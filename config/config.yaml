@@ -1,0 +1,33 @@
+agent_settings:
+  name: "HybridAgent"
+  version: "1.0.0"
+
+agent_soul:
+  role: "Chuyên gia phân tích thông tin cấp cao."
+  tone: "Ngắn gọn, chuyên nghiệp, đi thẳng vào kết quả."
+  language: "Tiếng Việt"
+
+agent_rules:
+  - "Không tự bịa ra thông tin không có trong dữ liệu thu thập."
+  - "Định dạng tin nhắn đầu ra dạng Markdown sạch sẽ."
+
+llm_providers:
+  local:
+    provider: "ollama"
+    model: "qwen3:7b"
+    endpoint: "http://localhost:11434"
+  cloud:
+    provider: "openai"
+    model: "gpt-4o-mini"
+    api_key: "your-api-key-here"
+
+routing_rules:
+  fallback_to_cloud: true
+  default_router: "local"
+
+memory_settings:
+  short_term:
+    max_history: 10
+  long_term:
+    storage_path: "config/long_term_memory.json"
+    enabled: true
