@@ -1,0 +1,44 @@
+version: '3.8'
+
+services:
+  ai_gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - OPENAI_API_KEY=${OPENAI_API_KEY} # Truyền biến môi trường từ host
+    depends_on:
+      - redis
+      - chroma
+    networks:
+      - ai_net
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    networks:
+      - ai_net
+
+  chroma:
+    image: chromadb/chroma:latest
+    ports:
+      - "8001:8000" # Cổng nội bộ của Chroma là 8000
+    networks:
+      - ai_net
+
+  prometheus:
+    image: prom/prometheus:v2.45.0
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    ports:
+      - "9090:9090"
+    networks:
+      - ai_net
+
+networks:
+  ai_net:
+    driver: bridge

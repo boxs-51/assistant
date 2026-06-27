@@ -38,24 +38,28 @@ class ContextEngine:
         past_facts = self.long_mem.search_relevant_facts(user_request)
         active_tasks = self.get_active_tasks(session_id)
         
-        # Tính toán token và cắt tỉa short_mem (giữ nguyên logic đã làm trước đó)
+        # Nâng cấp: Logic phân bổ token an toàn hơn
         past_facts_tokens = self.short_mem.count_tokens(past_facts)
         active_tasks_tokens = self.short_mem.count_tokens(active_tasks)
         
-        available_short_term_tokens = max(1000, self.max_context_tokens - past_facts_tokens - active_tasks_tokens)
+        # Tính toán số token còn lại cho lịch sử chat, đảm bảo không bị âm
+        available_short_term_tokens = self.max_context_tokens - past_facts_tokens - active_tasks_tokens
+        if available_short_term_tokens < 0:
+            # Nếu ký ức dài hạn và task đã chiếm hết chỗ, không còn chỗ cho chat
+            available_short_term_tokens = 0
         
-        original_max = self.short_mem.max_tokens
-        self.short_mem.max_tokens = available_short_term_tokens
-        self.short_mem._prune_by_tokens(session_id)
-        self.short_mem.max_tokens = original_max
+        # Yêu cầu short_mem tự cắt tỉa theo giới hạn token mới mà không thay đổi trạng thái của nó
+        self.short_mem.prune_by_tokens(session_id, available_short_term_tokens)
         
         chat_history = self.short_mem.get_context(session_id)
         
-        # Kết hợp toàn bộ vào 1 khối bối cảnh duy nhất
+        # Định dạng lại chat_history để dễ đọc hơn cho LLM
+        formatted_chat_history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
+
         full_prompt_context = (
             f"[TRẠNG THÁI TÁC VỤ (WORKING MEMORY)]:\n{active_tasks}\n\n"
             f"[KÝ ỨC QUÁ KHỨ]:\n{past_facts}\n\n"
-            f"[LỊCH SỬ CHAT]:\n{chat_history}"
+            f"[LỊCH SỬ CHAT GẦN ĐÂY]:\n{formatted_chat_history}"
         )
         
         return {

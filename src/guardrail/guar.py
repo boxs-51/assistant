@@ -1,41 +1,78 @@
 import re
+import unicodedata
+import os
+import yaml
 
 class GuardrailSystem:
-    def __init__(self):
-        # Bộ từ khóa chặn Prompt Injection phổ biến
-        self.forbidden_input_patterns = [
-            r"ignore previous instructions",
-            r"bỏ qua các lệnh trước đó",
-            r"system prompt",
-            r"bí mật hệ thống",
-            r"từ giờ hãy đóng vai làm"
-        ]
-        # Bộ từ khóa chặn rò rỉ thông tin nhạy cảm ở đầu ra
-        self.forbidden_output_patterns = [
-            r"sk-[a-zA-Z0-9]{48}", # Định dạng OpenAI API Key
-            r"password\s*=\s*['\"][^'\"]+['\"]",
-            r"INTERNAL_SERVER_ERROR"
-        ]
+    def __init__(self, filter_dir="config/guardrails"):
+        self.forbidden_input_patterns = []
+        self.redaction_patterns = {}
+        self._load_filters_from_directory(filter_dir)
+
+    def _load_filters_from_directory(self, directory: str):
+        """Tự động tải các bộ lọc từ các file YAML trong một thư mục."""
+        print(f"🛡️ [Guardrail] Đang tải các bộ lọc bảo mật từ thư mục '{directory}'...")
+        if not os.path.isdir(directory):
+            print(f"⚠️ [Guardrail] Thư mục '{directory}' không tồn tại. Bỏ qua việc tải bộ lọc.")
+            return
+
+        for filename in sorted(os.listdir(directory)):
+            if filename.endswith((".yaml", ".yml")):
+                filepath = os.path.join(directory, filename)
+                with open(filepath, "r", encoding="utf-8") as f:
+                    filter_config = yaml.safe_load(f)
+                    self.forbidden_input_patterns.extend(filter_config.get("input_filters", []))
+                    self.redaction_patterns.update(filter_config.get("output_redaction", {}))
+                    print(f"  -> Đã tải thành công bộ lọc: {filter_config.get('name', filename)}")
+        print("✅ [Guardrail] Tải xong tất cả các bộ lọc bảo mật.")
+
+    def _normalize_text(self, text: str) -> str:
+        """
+        Nâng cấp: Chuẩn hóa văn bản để chống các kỹ thuật bypass.
+        1. Chuyển về chữ thường.
+        2. Loại bỏ dấu tiếng Việt.
+        3. Chuẩn hóa khoảng trắng.
+        4. Loại bỏ các ký tự điều khiển và ký tự ẩn.
+        """
+        # Loại bỏ dấu
+        no_accents = ''.join(c for c in unicodedata.normalize('NFD', text) if unicodedata.category(c) != 'Mn')
+        # Chuyển về chữ thường
+        lowered = no_accents.lower()
+        # Loại bỏ ký tự điều khiển và chuẩn hóa khoảng trắng
+        no_control_chars = re.sub(r"[\x00-\x1f\x7f-\x9f]", "", lowered)
+        normalized_space = re.sub(r"\s+", " ", no_control_chars).strip()
+        return normalized_space
 
     def verify_input(self, user_request: str) -> bool:
         """Kiểm tra yêu cầu đầu vào xem có dấu hiệu tấn công hay không"""
-        lowered_input = user_request.lower()
+        normalized_input = self._normalize_text(user_request)
         for pattern in self.forbidden_input_patterns:
-            if re.search(pattern, lowered_input):
+            if re.search(pattern, normalized_input):
                 print(f"🚨 [Guardrail] CẢNH BÁO: Phát hiện Input độc hại vi phạm pattern '{pattern}'!")
                 return False
         return True
 
     def verify_output(self, ai_response: str) -> str:
-        """Kiểm tra đầu ra của AI trước khi gửi cho người dùng"""
-        # 1. Kiểm tra rò rỉ key/mật khẩu
-        for pattern in self.forbidden_output_patterns:
-            if re.search(pattern, ai_response):
-                print(f"🚨 [Guardrail] CHẶN ĐỨNG: AI cố tình rò rỉ thông tin bảo mật!")
-                return "Xin lỗi, tôi không thể xử lý yêu cầu này do vi phạm chính sách bảo mật đầu ra."
-        
-        # 2. Xử lý fallback nếu AI bị văng code lỗi thô
-        if "traceback (most recent call last)" in ai_response.lower():
-            return "Hệ thống gặp sự cố xử lý logic, tôi đang điều chỉnh lại cấu trúc."
-            
-        return ai_response
+        """
+        Nâng cấp: Quét và che mờ (Redact) thông tin nhạy cảm trong đầu ra của AI
+        thay vì chặn cứng, giúp duy trì trải nghiệm người dùng.
+        """
+        sanitized_response = ai_response
+        found_sensitive_data = False
+
+        for name, pattern in self.redaction_patterns.items():
+            # Sử dụng re.sub với một hàm callback để có thể xử lý logic phức tạp hơn nếu cần
+            def redact_match(match):
+                nonlocal found_sensitive_data
+                found_sensitive_data = True
+                # Che toàn bộ chuỗi khớp được
+                print(f"🚨 [Guardrail] CHE MỜ: Phát hiện và che mờ thông tin nhạy cảm loại '{name}'.")
+                return f"[{name.upper()}_REDACTED]"
+
+            sanitized_response = re.sub(pattern, redact_match, sanitized_response, flags=re.IGNORECASE)
+
+        # Xử lý đặc biệt cho các lỗi hệ thống để đưa ra thông báo thân thiện
+        if "INTERNAL_SERVER_ERROR" in sanitized_response or "Traceback" in sanitized_response:
+            return "Hệ thống gặp sự cố trong quá trình xử lý. Vui lòng thử lại sau."
+
+        return sanitized_response

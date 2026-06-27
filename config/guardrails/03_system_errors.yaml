@@ -1,0 +1,7 @@
+# Bộ lọc xử lý lỗi hệ thống
+name: System Error Handling
+description: Các pattern để nhận diện và xử lý các thông báo lỗi hệ thống một cách thân thiện.
+
+output_redaction:
+  "Internal Server Error": r"INTERNAL_SERVER_ERROR"
+  "Traceback": r"Traceback \(most recent call last\)"

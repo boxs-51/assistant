@@ -22,3 +22,6 @@ Rules:
 
     def get_provider_config(self, provider_type: str) -> dict:
         return self.config["llm_providers"].get(provider_type, {})
+
+    def get_routing_config(self) -> dict:
+        return self.config.get("model_routing", {})

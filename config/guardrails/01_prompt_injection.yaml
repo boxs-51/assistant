@@ -1,0 +1,11 @@
+# Bộ lọc chống tấn công Prompt Injection
+name: Prompt Injection Filters
+description: Các pattern để phát hiện và chặn các nỗ lực tấn công prompt injection.
+
+input_filters:
+  - r"\bignore\s+(all|previous)\s+instructions\b"
+  - r"\bbo\s+qua\s+(tat\s+ca|cac)\s+lenh\s+truoc\s+do\b"
+  - r"\bsystem\s+prompt\b"
+  - r"\bsecret\s+system\b"
+  - r"\brole\s*play\s+as\b"
+  - r"\btu\s+gio\s+hay\s+dong\s+vai\s+lam\b"

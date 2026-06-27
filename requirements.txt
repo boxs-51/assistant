@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+httpx
+redis
+chromadb
+sentence-transformers
+pyyaml
+prometheus-fastapi-instrumentator
+pybreaker

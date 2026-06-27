@@ -1,37 +1,64 @@
-import json
 import os
+import chromadb
+from sentence_transformers import SentenceTransformer
 
 class LongTermMemory:
-    def __init__(self, storage_path="config/long_term_memory.json"):
+    def __init__(self, storage_path="memory/chroma_db"):
         self.storage_path = storage_path
-        self.memory_data = self._load_memory()
+        os.makedirs(os.path.dirname(storage_path), exist_ok=True)
+        
+        # 1. Khởi tạo mô hình embedding (chạy local)
+        # 'all-MiniLM-L6-v2' là một mô hình nhẹ và hiệu quả cho nhiều tác vụ.
+        print("🧠 [LongTermMemory] Đang tải mô hình embedding...")
+        self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        print("✅ [LongTermMemory] Tải mô hình embedding thành công.")
 
-    def _load_memory(self) -> dict:
-        if os.path.exists(self.storage_path):
-            with open(self.storage_path, "r", encoding="utf-8") as f:
-                return json.load(f)
-        return {"user_profile": {}, "learned_rules": [], "past_facts": {}}
-
-    def save_memory(self):
-        with open(self.storage_path, "w", encoding="utf-8") as f:
-            json.dump(self.memory_data, f, ensure_ascii=False, indent=4)
+        # 2. Khởi tạo ChromaDB client và collection
+        # PersistentClient sẽ lưu dữ liệu vào ổ đĩa
+        self.client = chromadb.PersistentClient(path=self.storage_path)
+        self.collection = self.client.get_or_create_collection(
+            name="past_facts",
+            metadata={"hnsw:space": "cosine"} # Sử dụng khoảng cách cosine để đo độ tương đồng
+        )
 
     def search_relevant_facts(self, query: str) -> str:
         """
-        Tìm kiếm thông tin liên quan từ quá khứ dựa trên từ khóa.
-        (Sau này có thể nâng cấp thành Vector Search / RAG tại đây)
+        Nâng cấp: Tìm kiếm thông tin bằng Vector Search (tìm kiếm ngữ nghĩa).
         """
+        if not query:
+            return "Không có ký ức cũ liên quan."
+
+        # 1. Tạo vector embedding cho câu truy vấn
+        query_embedding = self.embedding_model.encode(query).tolist()
+
+        # 2. Truy vấn ChromaDB để tìm 3 ký ức gần nhất
+        results = self.collection.query(
+            query_embeddings=[query_embedding],
+            n_results=3
+        )
+
         relevant_info = []
-        query_lower = query.lower()
-        
-        # Thử quét qua các sự kiện/tri thức cũ đã lưu
-        for key, value in self.memory_data.get("past_facts", {}).items():
-            if key.lower() in query_lower:
-                relevant_info.append(f"- {key}: {value}")
-                
+        # `results['documents'][0]` chứa danh sách các văn bản tìm được
+        for doc in results['documents'][0]:
+            relevant_info.append(f"- {doc}")
+
         return "\n".join(relevant_info) if relevant_info else "Không có ký ức cũ liên quan."
 
     def learn_new_fact(self, key: str, value: str):
-        """Hàm giúp Agent tự ghi nhớ thêm kiến thức mới sau khi xử lý xong task"""
-        self.memory_data["past_facts"][key] = value
-        self.save_memory()
+        """
+        Hàm giúp Agent tự ghi nhớ kiến thức mới bằng cách chuyển nó thành vector.
+        """
+        # 1. Tạo một văn bản duy nhất để embedding
+        document = f"{key}: {value}"
+        
+        # 2. Tạo embedding cho văn bản
+        embedding = self.embedding_model.encode(document).tolist()
+        
+        # 3. Lưu vào ChromaDB. ID là duy nhất, ta có thể dùng chính `key` làm ID.
+        # Nếu ID đã tồn tại, ChromaDB sẽ tự động cập nhật (upsert).
+        self.collection.upsert(
+            ids=[key],
+            embeddings=[embedding],
+            documents=[document]
+        )
+        print(f"📝 [LongTermMemory] Đã học và ghi nhớ sự thật mới: '{key}'")
