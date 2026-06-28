@@ -8,7 +8,7 @@ class LongTermMemory:
         os.makedirs(os.path.dirname(storage_path), exist_ok=True)
         
         # 1. Khởi tạo mô hình embedding (chạy local)
-        # 'all-MiniLM-L6-v2' là một mô hình nhẹ và hiệu quả cho nhiều tác vụ.
+        # 'all-MiniLM-L6-v2' là một mô hình nhẹ và hiệu quả cho nhiều tác vụ.py 
         print("🧠 [LongTermMemory] Đang tải mô hình embedding...")
         self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         print("✅ [LongTermMemory] Tải mô hình embedding thành công.")

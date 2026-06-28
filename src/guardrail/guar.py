@@ -1,4 +1,5 @@
 import re
+from typing import AsyncGenerator
 import unicodedata
 import os
 import yaml
@@ -43,7 +44,7 @@ class GuardrailSystem:
         normalized_space = re.sub(r"\s+", " ", no_control_chars).strip()
         return normalized_space
 
-    def verify_input(self, user_request: str) -> bool:
+    def validate_input(self, user_request: str) -> bool:
         """Kiểm tra yêu cầu đầu vào xem có dấu hiệu tấn công hay không"""
         normalized_input = self._normalize_text(user_request)
         for pattern in self.forbidden_input_patterns:
@@ -52,7 +53,7 @@ class GuardrailSystem:
                 return False
         return True
 
-    def verify_output(self, ai_response: str) -> str:
+    def sanitize_output(self, ai_response: str) -> str:
         """
         Nâng cấp: Quét và che mờ (Redact) thông tin nhạy cảm trong đầu ra của AI
         thay vì chặn cứng, giúp duy trì trải nghiệm người dùng.
@@ -76,3 +77,28 @@ class GuardrailSystem:
             return "Hệ thống gặp sự cố trong quá trình xử lý. Vui lòng thử lại sau."
 
         return sanitized_response
+
+    async def sanitize_stream(self, stream: AsyncGenerator[str, None], buffer_size: int = 512) -> AsyncGenerator[str, None]:
+        """
+        Làm sạch dữ liệu từ một stream một cách an toàn, tránh cắt PII giữa các chunk.
+        Sử dụng một buffer và một "vùng an toàn" (overlap) để đảm bảo các pattern
+        bị chia cắt vẫn được phát hiện.
+        """
+        buffer = ""
+        # Kích thước của vùng an toàn, nên lớn hơn độ dài của PII dài nhất có thể
+        overlap_size = 100 
+
+        async for chunk in stream:
+            buffer += chunk
+            
+            # Chỉ xử lý và yield phần buffer lớn hơn kích thước an toàn
+            while len(buffer) > overlap_size:
+                # Phần buffer an toàn để xử lý
+                safe_part = buffer[:-overlap_size]
+                yield self.sanitize_output(safe_part)
+                # Giữ lại phần cuối của buffer để kiểm tra lần sau
+                buffer = buffer[-overlap_size:]
+        
+        # Xử lý phần buffer còn lại sau khi stream kết thúc
+        if buffer:
+            yield self.sanitize_output(buffer)

@@ -3,13 +3,13 @@ import re
 import asyncio
 from typing import Dict, Any, List, Tuple, Callable
 
-from src.config_loader import ConfigLoader
-from src.context_engine.memory_manager import ContextEngine
-from src.guardrail.guar import GuardrailSystem
-from src.minitor import ExecutionMonitor
-from src.capability import CapabilityManager
-from src.gateway_client import AIGatewayClient
-from src.model_selector import ModelSelector
+from config_loader import ConfigLoader
+from context_engine.memory_manager import ContextEngine
+from guardrail.guar import GuardrailSystem
+from minitor import ExecutionMonitor
+from capability import CapabilityManager
+from gateway_client import AIGatewayClient
+from model_selector import ModelSelector
 
 
 class AgentOrchestrator:
@@ -45,10 +45,10 @@ class AgentOrchestrator:
             current_prompt = f"{user_prompt}\n\n{last_error}" if last_error else user_prompt
             
             # Kiểm tra xem hàm sinh câu trả lời có phải là async coroutine không
-            if asyncio.iscoroutinefunction(llm_generate_func):
-                response_text = await llm_generate_func(system_prompt=system_prompt, prompt=current_prompt)
-            else:
-                response_text = llm_generate_func(system_prompt=system_prompt, prompt=current_prompt)
+            #if asyncio.iscoroutinefunction(llm_generate_func):
+                #response_text = await llm_generate_func(system_prompt, current_prompt)
+            #else:
+            response_text = await llm_generate_func(system_prompt, current_prompt)
             
             try:
                 match = re.search(r"\{.*\}", response_text, re.DOTALL)
@@ -231,3 +231,4 @@ Bạn PHẢI trả lời duy nhất theo định dạng JSON mẫu dưới đây
 }}
 """
         return action_prompt.strip()
+    

@@ -1,42 +1,41 @@
 import redis.asyncio as redis
-import time
+import structlog
+from redis.exceptions import ConnectionError
+from .rate_limiter.storage.redis_storage import RedisStorage
+from .rate_limiter.factory import RateLimiterFactory
+from .config import settings
 
-class TokenBucketRateLimiter:
-    def __init__(self, redis_client: redis.Redis, capacity: int = 100, refill_rate: int = 10):
-        self.redis = redis_client
-        self.capacity = capacity       # Max requests (RPM)
-        self.refill_rate = refill_rate # Requests per second
+logger = structlog.get_logger(__name__)
+
+class RateLimiterManager:
+    """
+    REFACTORED: Lớp quản lý chính, đóng vai trò là entry point cho hệ thống.
+    Sử dụng RateLimiterFactory để tạo ra thuật toán limiter phù hợp.
+    """
+    def __init__(self, redis_client: redis.Redis):
+        # Dependency Injection: Nhận redis_client từ bên ngoài
+        storage = RedisStorage(redis_client)
+        # Factory sẽ đọc config và tạo ra limiter tương ứng
+        self.limiter = RateLimiterFactory.create_limiter(storage)
 
     async def is_allowed(self, key: str, cost: int = 1) -> tuple[bool, float]:
         """
-        Kiểm tra xem một request có được phép hay không dựa trên thuật toán Token Bucket.
+        Kiểm tra xem một request có được phép hay không.
         """
-        current_time = time.time()
-        bucket_key = f"rate_limit:{key}"
-        
-        # Lấy thông tin bucket từ Redis trong một transaction
-        pipe = self.redis.pipeline()
-        pipe.hget(bucket_key, "tokens")
-        pipe.hget(bucket_key, "last_refill")
-        results = await pipe.execute()
-        
-        tokens_str, last_refill_str = results
-        
-        tokens = float(tokens_str) if tokens_str else self.capacity
-        last_refill = float(last_refill_str) if last_refill_str else current_time
-
-        # Nạp lại token dựa trên thời gian đã trôi qua
-        time_passed = current_time - last_refill
-        new_tokens = time_passed * self.refill_rate
-        tokens = min(self.capacity, tokens + new_tokens)
-        
-        if tokens >= cost:
-            # Nếu đủ token, trừ đi và cập nhật bucket
-            new_tokens_count = tokens - cost
-            await self.redis.hmset(bucket_key, {"tokens": new_tokens_count, "last_refill": current_time})
+        try:
+            if not self.limiter:
+                # Fail open nếu không có limiter nào được cấu hình
+                return True, 0.0
+                
+            limiter_key = f"rate_limit:{key}"
+            allowed, _, wait_time = await self.limiter.is_allowed(key=limiter_key, cost=cost)
+            return allowed, wait_time
+        except ConnectionError as e:
+            logger.error("Rate limiter failed: Could not connect to Redis.", error=str(e))
+            # TODO: Add a metric to count Redis failures.
+            # if settings.RATE_LIMIT_FAIL_MODE == "closed":
+            #     return False, -1
+            
+            # Default to "fail open" mode
+            logger.warning("Failing open: Allowing request due to Redis connection error.")
             return True, 0.0
-        else:
-            # Nếu không đủ, tính toán thời gian phải chờ
-            tokens_needed = cost - tokens
-            wait_time = tokens_needed / self.refill_rate
-            return False, wait_time

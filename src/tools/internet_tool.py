@@ -1,4 +1,4 @@
-from src.tools.base import BaseTool
+from tools.base_tool import BaseTool
 import requests
 
 class FetchWebTool(BaseTool):

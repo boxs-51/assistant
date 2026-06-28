@@ -1,1 +1,7 @@
 venv/
+__pycache__
+*.env
+
+data/
+memory/
+1.0.0

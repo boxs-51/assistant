@@ -1,7 +1,7 @@
 import json
 import re
-from src.skills.base_skill import BaseSkill
-from src.tools.internet_tool import FetchWebTool  # Hàm cào web thô đã viết ở phần trước
+from skills.base_skill import BaseSkill
+from ..tools.internet_tool import FetchWebTool  # Hàm cào web thô đã viết ở phần trước
 
 class SearchAnalysisSkill(BaseSkill):
     def __init__(self):

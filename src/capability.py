@@ -1,5 +1,5 @@
-from src.tools.registry import ToolRegistry
-from src.skills.registry import SkillRegistry
+from tools.registry import ToolRegistry
+from skills.registry import SkillRegistry
 
 class CapabilityManager:
     """Hệ thống lõi quản lý cả Tools và Skills"""

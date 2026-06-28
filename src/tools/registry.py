@@ -1,7 +1,7 @@
 import os
 import importlib
 import inspect
-from src.tools.base import BaseTool
+from tools.base_tool import BaseTool
 
 class ToolRegistry:
     def __init__(self):

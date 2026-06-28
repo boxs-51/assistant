@@ -1,7 +1,7 @@
 import os
 import importlib
 import inspect
-from src.skills.base_skill import BaseSkill
+from skills.base_skill import BaseSkill
 
 class SkillRegistry:
     def __init__(self):

@@ -1,38 +1,65 @@
 import re
-from typing import AsyncGenerator
+import secrets
+from typing import AsyncGenerator, Optional
+from fastapi import Depends, HTTPException, status
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 
-# Giả lập, bạn có thể tích hợp GuardrailSystem đã có ở đây
-class InputGuardrail:
-    def __init__(self):
-        self.patterns = [re.compile(p, re.IGNORECASE) for p in [r"ignore previous instructions"]]
+from .config import settings
+# Tích hợp GuardrailSystem lõi
+from ..guardrail.guar import GuardrailSystem
+
+# Cơ chế xác thực Bearer Token
+bearer_scheme = HTTPBearer()
+
+async def authenticate_client(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> str:
+    """
+    Dependency để xác thực client dựa trên Bearer Token.
+    So sánh token được cung cấp với API_KEY trong file cấu hình.
+    """
+    # Nếu tắt xác thực trong config, bỏ qua và trả về một client_id mặc định
+    if not settings.ENABLE_AUTH:
+        return "anonymous_client"
+
+    # So sánh token
+    is_correct_scheme = credentials.scheme == "Bearer"
+    is_correct_token = secrets.compare_digest(credentials.credentials, settings.API_KEY)
+
+    if not (is_correct_scheme and is_correct_token):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing API key",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    # Trả về một định danh cho client đã xác thực, có thể dùng cho rate limiting
+    return "authenticated_client"
+
+class InputGuardrailAdapter:
+    """Adapter để tích hợp Input Guardrail của hệ thống lõi vào Gateway."""
+    def __init__(self, guardrail_system: GuardrailSystem):
+        self.system = guardrail_system
 
     def validate(self, text: str) -> bool:
-        for pattern in self.patterns:
-            if pattern.search(text):
-                return False
-        return True
+        """Ủy quyền việc kiểm tra cho GuardrailSystem."""
+        if not settings.ENABLE_INPUT_GUARDRAIL:
+            return True
+        return self.system.validate_input(text)
 
-class OutputGuardrail:
-    def __init__(self):
-        self.redaction_patterns = {
-            "EMAIL": re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b"),
-            "API_KEY": re.compile(r"sk-[a-zA-Z0-9]{20,}")
-        }
+class OutputGuardrailAdapter:
+    """Adapter để tích hợp Output Guardrail của hệ thống lõi vào Gateway."""
+    def __init__(self, guardrail_system: GuardrailSystem):
+        self.system = guardrail_system
 
     def sanitize(self, text: str) -> str:
-        for name, pattern in self.redaction_patterns.items():
-            text = pattern.sub(f"[{name}_REDACTED]", text)
-        return text
+        """Ủy quyền việc làm sạch cho GuardrailSystem."""
+        if not settings.ENABLE_OUTPUT_GUARDRAIL:
+            return text
+        return self.system.sanitize_output(text)
 
     async def sanitize_stream(self, stream: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]:
-        """Làm sạch dữ liệu từ một stream."""
-        buffer = ""
-        async for chunk in stream:
-            buffer += chunk
-            # Tạm thời làm sạch buffer, thực tế cần logic phức tạp hơn để không cắt giữa chừng PII
-            sanitized_buffer = self.sanitize(buffer)
-            yield sanitized_buffer
-            buffer = "" # Reset buffer
-        
-        if buffer: # Xử lý phần còn lại
-            yield self.sanitize(buffer)
+        """Ủy quyền việc làm sạch stream cho GuardrailSystem."""
+        if not settings.ENABLE_OUTPUT_GUARDRAIL:
+            async for chunk in stream:
+                yield chunk
+        else:
+            async for sanitized_chunk in self.system.sanitize_stream(stream):
+                yield sanitized_chunk

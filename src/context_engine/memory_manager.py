@@ -1,5 +1,5 @@
-from src.memory.short_term import ShortTermMemory
-from src.memory.long_term import LongTermMemory
+from memory.short_term import ShortTermMemory
+from memory.long_term import LongTermMemory
 
 class ContextEngine:
     def __init__(self, config):
