@@ -75,6 +75,7 @@ async def test_gemini_streaming():
                 print("\n---------------------------------------------")
 
     except httpx.HTTPStatusError as e:
+        await e.response.aread()
         print(f"❌ Error: Request failed with status {e.response.status_code}")
         print(f"   Response: {e.response.text}")
     except httpx.RequestError as e:
@@ -86,11 +87,12 @@ async def test_ollama_provider():
     """
     print("\n--- 🚀 [Test 3] Testing Ollama (Local) ---")
     payload = {
-        "model": "llama3",  # Giả sử bạn có model llama3 trên Ollama
+        "model": "gemma3:1b",  # Giả sử bạn có model llama3 trên Ollama
         "provider_preference": "local", # Yêu cầu ưu tiên provider local
         "messages": [
             {"role": "user", "content": "Viết một hàm Python để tính tổng hai số."}
         ],
+        "stream" : False
     }
 
     headers = {
@@ -117,8 +119,8 @@ async def test_ollama_provider():
         print("   Is Ollama server running?")
 
 async def main():
-    await test_gemini_provider()
-    await test_gemini_streaming()
+    #await test_gemini_provider()
+    #await test_gemini_streaming()
     await test_ollama_provider()
 
 if __name__ == "__main__":

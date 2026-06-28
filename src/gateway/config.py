@@ -75,6 +75,9 @@ class Settings(BaseSettings):
     # Provider không được cấu hình (thiếu API key/URL) sẽ tự động bị bỏ qua.
     PROVIDER_PRIORITY: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama"])
 
+    # Đường dẫn đến file YAML chứa các quy tắc định tuyến.
+    ROUTING_RULES_PATH: str = "config/routing/routing_rules.yaml"
+
     # =====================================================
     # OpenAI
     # =====================================================

@@ -1,6 +1,9 @@
 from typing import Dict, List
 import structlog
 import fnmatch
+import yaml
+import os
+import asyncio
 
 from ...config import settings
 from ..providers.base import BaseProvider
@@ -9,56 +12,75 @@ logger = structlog.get_logger(__name__)
 
 class RoutingPolicy:
     """
-    Strategy Pattern: Chứa logic để phân giải một tên model thành một chuỗi fallback các provider.
-    Hỗ trợ các quy tắc được định nghĩa một cách tường minh và so khớp wildcard.
+    REFACTORED: Chứa logic phân giải model thành chuỗi provider.
+    Hỗ trợ tải quy tắc từ file YAML và reload nóng (hot-reload).
     """
     def __init__(self, providers: Dict[str, BaseProvider]):
         self.providers = providers
         self._default_chain: List[BaseProvider] = []
         self._rules: List[Dict] = []
+        self._reload_lock = asyncio.Lock() # Lock để đảm bảo an toàn khi reload
         self._initialize()
 
     def _initialize(self):
         """
         Khởi tạo các quy tắc định tuyến và chuỗi fallback mặc định từ settings.
         """
-        # 1. Xây dựng chuỗi fallback mặc định từ config
+        # Xây dựng chuỗi fallback mặc định từ config
         self._default_chain = [self.providers[name] for name in settings.PROVIDER_PRIORITY if name in self.providers]
+        logger.info(
+            "Default chain",
+            chain=[p.name for p in self._default_chain]
+        )
+        # Tải quy tắc từ file YAML
+        self._load_rules_from_file()
 
-        # 2. Định nghĩa các quy tắc định tuyến một cách tường minh.
-        # Cấu trúc này có thể được tải từ file YAML/JSON để có thể reload nóng.
-        # Thứ tự của các quy tắc là quan trọng: quy tắc đầu tiên khớp sẽ được sử dụng.
-        routing_rules_config = [
-            {
-                "models": ["gpt-4o", "gpt-3.5-turbo", "gpt-4*"],
-                "provider_chain": ["openai", "gemini", "anthropic"]
-            },
-            {
-                "models": ["gemini-pro", "gemini-1.5-pro", "gemini*"],
-                "provider_chain": ["gemini", "openai", "anthropic"]
-            },
-            # Quy tắc này giải quyết yêu cầu của bạn: các model local sẽ được định tuyến đến ollama trước.
-            {
-                "models": ["llama*", "codellama*", "mistral*", "phi3*"],
-                "provider_chain": ["ollama", "openai"] # Ví dụ: thử local trước, nếu thất bại thì fallback ra cloud
-            }
-        ]
+    def _load_rules_from_file(self):
+        """Tải và xử lý các quy tắc định tuyến từ file YAML."""
+        new_rules = []
+        if not os.path.exists(settings.ROUTING_RULES_PATH):
+            logger.error("Routing rules file not found.", path=settings.ROUTING_RULES_PATH)
+            self._rules = []
+            
+            return
 
-        # 3. Xử lý các quy tắc để tạo ra một bộ quy tắc có thể sử dụng được
-        for rule_config in routing_rules_config:
-            # [REFACTOR] Log a warning for any provider in a rule that isn't available.
-            # This makes debugging configuration errors much easier.
-            for p_name in rule_config["provider_chain"]:
-                if p_name not in self.providers:
-                    logger.warning(
-                        "Provider in routing rule is not available/configured.",
-                        rule_models=rule_config["models"], missing_provider=p_name
-                    )
-            provider_chain = [self.providers[p_name] for p_name in rule_config["provider_chain"] if p_name in self.providers]
-            if provider_chain:
-                self._rules.append({"models": rule_config["models"], "chain": provider_chain})
-        
-        logger.info("RoutingPolicy initialized", default_fallback_chain=[p.name for p in self._default_chain], rule_count=len(self._rules))
+        try:
+            with open(settings.ROUTING_RULES_PATH, 'r', encoding='utf-8') as f:
+                config = yaml.safe_load(f)
+
+            routing_rules_config = config.get("rules", [])
+
+            for rule_config in routing_rules_config:
+                # Log cảnh báo nếu một provider trong quy tắc không được cấu hình/khả dụng.
+                for p_name in rule_config.get("provider_chain", []):
+                    if p_name not in self.providers:
+                        logger.warning(
+                            "Provider in routing rule is not available/configured.",
+                            rule_name=rule_config.get("name"), missing_provider=p_name
+                        )
+                
+                provider_chain = [self.providers[p_name] for p_name in rule_config.get("provider_chain", []) if p_name in self.providers]
+                
+                if provider_chain:
+                    new_rules.append({"models": rule_config["models"], "chain": provider_chain})
+            
+            self._rules = new_rules
+            logger.info("Routing rules loaded successfully.", rule_count=len(self._rules), path=settings.ROUTING_RULES_PATH)
+
+        except (yaml.YAMLError, FileNotFoundError, Exception) as e:
+            logger.error("Failed to load or parse routing rules file. No rules will be applied.", error=str(e), path=settings.ROUTING_RULES_PATH)
+            self._rules = [] # Xóa các quy tắc cũ nếu file mới bị lỗi để tránh hành vi không mong muốn
+
+    async def reload_rules(self) -> bool:
+        """Tải lại các quy tắc định tuyến từ file một cách an toàn."""
+        async with self._reload_lock:
+            logger.info("Attempting to hot-reload routing rules...")
+            try:
+                self._load_rules_from_file()
+                return True
+            except Exception:
+                logger.error("Hot-reload of routing rules failed.", exc_info=True)
+                return False
 
     def get_fallback_chain(self, model: str) -> List[BaseProvider]:
         """Lấy chuỗi fallback các provider phù hợp cho một model cụ thể."""
