@@ -9,8 +9,7 @@ import structlog
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 import uuid
-
-from .config import settings
+from .config.core import ConfigLoader, ConfigurationRegistry
 from .limiter import RateLimiterManager
 # --- Enterprise Routing Imports ---
 from .router import ModelRouter
@@ -37,15 +36,21 @@ app = FastAPI(title="AI Gateway")
 @app.on_event("startup")
 async def startup_event():
     """Khởi tạo các kết nối cần thiết khi server khởi động."""
+    # 1. Tải cấu hình
+    # Đây là bước đầu tiên và quan trọng nhất
+    loader = ConfigLoader(default_config_path="config/default.yaml")
+    app_config = loader.load_config()
+    ConfigurationRegistry.set_config(app_config)
+    settings = ConfigurationRegistry.get_config()
     # Cấu hình logging ngay khi khởi động
-    setup_logging(log_level=settings.LOG_LEVEL)
+    setup_logging(log_level=settings.logging.level)
     # Cấu hình tracing
-    setup_tracing(service_name=settings.GATEWAY_NAME)
+    setup_tracing(service_name=settings.gateway.name)
     # Tự động instrument FastAPI app
     FastAPIInstrumentor.instrument_app(app)
     global logger
     logger = structlog.get_logger("gateway.main")
-    app.state.redis = redis.from_url(settings.REDIS_URL, decode_responses=True)
+    app.state.redis = redis.from_url(settings.redis.url, decode_responses=True)
     app.state.limiter = RateLimiterManager(app.state.redis)
     # --- Enterprise Routing Initialization Flow ---
     provider_registry = ProviderRegistry()
@@ -77,7 +82,7 @@ async def startup_event():
     cache_backend = ChromaCacheBackend()
     app.state.cache = SemanticCache(backend=cache_backend, embedding_service=embedding_service)
     # ---------------------------------------
-    app.state.http_client = httpx.AsyncClient(timeout=settings.PROVIDER_TIMEOUT)
+    app.state.http_client = httpx.AsyncClient(timeout=settings.provider.timeout)
     logger.info("Gateway startup complete.")
 
 @app.on_event("shutdown")
@@ -186,40 +191,41 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
                 body=body
             )
             # Lấy tên provider từ response gốc nếu cần
-            final_provider_name = gateway_response.raw_response.request.url.host
+            # Lấy tên provider từ request gốc được lưu trong raw_response
+            final_provider_name = "unknown"
+            if gateway_response.raw_response and gateway_response.raw_response.request:
+                 final_provider_name = gateway_response.raw_response.request.url.host
             span.set_attribute("final_provider", final_provider_name)
         
         # 7. Xử lý response và Output Guardrail
         is_streaming = body.get("stream", False)
         
         if is_streaming:
-            # TODO: Refactor router và executor để hỗ trợ streaming
-            # Logic streaming sẽ phức tạp hơn và cần một luồng riêng
-            # Dưới đây là một ví dụ giả định về cách nó sẽ hoạt động
             async def stream_generator():
-                # Giả sử router có một phương thức stream_with_fallback
-                # stream_chunks = app.state.router.stream_with_fallback(...)
-                # async for chunk in stream_chunks:
-                #     sanitized_chunk = app.state.output_guardrail.sanitize(chunk.choices[0].delta.content or "")
-                #     chunk.choices[0].delta.content = sanitized_chunk
-                #     yield chunk.to_sse()
-                # Đây là placeholder
-                yield GatewayStreamChunk(model="placeholder", choices=[]).to_sse()
+                """Generator để xử lý và yield các chunk đã được chuẩn hóa."""
+                stream_chunks = app.state.router.stream_with_fallback(
+                    http_client=app.state.http_client,
+                    model=body.get("model"),
+                    body=body
+                )
+                async for chunk in stream_chunks:
+                    # TODO: Output Guardrail cho từng chunk (nếu cần)
+                    yield chunk.to_sse()
 
             return StreamingResponse(
-                stream_generator(), # Cần triển khai logic stream thực tế
+                stream_generator(),
                 media_type="text/event-stream"
             )
         else:
             with tracer.start_as_current_span("response_processing"):
                 # GatewayResponse đã có cấu trúc chuẩn, không cần bóc tách phức tạp
-                final_content = gateway_response.choices[0].message.content
+                final_content = gateway_response.choices[0].message.content or ""
                 
                 # Làm sạch đầu ra
                 with tracer.start_as_current_span("output_guardrail"):
                     safe_content = app.state.output_guardrail.sanitize(final_content)
                 gateway_response.choices[0].message.content = safe_content
-                
+
                 # 8. Cập nhật cache
                 # await app.state.cache.set(user_prompt, final_content, ...)
                 
@@ -233,8 +239,8 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
                     output_tokens = gateway_response.usage.completion_tokens
 
                     # Ghi nhận vào Metrics
-                    # metrics.record_input_tokens(final_provider.name, body.get("model"), input_tokens)
-                    # metrics.record_output_tokens(final_provider.name, body.get("model"), output_tokens)
+                    metrics.increment_input_tokens(final_provider_name, gateway_response.model, input_tokens)
+                    metrics.increment_output_tokens(final_provider_name, gateway_response.model, output_tokens)
                     
                     # Ghi nhận vào Span Attributes
                     token_span.set_attribute("input_tokens", input_tokens)
@@ -305,10 +311,11 @@ def get_metrics():
 @app.get("/stats", tags=["Health"])
 async def get_stats():
     """Cung cấp thống kê hoạt động ở dạng JSON cho dashboard nội bộ."""
+    settings = ConfigurationRegistry.get_config()
     process = psutil.Process()
     return {
-        "gateway_name": settings.GATEWAY_NAME,
-        "gateway_version": settings.GATEWAY_VERSION,
+        "gateway_name": settings.gateway.name,
+        "gateway_version": settings.gateway.version,
         "cpu_usage_percent": process.cpu_percent(interval=0.1),
         "memory_usage_mb": process.memory_info().rss / (1024 * 1024),
         # Thêm các số liệu khác từ module metrics nếu cần

@@ -19,11 +19,11 @@ class ChromaCacheBackend(BaseCacheBackend):
     """Triển khai Semantic Cache sử dụng ChromaDB."""
 
     def __init__(self):
-        logger.info("Initializing ChromaDB cache backend...", path=settings.CACHE_PATH)
-        os.makedirs(os.path.dirname(settings.CACHE_PATH), exist_ok=True)
-        self.client = chromadb.PersistentClient(path=settings.CACHE_PATH)
+        logger.info("Initializing ChromaDB cache backend...", path=settings.semantic_cache.path)
+        os.makedirs(os.path.dirname(settings.semantic_cache.path), exist_ok=True)
+        self.client = chromadb.PersistentClient(path=settings.semantic_cache.path)
         self.collection = self.client.get_or_create_collection(
-            name=settings.CACHE_COLLECTION,
+            name=settings.semantic_cache.collection,
             metadata={"hnsw:space": "cosine"}
         )
         logger.info("ChromaDB backend is ready.")
@@ -46,7 +46,7 @@ class ChromaCacheBackend(BaseCacheBackend):
                     span.set_attribute("best_distance", distance)
 
                     # Chỉ xử lý nếu kết quả trả về nằm trong ngưỡng cho phép
-                    if distance > settings.CACHE_SIMILARITY_THRESHOLD:
+                    if distance > settings.semantic_cache.similarity_threshold:
                         return None, distance, "below_threshold"
 
                     # Khôi phục CacheEntry từ metadata
@@ -90,8 +90,8 @@ class ChromaCacheBackend(BaseCacheBackend):
         with tracer.start_as_current_span("chroma_upsert"):
             try:
                 # Cập nhật thời gian hết hạn cho metadata trước khi lưu
-                if settings.CACHE_EXPIRE_SECONDS > 0:
-                    entry.metadata.expires_at = time.time() + settings.CACHE_EXPIRE_SECONDS
+                if settings.redis.cache_expire_seconds > 0:
+                    entry.metadata.expires_at = time.time() + settings.redis.cache_expire_seconds
 
                 await asyncio.to_thread(
                     self.collection.upsert,
@@ -112,8 +112,8 @@ class ChromaCacheBackend(BaseCacheBackend):
         with tracer.start_as_current_span("chroma_batch_upsert"):
             try:
                 for entry in entries:
-                    if settings.CACHE_EXPIRE_SECONDS > 0:
-                        entry.metadata.expires_at = time.time() + settings.CACHE_EXPIRE_SECONDS
+                    if settings.redis.cache_expire_seconds > 0:
+                        entry.metadata.expires_at = time.time() + settings.redis.cache_expire_seconds
                 
                 await asyncio.to_thread(
                     self.collection.upsert,

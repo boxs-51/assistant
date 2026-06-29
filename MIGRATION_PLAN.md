@@ -35,19 +35,19 @@ Mục tiêu: Gateway chỉ làm việc với các schema đã được chuẩn h
 
 ## Giai đoạn 3: Tích hợp vào Luồng Thực thi (Integration)
 
-- [ ] **Bước 4: Refactor `ProviderExecutor`.**
-    - [ ] Mở file `src/gateway/routing/executor.py`.
-    - [ ] Thay đổi phương thức `execute` để gọi `provider.normalize_response` sau khi nhận được `httpx.Response`.
-    - [ ] Thay đổi kiểu trả về của `execute` từ `httpx.Response` thành `GatewayResponse`.
+- [ X ] **Bước 4: Refactor `ProviderExecutor`.**
+    - [ X ] Mở file `src/gateway/routing/executor.py`.
+    - [ X ] Thay đổi phương thức `execute` để gọi `provider.normalize_response` sau khi nhận được `httpx.Response`.
+    - [ X ] Thay đổi kiểu trả về của `execute` từ `httpx.Response` thành `GatewayResponse`.
 
-- [ ] **Bước 5: Refactor `ModelRouter`.**
-    - [ ] Mở file `src/gateway/router.py`.
-    - [ ] Cập nhật `execute_with_fallback` để nhận và trả về `GatewayResponse`.
+- [ X ] **Bước 5: Refactor `ModelRouter`.**
+    - [ X ] Mở file `src/gateway/router.py`.
+    - [ X ] Cập nhật `execute_with_fallback` để nhận và trả về `GatewayResponse`.
 
-- [ ] **Bước 6: Refactor Endpoint `chat_completions_proxy`.**
-    - [ ] Mở file `src/gateway/base_gateway.py`.
-    - [ ] Thay đổi logic xử lý response để làm việc trực tiếp với đối tượng `GatewayResponse` đã được chuẩn hóa.
-    - [ ] Loại bỏ hoàn toàn việc truy cập `response.json()["choices"]` hoặc các key đặc thù của provider.
+- [ X ] **Bước 6: Refactor Endpoint `chat_completions_proxy`.**
+    - [ X ] Mở file `src/gateway/base_gateway.py`.
+    - [ X ] Thay đổi logic xử lý response để làm việc trực tiếp với đối tượng `GatewayResponse` đã được chuẩn hóa.
+    - [ X ] Loại bỏ hoàn toàn việc truy cập `response.json()["choices"]` hoặc các key đặc thù của provider.
 
 ## Giai đoạn 4: Hoàn thiện Streaming và Dọn dẹp
 

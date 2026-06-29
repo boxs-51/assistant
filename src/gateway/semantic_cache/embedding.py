@@ -27,13 +27,13 @@ class EmbeddingService:
             cls._instance = super(EmbeddingService, cls).__new__(cls)
             try:
                 with tracer.start_as_current_span("load_embedding_model"):
-                    logger.info("Loading embedding model...", model_name=settings.EMBEDDING_MODEL)
+                    logger.info("Loading embedding model...", model_name=settings.semantic_cache.embedding_model)
                     # .eval() để chuyển sang chế độ inference
                     # Thêm cache_folder để chỉ định nơi lưu model, giúp quản lý dễ dàng hơn
                     cls._model = SentenceTransformer(
-                        settings.EMBEDDING_MODEL,
-                        device=settings.EMBEDDING_DEVICE,
-                        cache_folder=settings.EMBEDDING_CACHE_FOLDER,
+                        settings.semantic_cache.embedding_model,
+                        device=settings.semantic_cache.embedding_device,
+                        cache_folder=settings.semantic_cache.embedding_cache_folder,
                     ).eval() # Chuyển sang chế độ inference
                     logger.info("Embedding model loaded successfully.")
             except Exception as e:

@@ -1,4 +1,4 @@
-from typing import Dict, Any, Tuple
+from typing import Dict, Any, Tuple, AsyncGenerator
 
 import httpx
 import structlog
@@ -7,7 +7,7 @@ from ..config import settings
 from ..metrics import metrics
 from .exceptions import ProviderError
 from .providers.base import BaseProvider
-from ..schemas import GatewayResponse # Import schema chuẩn
+from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 from .policies.retry import RetryPolicy
 from .policies.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
@@ -91,3 +91,42 @@ class ProviderExecutor:
             )
             # Ném lại lỗi dưới dạng ProviderError để Router có thể fallback.
             raise ProviderError(f"Provider failed after all retries: {e}", provider_name=provider.name) from e
+
+    async def execute_stream(self, provider: BaseProvider, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> AsyncGenerator[GatewayStreamChunk, None]:
+        """
+        Điều phối việc thực thi một request streaming.
+        Luồng này không hỗ trợ retry cho từng chunk.
+        """
+        breaker = await self.breaker_manager.get_breaker(provider.name)
+        model = body.get("model", "unknown")
+
+        try:
+            await breaker.before_request()
+
+            # Gọi thẳng vào provider.request, không qua retry policy cho stream
+            response = await provider.request(http_client, body, settings.PROVIDER_TIMEOUT)
+            
+            # Bắt đầu stream và chuẩn hóa
+            async for chunk in provider.normalize_stream(response, model):
+                yield chunk
+
+            await breaker.on_success()
+
+        except CircuitBreakerOpenError as e:
+            logger.warning("Skipping provider stream, circuit breaker is open.", provider=provider.name)
+            raise ProviderError(f"Circuit breaker is open for {provider.name}", provider_name=provider.name) from e
+
+        except Exception as e:
+            await breaker.on_failure()
+            if isinstance(e, httpx.HTTPStatusError):
+                error_label = str(e.response.status_code)
+            elif isinstance(e, httpx.RequestError):
+                error_label = self._get_error_metric_label(e)
+            else:
+                error_label = "unexpected_error"
+            
+            metrics.increment_provider_errors(provider.name, error_label)
+            logger.warning(
+                "Provider stream execution failed.", provider=provider.name, error=str(e), error_type=type(e).__name__
+            )
+            raise ProviderError(f"Provider stream failed: {e}", provider_name=provider.name) from e

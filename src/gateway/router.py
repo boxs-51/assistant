@@ -1,5 +1,5 @@
 import httpx
-from typing import List, Dict, Any, Tuple, Coroutine
+from typing import List, Dict, Any, Tuple, Coroutine, AsyncGenerator
 import asyncio
 
 import structlog
@@ -109,3 +109,45 @@ class ModelRouter:
 
         logger.critical("All providers in fallback chain failed", model=model)
         raise NoAvailableProviderError("All providers are currently unavailable.") from last_exception
+
+    async def stream_with_fallback(self, http_client: httpx.AsyncClient, model: str, body: Dict[str, Any]) -> AsyncGenerator[GatewayStreamChunk, None]:
+        # 1. & 2. Lấy và sắp xếp chuỗi fallback (logic giống hệt execute_with_fallback)
+        initial_chain = self.routing_policy.get_fallback_chain(model)
+        if not initial_chain:
+            raise NoAvailableProviderError(f"No provider configured for model '{model}' or default.")
+
+        execution_chain = initial_chain
+        specific_provider_name = body.get("provider")
+        provider_preference = body.get("provider_preference")
+
+        if specific_provider_name and specific_provider_name in self.providers:
+            preferred_provider = self.providers[specific_provider_name]
+            others = [p for p in initial_chain if p.name != specific_provider_name]
+            execution_chain = [preferred_provider] + others
+        elif provider_preference in ["local", "cloud"]:
+            preferred = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) == provider_preference]
+            others = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) != provider_preference]
+            execution_chain = preferred + others
+
+        # 3. Lọc các provider không khỏe mạnh
+        healthy_execution_chain = await self._get_healthy_fallback_chain(execution_chain)
+        if not healthy_execution_chain:
+            logger.critical("All providers in the execution chain are unhealthy (circuit open).", model=model)
+            raise NoAvailableProviderError("All configured providers are currently unavailable (circuit breakers are open).")
+
+        last_exception = None
+        # 4. Thực thi streaming tuần tự
+        for provider in healthy_execution_chain:
+            try:
+                logger.info("Attempting to stream from provider", provider=provider.name, model=model)
+                # Sử dụng executor.execute_stream và yield from
+                async for chunk in self.executor.execute_stream(provider, http_client, body):
+                    yield chunk
+                return # Nếu stream thành công, kết thúc generator
+            except (ProviderError, httpx.RequestError, httpx.HTTPStatusError) as e:
+                logger.warning("Provider stream failed, attempting next in fallback chain", provider=provider.name, error=str(e))
+                last_exception = e
+                continue
+
+        logger.critical("All providers in fallback chain failed for streaming", model=model)
+        raise NoAvailableProviderError("All providers are currently unavailable for streaming.") from last_exception

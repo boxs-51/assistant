@@ -1,0 +1,61 @@
+# config/default.yaml
+# Cấu hình mặc định cho AI Gateway.
+# Các giá trị ở đây sẽ bị ghi đè bởi các file môi trường (e.g., production.yaml) và biến môi trường.
+
+gateway:
+  name: "AI Gateway"
+  version: "1.0.0"
+  host: "0.0.0.0"
+  port: 8000
+  debug: false
+
+security:
+  api_key: "change-me"
+  enable_auth: false
+  enable_input_guardrail: true
+  enable_output_guardrail: true
+
+rate_limit:
+  algorithm: "token_bucket"
+  capacity: 100
+  refill_rate: 5.0
+  limit: 100
+  window_size: 60
+
+redis:
+  url: "redis://localhost:6379/0"
+  cache_expire_seconds: 3600
+
+provider:
+  timeout: 60
+  retry: 2
+  enable_fallback: true
+  priority: ["openai", "anthropic", "gemini", "ollama"]
+  routing_rules_path: "config/routing/routing_rules.yaml"
+
+openai:
+  api_key: ""
+  base_url: "https://api.openai.com/v1"
+
+anthropic:
+  api_key: ""
+  base_url: "https://api.anthropic.com"
+
+gemini:
+  api_key: ""
+  base_url: "https://generativelanguage.googleapis.com"
+
+ollama:
+  base_url: "http://127.0.0.1:11434"
+
+logging:
+  level: "INFO"
+  file: "gateway.log"
+
+metrics:
+  enable: true
+  port: 9090
+
+tracing:
+  enable: false
+  otlp_endpoint: "http://localhost:4318"

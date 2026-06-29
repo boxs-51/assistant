@@ -127,5 +127,11 @@ class Metrics:
     def record_latency(self, provider: str, model: str, seconds: float):
         PROVIDER_LATENCY_SECONDS.labels(provider=provider, model=model).observe(seconds)
 
+    def increment_input_tokens(self, provider: str, model: str, count: int):
+        INPUT_TOKENS_TOTAL.labels(provider=provider, model=model).inc(count)
+
+    def increment_output_tokens(self, provider: str, model: str, count: int):
+        OUTPUT_TOKENS_TOTAL.labels(provider=provider, model=model).inc(count)
+
 # Khởi tạo một instance duy nhất để toàn bộ ứng dụng sử dụng
 metrics = Metrics()

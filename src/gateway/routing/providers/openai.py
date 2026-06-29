@@ -4,7 +4,7 @@ from typing import Dict, Any, AsyncGenerator
 
 from .base import BaseProvider
 from ...config import settings
-from ...schemas import (
+from ...config_loader.schemas import (
     GatewayResponse, GatewayStreamChunk, GatewayStreamChoice, GatewayStreamDelta
 )
 from ..exceptions import ResponseValidationError
@@ -14,17 +14,17 @@ class OpenAIProvider(BaseProvider):
     def __init__(self):
         super().__init__(
             name="openai",
-            api_url=f"{settings.OPENAI_BASE_URL}/v1/chat/completions",
+            api_url=f"{settings.openai.base_url}/v1/chat/completions",
             headers={
                 "Content-Type": "application/json",
-                "Authorization": f"Bearer {settings.OPENAI_API_KEY}"
+                "Authorization": f"Bearer {settings.openai.api_key}"
             }
         )
 
     @classmethod
     def is_configured(cls) -> bool:
         """Kiểm tra xem OpenAI API key đã được cung cấp hay chưa."""
-        return bool(settings.OPENAI_API_KEY)
+        return bool(settings.openai.api_key)
 
     async def request(self, http_client: httpx.AsyncClient, body: Dict[str, Any], timeout: float) -> httpx.Response:
         """Thực hiện request đến OpenAI API."""
