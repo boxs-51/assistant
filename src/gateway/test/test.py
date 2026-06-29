@@ -17,7 +17,7 @@ async def test_gemini_provider():
     """
     print("\n--- 🚀 [Test 1] Testing Gemini (Non-streaming) ---")
     payload = {
-        "model": "gemini-1.5-pro",  # Chỉ định model của Gemini
+        "model": "default",  # Chỉ định model của Gemini
         "provider": "gemini",
         "messages": [
             {"role": "user", "content": "Viết một bài thơ ngắn về AI Gateway."}
@@ -52,7 +52,8 @@ async def test_gemini_streaming():
     """
     print("\n--- 🚀 [Test 2] Testing Gemini (Streaming) ---")
     payload = {
-        "model": "gemini-pro",
+        "model": "default",
+        "provider": "gemini",
         "messages": [
             {"role": "user", "content": "Kể một câu chuyện cười ngắn."}
         ],
@@ -67,17 +68,19 @@ async def test_gemini_streaming():
     try:
         async with httpx.AsyncClient(timeout=120.0) as client:
             async with client.stream("POST", GATEWAY_URL, json=payload, headers=headers) as response:
-                response.raise_for_status()
+                # Kiểm tra status code thủ công để xử lý lỗi stream một cách tường minh
+                if response.status_code >= 400:
+                    print(f"\n❌ Error: Request failed with status {response.status_code}")
+                    body = await response.aread()
+                    print(f"   Response: {body.decode()}")
+                    return
+
                 print("✅ Success! Receiving stream from Gateway:")
                 print("---------------------------------------------", end="", flush=True)
                 async for chunk in response.aiter_text():
                     print(chunk, end="", flush=True)
                 print("\n---------------------------------------------")
 
-    except httpx.HTTPStatusError as e:
-        await e.response.aread()
-        print(f"❌ Error: Request failed with status {e.response.status_code}")
-        print(f"   Response: {e.response.text}")
     except httpx.RequestError as e:
         print(f"❌ Error: Could not connect to the AI Gateway at {GATEWAY_URL}. Details: {e}")
 
@@ -119,8 +122,8 @@ async def test_ollama_provider():
         print("   Is Ollama server running?")
 
 async def main():
-    #await test_gemini_provider()
-    #await test_gemini_streaming()
+    await test_gemini_provider()
+    await test_gemini_streaming()
     await test_ollama_provider()
 
 if __name__ == "__main__":

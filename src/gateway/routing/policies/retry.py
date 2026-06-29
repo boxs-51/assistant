@@ -14,8 +14,13 @@ class RetryPolicy:
     REFACTORED (v2): Chứa logic về việc thử lại (retry) một cách độc lập.
     Nó không biết về Circuit Breaker, Metrics hay các thành phần khác.
     """
-    def __init__(self, max_retries: int = settings.PROVIDER_RETRY):
-        self.max_retries = max_retries
+    def __init__(self, max_retries: int | None = None):
+        """
+        Khởi tạo RetryPolicy.
+        :param max_retries: Số lần thử lại tối đa. Nếu là None, sẽ lấy từ cấu hình.
+        """
+        # Trì hoãn việc truy cập settings cho đến khi đối tượng được tạo
+        self.max_retries = max_retries if max_retries is not None else settings.provider.retry
 
     def _is_retryable(self, error: Exception) -> bool:
         """Kiểm tra xem một lỗi có nên được thử lại hay không."""

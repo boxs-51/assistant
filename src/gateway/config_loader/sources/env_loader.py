@@ -1,8 +1,8 @@
 from typing import Dict, Any
 import os
 
-from .base import BaseConfigSource
-from .utils import parse_nested_keys
+from ..base import BaseConfigSource
+from ..utils import parse_nested_keys
 
 class EnvLoader(BaseConfigSource):
     def __init__(self, prefix: str = "APP_"):

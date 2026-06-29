@@ -3,8 +3,8 @@ from dotenv import dotenv_values
 import os
 import structlog
 
-from .base import BaseConfigSource
-from .utils import parse_nested_keys
+from ..base import BaseConfigSource
+from ..utils import parse_nested_keys
 
 logger = structlog.get_logger(__name__)
 

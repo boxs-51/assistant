@@ -3,7 +3,7 @@ import yaml
 import os
 import structlog
 
-from .base import BaseConfigSource
+from ..base import BaseConfigSource
 
 logger = structlog.get_logger(__name__)
 

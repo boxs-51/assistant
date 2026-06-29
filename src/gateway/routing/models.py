@@ -2,7 +2,7 @@ from pydantic import BaseModel, Field
 import time
 from typing import Optional
 
-from .providers.base import BaseProvider
+from .providers.base.provider import BaseProvider
 
 class ProviderEntry(BaseModel):
     """

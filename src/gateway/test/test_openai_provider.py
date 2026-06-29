@@ -4,7 +4,7 @@ import json
 import time
 from typing import AsyncGenerator
 
-from src.gateway.routing.providers.openai import OpenAIProvider
+from gateway.routing.providers.openai.openai import OpenAIProvider
 from src.gateway.schemas import GatewayResponse, GatewayStreamChunk
 
 pytestmark = pytest.mark.asyncio

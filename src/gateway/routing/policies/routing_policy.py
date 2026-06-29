@@ -6,7 +6,7 @@ import os
 import asyncio
 
 from ...config import settings
-from ..providers.base import BaseProvider
+from ..providers.base.provider import BaseProvider
 
 logger = structlog.get_logger(__name__)
 
@@ -27,7 +27,7 @@ class RoutingPolicy:
         Khởi tạo các quy tắc định tuyến và chuỗi fallback mặc định từ settings.
         """
         # Xây dựng chuỗi fallback mặc định từ config
-        self._default_chain = [self.providers[name] for name in settings.PROVIDER_PRIORITY if name in self.providers]
+        self._default_chain = [self.providers[name] for name in settings.provider.priority if name in self.providers]
         logger.info(
             "Default chain",
             chain=[p.name for p in self._default_chain]
@@ -38,14 +38,14 @@ class RoutingPolicy:
     def _load_rules_from_file(self):
         """Tải và xử lý các quy tắc định tuyến từ file YAML."""
         new_rules = []
-        if not os.path.exists(settings.ROUTING_RULES_PATH):
-            logger.error("Routing rules file not found.", path=settings.ROUTING_RULES_PATH)
+        if not os.path.exists(settings.provider.routing_rules_path):
+            logger.error("Routing rules file not found.", path=settings.provider.routing_rules_path)
             self._rules = []
             
             return
 
         try:
-            with open(settings.ROUTING_RULES_PATH, 'r', encoding='utf-8') as f:
+            with open(settings.provider.routing_rules_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
 
             routing_rules_config = config.get("rules", [])
@@ -65,10 +65,10 @@ class RoutingPolicy:
                     new_rules.append({"models": rule_config["models"], "chain": provider_chain})
             
             self._rules = new_rules
-            logger.info("Routing rules loaded successfully.", rule_count=len(self._rules), path=settings.ROUTING_RULES_PATH)
+            logger.info("Routing rules loaded successfully.", rule_count=len(self._rules), path=settings.provider.routing_rules_path)
 
         except (yaml.YAMLError, FileNotFoundError, Exception) as e:
-            logger.error("Failed to load or parse routing rules file. No rules will be applied.", error=str(e), path=settings.ROUTING_RULES_PATH)
+            logger.error("Failed to load or parse routing rules file. No rules will be applied.", error=str(e), path=settings.provider.routing_rules_path)
             self._rules = [] # Xóa các quy tắc cũ nếu file mới bị lỗi để tránh hành vi không mong muốn
 
     async def reload_rules(self) -> bool:

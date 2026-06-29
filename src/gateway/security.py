@@ -17,12 +17,12 @@ async def authenticate_client(credentials: HTTPAuthorizationCredentials = Depend
     So sánh token được cung cấp với API_KEY trong file cấu hình.
     """
     # Nếu tắt xác thực trong config, bỏ qua và trả về một client_id mặc định
-    if not settings.ENABLE_AUTH:
+    if not settings.security.enable_auth:
         return "anonymous_client"
 
     # So sánh token
     is_correct_scheme = credentials.scheme == "Bearer"
-    is_correct_token = secrets.compare_digest(credentials.credentials, settings.API_KEY)
+    is_correct_token = secrets.compare_digest(credentials.credentials, settings.security.api_key)
 
     if not (is_correct_scheme and is_correct_token):
         raise HTTPException(
@@ -40,7 +40,7 @@ class InputGuardrailAdapter:
 
     def validate(self, text: str) -> bool:
         """Ủy quyền việc kiểm tra cho GuardrailSystem."""
-        if not settings.ENABLE_INPUT_GUARDRAIL:
+        if not settings.security.enable_input_guardrail:
             return True
         return self.system.validate_input(text)
 
@@ -51,13 +51,13 @@ class OutputGuardrailAdapter:
 
     def sanitize(self, text: str) -> str:
         """Ủy quyền việc làm sạch cho GuardrailSystem."""
-        if not settings.ENABLE_OUTPUT_GUARDRAIL:
+        if not settings.security.enable_output_guardrail:
             return text
         return self.system.sanitize_output(text)
 
     async def sanitize_stream(self, stream: AsyncGenerator[str, None]) -> AsyncGenerator[str, None]:
         """Ủy quyền việc làm sạch stream cho GuardrailSystem."""
-        if not settings.ENABLE_OUTPUT_GUARDRAIL:
+        if not settings.security.enable_output_guardrail:
             async for chunk in stream:
                 yield chunk
         else:

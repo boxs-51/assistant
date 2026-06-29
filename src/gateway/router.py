@@ -11,7 +11,7 @@ from .routing.executor import ProviderExecutor
 from .routing.policies.routing_policy import RoutingPolicy
 from .routing.policies.circuit_breaker import CircuitBreakerManager
 from .schemas import GatewayResponse, GatewayStreamChunk # Import schema
-from .routing.providers.base import BaseProvider
+from .routing.providers.base.provider import BaseProvider, ProviderCapability
 
 logger = structlog.get_logger(__name__)
 
@@ -128,15 +128,21 @@ class ModelRouter:
             preferred = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) == provider_preference]
             others = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) != provider_preference]
             execution_chain = preferred + others
+        
+        # 3. [MỚI] Lọc các provider không hỗ trợ streaming
+        stream_capable_chain = [
+            p for p in execution_chain if p.has_capability(ProviderCapability.STREAMING)
+        ]
+        if not stream_capable_chain:
+            raise NoAvailableProviderError(f"No providers configured for model '{model}' support streaming.")
 
-        # 3. Lọc các provider không khỏe mạnh
-        healthy_execution_chain = await self._get_healthy_fallback_chain(execution_chain)
+        # 4. Lọc các provider không khỏe mạnh
+        healthy_execution_chain = await self._get_healthy_fallback_chain(stream_capable_chain)
         if not healthy_execution_chain:
             logger.critical("All providers in the execution chain are unhealthy (circuit open).", model=model)
             raise NoAvailableProviderError("All configured providers are currently unavailable (circuit breakers are open).")
 
-        last_exception = None
-        # 4. Thực thi streaming tuần tự
+        # 5. Thực thi streaming tuần tự
         for provider in healthy_execution_chain:
             try:
                 logger.info("Attempting to stream from provider", provider=provider.name, model=model)

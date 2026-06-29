@@ -3,7 +3,7 @@ import httpx
 import json
 from typing import AsyncGenerator
 
-from src.gateway.routing.providers.ollama import OllamaProvider
+from gateway.routing.providers.ollama.ollama import OllamaProvider
 from src.gateway.schemas import GatewayResponse, GatewayStreamChunk
 
 # Sử dụng pytest-asyncio để chạy các test bất đồng bộ

@@ -1,5 +1,6 @@
-from .config.core import ConfigurationRegistry
-from .config.schemas import ConfigSchema
+from typing import Any
+from .config_loader.core import ConfigurationRegistry
+from .config_loader.schemas import ConfigSchema
 
 """
 Đây là điểm truy cập trung tâm cho cấu hình trong toàn bộ ứng dụng.
@@ -13,6 +14,20 @@ from ..config import settings
 print(settings.gateway.port)
 """
 
-# Tạo một proxy object để các module khác có thể import `settings`
-# mà không gây ra lỗi circular import.
-settings: ConfigSchema = ConfigurationRegistry.get_config()
+class _SettingsProxy:
+    """
+    Một proxy lười biếng cho đối tượng cấu hình.
+    Nó trì hoãn việc gọi `ConfigurationRegistry.get_config()` cho đến khi
+    một thuộc tính của cấu hình được truy cập lần đầu tiên.
+    Điều này ngăn ngừa lỗi khởi tạo tại thời điểm import.
+    """
+    def __getattr__(self, name: str) -> Any:
+        # Lấy cấu hình thực tế khi một thuộc tính được truy cập lần đầu.
+        # Sau đó, thay thế proxy bằng đối tượng cấu hình thực tế
+        # cho các truy cập trong tương lai để có hiệu suất tốt hơn.
+        config = ConfigurationRegistry.get_config()
+        globals()['settings'] = config
+        return getattr(config, name)
+
+# Khởi tạo proxy. Các module khác sẽ import đối tượng này.
+settings: ConfigSchema = _SettingsProxy() # type: ignore

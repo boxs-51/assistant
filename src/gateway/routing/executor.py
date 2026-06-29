@@ -6,7 +6,7 @@ import structlog
 from ..config import settings
 from ..metrics import metrics
 from .exceptions import ProviderError
-from .providers.base import BaseProvider
+from .providers.base.provider import BaseProvider
 from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 from .policies.retry import RetryPolicy
 from .policies.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
@@ -50,7 +50,7 @@ class ProviderExecutor:
 
         async def execution_func():
             """Hàm thực thi lõi, chỉ gọi provider và kiểm tra status."""
-            response = await provider.request(http_client, body, settings.PROVIDER_TIMEOUT)
+            response = await provider.request(http_client, body, settings.provider.timeout)
             # Bước mới: Chuẩn hóa response ngay sau khi nhận được
             normalized_response = await provider.normalize_response(response, model)
             return normalized_response
@@ -104,7 +104,7 @@ class ProviderExecutor:
             await breaker.before_request()
 
             # Gọi thẳng vào provider.request, không qua retry policy cho stream
-            response = await provider.request(http_client, body, settings.PROVIDER_TIMEOUT)
+            response = await provider.request(http_client, body, settings.provider.timeout)
             
             # Bắt đầu stream và chuẩn hóa
             async for chunk in provider.normalize_stream(response, model):

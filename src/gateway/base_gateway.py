@@ -9,7 +9,7 @@ import structlog
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 import uuid
-from .config.core import ConfigLoader, ConfigurationRegistry
+from .config_loader.core import ConfigLoader, ConfigurationRegistry
 from .limiter import RateLimiterManager
 # --- Enterprise Routing Imports ---
 from .router import ModelRouter
@@ -38,7 +38,7 @@ async def startup_event():
     """Khởi tạo các kết nối cần thiết khi server khởi động."""
     # 1. Tải cấu hình
     # Đây là bước đầu tiên và quan trọng nhất
-    loader = ConfigLoader(default_config_path="config/default.yaml")
+    loader = ConfigLoader(default_config_path="config/gateway/default.yaml")
     app_config = loader.load_config()
     ConfigurationRegistry.set_config(app_config)
     settings = ConfigurationRegistry.get_config()

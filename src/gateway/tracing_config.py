@@ -15,13 +15,13 @@ def setup_tracing(service_name: str = "ai-gateway"):
     Hàm này thiết lập một TracerProvider, định nghĩa các thuộc tính của dịch vụ,
     và cấu hình một exporter để gửi dữ liệu trace đến một collector (ví dụ: Jaeger, Tempo).
     """
-    if not settings.ENABLE_TRACING:
+    if not settings.tracing.enable:
         return
 
     # 1. Tạo một resource để định danh dịch vụ của bạn
     resource = Resource(attributes={
         "service.name": service_name,
-        "service.version": settings.GATEWAY_VERSION,
+        "service.version": settings.gateway.version,
     })
 
     # 2. Thiết lập TracerProvider với resource đã tạo
@@ -29,7 +29,7 @@ def setup_tracing(service_name: str = "ai-gateway"):
 
     # 3. Cấu hình OTLP Exporter để gửi trace qua HTTP
     # Endpoint được lấy từ file config
-    exporter = OTLPSpanExporter(endpoint=f"{settings.OTEL_EXPORTER_OTLP_ENDPOINT}/v1/traces")
+    exporter = OTLPSpanExporter(endpoint=f"{settings.tracing.otlp_endpoint}/v1/traces")
 
     # 4. Sử dụng BatchSpanProcessor để gửi trace theo lô, giúp tối ưu hiệu suất
     processor = BatchSpanProcessor(exporter)

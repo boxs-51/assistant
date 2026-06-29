@@ -19,15 +19,15 @@ class RateLimiterFactory:
     @classmethod
     def create_limiter(cls, storage: BaseStorage) -> Optional[BaseRateLimiter]:
         """Tạo một limiter instance dựa trên cấu hình trong settings."""
-        algorithm = settings.RATE_LIMIT_ALGORITHM.lower()
+        algorithm = settings.rate_limit.algorithm.lower()
         limiter_class = cls._limiter_classes.get(algorithm)
 
         if not limiter_class:
             raise ValueError(f"Unknown rate limiting algorithm: {algorithm}")
 
         if algorithm == "token_bucket":
-            return TokenBucketLimiter(storage, settings.RATE_LIMIT_CAPACITY, settings.RATE_LIMIT_REFILL_RATE, settings.CACHE_EXPIRE_SECONDS)
+            return TokenBucketLimiter(storage, settings.rate_limit.capacity, settings.rate_limit.refill_rate, settings.redis.cache_expire_seconds)
         elif algorithm == "sliding_window":
-            return SlidingWindowLimiter(storage, settings.RATE_LIMIT_LIMIT, settings.RATE_LIMIT_WINDOW_SIZE, settings.CACHE_EXPIRE_SECONDS)
+            return SlidingWindowLimiter(storage, settings.rate_limit.limit, settings.rate_limit.window_size, settings.redis.cache_expire_seconds)
         
         return None
