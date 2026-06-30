@@ -3,7 +3,9 @@ from typing import AsyncGenerator
 import unicodedata
 import os
 import yaml
+import structlog
 
+logger = structlog.get_logger()
 class GuardrailSystem:
     def __init__(self, filter_dir="config/guardrails"):
         self.forbidden_input_patterns = []
@@ -12,9 +14,9 @@ class GuardrailSystem:
 
     def _load_filters_from_directory(self, directory: str):
         """Tự động tải các bộ lọc từ các file YAML trong một thư mục."""
-        print(f"🛡️ [Guardrail] Đang tải các bộ lọc bảo mật từ thư mục '{directory}'...")
+        logger.info("Loading guardrail filters", directory=directory)
         if not os.path.isdir(directory):
-            print(f"⚠️ [Guardrail] Thư mục '{directory}' không tồn tại. Bỏ qua việc tải bộ lọc.")
+            logger.warning("Guardrail filter directory not found, skipping.", directory=directory)
             return
 
         for filename in sorted(os.listdir(directory)):
@@ -22,10 +24,11 @@ class GuardrailSystem:
                 filepath = os.path.join(directory, filename)
                 with open(filepath, "r", encoding="utf-8") as f:
                     filter_config = yaml.safe_load(f)
+                    filter_name = filter_config.get('name', filename)
                     self.forbidden_input_patterns.extend(filter_config.get("input_filters", []))
                     self.redaction_patterns.update(filter_config.get("output_redaction", {}))
-                    print(f"  -> Đã tải thành công bộ lọc: {filter_config.get('name', filename)}")
-        print("✅ [Guardrail] Tải xong tất cả các bộ lọc bảo mật.")
+                    logger.debug("Loaded guardrail filter successfully", filter_name=filter_name)
+        logger.info("Finished loading all guardrail filters.")
 
     def _normalize_text(self, text: str) -> str:
         """
@@ -49,8 +52,8 @@ class GuardrailSystem:
         normalized_input = self._normalize_text(user_request)
         for pattern in self.forbidden_input_patterns:
             if re.search(pattern, normalized_input):
-                print(f"🚨 [Guardrail] CẢNH BÁO: Phát hiện Input độc hại vi phạm pattern '{pattern}'!")
-                return False
+                logger.warning("Malicious input detected", violated_pattern=pattern)
+                return False # Block the request
         return True
 
     def sanitize_output(self, ai_response: str) -> str:
@@ -67,7 +70,7 @@ class GuardrailSystem:
                 nonlocal found_sensitive_data
                 found_sensitive_data = True
                 # Che toàn bộ chuỗi khớp được
-                print(f"🚨 [Guardrail] CHE MỜ: Phát hiện và che mờ thông tin nhạy cảm loại '{name}'.")
+                logger.info("Redacting sensitive data", redaction_type=name)
                 return f"[{name.upper()}_REDACTED]"
 
             sanitized_response = re.sub(pattern, redact_match, sanitized_response, flags=re.IGNORECASE)

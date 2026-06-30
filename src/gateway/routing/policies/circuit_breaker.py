@@ -4,7 +4,7 @@ from typing import Dict, Optional
 from enum import Enum
 import structlog
 
-from ...metrics import metrics
+from ... import observability as gateway_metrics
 
 logger = structlog.get_logger(__name__)
 
@@ -99,7 +99,7 @@ class CircuitBreaker:
                 self._state = CircuitBreakerState.OPEN
                 self._last_failure_time = time.monotonic()
                 logger.warning("Circuit breaker has been RE-OPENED from half-open state due to trial failure.", provider=self.provider_name)
-                metrics.increment_circuit_breaker_opens(self.provider_name)
+                gateway_metrics.metrics.increment_circuit_breaker_opens(self.provider_name)
                 # Release lock sau khi thử thất bại
                 if self._half_open_lock.locked():
                     self._half_open_lock.release()
@@ -109,7 +109,7 @@ class CircuitBreaker:
                     self._state = CircuitBreakerState.OPEN
                     self._last_failure_time = time.monotonic()
                     logger.error("Circuit breaker has been OPENED due to failures.", provider=self.provider_name, failure_count=self._failure_count)
-                    metrics.increment_circuit_breaker_opens(self.provider_name)
+                    gateway_metrics.metrics.increment_circuit_breaker_opens(self.provider_name)
 
     async def is_open(self) -> bool:
         """Kiểm tra nhanh xem circuit có đang mở hay không, dùng cho health-aware routing."""

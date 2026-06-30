@@ -6,7 +6,7 @@ import structlog
 from opentelemetry import trace
 
 from .config import settings
-from .metrics import metrics
+from . import observability as gateway_metrics
 from .semantic_cache.base import BaseCacheBackend
 from .semantic_cache.embedding import EmbeddingService
 from .semantic_cache.models import CacheEntry, CacheMetadata
@@ -58,7 +58,7 @@ class SemanticCache:
                         span.set_attribute("cache_hit", True)
                         span.set_attribute("cache_distance", distance)
                         logger.info("Cache hit", distance=round(distance, 4))
-                        metrics.increment_cache_hits()
+                        gateway_metrics.metrics.increment_cache_hits()
                         return entry.response, embedding
     
                 except Exception as e:
@@ -72,7 +72,7 @@ class SemanticCache:
                 span.set_attribute("cache_miss_reason", miss_reason_val)
                 return None
         finally:
-            metrics.record_semantic_cache_latency("get", time.time() - start_time)
+            gateway_metrics.metrics.record_semantic_cache_latency("get", time.time() - start_time)
 
     async def set(self, prompt: str, response: str, embedding: list[float]):
         """Lưu một cặp prompt-response mới vào cache, sử dụng embedding đã có."""
@@ -83,8 +83,8 @@ class SemanticCache:
             entry = CacheEntry(id=entry_id, response=response, embedding=embedding, metadata=metadata)
 
             await self.backend.set(entry)
-            metrics.increment_cache_write()
-            metrics.record_semantic_cache_latency("set", time.time() - start_time)
+            gateway_metrics.metrics.increment_cache_write()
+            gateway_metrics.metrics.record_semantic_cache_latency("set", time.time() - start_time)
             logger.debug("Cache updated", prompt_id=entry_id)
 
     async def batch_set(self, items: List[Tuple[str, str, list[float]]]):
@@ -96,4 +96,4 @@ class SemanticCache:
             entries.append(CacheEntry(id=entry_id, response=response, embedding=embedding, metadata=metadata))
         if entries:
             await self.backend.batch_set(entries)
-            metrics.increment_cache_write(amount=len(entries))
+            gateway_metrics.metrics.increment_cache_write(amount=len(entries))

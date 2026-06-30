@@ -20,17 +20,15 @@ from .routing.policies.routing_policy import RoutingPolicy
 from .routing.policies.circuit_breaker import CircuitBreakerManager
 # --------------------------------
 from .security import authenticate_client, InputGuardrailAdapter, OutputGuardrailAdapter
-from .schemas import GatewayStreamChunk # Import schema mới
 from ..guardrail.guar import GuardrailSystem
 # --- Refactored Cache Imports ---
 from .caching import SemanticCache
 from .semantic_cache.chroma_backend import ChromaCacheBackend
 from .semantic_cache.embedding import EmbeddingService
 # --------------------------------
-from .metrics import metrics
-from .logging_config import setup_logging
-from .tracing_config import setup_tracing
 
+from shared_core.observability import ObservabilityConfig ,LoggingConfig, TracingConfig
+from .import observability as gateway_metrics
 app = FastAPI(title="AI Gateway")
 
 @app.on_event("startup")
@@ -43,9 +41,12 @@ async def startup_event():
     ConfigurationRegistry.set_config(app_config)
     settings = ConfigurationRegistry.get_config()
     # Cấu hình logging ngay khi khởi động
-    setup_logging(log_level=settings.logging.level)
-    # Cấu hình tracing
-    setup_tracing(service_name=settings.gateway.name)
+    config = ObservabilityConfig(service_name=settings.gateway.name,
+                                 service_version=settings.gateway.version,
+                                 logging=LoggingConfig(level=settings.logging.level),
+                                 tracing=TracingConfig(enable=settings.tracing.enable, otlp_endpoint=settings.tracing.otlp_endpoint)
+                                )
+    gateway_metrics.setup_gateway_observability(config)
     # Tự động instrument FastAPI app
     FastAPIInstrumentor.instrument_app(app)
     global logger
@@ -107,9 +108,9 @@ async def observability_middleware(request: Request, call_next):
     start_time = time.time()
     logger.info("Request received", method=request.method, path=request.url.path)
 
-    metrics.increment_requests_in_flight()
+    gateway_metrics.metrics.increment_requests_in_flight()
     response = await call_next(request)
-    metrics.decrement_requests_in_flight()
+    gateway_metrics.metrics.decrement_requests_in_flight()
 
     process_time = time.time() - start_time
     # TODO: Ghi nhận latency của toàn bộ request vào một histogram mới
@@ -131,7 +132,7 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
     """
     tracer = trace.get_tracer(__name__)
 
-    metrics.increment_requests(request.method, request.url.path)
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
     structlog.contextvars.bind_contextvars(client_id=client_id)
     start_time = time.time()
     
@@ -142,7 +143,7 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
         user_prompt = " ".join([msg['content'] for msg in body.get("messages", []) if msg['role'] == 'user'])
     except Exception:
         logger.error("Invalid request body", exc_info=True)
-        metrics.increment_failed(400)
+        gateway_metrics.metrics.increment_failed(400)
         raise HTTPException(status_code=400, detail="Invalid request body.")
 
     # 2. Input Guardrail
@@ -151,8 +152,8 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
             span.set_attribute("blocked", True)
             span.set_attribute("reason", "prompt_injection")
             logger.warning("Request blocked by Input Guardrail", reason="prompt_injection", prompt=user_prompt)
-            metrics.increment_prompt_block()
-            metrics.increment_failed(400)
+            gateway_metrics.metrics.increment_prompt_block()
+            gateway_metrics.metrics.increment_failed(400)
             raise HTTPException(status_code=400, detail="Request blocked due to potential prompt injection.")
 
     # 3. Rate Limiting
@@ -160,8 +161,8 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
         is_allowed, wait_time = await app.state.limiter.is_allowed(client_id, cost=1) # Cost = 1 request
         if not is_allowed:
             logger.warning("Request blocked by Rate Limiter", client_id=client_id)
-            metrics.increment_rate_limit()
-            metrics.increment_failed(429)
+            gateway_metrics.metrics.increment_rate_limit()
+            gateway_metrics.metrics.increment_failed(429)
             raise HTTPException(status_code=429, detail=f"Rate limit exceeded. Try again in {wait_time:.2f} seconds.")
 
     # 4. Semantic Cache
@@ -169,9 +170,9 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
     if cached_result:
         cached_response, cached_embedding = cached_result
         with tracer.start_as_current_span("process_cached_response"):
-            metrics.increment_success()
+            gateway_metrics.metrics.increment_success()
             latency = time.time() - start_time
-            metrics.record_latency("cache", "N/A", latency) # Model không áp dụng cho cache
+            gateway_metrics.metrics.record_latency("cache", "N/A", latency) # Model không áp dụng cho cache
             # Vẫn cần quét output của cache để đảm bảo an toàn
             safe_cached_response = app.state.output_guardrail.sanitize(cached_response)
             return {"choices": [{"message": {"role": "assistant", "content": safe_cached_response}}]}
@@ -229,9 +230,9 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
                 # 8. Cập nhật cache
                 # await app.state.cache.set(user_prompt, final_content, ...)
                 
-                metrics.increment_success()
+                gateway_metrics.metrics.increment_success()
                 latency = time.time() - start_time
-                metrics.record_latency(final_provider_name, gateway_response.model, latency)
+                gateway_metrics.metrics.record_latency(final_provider_name, gateway_response.model, latency)
 
                 # 9. [MỚI] Theo dõi Token và Chi phí
                 with tracer.start_as_current_span("token_tracking") as token_span:
@@ -239,8 +240,8 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
                     output_tokens = gateway_response.usage.completion_tokens
 
                     # Ghi nhận vào Metrics
-                    metrics.increment_input_tokens(final_provider_name, gateway_response.model, input_tokens)
-                    metrics.increment_output_tokens(final_provider_name, gateway_response.model, output_tokens)
+                    gateway_metrics.metrics.increment_input_tokens(final_provider_name, gateway_response.model, input_tokens)
+                    gateway_metrics.metrics.increment_output_tokens(final_provider_name, gateway_response.model, output_tokens)
                     
                     # Ghi nhận vào Span Attributes
                     token_span.set_attribute("input_tokens", input_tokens)
@@ -253,7 +254,7 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
         # Lỗi này xảy ra khi tất cả các provider đều không khả dụng
         trace.get_current_span().record_exception(e)
         logger.critical("All providers are unavailable", error=str(e))
-        metrics.increment_failed(503)
+        gateway_metrics.metrics.increment_failed(503)
         raise HTTPException(status_code=503, detail="Service Unavailable: All LLM providers are currently down.")
 
 # =================================================================

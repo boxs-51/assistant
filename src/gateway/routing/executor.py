@@ -4,7 +4,7 @@ import httpx
 import structlog
 
 from ..config import settings
-from ..metrics import metrics
+from ..import observability as gateway_metrics
 from .exceptions import ProviderError
 from .providers.base.provider import BaseProvider
 from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
@@ -84,7 +84,7 @@ class ProviderExecutor:
             else:
                 error_label = "unexpected_error"
             
-            metrics.increment_provider_errors(provider.name, error_label)
+            gateway_metrics.metrics.increment_provider_errors(provider.name, error_label)
             logger.warning(
                 "Provider execution failed after all retries.",
                 provider=provider.name, error=str(e), error_type=type(e).__name__
@@ -125,7 +125,7 @@ class ProviderExecutor:
             else:
                 error_label = "unexpected_error"
             
-            metrics.increment_provider_errors(provider.name, error_label)
+            gateway_metrics.metrics.increment_provider_errors(provider.name, error_label)
             logger.warning(
                 "Provider stream execution failed.", provider=provider.name, error=str(e), error_type=type(e).__name__
             )

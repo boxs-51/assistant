@@ -31,7 +31,7 @@ provider:
   retry: 2
   enable_fallback: true
   priority: ["openai", "anthropic", "gemini", "ollama"]
-  routing_rules_path: "config/routing/routing_rules.yaml"
+  routing_rules_path: "config/gateway/routing/routing_rules.yaml"
 
 openai:
   api_key: ""
