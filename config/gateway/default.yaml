@@ -22,6 +22,17 @@ rate_limit:
   limit: 100
   window_size: 60
 
+circuit_breaker:
+  default:
+    failure_threshold: 3
+    reset_timeout: 30 # Thời gian chờ dài hơn cho các LLM provider
+    success_threshold: 1
+  providers:
+    redis_rate_limiter:
+      failure_threshold: 2 # Ngưỡng thấp hơn cho Redis
+      reset_timeout: 5     # Thời gian reset ngắn hơn
+      success_threshold: 1
+
 redis:
   url: "redis://localhost:6379/0"
   cache_expire_seconds: 3600

@@ -1,10 +1,11 @@
 import asyncio
 import time
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 from enum import Enum
 import structlog
 
-from ... import observability as gateway_metrics
+from ..gateway import observability as gateway_metrics
+from ..gateway.config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -117,6 +118,21 @@ class CircuitBreaker:
         return current_state == CircuitBreakerState.OPEN
 
     @property
+    def failure_count(self) -> int:
+        """Trả về số lỗi liên tiếp hiện tại."""
+        return self._failure_count
+
+    @property
+    def success_count(self) -> int:
+        """Trả về số thành công liên tiếp hiện tại (chỉ dùng trong HALF_OPEN)."""
+        return self._success_count
+
+    @property
+    def last_failure_time(self) -> float:
+        """Trả về thời điểm (monotonic) của lỗi cuối cùng."""
+        return self._last_failure_time
+
+    @property
     def current_state(self) -> CircuitBreakerState:
         """Trả về trạng thái nội bộ mà không kích hoạt logic chuyển đổi."""
         return self._state
@@ -129,9 +145,6 @@ class CircuitBreakerManager:
     def __init__(self):
         self._breakers: Dict[str, CircuitBreaker] = {}
         self._lock = asyncio.Lock()
-        # TODO: Load config từ settings
-        self.fail_max = 5
-        self.reset_timeout = 30
 
     async def get_breaker(self, provider_name: str) -> CircuitBreaker:
         """Lấy hoặc tạo một CircuitBreaker cho một provider cụ thể."""
@@ -139,7 +152,36 @@ class CircuitBreakerManager:
         if provider_name not in self._breakers:
             async with self._lock:
                 if provider_name not in self._breakers:
-                    logger.info("Creating new circuit breaker", provider=provider_name)
-                    breaker = CircuitBreaker(provider_name=provider_name, failure_threshold=self.fail_max, reset_timeout=self.reset_timeout)
+                    # Lấy cấu hình cho provider này, hoặc dùng default nếu không có
+                    provider_settings = settings.circuit_breaker.providers.get(
+                        provider_name, settings.circuit_breaker.default
+                    )
+                    logger.info(
+                        "Creating new circuit breaker",
+                        provider=provider_name,
+                        failure_threshold=provider_settings.failure_threshold,
+                        reset_timeout=provider_settings.reset_timeout
+                    )
+                    breaker = CircuitBreaker(
+                        provider_name=provider_name,
+                        failure_threshold=provider_settings.failure_threshold,
+                        reset_timeout=provider_settings.reset_timeout,
+                        success_threshold=provider_settings.success_threshold
+                    )
                     self._breakers[provider_name] = breaker
         return self._breakers[provider_name]
+
+    async def get_all_statuses(self) -> Dict[str, Dict[str, Any]]:
+        """
+        Lấy thông tin trạng thái chi tiết của tất cả các circuit breaker đã được tạo.
+        """
+        statuses = {}
+        async with self._lock:
+            for provider_name, breaker in self._breakers.items():
+                statuses[provider_name] = {
+                    "state": breaker.current_state.value,
+                    "failure_count": breaker.failure_count,
+                    "success_count": breaker.success_count,
+                    "last_failure_time": breaker.last_failure_time,
+                }
+        return statuses

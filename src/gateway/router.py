@@ -9,7 +9,7 @@ from .config import settings
 from .routing.exceptions import NoAvailableProviderError, ProviderError
 from .routing.executor import ProviderExecutor
 from .routing.policies.routing_policy import RoutingPolicy
-from .routing.policies.circuit_breaker import CircuitBreakerManager
+from ..circuit_breaker.circuit_breaker import CircuitBreakerManager
 from .schemas import GatewayResponse, GatewayStreamChunk # Import schema
 from .routing.providers.base.provider import BaseProvider, ProviderCapability
 

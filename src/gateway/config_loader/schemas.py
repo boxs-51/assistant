@@ -25,10 +25,22 @@ class RateLimitSettings(BaseModel):
     refill_rate: float = 5.0
     limit: int = 100
     window_size: int = 60
+    fail_mode: str = "open"  # 'open' hoặc 'closed'
+
+class CircuitBreakerProviderSettings(BaseModel):
+    """Cấu hình ngưỡng cho một Circuit Breaker cụ thể."""
+    failure_threshold: int = 3
+    reset_timeout: int = 10 # seconds
+    success_threshold: int = 1
+
+class CircuitBreakerSettings(BaseModel):
+    default: CircuitBreakerProviderSettings = Field(default_factory=CircuitBreakerProviderSettings)
+    providers: dict[str, CircuitBreakerProviderSettings] = Field(default_factory=dict)
 
 class RedisSettings(BaseModel):
     url: str = "redis://localhost:6379/0"
     cache_expire_seconds: int = 3600
+    key_prefix: str = "aigateway"
 
 class ProviderSettings(BaseModel):
     timeout: int = 60
@@ -84,6 +96,7 @@ class ConfigSchema(BaseModel):
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
+    circuit_breaker: CircuitBreakerSettings = Field(default_factory=CircuitBreakerSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
     provider: ProviderSettings = Field(default_factory=ProviderSettings)
     openai: OpenAISettings = Field(default_factory=OpenAISettings)

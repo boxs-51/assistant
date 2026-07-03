@@ -49,6 +49,7 @@ class GeminiProvider(BaseProvider):
                 ProviderCapability.STREAMING,
                 ProviderCapability.TEXT_GENERATION,
                 ProviderCapability.VISION, # Gemini Pro Vision
+                ProviderCapability.STREAMING
             }
         )
 

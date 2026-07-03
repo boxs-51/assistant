@@ -4,7 +4,7 @@ import httpx
 import structlog
 
 from ..exceptions import ProviderError,  ResponseValidationError
-from .circuit_breaker import CircuitBreakerOpenError
+from ....circuit_breaker.circuit_breaker import CircuitBreakerOpenError
 from ...config import settings
 
 logger = structlog.get_logger(__name__)

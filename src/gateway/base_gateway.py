@@ -17,7 +17,7 @@ from .routing.registry import ProviderRegistry
 from .routing.discovery import ProviderDiscovery
 from .routing.exceptions import NoAvailableProviderError
 from .routing.policies.routing_policy import RoutingPolicy
-from .routing.policies.circuit_breaker import CircuitBreakerManager
+from ..circuit_breaker.circuit_breaker import CircuitBreakerManager
 # --------------------------------
 from .security import authenticate_client, InputGuardrailAdapter, OutputGuardrailAdapter
 from ..guardrail.guar import GuardrailSystem
@@ -36,6 +36,9 @@ async def startup_event():
     """Khởi tạo các kết nối cần thiết khi server khởi động."""
     # 1. Tải cấu hình
     # Đây là bước đầu tiên và quan trọng nhất
+    # Di chuyển logger ra ngoài để có thể truy cập toàn cục sau khi cấu hình
+    global logger; logger = structlog.get_logger("gateway.main")
+    
     loader = ConfigLoader(default_config_path="config/gateway/default.yaml")
     app_config = loader.load_config()
     ConfigurationRegistry.set_config(app_config)
@@ -49,10 +52,7 @@ async def startup_event():
     gateway_metrics.setup_gateway_observability(config)
     # Tự động instrument FastAPI app
     FastAPIInstrumentor.instrument_app(app)
-    global logger
-    logger = structlog.get_logger("gateway.main")
     app.state.redis = redis.from_url(settings.redis.url, decode_responses=True)
-    app.state.limiter = RateLimiterManager(app.state.redis)
     # --- Enterprise Routing Initialization Flow ---
     provider_registry = ProviderRegistry()
     provider_discovery = ProviderDiscovery(registry=provider_registry)
@@ -61,12 +61,15 @@ async def startup_event():
     # Policy giờ đây cần danh sách các provider có sẵn để tự khởi tạo các quy tắc
     available_providers = provider_registry.list_all_providers()
     routing_policy = RoutingPolicy(providers=available_providers)
+    
+    # --- Centralized Managers ---
+    # CircuitBreakerManager giờ được dùng chung cho cả Router và Rate Limiter
+    circuit_breaker_manager = CircuitBreakerManager()
+    app.state.limiter = RateLimiterManager(app.state.redis, circuit_breaker_manager)
     logger.info(
         "Providers",
         providers=list(available_providers.keys())
     )
-    
-    circuit_breaker_manager = CircuitBreakerManager() # Tạo manager
     app.state.router = ModelRouter(
         providers=available_providers,
         routing_policy=routing_policy,
@@ -212,6 +215,9 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
                 async for chunk in stream_chunks:
                     # TODO: Output Guardrail cho từng chunk (nếu cần)
                     yield chunk.to_sse()
+                
+                # [FIX] Gửi thông điệp [DONE] theo chuẩn OpenAI khi stream kết thúc thành công
+                yield "data: [DONE]\n\n"
 
             return StreamingResponse(
                 stream_generator(),
@@ -272,6 +278,20 @@ async def reload_routing_rules(request: Request):
         return {"status": "success", "message": "Routing rules reloaded successfully."}
     else:
         raise HTTPException(status_code=500, detail="Failed to reload routing rules. Check logs for details.")
+
+@app.get("/admin/circuit-breakers/status", tags=["Admin"], dependencies=[Depends(authenticate_client)])
+async def get_circuit_breaker_statuses(request: Request):
+    """
+    Endpoint quản trị để xem trạng thái hiện tại của tất cả các Circuit Breaker.
+    Cung cấp thông tin chi tiết về trạng thái (open, closed, half-open),
+    số lỗi, và thời gian xảy ra lỗi cuối cùng.
+    Yêu cầu xác thực.
+    """
+    # CircuitBreakerManager được inject vào ModelRouter, ta có thể lấy nó từ đó.
+    circuit_breaker_manager = request.app.state.router.circuit_breaker_manager
+    statuses = await circuit_breaker_manager.get_all_statuses()
+    return JSONResponse(content=statuses)
+
 
 # =================================================================
 # HEALTH & STATUS ENDPOINTS

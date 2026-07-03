@@ -9,7 +9,7 @@ from .exceptions import ProviderError
 from .providers.base.provider import BaseProvider
 from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 from .policies.retry import RetryPolicy
-from .policies.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ...circuit_breaker.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
 logger = structlog.get_logger(__name__)
 

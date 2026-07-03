@@ -1,5 +1,5 @@
 import os
-from typing import Tuple
+from typing import Tuple, Dict, Any
 from redis.commands.core import Script
 import redis.asyncio as redis
 import structlog
@@ -8,44 +8,38 @@ from .base import BaseStorage
 
 logger = structlog.get_logger(__name__)
 
+
 class RedisStorage(BaseStorage):
     """Triển khai Storage sử dụng Redis và Lua script để đảm bảo tính nguyên tử."""
 
     def __init__(self, redis_client: redis.Redis):
         self.redis = redis_client
-        self.token_bucket_script = self._load_lua_script('token_bucket.lua')
-        self.sliding_window_script = self._load_lua_script('sliding_window.lua')
+        self.scripts: Dict[str, Script] = {
+            "token_bucket": self._load_lua_script('token_bucket.lua'),
+            "sliding_window": self._load_lua_script('sliding_window.lua'),
+        }
+        logger.info("All rate limiter Lua scripts loaded successfully.")
 
     def _load_lua_script(self, filename: str) -> "redis.client.Script":
         """Tải một Lua script từ file và đăng ký nó với Redis."""
         script_path = os.path.join(os.path.dirname(__file__), '..', 'scripts', filename)
-        with open(script_path, 'r', encoding="utf-8") as f:
-            script_code = f.read()
-        return self.redis.register_script(script_code)
+        logger.debug("Loading Lua script", path=script_path)
+        try:
+            with open(script_path, 'r', encoding="utf-8") as f:
+                script_code = f.read()
+            return self.redis.register_script(script_code)
+        except FileNotFoundError:
+            logger.error("Lua script file not found.", path=script_path)
+            raise
+        except Exception as e:
+            logger.critical("Failed to load or register Lua script.", path=script_path, error=str(e))
+            raise RuntimeError(f"Could not load Lua script {filename}") from e
 
-    async def consume_token_bucket(
-        self, key: str, capacity: float, refill_rate: float, cost: float, ttl: int
-    ) -> Tuple[bool, float, float]:
+    async def execute(self, script_name: str, keys: list, args: list) -> Any:
         """
-        Gọi Lua script để thực thi thuật toán Token Bucket một cách nguyên tử.
+        Thực thi một script đã được đăng ký với các key và argument đã cho.
         """
-        import time
-        current_time = time.time()
-        
-        result = await self.token_bucket_script(keys=[key], args=[capacity, refill_rate, cost, current_time, ttl])
-        
-        allowed, remaining_tokens, wait_time = result
-        return bool(allowed), float(remaining_tokens), float(wait_time)
-
-    async def consume_sliding_window(
-        self, key: str, limit: int, window_size: int, ttl: int
-    ) -> Tuple[bool, int]:
-        """
-        Gọi Lua script để thực thi thuật toán Sliding Window một cách nguyên tử.
-        """
-        import time
-        current_time = time.time()
-
-        result = await self.sliding_window_script(keys=[key], args=[limit, window_size, current_time, ttl])
-        allowed, remaining = result
-        return bool(allowed), int(remaining)
+        script = self.scripts.get(script_name)
+        if not script:
+            raise ValueError(f"Script '{script_name}' not found or not loaded.")
+        return await script(keys=keys, args=args)
