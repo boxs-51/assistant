@@ -2,7 +2,7 @@ from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 import httpx
 import redis.asyncio as redis
-import time
+import time, anyio
 import psutil
 from prometheus_client import generate_latest
 import structlog
@@ -12,10 +12,10 @@ import uuid
 from .config_loader.core import ConfigLoader, ConfigurationRegistry
 from .limiter import RateLimiterManager
 # --- Enterprise Routing Imports ---
-from .router import ModelRouter
+from .router import ModelRouter # Sẽ được sửa đổi bên dưới
 from .routing.registry import ProviderRegistry
 from .routing.discovery import ProviderDiscovery
-from .routing.exceptions import NoAvailableProviderError
+from .routing.exceptions import NoAvailableProviderError, ProviderError
 from .routing.policies.routing_policy import RoutingPolicy
 from ..circuit_breaker.circuit_breaker import CircuitBreakerManager
 # --------------------------------
@@ -29,6 +29,8 @@ from .semantic_cache.embedding import EmbeddingService
 
 from shared_core.observability import ObservabilityConfig ,LoggingConfig, TracingConfig
 from .import observability as gateway_metrics
+from .config import settings
+
 app = FastAPI(title="AI Gateway")
 
 @app.on_event("startup")
@@ -42,7 +44,7 @@ async def startup_event():
     loader = ConfigLoader(default_config_path="config/gateway/default.yaml")
     app_config = loader.load_config()
     ConfigurationRegistry.set_config(app_config)
-    settings = ConfigurationRegistry.get_config()
+    #settings = ConfigurationRegistry.get_config()
     # Cấu hình logging ngay khi khởi động
     config = ObservabilityConfig(service_name=settings.gateway.name,
                                  service_version=settings.gateway.version,
@@ -261,6 +263,102 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
         gateway_metrics.metrics.increment_failed(503)
         raise HTTPException(status_code=503, detail="Service Unavailable: All LLM providers are currently down.")
 
+@app.post("/v1/embeddings", tags=["LLM APIs"])
+async def embeddings_proxy(request: Request, client_id: str = Depends(authenticate_client)):
+    """
+    Endpoint để tạo vector embeddings cho văn bản.
+    """
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id)
+
+    try:
+        body = await request.json()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid request body.")
+
+    # TODO: Thêm Rate Limiting và Caching nếu cần
+
+    try:
+        # Sử dụng phương thức mới của router
+        response_data = await app.state.router.execute_embeddings(
+            http_client=app.state.http_client,
+            body=body
+        )
+        return JSONResponse(content=response_data)
+    except NoAvailableProviderError as e:
+        logger.critical("All providers are unavailable for embeddings", error=str(e))
+        raise HTTPException(status_code=503, detail="Service Unavailable: All providers for embeddings are down.")
+
+@app.get("/v1/models", tags=["LLM APIs"])
+async def list_models_proxy(
+    request: Request,
+    provider_name: str,
+    client_id: str = Depends(authenticate_client),
+):
+    """
+    Endpoint để lấy danh sách các model có sẵn từ một provider.
+    Mặc định lấy từ 'openai' nếu không có provider_name nào được chỉ định.
+    """
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id)
+
+    # Nếu chỉ list models, mặc định là 'openai' để tương thích ngược
+
+
+    try:
+        provider = app.state.router.providers.get(provider_name)
+
+        if not provider:
+            raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not configured or found.")
+
+        # Lấy danh sách tất cả các model
+        models_data = await provider.models(
+            http_client=app.state.http_client, 
+            timeout=settings.provider.timeout
+        )
+        return models_data
+
+    except NotImplementedError:
+        logger.warning("Requested model functionality not implemented for provider", provider=provider_name)
+        raise HTTPException(status_code=501, detail=f"The requested model functionality is not implemented for provider '{provider_name}'.")
+    except Exception as e:
+        logger.error("Failed to process model request", provider=provider_name, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to process model request for provider '{provider_name}'.")
+
+@app.get("/v1/models/{model_id:path}", tags=["LLM APIs"])
+async def get_model_details_proxy(
+    request: Request,
+    model_id: str,
+    provider_name: str, # Bắt buộc phải có provider để biết hỏi ai
+    client_id: str = Depends(authenticate_client)
+):
+    """
+    Endpoint để lấy thông tin chi tiết của một model cụ thể từ một provider.
+    """
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id, model_id=model_id, provider_name=provider_name)
+
+    try:
+        provider = app.state.router.providers.get(provider_name)
+
+        if not provider:
+            raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not configured or found.")
+
+        # Gọi phương thức model của provider đã chọn
+        model_data = await provider.model(
+            http_client=app.state.http_client,
+            timeout=settings.provider.timeout,
+            model_name=model_id
+        )
+        return model_data
+
+    except NotImplementedError:
+        logger.warning("Get model details endpoint not implemented for provider", provider=provider_name)
+        raise HTTPException(status_code=501, detail=f"Fetching model details is not implemented for provider '{provider_name}'.")
+    except Exception as e:
+        logger.error("Failed to fetch model details", provider=provider_name, model=model_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to fetch model details from provider '{provider_name}'.")
+
 # =================================================================
 # ADMIN ENDPOINTS
 # =================================================================
@@ -330,7 +428,7 @@ def get_metrics():
 @app.get("/stats", tags=["Health"])
 async def get_stats():
     """Cung cấp thống kê hoạt động ở dạng JSON cho dashboard nội bộ."""
-    settings = ConfigurationRegistry.get_config()
+    #settings = ConfigurationRegistry.get_config()
     process = psutil.Process()
     return {
         "gateway_name": settings.gateway.name,

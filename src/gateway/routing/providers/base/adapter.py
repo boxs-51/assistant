@@ -23,3 +23,11 @@ class BaseAdapter(ABC):
     async def adapt_chat_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Chuyển đổi stream từ provider về stream các GatewayStreamChunk."""
         pass
+
+    def adapt_embeddings_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Chuyển đổi request body cho embeddings. Mặc định là không thay đổi."""
+        return request
+
+    async def adapt_embeddings_response(self, response: httpx.Response) -> Dict[str, Any]:
+        """Chuyển đổi response cho embeddings. Mặc định là trả về JSON gốc."""
+        return await response.json()

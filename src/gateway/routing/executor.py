@@ -8,6 +8,7 @@ from ..import observability as gateway_metrics
 from .exceptions import ProviderError
 from .providers.base.provider import BaseProvider
 from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
+from typing import Callable, Awaitable
 from .policies.retry import RetryPolicy
 from ...circuit_breaker.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
@@ -40,17 +41,18 @@ class ProviderExecutor:
             return "pool_timeout"
         return "request_error"
 
-    async def execute(self, provider: BaseProvider, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> GatewayResponse:
+    async def execute(self, **kwargs) -> GatewayResponse:
         """
         Điều phối việc thực thi request với các policy Circuit Breaker và Retry.
         Luồng thực thi: before_request -> retry(request -> normalize) -> on_success/on_failure.
         """
+        provider = kwargs.get("provider")
         breaker = await self.breaker_manager.get_breaker(provider.name)
 
         async def execution_func():
             """Hàm thực thi lõi, chỉ gọi provider và kiểm tra status."""
             # Gọi thẳng vào phương thức API cấp cao của provider
-            normalized_response = await provider.chat(http_client, body, settings.provider.timeout)
+            normalized_response = await provider.chat(**kwargs)
             return normalized_response
 
         try:
@@ -90,20 +92,19 @@ class ProviderExecutor:
             # Ném lại lỗi dưới dạng ProviderError để Router có thể fallback.
             raise ProviderError(f"Provider failed after all retries: {e}", provider_name=provider.name) from e
 
-    async def execute_stream(self, provider: BaseProvider, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> AsyncGenerator[GatewayStreamChunk, None]:
+    async def execute_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
         """
         Điều phối việc thực thi một request streaming.
         Luồng này không hỗ trợ retry cho từng chunk.
         """
+        provider = kwargs.get("provider")
         breaker = await self.breaker_manager.get_breaker(provider.name)
 
         try:
             await breaker.before_request()
 
             # Bắt đầu stream và chuẩn hóa
-            async for chunk in provider.chat_stream(
-                http_client, body, settings.provider.timeout
-            ):
+            async for chunk in provider.chat_stream(**kwargs):
                 yield chunk
 
             await breaker.on_success()
@@ -126,3 +127,44 @@ class ProviderExecutor:
                 "Provider stream execution failed.", provider=provider.name, error=str(e), error_type=type(e).__name__
             )
             raise ProviderError(f"Provider stream failed: {e}", provider_name=provider.name) from e
+
+    async def execute_generic(
+        self,
+        provider: BaseProvider,
+        execution_callable: Callable[[], Awaitable[Any]],
+    ) -> Any:
+        """
+        Thực thi một hàm bất đồng bộ bất kỳ với các policy Circuit Breaker và Retry.
+        Hàm này tổng quát hóa `execute` để dùng cho models, embeddings, etc.
+        """
+        breaker = await self.breaker_manager.get_breaker(provider.name)
+
+        try:
+            await breaker.before_request()
+
+            # RetryPolicy bọc hàm thực thi được truyền vào.
+            response = await self.retry_policy.apply(execution_callable, provider.name)
+
+            await breaker.on_success()
+            return response
+
+        except CircuitBreakerOpenError as e:
+            logger.warning("Skipping provider call, circuit breaker is open.", provider=provider.name)
+            raise ProviderError(f"Circuit breaker is open for {provider.name}", provider_name=provider.name) from e
+
+        except Exception as e:
+            await breaker.on_failure()
+
+            if isinstance(e, httpx.HTTPStatusError):
+                error_label = str(e.response.status_code)
+            elif isinstance(e, httpx.RequestError):
+                error_label = self._get_error_metric_label(e)
+            else:
+                error_label = "unexpected_error"
+
+            gateway_metrics.metrics.increment_provider_errors(provider.name, error_label)
+            logger.warning(
+                "Provider generic execution failed after all retries.",
+                provider=provider.name, error=str(e), error_type=type(e).__name__
+            )
+            raise ProviderError(f"Provider failed after all retries: {e}", provider_name=provider.name) from e

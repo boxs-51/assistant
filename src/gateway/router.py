@@ -10,9 +10,10 @@ from .routing.exceptions import NoAvailableProviderError, ProviderError
 from .routing.executor import ProviderExecutor
 from .routing.policies.routing_policy import RoutingPolicy
 from ..circuit_breaker.circuit_breaker import CircuitBreakerManager
-from .schemas import GatewayResponse, GatewayStreamChunk # Import schema
-from .routing.providers.base.provider import BaseProvider, ProviderCapability
+from .schemas import GatewayResponse, GatewayStreamChunk
+from .routing.providers.base.provider import BaseProvider, ModelCapability
 
+import asyncio, anyio
 logger = structlog.get_logger(__name__)
 
 class ModelRouter:
@@ -95,9 +96,14 @@ class ModelRouter:
             with trace.get_tracer(__name__).start_as_current_span(f"provider_attempt:{provider.name}") as span:
                 span.set_attribute("provider.name", provider.name); span.set_attribute("model.name", body.get("model"))
                 try:
+                    # [CẢI TIẾN] Kiểm tra năng lực ngay trước khi thực thi (lazy check)
+                    if not await provider.has_capability(body.get("model"), ModelCapability.CHAT, http_client, settings.provider.timeout):
+                        logger.warning("Skipping provider as it does not support CHAT capability for the model.", provider=provider.name, model=body.get("model"))
+                        continue
+
                     logger.info("Attempting to call provider", provider=provider.name, model=body.get("model"))
                     # Executor giờ trả về GatewayResponse đã được chuẩn hóa
-                    gateway_response = await self.executor.execute(provider, http_client, body)
+                    gateway_response = await self.executor.execute(provider=provider, http_client=http_client, body=body)
                     logger.info("Provider call successful", provider=provider.name)
                     span.set_attribute("provider.success", True)
                     return gateway_response
@@ -130,9 +136,17 @@ class ModelRouter:
             execution_chain = preferred + others
         
         # 3. [MỚI] Lọc các provider không hỗ trợ streaming
-        stream_capable_chain = [
-            p for p in execution_chain if p.has_capability(ProviderCapability.STREAMING)
+        
+        # Tạo coroutine để kiểm tra năng lực streaming cho từng provider
+        stream_check_coroutines = [
+            p.has_capability(body.get("model"), ModelCapability.CHAT_STREAM, http_client, settings.provider.timeout)
+            for p in execution_chain
         ]
+        # Chạy kiểm tra song song
+        stream_check_results = await asyncio.gather(*stream_check_coroutines, return_exceptions=True)
+
+        stream_capable_chain = [p for i, p in enumerate(execution_chain) if stream_check_results[i] is True]
+
         if not stream_capable_chain:
             raise NoAvailableProviderError(f"No providers configured for model '{body.get('model')}' support streaming.")
 
@@ -147,7 +161,7 @@ class ModelRouter:
             try:
                 logger.info("Attempting to stream from provider", provider=provider.name, model=body.get("model"))
                 # Sử dụng executor.execute_stream và yield from
-                async for chunk in self.executor.execute_stream(provider, http_client, body):
+                async for chunk in self.executor.execute_stream(provider=provider, http_client=http_client, body=body):
                     yield chunk
                 return # Nếu stream thành công, kết thúc generator
             except (ProviderError, httpx.RequestError, httpx.HTTPStatusError) as e:
@@ -157,3 +171,45 @@ class ModelRouter:
 
         logger.critical("All providers in fallback chain failed for streaming", model=body.get("model"))
         raise NoAvailableProviderError("All providers are currently unavailable for streaming.") from last_exception
+        
+    async def execute_embeddings(self, http_client: httpx.AsyncClient, body: dict) -> dict:
+        """Thực thi request embeddings với fallback và kiểm tra năng lực."""
+        provider_list = self.routing_policy.get_provider_list(body)
+        
+        # Lọc các provider hỗ trợ embeddings cho model
+        capable_providers_coroutines = [
+            (p, p.has_capability(body.get("model"), ModelCapability.EMBEDDINGS, http_client, settings.provider.timeout))
+            for p_name in provider_list if (p := self.providers.get(p_name))
+        ]
+        capable_results = await asyncio.gather(*[coro for _, coro in capable_providers_coroutines])
+        
+        execution_chain = [
+            provider for i, (provider, _) in enumerate(capable_providers_coroutines) if capable_results[i] is True
+        ]
+
+        if not execution_chain:
+            raise NoAvailableProviderError(f"No providers support embeddings for model '{body.get('model')}'.")
+
+        last_error = None
+        for provider in execution_chain:
+            try:
+                # Định nghĩa hàm gọi cụ thể cho embeddings
+                execution_callable = lambda: provider.embeddings(http_client=http_client, body=body, timeout=settings.provider.timeout)
+                # Dùng executor mới
+                result = await self.executor.execute_generic(provider, execution_callable)
+                return result
+            except ProviderError as e:
+                last_error = e
+                continue
+
+        raise NoAvailableProviderError("All providers failed for embeddings request.") from last_error
+
+    async def list_models(self, http_client: httpx.AsyncClient) -> List[dict]:
+        """Lấy danh sách model từ tất cả các provider có sẵn."""
+        async with anyio.create_task_group() as tg:
+            for provider in self.providers.values():
+                # Bỏ qua các provider chưa triển khai `models`
+                if "NotImplementedError" in str(provider.models): continue
+                tg.start_soon(provider.models, http_client, settings.provider.timeout)
+        # Đây là một cách đơn giản, trong thực tế cần xử lý lỗi cho từng provider
+        return [{"provider": "example", "models": []}] # Placeholder

@@ -11,13 +11,13 @@ class OpenAIAdapter(BaseAdapter):
     Vì schema nội bộ của gateway dựa trên OpenAI, adapter này chủ yếu
     thực hiện việc xác thực và chuyển đổi kiểu dữ liệu.
     """
-    def adapt_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """Request đã ở định dạng chuẩn, không cần thay đổi."""
+    def adapt_chat_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+        """Request đã ở định dạng chuẩn OpenAI, không cần thay đổi."""
         return request
 
-    def adapt_response(self, response: httpx.Response) -> GatewayResponse:
+    async def adapt_chat_response(self, response: httpx.Response) -> GatewayResponse:
         """Chuyển đổi response JSON từ OpenAI về GatewayResponse."""
-        response_data = response.json()
+        response_data = await response.json()
         try:
             # Pydantic model sẽ tự động validate cấu trúc
             return GatewayResponse.model_validate(response_data)
@@ -25,7 +25,7 @@ class OpenAIAdapter(BaseAdapter):
             # Bắt các lỗi validation từ Pydantic
             raise ResponseValidationError(f"Invalid response structure from OpenAI-compatible API: {e}", provider_name="openai") from e
 
-    async def adapt_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
+    async def adapt_chat_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Chuyển đổi stream của OpenAI (SSE) sang stream các GatewayStreamChunk."""
         async for line in response.aiter_lines():
             line = line.decode('utf-8').strip()

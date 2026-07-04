@@ -12,6 +12,10 @@ class ApiType(Enum):
     # Image APIs
     IMAGE_GENERATION = "images/generations"
     
+    # Audio APIs
+    AUDIO_TRANSCRIPTION = "audio/transcriptions"
+    TEXT_TO_SPEECH = "audio/speech"
+    
     # File APIs
     FILES = "files"
     

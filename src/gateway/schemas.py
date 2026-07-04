@@ -1,5 +1,6 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional, Any
+import time
 
 # =================================================================
 # API DATA TRANSFER OBJECTS (DTOs)
@@ -56,3 +57,18 @@ class GatewayStreamChunk(BaseModel):
     def to_sse(self) -> str:
         """Chuyển đổi chunk thành định dạng Server-Sent Event (SSE)."""
         return f"data: {self.model_dump_json()}\n\n"
+
+# --- Cấu trúc cho Model Management APIs ---
+
+class ModelInfo(BaseModel):
+    """Định nghĩa cấu trúc cho thông tin của một model."""
+    id: str
+    object: str = "model"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    owned_by: str
+    capabilities: List[str] = Field(default_factory=list, description="Danh sách các năng lực mà model hỗ trợ.")
+
+class ModelList(BaseModel):
+    """Định nghĩa cấu trúc cho một danh sách các model."""
+    object: str = "list"
+    data: List[ModelInfo]

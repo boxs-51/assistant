@@ -21,10 +21,10 @@ class OllamaAdapter(BaseAdapter):
         # Không cần thay đổi nhiều, nhưng có thể thêm logic để loại bỏ các trường không được hỗ trợ
         return adapted_request
 
-    def adapt_chat_response(self, response: httpx.Response) -> GatewayResponse:
+    async def adapt_chat_response(self, response: httpx.Response) -> GatewayResponse: # Make it async
         """Chuyển đổi response JSON từ Ollama về GatewayResponse."""
         try:
-            response_data = response.json()
+            response_data = await response.json()
             message_data = response_data.get("message", {})
             
             return GatewayResponse(
