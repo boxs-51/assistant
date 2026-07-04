@@ -58,33 +58,24 @@ class GeminiProvider(BaseProvider):
         """Kiểm tra xem Gemini API key đã được cung cấp hay chưa."""
         return bool(settings.gemini.api_key)
 
-    async def request(self, http_client: httpx.AsyncClient, body: Dict[str, Any], timeout: float) -> httpx.Response:
-        # 4. Logic request giờ đây trở nên cực kỳ đơn giản và chuẩn hóa
-        provider_model = self.mapper.translate(body.get("model") or "default")
-        adapted_body = self.adapter.adapt_request(body)
-        is_streaming = body.get("stream", False)
+    async def chat(self, http_client: httpx.AsyncClient, body: Dict[str, Any], timeout: float) -> GatewayResponse:
+        prepared_body = self.prepare_body(body)
+        provider_model = prepared_body.get("model", "default") # Lấy model đã được dịch
+        
         endpoint_template = "v1beta/models/{model}:{action}"
-        action = "streamGenerateContent" if is_streaming else "generateContent"
-        request_url = self.endpoints.build(endpoint_template, model=provider_model, action=action)
-        headers = {"Content-Type": "application/json"}
-        if is_streaming:
-            headers["Accept"] = "text/event-stream"
-        # Auth được xử lý tự động
-        final_url, auth_headers = self.auth.prepare_request(request_url, headers)
-        logger.info(
-            "Gemini request",
-            provider_model=provider_model,
-            url=request_url,
-            stream=is_streaming,
-        )
-                
-        return await http_client.post(final_url, json=adapted_body, headers=auth_headers, timeout=timeout)
+        action = "generateContent"
 
-    async def normalize_response(self, response: httpx.Response, model: str) -> GatewayResponse:
-        response.raise_for_status()
-        return self.adapter.adapt_response(response.json(), model)
+        response = await self.send(http_client, endpoint_template, prepared_body, timeout, model=provider_model, action=action)
+        return await self.adapter.adapt_chat_response(response)
 
-    async def normalize_stream(self, response: httpx.Response, model: str) -> AsyncGenerator[GatewayStreamChunk, None]:
-        response.raise_for_status()
-        async for chunk in self.adapter.adapt_stream(response.aiter_bytes(), model):
+    async def chat_stream(self, http_client: httpx.AsyncClient, body: Dict[str, Any], timeout: float) -> AsyncGenerator[GatewayStreamChunk, None]:
+        prepared_body = self.prepare_body(body)
+        provider_model = prepared_body.get("model", "default")
+        
+        endpoint_template = "v1beta/models/{model}:{action}"
+        action = "streamGenerateContent"
+        headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
+        
+        response = await self.send(http_client, endpoint_template, prepared_body, timeout, headers, model=provider_model, action=action)
+        async for chunk in self.adapter.adapt_chat_stream(response):
             yield chunk

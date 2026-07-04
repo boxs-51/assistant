@@ -46,13 +46,11 @@ class ProviderExecutor:
         Luồng thực thi: before_request -> retry(request -> normalize) -> on_success/on_failure.
         """
         breaker = await self.breaker_manager.get_breaker(provider.name)
-        model = body.get("model", "unknown")
 
         async def execution_func():
             """Hàm thực thi lõi, chỉ gọi provider và kiểm tra status."""
-            response = await provider.request(http_client, body, settings.provider.timeout)
-            # Bước mới: Chuẩn hóa response ngay sau khi nhận được
-            normalized_response = await provider.normalize_response(response, model)
+            # Gọi thẳng vào phương thức API cấp cao của provider
+            normalized_response = await provider.chat(http_client, body, settings.provider.timeout)
             return normalized_response
 
         try:
@@ -98,16 +96,14 @@ class ProviderExecutor:
         Luồng này không hỗ trợ retry cho từng chunk.
         """
         breaker = await self.breaker_manager.get_breaker(provider.name)
-        model = body.get("model", "unknown")
 
         try:
             await breaker.before_request()
 
-            # Gọi thẳng vào provider.request, không qua retry policy cho stream
-            response = await provider.request(http_client, body, settings.provider.timeout)
-            
             # Bắt đầu stream và chuẩn hóa
-            async for chunk in provider.normalize_stream(response, model):
+            async for chunk in provider.chat_stream(
+                http_client, body, settings.provider.timeout
+            ):
                 yield chunk
 
             await breaker.on_success()

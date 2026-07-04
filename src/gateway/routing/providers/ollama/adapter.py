@@ -7,11 +7,11 @@ from ....schemas import (
 )
 from ..base.adapter import BaseAdapter
 from ...exceptions import ResponseValidationError
-
+import httpx
 class OllamaAdapter(BaseAdapter):
     """Adapter để chuyển đổi định dạng request/response của Ollama."""
 
-    def adapt_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def adapt_chat_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """
         Chuyển đổi request body từ chuẩn Gateway sang chuẩn Ollama.
         Trong trường hợp này, API /api/chat của Ollama khá tương thích.
@@ -21,13 +21,14 @@ class OllamaAdapter(BaseAdapter):
         # Không cần thay đổi nhiều, nhưng có thể thêm logic để loại bỏ các trường không được hỗ trợ
         return adapted_request
 
-    def adapt_response(self, response_data: Dict[str, Any], model: str) -> GatewayResponse:
+    def adapt_chat_response(self, response: httpx.Response) -> GatewayResponse:
         """Chuyển đổi response JSON từ Ollama về GatewayResponse."""
         try:
+            response_data = response.json()
             message_data = response_data.get("message", {})
             
             return GatewayResponse(
-                model=response_data.get("model", model),
+                model=response_data.get("model", "default"),
                 choices=[
                     GatewayChoice(
                         index=0,
@@ -47,9 +48,9 @@ class OllamaAdapter(BaseAdapter):
         except (KeyError, IndexError) as e:
             raise ResponseValidationError(f"Invalid response structure from Ollama: {str(e)}", provider_name="ollama") from e
 
-    async def adapt_stream(self, response_iterator: AsyncGenerator[bytes, None], model: str) -> AsyncGenerator[GatewayStreamChunk, None]:
+    async def adapt_chat_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Chuyển đổi stream của Ollama (JSON objects trên mỗi dòng) sang stream các GatewayStreamChunk."""
-        async for line in response_iterator:
+        async for line in response.aiter_lines():
             if not line:
                 continue
             try:
@@ -57,7 +58,7 @@ class OllamaAdapter(BaseAdapter):
                 message_chunk = ollama_chunk.get("message", {})
                 
                 yield GatewayStreamChunk(
-                    model=ollama_chunk.get("model", model),
+                    model=ollama_chunk.get("model", "default"),
                     choices=[GatewayStreamChoice(
                         index=0,
                         delta=GatewayStreamDelta(content=message_chunk.get("content", "")),

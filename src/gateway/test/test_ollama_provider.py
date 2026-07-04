@@ -3,7 +3,7 @@ import httpx
 import json
 from typing import AsyncGenerator
 
-from gateway.routing.providers.ollama.ollama import OllamaProvider
+from src.gateway.routing.providers.ollama.ollama import OllamaProvider
 from src.gateway.schemas import GatewayResponse, GatewayStreamChunk
 
 # Sử dụng pytest-asyncio để chạy các test bất đồng bộ
@@ -23,7 +23,7 @@ async def test_normalize_response_success(provider: OllamaProvider):
     """
     # 1. Dữ liệu giả lập từ Ollama
     ollama_payload = {
-        "model": "llama3",
+        "model": "llama3-8b",
         "created_at": "2023-08-04T08:52:19.323Z",
         "response": "Xin chào! Tôi là một mô hình ngôn ngữ.",
         "done": True,
@@ -39,7 +39,7 @@ async def test_normalize_response_success(provider: OllamaProvider):
     )
 
     # 2. Gọi phương thức cần test
-    gateway_response = await provider.normalize_response(mock_response, "llama3-8b")
+    gateway_response = await provider.normalize_response(mock_response)
 
     # 3. Kiểm tra kết quả
     assert isinstance(gateway_response, GatewayResponse)
@@ -61,10 +61,10 @@ async def test_normalize_stream_success(provider: OllamaProvider):
     """
     # 1. Dữ liệu stream giả lập từ Ollama
     stream_chunks_raw = [
-        {"model": "llama3", "response": "Xin ", "done": False},
-        {"model": "llama3", "response": "chào", "done": False},
-        {"model": "llama3", "response": "!", "done": False},
-        {"model": "llama3", "response": "", "done": True, "prompt_eval_count": 10, "eval_count": 3},
+        {"model": "llama3-8b", "response": "Xin ", "done": False},
+        {"model": "llama3-8b", "response": "chào", "done": False},
+        {"model": "llama3-8b", "response": "!", "done": False},
+        {"model": "llama3-8b", "response": "", "done": True, "prompt_eval_count": 10, "eval_count": 3},
     ]
 
     async def mock_stream() -> AsyncGenerator[bytes, None]:
@@ -81,7 +81,7 @@ async def test_normalize_stream_success(provider: OllamaProvider):
 
     # 2. Gọi phương thức cần test và thu thập kết quả
     results = []
-    async for chunk in provider.normalize_stream(mock_response, "llama3-8b"):
+    async for chunk in provider.normalize_stream(mock_response):
         results.append(chunk)
 
     # 3. Kiểm tra kết quả
@@ -100,3 +100,12 @@ async def test_normalize_stream_success(provider: OllamaProvider):
     assert results[3].choices[0].delta.content is None
     assert results[3].choices[0].finish_reason == "stop"
     # Ollama stream không trả về usage trong chunk cuối, nên không cần test
+
+# =================================================================
+# KÍCH HOẠT CHẠY TRỰC TIẾP
+# =================================================================
+if __name__ == "__main__":
+    import sys
+    import warnings
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    sys.exit(pytest.main(["-v", "-s", __file__]))

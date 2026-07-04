@@ -2,6 +2,7 @@ import httpx
 from typing import Dict, Any, AsyncGenerator
 
 from ..base.provider import BaseProvider
+from ..base.api import ApiType
 from ..base.auth import BearerToken
 from ..base.capability import ProviderCapability
 from ..base.endpoint import EndpointBuilder
@@ -42,19 +43,15 @@ class OpenAIProvider(BaseProvider):
         """Kiểm tra xem OpenAI API key đã được cung cấp hay chưa."""
         return bool(settings.openai.api_key)
 
-    async def request(self, http_client: httpx.AsyncClient, body: Dict[str, Any], timeout: float) -> httpx.Response:
-        """Thực hiện request đến OpenAI API bằng cách sử dụng các thành phần đã được lắp ráp."""
-        provider_model = self.mapper.translate(body.get("model", "gpt-4o"))
-        body["model"] = provider_model # Cập nhật model trong body request
-        adapted_body = self.adapter.adapt_request(body)
-        request_url = self.endpoints.build("chat/completions")
-        final_url, auth_headers = self.auth.prepare_request(request_url, {"Content-Type": "application/json"})
-        return await http_client.post(final_url, json=adapted_body, headers=auth_headers, timeout=timeout)
+    async def chat(self, http_client: httpx.AsyncClient, body: Dict[str, Any], timeout: float) -> GatewayResponse:
+        prepared_body = self.prepare_body(body, default_model="gpt-4o")
+        response = await self.send(http_client, ApiType.CHAT_COMPLETIONS, prepared_body, timeout)
+        return self.adapter.adapt_chat_response(response)
 
-    async def normalize_response(self, response: httpx.Response, model: str) -> GatewayResponse:
-        response.raise_for_status()
-        return self.adapter.adapt_response(response.json(), model)
 
-    async def normalize_stream(self, response: httpx.Response, model: str) -> AsyncGenerator[GatewayStreamChunk, None]:
-        async for chunk in self.adapter.adapt_stream(response.aiter_bytes(), model):
+    async def chat_stream(self, http_client: httpx.AsyncClient, body: Dict[str, Any], timeout: float) -> AsyncGenerator[GatewayStreamChunk, None]:
+        prepared_body = self.prepare_body(body, default_model="gpt-4o")
+        response = await self.send(http_client, ApiType.CHAT_COMPLETIONS, prepared_body, timeout)
+        
+        async for chunk in self.adapter.adapt_chat_stream(response):
             yield chunk

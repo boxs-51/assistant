@@ -191,7 +191,6 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
             # Router giờ trả về một GatewayResponse đã được chuẩn hóa
             gateway_response = await app.state.router.execute_with_fallback(
                 http_client=app.state.http_client,
-                model=body.get("model"),
                 body=body
             )
             # Lấy tên provider từ response gốc nếu cần
@@ -207,9 +206,8 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
         if is_streaming:
             async def stream_generator():
                 """Generator để xử lý và yield các chunk đã được chuẩn hóa."""
-                stream_chunks = app.state.router.stream_with_fallback(
+                stream_chunks = await app.state.router.stream_with_fallback(
                     http_client=app.state.http_client,
-                    model=body.get("model"),
                     body=body
                 )
                 async for chunk in stream_chunks:

@@ -4,7 +4,7 @@ from typing import Dict, Any, AsyncGenerator
 from ....schemas import GatewayResponse, GatewayStreamChunk
 from ..base.adapter import BaseAdapter
 from ...exceptions import ResponseValidationError
-
+import httpx
 class OpenAIAdapter(BaseAdapter):
     """
     Adapter cho các API tương thích với OpenAI.
@@ -15,8 +15,9 @@ class OpenAIAdapter(BaseAdapter):
         """Request đã ở định dạng chuẩn, không cần thay đổi."""
         return request
 
-    def adapt_response(self, response_data: Dict[str, Any], model: str) -> GatewayResponse:
+    def adapt_response(self, response: httpx.Response) -> GatewayResponse:
         """Chuyển đổi response JSON từ OpenAI về GatewayResponse."""
+        response_data = response.json()
         try:
             # Pydantic model sẽ tự động validate cấu trúc
             return GatewayResponse.model_validate(response_data)
@@ -24,9 +25,9 @@ class OpenAIAdapter(BaseAdapter):
             # Bắt các lỗi validation từ Pydantic
             raise ResponseValidationError(f"Invalid response structure from OpenAI-compatible API: {e}", provider_name="openai") from e
 
-    async def adapt_stream(self, response_iterator: AsyncGenerator[bytes, None], model: str) -> AsyncGenerator[GatewayStreamChunk, None]:
+    async def adapt_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Chuyển đổi stream của OpenAI (SSE) sang stream các GatewayStreamChunk."""
-        async for line in response_iterator:
+        async for line in response.aiter_lines():
             line = line.decode('utf-8').strip()
             if line.startswith("data: "):
                 data = line[len("data: "):]

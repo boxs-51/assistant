@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, AsyncGenerator
 
+import httpx
 from ....schemas import GatewayResponse, GatewayStreamChunk
 
 class BaseAdapter(ABC):
@@ -9,16 +10,16 @@ class BaseAdapter(ABC):
     của Gateway và định dạng của provider cụ thể.
     """
     @abstractmethod
-    def adapt_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def adapt_chat_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
         """Chuyển đổi request body từ chuẩn Gateway sang chuẩn provider."""
         pass
 
     @abstractmethod
-    def adapt_response(self, response_data: Dict[str, Any], model: str) -> GatewayResponse:
+    async def adapt_chat_response(self, response: httpx.Response) -> GatewayResponse:
         """Chuyển đổi response JSON từ provider về GatewayResponse."""
         pass
 
     @abstractmethod
-    async def adapt_stream(self, response_iterator: AsyncGenerator[bytes, None], model: str) -> AsyncGenerator[GatewayStreamChunk, None]:
+    async def adapt_chat_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Chuyển đổi stream từ provider về stream các GatewayStreamChunk."""
         pass

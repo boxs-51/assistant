@@ -4,7 +4,7 @@ import json
 import time
 from typing import AsyncGenerator
 
-from gateway.routing.providers.openai.openai import OpenAIProvider
+from src.gateway.routing.providers.openai.openai import OpenAIProvider
 from src.gateway.schemas import GatewayResponse, GatewayStreamChunk
 
 pytestmark = pytest.mark.asyncio
@@ -26,7 +26,7 @@ async def test_normalize_response_success(provider: OpenAIProvider):
         "id": "chatcmpl-123",
         "object": "chat.completion",
         "created": int(time.time()),
-        "model": "gpt-4o-2024-05-13",
+        "model": "gpt-4o",
         "choices": [{
             "index": 0,
             "message": {
@@ -48,7 +48,7 @@ async def test_normalize_response_success(provider: OpenAIProvider):
     )
 
     # 2. Gọi phương thức cần test
-    gateway_response = await provider.normalize_response(mock_response, "gpt-4o")
+    gateway_response = await provider.normalize_response(mock_response)
 
     # 3. Kiểm tra kết quả
     assert isinstance(gateway_response, GatewayResponse)
@@ -84,10 +84,19 @@ async def test_normalize_stream_success(provider: OpenAIProvider):
     mock_response.aiter_bytes = mock_stream
 
     # 2. Gọi phương thức và thu thập kết quả
-    results = [chunk async for chunk in provider.normalize_stream(mock_response, "gpt-4o")]
+    results = [chunk async for chunk in provider.normalize_stream(mock_response)]
 
     # 3. Kiểm tra kết quả
     assert len(results) == 3
     assert isinstance(results[0], GatewayStreamChunk)
     assert results[0].choices[0].delta.content == "Hello"
     assert results[2].choices[0].finish_reason == "stop"
+
+# =================================================================
+# KÍCH HOẠT CHẠY TRỰC TIẾP
+# =================================================================
+if __name__ == "__main__":
+    import sys
+    import warnings
+    warnings.filterwarnings("ignore", category=DeprecationWarning)
+    sys.exit(pytest.main(["-v", "-s", __file__]))

@@ -55,11 +55,11 @@ class ModelRouter:
 
         return healthy_chain
 
-    async def execute_with_fallback(self, http_client: httpx.AsyncClient, model: str, body: Dict[str, Any]) -> GatewayResponse:
+    async def execute_with_fallback(self, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> GatewayResponse:
         # 1. Lấy chuỗi fallback một cách linh động từ policy cho mỗi request
-        initial_chain = self.routing_policy.get_fallback_chain(model)
+        initial_chain = self.routing_policy.get_fallback_chain(body.get("model"))
         if not initial_chain:
-            raise NoAvailableProviderError(f"No provider configured for model '{model}' or default.")
+            raise NoAvailableProviderError(f"No provider configured for model '{body.get('model')}' or default.")
 
         # 2. Logic định tuyến ưu tiên theo yêu cầu của client
         execution_chain = initial_chain
@@ -86,16 +86,16 @@ class ModelRouter:
         healthy_execution_chain = await self._get_healthy_fallback_chain(execution_chain)
 
         if not healthy_execution_chain:
-            logger.critical("All providers in the execution chain are unhealthy (circuit open).", model=model, initial_chain=[p.name for p in execution_chain])
+            logger.critical("All providers in the execution chain are unhealthy (circuit open).", model=body.get("model"), initial_chain=[p.name for p in execution_chain])
             raise NoAvailableProviderError("All configured providers are currently unavailable (circuit breakers are open).")
 
         last_exception = None
         # 4. Thực thi tuần tự theo chuỗi đã được xác định
         for provider in healthy_execution_chain:
             with trace.get_tracer(__name__).start_as_current_span(f"provider_attempt:{provider.name}") as span:
-                span.set_attribute("provider.name", provider.name); span.set_attribute("model.name", model)
+                span.set_attribute("provider.name", provider.name); span.set_attribute("model.name", body.get("model"))
                 try:
-                    logger.info("Attempting to call provider", provider=provider.name, model=model)
+                    logger.info("Attempting to call provider", provider=provider.name, model=body.get("model"))
                     # Executor giờ trả về GatewayResponse đã được chuẩn hóa
                     gateway_response = await self.executor.execute(provider, http_client, body)
                     logger.info("Provider call successful", provider=provider.name)
@@ -107,14 +107,14 @@ class ModelRouter:
                     last_exception = e
                     continue
 
-        logger.critical("All providers in fallback chain failed", model=model)
+        logger.critical("All providers in fallback chain failed", model=body.get("model"))
         raise NoAvailableProviderError("All providers are currently unavailable.") from last_exception
 
-    async def stream_with_fallback(self, http_client: httpx.AsyncClient, model: str, body: Dict[str, Any]) -> AsyncGenerator[GatewayStreamChunk, None]:
+    async def stream_with_fallback(self, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> AsyncGenerator[GatewayStreamChunk, None]:
         # 1. & 2. Lấy và sắp xếp chuỗi fallback (logic giống hệt execute_with_fallback)
-        initial_chain = self.routing_policy.get_fallback_chain(model)
+        initial_chain = self.routing_policy.get_fallback_chain(body.get("model"))
         if not initial_chain:
-            raise NoAvailableProviderError(f"No provider configured for model '{model}' or default.")
+            raise NoAvailableProviderError(f"No provider configured for model '{body.get('model')}' or default.")
 
         execution_chain = initial_chain
         specific_provider_name = body.get("provider")
@@ -134,18 +134,18 @@ class ModelRouter:
             p for p in execution_chain if p.has_capability(ProviderCapability.STREAMING)
         ]
         if not stream_capable_chain:
-            raise NoAvailableProviderError(f"No providers configured for model '{model}' support streaming.")
+            raise NoAvailableProviderError(f"No providers configured for model '{body.get('model')}' support streaming.")
 
         # 4. Lọc các provider không khỏe mạnh
         healthy_execution_chain = await self._get_healthy_fallback_chain(stream_capable_chain)
         if not healthy_execution_chain:
-            logger.critical("All providers in the execution chain are unhealthy (circuit open).", model=model)
+            logger.critical("All providers in the execution chain are unhealthy (circuit open).", model=body.get("model"))
             raise NoAvailableProviderError("All configured providers are currently unavailable (circuit breakers are open).")
 
         # 5. Thực thi streaming tuần tự
         for provider in healthy_execution_chain:
             try:
-                logger.info("Attempting to stream from provider", provider=provider.name, model=model)
+                logger.info("Attempting to stream from provider", provider=provider.name, model=body.get("model"))
                 # Sử dụng executor.execute_stream và yield from
                 async for chunk in self.executor.execute_stream(provider, http_client, body):
                     yield chunk
@@ -155,5 +155,5 @@ class ModelRouter:
                 last_exception = e
                 continue
 
-        logger.critical("All providers in fallback chain failed for streaming", model=model)
+        logger.critical("All providers in fallback chain failed for streaming", model=body.get("model"))
         raise NoAvailableProviderError("All providers are currently unavailable for streaming.") from last_exception
