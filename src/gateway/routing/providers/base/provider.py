@@ -2,16 +2,15 @@ from .adapter import BaseAdapter
 from .auth import AuthStrategy
 from .api import ApiType
 from .endpoint import EndpointBuilder
-from .capability import ProviderCapability, ModelCapability
+from ....schemas import ProviderCapability, ModelCapability
 from .api_mapper import ApiTypeMapper
-from .model_capability import BaseModelCapabilityManager
+from .capability import ModelCapabilityManager
 from .model_mapper import ModelMapper
 from abc import ABC, abstractmethod
 import httpx
 import structlog
-from typing import Dict, Any, AsyncGenerator, List, Set, Union
+from typing import Dict, Any, Set, Union
 
-from ....schemas import GatewayResponse, GatewayStreamChunk
 logger = structlog.get_logger(__name__)
 
 class BaseProvider(ABC):
@@ -27,7 +26,7 @@ class BaseProvider(ABC):
         adapter: BaseAdapter,
         api_mapper: ApiTypeMapper,
         model_mapper: ModelMapper,
-        capability_manager: BaseModelCapabilityManager,
+        capability_manager: ModelCapabilityManager,
         provider_capabilities: Set[ProviderCapability] = set()
     ):
         self.name = provider_name
@@ -38,7 +37,6 @@ class BaseProvider(ABC):
         self.mapper = model_mapper
         self.capability_manager = capability_manager
         self.provider_capabilities = provider_capabilities
-        self.DEFAULT_MODEL = "default"
 
     def has_provider_capability(self, capability: ProviderCapability) -> bool:
         """Kiểm tra xem nhà cung cấp có hỗ trợ một năng lực nhất định hay không."""
@@ -55,17 +53,19 @@ class BaseProvider(ABC):
         )
         return capability in model_caps
 
-    def prepare_request(self, body: Dict[str, Any], default_model: str | None = None) -> Dict[str, Any]:
+    def prepare_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
         """
         Chuẩn bị body cho request: dịch tên model và adapt body.
         Loại bỏ logic lặp lại ở các provider con.
         """
         prepared = body.copy()
         # Dịch tên model, sử dụng default_model nếu có, hoặc lấy từ body, hoặc 'default'
-        model = body.get("model") or default_model or self.DEFAULT_MODEL
+        model = body.get("model")
+        logger.info(f"Preparing request for provider {self.name} with original model: {model}")
         translated_model = self.mapper.translate(model)
         prepared["model"] = translated_model
-        
+        logger.info(f"Translated model for provider {self.name}: {translated_model}")
+        logger.info(f"Prepared request body for provider {self.name}: {prepared['model']}")
         return self.adapter.adapt_chat_request(prepared)
     
     def build_endpoint(
@@ -138,7 +138,7 @@ class BaseProvider(ABC):
         # 1. Log quá trình build URL và xử lý Auth
         try:
             request_url = self.build_endpoint(api_type, **endpoint_kwargs)
-            final_url, auth_headers = self.auth.prepare_request(request_url, headers)
+            auth_url, auth_headers = self.auth.prepare_request(request_url, headers)
             
             # Tạo bản sao headers không lộ API key hoàn toàn nếu log ra (Tùy chọn bảo mật)
             masked_headers = {k: (v if "key" not in k.lower() and "auth" not in k.lower() else "***") for k, v in auth_headers.items()}
@@ -168,7 +168,7 @@ class BaseProvider(ABC):
         try:
             response = await client.request(
                 method=method,
-                url=final_url,
+                url=auth_url,
                 json=json,
                 data=data,
                 files=files,

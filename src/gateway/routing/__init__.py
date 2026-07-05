@@ -5,13 +5,15 @@ import asyncio
 import structlog
 from opentelemetry import trace
 
-from .config import settings
-from .routing.exceptions import NoAvailableProviderError, ProviderError
-from .routing.executor import ProviderExecutor
-from .routing.policies.routing_policy import RoutingPolicy
-from ..circuit_breaker.circuit_breaker import CircuitBreakerManager
-from .schemas import GatewayResponse, GatewayStreamChunk
-from .routing.providers.base.provider import BaseProvider, ModelCapability
+from ..config import settings
+from .exceptions import NoAvailableProviderError, ProviderError
+from .executor import ProviderExecutor
+from .policies.routing_policy import RoutingPolicy 
+from .registry import ProviderRegistry
+from .discovery import ProviderDiscovery
+from ...circuit_breaker.circuit_breaker import CircuitBreakerManager
+from ..schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
+from .providers.base.provider import BaseProvider
 
 import asyncio, anyio
 logger = structlog.get_logger(__name__)
@@ -28,13 +30,24 @@ class ModelRouter:
         "gemini": "cloud",
         "anthropic": "cloud",
     }
-    def __init__(self, providers: Dict[str, BaseProvider], routing_policy: RoutingPolicy, circuit_breaker_manager: CircuitBreakerManager):
+    def __init__(self, circuit_breaker_manager: CircuitBreakerManager):
         # Dependency Injection: Nhận tất cả các thành phần phụ thuộc
+        provider_registry = ProviderRegistry()
+        provider_discovery = ProviderDiscovery(registry=provider_registry)
+        provider_discovery.run() # Chạy quá trình khám phá
+
+        available_providers = provider_registry.list_all_providers()
+        routing_policy = RoutingPolicy(providers=available_providers)
         self.executor = ProviderExecutor(circuit_breaker_manager)
-        self.providers = providers
+        
+        self.providers = available_providers
         # Policy giờ đây cần danh sách provider để tự khởi tạo
         self.routing_policy = routing_policy
 
+        logger.info(
+            "Providers",
+            providers=list(available_providers.keys())
+        )
         if not self.providers:
             raise RuntimeError("Configuration Error: No LLM providers are enabled.")
 

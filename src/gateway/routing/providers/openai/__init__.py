@@ -7,7 +7,7 @@ from ..base.api import ApiType
 from ..base.auth import BearerToken
 from ..base.api_mapper import ApiTypeMapper
 from ..base.endpoint import EndpointBuilder
-from ..base.model_capability import DefaultModelCapabilityManager
+from ..base.capability import ModelCapabilityManager
 from ..base.capability import ProviderCapability
 from ..base.model_mapper import ModelMapper
 from .adapter import OpenAIAdapter
@@ -41,7 +41,7 @@ class OpenAIProvider(BaseProvider):
             adapter=OpenAIAdapter(),
             api_mapper=ApiTypeMapper(api_map=OPENAI_API_MAP),
             model_mapper=ModelMapper(model_map=OPENAI_MODEL_MAP),
-            capability_manager=DefaultModelCapabilityManager(provider_name="openai"),
+            capability_manager=ModelCapabilityManager(provider_name="openai"),
             provider_capabilities={
                 ProviderCapability.FILES,
                 ProviderCapability.ASSISTANTS,

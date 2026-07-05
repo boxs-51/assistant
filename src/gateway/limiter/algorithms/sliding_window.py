@@ -3,7 +3,7 @@ import structlog
 
 from .base import BaseRateLimiter
 from ..storage.base import BaseStorage
-from ...config_loader.schemas import ConfigSchema
+from ...config.schemas import ConfigSchema
 
 logger = structlog.get_logger(__name__)
 

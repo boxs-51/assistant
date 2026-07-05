@@ -53,6 +53,7 @@ class ProviderExecutor:
             """Hàm thực thi lõi, chỉ gọi provider và kiểm tra status."""
             # Gọi thẳng vào phương thức API cấp cao của provider
             normalized_response = await provider.chat(**kwargs)
+            logger.info(f"Normalized response from provider {provider.name}: {normalized_response}")
             return normalized_response
 
         try:
@@ -104,7 +105,9 @@ class ProviderExecutor:
             await breaker.before_request()
 
             # Bắt đầu stream và chuẩn hóa
+            logger.info(f"Starting streaming from provider {provider.name} " )
             async for chunk in provider.chat_stream(**kwargs):
+                logger.info(f"Normalized chunk from provider {provider.name}: {chunk}")
                 yield chunk
 
             await breaker.on_success()

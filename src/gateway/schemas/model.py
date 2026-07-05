@@ -1,19 +1,8 @@
-from __future__ import annotations
 from enum import Enum, auto
-from typing import TYPE_CHECKING
-
-class ProviderCapability(Enum):
-    """
-    Định nghĩa các năng lực (capabilities) mà một NHÀ CUNG CẤP (provider) hỗ trợ,
-    không phụ thuộc vào model cụ thể.
-    """
-    # =========================
-    # API-level features
-    # =========================
-    BATCH_API = auto()      # Hỗ trợ batch processing API (e.g., OpenAI Batch API)
-    FINE_TUNING = auto()    # Hỗ trợ fine-tuning API
-    FILES = auto()          # Hỗ trợ file management API (upload, download, etc.)
-    ASSISTANTS = auto()     # Hỗ trợ Assistants API
+from typing import Any, Dict, List, Optional, Set
+from pydantic import  Field
+from .base import GatewayBaseModel
+import time
 
 class ModelCapability(Enum):
     """
@@ -98,3 +87,34 @@ class ModelCapability(Enum):
     # =========================
     JSON_MODE = auto() # Hỗ trợ ép đầu ra JSON
     STRUCTURED_OUTPUT = auto() # Hỗ trợ schema phức tạp hơn JSON
+
+# =================================================================
+# 4. THIẾT KẾ LẠI MODEL INFO (Nền tảng Routing, Capability, Pricing)
+# =================================================================
+
+class ContextLimits(GatewayBaseModel): # Giữ nguyên
+    """Định nghĩa cấu trúc cho giới hạn ngữ cảnh của model."""
+    context_window: int = Field(..., description="Tổng độ dài context window")
+    max_output_tokens: int = Field(..., description="Giới hạn tối đa của output tokens")
+    max_input_tokens: Optional[int] = Field(None, description="Giới hạn tối đa của input tokens nếu có")
+
+class ModelInfo(GatewayBaseModel): # Giữ nguyên
+    """Cấu trúc lõi quản lý thông tin model phục vụ cho thuật toán Routing và kiểm soát Capability."""
+    id: str = Field(..., description="Unique ID của model trong hệ thống Gateway (e.g., 'gpt-4o')")
+    object: str = "model"
+    display_name: str
+    provider: str = Field(..., description="Mã nhà cung cấp gốc (openai, anthropic, azure,...)")
+    family: str = Field(..., description="Dòng model (e.g., gpt-4, claude-3, llama-3)")
+    version: str
+    description: str
+    limits: ContextLimits
+    capabilities: Set[ModelCapability] = Field(default_factory=set)
+    is_active: bool = True
+    fallback_model_id: Optional[str] = Field(None, description="ID của model thay thế nếu model này die")
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+    created: int = Field(default_factory=lambda: int(time.time()))
+    owned_by: str
+
+class ModelList(GatewayBaseModel): # Giữ nguyên
+    object: str = "list"
+    data: List[ModelInfo]

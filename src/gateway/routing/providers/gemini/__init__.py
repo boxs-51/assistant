@@ -1,7 +1,8 @@
 import httpx
 import structlog
+import base64
 import asyncio
-from typing import Dict, Any, AsyncGenerator
+from typing import Dict, Any, AsyncGenerator, List, Optional
 
 # 1. Import các thành phần đã được module hóa
 from ..base.provider import BaseProvider
@@ -9,13 +10,12 @@ from ..base.api import ApiType
 from ..base.auth import ApiKeyInQuery
 from ..base.api_mapper import ApiTypeMapper
 from ..base.endpoint import EndpointBuilder
-from ..base.model_capability import DefaultModelCapabilityManager
-from ..base.capability import ProviderCapability
+from ..base.capability import ModelCapabilityManager, ProviderCapability
 from ..base.model_mapper import ModelMapper
-from .adapter import GeminiAdapter # Adapter chuyên biệt
+from .adapter import GeminiAdapter, FileHelper # Adapter chuyên biệt
 
 from ....config import settings
-from ....schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo
+from ....schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo, ContextLimits, PricingInfo
 
 logger = structlog.get_logger(__name__)
 
@@ -46,6 +46,7 @@ GEMINI_API_MAP = {
     ApiType.EMBEDDINGS: "v1beta/models/{model}:{action}",
     ApiType.IMAGE_GENERATION: "v1/images:generate", # Giả định endpoint cho Imagen 2
     ApiType.TEXT_TO_SPEECH: "v1/text:synthesize", # Giả định endpoint cho Text-to-Speech
+    "upload_file": "v1beta/files", # Endpoint cho File API
 }
 
 class GeminiProvider(BaseProvider):
@@ -59,7 +60,7 @@ class GeminiProvider(BaseProvider):
             adapter=GeminiAdapter(),
             api_mapper=ApiTypeMapper(api_map=GEMINI_API_MAP),
             model_mapper=ModelMapper(model_map=GEMINI_MODEL_MAP),
-            capability_manager=DefaultModelCapabilityManager(provider_name="gemini"), # Có thể tạo GeminiCapabilityManager riêng sau này
+            capability_manager=ModelCapabilityManager(provider_name="gemini"), # Có thể tạo GeminiCapabilityManager riêng sau này
             provider_capabilities={
                 ProviderCapability.BATCH_API, # Gemini hỗ trợ batch embeddings
                 ProviderCapability.FINE_TUNING,
@@ -75,9 +76,11 @@ class GeminiProvider(BaseProvider):
     async def chat(self, **kwargs) -> GatewayResponse:
         body = kwargs.get("body")
         prepared_body = self.prepare_request(body)
-        provider_model = prepared_body.get("model", "default") # Lấy model đã được dịch
-        
+        provider_model = prepared_body.get("model") # Lấy model đã được dịch
+
         action = "generateContent"
+
+        logger.info(f"Prepared request body: {prepared_body}, using provider model: {provider_model}")
 
         response = await self.send(
             client=kwargs.get("http_client"),
@@ -92,9 +95,12 @@ class GeminiProvider(BaseProvider):
     async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
         body = kwargs.get("body")
         prepared_body = self.prepare_request(body)
-        provider_model = prepared_body.get("model", "default")
+        provider_model = prepared_body.get("model")
 
         action = "streamGenerateContent"
+
+        logger.info(f"Prepared request body: {prepared_body}, using provider model: {provider_model}")
+
         response = await self.send(
             client=kwargs.get("http_client"),
             api_type=ApiType.CHAT_COMPLETIONS,
@@ -107,7 +113,9 @@ class GeminiProvider(BaseProvider):
             yield chunk
 
     async def models(self, **kwargs) -> ModelList:
-        """Lấy danh sách các model từ Gemini và phân tích capability động."""
+        """Lấy danh sách các model trực tiếp từ Gemini API và ánh xạ sang định dạng Gateway."""
+        import asyncio
+        
         http_client = kwargs.get("http_client")
         timeout = kwargs.get("timeout")
         
@@ -120,9 +128,6 @@ class GeminiProvider(BaseProvider):
                 api_type=ApiType.MODELS,
                 timeout=timeout,
             )
-            
-            # httpx response.json() là đồng bộ, nhưng nếu dùng thư viện custom có thể cần await. 
-            # Giữ nguyên theo code gốc của bạn:
             gemini_data = response.json() 
             
             logger.debug(
@@ -130,69 +135,69 @@ class GeminiProvider(BaseProvider):
                 status_code=response.status_code,
                 response_keys=list(gemini_data.keys()) if isinstance(gemini_data, dict) else "Not a dict"
             )
-            
         except Exception as e:
             logger.error("Failed to fetch or parse models from Gemini API", error=str(e), provider=self.name)
             raise e
 
         # Gemini API trả về key 'models' thay vì 'data'
-        models_list = gemini_data.get("models", [])
-        logger.info("Found models in Gemini response, starting capability resolution", count=len(models_list))
+        gemini_models = gemini_data.get("models", [])
+        logger.info("Found raw models in Gemini response, starting mapping", count=len(gemini_models))
 
-        async def get_model_info(model_data: Dict[str, Any]) -> ModelInfo | None:
-            raw_name = model_data.get("name", "")
-            # Gemini dùng 'name' có prefix 'models/', ví dụ 'models/gemini-2.5-flash'
-            model_id = raw_name.replace("models/", "")
+        final_models: List[ModelInfo] = []
+        
+        for m in gemini_models:
+            raw_name = m.get("name", "")  # e.g., "models/gemini-2.5-flash"
+            model_id = raw_name.replace("models/", "") if "models/" in raw_name else raw_name
             
             if not model_id:
-                logger.warning("Skipping model entry with empty or invalid name attribute", model_data=model_data)
-                return None
-            
-            logger.debug("Resolving capabilities for specific model", model_id=model_id, raw_name=raw_name)
+                logger.warning("Skipping model entry with empty or invalid name attribute", model_data=m)
+                continue
             
             try:
-                # Truyền raw_name hoặc model_id tùy thuộc vào capability_manager của bạn yêu cầu chuỗi nào
-                capabilities_set = await self.capability_manager.get_capabilities_for_model(
-                    provider=self, 
-                    model_name=raw_name, # Khuyên dùng raw_name đầy đủ nếu hàm map dựa trên "models/..."
-                    http_client=http_client, 
-                    timeout=timeout
+                # 1. Trích xuất thông tin giới hạn (Context Limits) từ Gemini payload
+                input_limit = m.get("inputTokenLimit", 32768)
+                output_limit = m.get("outputTokenLimit", 8192)
+                
+                limits_dto = ContextLimits(
+                    context_window=input_limit,       # Gemini sử dụng input limit làm ngữ cảnh đầu vào
+                    max_input_tokens=input_limit,
+                    max_output_tokens=output_limit
                 )
                 
-                cap_names = [cap.name for cap in capabilities_set]
-                logger.debug(
-                    "Successfully resolved capabilities for model", 
-                    model_id=model_id, 
-                    capabilities=cap_names
-                )
-                
-                return ModelInfo(
-                    id=model_id, 
-                    owned_by="google", 
-                    capabilities=cap_names
-                )
-            except Exception as e:
-                # Log lỗi của từng model riêng lẻ để không làm sập toàn bộ tiến trình lấy list
-                logger.error(
-                    "Error resolving capabilities for model, skipping this model", 
-                    model_id=model_id, 
-                    error=str(e)
-                )
-                return None
+                # 2. Tạo Pricing mặc định (Giá thực tế thường được cấu hình tĩnh hoặc fetch từ DB/file cấu hình riêng)
+                pricing_dto = PricingInfo()
 
-        # Tạo danh sách các task chạy song song
-        tasks = [get_model_info(m) for m in models_list]
-        
-        logger.debug("Executing concurrent capability resolution tasks", task_count=len(tasks))
-        results = await asyncio.gather(*tasks)
-        
-        # Lọc bỏ các kết quả None do lỗi hoặc dữ liệu trống
-        final_models = [info for info in results if info]
-        
+                # 3. Tạo Object ModelInfo hoàn chỉnh
+                # Lưu ý: Trường 'capabilities' lúc này sẽ tạm để trống (set()) hoặc 
+                # sẽ được fill bởi ModelCapabilityManager bên ngoài sau khi hàm này trả về danh sách thô.
+                model_info = ModelInfo(
+                    id=model_id,
+                    display_name=m.get("displayName", model_id),
+                    provider=self.name,
+                    family=model_id.split("-")[0] if "-" in model_id else model_id,
+                    version=m.get("version", "v1"),
+                    description=m.get("description", ""),
+                    limits=limits_dto,
+                    pricing=pricing_dto,
+                    capabilities=set(),  # KHÔNG gọi capability_manager ở đây nữa để bẻ gãy vòng lặp vô hạn
+                    owned_by="google",
+                    metadata={
+                        "supported_generation_methods": m.get("supportedGenerationMethods", []),
+                        "top_p": m.get("topP"),
+                        "top_k": m.get("topK"),
+                        "temperature": m.get("temperature"),
+                    }
+                )
+                final_models.append(model_info)
+                
+            except Exception as e:
+                logger.error("Error mapping raw Gemini model data to ModelInfo DTO", model_id=model_id, error=str(e))
+                continue
+
         logger.info(
-            "Successfully completed processing Gemini models list", 
-            requested_count=len(models_list), 
-            successful_count=len(final_models)
+            "Successfully mapped Gemini models list to Gateway DTOs", 
+            raw_count=len(gemini_models), 
+            mapped_count=len(final_models)
         )
         
         return ModelList(data=final_models)
@@ -244,7 +249,7 @@ class GeminiProvider(BaseProvider):
     async def model(self, **kwargs) -> ModelInfo:
         """
         Lấy thông tin cấu hình chi tiết của một model cụ thể từ Gemini API.
-        Tận dụng tính năng truyền trực tiếp chuỗi URL template vào hàm send().
+        Chỉ thực hiện fetch và parse dữ liệu thô, loại bỏ hoàn toàn capability_manager.
         """
         http_client = kwargs.get("http_client")
         timeout = kwargs.get("timeout")
@@ -254,7 +259,7 @@ class GeminiProvider(BaseProvider):
             logger.error("Missing required parameter 'model_name' in model details request")
             raise ValueError("Parameter 'model_name' is required.")
 
-        # Chuẩn hóa tên model: loại bỏ "models/" nếu có
+        # Chuẩn hóa tên model: loại bỏ "models/" nếu có để dựng endpoint
         clean_model_name = raw_model_name.replace("models/", "")
         api_endpoint_template = f"v1beta/models/{clean_model_name}"
 
@@ -282,24 +287,41 @@ class GeminiProvider(BaseProvider):
                 display_name=gemini_raw_data.get("displayName")
             )
             
-            # --- CẬP NHẬT QUAN TRỌNG: Map dữ liệu sang đúng cấu trúc ModelInfo ---
+            # --- PARSE DỮ LIỆU SANG MODELINFO DTO ---
             raw_name = gemini_raw_data.get("name", "")
             model_id = raw_name.replace("models/", "") if raw_name else clean_model_name
             
-            # Lấy danh sách capabilities tương tự như hàm `models` tổng thể
-            capabilities_set = await self.capability_manager.get_capabilities_for_model(
-                provider=self, 
-                model_name=raw_name or f"models/{clean_model_name}",
-                http_client=http_client, 
-                timeout=timeout
+            # 1. Trích xuất giới hạn tokens từ payload chi tiết của Gemini
+            input_limit = gemini_raw_data.get("inputTokenLimit", 32768)
+            output_limit = gemini_raw_data.get("outputTokenLimit", 8192)
+            
+            limits_dto = ContextLimits(
+                context_window=input_limit,
+                max_input_tokens=input_limit,
+                max_output_tokens=output_limit
             )
-            cap_names = [cap.name for cap in capabilities_set]
+            
+            # 2. Khởi tạo Pricing trống (Cấu hình tĩnh ở tầng trên xử lý)
+            pricing_dto = PricingInfo()
 
-            # Khởi tạo chuẩn xác theo Schema Pydantic của bạn
+            # 3. Trả về ModelInfo với capabilities trống để bên ngoài tự map
             return ModelInfo(
                 id=model_id,
+                display_name=gemini_raw_data.get("displayName", model_id),
+                provider=self.name,
+                family=model_id.split("-")[0] if "-" in model_id else model_id,
+                version=gemini_raw_data.get("version", "v1"),
+                description=gemini_raw_data.get("description", ""),
+                limits=limits_dto,
+                pricing=pricing_dto,
+                capabilities=set(),  # KHÔNG gọi capability_manager tại đây
                 owned_by="google",
-                capabilities=cap_names
+                metadata={
+                    "supported_generation_methods": gemini_raw_data.get("supportedGenerationMethods", []),
+                    "top_p": gemini_raw_data.get("topP"),
+                    "top_k": gemini_raw_data.get("topK"),
+                    "temperature": gemini_raw_data.get("temperature"),
+                }
             )
 
         except Exception as e:
@@ -341,7 +363,40 @@ class GeminiProvider(BaseProvider):
     async def url_context(self, **kwargs) -> Any: raise NotImplementedError
     async def execute_code(self, **kwargs) -> Any: raise NotImplementedError
     async def live(self, **kwargs) -> Any: raise NotImplementedError
-    async def live_stream(self, **kwargs) -> Any: raise NotImplementedError
+    async def live_stream(self, **kwargs) -> Any: raise NotImplementedError 
+    
+    async def upload_file(self, **kwargs) -> Any:
+        """Tải tệp lên Gemini File API và trả về thông tin tệp."""
+        file_path = kwargs.get("file_path")
+        display_name = kwargs.get("display_name")
+        http_client = kwargs.get("http_client")
+        timeout = kwargs.get("timeout")
+
+        if not file_path or not http_client:
+            raise ValueError("`file_path` và `http_client` là bắt buộc.")
+
+        # 1. Xác định MIME type
+        mime_type = FileHelper.detect_mime_type(file_path)
+        
+        # 2. Chuẩn bị request body cho Gemini File API
+        file_metadata = {
+            "file": {
+                "displayName": display_name or file_path.name,
+                "mimeType": mime_type,
+            }
+        }
+
+        # 3. Gửi request (Lưu ý: Gemini API v1beta yêu cầu upload 2 bước, đây là bước tạo metadata)
+        # Bước thực sự upload file content sẽ cần một request khác tới upload_uri được trả về.
+        # Tuy nhiên, nhiều thư viện client trừu tượng hóa điều này. Giả sử `send` có thể xử lý.
+        response = await self.send(
+            client=http_client,
+            api_type="upload_file",
+            json=file_metadata,
+            timeout=timeout,
+        )
+        return await self.adapter.adapt_file_upload_response(response)
+
     async def create_session(self, **kwargs) -> Any: raise NotImplementedError
     async def delete_session(self, **kwargs) -> Any: raise NotImplementedError
     async def get_session(self, **kwargs) -> Any: raise NotImplementedError

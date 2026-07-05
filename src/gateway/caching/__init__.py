@@ -5,11 +5,11 @@ from typing import Optional, Tuple, List
 import structlog
 from opentelemetry import trace
 
-from .config import settings
-from . import observability as gateway_metrics
-from .semantic_cache.base import BaseCacheBackend
-from .semantic_cache.embedding import EmbeddingService
-from .semantic_cache.models import CacheEntry, CacheMetadata
+from ..config import settings
+from .. import observability as gateway_metrics
+from .base import BaseCacheBackend
+from .embedding import EmbeddingService
+from .models import CacheEntry, CacheMetadata
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)

@@ -1,9 +1,9 @@
 from typing import Dict, Type, Optional
 
 from .providers.base.provider import BaseProvider
-from .providers.openai.openai import OpenAIProvider
-from .providers.ollama.ollama import OllamaProvider
-from .providers.gemini.gemini import GeminiProvider
+from .providers.openai import OpenAIProvider
+from .providers.ollama import OllamaProvider
+from .providers.gemini import GeminiProvider
 # Import các provider khác ở đây, ví dụ: from .providers.gemini import GeminiProvider
 
 class ProviderFactory:

@@ -1,5 +1,6 @@
-from fastapi import FastAPI, Request, HTTPException, Depends
+from fastapi import FastAPI, Request, HTTPException, Depends, APIRouter, status
 from fastapi.responses import StreamingResponse, JSONResponse
+from pydantic import ValidationError
 import httpx
 import redis.asyncio as redis
 import time, anyio
@@ -8,23 +9,24 @@ from prometheus_client import generate_latest
 import structlog
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from typing import List, Dict, Any
+import hashlib
+
+from .schemas import GatewayChatRequest
 import uuid
-from .config_loader.core import ConfigLoader, ConfigurationRegistry
+from .config.core import ConfigLoader, ConfigurationRegistry
 from .limiter import RateLimiterManager
 # --- Enterprise Routing Imports ---
-from .router import ModelRouter # Sẽ được sửa đổi bên dưới
-from .routing.registry import ProviderRegistry
-from .routing.discovery import ProviderDiscovery
+from .routing import ModelRouter # Sẽ được sửa đổi bên dưới
 from .routing.exceptions import NoAvailableProviderError, ProviderError
-from .routing.policies.routing_policy import RoutingPolicy
 from ..circuit_breaker.circuit_breaker import CircuitBreakerManager
 # --------------------------------
 from .security import authenticate_client, InputGuardrailAdapter, OutputGuardrailAdapter
 from ..guardrail.guar import GuardrailSystem
 # --- Refactored Cache Imports ---
 from .caching import SemanticCache
-from .semantic_cache.chroma_backend import ChromaCacheBackend
-from .semantic_cache.embedding import EmbeddingService
+from .caching.chroma_backend import ChromaCacheBackend
+from .caching.embedding import EmbeddingService
 # --------------------------------
 
 from shared_core.observability import ObservabilityConfig ,LoggingConfig, TracingConfig
@@ -55,26 +57,12 @@ async def startup_event():
     # Tự động instrument FastAPI app
     FastAPIInstrumentor.instrument_app(app)
     app.state.redis = redis.from_url(settings.redis.url, decode_responses=True)
-    # --- Enterprise Routing Initialization Flow ---
-    provider_registry = ProviderRegistry()
-    provider_discovery = ProviderDiscovery(registry=provider_registry)
-    provider_discovery.run() # Chạy quá trình khám phá
-    
-    # Policy giờ đây cần danh sách các provider có sẵn để tự khởi tạo các quy tắc
-    available_providers = provider_registry.list_all_providers()
-    routing_policy = RoutingPolicy(providers=available_providers)
-    
     # --- Centralized Managers ---
     # CircuitBreakerManager giờ được dùng chung cho cả Router và Rate Limiter
     circuit_breaker_manager = CircuitBreakerManager()
     app.state.limiter = RateLimiterManager(app.state.redis, circuit_breaker_manager)
-    logger.info(
-        "Providers",
-        providers=list(available_providers.keys())
-    )
+
     app.state.router = ModelRouter(
-        providers=available_providers,
-        routing_policy=routing_policy,
         circuit_breaker_manager=circuit_breaker_manager # Inject vào router
     )
     # -------------------------------------
@@ -133,25 +121,93 @@ async def observability_middleware(request: Request, call_next):
 @app.post("/v1/chat/completions")
 async def chat_completions_proxy(request: Request, client_id: str = Depends(authenticate_client)):
     """
-    Endpoint chính, hoạt động như một proxy thông minh cho các request chat completion.
+    Endpoint proxy thông minh, ép dữ liệu đầu vào sang GatewayChatRequest Schema
+    và bắt lỗi Validation để phản hồi lập tức nếu client gửi sai cấu trúc.
     """
     tracer = trace.get_tracer(__name__)
-
     gateway_metrics.metrics.increment_requests(request.method, request.url.path)
     structlog.contextvars.bind_contextvars(client_id=client_id)
     start_time = time.time()
     
-    # 1. Đọc và kiểm tra nội dung request
-    try:
-        body = await request.json()
-        print(body)
-        user_prompt = " ".join([msg['content'] for msg in body.get("messages", []) if msg['role'] == 'user'])
-    except Exception:
-        logger.error("Invalid request body", exc_info=True)
-        gateway_metrics.metrics.increment_failed(400)
-        raise HTTPException(status_code=400, detail="Invalid request body.")
+    final_provider_name = "unknown" 
 
-    # 2. Input Guardrail
+    # 1. Đọc JSON thô và ÉP SANG SCHEMAS Pydantic (GatewayChatRequest)
+    try:
+        raw_body = await request.json()
+    except Exception:
+        logger.error("Invalid JSON format in request body")
+        gateway_metrics.metrics.increment_failed(400)
+        raise HTTPException(status_code=400, detail="Malformed JSON in request body.")
+
+    try:
+        # Ép kiểu dữ liệu sang Pydantic Object (Tự động kích hoạt validation)
+        chat_request = GatewayChatRequest(**raw_body)
+    except ValidationError as val_err:
+        # TRẢ LỜI LUÔN NẾU MESSAGES/REQUEST BỊ SAI ĐỊNH DẠNG SCHEMAS
+        logger.warning("Request schema validation failed", errors=val_err.errors())
+        gateway_metrics.metrics.increment_failed(422)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
+            detail={
+                "message": "Cấu trúc request hoặc messages không hợp lệ với hệ thống Multimodal Gateway.",
+                "errors": val_err.errors() # Trả về chi tiết các trường bị lỗi (Ví dụ: sai kiểu dữ liệu, thiếu role,...)
+            }
+        )
+
+    # 2. Bóc tách văn bản (user_prompt) & Multimedia Signature dựa trên Pydantic Object mới
+    text_parts: List[str] = []
+    multimedia_signatures: List[str] = []
+
+    for msg in chat_request.messages:
+        if msg.role != "user":
+            continue
+            
+        content = msg.content
+        
+        # Trường hợp nội dung là chuỗi phẳng (Text cũ, tương thích ngược)
+        if isinstance(content, str):
+            text_parts.append(content)
+            
+        # Trường hợp nội dung là mảng List[MessageContentPart] chuẩn Schema mới
+        elif isinstance(content, list):
+            for part in content:
+                # Vì part lúc này là một thực thể đã qua validate, bạn truy cập trực tiếp bằng dấu chấm (.)
+                if part.type.value == "text" and part.text:
+                    text_parts.append(part.text)
+                
+                elif part.type.value in ["image", "audio", "video", "file"]:
+                    # Lấy object media tương ứng dựa theo type (ví dụ: part.image hoặc part.file)
+                    media_obj = getattr(part, part.type.value, None)
+                    if media_obj and getattr(media_obj, "base64_data", None):
+                        base64_str = media_obj.base64_data
+                        media_hash = hashlib.md5(base64_str.encode()).hexdigest()
+                        multimedia_signatures.append(f"{part.type.value}:{media_hash}")
+
+    user_prompt = " ".join(text_parts)
+    
+    # Tạo Cache Key hợp nhất từ Text + Chữ ký đa phương tiện
+    cache_key = user_prompt
+    if multimedia_signatures:
+        cache_key += " | media_sign:" + ",".join(multimedia_signatures)
+
+    # Chuyển đổi chat_request Pydantic object thành dictionary để truyền vào router xử lý
+    # (Có thể giữ nguyên object nếu Router của bạn chấp nhận Pydantic Model)
+    body_dict = chat_request.model_dump()
+
+    import json
+    print("\n🔍 [DEBUG GATEWAY] Body sau khi validate Pydantic:")
+    # Chỉ in 100 ký tự đầu của base64 để tránh ngập terminal
+    debug_body = json.loads(json.dumps(body_dict))
+    for msg in debug_body.get("messages", []):
+        if isinstance(msg.get("content"), list):
+            for part in msg["content"]:
+                if part.get("type") in ["image", "file"] and part.get(part["type"]):
+                    media = part[part["type"]]
+                    if "base64_data" in media:
+                        media["base64_data"] = media["base64_data"][:30] + "...[TRUNCATED]..."
+    print(json.dumps(debug_body, indent=2, ensure_ascii=False))
+
+    # 3. Input Guardrail
     with tracer.start_as_current_span("input_guardrail") as span:
         if not app.state.input_guardrail.validate(user_prompt):
             span.set_attribute("blocked", True)
@@ -161,108 +217,113 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
             gateway_metrics.metrics.increment_failed(400)
             raise HTTPException(status_code=400, detail="Request blocked due to potential prompt injection.")
 
-    # 3. Rate Limiting
+    # 4. Rate Limiting
     with tracer.start_as_current_span("rate_limiter"):
-        is_allowed, wait_time = await app.state.limiter.is_allowed(client_id, cost=1) # Cost = 1 request
+        is_allowed, wait_time = await app.state.limiter.is_allowed(client_id, cost=1)
         if not is_allowed:
             logger.warning("Request blocked by Rate Limiter", client_id=client_id)
             gateway_metrics.metrics.increment_rate_limit()
             gateway_metrics.metrics.increment_failed(429)
             raise HTTPException(status_code=429, detail=f"Rate limit exceeded. Try again in {wait_time:.2f} seconds.")
 
-    # 4. Semantic Cache
-    cached_result = await app.state.cache.get(user_prompt)
+    # 5. Semantic Cache
+    cached_result = await app.state.cache.get(cache_key)
     if cached_result:
-        cached_response, cached_embedding = cached_result
+        cached_response, _ = cached_result
         with tracer.start_as_current_span("process_cached_response"):
             gateway_metrics.metrics.increment_success()
             latency = time.time() - start_time
-            gateway_metrics.metrics.record_latency("cache", "N/A", latency) # Model không áp dụng cho cache
-            # Vẫn cần quét output của cache để đảm bảo an toàn
+            gateway_metrics.metrics.record_latency("cache", "N/A", latency)
+            
             safe_cached_response = app.state.output_guardrail.sanitize(cached_response)
             return {"choices": [{"message": {"role": "assistant", "content": safe_cached_response}}]}
-    else:
-        # Nếu cache miss, embedding đã được tạo và có thể được tái sử dụng
-        # Tuy nhiên, để đơn giản hóa luồng, chúng ta sẽ tạo lại nó trong hàm set()
-        # Một cải tiến trong tương lai là truyền embedding này đi.
-        pass
 
-    # 5. & 6. Routing, Fallback và Gọi LLM Provider (gộp làm một)
+    # 6. Kiểm tra chế độ Streaming / Non-Streaming trực tiếp từ Object
+    is_streaming = chat_request.stream
+
     try:
-        with tracer.start_as_current_span("llm_routing_fallback") as span:
-            # Router giờ trả về một GatewayResponse đã được chuẩn hóa
-            gateway_response = await app.state.router.execute_with_fallback(
-                http_client=app.state.http_client,
-                body=body
-            )
-            # Lấy tên provider từ response gốc nếu cần
-            # Lấy tên provider từ request gốc được lưu trong raw_response
-            final_provider_name = "unknown"
-            if gateway_response.raw_response and gateway_response.raw_response.request:
-                 final_provider_name = gateway_response.raw_response.request.url.host
-            span.set_attribute("final_provider", final_provider_name)
-        
-        # 7. Xử lý response và Output Guardrail
-        is_streaming = body.get("stream", False)
-        
         if is_streaming:
             async def stream_generator():
-                """Generator để xử lý và yield các chunk đã được chuẩn hóa."""
-                stream_chunks = await app.state.router.stream_with_fallback(
+                detected_provider = "unknown"
+                detected_model = "gemini-model"
+                
+                stream_chunks = app.state.router.stream_with_fallback(
                     http_client=app.state.http_client,
-                    body=body
+                    body=body_dict
                 )
+                
                 async for chunk in stream_chunks:
-                    # TODO: Output Guardrail cho từng chunk (nếu cần)
+                    if chunk.provider:
+                        detected_provider = chunk.provider
+                    if chunk.model:
+                        detected_model = chunk.model
+                        
+                    if chunk.usage:
+                        with tracer.start_as_current_span("token_tracking_stream") as t_span:
+                            in_t = chunk.usage.prompt_tokens
+                            out_t = chunk.usage.completion_tokens
+                            
+                            gateway_metrics.metrics.increment_input_tokens(detected_provider, detected_model, in_t)
+                            gateway_metrics.metrics.increment_output_tokens(detected_provider, detected_model, out_t)
+                            t_span.set_attributes({"input_tokens": in_t, "output_tokens": out_t})
+                    
                     yield chunk.to_sse()
                 
-                # [FIX] Gửi thông điệp [DONE] theo chuẩn OpenAI khi stream kết thúc thành công
                 yield "data: [DONE]\n\n"
+                
+                gateway_metrics.metrics.increment_success()
+                latency = time.time() - start_time
+                gateway_metrics.metrics.record_latency(detected_provider, detected_model, latency)
 
             return StreamingResponse(
                 stream_generator(),
                 media_type="text/event-stream"
             )
+            
         else:
+            # 7. Xử lý luồng Non-Streaming dữ liệu Multimodal
+            with tracer.start_as_current_span("llm_routing_fallback") as span:
+                gateway_response = await app.state.router.execute_with_fallback(
+                    http_client=app.state.http_client,
+                    body=body_dict
+                )
+                final_provider_name = gateway_response.provider
+                span.set_attribute("final_provider", final_provider_name)
+            
             with tracer.start_as_current_span("response_processing"):
-                # GatewayResponse đã có cấu trúc chuẩn, không cần bóc tách phức tạp
                 final_content = gateway_response.choices[0].message.content or ""
                 
-                # Làm sạch đầu ra
+                # Output Guardrail làm sạch văn bản đầu ra
                 with tracer.start_as_current_span("output_guardrail"):
                     safe_content = app.state.output_guardrail.sanitize(final_content)
                 gateway_response.choices[0].message.content = safe_content
 
-                # 8. Cập nhật cache
-                # await app.state.cache.set(user_prompt, final_content, ...)
+                # Cập nhật cache dựa trên mã khóa cache_key hợp nhất
+                # await app.state.cache.set(cache_key, safe_content)
                 
                 gateway_metrics.metrics.increment_success()
                 latency = time.time() - start_time
                 gateway_metrics.metrics.record_latency(final_provider_name, gateway_response.model, latency)
 
-                # 9. [MỚI] Theo dõi Token và Chi phí
+                # Theo dõi Token sử dụng
                 with tracer.start_as_current_span("token_tracking") as token_span:
                     input_tokens = gateway_response.usage.prompt_tokens
                     output_tokens = gateway_response.usage.completion_tokens
 
-                    # Ghi nhận vào Metrics
                     gateway_metrics.metrics.increment_input_tokens(final_provider_name, gateway_response.model, input_tokens)
                     gateway_metrics.metrics.increment_output_tokens(final_provider_name, gateway_response.model, output_tokens)
                     
-                    # Ghi nhận vào Span Attributes
                     token_span.set_attribute("input_tokens", input_tokens)
                     token_span.set_attribute("output_tokens", output_tokens)
                 
-                # Trả về Pydantic model, FastAPI sẽ tự động chuyển thành JSON
                 return gateway_response
             
     except NoAvailableProviderError as e:
-        # Lỗi này xảy ra khi tất cả các provider đều không khả dụng
         trace.get_current_span().record_exception(e)
         logger.critical("All providers are unavailable", error=str(e))
         gateway_metrics.metrics.increment_failed(503)
         raise HTTPException(status_code=503, detail="Service Unavailable: All LLM providers are currently down.")
-
+    
 @app.post("/v1/embeddings", tags=["LLM APIs"])
 async def embeddings_proxy(request: Request, client_id: str = Depends(authenticate_client)):
     """
@@ -316,7 +377,8 @@ async def list_models_proxy(
             http_client=app.state.http_client, 
             timeout=settings.provider.timeout
         )
-        return models_data
+        enriched_list = provider.capability_manager.enrich_capabilities(models_data)
+        return enriched_list
 
     except NotImplementedError:
         logger.warning("Requested model functionality not implemented for provider", provider=provider_name)
@@ -350,7 +412,8 @@ async def get_model_details_proxy(
             timeout=settings.provider.timeout,
             model_name=model_id
         )
-        return model_data
+        enriched_list = provider.capability_manager.enrich_capabilities(model_data)
+        return enriched_list
 
     except NotImplementedError:
         logger.warning("Get model details endpoint not implemented for provider", provider=provider_name)

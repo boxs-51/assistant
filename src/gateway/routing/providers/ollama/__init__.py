@@ -7,7 +7,7 @@ from ..base.api import ApiType
 from ..base.auth import NoAuth
 from ..base.api_mapper import ApiTypeMapper
 from ..base.endpoint import EndpointBuilder
-from ..base.model_capability import DefaultModelCapabilityManager
+from ..base.capability import ModelCapabilityManager
 from ..base.model_mapper import ModelMapper
 from .adapter import OllamaAdapter
 
@@ -33,7 +33,7 @@ class OllamaProvider(BaseProvider):
             adapter=OllamaAdapter(),
             api_mapper=ApiTypeMapper(api_map=OLLAMA_API_MAP),
             model_mapper=ModelMapper(model_map=OLLAMA_MODEL_MAP),
-            capability_manager=DefaultModelCapabilityManager(provider_name="ollama")
+            capability_manager=ModelCapabilityManager(provider_name="ollama")
         )
         self.DEFAULT_MODEL = "llama3"
 

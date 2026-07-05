@@ -1,6 +1,6 @@
 from typing import Any
-from .config_loader.core import ConfigurationRegistry
-from .config_loader.schemas import ConfigSchema
+from .core import ConfigurationRegistry
+from .schemas import ConfigSchema
 
 """
 Đây là điểm truy cập trung tâm cho cấu hình trong toàn bộ ứng dụng.

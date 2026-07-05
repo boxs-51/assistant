@@ -4,10 +4,10 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Dict, Any
 
 # Đường dẫn import chính xác từ hệ thống của bạn
-from src.gateway.schemas import GatewayResponse, GatewayStreamChunk
-from src.gateway.routing.providers.base.capability import ProviderCapability
-from src.gateway.routing.providers.gemini.gemini import GeminiProvider, GEMINI_MODEL_MAP
-from src.gateway.config_loader.core import ConfigurationRegistry
+from gateway.schemas import GatewayResponse, GatewayStreamChunk
+from gateway.routing.providers.base.capability.capability import ProviderCapability
+from gateway.routing.providers.gemini import GeminiProvider, GEMINI_MODEL_MAP
+from src.gateway.config.core import ConfigurationRegistry
 
 
 @pytest.fixture(autouse=True)
