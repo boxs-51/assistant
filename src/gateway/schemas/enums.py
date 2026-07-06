@@ -3,7 +3,13 @@ from enum import Enum
 # =================================================================
 # 0. ENUMS (Định nghĩa các loại hằng số)
 # =================================================================
-
+class ToolType(str, Enum):
+    """Phân loại Tool độc lập để ExecutorRegistry điều phối chính xác."""
+    LOCAL = "LOCAL"
+    MCP = "MCP"
+    NATIVE = "NATIVE"
+    WORKFLOW = "WORKFLOW"
+    
 class MessageContentType(str, Enum):
     """Các loại nội dung có thể có trong một phần của message."""
     TEXT = "text"

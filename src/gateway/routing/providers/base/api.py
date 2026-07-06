@@ -21,3 +21,4 @@ class ApiType(Enum):
     
     # Management APIs
     MODELS = "models"
+    MODEL = "models"

@@ -23,13 +23,6 @@ class ModelRouter:
     REFACTORED: Lớp điều phối chính, chỉ chịu trách nhiệm điều phối luồng request.
     Nó ủy quyền việc xây dựng bảng định tuyến và thực thi cho các thành phần chuyên biệt.
     """
-    # Định nghĩa nhóm provider để hỗ trợ định tuyến local/cloud
-    PROVIDER_TYPES = {
-        "ollama": "local",
-        "openai": "cloud",
-        "gemini": "cloud",
-        "anthropic": "cloud",
-    }
     def __init__(self, circuit_breaker_manager: CircuitBreakerManager):
         # Dependency Injection: Nhận tất cả các thành phần phụ thuộc
         provider_registry = ProviderRegistry()
@@ -78,7 +71,7 @@ class ModelRouter:
         # 2. Logic định tuyến ưu tiên theo yêu cầu của client
         execution_chain = initial_chain
         specific_provider_name = body.get("provider")
-        provider_preference = body.get("provider_preference")
+
 
         # Ưu tiên cao nhất: Client yêu cầu một provider cụ thể
         if specific_provider_name and specific_provider_name in self.providers:
@@ -87,15 +80,7 @@ class ModelRouter:
             others = [p for p in initial_chain if p.name != specific_provider_name]
             execution_chain = [preferred_provider] + others
             logger.info(f"Prioritizing provider '{specific_provider_name}' based on request.", chain=[p.name for p in execution_chain])
-        # Ưu tiên thứ hai: Client yêu cầu một nhóm provider (local/cloud)
-        elif provider_preference in ["local", "cloud"]:
-            # Phân tách danh sách thành 2 nhóm: ưu tiên và còn lại
-            preferred = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) == provider_preference]
-            others = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) != provider_preference]
-            # Tạo chuỗi thực thi mới với nhóm ưu tiên được đặt lên đầu
-            execution_chain = preferred + others
-            logger.info(f"Re-ordered execution chain based on preference '{provider_preference}'", chain=[p.name for p in execution_chain])
-
+   
         # 3. [MỚI] Lọc các provider không khỏe mạnh (circuit open) khỏi chuỗi thực thi
         healthy_execution_chain = await self._get_healthy_fallback_chain(execution_chain)
 
@@ -143,10 +128,7 @@ class ModelRouter:
             preferred_provider = self.providers[specific_provider_name]
             others = [p for p in initial_chain if p.name != specific_provider_name]
             execution_chain = [preferred_provider] + others
-        elif provider_preference in ["local", "cloud"]:
-            preferred = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) == provider_preference]
-            others = [p for p in initial_chain if self.PROVIDER_TYPES.get(p.name) != provider_preference]
-            execution_chain = preferred + others
+
         
         # 3. [MỚI] Lọc các provider không hỗ trợ streaming
         

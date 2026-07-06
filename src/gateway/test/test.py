@@ -1,220 +1,330 @@
-import base64
-from pathlib import Path
-
-import httpx
 import asyncio
 import os
-import json
 import time
-from dotenv import load_dotenv
-from ..routing.providers.gemini import FileHelper
-load_dotenv(dotenv_path=os.path.join(os.path.dirname(__file__), '..', '.env'))
+import base64
+import io
+import uuid
+import json
+import threading
+from typing import Any, Dict, List, Tuple, Optional, Literal, Union, AsyncGenerator
+from pydantic import BaseModel, Field
 
-GATEWAY_URL = "http://localhost:8000/v1/chat/completions"
-GATEWAY_API_KEY = os.getenv("GEMINI_API_KEY", "change-me")
+import httpx
+from PIL import Image, ImageTk
+import tkinter as tk
+from tkinter import messagebox, scrolledtext
 
-def print_usage_info(usage_data: dict):
-    """Hàm bổ trợ để in chi tiết Token Usage."""
-    if not usage_data:
-        return
-    print("\n📊 [Token Usage Info]")
-    print(f"  └─ Prompt Tokens:      {usage_data.get('prompt_tokens', 0)}")
-    print(f"  └─ Completion Tokens:  {usage_data.get('completion_tokens', 0)}")
-    print(f"  └─ Total Tokens:       {usage_data.get('total_tokens', 0)}")
+# =========================================================================
+# 1. ĐỊNH NGHĨA CÁC DTO (CẢ STREAM VÀ NON-STREAM ĐỒNG BỘ)
+# =========================================================================
 
+class GatewayUsage(BaseModel):
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+    total_tokens: int = 0
 
+class GatewayStreamDelta(BaseModel):
+    content: Optional[str] = None
+    role: Optional[str] = None
+    tool_calls: Optional[List[Any]] = None
 
-async def print_smooth_text(text: str, delay: float = 0.01):
-    """
-    Nhận vào một chuỗi văn bản và in ra từng ký tự với độ trễ cố định
-    để tạo hiệu ứng typewriter (máy đánh chữ) siêu mượt.
-    """
-    for char in text:
-        print(char, end="", flush=True)
-        await asyncio.sleep(delay)
+class GatewayStreamChoice(BaseModel):
+    index: int
+    delta: GatewayStreamDelta
+    finish_reason: Optional[str] = None
 
-async def test_gemini_provider():
-    """
-    Test 1: Gửi một request non-streaming kèm theo SYSTEM PROMPT.
-    """
-    print("\n--- 🚀 [Test 1] Testing Gemini (Non-streaming với System Prompt) ---")
-    payload = {
-        "model": "default",
-        "provider": "gemini",
-        "messages": [
-            # === THÊM SYSTEM PROMPT TẠI ĐÂY ===
-            {
-                "role": "system", 
-                "content": "Bạn là một trợ lý ảo hài hước, luôn trả lời bằng thơ và kết thúc câu bằng từ 'bạn hiền'."
-            },
-            {
-                "role": "user", 
-                "content": "Giải thích ngắn gọn AI Gateway là gì?"
+class GatewayStreamChunk(BaseModel):
+    id: str = Field(default_factory=str)
+    model: str
+    choices: List[GatewayStreamChoice]
+    object: str = "gateway_stream_chunk"
+    created: int = Field(default_factory=lambda: int(time.time()))
+    provider: str
+    usage: Optional[GatewayUsage] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+# DTO phục vụ luồng Non-stream cũ để so sánh
+class FileMetadata(BaseModel):
+    created_at: Optional[int] = None
+
+class GatewayAttachment(BaseModel):
+    id: Optional[str] = None
+    mime_type: str
+    base64_data: Optional[str] = None
+    metadata: FileMetadata = Field(default_factory=FileMetadata)
+
+class ImageContent(BaseModel):
+    attachment: GatewayAttachment
+
+class MessageContentPart(BaseModel):
+    type: Literal["text", "image", "audio", "video", "file", "url"]
+    text: Optional[str] = None
+    image: Optional[ImageContent] = None
+
+class GatewayMessage(BaseModel):
+    role: str
+    content: List[MessageContentPart]
+
+class GatewayChoice(BaseModel):
+    index: int
+    message: GatewayMessage
+    finish_reason: Optional[str] = None
+
+class GatewayResponse(BaseModel):
+    id: str
+    model: str
+    choices: List[GatewayChoice]
+    usage: GatewayUsage
+    provider: str
+
+# =========================================================================
+# 2. BỘ ADAPTER XỬ LÝ SONG SONG CẢ HAI PHƯƠNG THỨC
+# =========================================================================
+
+class DualGeminiAdapter:
+    def __init__(self, provider_name: str = "gemini"):
+        self.provider_name = provider_name
+
+    def _parse_part_to_text_and_attachment(self, part: Dict[str, Any]) -> tuple[str, Optional[Dict[str, Any]]]:
+        text_delta = ""
+        attachment_data = None
+
+        if "text" in part:
+            text_delta = part["text"]
+        elif "inlineData" in part:
+            inline_data = part["inlineData"]
+            mime_type = inline_data.get("mimeType", "application/octet-stream")
+            attachment_data = {
+                "id": f"att-{uuid.uuid4()}",
+                "mime_type": mime_type,
+                "base64_data": inline_data.get("data", ""),
+                "metadata": {"created_at": int(time.time())}
             }
-        ],
-        "temperature": 0.7,
-    }
-    headers = {
-        "Authorization": f"Bearer {GATEWAY_API_KEY}",
-        "Content-Type": "application/json",
-    }
+            text_delta = f"\n\n*[Hệ thống: Nhận tệp đính kèm {mime_type}]*\n"
+        elif "executableCode" in part:
+            text_delta = f"\n\n```python\n# [AI Executed Code]\n{part['executableCode'].get('code', '')}\n```"
+        elif "codeExecutionResult" in part:
+            text_delta = f"\n\n```text\n# [Execution Output]\n{part['codeExecutionResult'].get('output', '')}\n```"
 
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            response = await client.post(GATEWAY_URL, json=payload, headers=headers)
-            response.raise_for_status()
-            res = response.json()
-            
-            print("✅ Success! Response Metadata:")
-            print(f"  🌐 Provider:     {res.get('provider')}")
-            print(f"  🤖 Actual Model: {res.get('model')}")
-            print("---------------------------------------------")
-            content = res.get("choices")[0].get("message").get("content")
-            await print_smooth_text(content)
-            print("---------------------------------------------")
-            print_usage_info(res.get("usage"))
+        return text_delta, attachment_data
 
-    except httpx.HTTPStatusError as e:
-        print(f"\n❌ Error: Request failed with status {e.response.status_code}\nResponse: {e.response.text}")
-    except httpx.RequestError as e:
-        print(f"❌ Error: Could not connect to AI Gateway. Details: {e}")
-
-
-async def test_gemini_streaming():
-    """
-    Test 2 (Nâng cấp): Gửi một request streaming kèm theo SYSTEM PROMPT,
-    đính kèm 1 file ảnh (hoặc tài liệu) dưới dạng Multimodal Schema.
-    """
-    print("\n--- 🚀 [Test 2] Testing Gemini (Multimodal Streaming) ---")
-    
-    # 📝 ĐƯỜNG DẪN ĐẾN FILE TEST CỦA BẠN (Thay đổi cho đúng file thực tế của bạn)
-    # Ví dụ: "test_image.png" hoặc "document.pdf"
-    path_to_test_file = "D:\\OIP.jfif" 
-    
-    try:
-        # 1. Chuyển đổi file test thành Base64
-        file_path = Path(path_to_test_file)
-        mime_type = FileHelper.detect_mime_type(file_path)
-        with open(file_path, "rb") as f:
-            base64_data = base64.b64encode(f.read()).decode('utf-8')
-        print(f"📦 Đã load file thành công. Loại: {mime_type} ({len(base64_data)} bytes)")
-        print("  └─ Đang xây dựng payload Multimodal cho request streaming...")
-        # Xác định type payload dựa vào mime_type để mapping đúng Schema
-        is_image = mime_type.startswith("image/")
-        media_type = "image" if is_image else "file"
+    async def adapt_chat_stream(self, response: httpx.Response, request_model: str) -> AsyncGenerator[GatewayStreamChunk, None]:
+        stream_id = f"chatcmpl-{uuid.uuid4()}"
+        buffer = ""
         
-        # 2. Xây dựng cấu trúc payload Multimodal hoàn chỉnh
-        payload = {
-            "model": "gemini-2.5-flash",  # Đảm bảo dùng model multimodal thế hệ mới
-            "messages": [
-                {
-                    "role": "system", 
-                    "content": "Bạn là một chuyên gia phân tích dữ liệu và hình ảnh chuyên nghiệp."
-                },
-                {
-                    "role": "user", 
-                    # Content bây giờ là List[MessageContentPart]
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": "Hãy đọc và phân tích kỹ nội dung từ tệp đính kèm này giúp tôi."
-                        },
-                        {
-                            # Trường này khớp với loại: part.image hoặc part.file
-                            "type": media_type, 
-                            media_type: {
-                                # Nếu là "image", nó sẽ map vào class ImageContent
-                                # Bên trong ImageContent bắt buộc phải có object "attachment"
-                                "attachment": {
-                                    "mime_type": mime_type,
-                                    "base64_data": base64_data,
-                                    "filename": "OIP.jfif"
-                                },
-                                "detail": "auto" # Thuộc tính tùy chọn của ImageContent
-                            } if media_type == "image" else {
-                                # Nếu là "file", nó map thẳng vào class GatewayAttachment
-                                "mime_type": mime_type,
-                                "base64_data": base64_data,
-                                "filename": "document.pdf"
-                            }
-                        }
-                    ]
-                }
-            ],
-            "stream": True
-        }
-        
-    except FileNotFoundError:
-        print(f"⚠️ Cảnh báo: Không tìm thấy file test tại '{path_to_test_file}'. Sẽ fallback về test TEXT thuần túy.")
-        # Fallback về text nếu bạn lười tạo file ảnh test
-        payload = {
-            "model": "gemini-2.5-flash",
-            "messages": [
-                {"role": "system", "content": "Bạn là trợ lý ảo."},
-                {"role": "user", "content": "Kể một câu chuyện cười ngắn khoảng 3 câu."}
-            ],
-            "stream": True
-        }
+        async for chunk_text in response.aiter_text():
+            buffer += chunk_text
+            while True:
+                buffer = buffer.lstrip()
+                if buffer.startswith('['): buffer = buffer[1:].lstrip()
+                if buffer.startswith(','): buffer = buffer[1:].lstrip()
+                if buffer.startswith(']'): 
+                    buffer = buffer[1:].lstrip()
+                    break
+                if not buffer: break
 
-    headers = {
-        "Authorization": f"Bearer {GATEWAY_API_KEY}",
-        "Content-Type": "application/json",
-    }
-
-    try:
-        async with httpx.AsyncClient(timeout=120.0) as client:
-            async with client.stream("POST", GATEWAY_URL, json=payload, headers=headers) as response:
-                if response.status_code >= 400:
-                    body = await response.aread()
-                    print(f"\n❌ Error {response.status_code}: {body.decode()}")
-                    return
-
-                print("✅ Stream Connection Established. Content:")
-                print("---------------------------------------------")
-                
-                last_chunk_metadata = {}
-                
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line or line.startswith(":"):
-                        continue
+                try:
+                    obj, idx = json.JSONDecoder().raw_decode(buffer)
+                    buffer = buffer[idx:].lstrip()
                     
-                    if line.startswith("data:"):
-                        data_content = line[5:].strip()
-                        if data_content == "[DONE]":
-                            break
+                    text_delta = ""
+                    chunk_metadata = {}
+                    finish_reason = None
+                    
+                    if "candidates" in obj:
+                        candidate = obj["candidates"][0]
+                        if "finishReason" in candidate:
+                            finish_reason = candidate["finishReason"].lower()
                         
-                        try:
-                            chunk_json = json.loads(data_content)
-                            last_chunk_metadata["provider"] = chunk_json.get("provider")
-                            last_chunk_metadata["model"] = chunk_json.get("model")
-                            if chunk_json.get("usage"):
-                                last_chunk_metadata["usage"] = chunk_json.get("usage")
+                        if "content" in candidate and "parts" in candidate["content"]:
+                            parts = candidate["content"]["parts"]
+                            extracted_attachments = []
+                            for part in parts:
+                                t_delta, att = self._parse_part_to_text_and_attachment(part)
+                                if t_delta: text_delta += t_delta
+                                if att: extracted_attachments.append(att)
                             
-                            choices = chunk_json.get("choices", [])
-                            if choices:
-                                content = choices[0].get("delta", {}).get("content", "")
-                                if content:
-                                    # Chạy hiệu ứng chữ mượt mà
-                                    await print_smooth_text(content, delay=0.005)
-                                    
-                        except json.JSONDecodeError:
-                            continue
+                            if extracted_attachments:
+                                chunk_metadata["stream_attachments"] = extracted_attachments
+
+                    gateway_usage = None
+                    if "usageMetadata" in obj:
+                        u = obj["usageMetadata"]
+                        gateway_usage = GatewayUsage(prompt_tokens=u.get("promptTokenCount", 0), completion_tokens=u.get("candidatesTokenCount", 0), total_tokens=u.get("totalTokenCount", 0))
+
+                    yield GatewayStreamChunk(
+                        id=stream_id,
+                        model=request_model,
+                        choices=[GatewayStreamChoice(index=0, delta=GatewayStreamDelta(content=text_delta if text_delta else None, role="assistant"), finish_reason=finish_reason)],
+                        provider=self.provider_name,
+                        usage=gateway_usage,
+                        metadata=chunk_metadata
+                    )
+                except json.JSONDecodeError:
+                    break
+
+    def adapt_chat_response(self, response_data: Dict[str, Any], request_model: str) -> GatewayResponse:
+        choices = []
+        for idx, candidate in enumerate(response_data.get("candidates", [])):
+            parts = candidate.get("content", {}).get("parts", [])
+            content_parts = []
+            for part in parts:
+                t_delta, att = self._parse_part_to_text_and_attachment(part)
+                if t_delta:
+                    content_parts.append(MessageContentPart(type="text", text=t_delta))
+                if att:
+                    attachment = GatewayAttachment(id=att["id"], mime_type=att["mime_type"], base64_data=att["base64_data"])
+                    content_parts.append(MessageContentPart(type="image", image=ImageContent(attachment=attachment)))
+
+            choices.append(GatewayChoice(index=idx, message=GatewayMessage(role="assistant", content=content_parts), finish_reason=candidate.get("finishReason", "stop").lower()))
+        u = response_data.get("usageMetadata", {})
+        return GatewayResponse(id=f"chatcmpl-{uuid.uuid4()}", model=request_model, choices=choices, usage=GatewayUsage(prompt_tokens=u.get("promptTokenCount", 0), completion_tokens=u.get("candidatesTokenCount", 0), total_tokens=u.get("totalTokenCount", 0)), provider=self.provider_name)
+
+# =========================================================================
+# 3. GIAO DIỆN ĐỒ HOẠ (HỖ TRỢ BIẾN STREAM SWITCH)
+# =========================================================================
+
+class GeminiGatewayGUI:
+    def __init__(self, root):
+        self.root = root
+        self.root.title("Google Gemini Gateway Client - Smooth Typewriter")
+        self.root.geometry("1150x750")
+        self.root.configure(bg="#f4f6f9")
+        self.rendered_image = None
+
+        # --- KHUNG ĐIỀU KHIỂN PHÍA TRÊN ---
+        top_frame = tk.Frame(root, bg="#ffffff", bd=1, relief=tk.SOLID)
+        top_frame.pack(fill=tk.X, padx=15, pady=10)
+
+        tk.Label(top_frame, text="Prompt:", font=("Helvetica", 11, "bold"), bg="#ffffff").grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        
+        self.prompt_entry = tk.Entry(top_frame, font=("Helvetica", 11), width=50)
+        self.prompt_entry.insert(0, "Tạo bảng doanh thu 3 tháng đầu năm và vẽ biểu đồ hình cột.")
+        self.prompt_entry.grid(row=0, column=1, padx=5, pady=10, sticky="we")
+
+        self.is_stream_var = tk.BooleanVar(value=True)  
+        self.stream_check = tk.Checkbutton(top_frame, text="Bật Streaming", font=("Helvetica", 10, "bold"), variable=self.is_stream_var, bg="#ffffff", activebackground="#ffffff")
+        self.stream_check.grid(row=0, column=2, padx=10, pady=10)
+
+        self.submit_btn = tk.Button(top_frame, text="Gửi Yêu Cầu AI", font=("Helvetica", 11, "bold"), bg="#007bff", fg="white", command=self.start_request_thread, width=15)
+        self.submit_btn.grid(row=0, column=3, padx=10, pady=10)
+        top_frame.columnconfigure(1, weight=1)
+
+        # --- KHUNG CHỨA NỘI DUNG CHÍNH ---
+        main_frame = tk.Frame(root, bg="#f4f6f9")
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+
+        left_frame = tk.LabelFrame(main_frame, text=" 📝 Văn bản & Mã nguồn (Hiển thị mượt) ", font=("Helvetica", 10, "bold"), bg="#ffffff")
+        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+
+        self.text_area = scrolledtext.ScrolledText(left_frame, wrap=tk.WORD, font=("Consolas", 10))
+        self.text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+        right_frame = tk.LabelFrame(main_frame, text=" 📊 Biêu đồ / Hình ảnh (GatewayAttachment) ", font=("Helvetica", 10, "bold"), bg="#ffffff")
+        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+
+        self.image_label = tk.Label(right_frame, text="[Chưa có hình ảnh]", font=("Helvetica", 11, "italic"), bg="#eaedf2", fg="#6c757d")
+        self.image_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+
+    def append_text_instantly(self, text: str):
+        """Dùng cho STREAM: Chèn ngay lập tức chuỗi ký tự vừa nhận từ mạng vào UI."""
+        self.text_area.insert(tk.END, text)
+        self.text_area.see(tk.END)
+
+    def append_text_smoothly(self, text: str, index: int = 0, delay_ms: int = 10):
+        """
+        Dùng cho NON-STREAM: Đệ quy an toàn bằng hệ thống sự kiện của Tkinter (.after)
+        để in từng ký tự một với độ trễ tùy chỉnh (mặc định 10ms), tạo hiệu ứng typewriter siêu mượt.
+        """
+        if index < len(text):
+            char = text[index]
+            self.text_area.insert(tk.END, char)
+            self.text_area.see(tk.END)
+            # Lên lịch in ký tự tiếp theo sau `delay_ms` mili-giây
+            self.root.after(delay_ms, lambda: self.append_text_smoothly(text, index + 1, delay_ms))
+
+    def render_base64_image(self, base64_str: str):
+        try:
+            image_bytes = base64.b64decode(base64_str)
+            pil_img = Image.open(io.BytesIO(image_bytes))
+            pil_img.thumbnail((500, 500))
+            self.rendered_image = ImageTk.PhotoImage(pil_img)
+            self.image_label.config(image=self.rendered_image, text="")
+        except Exception as e:
+            self.image_label.config(text=f"❌ Lỗi hiển thị ảnh: {str(e)}")
+
+    def start_request_thread(self):
+        prompt = self.prompt_entry.get().strip()
+        if not prompt: return
+        self.submit_btn.config(state=tk.DISABLED, text="Đang chạy...")
+        self.text_area.delete("1.0", tk.END)
+        self.image_label.config(image="", text="[Đang xử lý kết nối...]")
+        
+        use_stream = self.is_stream_var.get()
+        threading.Thread(target=lambda: asyncio.run(self.execute_api_flow(prompt, use_stream)), daemon=True).start()
+
+    async def execute_api_flow(self, prompt: str, use_stream: bool):
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            self.root.after(0, lambda: messagebox.showerror("Lỗi", "Vui lòng cấu hình GEMINI_API_KEY"))
+            self.root.after(0, lambda: self.submit_btn.config(state=tk.NORMAL, text="Gửi Yêu Cầu AI"))
+            return
+
+        model = "gemini-2.5-flash"
+        adapter = DualGeminiAdapter()
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "tools": [{"codeExecution": {}}],
+            "systemInstruction": {"parts": [{"text": "Bạn là trợ lý phân tích dữ liệu. Luôn dùng bảng Markdown."}]}
+        }
+
+        method = "streamGenerateContent" if use_stream else "generateContent"
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={api_key}"
+
+        async with httpx.AsyncClient() as client:
+            try:
+                if use_stream:
+                    # KỊCH BẢN 1: CHẠY STREAMING
+                    async with client.stream("POST", url, json=payload, timeout=60.0) as response:
+                        response.raise_for_status()
+                        async for chunk in adapter.adapt_chat_stream(response, model):
+                            delta_text = chunk.choices[0].delta.content
+                            if delta_text:
+                                # Đổ text trực tiếp ra màn hình (mượt tự nhiên theo tốc độ mạng)
+                                self.root.after(0, lambda dt=delta_text: self.append_text_instantly(dt))
                             
-                print("\n---------------------------------------------")
-                print("🏁 Stream Finished.")
-                print(f"  🌐 Provider:     {last_chunk_metadata.get('provider')}")
-                print(f"  🤖 Actual Model: {last_chunk_metadata.get('model')}")
-                # Giả định hàm in usage_info của bạn:
-                if last_chunk_metadata.get("usage"):
-                    print(f"  📊 Usage: {last_chunk_metadata.get('usage')}")
-
-    except httpx.RequestError as e:
-        print(f"❌ Error: Could not connect to AI Gateway. Details: {e}")
-
-async def main():
-    await test_gemini_provider()
-    await test_gemini_streaming()
+                            if "stream_attachments" in chunk.metadata:
+                                for att in chunk.metadata["stream_attachments"]:
+                                    if att["mime_type"].startswith("image/"):
+                                        self.root.after(0, lambda b6=att["base64_data"]: self.render_base64_image(b6))
+                else:
+                    # KỊCH BẢN 2: CHẠY NON-STREAM (NHẬN CẢ CỤM TEXT LỚN)
+                    response = await client.post(url, json=payload, timeout=60.0)
+                    response.raise_for_status()
+                    output = adapter.adapt_chat_response(response.json(), model)
+                    
+                    full_text = ""
+                    base64_img = None
+                    
+                    # Thu thập toàn bộ dữ liệu trước khi chạy hiệu ứng chữ mượt
+                    for part in output.choices[0].message.content:
+                        if part.type == "text" and part.text:
+                            full_text += part.text
+                        elif part.type == "image" and part.image:
+                            base64_img = part.image.attachment.base64_data
+                    
+                    # Gọi hàm in chữ mượt độc lập dạng máy đánh chữ cho toàn bộ khối văn bản
+                    if full_text:
+                        self.root.after(0, lambda t=full_text: self.append_text_smoothly(t, delay_ms=10))
+                    if base64_img:
+                        self.root.after(0, lambda b=base64_img: self.render_base64_image(b))
+                            
+            except Exception as e:
+                self.root.after(0, lambda err=str(e): self.append_text_instantly(f"\n❌ Lỗi hệ thống: {err}"))
+            finally:
+                self.root.after(0, lambda: self.submit_btn.config(state=tk.NORMAL, text="Gửi Yêu Cầu AI"))
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    root_window = tk.Tk()
+    app = GeminiGatewayGUI(root_window)
+    root_window.mainloop()

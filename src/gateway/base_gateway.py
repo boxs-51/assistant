@@ -1,5 +1,5 @@
-from fastapi import FastAPI, Request, HTTPException, Depends, APIRouter, status
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi import FastAPI, Request, HTTPException, Depends, status , Query, UploadFile, File
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from pydantic import ValidationError
 import httpx
 import redis.asyncio as redis
@@ -9,8 +9,9 @@ from prometheus_client import generate_latest
 import structlog
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Literal, Optional
 import hashlib
+import io
 
 from .schemas import GatewayChatRequest
 import uuid
@@ -193,19 +194,6 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
     # Chuyển đổi chat_request Pydantic object thành dictionary để truyền vào router xử lý
     # (Có thể giữ nguyên object nếu Router của bạn chấp nhận Pydantic Model)
     body_dict = chat_request.model_dump()
-
-    import json
-    print("\n🔍 [DEBUG GATEWAY] Body sau khi validate Pydantic:")
-    # Chỉ in 100 ký tự đầu của base64 để tránh ngập terminal
-    debug_body = json.loads(json.dumps(body_dict))
-    for msg in debug_body.get("messages", []):
-        if isinstance(msg.get("content"), list):
-            for part in msg["content"]:
-                if part.get("type") in ["image", "file"] and part.get(part["type"]):
-                    media = part[part["type"]]
-                    if "base64_data" in media:
-                        media["base64_data"] = media["base64_data"][:30] + "...[TRUNCATED]..."
-    print(json.dumps(debug_body, indent=2, ensure_ascii=False))
 
     # 3. Input Guardrail
     with tracer.start_as_current_span("input_guardrail") as span:
@@ -391,7 +379,7 @@ async def list_models_proxy(
 async def get_model_details_proxy(
     request: Request,
     model_id: str,
-    provider_name: str, # Bắt buộc phải có provider để biết hỏi ai
+    provider_name: str = Query(..., description="Tên nhà cung cấp (e.g., gemini, openai)"),
     client_id: str = Depends(authenticate_client)
 ):
     """
@@ -410,7 +398,7 @@ async def get_model_details_proxy(
         model_data = await provider.model(
             http_client=app.state.http_client,
             timeout=settings.provider.timeout,
-            model_name=model_id
+            model=model_id
         )
         enriched_list = provider.capability_manager.enrich_capabilities(model_data)
         return enriched_list
@@ -421,6 +409,149 @@ async def get_model_details_proxy(
     except Exception as e:
         logger.error("Failed to fetch model details", provider=provider_name, model=model_id, error=str(e))
         raise HTTPException(status_code=500, detail=f"Failed to fetch model details from provider '{provider_name}'.")
+
+@app.get("/v1/files")
+async def list_files_proxy(
+    request: Request,
+    provider_name: str = Query(..., description="Tên nhà cung cấp"),
+    page_size: Optional[int] = Query(None, alias="page_size"),
+    page_token: Optional[str] = Query(None, alias="page_token"),
+    client_id: str = Depends(authenticate_client)
+):
+    """Endpoint lấy danh sách các file có sẵn từ Provider."""
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id, provider_name=provider_name)
+
+    provider = app.state.router.providers.get(provider_name)
+    if not provider:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
+
+    try:
+        files_list = await provider.list_files(
+            http_client=app.state.http_client,
+            timeout=settings.provider.timeout,
+            page_size=page_size,
+            page_token=page_token
+        )
+        return files_list
+    except Exception as e:
+        logger.error("Failed to list files", provider=provider_name, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to retrieve files list.")
+    
+@app.post("/v1/files")
+async def upload_file_proxy(
+    request: Request,
+    provider_name: str = Query(..., description="Tên nhà cung cấp"),
+    display_name: Optional[str] = Query(None, description="Tên hiển thị tùy chọn"),
+    file: UploadFile = File(..., description="Tệp tin cần tải lên"),
+    client_id: str = Depends(authenticate_client)
+):
+    """Endpoint tải tệp tin lên hệ thống lưu trữ của Provider."""
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id, provider_name=provider_name)
+
+    provider = app.state.router.providers.get(provider_name)
+    if not provider:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
+
+    try:
+        # Đọc dữ liệu file tạm thời hoặc truyền thẳng object qua file_path tùy theo thiết kế FileHelper của bạn
+        # Ở đây giả định truyền UploadFile object hoặc một file-like object vào adapter
+        upload_result = await provider.upload_file(
+            http_client=app.state.http_client,
+            timeout=settings.provider.timeout,
+            file_path=file,  # Hoặc lưu tạm ra ổ đĩa rồi truyền path chuỗi tùy FileHelper của bạn xử lý
+            display_name=display_name or file.filename
+        )
+        return upload_result
+    except Exception as e:
+        logger.error("Failed to upload file", provider=provider_name, error=str(e))
+        raise HTTPException(status_code=500, detail="Failed to upload file.")
+    
+@app.get("/v1/files/{file_id:path}")
+async def get_or_download_file_proxy(
+    request: Request,
+    file_id: str,
+    provider_name: str = Query(..., description="Tên nhà cung cấp"),
+    action: Literal["metadata", "download"] = Query("metadata", description="Hành động: lấy thông tin hoặc tải file"),
+    client_id: str = Depends(authenticate_client)
+):
+    """Endpoint lấy thông tin chi tiết (metadata) HOẶC tải nội dung nhị phân của một file."""
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id, file_id=file_id, provider_name=provider_name)
+
+    provider = app.state.router.providers.get(provider_name)
+    if not provider:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
+
+    try:
+        # BƯỚC 1: Lấy thông tin metadata của file trước
+        file_metadata = await provider.get_file(
+            http_client=app.state.http_client,
+            timeout=settings.provider.timeout,
+            file_name=file_id
+        )
+
+        # BƯỚC 2: Rẽ nhánh xử lý dựa vào tham số `action`
+        if action == "metadata":
+            return file_metadata
+        
+        elif action == "download":
+            if not file_metadata.uri:
+                raise HTTPException(status_code=400, detail="The requested file does not expose a valid download URI.")
+            
+            # Gọi hàm download_file đã viết thông qua uri có sẵn trong DTO
+            file_bytes = await provider.download_file(
+                http_client=app.state.http_client,
+                timeout=settings.provider.timeout,
+                uri=file_metadata.uri
+            )
+            
+            # Trả về luồng nhị phân kèm đúng định dạng file gốc
+            return StreamingResponse(
+                io.BytesIO(file_bytes),
+                media_type=file_metadata.mime_type or "application/octet-stream",
+                headers={"Content-Disposition": f"attachment; filename={file_metadata.filename or 'file'}"}
+            )
+
+    except HTTPException as http_err:
+        raise http_err
+    except Exception as e:
+        logger.error("Error processing file request", provider=provider_name, file_id=file_id, action=action, error=str(e))
+        raise HTTPException(status_code=500, detail=f"Failed to process file request for '{file_id}'.")
+
+@app.delete("/v1/files/{file_id:path}")
+async def delete_file_proxy(
+    request: Request,
+    file_id: str,
+    provider_name: str = Query(..., description="Tên nhà cung cấp"),
+    client_id: str = Depends(authenticate_client)
+):
+    """Endpoint để xóa một tệp cụ thể ra khỏi hệ thống của provider."""
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id, file_id=file_id, provider_name=provider_name)
+
+    provider = app.state.router.providers.get(provider_name)
+    if not provider:
+        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
+
+    try:
+        success = await provider.delete_file(
+            http_client=app.state.http_client,
+            timeout=settings.provider.timeout,
+            file_name=file_id
+        )
+        if success:
+            return Response(status_code=204)  # 204 No Content là chuẩn RESTful khi xóa thành công
+        else:
+            raise HTTPException(status_code=400, detail=f"Provider failed to delete file '{file_id}'.")
+            
+    except HTTPException as http_err:
+        raise http_err
+    except Exception as e:
+        logger.error("Failed to delete file", provider=provider_name, file_id=file_id, error=str(e))
+        raise HTTPException(status_code=500, detail=f"An error occurred while deleting file '{file_id}'.")
+    
 
 # =================================================================
 # ADMIN ENDPOINTS
