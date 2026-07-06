@@ -5,192 +5,33 @@ import base64
 import io
 import uuid
 import json
+import re
 import threading
 from typing import Any, Dict, List, Tuple, Optional, Literal, Union, AsyncGenerator
-from pydantic import BaseModel, Field
 
 import httpx
 from PIL import Image, ImageTk
 import tkinter as tk
 from tkinter import messagebox, scrolledtext
 
-# =========================================================================
-# 1. ĐỊNH NGHĨA CÁC DTO (CẢ STREAM VÀ NON-STREAM ĐỒNG BỘ)
-# =========================================================================
-
-class GatewayUsage(BaseModel):
-    prompt_tokens: int = 0
-    completion_tokens: int = 0
-    total_tokens: int = 0
-
-class GatewayStreamDelta(BaseModel):
-    content: Optional[str] = None
-    role: Optional[str] = None
-    tool_calls: Optional[List[Any]] = None
-
-class GatewayStreamChoice(BaseModel):
-    index: int
-    delta: GatewayStreamDelta
-    finish_reason: Optional[str] = None
-
-class GatewayStreamChunk(BaseModel):
-    id: str = Field(default_factory=str)
-    model: str
-    choices: List[GatewayStreamChoice]
-    object: str = "gateway_stream_chunk"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    provider: str
-    usage: Optional[GatewayUsage] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-# DTO phục vụ luồng Non-stream cũ để so sánh
-class FileMetadata(BaseModel):
-    created_at: Optional[int] = None
-
-class GatewayAttachment(BaseModel):
-    id: Optional[str] = None
-    mime_type: str
-    base64_data: Optional[str] = None
-    metadata: FileMetadata = Field(default_factory=FileMetadata)
-
-class ImageContent(BaseModel):
-    attachment: GatewayAttachment
-
-class MessageContentPart(BaseModel):
-    type: Literal["text", "image", "audio", "video", "file", "url"]
-    text: Optional[str] = None
-    image: Optional[ImageContent] = None
-
-class GatewayMessage(BaseModel):
-    role: str
-    content: List[MessageContentPart]
-
-class GatewayChoice(BaseModel):
-    index: int
-    message: GatewayMessage
-    finish_reason: Optional[str] = None
-
-class GatewayResponse(BaseModel):
-    id: str
-    model: str
-    choices: List[GatewayChoice]
-    usage: GatewayUsage
-    provider: str
-
-# =========================================================================
-# 2. BỘ ADAPTER XỬ LÝ SONG SONG CẢ HAI PHƯƠNG THỨC
-# =========================================================================
-
-class DualGeminiAdapter:
-    def __init__(self, provider_name: str = "gemini"):
-        self.provider_name = provider_name
-
-    def _parse_part_to_text_and_attachment(self, part: Dict[str, Any]) -> tuple[str, Optional[Dict[str, Any]]]:
-        text_delta = ""
-        attachment_data = None
-
-        if "text" in part:
-            text_delta = part["text"]
-        elif "inlineData" in part:
-            inline_data = part["inlineData"]
-            mime_type = inline_data.get("mimeType", "application/octet-stream")
-            attachment_data = {
-                "id": f"att-{uuid.uuid4()}",
-                "mime_type": mime_type,
-                "base64_data": inline_data.get("data", ""),
-                "metadata": {"created_at": int(time.time())}
-            }
-            text_delta = f"\n\n*[Hệ thống: Nhận tệp đính kèm {mime_type}]*\n"
-        elif "executableCode" in part:
-            text_delta = f"\n\n```python\n# [AI Executed Code]\n{part['executableCode'].get('code', '')}\n```"
-        elif "codeExecutionResult" in part:
-            text_delta = f"\n\n```text\n# [Execution Output]\n{part['codeExecutionResult'].get('output', '')}\n```"
-
-        return text_delta, attachment_data
-
-    async def adapt_chat_stream(self, response: httpx.Response, request_model: str) -> AsyncGenerator[GatewayStreamChunk, None]:
-        stream_id = f"chatcmpl-{uuid.uuid4()}"
-        buffer = ""
-        
-        async for chunk_text in response.aiter_text():
-            buffer += chunk_text
-            while True:
-                buffer = buffer.lstrip()
-                if buffer.startswith('['): buffer = buffer[1:].lstrip()
-                if buffer.startswith(','): buffer = buffer[1:].lstrip()
-                if buffer.startswith(']'): 
-                    buffer = buffer[1:].lstrip()
-                    break
-                if not buffer: break
-
-                try:
-                    obj, idx = json.JSONDecoder().raw_decode(buffer)
-                    buffer = buffer[idx:].lstrip()
-                    
-                    text_delta = ""
-                    chunk_metadata = {}
-                    finish_reason = None
-                    
-                    if "candidates" in obj:
-                        candidate = obj["candidates"][0]
-                        if "finishReason" in candidate:
-                            finish_reason = candidate["finishReason"].lower()
-                        
-                        if "content" in candidate and "parts" in candidate["content"]:
-                            parts = candidate["content"]["parts"]
-                            extracted_attachments = []
-                            for part in parts:
-                                t_delta, att = self._parse_part_to_text_and_attachment(part)
-                                if t_delta: text_delta += t_delta
-                                if att: extracted_attachments.append(att)
-                            
-                            if extracted_attachments:
-                                chunk_metadata["stream_attachments"] = extracted_attachments
-
-                    gateway_usage = None
-                    if "usageMetadata" in obj:
-                        u = obj["usageMetadata"]
-                        gateway_usage = GatewayUsage(prompt_tokens=u.get("promptTokenCount", 0), completion_tokens=u.get("candidatesTokenCount", 0), total_tokens=u.get("totalTokenCount", 0))
-
-                    yield GatewayStreamChunk(
-                        id=stream_id,
-                        model=request_model,
-                        choices=[GatewayStreamChoice(index=0, delta=GatewayStreamDelta(content=text_delta if text_delta else None, role="assistant"), finish_reason=finish_reason)],
-                        provider=self.provider_name,
-                        usage=gateway_usage,
-                        metadata=chunk_metadata
-                    )
-                except json.JSONDecodeError:
-                    break
-
-    def adapt_chat_response(self, response_data: Dict[str, Any], request_model: str) -> GatewayResponse:
-        choices = []
-        for idx, candidate in enumerate(response_data.get("candidates", [])):
-            parts = candidate.get("content", {}).get("parts", [])
-            content_parts = []
-            for part in parts:
-                t_delta, att = self._parse_part_to_text_and_attachment(part)
-                if t_delta:
-                    content_parts.append(MessageContentPart(type="text", text=t_delta))
-                if att:
-                    attachment = GatewayAttachment(id=att["id"], mime_type=att["mime_type"], base64_data=att["base64_data"])
-                    content_parts.append(MessageContentPart(type="image", image=ImageContent(attachment=attachment)))
-
-            choices.append(GatewayChoice(index=idx, message=GatewayMessage(role="assistant", content=content_parts), finish_reason=candidate.get("finishReason", "stop").lower()))
-        u = response_data.get("usageMetadata", {})
-        return GatewayResponse(id=f"chatcmpl-{uuid.uuid4()}", model=request_model, choices=choices, usage=GatewayUsage(prompt_tokens=u.get("promptTokenCount", 0), completion_tokens=u.get("candidatesTokenCount", 0), total_tokens=u.get("totalTokenCount", 0)), provider=self.provider_name)
-
-# =========================================================================
-# 3. GIAO DIỆN ĐỒ HOẠ (HỖ TRỢ BIẾN STREAM SWITCH)
-# =========================================================================
+from ..schemas import (
+    GatewayUsage, GatewayStreamDelta, GatewayStreamChoice, GatewayStreamChunk,
+    GatewayAttachment, ImageContent, MessageContentPart, GatewayMessage,
+    GatewayChoice, GatewayResponse, TextContent, MessageContentType, GatewayChatRequest,
+    GatewayToolDefinition, ToolType
+)
+from ..routing.providers.gemini.adapter import GeminiAdapter, FileHelper
 
 class GeminiGatewayGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Google Gemini Gateway Client - Smooth Typewriter")
-        self.root.geometry("1150x750")
+        self.root.title("Gemini Gateway Client (Chuẩn hóa DTO & Giao diện nâng cao)")
+        self.root.geometry("1400x900")
         self.root.configure(bg="#f4f6f9")
         self.rendered_image = None
+        
+        # Biến trạng thái để quản lý tag khi STREAMING code block
+        self.current_stream_tag = "plain_text"
 
         # --- KHUNG ĐIỀU KHIỂN PHÍA TRÊN ---
         top_frame = tk.Frame(root, bg="#ffffff", bd=1, relief=tk.SOLID)
@@ -212,36 +53,123 @@ class GeminiGatewayGUI:
 
         # --- KHUNG CHỨA NỘI DUNG CHÍNH ---
         main_frame = tk.Frame(root, bg="#f4f6f9")
-        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=5)
+        main_frame.pack(fill=tk.BOTH, expand=True, padx=15, pady=(0, 10))
+        main_frame.rowconfigure(0, weight=2) 
+        main_frame.rowconfigure(1, weight=1) 
+        main_frame.columnconfigure(0, weight=1)
 
-        left_frame = tk.LabelFrame(main_frame, text=" 📝 Văn bản & Mã nguồn (Hiển thị mượt) ", font=("Helvetica", 10, "bold"), bg="#ffffff")
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 10))
+        # --- KHUNG OUTPUT (VĂN BẢN VÀ HÌNH ẢNH) ---
+        output_frame = tk.Frame(main_frame, bg="#f4f6f9")
+        output_frame.grid(row=0, column=0, sticky="nsew", pady=(0, 10))
+        output_frame.columnconfigure(0, weight=1)
+        output_frame.columnconfigure(1, weight=1)
+        output_frame.rowconfigure(0, weight=1)
 
-        self.text_area = scrolledtext.ScrolledText(left_frame, wrap=tk.WORD, font=("Consolas", 10))
-        self.text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        left_frame = tk.LabelFrame(output_frame, text=" 📝 Nội dung trả về (Văn bản, Markdown, Code) ", font=("Helvetica", 10, "bold"), bg="#ffffff")
+        left_frame.grid(row=0, column=0, sticky="nsew", padx=(0, 5))
 
-        right_frame = tk.LabelFrame(main_frame, text=" 📊 Biêu đồ / Hình ảnh (GatewayAttachment) ", font=("Helvetica", 10, "bold"), bg="#ffffff")
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        self.text_area = scrolledtext.ScrolledText(left_frame, wrap=tk.WORD, font=("Consolas", 11))
+        self.text_area.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        self.image_label = tk.Label(right_frame, text="[Chưa có hình ảnh]", font=("Helvetica", 11, "italic"), bg="#eaedf2", fg="#6c757d")
-        self.image_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        # --- Cấu hình các tag định dạng cho text_area ---
+        self.text_area.tag_configure("bold", font=("Helvetica", 11, "bold"))
+        self.text_area.tag_configure("code_block", font=("Consolas", 10), background="#272822", foreground="#f8f8f2", lmargin1=15, lmargin2=15, rmargin=15, spacing1=2, spacing3=2, wrap=tk.WORD)
+        self.text_area.tag_configure("output_block", font=("Consolas", 10), background="#f0f0f0", foreground="#333333", lmargin1=15, lmargin2=15, rmargin=15, spacing1=2, spacing3=2, wrap=tk.WORD)
+        self.text_area.tag_configure("plain_text", font=("Helvetica", 11), spacing3=5)
 
-    def append_text_instantly(self, text: str):
-        """Dùng cho STREAM: Chèn ngay lập tức chuỗi ký tự vừa nhận từ mạng vào UI."""
-        self.text_area.insert(tk.END, text)
+        right_frame = tk.LabelFrame(output_frame, text=" 🖼️ Hình ảnh đính kèm (Attachment) ", font=("Helvetica", 10, "bold"), bg="#ffffff")
+        right_frame.grid(row=0, column=1, sticky="nsew", padx=(5, 0))
+
+        self.image_label = tk.Label(right_frame, text="[Chưa có hình ảnh]", font=("Helvetica", 12, "italic"), bg="#eaedf2", fg="#6c757d")
+        self.image_label.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+
+        # --- KHUNG LOGGING ---
+        log_container = tk.LabelFrame(main_frame, text=" 🔎 Dữ liệu chi tiết (Raw vs DTO) ", font=("Helvetica", 10, "bold"), bg="#ffffff")
+        log_container.grid(row=1, column=0, sticky="nsew")
+        log_container.columnconfigure(0, weight=1)
+        log_container.columnconfigure(1, weight=1)
+        log_container.rowconfigure(1, weight=1)
+
+        tk.Label(log_container, text="Dữ liệu thô từ API (Raw)", font=("Helvetica", 9, "bold"), bg="#ffffff").grid(row=0, column=0, padx=5, pady=2, sticky="w")
+        self.raw_log_area = scrolledtext.ScrolledText(log_container, wrap=tk.WORD, font=("Consolas", 9), height=10, bg="#2b2b2b", fg="#a9b7c6")
+        self.raw_log_area.grid(row=1, column=0, sticky="nsew", padx=5, pady=5)
+
+        tk.Label(log_container, text="Dữ liệu chuẩn hóa (DTO)", font=("Helvetica", 9, "bold"), bg="#ffffff").grid(row=0, column=1, padx=5, pady=2, sticky="w")
+        self.dto_log_area = scrolledtext.ScrolledText(log_container, wrap=tk.WORD, font=("Consolas", 9), height=10, bg="#e8e8e8")
+        self.dto_log_area.grid(row=1, column=1, sticky="nsew", padx=5, pady=5)
+
+    def append_text_by_format(self, text: str, text_format: str):
+        """
+        Xử lý thông minh cho STREAM: Dựa vào 'format' từ TextContent DTO để chọn UI tag phù hợp
+        mà không cần dùng Regex để bóc tách lại chuỗi thô.
+        """
+        # Xác định tag đồ họa dựa trên cấu trúc enum format của bạn
+        if text_format == "code":
+            # Kiểm tra xem đây là block code tự chạy hay log stdout
+            if "[AI Executed Code]" in text or self.current_stream_tag == "code_block":
+                tag = "code_block"
+                self.current_stream_tag = "code_block"
+            elif "[Execution Output]" in text or self.current_stream_tag == "output_block":
+                tag = "output_block"
+                self.current_stream_tag = "output_block"
+            else:
+                tag = "code_block"
+        else:
+            tag = "plain_text"
+            self.current_stream_tag = "plain_text"
+
+        # Làm sạch các nhãn kỹ thuật trước khi in ra UI cho người dùng
+        cleaned_text = text.replace("```python", "").replace("```text", "").replace("```", "")
+        cleaned_text = cleaned_text.replace("# [AI Executed Code]", "").replace("# [Execution Output]", "")
+        
+        self.text_area.insert(tk.END, cleaned_text, tag)
         self.text_area.see(tk.END)
 
-    def append_text_smoothly(self, text: str, index: int = 0, delay_ms: int = 10):
+    def parse_and_append_formatted_text(self, text: str):
         """
-        Dùng cho NON-STREAM: Đệ quy an toàn bằng hệ thống sự kiện của Tkinter (.after)
-        để in từng ký tự một với độ trễ tùy chỉnh (mặc định 10ms), tạo hiệu ứng typewriter siêu mượt.
+        Dùng riêng cho NON-STREAM: Phân tích cả cụm văn bản lớn bằng Regex 
+        khi toàn bộ API flow đã hoàn thành.
         """
-        if index < len(text):
-            char = text[index]
-            self.text_area.insert(tk.END, char)
-            self.text_area.see(tk.END)
-            # Lên lịch in ký tự tiếp theo sau `delay_ms` mili-giây
-            self.root.after(delay_ms, lambda: self.append_text_smoothly(text, index + 1, delay_ms))
+        code_pattern = r"```(python|text)\n(.*?)\n```"
+        parts = re.split(code_pattern, text, flags=re.DOTALL)
+
+        i = 0
+        while i < len(parts):
+            if i % 3 == 0:
+                self.text_area.insert(tk.END, parts[i], "plain_text")
+                i += 1
+            else:
+                lang = parts[i]
+                code = parts[i+1]
+                tag = "code_block" if lang == "python" else "output_block"
+                
+                # Loại bỏ comment kỹ thuật nếu có
+                cleaned_code = code.replace("# [AI Executed Code]", "").replace("# [Execution Output]", "")
+                self.text_area.insert(tk.END, cleaned_code.strip() + "\n", tag)
+                i += 2
+
+        self.text_area.see(tk.END)
+
+    def log_data(self, raw_data: Any, dto_data: Any):
+        """Hiển thị dữ liệu thô và DTO đã chuẩn hóa ra vùng log."""
+        if raw_data:
+            self.raw_log_area.insert(tk.END, self._format_log_json(raw_data) + "\n\n")
+            self.raw_log_area.see(tk.END)
+        if dto_data:
+            self.dto_log_area.insert(tk.END, self._format_log_json(dto_data) + "\n\n")
+            self.dto_log_area.see(tk.END)
+
+    def _truncate_long_strings(self, data: Any, parent_key: str = "") -> Any:
+        if isinstance(data, dict):
+            return {k: self._truncate_long_strings(v, k) for k, v in data.items()}
+        if isinstance(data, list):
+            return [self._truncate_long_strings(v, parent_key) for v in data]
+        if parent_key == 'base64_data' and isinstance(data, str) and len(data) > 100:
+            return f"{data[:20]}... (truncated) ...{data[-20:]}"
+        return data
+
+    def _format_log_json(self, data: Any) -> str:
+        return json.dumps(self._truncate_long_strings(data), indent=2, ensure_ascii=False)
 
     def render_base64_image(self, base64_str: str):
         try:
@@ -258,8 +186,11 @@ class GeminiGatewayGUI:
         if not prompt: return
         self.submit_btn.config(state=tk.DISABLED, text="Đang chạy...")
         self.text_area.delete("1.0", tk.END)
+        self.raw_log_area.delete("1.0", tk.END)
+        self.dto_log_area.delete("1.0", tk.END)
         self.image_label.config(image="", text="[Đang xử lý kết nối...]")
         
+        self.current_stream_tag = "plain_text" # Reset tag pointer
         use_stream = self.is_stream_var.get()
         threading.Thread(target=lambda: asyncio.run(self.execute_api_flow(prompt, use_stream)), daemon=True).start()
 
@@ -271,56 +202,87 @@ class GeminiGatewayGUI:
             return
 
         model = "gemini-2.5-flash"
-        adapter = DualGeminiAdapter()
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "tools": [{"codeExecution": {}}],
-            "systemInstruction": {"parts": [{"text": "Bạn là trợ lý phân tích dữ liệu. Luôn dùng bảng Markdown."}]}
-        }
+        adapter = GeminiAdapter()
+
+        # FIX 1: Đưa tools về định dạng LIST đúng cấu trúc quy định của GatewayChatRequest
+        gateway_request = GatewayChatRequest(
+            model=model,
+            messages=[
+                GatewayMessage(role="system", content="Bạn là trợ lý phân tích dữ liệu. Luôn dùng bảng Markdown."),
+                GatewayMessage(role="user", content=prompt)
+            ],
+            tools=[
+                GatewayToolDefinition(
+                    name="code_execution",  
+                    description="Kích hoạt trình thông dịch code Python của Gemini",
+                    tool_type=ToolType.NATIVE  
+                )
+            ],
+            stream=use_stream
+        )
+
+        payload = adapter.adapt_chat_request(gateway_request.model_dump())
 
         method = "streamGenerateContent" if use_stream else "generateContent"
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:{method}?key={api_key}"
-
+        
         async with httpx.AsyncClient() as client:
             try:
                 if use_stream:
                     # KỊCH BẢN 1: CHẠY STREAMING
                     async with client.stream("POST", url, json=payload, timeout=60.0) as response:
                         response.raise_for_status()
-                        async for chunk in adapter.adapt_chat_stream(response, model):
-                            delta_text = chunk.choices[0].delta.content
-                            if delta_text:
-                                # Đổ text trực tiếp ra màn hình (mượt tự nhiên theo tốc độ mạng)
-                                self.root.after(0, lambda dt=delta_text: self.append_text_instantly(dt))
-                            
-                            if "stream_attachments" in chunk.metadata:
-                                for att in chunk.metadata["stream_attachments"]:
-                                    if att["mime_type"].startswith("image/"):
-                                        self.root.after(0, lambda b6=att["base64_data"]: self.render_base64_image(b6))
+                        
+                        async for chunk_dto in adapter.adapt_chat_stream(response):
+                            # Log cấu trúc DTO nhận được từ stream adapter
+                            self.root.after(0, lambda d=chunk_dto: self.log_data(
+                                raw_data=None, 
+                                dto_data=d.model_dump(exclude_none=True)
+                            ))
+
+                            # FIX 2: Tận dụng trực tiếp "content_parts" bóc tách từ hàm _parse_gemini_parts_to_content 
+                            # để lấy chính xác trạng thái format="code" hoặc format="plain" theo thời gian thực.
+                            if "content_parts" in chunk_dto.metadata:
+                                for part_dict in chunk_dto.metadata["content_parts"]:
+                                    part = MessageContentPart.model_validate(part_dict)
+                                    if isinstance(part.data, TextContent):
+                                        # Truyền cả dữ liệu chữ và định dạng format ("code"/"plain") xuống UI
+                                        self.root.after(0, lambda dt=part.data.data, fmt=part.data.format: 
+                                            self.append_text_by_format(dt, fmt))
+                                            
+                                    elif isinstance(part.data, ImageContent) and part.data.attachment and part.data.attachment.base64_data:
+                                        self.root.after(0, lambda b6=part.data.attachment.base64_data: 
+                                            self.render_base64_image(b6))
+
                 else:
-                    # KỊCH BẢN 2: CHẠY NON-STREAM (NHẬN CẢ CỤM TEXT LỚN)
+                    # KỊCH BẢN 2: CHẠY NON-STREAM
                     response = await client.post(url, json=payload, timeout=60.0)
                     response.raise_for_status()
-                    output = adapter.adapt_chat_response(response.json(), model)
+                    raw_json = response.json()
+                    output_dto = await adapter.adapt_chat_response(response)
+
+                    self.root.after(0, lambda r=raw_json, d=output_dto: self.log_data(
+                        raw_data=r, dto_data=d.model_dump(exclude_none=True)
+                    ))
                     
                     full_text = ""
-                    base64_img = None
+                    attachments = []
                     
-                    # Thu thập toàn bộ dữ liệu trước khi chạy hiệu ứng chữ mượt
-                    for part in output.choices[0].message.content:
-                        if part.type == "text" and part.text:
-                            full_text += part.text
-                        elif part.type == "image" and part.image:
-                            base64_img = part.image.attachment.base64_data
+                    for part in output_dto.choices[0].message.content:
+                        if isinstance(part.data, TextContent):
+                            full_text += part.data.data
+                        elif isinstance(part.data, ImageContent) and part.data.attachment:
+                            attachments.append(part.data.attachment)
                     
-                    # Gọi hàm in chữ mượt độc lập dạng máy đánh chữ cho toàn bộ khối văn bản
                     if full_text:
-                        self.root.after(0, lambda t=full_text: self.append_text_smoothly(t, delay_ms=10))
-                    if base64_img:
-                        self.root.after(0, lambda b=base64_img: self.render_base64_image(b))
+                        self.root.after(0, lambda t=full_text: self.parse_and_append_formatted_text(t))
+                        
+                    for att in attachments:
+                        if att.base64_data:
+                            self.root.after(0, lambda b=att.base64_data: self.render_base64_image(b))
                             
             except Exception as e:
-                self.root.after(0, lambda err=str(e): self.append_text_instantly(f"\n❌ Lỗi hệ thống: {err}"))
+                self.root.after(0, lambda err=str(e): self.text_area.insert(tk.END, f"\n❌ Lỗi hệ thống: {err}\n"))
             finally:
                 self.root.after(0, lambda: self.submit_btn.config(state=tk.NORMAL, text="Gửi Yêu Cầu AI"))
 

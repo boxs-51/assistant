@@ -20,7 +20,7 @@ from .limiter import RateLimiterManager
 # --- Enterprise Routing Imports ---
 from .routing import ModelRouter # Sẽ được sửa đổi bên dưới
 from .routing.exceptions import NoAvailableProviderError, ProviderError
-from ..circuit_breaker.circuit_breaker import CircuitBreakerManager
+from .circuit_breaker import CircuitBreakerManager
 # --------------------------------
 from .security import authenticate_client, InputGuardrailAdapter, OutputGuardrailAdapter
 from ..guardrail.guar import GuardrailSystem
@@ -622,7 +622,6 @@ def get_metrics():
 @app.get("/stats", tags=["Health"])
 async def get_stats():
     """Cung cấp thống kê hoạt động ở dạng JSON cho dashboard nội bộ."""
-    #settings = ConfigurationRegistry.get_config()
     process = psutil.Process()
     return {
         "gateway_name": settings.gateway.name,

@@ -6,7 +6,7 @@ import os
 import asyncio
 
 from ...config import settings
-from ..providers.base.provider import BaseProvider
+from ..providers.base.provider.provider import BaseProvider
 
 logger = structlog.get_logger(__name__)
 

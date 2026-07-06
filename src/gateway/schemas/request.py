@@ -21,6 +21,7 @@ class GatewayChatRequest(GatewayBaseModel):
     model: str
     messages: List[GatewayMessage]
     tools: Optional[List[GatewayToolDefinition]] = None
+    #tools: Optional[List[Dict[str, Any]]] = None
     attachments: Optional[List[GatewayAttachment]] = None
     
     # Generation parameters

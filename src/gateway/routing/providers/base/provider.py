@@ -10,10 +10,11 @@ from abc import ABC, abstractmethod
 import httpx
 import structlog
 from typing import Dict, Any, Set, Union
+from .interfaces.chat import ChatProvider
 
 logger = structlog.get_logger(__name__)
 
-class BaseProvider(ABC):
+class BaseProvider(ABC,ChatProvider):
     """
     Một container cho các thành phần cấu thành nên một provider.
     Sử dụng Composition over Inheritance.
@@ -230,8 +231,6 @@ class BaseProvider(ABC):
     async def chat(self, **kwargs) -> Any: raise NotImplementedError
     @abstractmethod
     async def chat_stream(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def chat_batch(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Models
@@ -248,18 +247,12 @@ class BaseProvider(ABC):
     # =========================
     @abstractmethod
     async def embeddings(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def embeddings_batch(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Images
     # =========================
     @abstractmethod
     async def image_generation(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def image_edit(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def image_variation(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Audio
@@ -267,13 +260,7 @@ class BaseProvider(ABC):
     @abstractmethod
     async def speech_to_text(self, **kwargs) -> Any: raise NotImplementedError
     @abstractmethod
-    async def speech_to_text_stream(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
     async def text_to_speech(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def text_to_speech_stream(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def audio_translation(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Video
@@ -307,8 +294,6 @@ class BaseProvider(ABC):
     @abstractmethod
     async def get_cache(self, **kwargs) -> Any: raise NotImplementedError
     @abstractmethod
-    async def update_cache(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
     async def delete_cache(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
@@ -316,52 +301,13 @@ class BaseProvider(ABC):
     # =========================
     @abstractmethod
     async def count_tokens(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def tokenize(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def detokenize(self, **kwargs) -> Any: raise NotImplementedError
 
-    # =========================
-    # Function / Tool Calling
-    # =========================
-    @abstractmethod
-    async def tool_call(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def execute_tool(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Search
-    # =========================
-    @abstractmethod
-    async def web_search(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def url_context(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Code Execution
-    # =========================
-    @abstractmethod
-    async def execute_code(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Live API
     # =========================
     @abstractmethod
     async def live(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def live_stream(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Sessions / Chat Memory
-    # =========================
-    @abstractmethod
-    async def create_session(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def delete_session(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def get_session(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def list_sessions(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Batch
@@ -370,10 +316,6 @@ class BaseProvider(ABC):
     async def create_batch(self, **kwargs) -> Any: raise NotImplementedError
     @abstractmethod
     async def batch_status(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def cancel_batch(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def list_batches(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Fine Tune
@@ -384,16 +326,6 @@ class BaseProvider(ABC):
     async def list_fine_tunes(self, **kwargs) -> Any: raise NotImplementedError
     @abstractmethod
     async def fine_tune_status(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def cancel_fine_tune(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Assistants / Agents
-    # =========================
-    @abstractmethod
-    async def assistant(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def assistant_stream(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Moderation / Safety
@@ -412,20 +344,12 @@ class BaseProvider(ABC):
     # =========================
     @abstractmethod
     async def vision(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def ocr(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Computer Use
     # =========================
     @abstractmethod
     async def computer_use(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Browser
-    # =========================
-    @abstractmethod
-    async def browser(self, **kwargs) -> Any: raise NotImplementedError
 
     # =========================
     # Metadata

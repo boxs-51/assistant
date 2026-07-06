@@ -1,6 +1,8 @@
 import mimetypes
 from pathlib import Path
 from fastapi import UploadFile
+from urllib.parse import urlparse
+
 class FileHelper:
     """Lớp tiện ích để xử lý các hoạt động liên quan đến tệp."""
 
@@ -14,13 +16,20 @@ class FileHelper:
         """
         Xác định mimeType của tệp dựa trên đuôi tệp, tương thích cả str, Path và FastAPI UploadFile.
         """
-        # BƯỚC SỬA ĐỔI: Nếu là UploadFile từ FastAPI, lấy thuộc tính filename
+        filename_str = ""
         if hasattr(file_path, "filename"):
-            filename = file_path.filename
+            filename_str = file_path.filename
         elif isinstance(file_path, Path):
-            filename = file_path.name
+            filename_str = file_path.name
         else:
-            filename = str(file_path)
+            filename_str = str(file_path)
+
+        # Cải tiến: Nếu là URL, chỉ lấy phần path để xác định extension
+        try:
+            parsed_url = urlparse(filename_str)
+            filename = parsed_url.path if parsed_url.scheme and parsed_url.netloc else filename_str
+        except Exception:
+            filename = filename_str
 
         # Trích xuất suffix từ tên file
         file_extension = Path(filename).suffix.lower()

@@ -6,11 +6,11 @@ import structlog
 from ..config import settings
 from ..import observability as gateway_metrics
 from .exceptions import ProviderError
-from .providers.base.provider import BaseProvider
+from .providers.base.provider.provider import BaseProvider
 from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 from typing import Callable, Awaitable
 from .policies.retry import RetryPolicy
-from ...circuit_breaker.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
 logger = structlog.get_logger(__name__)
 

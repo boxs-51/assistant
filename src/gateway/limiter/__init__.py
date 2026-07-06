@@ -4,7 +4,7 @@ from redis.exceptions import RedisError
 from .storage.redis_storage import RedisStorage
 from .factory import RateLimiterFactory
 from ..config import settings
-from ...circuit_breaker.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 from .. import observability as gateway_metrics
 
 logger = structlog.get_logger(__name__)

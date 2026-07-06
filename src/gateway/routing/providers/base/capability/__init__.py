@@ -8,7 +8,7 @@ from typing import Dict, Any, List, Set, TYPE_CHECKING, Optional, Union
 from .....schemas import ModelInfo, ModelList ,ModelCapability, ProviderCapability
 
 if TYPE_CHECKING:
-    from ..provider import BaseProvider
+    from ..provider.provider import BaseProvider
 
 logger = structlog.get_logger(__name__)
 

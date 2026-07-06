@@ -11,9 +11,9 @@ from .executor import ProviderExecutor
 from .policies.routing_policy import RoutingPolicy 
 from .registry import ProviderRegistry
 from .discovery import ProviderDiscovery
-from ...circuit_breaker.circuit_breaker import CircuitBreakerManager
+from ..circuit_breaker import CircuitBreakerManager
 from ..schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
-from .providers.base.provider import BaseProvider
+from .providers.base.provider.provider import BaseProvider
 
 import asyncio, anyio
 logger = structlog.get_logger(__name__)

@@ -4,8 +4,8 @@ from typing import Dict, Optional, Any
 from enum import Enum
 import structlog
 
-from ..gateway import observability as gateway_metrics
-from ..gateway.config import settings
+from . import observability as gateway_metrics
+from .config import settings
 
 logger = structlog.get_logger(__name__)
 
