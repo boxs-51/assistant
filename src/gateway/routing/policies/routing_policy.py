@@ -1,12 +1,13 @@
-from typing import Dict, List
 import structlog
 import fnmatch
 import yaml
 import os
 import asyncio
 
+from typing import Dict, List
+
 from ...config import settings
-from ..providers.base.provider.provider import BaseProvider
+from ..providers.base.provider import BaseProvider
 
 logger = structlog.get_logger(__name__)
 

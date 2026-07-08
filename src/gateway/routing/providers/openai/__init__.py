@@ -8,10 +8,11 @@ from ..base import (
     ModelCapabilityManager, ProviderCapability,
     ModelMapper
 )
-from .adapter import OpenAIAdapter
 
 from ....config import settings
 from ....schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo
+
+from .api.chats import OpenAIChats
 
 # Mapping model cho OpenAI, có thể mở rộng cho các model fallback
 OPENAI_MODEL_MAP = {
@@ -36,7 +37,6 @@ class OpenAIProvider(BaseProvider):
             provider_name="openai",
             auth_strategy=BearerToken(api_key=str(settings.openai.api_key)),
             endpoint_builder=EndpointBuilder(base_url=str(settings.openai.base_url)),
-            adapter=OpenAIAdapter(),
             api_mapper=ApiTypeMapper(api_map=OPENAI_API_MAP),
             model_mapper=ModelMapper(model_map=OPENAI_MODEL_MAP),
             capability_manager=ModelCapabilityManager(provider_name="openai"),
@@ -46,37 +46,14 @@ class OpenAIProvider(BaseProvider):
                 ProviderCapability.FINE_TUNING,
             }
         )
-        self.DEFAULT_MODEL = "gpt-4o"
+        self.chat = OpenAIChats(provider=self)
 
     @classmethod
     def is_configured(cls) -> bool:
         """Kiểm tra xem OpenAI API key đã được cung cấp hay chưa."""
         return bool(settings.openai.api_key)
 
-    async def chat(self, **kwargs) -> GatewayResponse:
-        body = kwargs.get("body")
-        prepared_body = self.prepare_request(body)
-        response = await self.send(
-            client=kwargs.get("http_client"),
-            api_type=ApiType.CHAT_COMPLETIONS,
-            json=prepared_body,
-            timeout=kwargs.get("timeout"),
-        )
-        return await self.adapter.adapt_chat_response(response)
 
-
-    async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
-        body = kwargs.get("body")
-        prepared_body = self.prepare_request(body)
-        response = await self.send(
-            client=kwargs.get("http_client"),
-            api_type=ApiType.CHAT_COMPLETIONS,
-            json=prepared_body,
-            timeout=kwargs.get("timeout")
-        )
-        
-        async for chunk in self.adapter.adapt_chat_stream(response):
-            yield chunk
 
     async def models(self, **kwargs) -> ModelList:
         """Lấy danh sách các model từ OpenAI."""
@@ -109,11 +86,6 @@ class OpenAIProvider(BaseProvider):
         
         return ModelList(data=[info for info in results if info])
 
-    # =======================================================================
-    # Placeholder implementations for abstract methods from BaseProvider
-    # =======================================================================
-
-    async def chat_batch(self, **kwargs): raise NotImplementedError
     
     async def model(self, **kwargs) -> Dict[str, Any]:
         """Lấy thông tin chi tiết của một model cụ thể từ OpenAI."""
@@ -122,12 +94,7 @@ class OpenAIProvider(BaseProvider):
         api_type_template = f"models/{model_name}"
         response = await self.send(client=kwargs.get("http_client"), method="GET", api_type=api_type_template, timeout=kwargs.get("timeout"))
         return await response.json()
-    async def model_capabilities(self, **kwargs): raise NotImplementedError("OpenAI capabilities are inferred from the 'models' endpoint, no separate capabilities endpoint exists.")
-    async def embeddings_batch(self, **kwargs): raise NotImplementedError
-    async def image_generation(self, **kwargs): raise NotImplementedError
-    async def image_edit(self, **kwargs): raise NotImplementedError
-    async def image_variation(self, **kwargs): raise NotImplementedError
-    # ... and so on for all other abstract methods defined in BaseProvider.
+
 
     async def embeddings(self, **kwargs) -> Dict[str, Any]:
         """Tạo embeddings cho văn bản bằng API của OpenAI."""

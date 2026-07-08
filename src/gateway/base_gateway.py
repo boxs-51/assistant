@@ -9,7 +9,7 @@ from prometheus_client import generate_latest
 import structlog
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from typing import List, Dict, Any, Literal, Optional
+from typing import List, Dict, Any, Literal, Optional, AsyncGenerator, Tuple
 import hashlib
 import io
 
@@ -35,15 +35,14 @@ from .import observability as gateway_metrics
 from .config import settings
 
 app = FastAPI(title="AI Gateway")
+tracer = trace.get_tracer(__name__)
+logger = structlog.get_logger(__name__)
 
 @app.on_event("startup")
 async def startup_event():
     """Khởi tạo các kết nối cần thiết khi server khởi động."""
     # 1. Tải cấu hình
-    # Đây là bước đầu tiên và quan trọng nhất
-    # Di chuyển logger ra ngoài để có thể truy cập toàn cục sau khi cấu hình
-    global logger; logger = structlog.get_logger("gateway.main")
-    
+
     loader = ConfigLoader(default_config_path="config/gateway/default.yaml")
     app_config = loader.load_config()
     ConfigurationRegistry.set_config(app_config)
@@ -78,6 +77,7 @@ async def startup_event():
     app.state.cache = SemanticCache(backend=cache_backend, embedding_service=embedding_service)
     # ---------------------------------------
     app.state.http_client = httpx.AsyncClient(timeout=settings.provider.timeout)
+    app.state.tracer = trace.get_tracer(__name__)
     logger.info("Gateway startup complete.")
 
 @app.on_event("shutdown")
@@ -119,20 +119,8 @@ async def observability_middleware(request: Request, call_next):
 
     return response
 
-@app.post("/v1/chat/completions")
-async def chat_completions_proxy(request: Request, client_id: str = Depends(authenticate_client)):
-    """
-    Endpoint proxy thông minh, ép dữ liệu đầu vào sang GatewayChatRequest Schema
-    và bắt lỗi Validation để phản hồi lập tức nếu client gửi sai cấu trúc.
-    """
-    tracer = trace.get_tracer(__name__)
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id)
-    start_time = time.time()
-    
-    final_provider_name = "unknown" 
-
-    # 1. Đọc JSON thô và ÉP SANG SCHEMAS Pydantic (GatewayChatRequest)
+async def parse_and_validate_request(request: Request) -> GatewayChatRequest:
+    """1. Đọc JSON thô và ép sang schema Pydantic."""
     try:
         raw_body = await request.json()
     except Exception:
@@ -141,21 +129,21 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
         raise HTTPException(status_code=400, detail="Malformed JSON in request body.")
 
     try:
-        # Ép kiểu dữ liệu sang Pydantic Object (Tự động kích hoạt validation)
-        chat_request = GatewayChatRequest(**raw_body)
+        return GatewayChatRequest(**raw_body)
     except ValidationError as val_err:
-        # TRẢ LỜI LUÔN NẾU MESSAGES/REQUEST BỊ SAI ĐỊNH DẠNG SCHEMAS
         logger.warning("Request schema validation failed", errors=val_err.errors())
         gateway_metrics.metrics.increment_failed(422)
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
             detail={
                 "message": "Cấu trúc request hoặc messages không hợp lệ với hệ thống Multimodal Gateway.",
-                "errors": val_err.errors() # Trả về chi tiết các trường bị lỗi (Ví dụ: sai kiểu dữ liệu, thiếu role,...)
+                "errors": val_err.errors()
             }
         )
 
-    # 2. Bóc tách văn bản (user_prompt) & Multimedia Signature dựa trên Pydantic Object mới
+
+def extract_prompt_and_cache_key(chat_request: GatewayChatRequest) -> Tuple[str, str]:
+    """2. Bóc tách văn bản (user_prompt) và tính toán Cache Key từ nội dung Multimodal."""
     text_parts: List[str] = []
     multimedia_signatures: List[str] = []
 
@@ -164,20 +152,13 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
             continue
             
         content = msg.content
-        
-        # Trường hợp nội dung là chuỗi phẳng (Text cũ, tương thích ngược)
         if isinstance(content, str):
             text_parts.append(content)
-            
-        # Trường hợp nội dung là mảng List[MessageContentPart] chuẩn Schema mới
         elif isinstance(content, list):
             for part in content:
-                # Vì part lúc này là một thực thể đã qua validate, bạn truy cập trực tiếp bằng dấu chấm (.)
                 if part.type.value == "text" and part.text:
                     text_parts.append(part.text)
-                
                 elif part.type.value in ["image", "audio", "video", "file"]:
-                    # Lấy object media tương ứng dựa theo type (ví dụ: part.image hoặc part.file)
                     media_obj = getattr(part, part.type.value, None)
                     if media_obj and getattr(media_obj, "base64_data", None):
                         base64_str = media_obj.base64_data
@@ -185,17 +166,15 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
                         multimedia_signatures.append(f"{part.type.value}:{media_hash}")
 
     user_prompt = " ".join(text_parts)
-    
-    # Tạo Cache Key hợp nhất từ Text + Chữ ký đa phương tiện
     cache_key = user_prompt
     if multimedia_signatures:
         cache_key += " | media_sign:" + ",".join(multimedia_signatures)
+        
+    return user_prompt, cache_key
 
-    # Chuyển đổi chat_request Pydantic object thành dictionary để truyền vào router xử lý
-    # (Có thể giữ nguyên object nếu Router của bạn chấp nhận Pydantic Model)
-    body_dict = chat_request.model_dump()
 
-    # 3. Input Guardrail
+def run_input_guardrail(user_prompt: str) -> None:
+    """3. Kiểm tra an toàn bảo mật cho Prompt (Input Guardrail)."""
     with tracer.start_as_current_span("input_guardrail") as span:
         if not app.state.input_guardrail.validate(user_prompt):
             span.set_attribute("blocked", True)
@@ -205,7 +184,9 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
             gateway_metrics.metrics.increment_failed(400)
             raise HTTPException(status_code=400, detail="Request blocked due to potential prompt injection.")
 
-    # 4. Rate Limiting
+
+async def run_rate_limiter(client_id: str) -> None:
+    """4. Kiểm tra giới hạn tần suất gọi API (Rate Limiting)."""
     with tracer.start_as_current_span("rate_limiter"):
         is_allowed, wait_time = await app.state.limiter.is_allowed(client_id, cost=1)
         if not is_allowed:
@@ -214,7 +195,95 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
             gateway_metrics.metrics.increment_failed(429)
             raise HTTPException(status_code=429, detail=f"Rate limit exceeded. Try again in {wait_time:.2f} seconds.")
 
-    # 5. Semantic Cache
+
+async def generate_stream_response(body_dict: Dict[str, Any], start_time: float) -> AsyncGenerator[str, None]:
+    """Hàm generator xử lý luồng dữ liệu Streaming từ LLM Router."""
+    detected_provider = "unknown"
+    detected_model = "gemini-model"
+    
+    stream_chunks = app.state.router.stream_with_fallback(
+        http_client=app.state.http_client,
+        body=body_dict
+    )
+    
+    async for chunk in stream_chunks:
+        if chunk.provider:
+            detected_provider = chunk.provider
+        if chunk.model:
+            detected_model = chunk.model
+            
+        if chunk.usage:
+            with tracer.start_as_current_span("token_tracking_stream") as t_span:
+                in_t = chunk.usage.prompt_tokens
+                out_t = chunk.usage.completion_tokens
+                
+                gateway_metrics.metrics.increment_input_tokens(detected_provider, detected_model, in_t)
+                gateway_metrics.metrics.increment_output_tokens(detected_provider, detected_model, out_t)
+                t_span.set_attributes({"input_tokens": in_t, "output_tokens": out_t})
+        
+        yield chunk.to_sse()
+    
+    yield "data: [DONE]\n\n"
+    
+    gateway_metrics.metrics.increment_success()
+    latency = time.time() - start_time
+    gateway_metrics.metrics.record_latency(detected_provider, detected_model, latency)
+
+
+async def handle_non_stream_response(body_dict: Dict[str, Any], start_time: float) -> Any:
+    """Hàm xử lý luồng dữ liệu Non-Streaming (Đồng bộ) từ LLM Router."""
+    with tracer.start_as_current_span("llm_routing_fallback") as span:
+        gateway_response = await app.state.router.execute_with_fallback(
+            http_client=app.state.http_client,
+            body=body_dict
+        )
+        final_provider_name = gateway_response.provider
+        span.set_attribute("final_provider", final_provider_name)
+    
+    with tracer.start_as_current_span("response_processing"):
+        final_content = gateway_response.choices[0].message.content or ""
+        
+        # 7. Output Guardrail làm sạch văn bản đầu ra
+        with tracer.start_as_current_span("output_guardrail"):
+            safe_content = app.state.output_guardrail.sanitize(final_content)
+        gateway_response.choices[0].message.content = safe_content
+        
+        gateway_metrics.metrics.increment_success()
+        latency = time.time() - start_time
+        gateway_metrics.metrics.record_latency(final_provider_name, gateway_response.model, latency)
+
+        # Theo dõi Token sử dụng
+        with tracer.start_as_current_span("token_tracking") as token_span:
+            input_tokens = gateway_response.usage.prompt_tokens
+            output_tokens = gateway_response.usage.completion_tokens
+
+            gateway_metrics.metrics.increment_input_tokens(final_provider_name, gateway_response.model, input_tokens)
+            gateway_metrics.metrics.increment_output_tokens(final_provider_name, gateway_response.model, output_tokens)
+            
+            token_span.set_attribute("input_tokens", input_tokens)
+            token_span.set_attribute("output_tokens", output_tokens)
+        
+        return gateway_response
+@app.post("/v1/chat/completions")
+async def chat_completions_proxy(request: Request, client_id: str = Depends(authenticate_client)):
+    """Endpoint proxy thông minh xử lý Request kết nối đa mô hình (Multimodal Gateway)."""
+    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
+    structlog.contextvars.bind_contextvars(client_id=client_id)
+    start_time = time.time()
+
+    # 1. Đọc và Kiểm tra cấu trúc dữ liệu đầu vào (Validation)
+    chat_request = await parse_and_validate_request(request)
+
+    # 2. Bóc tách Prompt chính và sinh chuỗi khóa Cache định danh (Cache Key)
+    user_prompt, cache_key = extract_prompt_and_cache_key(chat_request)
+
+    # 3. Chạy tầng Input Guardrail chống Prompt Injection
+    run_input_guardrail(user_prompt)
+
+    # 4. Kiểm tra Tần suất gọi API (Rate Limiting)
+    await run_rate_limiter(client_id)
+
+    # 5. Kiểm tra Semantic Cache xem câu hỏi đã từng được trả lời chưa
     cached_result = await app.state.cache.get(cache_key)
     if cached_result:
         cached_response, _ = cached_result
@@ -226,92 +295,25 @@ async def chat_completions_proxy(request: Request, client_id: str = Depends(auth
             safe_cached_response = app.state.output_guardrail.sanitize(cached_response)
             return {"choices": [{"message": {"role": "assistant", "content": safe_cached_response}}]}
 
-    # 6. Kiểm tra chế độ Streaming / Non-Streaming trực tiếp từ Object
-    is_streaming = chat_request.stream
+    # Chuẩn bị dữ liệu dict để truyền vào Router
+    body_dict = chat_request.model_dump()
 
+    # 6 & 7. Định tuyến và xử lý cuộc gọi sang các nhà cung cấp LLM (Providers)
     try:
-        if is_streaming:
-            async def stream_generator():
-                detected_provider = "unknown"
-                detected_model = "gemini-model"
-                
-                stream_chunks = app.state.router.stream_with_fallback(
-                    http_client=app.state.http_client,
-                    body=body_dict
-                )
-                
-                async for chunk in stream_chunks:
-                    if chunk.provider:
-                        detected_provider = chunk.provider
-                    if chunk.model:
-                        detected_model = chunk.model
-                        
-                    if chunk.usage:
-                        with tracer.start_as_current_span("token_tracking_stream") as t_span:
-                            in_t = chunk.usage.prompt_tokens
-                            out_t = chunk.usage.completion_tokens
-                            
-                            gateway_metrics.metrics.increment_input_tokens(detected_provider, detected_model, in_t)
-                            gateway_metrics.metrics.increment_output_tokens(detected_provider, detected_model, out_t)
-                            t_span.set_attributes({"input_tokens": in_t, "output_tokens": out_t})
-                    
-                    yield chunk.to_sse()
-                
-                yield "data: [DONE]\n\n"
-                
-                gateway_metrics.metrics.increment_success()
-                latency = time.time() - start_time
-                gateway_metrics.metrics.record_latency(detected_provider, detected_model, latency)
-
+        if chat_request.config.stream:
             return StreamingResponse(
-                stream_generator(),
+                generate_stream_response(body_dict, start_time),
                 media_type="text/event-stream"
             )
-            
         else:
-            # 7. Xử lý luồng Non-Streaming dữ liệu Multimodal
-            with tracer.start_as_current_span("llm_routing_fallback") as span:
-                gateway_response = await app.state.router.execute_with_fallback(
-                    http_client=app.state.http_client,
-                    body=body_dict
-                )
-                final_provider_name = gateway_response.provider
-                span.set_attribute("final_provider", final_provider_name)
-            
-            with tracer.start_as_current_span("response_processing"):
-                final_content = gateway_response.choices[0].message.content or ""
-                
-                # Output Guardrail làm sạch văn bản đầu ra
-                with tracer.start_as_current_span("output_guardrail"):
-                    safe_content = app.state.output_guardrail.sanitize(final_content)
-                gateway_response.choices[0].message.content = safe_content
-
-                # Cập nhật cache dựa trên mã khóa cache_key hợp nhất
-                # await app.state.cache.set(cache_key, safe_content)
-                
-                gateway_metrics.metrics.increment_success()
-                latency = time.time() - start_time
-                gateway_metrics.metrics.record_latency(final_provider_name, gateway_response.model, latency)
-
-                # Theo dõi Token sử dụng
-                with tracer.start_as_current_span("token_tracking") as token_span:
-                    input_tokens = gateway_response.usage.prompt_tokens
-                    output_tokens = gateway_response.usage.completion_tokens
-
-                    gateway_metrics.metrics.increment_input_tokens(final_provider_name, gateway_response.model, input_tokens)
-                    gateway_metrics.metrics.increment_output_tokens(final_provider_name, gateway_response.model, output_tokens)
-                    
-                    token_span.set_attribute("input_tokens", input_tokens)
-                    token_span.set_attribute("output_tokens", output_tokens)
-                
-                return gateway_response
+            return await handle_non_stream_response(body_dict, start_time)
             
     except NoAvailableProviderError as e:
         trace.get_current_span().record_exception(e)
         logger.critical("All providers are unavailable", error=str(e))
         gateway_metrics.metrics.increment_failed(503)
         raise HTTPException(status_code=503, detail="Service Unavailable: All LLM providers are currently down.")
-    
+        
 @app.post("/v1/embeddings", tags=["LLM APIs"])
 async def embeddings_proxy(request: Request, client_id: str = Depends(authenticate_client)):
     """
@@ -361,7 +363,7 @@ async def list_models_proxy(
             raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not configured or found.")
 
         # Lấy danh sách tất cả các model
-        models_data = await provider.models(
+        models_data = await provider.models.models(
             http_client=app.state.http_client, 
             timeout=settings.provider.timeout
         )
@@ -395,7 +397,7 @@ async def get_model_details_proxy(
             raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not configured or found.")
 
         # Gọi phương thức model của provider đã chọn
-        model_data = await provider.model(
+        model_data = await provider.models.model(
             http_client=app.state.http_client,
             timeout=settings.provider.timeout,
             model=model_id
@@ -427,7 +429,7 @@ async def list_files_proxy(
         raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
 
     try:
-        files_list = await provider.list_files(
+        files_list = await provider.files.list_files(
             http_client=app.state.http_client,
             timeout=settings.provider.timeout,
             page_size=page_size,
@@ -457,7 +459,7 @@ async def upload_file_proxy(
     try:
         # Đọc dữ liệu file tạm thời hoặc truyền thẳng object qua file_path tùy theo thiết kế FileHelper của bạn
         # Ở đây giả định truyền UploadFile object hoặc một file-like object vào adapter
-        upload_result = await provider.upload_file(
+        upload_result = await provider.files.upload_file(
             http_client=app.state.http_client,
             timeout=settings.provider.timeout,
             file_path=file,  # Hoặc lưu tạm ra ổ đĩa rồi truyền path chuỗi tùy FileHelper của bạn xử lý
@@ -486,7 +488,7 @@ async def get_or_download_file_proxy(
 
     try:
         # BƯỚC 1: Lấy thông tin metadata của file trước
-        file_metadata = await provider.get_file(
+        file_metadata = await provider.files.get_file(
             http_client=app.state.http_client,
             timeout=settings.provider.timeout,
             file_name=file_id
@@ -501,7 +503,7 @@ async def get_or_download_file_proxy(
                 raise HTTPException(status_code=400, detail="The requested file does not expose a valid download URI.")
             
             # Gọi hàm download_file đã viết thông qua uri có sẵn trong DTO
-            file_bytes = await provider.download_file(
+            file_bytes = await provider.files.download_file(
                 http_client=app.state.http_client,
                 timeout=settings.provider.timeout,
                 uri=file_metadata.uri
@@ -536,7 +538,7 @@ async def delete_file_proxy(
         raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
 
     try:
-        success = await provider.delete_file(
+        success = await provider.files.delete_file(
             http_client=app.state.http_client,
             timeout=settings.provider.timeout,
             file_name=file_id

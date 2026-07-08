@@ -13,7 +13,7 @@ from .registry import ProviderRegistry
 from .discovery import ProviderDiscovery
 from ..circuit_breaker import CircuitBreakerManager
 from ..schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
-from .providers.base.provider.provider import BaseProvider
+from .providers.base.provider import BaseProvider
 
 import asyncio, anyio
 logger = structlog.get_logger(__name__)
@@ -122,7 +122,6 @@ class ModelRouter:
 
         execution_chain = initial_chain
         specific_provider_name = body.get("provider")
-        provider_preference = body.get("provider_preference")
 
         if specific_provider_name and specific_provider_name in self.providers:
             preferred_provider = self.providers[specific_provider_name]

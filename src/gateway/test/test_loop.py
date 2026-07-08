@@ -252,7 +252,10 @@ async def interactive_chat_loop(provider: str, default_model: str):
                 "model": default_model,
                 "provider": provider,
                 "messages": conversation_history,
-                "stream": True
+                "config": {
+                    "stream": True
+                }
+                
             }
 
             async with httpx.AsyncClient(timeout=120.0) as client:

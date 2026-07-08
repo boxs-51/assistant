@@ -1,4 +1,4 @@
-from .adapter import BaseAdapter
+
 from .auth import AuthStrategy
 from .api import ApiType
 from .endpoint import EndpointBuilder
@@ -10,11 +10,10 @@ from abc import ABC, abstractmethod
 import httpx
 import structlog
 from typing import Dict, Any, Set, Union
-from .interfaces.chat import ChatProvider
 
 logger = structlog.get_logger(__name__)
 
-class BaseProvider(ABC,ChatProvider):
+class BaseProvider(ABC):
     """
     Một container cho các thành phần cấu thành nên một provider.
     Sử dụng Composition over Inheritance.
@@ -24,16 +23,15 @@ class BaseProvider(ABC,ChatProvider):
         provider_name: str,
         auth_strategy: AuthStrategy,
         endpoint_builder: EndpointBuilder,
-        adapter: BaseAdapter,
         api_mapper: ApiTypeMapper,
         model_mapper: ModelMapper,
         capability_manager: ModelCapabilityManager,
         provider_capabilities: Set[ProviderCapability] = set()
     ):
+        super().__init__()
         self.name = provider_name
         self.auth = auth_strategy
         self.endpoints = endpoint_builder
-        self.adapter = adapter
         self.api_mapper = api_mapper
         self.mapper = model_mapper
         self.capability_manager = capability_manager
@@ -54,21 +52,7 @@ class BaseProvider(ABC,ChatProvider):
         )
         return capability in model_caps
 
-    def prepare_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Chuẩn bị body cho request: dịch tên model và adapt body.
-        Loại bỏ logic lặp lại ở các provider con.
-        """
-        prepared = body.copy()
-        # Dịch tên model, sử dụng default_model nếu có, hoặc lấy từ body, hoặc 'default'
-        model = body.get("model")
-        logger.info(f"Preparing request for provider {self.name} with original model: {model}")
-        translated_model = self.mapper.translate(model)
-        prepared["model"] = translated_model
-        logger.info(f"Translated model for provider {self.name}: {translated_model}")
-        logger.info(f"Prepared request body for provider {self.name}: {prepared['model']}")
-        return self.adapter.adapt_chat_request(prepared)
-    
+
     def build_endpoint(
         self,
         api_type: Union[ApiType, str],
@@ -224,127 +208,9 @@ class BaseProvider(ABC,ChatProvider):
         """Kiểm tra xem provider đã được cấu hình đúng cách hay chưa."""
         raise NotImplementedError
 
-    # =========================
-    # Chat / Completion
-    # =========================
-    @abstractmethod
-    async def chat(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def chat_stream(self, **kwargs) -> Any: raise NotImplementedError
 
-    # =========================
-    # Models
-    # =========================
-    @abstractmethod
-    async def models(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def model(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def model_capabilities(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Embeddings
-    # =========================
-    @abstractmethod
-    async def embeddings(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Images
-    # =========================
-    @abstractmethod
-    async def image_generation(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Audio
-    # =========================
-    @abstractmethod
-    async def speech_to_text(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def text_to_speech(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Video
-    # =========================
-    @abstractmethod
-    async def video_generation(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def video_understanding(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Files
-    # =========================
-    @abstractmethod
-    async def upload_file(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def download_file(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def delete_file(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def list_files(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def get_file(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Cache
-    # =========================
-    @abstractmethod
-    async def create_cache(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def list_cache(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def get_cache(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def delete_cache(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Tokens
-    # =========================
-    @abstractmethod
-    async def count_tokens(self, **kwargs) -> Any: raise NotImplementedError
-
-
-    # =========================
-    # Live API
-    # =========================
-    @abstractmethod
-    async def live(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Batch
-    # =========================
-    @abstractmethod
-    async def create_batch(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def batch_status(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Fine Tune
-    # =========================
-    @abstractmethod
-    async def fine_tune(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def list_fine_tunes(self, **kwargs) -> Any: raise NotImplementedError
-    @abstractmethod
-    async def fine_tune_status(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Moderation / Safety
-    # =========================
     @abstractmethod
     async def moderation(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # Reranking
-    # =========================
-    @abstractmethod
-    async def rerank(self, **kwargs) -> Any: raise NotImplementedError
-
-    # =========================
-    # OCR / Vision
-    # =========================
-    @abstractmethod
-    async def vision(self, **kwargs) -> Any: raise NotImplementedError
-
     # =========================
     # Computer Use
     # =========================

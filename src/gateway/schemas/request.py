@@ -9,6 +9,17 @@ from .tool import GatewayToolDefinition
 # 7. GATEWAY REQUEST DTO
 # =================================================================
 
+class RequestConfig(GatewayBaseModel):
+    """Cấu hình tham số sinh văn bản (Generation Parameters) cho LLM."""
+    temperature: Optional[float] = Field(default=None, description="Điều khiển tính sáng tạo của câu trả lời")
+    top_p: Optional[float] = Field(default=None, description="Nucleus sampling")
+    max_tokens: Optional[int] = Field(default=None, description="Số lượng token tối đa sinh ra")
+    stream: bool = Field(default=False, description="Bật/Tắt chế độ streaming")
+    presence_penalty: Optional[float] = Field(default=None, description="Phạt dựa trên sự xuất hiện của từ")
+    frequency_penalty: Optional[float] = Field(default=None, description="Phạt dựa trên tần suất của từ")
+    response_format: Dict[str, Any] = Field(default=None, description="Chọn định dạng trả về của LLM")
+
+    
 class RequestMetadata(GatewayBaseModel):
     """Metadata được phân tầng rõ ràng trong request."""
     user: Dict[str, Any] = Field(default_factory=dict)
@@ -18,18 +29,11 @@ class RequestMetadata(GatewayBaseModel):
 
 class GatewayChatRequest(GatewayBaseModel):
     """DTO chuẩn hóa cho mọi request chat, để Adapter chỉ nhận một object duy nhất."""
-    model: str
-    messages: List[GatewayMessage]
-    tools: Optional[List[GatewayToolDefinition]] = None
-    #tools: Optional[List[Dict[str, Any]]] = None
-    attachments: Optional[List[GatewayAttachment]] = None
+
+    model: str = Field(..., description="Định danh model sử dụng (e.g., gpt-4o, claude-3-5-sonnet)")
+    messages: List[GatewayMessage] = Field(..., description="Danh sách lịch sử hội thoại")
+    tools: Optional[List[GatewayToolDefinition]] = Field(default=None, description="Danh sách công cụ hỗ trợ (Function Calling)")
     
-    # Generation parameters
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
-    max_tokens: Optional[int] = None
-    stream: bool = False
-    presence_penalty: Optional[float] = None
-    frequency_penalty: Optional[float] = None
-    
-    metadata: RequestMetadata = Field(default_factory=RequestMetadata)
+    # Gom cụm các cấu hình và metadata
+    config: RequestConfig = Field(default_factory=RequestConfig, description="Cấu hình tham số của request")
+    metadata: RequestMetadata = Field(default_factory=RequestMetadata, description="Thông tin tracking và định tuyến")

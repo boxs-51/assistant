@@ -1,10 +1,9 @@
 from typing import Dict, Type, Optional
 
-from .providers.base.provider.provider import BaseProvider
+from .providers.base.provider import BaseProvider
 from .providers.openai import OpenAIProvider
 from .providers.ollama import OllamaProvider
-from .providers.gemini import GeminiProvider
-# Import các provider khác ở đây, ví dụ: from .providers.gemini import GeminiProvider
+from .providers.google import GoogleProvider
 
 class ProviderFactory:
     """
@@ -14,7 +13,7 @@ class ProviderFactory:
     _provider_classes: Dict[str, Type[BaseProvider]] = {
         "openai": OpenAIProvider,
         "ollama": OllamaProvider,
-        "gemini": GeminiProvider,
+        "gemini": GoogleProvider,
     }
 
     @classmethod

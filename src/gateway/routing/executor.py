@@ -1,14 +1,14 @@
-from typing import Dict, Any, Tuple, AsyncGenerator
-
 import httpx
 import structlog
+
+from typing import Callable, Awaitable, AsyncGenerator, Any
 
 from ..config import settings
 from ..import observability as gateway_metrics
 from .exceptions import ProviderError
-from .providers.base.provider.provider import BaseProvider
+from .providers.base.provider import BaseProvider
 from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
-from typing import Callable, Awaitable
+
 from .policies.retry import RetryPolicy
 from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
@@ -52,7 +52,7 @@ class ProviderExecutor:
         async def execution_func():
             """Hàm thực thi lõi, chỉ gọi provider và kiểm tra status."""
             # Gọi thẳng vào phương thức API cấp cao của provider
-            normalized_response = await provider.chat(**kwargs)
+            normalized_response = await provider.chat.chat(**kwargs)
             return normalized_response
 
         try:
@@ -105,7 +105,7 @@ class ProviderExecutor:
 
             # Bắt đầu stream và chuẩn hóa
             logger.info(f"Starting streaming from provider {provider.name} " )
-            async for chunk in provider.chat_stream(**kwargs):
+            async for chunk in provider.chat.chat_stream(**kwargs):
                 yield chunk
 
             await breaker.on_success()
