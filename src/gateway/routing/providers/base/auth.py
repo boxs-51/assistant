@@ -13,11 +13,20 @@ class AuthStrategy(ABC):
 
 class BearerToken(AuthStrategy):
     """Xác thực bằng Bearer Token trong header Authorization."""
-    def __init__(self, api_key: str):
-        self.api_key = api_key
+    def __init__(self, access_token: str):
+        self.access_token = access_token
 
     def prepare_request(self, url: str, headers: Dict[str, str]) -> Tuple[str, Dict[str, str]]:
-        headers["Authorization"] = f"Bearer {self.api_key}"
+        headers["Authorization"] = f"Bearer {self.access_token}"
+        return url, headers
+    
+class ApiKeyHeader(AuthStrategy):
+    def __init__(self, api_key: str, header_name="x-goog-api-key"):
+        self.api_key = api_key
+        self.header_name = header_name
+
+    def prepare_request(self, url, headers):
+        headers[self.header_name] = self.api_key
         return url, headers
 
 class ApiKeyInQuery(AuthStrategy):

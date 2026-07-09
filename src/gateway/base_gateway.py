@@ -1,6 +1,8 @@
 from fastapi import FastAPI, Request, HTTPException, Depends, status , Query, UploadFile, File
 from fastapi.responses import StreamingResponse, JSONResponse, Response
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import ValidationError
+
 import httpx
 import redis.asyncio as redis
 import time, anyio
@@ -38,6 +40,20 @@ app = FastAPI(title="AI Gateway")
 tracer = trace.get_tracer(__name__)
 logger = structlog.get_logger(__name__)
 
+origins = [
+    "http://localhost:3000",  # Port local server của bạn
+    "http://127.0.0.1:3000",
+    "http://localhost:5500",  # Port mặc định của VS Code Live Server
+    "*",                      # Cho phép tất cả (chỉ nên dùng khi dev)
+]
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],  # Cho phép tất cả các phương thức bao gồm OPTIONS, GET, POST, DELETE
+    allow_headers=["*"],  # Cho phép tất cả các headers (như Authorization)
+)
 @app.on_event("startup")
 async def startup_event():
     """Khởi tạo các kết nối cần thiết khi server khởi động."""
@@ -448,7 +464,7 @@ async def upload_file_proxy(
     file: UploadFile = File(..., description="Tệp tin cần tải lên"),
     client_id: str = Depends(authenticate_client)
 ):
-    """Endpoint tải tệp tin lên hệ thống lưu trữ của Provider."""
+    """Endpoint tải tệp tin lên hệ thống lưu trữ của Provider thông qua Stream."""
     gateway_metrics.metrics.increment_requests(request.method, request.url.path)
     structlog.contextvars.bind_contextvars(client_id=client_id, provider_name=provider_name)
 
@@ -457,12 +473,13 @@ async def upload_file_proxy(
         raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
 
     try:
-        # Đọc dữ liệu file tạm thời hoặc truyền thẳng object qua file_path tùy theo thiết kế FileHelper của bạn
-        # Ở đây giả định truyền UploadFile object hoặc một file-like object vào adapter
+        # Gọi sang hàm adapter xử lý nhận Stream mới
         upload_result = await provider.files.upload_file(
             http_client=app.state.http_client,
             timeout=settings.provider.timeout,
-            file_path=file,  # Hoặc lưu tạm ra ổ đĩa rồi truyền path chuỗi tùy FileHelper của bạn xử lý
+            file_stream=file,                 # Truyền trực tiếp UploadFile object (Kế thừa từ stream bất đồng bộ)
+            file_size=file.size,              # Bắt buộc truyền size để Gemini Resumable Session tính toán
+            mime_type=file.content_type or "application/octet-stream", # MIME type từ client gửi lên
             display_name=display_name or file.filename
         )
         return upload_result

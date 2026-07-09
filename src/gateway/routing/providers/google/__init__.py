@@ -9,7 +9,7 @@ from typing import Dict, Any, AsyncGenerator, List, Optional
 # 1. Import các thành phần đã được module hóa
 from ..base import (
     BaseProvider, ApiType,
-    ApiKeyInQuery, ApiTypeMapper,
+    ApiKeyInQuery, ApiTypeMapper, BearerToken,
     EndpointBuilder,
     ModelCapabilityManager, ProviderCapability,
     ModelMapper

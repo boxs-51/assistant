@@ -1,0 +1,242 @@
+:root {
+    --bg-main: #1e1e2e;
+    --bg-sidebar: #181825;
+    --bg-chat: #313244;
+    --text-main: #cdd6f4;
+    --text-muted: #bac2de;
+    --accent: #cba6f7;
+    --accent-hover: #b4befe;
+    --border: #45475a;
+    --user-msg: #89b4fa;
+    --ai-msg: #45475a;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+body {
+    display: flex;
+    height: 100vh;
+    background-color: var(--bg-main);
+    color: var(--text-main);
+    overflow: hidden;
+}
+
+/* SIDEBAR */
+#sidebar {
+    width: 320px;
+    background-color: var(--bg-sidebar);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    padding: 20px;
+    gap: 20px;
+}
+
+h2,
+h3 {
+    color: var(--accent);
+    font-weight: 600;
+    margin-bottom: 10px;
+}
+
+.section {
+    background: rgba(255, 255, 255, 0.03);
+    padding: 15px;
+    border-radius: 8px;
+    border: 1px solid var(--border);
+}
+
+label {
+    display: block;
+    font-size: 12px;
+    margin-bottom: 5px;
+    color: var(--text-muted);
+    text-transform: uppercase;
+}
+
+input,
+select,
+button {
+    width: 100%;
+    padding: 10px;
+    background: var(--bg-main);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    border-radius: 6px;
+    margin-bottom: 10px;
+    outline: none;
+}
+
+input:focus,
+select:focus {
+    border-color: var(--accent);
+}
+
+button {
+    background: var(--accent);
+    color: var(--bg-sidebar);
+    font-weight: bold;
+    cursor: pointer;
+    transition: 0.2s;
+    border: none;
+}
+
+button:hover {
+    background: var(--accent-hover);
+}
+
+button.secondary {
+    background: transparent;
+    border: 1px solid var(--border);
+    color: var(--text-main);
+}
+
+button.secondary:hover {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+/* File List Context */
+#file-list {
+    max-height: 200px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.file-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-chat);
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 13px;
+    border-left: 3px solid var(--accent);
+}
+
+.file-item.pinned {
+    border-left-color: #a6e3a1;
+}
+
+.file-actions span {
+    cursor: pointer;
+    margin-left: 8px;
+    font-weight: bold;
+}
+
+.file-actions .del {
+    color: #f38ba8;
+}
+
+.file-actions .pin {
+    color: #a6e3a1;
+}
+
+/* CHAT CONTAINER */
+#chat-container {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+#chat-header {
+    padding: 20px;
+    background: var(--bg-sidebar);
+    border-bottom: 1px solid var(--border);
+}
+
+#chat-messages {
+    flex: 1;
+    padding: 20px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 15px;
+}
+
+/* Message Bubbles */
+.message {
+    max-width: 80%;
+    padding: 12px 16px;
+    border-radius: 12px;
+    line-height: 1.5;
+    word-wrap: break-word;
+    font-size: 15px;
+}
+
+.message.user {
+    align-self: flex-end;
+    background-color: var(--user-msg);
+    color: #11111b;
+    border-bottom-right-radius: 2px;
+}
+
+.message.assistant {
+    align-self: flex-start;
+    background-color: var(--ai-msg);
+    color: var(--text-main);
+    border-bottom-left-radius: 2px;
+}
+
+.message table {
+    border-collapse: collapse;
+    margin: 10px 0;
+    width: 100%;
+    background: rgba(0, 0, 0, 0.2);
+}
+
+.message table,
+.message th,
+.message td {
+    border: 1px solid var(--border);
+    padding: 8px;
+    text-align: left;
+}
+
+.message th {
+    background: rgba(255, 255, 255, 0.1);
+}
+
+/* Input Area */
+#chat-input-area {
+    padding: 20px;
+    background: var(--bg-sidebar);
+    border-top: 1px solid var(--border);
+    display: flex;
+    gap: 10px;
+    align-items: center;
+}
+
+#message-input {
+    flex: 1;
+    padding: 14px;
+    background: var(--bg-main);
+    border: 1px solid var(--border);
+    color: var(--text-main);
+    border-radius: 8px;
+    resize: none;
+    height: 50px;
+}
+
+#send-btn {
+    width: 100px;
+    height: 50px;
+    margin: 0;
+}
+
+#active-context-bar {
+    background: #252538;
+    padding: 5px 20px;
+    font-size: 12px;
+    color: #a6e3a1;
+    border-top: 1px solid var(--border);
+    display: none;
+}
+

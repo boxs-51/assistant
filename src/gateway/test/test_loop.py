@@ -59,16 +59,17 @@ async def test_upload_file(file_path_str: str, provider: str) -> str:
     url = f"{BASE_GATEWAY_URL}/files"
     params = {"provider_name": provider}
     
-    async with httpx.AsyncClient(timeout=60.0) as client:
+    async with httpx.AsyncClient(timeout=300.0) as client: # Tăng timeout cho file lớn
         try:
+            # Mở file bất đồng bộ bằng aiofiles (nếu có cài đặt) hoặc dùng open chuẩn nhưng truyền stream
             with open(path, "rb") as f:
                 files = {"file": (path.name, f, "application/octet-stream")}
                 response = await client.post(url, headers=headers, params=params, files=files)
                 
             if response.status_code in [200, 201]:
                 res_data = response.json()
-                print(f"✅ Upload thành công! File ID nhận được: {res_data.get('id')}")
-                return res_data.get("id")
+                print(f"✅ Upload thành công! File ID nhận được: {res_data.get('id') or res_data.get('name')}")
+                return res_data.get("id") or ""
             else:
                 print(f"❌ Upload thất bại ({response.status_code}): {response.text}")
         except Exception as e:

@@ -134,6 +134,7 @@ class BaseProvider(ABC):
                 api_type=str(api_type),
                 method=method,
                 endpoint_kwargs=endpoint_kwargs,
+                url=auth_url,
                 headers=masked_headers
             )
             # Nếu muốn soi kỹ JSON gửi đi khi debug, bật dòng này:

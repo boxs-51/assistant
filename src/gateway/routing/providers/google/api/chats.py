@@ -15,27 +15,15 @@ class GoogleChat(ChatProvider):
         self.response = ResponseChats()
         self.provider = provider
 
-
-    def prepare_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Chuẩn bị body cho request: dịch tên model và adapt body.
-        """
-        prepared = body.copy()
-        # Dịch tên model, sử dụng default_model nếu có, hoặc lấy từ body, hoặc 'default'
-        model = body.get("model")
-
-        translated_model = self.provider.mapper.translate(model)
-        prepared["model"] = translated_model
-
-        return self.request.adapt_chat(request=prepared)
-    
     async def chat(self, **kwargs) -> GatewayResponse:
         body = kwargs.get("body")
         client=kwargs.get("http_client")
         timeout=kwargs.get("timeout")
-        
-        prepared_body = self.prepare_request(body)
-        provider_model = prepared_body.get("model") # Lấy model đã được dịch
+
+        model = body.get("model")
+
+        translated_model = self.provider.mapper.translate(model)
+        prepared_body = self.request.adapt_chat(request=body)
 
         action = "generateContent"
 
@@ -44,24 +32,29 @@ class GoogleChat(ChatProvider):
             api_type=ApiType.CHAT_COMPLETIONS,
             json=prepared_body,
             timeout=timeout,
-            model=provider_model,
+            model=translated_model,
             action=action
         )
         return await self.response.adapt_chat(response)
 
     async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
         body = kwargs.get("body")
-        prepared_body = self.prepare_request(body)
-        provider_model = prepared_body.get("model")
+        timeout=kwargs.get("timeout")
+        client=kwargs.get("http_client")
+
+        model = body.get("model")
+
+        translated_model = self.provider.mapper.translate(model)
+        prepared_body = self.request.adapt_chat(request=body)
 
         action = "streamGenerateContent"
 
         response = await self.provider.send(
-            client=kwargs.get("http_client"),
+            client=client,
             api_type=ApiType.CHAT_COMPLETIONS,
             json=prepared_body,
-            timeout=kwargs.get("timeout"),
-            model=provider_model,
+            timeout=timeout,
+            model=translated_model,
             action=action
         )
         async for chunk in self.response.adapt_chat_stream(response=response):

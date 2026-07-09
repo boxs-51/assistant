@@ -1,6 +1,5 @@
-from typing import List ,Any
-from pathlib import Path
-import os
+from typing import List ,Any, Union, BinaryIO
+from fastapi import UploadFile
 
 from ..converters.files.response import ResponseFiles 
 from ...base import ApiType, BaseProvider
@@ -171,53 +170,52 @@ class GoogleFiles(FileProvider):
         
     async def upload_file(self, **kwargs) -> Any:
         """
-        Tải tệp kích thước lớn lên Gemini File API bằng cơ chế Resumable Upload
-        để không bị tràn bộ nhớ (RAM) và bypass giới hạn 20MB inlineData.
+        Tải tệp kích thước lớn lên Gemini File API bằng cơ chế Resumable Upload.
+        Nhận đầu vào là một File-like object (hoặc FastAPI UploadFile) để stream trực tiếp.
         """
-        file_path = kwargs.get("file_path")
-        display_name = kwargs.get("display_name")
+        # Thay thế file_path bằng file_stream (Có thể là UploadFile, BytesIO, hoặc open file)
+        file_stream: Union[UploadFile, BinaryIO] = kwargs.get("file_stream")
+        file_size: int = kwargs.get("file_size")  # Bắt buộc truyền vào vì stream không tự check size chuẩn được
+        mime_type: str = kwargs.get("mime_type", "application/octet-stream")
+        display_name: str = kwargs.get("display_name")
         http_client = kwargs.get("http_client")
         timeout = kwargs.get("timeout")
 
-        if not file_path:
-            logger.error("Missing required parameter 'file_path' in upload request")
-            raise ValueError("Parameter 'file_path' is required.")
+        if not file_stream:
+            logger.error("Missing required parameter 'file_stream' in upload request")
+            raise ValueError("Parameter 'file_stream' is required.")
+
+        if not file_size or file_size <= 0:
+            logger.error("Missing or invalid 'file_size'")
+            raise ValueError("A valid 'file_size' (bytes) is required when uploading via stream.")
 
         if not http_client:
             logger.error("Missing required parameter 'http_client' in upload request")
             raise ValueError("Parameter 'http_client' is required.")
 
-        # Chuyển đổi file_path thành đối tượng Path để thao tác dễ dàng
-        path_obj = Path(file_path)
-        if not path_obj.is_file():
-            logger.error("File does not exist at path", file_path=str(file_path))
-            raise FileNotFoundError(f"File not found at {file_path}")
-
-        # 1. Xác định kích thước file và MIME type
-        try:
-            file_size = os.path.getsize(path_obj)
-            mime_type = FileHelper.detect_mime_type(path_obj)
-            resolved_display_name = display_name or path_obj.name
-        except Exception as e:
-            logger.error("Failed to detect file properties", file_path=str(path_obj), error=str(e))
-            raise e
+        # Xác định tên hiển thị tùy thuộc vào loại stream truyền vào
+        if not display_name:
+            if isinstance(file_stream, UploadFile) and file_stream.filename:
+                resolved_display_name = file_stream.filename
+            else:
+                resolved_display_name = getattr(file_stream, "name", "untitled_file")
+        else:
+            resolved_display_name = display_name
 
         # --- BƯỚC 1: KHỞI TẠO SESSION RESUMABLE UPLOAD ---
-        # File metadata được gửi trong phần body
         file_metadata = {
             "file": {
                 "displayName": resolved_display_name,
             }
         }
 
-        # Bắt buộc thêm các Header định danh cấu trúc dữ liệu tải lên cho Google Resumable protocol
         init_headers = {
             "X-Upload-Content-Length": str(file_size),
             "X-Upload-Content-Type": mime_type,
         }
 
         logger.info(
-            "Initiating resumable upload session to Gemini",
+            "Initiating resumable upload session to Gemini via Stream",
             provider=self.provider.name,
             file_name=resolved_display_name,
             file_size_bytes=file_size,
@@ -225,69 +223,72 @@ class GoogleFiles(FileProvider):
         )
 
         try:
-            # Gửi request POST khởi tạo session upload (sử dụng ApiType.FILES)
-            # Note: endpoint của resumable upload thường là v1beta/files?uploadType=resumable
+            # Gửi request POST khởi tạo session upload (giữ nguyên)
             init_response = await self.provider.send(
                 client=http_client,
                 method="POST",
                 api_type=ApiType.FILES,
-                params={"uploadType": "resumable"}, # Thêm query param chỉ định kiểu resumable
+                params={"uploadType": "resumable"},
                 headers=init_headers,
                 json=file_metadata,
                 timeout=timeout,
             )
 
-            # Trích xuất Upload URL đặc định từ Header 'Location'
-            # Tùy thuộc vào việc hàm self.send của bạn trả về object httpx.Response hay dict:
-            # Nếu là httpx/aiohttp Response: sử dụng init_response.headers.get("Location")
             upload_url = getattr(init_response, "headers", {}).get("Location")
-            
             if not upload_url:
-                # Fallback nếu hàm self.send của bạn parse json sẵn và đưa headers vào chỗ khác
                 if isinstance(init_response, dict) and "upload_url" in init_response:
                     upload_url = init_response.get("upload_url")
                 else:
-                    raise ValueError("Could not find 'Location' header in Gemini response to start uploading data.")
+                    raise ValueError("Could not find 'Location' header in Gemini response.")
 
-            logger.info("Resumable upload session created successfully. Starting data transmission...")
+            logger.info("Resumable upload session created. Streaming data from object...")
 
-            # --- BƯỚC 2: STREAM DỮ LIỆU BINARY LÊN UPLOAD URL ---
-            # Đối với file lớn, mở file ở dạng 'rb' và truyền trực tiếp qua HTTP client.
-            # Hầu hết các client như httpx, aiohttp hỗ trợ truyền một "file-like object" 
-            # giúp tự động stream dữ liệu theo từng block mà không nạp toàn bộ file vào RAM cùng lúc.
+            # --- BƯỚC 2: STREAM DỮ LIỆU TỪ STREAM OBJECT LÊN GEMINI ---
             
-            with open(path_obj, "rb") as file_stream:
-                # Gửi PUT request trực tiếp lên URL được chỉ định riêng từ Google
-                # Note: Do gửi lên URL tùy biến (Location), hàm self.send của bạn cần hỗ trợ 
-                # ghi đè endpoint đầy đủ nếu truyền trực tiếp url hoặc chỉnh lại logic.
-                # Ở đây giả định bạn có thể request qua http_client bất đồng bộ gốc hoặc chỉnh phương thức send:
+            # Generator bất đồng bộ đọc dữ liệu theo từng chunk từ stream truyền vào
+            async def stream_chunk_generator():
+                chunk_size = 64 * 1024  # 64KB mỗi chunk
                 
-                upload_response = await http_client.request(
-                    method="PUT",
-                    url=upload_url,
-                    content=file_stream, # Stream dữ liệu thô
-                    headers={
-                        "Content-Length": str(file_size),
-                        "Content-Type": mime_type
-                    },
-                    timeout=timeout if timeout else 300.0 # Tăng timeout đối với file dung lượng lớn
-                )
+                # Trường hợp 1: Nếu đầu vào là UploadFile của FastAPI (Cần dùng await)
+                if isinstance(file_stream, UploadFile):
+                    # Đảm bảo con trỏ file ở vị trí đầu tiên
+                    await file_stream.seek(0)
+                    while chunk := await file_stream.read(chunk_size):
+                        yield chunk
+                
+                # Trường hợp 2: Nếu đầu vào là một file-like object đồng bộ (Standard Python file/BytesIO)
+                else:
+                    if hasattr(file_stream, "seek"):
+                        file_stream.seek(0)
+                    # Vì đọc từ stream đồng bộ, ta lặp thông thường nhưng vẫn yield ra cho httpx stream tiếp
+                    while chunk := file_stream.read(chunk_size):
+                        yield chunk
+
+            # Gửi PUT request stream trực tiếp
+            upload_response = await http_client.request(
+                method="PUT",
+                url=upload_url,
+                content=stream_chunk_generator(),  # Truyền async generator vào đây
+                headers={
+                    "Content-Length": str(file_size),
+                    "Content-Type": mime_type
+                },
+                timeout=timeout if timeout else 300.0
+            )
 
             logger.info(
-                "Successfully completed big file upload process to Gemini",
+                "Successfully completed stream upload to Gemini",
                 provider=self.provider.name,
                 status_code=upload_response.status_code
             )
 
-            # 4. Ánh xạ dữ liệu trả về thông qua adapter
             return await self.response.adapt_file_upload_response(upload_response)
 
         except Exception as e:
             logger.error(
-                "Unexpected error occurred during large file upload process",
+                "Unexpected error during stream upload process",
                 provider=self.provider.name,
                 file_name=resolved_display_name,
                 error=str(e)
             )
             raise e
-

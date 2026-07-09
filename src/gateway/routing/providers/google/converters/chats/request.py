@@ -3,6 +3,7 @@ from pathlib import Path
 import base64
 import os
 import re
+import json
 
 from ...file_extension import FileHelper
 from ......schemas import GatewayToolDefinition
@@ -30,6 +31,7 @@ class RequestChats():
             "url": UrlContextHandler(),
             "image_url": OpenAiVisionFallbackHandler()
         }
+
     def _process_flat_text_content(self, text_content: str) -> List[Dict[str, Any]]:
         """
         Hàm xử lý thông minh cho văn bản phẳng thuần túy.
@@ -41,38 +43,34 @@ class RequestChats():
         # 1. Kiểm tra nếu bản thân text_content là một chuỗi Data URL Base64 thô
         if stripped_text.startswith("data:") and ";base64," in stripped_text:
             try:
-                header, base64_data = stripped_text.split(";base64,", 1)
+                header, base64_data = stripped_text.split(";base64/", 1)
                 mime_type = header.replace("data:", "")
                 return [{"inlineData": {"mimeType": mime_type, "data": base64_data}}]
             except Exception as e:
-                logger.warning(f"Lỗi phân tách chuỗi Base64 thô",error=str(e))
-                # Tiếp tục luồng, coi như text bình thường
+                logger.warning(f"Lỗi phân tách chuỗi Base64 thô", error=str(e))
 
         # 2. Kiểm tra nếu là một đường dẫn Local File thô hợp lệ
-        # Sử dụng try-except để phòng trường hợp chuỗi chứa ký tự đặc biệt gây lỗi Path
-        try:
-            potential_path = Path(stripped_text)
-            if potential_path.is_file():
-                # Kiểm tra dung lượng file
-                file_size_mb = os.path.getsize(potential_path) / (1024 * 1024)
-                if file_size_mb > MAX_LOCAL_FILE_SIZE_MB:
-                    logger.warning(f"File local '{stripped_text}' vượt quá giới hạn ({file_size_mb:.2f}MB > {MAX_LOCAL_FILE_SIZE_MB}MB). Bỏ qua chuyển đổi Base64.")
-                    return [{"text": f"[Local File Path - Too Large]: {stripped_text}"}]
+        # try:
+        #     potential_path = Path(stripped_text)
+        #     if potential_path.is_file():
+        #         file_size_mb = os.path.getsize(potential_path) / (1024 * 1024)
+        #         if file_size_mb > MAX_LOCAL_FILE_SIZE_MB:
+        #             logger.warning(f"File local '{stripped_text}' vượt quá giới hạn ({file_size_mb:.2f}MB > {MAX_LOCAL_FILE_SIZE_MB}MB). Bỏ qua chuyển đổi Base64.")
+        #             return [{"text": f"[Local File Path - Too Large]: {stripped_text}"}]
                 
-                # Tiến hành chuyển sang Base64
-                mime_type = FileHelper.detect_mime_type(potential_path) if 'FileHelper' in globals() else "application/octet-stream"
-                with open(potential_path, "rb") as f:
-                    base64_data = base64.b64encode(f.read()).decode('utf-8')
+        #         mime_type = FileHelper.detect_mime_type(potential_path) if 'FileHelper' in globals() else "application/octet-stream"
+        #         with open(potential_path, "rb") as f:
+        #             base64_data = base64.b64encode(f.read()).decode('utf-8')
                 
-                return [{"inlineData": {"mimeType": mime_type, "data": base64_data}}]
-        except Exception as e:
-            # Không phải path hợp lệ hoặc lỗi đọc file -> Tiếp tục luồng xuống dưới
-            logger.warning(f"Path không hợp lệ hoặc lỗi đọc file",error =str(e),file_id=potential_path)
-            pass
+        #         return [{"inlineData": {"mimeType": mime_type, "data": base64_data}}]
+        # except Exception as e:
+        #     logger.warning(f"Path không hợp lệ hoặc lỗi đọc file", error=str(e), file_id=str(potential_path) if 'potential_path' in locals() else stripped_text)
+        #     pass
+        
 
         # 3. Kiểm tra nếu là một URL Web công khai thô
         if re.match(r'^https?://[^\s]+$', stripped_text):
-            return [{"text": f"[Link tham khảo]: {stripped_text}"}]
+            return [{"text": f"[Link]: {stripped_text}"}]
 
         # 4. Nếu là Text bình thường -> Kiểm tra và cắt độ dài chống lỗi Payload dữ liệu
         if len(text_content) > MAX_TEXT_LENGTH:
@@ -103,42 +101,111 @@ class RequestChats():
                             system_instruction_text += part.get("text", "") + "\n"
                 continue
 
-            gemini_role = "user" if role != "assistant" else "model"
             gemini_parts = []
 
-            # --- KỊCH BẢN 1: VĂN BẢN PHẲNG THUẦN TÚY (ĐÃ ĐƯỢC NÂNG CẤP) ---
-            if isinstance(content, str):
-                processed_parts = self._process_flat_text_content(content)
-                gemini_parts.extend(processed_parts)
+            # --- XỬ LÝ THEO TỪNG PHÂN HỆ VAI TRÒ (ROLE) ---
+            
+            # KỊCH BẢN A: TRỢ LÝ AI (ASSISTANT / MODEL)
+            if role == "assistant":
+                gemini_role = "model"
+                
+                # 1. Trích xuất Tool Calls từ hệ thống cũ/OpenAI (nếu có) chuyển dịch sang functionCall của Gemini
+                tool_calls = msg.get("tool_calls") or msg.get("function_call")
+                if tool_calls:
+                    if isinstance(tool_calls, list):
+                        for tc in tool_calls:
+                            func = tc.get("function", {})
+                            args = func.get("arguments", {})
+                            if isinstance(args, str):
+                                try:
+                                    args = json.loads(args)
+                                except Exception:
+                                    args = {"raw_arguments": args}
+                            gemini_parts.append({
+                                "functionCall": {
+                                    "name": func.get("name"),
+                                    "args": args
+                                }
+                            })
+                    elif isinstance(tool_calls, dict):
+                        args = tool_calls.get("arguments", {})
+                        if isinstance(args, str):
+                            try:
+                                args = json.loads(args)
+                            except Exception:
+                                args = {"raw_arguments": args}
+                        gemini_parts.append({
+                            "functionCall": {
+                                "name": tool_calls.get("name"),
+                                "args": args
+                            }
+                        })
 
-            # --- Kịch bản 2: Danh sách Multimodal Parts chuẩn mới ---
-            elif isinstance(content, list):
-                for part in content:
-                    raw_type = part.get("type")
-                    part_type = raw_type.value if hasattr(raw_type, "value") else str(raw_type)
-                    
-                    # Xử lý chữ thuần tại chỗ
-                    if part_type == "text":
-                        text_val = part.get("text", "")
-                        # Kiểm tra độ dài cho từng part text nhỏ
-                        if len(text_val) > MAX_TEXT_LENGTH:
-                            logger.warning(f"Part text quá dài. Tiến hành cắt ngắn về {MAX_TEXT_LENGTH} ký tự.")
-                            text_val = text_val[:MAX_TEXT_LENGTH] + "\n...[Cắt bớt]..."
+                # 2. Xử lý phần nội dung văn bản kèm theo của Assistant
+                if content:
+                    if isinstance(content, str):
+                        gemini_parts.extend(self._process_flat_text_content(content))
+                    elif isinstance(content, list):
+                        for part in content:
+                            if part.get("type") == "text" or "text" in part:
+                                gemini_parts.append({"text": part.get("text", "")})
+
+            # KỊCH BẢN B: KẾT QUẢ TRẢ VỀ TỪ CÔNG CỤ (TOOL / FUNCTION RESPONSE)
+            elif role == "tool":
+                # Quy tắc REST của Gemini: functionResponse bắt buộc phải nằm dưới turn của role 'user'
+                gemini_role = "user"
+                tool_name = msg.get("name") or msg.get("tool_name") or "unnamed_tool"
+                
+                # Chuẩn hóa cấu hình Response Object (Bắt buộc phải là JSON Object/Dict)
+                response_obj = {}
+                if isinstance(content, dict):
+                    response_obj = content
+                elif isinstance(content, str):
+                    try:
+                        response_obj = json.loads(content)
+                        if not isinstance(response_obj, dict):
+                            response_obj = {"response": response_obj}
+                    except Exception:
+                        response_obj = {"response": content}
+                else:
+                    response_obj = {"response": str(content)}
+
+                gemini_parts.append({
+                    "functionResponse": {
+                        "name": tool_name,
+                        "response": response_obj
+                    }
+                })
+
+            # KỊCH BẢN C: NGƯỜI DÙNG (USER) HOẶC CÁC ROLE KHÁC
+            else:
+                gemini_role = "user"
+                if isinstance(content, str):
+                    processed_parts = self._process_flat_text_content(content)
+                    gemini_parts.extend(processed_parts)
+                elif isinstance(content, list):
+                    for part in content:
+                        raw_type = part.get("type")
+                        part_type = raw_type.value if hasattr(raw_type, "value") else str(raw_type)
                         
-                        gemini_parts.append({"text": text_val})
-                        continue
-                        
-                    # ĐIỀU PHỐI THÔNG MINH: Tìm kiếm Sub-Adapter phụ trách loại tệp này
-                    handler = self.handlers.get(part_type)
-                    if handler:
-                        try:
-                            gemini_part_result = handler.handle(part, part_type)
-                            if gemini_part_result:
-                                gemini_parts.append(gemini_part_result)
-                        except Exception as e:
-                            logger.warning(f"Lỗi khi Sub-Adapter {handler.__class__.__name__} xử lý",error= str(e))
-                    else:
-                        logger(f"Không tìm thấy Sub-Adapter xử lý cho type: {part_type}")
+                        if part_type == "text":
+                            text_val = part.get("text", "")
+                            if len(text_val) > MAX_TEXT_LENGTH:
+                                logger.warning(f"Part text quá dài. Tiến hành cắt ngắn về {MAX_TEXT_LENGTH} ký tự.")
+                                text_val = text_val[:MAX_TEXT_LENGTH] + "\n...[Cắt bớt]..."
+                            gemini_parts.append({"text": text_val})
+                            continue
+                            
+                        handler = self.handlers.get(part_type)
+                        if handler:
+                            try:
+                                gemini_part_result = handler.handle(part, part_type)
+                                if gemini_part_result:
+                                    gemini_parts.append(gemini_part_result)
+                            except Exception as e:
+                                logger.warning(f"Lỗi khi Sub-Adapter {handler.__class__.__name__} xử lý", error=str(e))
+                        else:
+                            logger.warning(f"Không tìm thấy Sub-Adapter xử lý cho type: {part_type}")
 
             if gemini_parts:
                 gemini_contents.append({
@@ -155,20 +222,15 @@ class RequestChats():
             gemini_tools = []
             
             for tool_data in tools_input:
-                # Ép kiểu nghiêm ngặt từ dữ liệu nhận được về DTO Pydantic
                 if isinstance(tool_data, GatewayToolDefinition):
                     tool = tool_data
                 else:
                     tool = GatewayToolDefinition(**tool_data)
                 
-                # CHÍNH SÁCH PHÂN LOẠI DỰA TRÊN DTO:
-                # Nếu là tool hệ thống hoặc có tên đặc biệt -> Map thành công cụ chạy code của Gemini
                 if tool.tool_type.value == "NATIVE":
-                    # Đảm bảo không trùng lặp nếu client gửi nhiều lần
                     if {"code_execution": {}} not in gemini_tools:
                         gemini_tools.append({"code_execution": {}})
                 else:
-                    # Nếu là Custom Tool (MCP, API riêng...) -> Gom vào function_declarations
                     decl = {
                         "name": tool.name,
                         "description": tool.description
@@ -180,15 +242,11 @@ class RequestChats():
                         
                     function_declarations.append(decl)
             
-            # Nếu có custom functions, đóng gói lại và nạp vào danh sách tools của Gemini
             if function_declarations:
                 gemini_tools.append({"function_declarations": function_declarations})
                 
             if gemini_tools:
                 gemini_body["tools"] = gemini_tools
-
-        if "model" in request:
-            gemini_body["model"] = request["model"]
 
         # Giới hạn độ dài cho cả System Instruction tổng
         if system_instruction_text.strip():
@@ -222,9 +280,7 @@ class RequestChats():
         if "response_format" in config_data and config_data["response_format"] is not None:
             gen_config["responseMimeType"] = config_data["response_format"]
 
-
         if gen_config:
             gemini_body["generationConfig"] = gen_config
-
-    
+            
         return gemini_body

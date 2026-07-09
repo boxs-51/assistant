@@ -1,0 +1,60 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Gateway Multimodal Client</title>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+
+    <div id="sidebar">
+        <h2>Gateway Hub</h2>
+        <div class="section">
+            <h3>Cấu hình</h3>
+            <label>API Key</label>
+            <input type="password" id="api-key" value="change-me">
+            
+            <label>Provider</label>
+            <select id="provider-select">
+                <option value="gemini">Gemini</option>
+                <option value="openai">OpenAI</option>
+            </select>
+            
+            <label>Model ID</label>
+            <input type="text" id="model-id" value="gemini-2.5-flash">
+            <button class="secondary" onclick="viewModelDetails()">Xem Chi Tiết Model</button>
+        </div>
+
+        <div class="section" style="flex: 1; display: flex; flex-direction: column;">
+            <h3>Tệp tin Ngữ cảnh</h3>
+            <input type="file" id="file-uploader" style="display: none;">
+            <button onclick="document.getElementById('file-uploader').click()">📤 Tải Lên Tệp Mới</button>
+            <button class="secondary" onclick="loadFileList()">🔄 Làm Mới Danh Sách</button>
+            
+            <div id="file-list"></div>
+        </div>
+        
+        <button class="secondary" style="border-color: #f38ba8; color: #f38ba8;" onclick="clearConversation()">🧹 Làm Sạch Hội Thoại</button>
+    </div>
+
+    <div id="chat-container">
+        <div id="chat-header">
+            <strong>Chế độ Hội thoại Multimodal Module</strong>
+        </div>
+
+        <div id="chat-messages">
+            <div class="message assistant">Chào bạn! Hệ thống Modular Client đã sẵn sàng hoạt động.</div>
+        </div>
+
+        <div id="active-context-bar">📌 Đang đính kèm ngữ cảnh: <span id="active-context-files"></span></div>
+
+        <div id="chat-input-area">
+            <textarea id="message-input" placeholder="Nhập tin nhắn... (Enter để gửi)"></textarea>
+            <button id="send-btn">Gửi</button>
+        </div>
+    </div>
+
+    <script type="module" src="js/app.js"></script>
+</body>
+</html>
