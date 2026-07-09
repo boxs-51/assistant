@@ -1,9 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import JSONResponse
 
-from ..authentication.dependency import require_permission
+from ..authentication.dependency import require_permission, verify_admin_ip
 
-router = APIRouter(prefix="/admin", tags=["Admin"])
+router = APIRouter(
+    prefix="/admin", 
+    tags=["Admin"],
+    dependencies=[
+        Depends(verify_admin_ip),                  # Lớp 1: Kiểm tra IP Whitelist
+        Depends(require_permission("admin:write"))  # Lớp 2: Kiểm tra Token (Quyền hạn của JWT hoặc ak_)
+    ])
 
 @router.post("/reload/routing",
           dependencies=[Depends(require_permission("admin:write"))]

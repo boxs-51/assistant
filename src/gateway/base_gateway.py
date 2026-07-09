@@ -14,16 +14,15 @@ from .routing import ModelRouter
 from .circuit_breaker import CircuitBreakerManager
 from .authentication.oauth import create_oauth_client
 from .authentication.manager import AuthenticationManager
-from .authentication.router import router as auth_router
+from .router.auth import router as auth_router
 from .authentication.middleware import AuthenticationMiddleware
 from .middleware.observability import observability_middleware
 
 from .storage.core.manager import StorageEngine
-from .storage.services.semantic_cache_service import SemanticCache
 from .router.files import router as files_router
 from .router.models import router as models_router
 from .router.chat import router as chat_router
-from .fillter import InputGuardrailAdapter, OutputGuardrailAdapter
+from .fillter import InputFillter, OutputFillter
 from ..guardrail.guar import GuardrailSystem
 from .router.embeddings import router as embeddings_router
 from .router.admin import router as admin_router
@@ -99,7 +98,7 @@ async def startup_event():
 
     # --- Storage Engine Initialization (Chapter 1) ---
     # Khởi tạo StorageEngine để quản lý tất cả các kết nối (DB, Cache, Vector, Object Storage)
-    storage_engine = StorageEngine(config=settings.storage)
+    storage_engine = StorageEngine()
     await storage_engine.connect()
     app.state.storage = storage_engine
     logger.info("Storage Engine connected.")
@@ -111,20 +110,17 @@ async def startup_event():
     circuit_breaker_manager = CircuitBreakerManager()
     app.state.limiter = RateLimiterManager(
         cache_driver=app.state.storage.drivers.get("redis")._client,
-        circuit_breaker_manager=circuit_breaker_manager,
-        config=settings)
+        circuit_breaker_manager=circuit_breaker_manager)
 
     # --- Authentication Manager Initialization ---
     app.state.auth_manager = AuthenticationManager(
         user_repo=storage_engine.repositories.get("users"),
         api_key_repo=storage_engine.repositories.get("api_keys"),
-        session_repo=storage_engine.repositories.get("sessions"),
-        config=settings
-    )
+        session_repo=storage_engine.repositories.get("sessions"))
     logger.info("Authentication Manager initialized.")
 
     # --- OAuth Client Initialization ---
-    app.state.oauth = create_oauth_client(settings.oauth)
+    app.state.oauth = create_oauth_client()
     logger.info("OAuth clients initialized.")
 
     app.state.router = ModelRouter(
@@ -133,8 +129,8 @@ async def startup_event():
     # -------------------------------------
     # --- New Guardrail Initialization ---
     guardrail_system = GuardrailSystem()
-    app.state.input_guardrail = InputGuardrailAdapter(guardrail_system)
-    app.state.output_guardrail = OutputGuardrailAdapter(guardrail_system)
+    app.state.input_fillter = InputFillter(guardrail_system)
+    app.state.output_fillter = OutputFillter(guardrail_system)
     # ----------------------------------
     app.state.http_client = httpx.AsyncClient(timeout=settings.provider.timeout) # type: ignore
     app.state.tracer = trace.get_tracer(__name__)

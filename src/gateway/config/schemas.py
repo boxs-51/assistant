@@ -22,6 +22,8 @@ class OAuthSettings(BaseModel):
     github: Optional[OAuthClientConfig] = None
 
 class AuthenticationSettings(BaseModel):
+    admin_ips: Dict[str, str] = {}
+
     jwt_secret_key: str = "change-me"
     jwt_algorithm: str = "HS256"
     jwt_expiration: int = 3600
@@ -32,18 +34,9 @@ class AuthenticationSettings(BaseModel):
 class FrontendSettings(BaseModel):
     oauth_callback_url: Optional[str] = None
 
-class SecuritySettings(BaseModel):
-    api_key: str = "change-me"
-    enable_auth: bool = False
-    jwt_secret_key: str = "change-me"
-    jwt_algorithm: str = "HS256"
-    jwt_expiration: int = 3600
-
-    access_token_expire_minutes: int = 30
-    refresh_token_expire_days: int = 30
-    
-    enable_input_guardrail: bool = True
-    enable_output_guardrail: bool = True
+class FillterSettings(BaseModel):
+    enable_input_fillter: bool = True
+    enable_output_fillter: bool = True
 
 class RateLimitSettings(BaseModel):
     algorithm: str = "token_bucket"
@@ -133,7 +126,7 @@ class ConfigSchema(BaseModel):
     Đây là "Single Source of Truth" sau khi cấu hình đã được tải và hợp nhất.
     """
     gateway: GatewaySettings = Field(default_factory=GatewaySettings)
-    security: SecuritySettings = Field(default_factory=SecuritySettings)
+    fillter: FillterSettings = Field(default_factory=FillterSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     circuit_breaker: CircuitBreakerSettings = Field(default_factory=CircuitBreakerSettings)
     redis: RedisSettings = Field(default_factory=RedisSettings)
@@ -146,7 +139,6 @@ class ConfigSchema(BaseModel):
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     tracing: TracingSettings = Field(default_factory=TracingSettings)
     semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
-    token_budget: TokenBudgetSettings = Field(default_factory=TokenBudgetSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)

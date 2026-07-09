@@ -17,6 +17,7 @@ from ..drivers.chroma.driver import ChromaVectorDriver
 from ..services.embedding_service import EmbeddingService
 from ..repositories.conversations import ConversationRepository
 
+from ...config import settings
 
 logger = structlog.get_logger(__name__)
 
@@ -24,8 +25,8 @@ class StorageEngine:
     """
     Điểm truy cập chính, điều phối toàn bộ Storage Framework.
     """
-    def __init__(self, config: Dict[str, Any]):
-        self.config = config
+    def __init__(self):
+        self.config = settings.storage
         self.drivers = DriverRegistry()
         self.repositories = RepositoryRegistry()
         self.services = {} # Để lưu các service phức tạp hơn (e.g., SemanticCacheService)

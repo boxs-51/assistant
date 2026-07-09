@@ -74,7 +74,7 @@ def extract_prompt_and_cache_key(chat_request: GatewayChatRequest) -> Tuple[str,
 def run_input_guardrail(request: Request, user_prompt: str) -> None:
     """3. Kiểm tra an toàn bảo mật cho Prompt (Input Guardrail)."""
     with tracer.start_as_current_span("input_guardrail") as span:
-        if not request.app.state.input_guardrail.validate(user_prompt):
+        if not request.app.state.input_fillter.validate(user_prompt):
             span.set_attribute("blocked", True)
             span.set_attribute("reason", "prompt_injection")
             logger.warning("Request blocked by Input Guardrail", reason="prompt_injection", prompt=user_prompt)
@@ -134,8 +134,8 @@ async def handle_non_stream_response(request: Request, body_dict: Dict[str, Any]
     with tracer.start_as_current_span("response_processing"):
         final_content = gateway_response.choices[0].message.content or ""
         
-        with tracer.start_as_current_span("output_guardrail"):
-            safe_content = request.app.state.output_guardrail.sanitize(final_content)
+        with tracer.start_as_current_span("output_fillter"):
+            safe_content = request.app.state.output_fillter.sanitize(final_content)
         gateway_response.choices[0].message.content = safe_content
         
         gateway_metrics.metrics.increment_success()
@@ -179,7 +179,7 @@ async def chat_completions_proxy(
             latency = time.time() - start_time
             gateway_metrics.metrics.record_latency("cache", "N/A", latency)
             
-            safe_cached_response = request.app.state.output_guardrail.sanitize(cached_response)
+            safe_cached_response = request.app.state.output_fillter.sanitize(cached_response)
             return {"choices": [{"message": {"role": "assistant", "content": safe_cached_response}}]}
 
     body_dict = chat_request.model_dump()

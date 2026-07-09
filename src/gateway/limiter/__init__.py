@@ -7,6 +7,8 @@ from ..storage.interfaces.cache import CacheDriver
 from ..schemas.identity import Identity
 from ..middleware.observability import  gateway_metrics
 
+from ..config import settings
+
 logger = structlog.get_logger(__name__)
 
 class RateLimiterManager:
@@ -14,17 +16,17 @@ class RateLimiterManager:
     REFACTORED: Lớp quản lý chính, đóng vai trò là entry point cho hệ thống.
     Sử dụng RateLimiterFactory để tạo ra thuật toán limiter phù hợp.
     """
-    def __init__(self, cache_driver: CacheDriver, circuit_breaker_manager: CircuitBreakerManager, config: Dirt[str, Any]):
+    def __init__(self, cache_driver: CacheDriver, circuit_breaker_manager: CircuitBreakerManager):
         # Dependency Injection: Nhận CacheDriver từ bên ngoài
         storage = RedisStorage(cache_driver) # Tạm thời vẫn dùng raw client
         self.circuit_breaker_manager = circuit_breaker_manager
         # Factory sẽ đọc config và tạo ra limiter tương ứng.
         # Truyền cả hai phần của config để factory có thể linh hoạt.
-        self.config = config
+        self.config = settings
         self.limiter = RateLimiterFactory.create_limiter(
-            algorithm=config.rate_limit.algorithm.lower(),
+            algorithm=self.config.rate_limit.algorithm.lower(),
             storage=storage,
-            config=config # Truyền toàn bộ object config
+            config=self.config # Truyền toàn bộ object config
         )
 
     async def is_allowed(self, identity: Identity, cost: int = 1) -> tuple[bool, float]:
@@ -60,7 +62,7 @@ class RateLimiterManager:
 
     def _apply_fail_over_strategy(self) -> tuple[bool, float]:
         """Áp dụng chiến lược fail-open/fail-closed khi có lỗi."""
-        if settings.rate_limit.fail_mode == "closed":
+        if self.config.rate_limit.fail_mode == "closed":
             logger.warning("Failing closed: Rejecting request due to Redis error or open circuit.")
             return False, -1.0
 
@@ -75,7 +77,7 @@ class RateLimiterManager:
         
         # Tạo key dựa trên plan và định danh của người dùng
         identifier = identity.get_rate_limit_key()
-        limiter_key = f"{settings.redis.key_prefix}:rate_limit:plan:{identity.plan}:{identifier}"
+        limiter_key = f"{self.config.redis.key_prefix}:rate_limit:plan:{identity.plan}:{identifier}"
         allowed, _, wait_time = await self.limiter.is_allowed(key=limiter_key, cost=cost)
 
         # Ghi nhận metrics

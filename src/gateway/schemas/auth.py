@@ -46,3 +46,7 @@ class APIKeyResponseSchema(BaseModel):
     full_key: str = Field(..., description="API key đầy đủ. Chỉ hiển thị một lần duy nhất.")
     prefix: str
     created_at: str
+
+class VerifyOTPRequest(BaseModel):
+    email: EmailStr
+    otp: str

@@ -1,11 +1,13 @@
 <!DOCTYPE html>
 <html lang="vi">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gateway Multimodal Client</title>
     <link rel="stylesheet" href="css/style.css">
 </head>
+
 <body>
 
     <!-- Login Modal -->
@@ -30,18 +32,18 @@
     <div id="sidebar">
         <h2>Gateway Hub</h2>
         <div id="account-section" class="section" style="display: none;">
-             <p>Xin chào, <strong id="user-email"></strong>!</p>
-             <button id="logout-btn" class="secondary" style="margin-top: 10px;">Đăng Xuất</button>
+            <p>Xin chào, <strong id="user-email"></strong>!</p>
+            <button id="logout-btn" class="secondary" style="margin-top: 10px;">Đăng Xuất</button>
         </div>
         <div class="section">
             <h3>Cấu hình</h3>
-            
+
             <label>Provider</label>
             <select id="provider-select">
                 <option value="gemini">Gemini</option>
                 <option value="openai">OpenAI</option>
             </select>
-            
+
             <label>Model ID</label>
             <input type="text" id="model-id" value="gemini-2.5-flash">
             <button class="secondary" onclick="viewModelDetails()">Xem Chi Tiết Model</button>
@@ -59,11 +61,12 @@
             <input type="file" id="file-uploader" style="display: none;">
             <button onclick="document.getElementById('file-uploader').click()">📤 Tải Lên Tệp Mới</button>
             <button class="secondary" onclick="loadFileList()">🔄 Làm Mới Danh Sách</button>
-            
+
             <div id="file-list"></div>
         </div>
-        
-        <button class="secondary" style="border-color: #f38ba8; color: #f38ba8;" onclick="clearConversation()">🧹 Làm Sạch Hội Thoại</button>
+
+        <button class="secondary" style="border-color: #f38ba8; color: #f38ba8;" onclick="clearConversation()">🧹 Làm
+            Sạch Hội Thoại</button>
     </div>
 
     <div id="chat-container">
@@ -85,4 +88,5 @@
 
     <script type="module" src="js/app.js"></script>
 </body>
+
 </html>

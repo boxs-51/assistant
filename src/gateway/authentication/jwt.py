@@ -2,9 +2,10 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
 
+from ..config import ConfigSchema
 # Các cấu hình này nên được đưa vào file settings
 class JwtHelper:
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: ConfigSchema):
         
         self.config = config.auth
         self.SECRET_KEY = self.config.jwt_secret_key

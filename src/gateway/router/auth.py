@@ -9,11 +9,11 @@ from ..schemas.auth import (
     OAuthUserInfoSchema, RefreshRequestSchema,
     AccessTokenSchema, APIKeyCreateSchema, 
     APIKeyResponseSchema, APIKeyInfoSchema,
-    UserMeSchema
+    UserMeSchema, VerifyOTPRequest
 )
-from .exceptions import InvalidCredentialsError
-from .services.services import AuthenticationService
-from .services.api_key_service import APIKeyService
+from ..authentication.exceptions import InvalidCredentialsError, OTPCooldownError, OTPInvalidError
+from ..authentication.services.services import AuthenticationService
+from ..authentication.services.api_key_service import APIKeyService
 from ..storage.core.manager import StorageEngine
 from ..config import settings
 from ..authentication.dependency import get_current_identity
@@ -21,6 +21,8 @@ from ..schemas.identity import Identity
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = structlog.get_logger(__name__)
+
+
 
 def get_auth_service(request: Request) -> AuthenticationService:
     """FastAPI Dependency để lấy AuthenticationService."""
@@ -30,7 +32,7 @@ def get_auth_service(request: Request) -> AuthenticationService:
     oauth_repo = storage.repositories.get("oauth_accounts")
     org_repo = storage.repositories.get("organizations")
     member_repo = storage.repositories.get("members")
-    
+    redis_client = storage.drivers.get("redis")._client
     if not all([user_repo, session_repo, oauth_repo, org_repo, member_repo]):
         logger.error("Authentication repositories not initialized. Service cannot be created.")
         raise HTTPException(status_code=503, detail="Authentication service is temporarily unavailable.")
@@ -41,7 +43,7 @@ def get_auth_service(request: Request) -> AuthenticationService:
         oauth_repo=oauth_repo,
         org_repo=org_repo,
         member_repo=member_repo,
-        config=settings
+        redis_client = redis_client
     )
 
 def get_api_key_service(request: Request) -> APIKeyService:
@@ -57,6 +59,47 @@ def get_api_key_service(request: Request) -> APIKeyService:
 
     return APIKeyService(api_key_repo=api_key_repo, app_repo=app_repo, org_repo=org_repo)
 
+@router.post("/register/initiate")
+async def register_or_resend_otp(
+    user_data: UserCreateSchema,
+    auth_service: AuthenticationService = Depends(get_auth_service)
+):
+    """
+    Endpoint xử lý Đăng ký ban đầu VÀ Gửi lại mã OTP (Resend).
+    """
+    try:
+        result = await auth_service.initiate_registration(user_data)
+        return result
+    except OTPCooldownError as cooldown_err:
+        # Báo cáo cụ thể số giây còn lại cho phía Client cấu hình UI chặn nút bấm (Disable Button)
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "error": "otp_cooldown_active",
+                "message": str(cooldown_err),
+                "cooldown_remaining": cooldown_err.remaining_seconds
+            }
+        )
+    except InvalidCredentialsError as cred_err:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(cred_err))
+
+@router.post("/register/verify", response_model=TokenSchema)
+async def verify_otp_and_complete(
+    payload: VerifyOTPRequest,
+    auth_service: AuthenticationService = Depends(get_auth_service)
+):
+    """
+    Endpoint nhận OTP từ Client để xác thực hoàn tất đăng ký.
+    """
+    try:
+        tokens = await auth_service.confirm_registration(payload.email, payload.otp)
+        return tokens
+    except OTPInvalidError as otp_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, 
+            detail={"error": "invalid_or_expired_otp", "message": str(otp_err)}
+        )
+    
 @router.post("/register", response_model=TokenSchema, status_code=status.HTTP_201_CREATED)
 async def register_user(
     user_data: UserCreateSchema,

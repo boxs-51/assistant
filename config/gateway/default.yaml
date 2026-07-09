@@ -18,24 +18,21 @@ gateway:
   port: 8000
   debug: false
 
-security:
-  api_key: "change-me"
-  enable_auth: true
-  enable_input_guardrail: true
-  enable_output_guardrail: true
+oauth:
+  google:
+    client_id: "change-me"
+    client_secret: "change-me"
+  github:
+    client_id: "change-me"
+    client_secret: "change-me"
 
-  jwt_secret_key: "change-me"
-  jwt_algorithm: "HS256"
-  jwt_expiration: 3600
-
-  access_token_expire_minutes: 30
-  refresh_token_expire_days: 30
 
 frontend:
   oauth_callback_url: "http://localhost:8000/auth/callback"
 
-
 auth:
+  enable_auth: true
+
   jwt_secret_key: "change-me"
   jwt_algorithm: "HS256"
   jwt_expiration: 3600

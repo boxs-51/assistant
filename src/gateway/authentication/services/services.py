@@ -1,20 +1,23 @@
 import structlog
 import hashlib
+import secrets
 
 from typing import Dict, Any
 from ...schemas.auth import UserCreateSchema, LoginRequestSchema, TokenSchema, OAuthUserInfoSchema, AccessTokenSchema, UserMeSchema
-from ..exceptions import InvalidCredentialsError
+from ..exceptions import InvalidCredentialsError, OTPCooldownError, OTPInvalidError
 from ...schemas.identity import Identity
 from ...storage.repositories.users import UserRepository
 from ...storage.repositories.sessions import SessionRepository
 from ...storage.repositories.oauth_accounts import OAuthAccountRepository
 from ...storage.repositories.organizations import OrganizationRepository
 from ...storage.repositories.members import MemberRepository
+from ...authentication.services.otp_service import OTPStorageService
 from .. import password as PwdHelper
 from ..jwt import JwtHelper
 from ...config import settings
 
 logger = structlog.get_logger(__name__)
+ADMIN_EMAILS = ["manager.admin@gmail.com", "superdev@gmail.com"]
 
 class AuthenticationService:
     def __init__(
@@ -24,16 +27,97 @@ class AuthenticationService:
         oauth_repo: OAuthAccountRepository,
         org_repo: OrganizationRepository,
         member_repo: MemberRepository,
-        config: Dict[str, Any]
+        redis_client
     ):
-        self.config = config
+        self.config = settings
         self.user_repo = user_repo
         self.session_repo = session_repo
         self.oauth_repo = oauth_repo
         self.org_repo = org_repo
         self.member_repo = member_repo
-        self.jwt = JwtHelper(config)
 
+        self.jwt = JwtHelper(settings)
+        self.otp_storage = OTPStorageService(redis_client, user_repo)
+
+    def _generate_otp(self) -> str:
+        """Sinh chuỗi số ngẫu nhiên an toàn bảo mật gồm 6 chữ số."""
+        return "".join(secrets.choice("0123456789") for _ in range(6))
+
+    async def initiate_registration(self, user_data: UserCreateSchema) -> dict:
+        """
+        Giai đoạn 1: Đăng ký / Yêu cầu gửi lại OTP (Resend)
+        """
+        # Kiểm tra trùng email trong hệ thống chính thức trước
+        existing_user = await self.user_repo.get_by_email(user_data.email)
+        if existing_user:
+            raise InvalidCredentialsError("Email already registered")
+
+        # KIỂM TRA TIME COOLDOWN (Chặn spam gửi lại liên tục)
+        remaining_cooldown = await self.otp_storage.check_cooldown(user_data.email)
+        if remaining_cooldown > 0:
+            raise OTPCooldownError(remaining_seconds=remaining_cooldown)
+
+        # Sinh mã OTP mới
+        otp = self._generate_otp()
+        
+        hashed_password = PwdHelper.get_password_hash(user_data.password)
+        pending_user_payload = {
+            "email": user_data.email,
+            "hashed_password": hashed_password,
+            "name": user_data.name
+        }
+
+        # Lưu dữ liệu (Hệ thống tự động xử lý Fallback nếu Redis có vấn đề)
+        await self.otp_storage.save_pending_registration(user_data.email, pending_user_payload, otp)
+
+        # GIẢ LẬP: Gửi Email OTP thông qua một bên thứ ba (Background Task)
+        logger.info("OTP Sent Successfully", email=user_data.email, code=otp) # Trong môi trường production, hãy ẩn 'code' đi
+
+        return {
+            "status": "success",
+            "message": "OTP has been sent to your email.",
+            "cooldown_seconds": self.otp_storage.cooldown_ttl
+        }
+    
+    async def _generate_tokens_for_user(self, user_id: str, email: str) -> TokenSchema:
+        roles = await self.user_repo.get_user_roles(user_id)
+        organization = await self.user_repo.get_organization_for_user(user_id)
+        
+        # Nâng cấp quyền admin dựa trên danh sách Email đã định sẵn
+        if email in ADMIN_EMAILS and "admin" not in roles:
+            roles.append("admin")
+
+        jwt_data = {
+            "sub": user_id,
+            "roles": roles,
+            "org_id": organization.id if organization else None,
+            "plan": "enterprise" if "admin" in roles else (organization.plan if organization else "free")
+        }
+        
+        access_token = self.jwt.create_access_token(data=jwt_data)
+        refresh_token = self.jwt.create_refresh_token(data={"sub": user_id})
+        
+        # Lưu session vào Redis...
+        return TokenSchema(access_token=access_token, refresh_token=refresh_token)
+
+    async def confirm_registration(self, email: str, otp: str) -> TokenSchema:
+        """
+        Giai đoạn 2: Khớp mã và lưu tài khoản chính thức vào DB
+        """
+        user_payload = await self.otp_storage.verify_and_get_data(email, otp)
+        if not user_payload:
+            raise OTPInvalidError("Mã OTP không chính xác hoặc đã hết hạn sử dụng.")
+
+        # Thêm User chính thức vào Database
+        new_user = await self.user_repo.create(
+            email=user_payload["email"],
+            hashed_password=user_payload["hashed_password"],
+            name=user_payload["name"]
+        )
+
+        # Phát hành Token đăng nhập cho client tác nghiệp luôn
+        return await self._generate_tokens_for_user(new_user.id, new_user.email)
+    
     async def register_user(self, user_data: UserCreateSchema) -> TokenSchema:
         """
         Đăng ký một người dùng mới, hash mật khẩu và trả về token.
