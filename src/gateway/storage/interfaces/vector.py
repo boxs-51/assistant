@@ -1,10 +1,9 @@
 from abc import ABC, abstractmethod
 from typing import Optional, Any, List, Tuple
 
-from ...caching.models import CacheEntry, CacheGetResult
-from ..interfaces.driver import Driver
+from ..models.chroma.base import CacheEntry, CacheGetResult
 
-class VectorStorageDriver(Driver, ABC):
+class VectorStorageDriver( ABC):
     """
     Interface (hợp đồng) trừu tượng cho mọi Vector Storage Driver (Chroma, Qdrant, Pinecone...).
     """
@@ -30,4 +29,3 @@ class VectorStorageDriver(Driver, ABC):
     async def delete(self, entry_id: str):
         """Xóa một entry khỏi vector store dựa trên ID."""
         pass
-

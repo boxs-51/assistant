@@ -5,7 +5,7 @@ from typing import Optional, Tuple, List
 import structlog
 from opentelemetry import trace
 
-from ...middleware.observability import  gateway_metrics
+from ...middleware.observability import gateway_metrics
 from ...config import settings
 from ...storage.interfaces.vector import VectorStorageDriver
 from ...storage.services.embedding_service import EmbeddingService
@@ -15,7 +15,7 @@ logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
 
-class SemanticCache:
+class SemanticCacheService:
     """
     Lớp điều phối chính cho Semantic Cache.
     - Sử dụng EmbeddingService để tạo vector.

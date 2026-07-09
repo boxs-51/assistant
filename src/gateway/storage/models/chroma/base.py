@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, Literal, Tuple
 import time # type: ignore
 
 
@@ -32,3 +32,6 @@ class CacheEntry(BaseModel):
     def to_storage_dict(self) -> dict:
         """Chuyển đổi thành dict để lưu vào metadata của ChromaDB."""
         return self.metadata.model_dump()
+    
+CacheMissReason = Literal["not_found", "expired", "below_threshold", "unknown", "backend_error"]
+CacheGetResult = Tuple[Optional[CacheEntry], Optional[float], Optional[CacheMissReason]]

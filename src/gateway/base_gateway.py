@@ -17,9 +17,9 @@ from .authentication.manager import AuthenticationManager
 from .authentication.router import router as auth_router
 from .authentication.middleware import AuthenticationMiddleware
 from .middleware.observability import observability_middleware
-from .caching import SemanticCache
 
 from .storage.core.manager import StorageEngine
+from .storage.services.semantic_cache_service import SemanticCache
 from .router.files import router as files_router
 from .router.models import router as models_router
 from .router.chat import router as chat_router
@@ -104,16 +104,8 @@ async def startup_event():
     app.state.storage = storage_engine
     logger.info("Storage Engine connected.")
     # -------------------------------------------------
-
-    if app.state.storage.drivers.get("chroma") is not None:
-        embedding_service = app.state.storage.services("embedding_service")
-        cache_backend = app.state.storage.services("semantic_cache")
-        
-    app.state.cache = SemanticCache(
-        backend=cache_backend, 
-        embedding_service=embedding_service
-        )
-  
+    app.state.cache = app.state.storage.services("semantic_cache")
+    
     # --- Centralized Managers ---
     # CircuitBreakerManager giờ được dùng chung cho cả Router và Rate Limiter
     circuit_breaker_manager = CircuitBreakerManager()
