@@ -51,6 +51,49 @@ export const UIRenderer = {
         }
     },
 
+    // Cập nhật giao diện dựa trên trạng thái đăng nhập
+    updateLoginState(isLoggedIn, email = '') {
+        const loginModal = document.getElementById('login-modal-overlay');
+        const accountSection = document.getElementById('account-section');
+        const apiKeysSection = document.getElementById('api-keys-section');
+        const userEmailSpan = document.getElementById('user-email');
+
+        if (isLoggedIn) {
+            loginModal.style.display = 'none';
+            accountSection.style.display = 'block';
+            apiKeysSection.style.display = 'block';
+            userEmailSpan.textContent = email;
+        } else {
+            loginModal.style.display = 'flex';
+            accountSection.style.display = 'none';
+            apiKeysSection.style.display = 'none';
+        }
+    },
+
+    // Render danh sách API Keys
+    renderApiKeyList(keys, onRevoke) {
+        const listDiv = document.getElementById('api-key-list');
+        listDiv.innerHTML = "";
+
+        if (!keys || keys.length === 0) {
+            listDiv.innerHTML = "<div style='font-size:12px; color:var(--text-muted);'>Chưa có API key nào.</div>";
+            return;
+        }
+
+        keys.forEach(key => {
+            const item = document.createElement('div');
+            item.className = 'api-key-item';
+            item.innerHTML = `
+                <span>${key.name} (${key.prefix}...)</span>
+                <span class="del" data-id="${key.id}" title="Thu hồi key">🗑️</span>
+            `;
+            item.querySelector('.del').addEventListener('click', (e) => {
+                onRevoke(e.target.dataset.id);
+            });
+            listDiv.appendChild(item);
+        });
+    },
+
     // Render khu vực danh sách file bên sidebar
     renderFileList(files, activeFiles, onPinToggle, onFileDelete) {
         const fileListDiv = document.getElementById('file-list');

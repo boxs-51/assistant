@@ -1,11 +1,11 @@
 from typing import Dict, Any, List
 
-from ...base import ApiType, BaseProvider
+from ...core import ApiType, BaseProvider
 from .....schemas import (
     ModelInfo, ModelList,
     ContextLimits, PricingInfo
 )
-from ...base.interfaces.model import ModelProvider
+from ...core.interfaces.model import ModelProvider
 import structlog 
 logger = structlog.get_logger(__name__)
 

@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
-from ..providers.base.provider.provider import BaseProvider
+from ..providers.core.provider.provider import BaseProvider
 
 
 class BaseLoadBalancer(ABC):

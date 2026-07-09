@@ -6,7 +6,7 @@ import structlog
 from opentelemetry import trace
 
 from ..config import settings
-from .. import observability as gateway_metrics
+from ..middleware import observability as gateway_metrics
 from .base import BaseCacheBackend
 from .embedding import EmbeddingService
 from .models import CacheEntry, CacheMetadata

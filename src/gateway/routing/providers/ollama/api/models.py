@@ -1,8 +1,8 @@
 from typing import Dict, Any
 import asyncio
 
-from ...base import BaseProvider, ApiType
-from ...base.interfaces.model import ModelProvider
+from ...core import BaseProvider, ApiType
+from ...core.interfaces.model import ModelProvider
 from .....schemas import ModelInfo, ModelList
 
 class OllamaModels(ModelProvider):

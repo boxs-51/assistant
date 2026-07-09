@@ -1,6 +1,6 @@
 from typing import Dict, Any, AsyncGenerator
 
-from ..base import (
+from ..core import (
     BaseProvider, ApiType,
     NoAuth, ApiTypeMapper,
     EndpointBuilder,

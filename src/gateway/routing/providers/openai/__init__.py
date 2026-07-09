@@ -1,7 +1,7 @@
 import asyncio
 from typing import Dict, Any, AsyncGenerator
 
-from ..base import (
+from ..core import (
     BaseProvider, ApiType,
     BearerToken, ApiTypeMapper,
     EndpointBuilder, 

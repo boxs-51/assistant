@@ -1,7 +1,7 @@
 from typing import AsyncGenerator, Dict, Any
 
-from ...base.interfaces.chat import ChatProvider
-from ...base import BaseProvider, ApiType
+from ...core.interfaces.chat import ChatProvider
+from ...core import BaseProvider, ApiType
 from .....schemas import GatewayResponse, GatewayStreamChunk
 
 from ..converters.chats.request import RequestChats

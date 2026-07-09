@@ -1,7 +1,7 @@
 from typing import Dict, Any
 
-from ...base.provider import BaseProvider, ApiType
-from ...base.interfaces.embedding import EmbeddingProvider
+from ...core.provider import BaseProvider, ApiType
+from ...core.interfaces.embedding import EmbeddingProvider
 from ..converters.embeddings.request import RequestEmbeddings 
 from ..converters.embeddings.response import ResponseEmbeddings 
 

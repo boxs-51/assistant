@@ -2,6 +2,15 @@
 # Cấu hình mặc định cho AI Gateway.
 # Các giá trị ở đây sẽ bị ghi đè bởi các file môi trường (e.g., production.yaml) và biến môi trường.
 
+storage:
+  drivers:
+    redis:
+      enabled: true
+      url: "redis://localhost:6379/0"
+    sqlite:
+      enabled: true
+      path: "data/gateway_storage.db"
+
 gateway:
   name: "AI Gateway"
   version: "1.0.0"
@@ -11,9 +20,28 @@ gateway:
 
 security:
   api_key: "change-me"
-  enable_auth: false
+  enable_auth: true
   enable_input_guardrail: true
   enable_output_guardrail: true
+
+  jwt_secret_key: "change-me"
+  jwt_algorithm: "HS256"
+  jwt_expiration: 3600
+
+  access_token_expire_minutes: 30
+  refresh_token_expire_days: 30
+
+frontend:
+  oauth_callback_url: "http://localhost:8000/auth/callback"
+
+
+auth:
+  jwt_secret_key: "change-me"
+  jwt_algorithm: "HS256"
+  jwt_expiration: 3600
+
+  access_token_expire_minutes: 30
+  refresh_token_expire_days: 30
 
 rate_limit:
   algorithm: "token_bucket"

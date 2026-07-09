@@ -7,7 +7,7 @@ import asyncio
 from typing import Dict, List
 
 from ...config import settings
-from ..providers.base.provider import BaseProvider
+from ..providers.core.provider import BaseProvider
 
 logger = structlog.get_logger(__name__)
 

@@ -30,6 +30,7 @@ gateway/
     │   ├── __init__.py
     │   ├── users.py
     │   ├── api_keys.py
+    │   ├── oauth_accounts.py
     │   └── organizations.py
     │
     ├── services/           # Lớp xử lý nghiệp vụ (Business Logic)
@@ -144,6 +145,17 @@ CREATE TABLE api_keys (
     status VARCHAR(50) NOT NULL DEFAULT 'active', -- active, revoked
     created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+-- Bảng liên kết tài khoản OAuth
+CREATE TABLE oauth_accounts (
+    id VARCHAR(255) PRIMARY KEY,
+    user_id VARCHAR(255) NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    provider VARCHAR(50) NOT NULL, -- 'google', 'github', etc.
+    provider_user_id VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE (provider, provider_user_id)
+);
+
 
 -- Bảng Refresh Tokens
 CREATE TABLE refresh_tokens (
@@ -361,6 +373,8 @@ Chúng ta sẽ triển khai theo từng chương để đảm bảo chất lư�
 
 -   **Chương 2: Repository Pattern**
     -   Xây dựng các lớp `UserRepository`, `APIKeyRepository`... để trừu tượng hóa việc truy cập DB.
+    -   Xây dựng `OrganizationRepository` và `ApplicationRepository`.
+    -   Xây dựng `OAuthAccountRepository` để quản lý liên kết tài khoản.
 
 -   **Chương 3: Password Hash và JWT**
     -   Triển khai `password.py` với `passlib`.
@@ -395,7 +409,3 @@ Tài liệu này sẽ được cập nhật liên tục trong quá trình phát 
 ```
 
 Kế hoạch đã sẵn sàng. Chúng ta có thể bắt đầu với **Chương 1: Thiết kế Database và Entity** trong phiên làm việc tiếp theo.
-
-<!--
-[PROMPT_SUGGESTION]Bắt đầu triển khai Chương 1: Thiết kế Database và Entity bằng SQLAlchemy và Pydantic.[/PROMPT_SUGGESTION]
-[PROMPT_SUGGESTION]Viết pseudo-code chi tiết hơn cho lớp AuthenticationManager trong file `gateway/authentication/manager.py`.[/PROMPT_SUGGESTION]

@@ -1,39 +1,37 @@
-from fastapi import FastAPI, Request, HTTPException, Depends, status , Query, UploadFile, File
-from fastapi.responses import StreamingResponse, JSONResponse, Response
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import ValidationError
+from fastapi import FastAPI
 
+from fastapi.middleware.cors import CORSMiddleware
 import httpx
-import redis.asyncio as redis
-import time, anyio
-import psutil
-from prometheus_client import generate_latest
 import structlog
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from typing import List, Dict, Any, Literal, Optional, AsyncGenerator, Tuple
-import hashlib
-import io
 
-from .schemas import GatewayChatRequest
-import uuid
+
+
 from .config.core import ConfigLoader, ConfigurationRegistry
 from .limiter import RateLimiterManager
-# --- Enterprise Routing Imports ---
-from .routing import ModelRouter # Sẽ được sửa đổi bên dưới
-from .routing.exceptions import NoAvailableProviderError, ProviderError
+from .routing import ModelRouter
 from .circuit_breaker import CircuitBreakerManager
-# --------------------------------
-from .security import authenticate_client, InputGuardrailAdapter, OutputGuardrailAdapter
-from ..guardrail.guar import GuardrailSystem
-# --- Refactored Cache Imports ---
+from .authentication.oauth import create_oauth_client
+from .authentication.manager import AuthenticationManager
+from .authentication.router import router as auth_router
+from .authentication.middleware import AuthenticationMiddleware
+from .middleware.observability import observability_middleware
 from .caching import SemanticCache
-from .caching.chroma_backend import ChromaCacheBackend
-from .caching.embedding import EmbeddingService
-# --------------------------------
+
+from .storage.core.manager import StorageEngine
+from .router.files import router as files_router
+from .router.models import router as models_router
+from .router.chat import router as chat_router
+from .fillter import InputGuardrailAdapter, OutputGuardrailAdapter
+from ..guardrail.guar import GuardrailSystem
+from .router.embeddings import router as embeddings_router
+from .router.admin import router as admin_router
+from .router.health import router as health_router
+from .config import settings
 
 from shared_core.observability import ObservabilityConfig ,LoggingConfig, TracingConfig
-from .import observability as gateway_metrics
+from .middleware.observability import gateway_metrics
 from .config import settings
 
 app = FastAPI(title="AI Gateway")
@@ -41,11 +39,25 @@ tracer = trace.get_tracer(__name__)
 logger = structlog.get_logger(__name__)
 
 origins = [
-    "http://localhost:3000",  # Port local server của bạn
+    "http://localhost:3000",
     "http://127.0.0.1:3000",
-    "http://localhost:5500",  # Port mặc định của VS Code Live Server
-    "*",                      # Cho phép tất cả (chỉ nên dùng khi dev)
+    "http://localhost:5500",
+    "*",
 ]
+
+# Thêm middleware xác thực mới
+# Middleware này phải được thêm TRƯỚC CORSMiddleware để nó không can thiệp vào các request OPTIONS của CORS.
+app.add_middleware(
+    AuthenticationMiddleware,
+    public_paths=[
+        "/docs", "/openapi.json", "/health", "/ready", "/metrics", "/stats",
+        # Chỉ các endpoint cụ thể trong /auth là public
+        "/auth/login",
+        "/auth/register",
+        "/auth/refresh",
+        "/auth/oauth"
+    ]
+)
 
 app.add_middleware(
     CORSMiddleware,
@@ -54,6 +66,18 @@ app.add_middleware(
     allow_methods=["*"],  # Cho phép tất cả các phương thức bao gồm OPTIONS, GET, POST, DELETE
     allow_headers=["*"],  # Cho phép tất cả các headers (như Authorization)
 )
+
+app.middleware("http")(observability_middleware)
+
+# Import các router từ các module
+app.include_router(auth_router)
+app.include_router(files_router)
+app.include_router(models_router)
+app.include_router(chat_router)
+app.include_router(embeddings_router)
+app.include_router(admin_router)
+app.include_router(health_router)
+
 @app.on_event("startup")
 async def startup_event():
     """Khởi tạo các kết nối cần thiết khi server khởi động."""
@@ -72,11 +96,44 @@ async def startup_event():
     gateway_metrics.setup_gateway_observability(config)
     # Tự động instrument FastAPI app
     FastAPIInstrumentor.instrument_app(app)
-    app.state.redis = redis.from_url(settings.redis.url, decode_responses=True)
+
+    # --- Storage Engine Initialization (Chapter 1) ---
+    # Khởi tạo StorageEngine để quản lý tất cả các kết nối (DB, Cache, Vector, Object Storage)
+    storage_engine = StorageEngine(config=settings.storage)
+    await storage_engine.connect()
+    app.state.storage = storage_engine
+    logger.info("Storage Engine connected.")
+    # -------------------------------------------------
+
+    if app.state.storage.drivers.get("chroma") is not None:
+        embedding_service = app.state.storage.services("embedding_service")
+        cache_backend = app.state.storage.services("semantic_cache")
+        
+    app.state.cache = SemanticCache(
+        backend=cache_backend, 
+        embedding_service=embedding_service
+        )
+  
     # --- Centralized Managers ---
     # CircuitBreakerManager giờ được dùng chung cho cả Router và Rate Limiter
     circuit_breaker_manager = CircuitBreakerManager()
-    app.state.limiter = RateLimiterManager(app.state.redis, circuit_breaker_manager)
+    app.state.limiter = RateLimiterManager(
+        cache_driver=app.state.storage.drivers.get("redis")._client,
+        circuit_breaker_manager=circuit_breaker_manager,
+        config=settings)
+
+    # --- Authentication Manager Initialization ---
+    app.state.auth_manager = AuthenticationManager(
+        user_repo=storage_engine.repositories.get("users"),
+        api_key_repo=storage_engine.repositories.get("api_keys"),
+        session_repo=storage_engine.repositories.get("sessions"),
+        config=settings
+    )
+    logger.info("Authentication Manager initialized.")
+
+    # --- OAuth Client Initialization ---
+    app.state.oauth = create_oauth_client(settings.oauth)
+    logger.info("OAuth clients initialized.")
 
     app.state.router = ModelRouter(
         circuit_breaker_manager=circuit_breaker_manager # Inject vào router
@@ -87,568 +144,17 @@ async def startup_event():
     app.state.input_guardrail = InputGuardrailAdapter(guardrail_system)
     app.state.output_guardrail = OutputGuardrailAdapter(guardrail_system)
     # ----------------------------------
-    # --- Refactored Cache Initialization ---
-    embedding_service = EmbeddingService()
-    cache_backend = ChromaCacheBackend()
-    app.state.cache = SemanticCache(backend=cache_backend, embedding_service=embedding_service)
-    # ---------------------------------------
-    app.state.http_client = httpx.AsyncClient(timeout=settings.provider.timeout)
+    app.state.http_client = httpx.AsyncClient(timeout=settings.provider.timeout) # type: ignore
     app.state.tracer = trace.get_tracer(__name__)
     logger.info("Gateway startup complete.")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Đóng các kết nối khi server tắt."""
-    await app.state.redis.close()
+    if hasattr(app.state, 'storage'):
+        await app.state.storage.disconnect()
+    # await app.state.redis_connection.close() # [REMOVED] Không cần thiết nữa vì StorageEngine đã quản lý
     await app.state.http_client.aclose()
-
-@app.middleware("http")
-async def observability_middleware(request: Request, call_next):
-    """
-    Middleware trung tâm cho observability:
-    1. Gắn request_id vào context của log.
-    2. Ghi log cho request và response.
-    3. Theo dõi số request đang xử lý (in-flight) và latency.
-    4. Trả về correlation headers.
-    """
-    request_id = str(uuid.uuid4())
-    structlog.contextvars.clear_contextvars()
-    structlog.contextvars.bind_contextvars(request_id=request_id)
-
-    start_time = time.time()
-    logger.info("Request received", method=request.method, path=request.url.path)
-
-    gateway_metrics.metrics.increment_requests_in_flight()
-    response = await call_next(request)
-    gateway_metrics.metrics.decrement_requests_in_flight()
-
-    process_time = time.time() - start_time
-    # TODO: Ghi nhận latency của toàn bộ request vào một histogram mới
-    
-    # Thêm correlation headers vào response
-    current_span = trace.get_current_span()
-    if current_span.is_recording():
-        response.headers["x-trace-id"] = f"{current_span.get_span_context().trace_id:x}"
-    response.headers["x-request-id"] = request_id
-
-    logger.info("Request finished", status_code=response.status_code, process_time=round(process_time, 4))
-
-    return response
-
-async def parse_and_validate_request(request: Request) -> GatewayChatRequest:
-    """1. Đọc JSON thô và ép sang schema Pydantic."""
-    try:
-        raw_body = await request.json()
-    except Exception:
-        logger.error("Invalid JSON format in request body")
-        gateway_metrics.metrics.increment_failed(400)
-        raise HTTPException(status_code=400, detail="Malformed JSON in request body.")
-
-    try:
-        return GatewayChatRequest(**raw_body)
-    except ValidationError as val_err:
-        logger.warning("Request schema validation failed", errors=val_err.errors())
-        gateway_metrics.metrics.increment_failed(422)
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, 
-            detail={
-                "message": "Cấu trúc request hoặc messages không hợp lệ với hệ thống Multimodal Gateway.",
-                "errors": val_err.errors()
-            }
-        )
-
-
-def extract_prompt_and_cache_key(chat_request: GatewayChatRequest) -> Tuple[str, str]:
-    """2. Bóc tách văn bản (user_prompt) và tính toán Cache Key từ nội dung Multimodal."""
-    text_parts: List[str] = []
-    multimedia_signatures: List[str] = []
-
-    for msg in chat_request.messages:
-        if msg.role != "user":
-            continue
-            
-        content = msg.content
-        if isinstance(content, str):
-            text_parts.append(content)
-        elif isinstance(content, list):
-            for part in content:
-                if part.type.value == "text" and part.text:
-                    text_parts.append(part.text)
-                elif part.type.value in ["image", "audio", "video", "file"]:
-                    media_obj = getattr(part, part.type.value, None)
-                    if media_obj and getattr(media_obj, "base64_data", None):
-                        base64_str = media_obj.base64_data
-                        media_hash = hashlib.md5(base64_str.encode()).hexdigest()
-                        multimedia_signatures.append(f"{part.type.value}:{media_hash}")
-
-    user_prompt = " ".join(text_parts)
-    cache_key = user_prompt
-    if multimedia_signatures:
-        cache_key += " | media_sign:" + ",".join(multimedia_signatures)
-        
-    return user_prompt, cache_key
-
-
-def run_input_guardrail(user_prompt: str) -> None:
-    """3. Kiểm tra an toàn bảo mật cho Prompt (Input Guardrail)."""
-    with tracer.start_as_current_span("input_guardrail") as span:
-        if not app.state.input_guardrail.validate(user_prompt):
-            span.set_attribute("blocked", True)
-            span.set_attribute("reason", "prompt_injection")
-            logger.warning("Request blocked by Input Guardrail", reason="prompt_injection", prompt=user_prompt)
-            gateway_metrics.metrics.increment_prompt_block()
-            gateway_metrics.metrics.increment_failed(400)
-            raise HTTPException(status_code=400, detail="Request blocked due to potential prompt injection.")
-
-
-async def run_rate_limiter(client_id: str) -> None:
-    """4. Kiểm tra giới hạn tần suất gọi API (Rate Limiting)."""
-    with tracer.start_as_current_span("rate_limiter"):
-        is_allowed, wait_time = await app.state.limiter.is_allowed(client_id, cost=1)
-        if not is_allowed:
-            logger.warning("Request blocked by Rate Limiter", client_id=client_id)
-            gateway_metrics.metrics.increment_rate_limit()
-            gateway_metrics.metrics.increment_failed(429)
-            raise HTTPException(status_code=429, detail=f"Rate limit exceeded. Try again in {wait_time:.2f} seconds.")
-
-
-async def generate_stream_response(body_dict: Dict[str, Any], start_time: float) -> AsyncGenerator[str, None]:
-    """Hàm generator xử lý luồng dữ liệu Streaming từ LLM Router."""
-    detected_provider = "unknown"
-    detected_model = "gemini-model"
-    
-    stream_chunks = app.state.router.stream_with_fallback(
-        http_client=app.state.http_client,
-        body=body_dict
-    )
-    
-    async for chunk in stream_chunks:
-        if chunk.provider:
-            detected_provider = chunk.provider
-        if chunk.model:
-            detected_model = chunk.model
-            
-        if chunk.usage:
-            with tracer.start_as_current_span("token_tracking_stream") as t_span:
-                in_t = chunk.usage.prompt_tokens
-                out_t = chunk.usage.completion_tokens
-                
-                gateway_metrics.metrics.increment_input_tokens(detected_provider, detected_model, in_t)
-                gateway_metrics.metrics.increment_output_tokens(detected_provider, detected_model, out_t)
-                t_span.set_attributes({"input_tokens": in_t, "output_tokens": out_t})
-        
-        yield chunk.to_sse()
-    
-    yield "data: [DONE]\n\n"
-    
-    gateway_metrics.metrics.increment_success()
-    latency = time.time() - start_time
-    gateway_metrics.metrics.record_latency(detected_provider, detected_model, latency)
-
-
-async def handle_non_stream_response(body_dict: Dict[str, Any], start_time: float) -> Any:
-    """Hàm xử lý luồng dữ liệu Non-Streaming (Đồng bộ) từ LLM Router."""
-    with tracer.start_as_current_span("llm_routing_fallback") as span:
-        gateway_response = await app.state.router.execute_with_fallback(
-            http_client=app.state.http_client,
-            body=body_dict
-        )
-        final_provider_name = gateway_response.provider
-        span.set_attribute("final_provider", final_provider_name)
-    
-    with tracer.start_as_current_span("response_processing"):
-        final_content = gateway_response.choices[0].message.content or ""
-        
-        # 7. Output Guardrail làm sạch văn bản đầu ra
-        with tracer.start_as_current_span("output_guardrail"):
-            safe_content = app.state.output_guardrail.sanitize(final_content)
-        gateway_response.choices[0].message.content = safe_content
-        
-        gateway_metrics.metrics.increment_success()
-        latency = time.time() - start_time
-        gateway_metrics.metrics.record_latency(final_provider_name, gateway_response.model, latency)
-
-        # Theo dõi Token sử dụng
-        with tracer.start_as_current_span("token_tracking") as token_span:
-            input_tokens = gateway_response.usage.prompt_tokens
-            output_tokens = gateway_response.usage.completion_tokens
-
-            gateway_metrics.metrics.increment_input_tokens(final_provider_name, gateway_response.model, input_tokens)
-            gateway_metrics.metrics.increment_output_tokens(final_provider_name, gateway_response.model, output_tokens)
-            
-            token_span.set_attribute("input_tokens", input_tokens)
-            token_span.set_attribute("output_tokens", output_tokens)
-        
-        return gateway_response
-@app.post("/v1/chat/completions")
-async def chat_completions_proxy(request: Request, client_id: str = Depends(authenticate_client)):
-    """Endpoint proxy thông minh xử lý Request kết nối đa mô hình (Multimodal Gateway)."""
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id)
-    start_time = time.time()
-
-    # 1. Đọc và Kiểm tra cấu trúc dữ liệu đầu vào (Validation)
-    chat_request = await parse_and_validate_request(request)
-
-    # 2. Bóc tách Prompt chính và sinh chuỗi khóa Cache định danh (Cache Key)
-    user_prompt, cache_key = extract_prompt_and_cache_key(chat_request)
-
-    # 3. Chạy tầng Input Guardrail chống Prompt Injection
-    run_input_guardrail(user_prompt)
-
-    # 4. Kiểm tra Tần suất gọi API (Rate Limiting)
-    await run_rate_limiter(client_id)
-
-    # 5. Kiểm tra Semantic Cache xem câu hỏi đã từng được trả lời chưa
-    cached_result = await app.state.cache.get(cache_key)
-    if cached_result:
-        cached_response, _ = cached_result
-        with tracer.start_as_current_span("process_cached_response"):
-            gateway_metrics.metrics.increment_success()
-            latency = time.time() - start_time
-            gateway_metrics.metrics.record_latency("cache", "N/A", latency)
-            
-            safe_cached_response = app.state.output_guardrail.sanitize(cached_response)
-            return {"choices": [{"message": {"role": "assistant", "content": safe_cached_response}}]}
-
-    # Chuẩn bị dữ liệu dict để truyền vào Router
-    body_dict = chat_request.model_dump()
-
-    # 6 & 7. Định tuyến và xử lý cuộc gọi sang các nhà cung cấp LLM (Providers)
-    try:
-        if chat_request.config.stream:
-            return StreamingResponse(
-                generate_stream_response(body_dict, start_time),
-                media_type="text/event-stream"
-            )
-        else:
-            return await handle_non_stream_response(body_dict, start_time)
-            
-    except NoAvailableProviderError as e:
-        trace.get_current_span().record_exception(e)
-        logger.critical("All providers are unavailable", error=str(e))
-        gateway_metrics.metrics.increment_failed(503)
-        raise HTTPException(status_code=503, detail="Service Unavailable: All LLM providers are currently down.")
-        
-@app.post("/v1/embeddings", tags=["LLM APIs"])
-async def embeddings_proxy(request: Request, client_id: str = Depends(authenticate_client)):
-    """
-    Endpoint để tạo vector embeddings cho văn bản.
-    """
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id)
-
-    try:
-        body = await request.json()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid request body.")
-
-    # TODO: Thêm Rate Limiting và Caching nếu cần
-
-    try:
-        # Sử dụng phương thức mới của router
-        response_data = await app.state.router.execute_embeddings(
-            http_client=app.state.http_client,
-            body=body
-        )
-        return JSONResponse(content=response_data)
-    except NoAvailableProviderError as e:
-        logger.critical("All providers are unavailable for embeddings", error=str(e))
-        raise HTTPException(status_code=503, detail="Service Unavailable: All providers for embeddings are down.")
-
-@app.get("/v1/models", tags=["LLM APIs"])
-async def list_models_proxy(
-    request: Request,
-    provider_name: str,
-    client_id: str = Depends(authenticate_client),
-):
-    """
-    Endpoint để lấy danh sách các model có sẵn từ một provider.
-    Mặc định lấy từ 'openai' nếu không có provider_name nào được chỉ định.
-    """
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id)
-
-    # Nếu chỉ list models, mặc định là 'openai' để tương thích ngược
-
-
-    try:
-        provider = app.state.router.providers.get(provider_name)
-
-        if not provider:
-            raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not configured or found.")
-
-        # Lấy danh sách tất cả các model
-        models_data = await provider.models.models(
-            http_client=app.state.http_client, 
-            timeout=settings.provider.timeout
-        )
-        enriched_list = provider.capability_manager.enrich_capabilities(models_data)
-        return enriched_list
-
-    except NotImplementedError:
-        logger.warning("Requested model functionality not implemented for provider", provider=provider_name)
-        raise HTTPException(status_code=501, detail=f"The requested model functionality is not implemented for provider '{provider_name}'.")
-    except Exception as e:
-        logger.error("Failed to process model request", provider=provider_name, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to process model request for provider '{provider_name}'.")
-
-@app.get("/v1/models/{model_id:path}", tags=["LLM APIs"])
-async def get_model_details_proxy(
-    request: Request,
-    model_id: str,
-    provider_name: str = Query(..., description="Tên nhà cung cấp (e.g., gemini, openai)"),
-    client_id: str = Depends(authenticate_client)
-):
-    """
-    Endpoint để lấy thông tin chi tiết của một model cụ thể từ một provider.
-    """
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id, model_id=model_id, provider_name=provider_name)
-
-    try:
-        provider = app.state.router.providers.get(provider_name)
-
-        if not provider:
-            raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not configured or found.")
-
-        # Gọi phương thức model của provider đã chọn
-        model_data = await provider.models.model(
-            http_client=app.state.http_client,
-            timeout=settings.provider.timeout,
-            model=model_id
-        )
-        enriched_list = provider.capability_manager.enrich_capabilities(model_data)
-        return enriched_list
-
-    except NotImplementedError:
-        logger.warning("Get model details endpoint not implemented for provider", provider=provider_name)
-        raise HTTPException(status_code=501, detail=f"Fetching model details is not implemented for provider '{provider_name}'.")
-    except Exception as e:
-        logger.error("Failed to fetch model details", provider=provider_name, model=model_id, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to fetch model details from provider '{provider_name}'.")
-
-@app.get("/v1/files")
-async def list_files_proxy(
-    request: Request,
-    provider_name: str = Query(..., description="Tên nhà cung cấp"),
-    page_size: Optional[int] = Query(None, alias="page_size"),
-    page_token: Optional[str] = Query(None, alias="page_token"),
-    client_id: str = Depends(authenticate_client)
-):
-    """Endpoint lấy danh sách các file có sẵn từ Provider."""
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id, provider_name=provider_name)
-
-    provider = app.state.router.providers.get(provider_name)
-    if not provider:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
-
-    try:
-        files_list = await provider.files.list_files(
-            http_client=app.state.http_client,
-            timeout=settings.provider.timeout,
-            page_size=page_size,
-            page_token=page_token
-        )
-        return files_list
-    except Exception as e:
-        logger.error("Failed to list files", provider=provider_name, error=str(e))
-        raise HTTPException(status_code=500, detail="Failed to retrieve files list.")
-    
-@app.post("/v1/files")
-async def upload_file_proxy(
-    request: Request,
-    provider_name: str = Query(..., description="Tên nhà cung cấp"),
-    display_name: Optional[str] = Query(None, description="Tên hiển thị tùy chọn"),
-    file: UploadFile = File(..., description="Tệp tin cần tải lên"),
-    client_id: str = Depends(authenticate_client)
-):
-    """Endpoint tải tệp tin lên hệ thống lưu trữ của Provider thông qua Stream."""
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id, provider_name=provider_name)
-
-    provider = app.state.router.providers.get(provider_name)
-    if not provider:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
-
-    try:
-        # Gọi sang hàm adapter xử lý nhận Stream mới
-        upload_result = await provider.files.upload_file(
-            http_client=app.state.http_client,
-            timeout=settings.provider.timeout,
-            file_stream=file,                 # Truyền trực tiếp UploadFile object (Kế thừa từ stream bất đồng bộ)
-            file_size=file.size,              # Bắt buộc truyền size để Gemini Resumable Session tính toán
-            mime_type=file.content_type or "application/octet-stream", # MIME type từ client gửi lên
-            display_name=display_name or file.filename
-        )
-        return upload_result
-    except Exception as e:
-        logger.error("Failed to upload file", provider=provider_name, error=str(e))
-        raise HTTPException(status_code=500, detail="Failed to upload file.")
-    
-@app.get("/v1/files/{file_id:path}")
-async def get_or_download_file_proxy(
-    request: Request,
-    file_id: str,
-    provider_name: str = Query(..., description="Tên nhà cung cấp"),
-    action: Literal["metadata", "download"] = Query("metadata", description="Hành động: lấy thông tin hoặc tải file"),
-    client_id: str = Depends(authenticate_client)
-):
-    """Endpoint lấy thông tin chi tiết (metadata) HOẶC tải nội dung nhị phân của một file."""
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id, file_id=file_id, provider_name=provider_name)
-
-    provider = app.state.router.providers.get(provider_name)
-    if not provider:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
-
-    try:
-        # BƯỚC 1: Lấy thông tin metadata của file trước
-        file_metadata = await provider.files.get_file(
-            http_client=app.state.http_client,
-            timeout=settings.provider.timeout,
-            file_name=file_id
-        )
-
-        # BƯỚC 2: Rẽ nhánh xử lý dựa vào tham số `action`
-        if action == "metadata":
-            return file_metadata
-        
-        elif action == "download":
-            if not file_metadata.uri:
-                raise HTTPException(status_code=400, detail="The requested file does not expose a valid download URI.")
-            
-            # Gọi hàm download_file đã viết thông qua uri có sẵn trong DTO
-            file_bytes = await provider.files.download_file(
-                http_client=app.state.http_client,
-                timeout=settings.provider.timeout,
-                uri=file_metadata.uri
-            )
-            
-            # Trả về luồng nhị phân kèm đúng định dạng file gốc
-            return StreamingResponse(
-                io.BytesIO(file_bytes),
-                media_type=file_metadata.mime_type or "application/octet-stream",
-                headers={"Content-Disposition": f"attachment; filename={file_metadata.filename or 'file'}"}
-            )
-
-    except HTTPException as http_err:
-        raise http_err
-    except Exception as e:
-        logger.error("Error processing file request", provider=provider_name, file_id=file_id, action=action, error=str(e))
-        raise HTTPException(status_code=500, detail=f"Failed to process file request for '{file_id}'.")
-
-@app.delete("/v1/files/{file_id:path}")
-async def delete_file_proxy(
-    request: Request,
-    file_id: str,
-    provider_name: str = Query(..., description="Tên nhà cung cấp"),
-    client_id: str = Depends(authenticate_client)
-):
-    """Endpoint để xóa một tệp cụ thể ra khỏi hệ thống của provider."""
-    gateway_metrics.metrics.increment_requests(request.method, request.url.path)
-    structlog.contextvars.bind_contextvars(client_id=client_id, file_id=file_id, provider_name=provider_name)
-
-    provider = app.state.router.providers.get(provider_name)
-    if not provider:
-        raise HTTPException(status_code=404, detail=f"Provider '{provider_name}' not found.")
-
-    try:
-        success = await provider.files.delete_file(
-            http_client=app.state.http_client,
-            timeout=settings.provider.timeout,
-            file_name=file_id
-        )
-        if success:
-            return Response(status_code=204)  # 204 No Content là chuẩn RESTful khi xóa thành công
-        else:
-            raise HTTPException(status_code=400, detail=f"Provider failed to delete file '{file_id}'.")
-            
-    except HTTPException as http_err:
-        raise http_err
-    except Exception as e:
-        logger.error("Failed to delete file", provider=provider_name, file_id=file_id, error=str(e))
-        raise HTTPException(status_code=500, detail=f"An error occurred while deleting file '{file_id}'.")
-    
-
-# =================================================================
-# ADMIN ENDPOINTS
-# =================================================================
-
-@app.post("/admin/reload/routing", tags=["Admin"], dependencies=[Depends(authenticate_client)])
-async def reload_routing_rules(request: Request):
-    """
-    Endpoint quản trị để tải lại nóng (hot-reload) các quy tắc định tuyến từ file YAML.
-    Yêu cầu xác thực.
-    """
-    success = await app.state.router.routing_policy.reload_rules()
-    if success:
-        return {"status": "success", "message": "Routing rules reloaded successfully."}
-    else:
-        raise HTTPException(status_code=500, detail="Failed to reload routing rules. Check logs for details.")
-
-@app.get("/admin/circuit-breakers/status", tags=["Admin"], dependencies=[Depends(authenticate_client)])
-async def get_circuit_breaker_statuses(request: Request):
-    """
-    Endpoint quản trị để xem trạng thái hiện tại của tất cả các Circuit Breaker.
-    Cung cấp thông tin chi tiết về trạng thái (open, closed, half-open),
-    số lỗi, và thời gian xảy ra lỗi cuối cùng.
-    Yêu cầu xác thực.
-    """
-    # CircuitBreakerManager được inject vào ModelRouter, ta có thể lấy nó từ đó.
-    circuit_breaker_manager = request.app.state.router.circuit_breaker_manager
-    statuses = await circuit_breaker_manager.get_all_statuses()
-    return JSONResponse(content=statuses)
-
-
-# =================================================================
-# HEALTH & STATUS ENDPOINTS
-# =================================================================
-
-@app.get("/health", tags=["Health"])
-async def health_check():
-    """Endpoint đơn giản cho Kubernetes liveness probe."""
-    return {"status": "ok"}
-
-@app.get("/ready", tags=["Health"])
-async def readiness_check():
-    """
-    Kiểm tra sự sẵn sàng của các dịch vụ phụ thuộc (Redis, LLM Providers).
-    Sử dụng cho Kubernetes readiness probe.
-    """
-    try:
-        # 1. Kiểm tra Redis
-        await app.state.redis.ping()
-        
-        # 2. Kiểm tra các provider đã cấu hình
-        # Gửi một request nhỏ, không tốn kém để kiểm tra kết nối
-        for provider_name, provider in app.state.router.providers.items():
-            # Ví dụ: OpenAI có endpoint /v1/models để kiểm tra
-            if provider_name == "openai":
-                 await app.state.http_client.get(f"{provider.api_url}/models", headers=provider.headers)
-
-    except Exception as e:
-        raise HTTPException(status_code=503, detail=f"Service Unavailable: {str(e)}")
-
-    return {"status": "ready"}
-
-@app.get("/metrics", tags=["Health"])
-def get_metrics():
-    """Expose các số liệu cho Prometheus scrape."""
-    return StreamingResponse(generate_latest(), media_type="text/plain")
-
-@app.get("/stats", tags=["Health"])
-async def get_stats():
-    """Cung cấp thống kê hoạt động ở dạng JSON cho dashboard nội bộ."""
-    process = psutil.Process()
-    return {
-        "gateway_name": settings.gateway.name,
-        "gateway_version": settings.gateway.version,
-        "cpu_usage_percent": process.cpu_percent(interval=0.1),
-        "memory_usage_mb": process.memory_info().rss / (1024 * 1024),
-        # Thêm các số liệu khác từ module metrics nếu cần
-    }
 
 if __name__ == "__main__":
     import uvicorn

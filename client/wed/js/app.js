@@ -2,6 +2,72 @@ import { AppState } from './config.js';
 import { GatewayAPI } from './api.js';
 import { UIRenderer } from './ui.js';
 
+async function completeLogin(accessToken, refreshToken) {
+    // Lưu token tạm thời để gọi /me
+    AppState.saveTokens(accessToken, refreshToken, '...');
+
+    try {
+        const meResponse = await GatewayAPI.getMe();
+        if (meResponse.ok) {
+            const userInfo = await meResponse.json();
+            AppState.saveTokens(accessToken, refreshToken, userInfo.email); // Lưu lại với email chính xác
+            UIRenderer.updateLoginState(true, userInfo.email);
+            initializeAppState();
+        }
+    } catch (e) { console.error("Failed to fetch user info", e); }
+}
+
+// --- LUỒNG XÁC THỰC & QUẢN LÝ API KEY ---
+
+async function handleLogin() {
+    const email = document.getElementById('auth-email').value;
+    const password = document.getElementById('auth-password').value;
+    const errorP = document.getElementById('auth-error');
+    errorP.textContent = "";
+
+    try {
+        const response = await GatewayAPI.login(email, password);
+        const data = await response.json();
+        if (response.ok) {
+            await completeLogin(data.access_token, data.refresh_token);
+        } else {
+            errorP.textContent = data.detail || "Đăng nhập thất bại.";
+        }
+    } catch (err) {
+        errorP.textContent = "Lỗi kết nối đến server.";
+    }
+}
+
+async function handleRegister() {
+    const email = document.getElementById('auth-email').value;
+    const password = document.getElementById('auth-password').value;
+    const errorP = document.getElementById('auth-error');
+    errorP.textContent = "";
+
+    try {
+        const response = await GatewayAPI.register(email, password);
+        const data = await response.json();
+        if (response.ok) {
+            await completeLogin(data.access_token, data.refresh_token);
+        } else {
+            errorP.textContent = data.detail || "Đăng ký thất bại.";
+        }
+    } catch (err) {
+        errorP.textContent = "Lỗi kết nối đến server.";
+    }
+}
+
+function handleGoogleLogin() {
+    window.location.href = `${GatewayAPI.getAuthBaseUrl()}/oauth/login/google`;
+}
+
+function handleLogout() {
+    AppState.logout();
+    UIRenderer.updateLoginState(false);
+    UIRenderer.renderApiKeyList([]);
+    UIRenderer.renderFileList([]);
+}
+
 // --- LUỒNG QUẢN LÝ TỆP ---
 async function loadFileList() {
     try {
@@ -54,6 +120,44 @@ async function handleFileUpload(e) {
         }
     } catch (err) {
         alert("Upload file thất bại.");
+    }
+}
+
+// --- LUỒNG QUẢN LÝ API KEY ---
+async function loadApiKeys() {
+    try {
+        const response = await GatewayAPI.listApiKeys();
+        if (response.ok) {
+            const keys = await response.json();
+            UIRenderer.renderApiKeyList(keys, revokeApiKey);
+        }
+    } catch (err) {
+        console.error("Lỗi tải danh sách API key:", err);
+    }
+}
+
+async function createNewApiKey() {
+    const nameInput = document.getElementById('new-api-key-name');
+    if (!nameInput.value) return;
+
+    const response = await GatewayAPI.createApiKey(nameInput.value);
+    if (response.ok) {
+        const newKey = await response.json();
+        alert(`Tạo key thành công! Vui lòng lưu lại key này:\n\n${newKey.full_key}\n\nĐây là lần duy nhất key đầy đủ được hiển thị.`);
+        nameInput.value = "";
+        loadApiKeys();
+    } else {
+        alert("Tạo API key thất bại.");
+    }
+}
+
+async function revokeApiKey(keyId) {
+    if (!confirm("Thu hồi API key này? Key sẽ không thể sử dụng được nữa.")) return;
+    const response = await GatewayAPI.revokeApiKey(keyId);
+    if (response.ok) {
+        loadApiKeys();
+    } else {
+        alert("Thu hồi key thất bại.");
     }
 }
 
@@ -136,20 +240,48 @@ async function sendMessage() {
     }
 }
 
+function initializeAppState() {
+    if (AppState.isAuthenticated) {
+        loadFileList();
+        loadApiKeys();
+    }
+}
+
+function handleOAuthCallback() {
+    const params = new URLSearchParams(window.location.search);
+    const accessToken = params.get('access_token');
+    const refreshToken = params.get('refresh_token');
+
+    if (accessToken && refreshToken) {
+        // Xóa các tham số token khỏi URL để làm sạch
+        window.history.replaceState({}, document.title, window.location.pathname);
+        completeLogin(accessToken, refreshToken);
+    }
+}
+
 // --- KHỞI TẠO BẮT SỰ KIỆN KHI APP READY ---
 document.addEventListener("DOMContentLoaded", () => {
-    loadFileList();
+    handleOAuthCallback(); // Kiểm tra xem có phải là redirect từ OAuth không
 
+    // Auth events
+    document.getElementById('login-btn').addEventListener('click', handleLogin);
+    document.getElementById('register-btn').addEventListener('click', handleRegister);
+    document.getElementById('logout-btn').addEventListener('click', handleLogout);
+    document.getElementById('google-login-btn').addEventListener('click', handleGoogleLogin);
+
+    // Chat events
     document.getElementById('send-btn').addEventListener('click', sendMessage);
-    document.getElementById('file-uploader').addEventListener('change', handleFileUpload);
-    document.getElementById('provider-select').addEventListener('change', loadFileList);
-
     document.getElementById('message-input').addEventListener('keydown', (e) => {
         if (e.key === 'Enter' && !e.shiftKey) {
             e.preventDefault();
             sendMessage();
         }
     });
+
+    // File & API Key events
+    document.getElementById('file-uploader').addEventListener('change', handleFileUpload);
+    document.getElementById('provider-select').addEventListener('change', loadFileList);
+    document.getElementById('create-api-key-btn').addEventListener('click', createNewApiKey);
 
     window.viewModelDetails = async () => {
         const data = await GatewayAPI.getModelDetails(AppState.getModel(), AppState.getProvider());
@@ -163,6 +295,9 @@ document.addEventListener("DOMContentLoaded", () => {
         document.getElementById('chat-messages').innerHTML = `<div class="message assistant">🧹 Đã làm sạch ngữ cảnh.</div>`;
     };
 
+    // Tải trạng thái ban đầu
     window.loadFileList = loadFileList;
+    AppState.loadTokensFromStorage();
+    UIRenderer.updateLoginState(AppState.isAuthenticated, AppState.userEmail);
+    initializeAppState();
 });
-

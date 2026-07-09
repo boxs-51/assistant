@@ -1,7 +1,7 @@
 from typing import Dict, Optional
 import structlog
 
-from .providers.base.provider import BaseProvider
+from .providers.core.provider import BaseProvider
 from .models import ProviderEntry
 
 logger = structlog.get_logger(__name__)

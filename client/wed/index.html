@@ -8,12 +8,33 @@
 </head>
 <body>
 
+    <!-- Login Modal -->
+    <div id="login-modal-overlay">
+        <div id="login-modal-content">
+            <h2>Chào mừng đến Gateway</h2>
+            <div id="auth-form">
+                <label for="email">Email</label>
+                <input type="email" id="auth-email" placeholder="user@example.com">
+                <label for="password">Mật khẩu</label>
+                <input type="password" id="auth-password" placeholder="••••••••">
+                <div id="auth-buttons">
+                    <button id="login-btn">Đăng Nhập</button>
+                    <button id="register-btn" class="secondary">Đăng Ký</button>
+                </div>
+                <button id="google-login-btn" class="google-btn">Đăng nhập với Google</button>
+                <p id="auth-error"></p>
+            </div>
+        </div>
+    </div>
+
     <div id="sidebar">
         <h2>Gateway Hub</h2>
+        <div id="account-section" class="section" style="display: none;">
+             <p>Xin chào, <strong id="user-email"></strong>!</p>
+             <button id="logout-btn" class="secondary" style="margin-top: 10px;">Đăng Xuất</button>
+        </div>
         <div class="section">
             <h3>Cấu hình</h3>
-            <label>API Key</label>
-            <input type="password" id="api-key" value="change-me">
             
             <label>Provider</label>
             <select id="provider-select">
@@ -24,6 +45,13 @@
             <label>Model ID</label>
             <input type="text" id="model-id" value="gemini-2.5-flash">
             <button class="secondary" onclick="viewModelDetails()">Xem Chi Tiết Model</button>
+        </div>
+
+        <div id="api-keys-section" class="section" style="display: none;">
+            <h3>API Keys</h3>
+            <input type="text" id="new-api-key-name" placeholder="Tên gợi nhớ cho key mới...">
+            <button id="create-api-key-btn">Tạo API Key Mới</button>
+            <div id="api-key-list"></div>
         </div>
 
         <div class="section" style="flex: 1; display: flex; flex-direction: column;">

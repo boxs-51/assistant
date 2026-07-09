@@ -13,7 +13,7 @@ from .registry import ProviderRegistry
 from .discovery import ProviderDiscovery
 from ..circuit_breaker import CircuitBreakerManager
 from ..schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
-from .providers.base.provider import BaseProvider
+from .providers.core.provider import BaseProvider
 
 import asyncio, anyio
 logger = structlog.get_logger(__name__)

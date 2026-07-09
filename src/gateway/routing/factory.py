@@ -1,6 +1,6 @@
 from typing import Dict, Type, Optional
 
-from .providers.base.provider import BaseProvider
+from .providers.core.provider import BaseProvider
 from .providers.openai import OpenAIProvider
 from .providers.ollama import OllamaProvider
 from .providers.google import GoogleProvider

@@ -2,8 +2,8 @@ from typing import List ,Any, Union, BinaryIO
 from fastapi import UploadFile
 
 from ..converters.files.response import ResponseFiles 
-from ...base import ApiType, BaseProvider
-from ...base.interfaces.file import FileProvider
+from ...core import ApiType, BaseProvider
+from ...core.interfaces.file import FileProvider
 from ..file_extension import FileHelper
 
 import structlog

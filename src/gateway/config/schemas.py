@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, AnyHttpUrl, model_validator
-
+from typing import Dict, Optional
 # =================================================================
 # CONFIGURATION SCHEMAS
 # Đây là các Pydantic Model định nghĩa cấu trúc của cấu hình.
@@ -13,9 +13,35 @@ class GatewaySettings(BaseModel):
     port: int = 8000
     debug: bool = False
 
+class OAuthClientConfig(BaseModel):
+    client_id: str
+    client_secret: str
+
+class OAuthSettings(BaseModel):
+    google: Optional[OAuthClientConfig] = None
+    github: Optional[OAuthClientConfig] = None
+
+class AuthenticationSettings(BaseModel):
+    jwt_secret_key: str = "change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_expiration: int = 3600
+
+    access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 30
+
+class FrontendSettings(BaseModel):
+    oauth_callback_url: Optional[str] = None
+
 class SecuritySettings(BaseModel):
     api_key: str = "change-me"
     enable_auth: bool = False
+    jwt_secret_key: str = "change-me"
+    jwt_algorithm: str = "HS256"
+    jwt_expiration: int = 3600
+
+    access_token_expire_minutes: int = 30
+    refresh_token_expire_days: int = 30
+    
     enable_input_guardrail: bool = True
     enable_output_guardrail: bool = True
 
@@ -27,6 +53,23 @@ class RateLimitSettings(BaseModel):
     window_size: int = 60
     fail_mode: str = "open"  # 'open' hoặc 'closed'
 
+class RedisSettings(BaseModel):
+    url: str = "redis://localhost:6379/0"
+    cache_expire_seconds: int = 3600
+    key_prefix: str = "aigateway"
+
+class DriverConfig(BaseModel):
+    enabled: bool = True
+    url: Optional[str] = None
+    host: Optional[str] = None
+    port: Optional[int] = None
+    path: Optional[str] = None
+    password: Optional[str] = None
+
+
+class StorageSettings(BaseModel):
+    drivers: Dict[str, DriverConfig] = Field(default_factory=dict)
+
 class CircuitBreakerProviderSettings(BaseModel):
     """Cấu hình ngưỡng cho một Circuit Breaker cụ thể."""
     failure_threshold: int = 3
@@ -37,10 +80,6 @@ class CircuitBreakerSettings(BaseModel):
     default: CircuitBreakerProviderSettings = Field(default_factory=CircuitBreakerProviderSettings)
     providers: dict[str, CircuitBreakerProviderSettings] = Field(default_factory=dict)
 
-class RedisSettings(BaseModel):
-    url: str = "redis://localhost:6379/0"
-    cache_expire_seconds: int = 3600
-    key_prefix: str = "aigateway"
 
 class ProviderSettings(BaseModel):
     timeout: int = 60
@@ -108,6 +147,12 @@ class ConfigSchema(BaseModel):
     tracing: TracingSettings = Field(default_factory=TracingSettings)
     semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
     token_budget: TokenBudgetSettings = Field(default_factory=TokenBudgetSettings)
+    storage: StorageSettings = Field(default_factory=StorageSettings)
+    auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
+    oauth: OAuthSettings = Field(default_factory=OAuthSettings)
+    frontend: FrontendSettings = Field(default_factory=FrontendSettings)
+
+
 
     class Config:
         extra = "forbid" # Ném lỗi nếu có key không xác định trong cấu hình

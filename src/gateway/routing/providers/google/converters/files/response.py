@@ -1,11 +1,11 @@
-from typing import List, Dict, Any
+import datetime
+from typing import List, Dict, Any, Optional
 
 from ......schemas import (
     GatewayAttachment,
     FileMetadata
 
 )
-from ...utils import _parse_iso_to_timestamp
 
 
 import structlog
@@ -13,6 +13,18 @@ logger = structlog.get_logger(__name__)
 
 
 class ResponseFiles():
+
+    def _parse_iso_to_timestamp(iso_str: Optional[str]) -> Optional[int]:
+        """Hàm trợ giúp convert ISO datetime string từ Google API sang Unix timestamp."""
+        if not iso_str:
+            return None
+        try:
+            # Xử lý ký tự 'Z' của UTC để tương thích với các phiên bản Python cũ/mới
+            clean_str = iso_str.replace("Z", "+00:00")
+            dt = datetime.datetime.fromisoformat(clean_str)
+            return int(dt.timestamp())
+        except Exception:
+            return None
 
     async def adapt_file_upload_response(self, response: Any) -> GatewayAttachment:
         """
@@ -53,8 +65,8 @@ class ResponseFiles():
                 final_size = None
 
             # 3. Xử lý timestamps (Chuyển ISO 8601 string thành Unix timestamp int)
-            created_timestamp = _parse_iso_to_timestamp(iso_str=file_data.get("createTime"))
-            modified_timestamp = _parse_iso_to_timestamp(iso_str=file_data.get("updateTime"))
+            created_timestamp = self._parse_iso_to_timestamp(iso_str=file_data.get("createTime"))
+            modified_timestamp = self._parse_iso_to_timestamp(iso_str=file_data.get("updateTime"))
 
             # 4. Tạo FileMetadata DTO chi tiết
             metadata_dto = FileMetadata(

@@ -8,6 +8,7 @@
     --accent-hover: #b4befe;
     --border: #45475a;
     --user-msg: #89b4fa;
+    --error-text: #f38ba8;
     --ai-msg: #45475a;
 }
 
@@ -24,6 +25,50 @@ body {
     background-color: var(--bg-main);
     color: var(--text-main);
     overflow: hidden;
+}
+
+/* LOGIN MODAL */
+#login-modal-overlay {
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: 100%;
+    height: 100%;
+    background: rgba(0, 0, 0, 0.7);
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    z-index: 1000;
+}
+
+#login-modal-content {
+    background: var(--bg-sidebar);
+    padding: 30px;
+    border-radius: 12px;
+    border: 1px solid var(--border);
+    width: 400px;
+    text-align: center;
+}
+
+#auth-buttons {
+    display: flex;
+    gap: 10px;
+}
+
+#auth-error {
+    color: var(--error-text);
+    font-size: 14px;
+    margin-top: 15px;
+    min-height: 20px;
+}
+
+.google-btn {
+    background-color: #4285F4;
+    color: white;
+    margin-top: 10px;
+}
+.google-btn:hover {
+    background-color: #357ae8;
 }
 
 /* SIDEBAR */
@@ -138,6 +183,31 @@ button.secondary:hover {
     color: #a6e3a1;
 }
 
+/* API Key List */
+#api-key-list {
+    margin-top: 15px;
+    max-height: 150px;
+    overflow-y: auto;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+}
+
+.api-key-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    background: var(--bg-chat);
+    padding: 8px;
+    border-radius: 4px;
+    font-size: 13px;
+}
+
+.api-key-item .del {
+    cursor: pointer;
+    color: #f38ba8;
+}
+
 /* CHAT CONTAINER */
 #chat-container {
     flex: 1;
@@ -239,4 +309,3 @@ button.secondary:hover {
     border-top: 1px solid var(--border);
     display: none;
 }
-

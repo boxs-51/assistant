@@ -7,7 +7,7 @@ import os
 from typing import Dict, Any, AsyncGenerator, List, Optional
 
 # 1. Import các thành phần đã được module hóa
-from ..base import (
+from ..core import (
     BaseProvider, ApiType,
     ApiKeyInQuery, ApiTypeMapper, BearerToken,
     EndpointBuilder,
@@ -15,7 +15,6 @@ from ..base import (
     ModelMapper
 )
 from ....config import settings
-from .utils import *
 from .api import GoogleChat, GoogleFiles, GoogleModels, GoogleEmbeddings
 
 logger = structlog.get_logger(__name__)
