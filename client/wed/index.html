@@ -5,26 +5,37 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Gateway Multimodal Client</title>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/atom-one-dark.min.css">
     <link rel="stylesheet" href="css/style.css">
 </head>
 
 <body>
 
-    <!-- Login Modal -->
+    <!-- Login/Register Modal -->
     <div id="login-modal-overlay">
         <div id="login-modal-content">
             <h2>Chào mừng đến Gateway</h2>
-            <div id="auth-form">
+            <div id="auth-form" class="auth-view">
                 <label for="email">Email</label>
                 <input type="email" id="auth-email" placeholder="user@example.com">
                 <label for="password">Mật khẩu</label>
                 <input type="password" id="auth-password" placeholder="••••••••">
                 <div id="auth-buttons">
                     <button id="login-btn">Đăng Nhập</button>
-                    <button id="register-btn" class="secondary">Đăng Ký</button>
+                    <button id="show-register-btn" class="secondary">Đăng Ký</button>
                 </div>
                 <button id="google-login-btn" class="google-btn">Đăng nhập với Google</button>
                 <p id="auth-error"></p>
+            </div>
+            <div id="otp-form" class="auth-view" style="display: none;">
+                <p>Một mã OTP đã được gửi đến <strong id="otp-email-display"></strong>. Vui lòng kiểm tra và nhập vào bên dưới.</p>
+                <label for="otp">Mã OTP</label>
+                <input type="text" id="auth-otp" placeholder="123456">
+                <div id="otp-buttons">
+                    <button id="verify-otp-btn">Xác Thực</button>
+                    <button id="cancel-otp-btn" class="secondary">Hủy</button>
+                </div>
+                 <p id="otp-error"></p>
             </div>
         </div>
     </div>
@@ -46,7 +57,7 @@
 
             <label>Model ID</label>
             <input type="text" id="model-id" value="gemini-2.5-flash">
-            <button class="secondary" onclick="viewModelDetails()">Xem Chi Tiết Model</button>
+            <button id="view-model-details-btn" class="secondary">Xem Chi Tiết Model</button>
         </div>
 
         <div id="api-keys-section" class="section" style="display: none;">
@@ -58,15 +69,13 @@
 
         <div class="section" style="flex: 1; display: flex; flex-direction: column;">
             <h3>Tệp tin Ngữ cảnh</h3>
-            <input type="file" id="file-uploader" style="display: none;">
-            <button onclick="document.getElementById('file-uploader').click()">📤 Tải Lên Tệp Mới</button>
-            <button class="secondary" onclick="loadFileList()">🔄 Làm Mới Danh Sách</button>
+            <input type="file" id="file-uploader" style="display: none;" multiple>
+            <button id="upload-file-btn">📤 Đính kèm Tệp</button>
 
             <div id="file-list"></div>
         </div>
 
-        <button class="secondary" style="border-color: #f38ba8; color: #f38ba8;" onclick="clearConversation()">🧹 Làm
-            Sạch Hội Thoại</button>
+        <button id="clear-conversation-btn" class="secondary" style="border-color: #f38ba8; color: #f38ba8;">🧹 Làm Sạch Hội Thoại</button>
     </div>
 
     <div id="chat-container">
@@ -78,7 +87,7 @@
             <div class="message assistant">Chào bạn! Hệ thống Modular Client đã sẵn sàng hoạt động.</div>
         </div>
 
-        <div id="active-context-bar">📌 Đang đính kèm ngữ cảnh: <span id="active-context-files"></span></div>
+        <div id="active-context-bar">📌 Đang đính kèm: <span id="active-context-files"></span></div>
 
         <div id="chat-input-area">
             <textarea id="message-input" placeholder="Nhập tin nhắn... (Enter để gửi)"></textarea>
@@ -86,7 +95,9 @@
         </div>
     </div>
 
-    <script type="module" src="js/app.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.2/marked.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+    <script type="module" src="js/main.js"></script>
 </body>
 
 </html>

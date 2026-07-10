@@ -1,15 +1,16 @@
 import json
 import structlog
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Optional, Callable
 
-from ...storage.repositories.users import UserRepository
+from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
+
 logger = structlog.get_logger(__name__)
 
 class OTPStorageService:
-    def __init__(self, redis_client, user_repo: UserRepository):
+    def __init__(self, redis_client, uow_factory: Callable[[], SqlAlchemyUnitOfWork]):
         self.redis = redis_client
-        self.user_repo = user_repo
+        self.uow_factory = uow_factory
         self.otp_ttl = 300       # 5 phút hiệu lực cho mã OTP
         self.cooldown_ttl = 60   # 60 giây chờ tối thiểu giữa các lần bấm gửi lại
 
@@ -35,11 +36,12 @@ class OTPStorageService:
 
         # 2. Fallback sang DB nếu Redis sập
         # Cần thiết kế bảng `pending_registrations` hoặc tận dụng trường JSON/Bảng phụ trong user_repo
-        await self.user_repo.save_pending_registration_fallback(
-            email=email, 
-            payload=payload_str, 
-            expires_in_seconds=self.otp_ttl
-        )
+        async with self.uow_factory() as uow:
+            await uow.pending_registrations.create_or_update(
+                email=email,
+                payload=payload_str, 
+                expires_in_seconds=self.otp_ttl
+            )
 
     async def check_cooldown(self, email: str) -> int:
         """Kiểm tra thời gian cooldown còn lại. Trả về số giây còn lại (0 nếu đã hết)."""
@@ -51,7 +53,8 @@ class OTPStorageService:
             logger.error("Redis error during cooldown check, falling back to DB check", error=str(e))
             
         # Fallback DB: tính dựa trên thời gian bản ghi cũ tồn tại trong DB
-        return await self.user_repo.get_remaining_cooldown_fallback(email, self.cooldown_ttl)
+        async with self.uow_factory() as uow:
+            return await uow.pending_registrations.get_remaining_cooldown(email, self.cooldown_ttl)
 
     async def verify_and_get_data(self, email: str, input_otp: str) -> Optional[dict]:
         """Xác thực mã OTP và lấy dữ liệu người dùng ra để tạo tài khoản."""
@@ -68,7 +71,11 @@ class OTPStorageService:
 
         # 2. Nếu Redis sập hoặc không tìm thấy, thử tìm trong DB Fallback
         if not raw_data:
-            raw_data = await self.user_repo.get_and_delete_pending_registration_fallback(email)
+            async with self.uow_factory() as uow:
+                pending_record = await uow.pending_registrations.get_and_delete(email)
+                if pending_record:
+                    raw_data = pending_record.payload
+
 
         if not raw_data:
             return None

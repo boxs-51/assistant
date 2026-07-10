@@ -1,7 +1,6 @@
 import asyncio
 import os
-from typing import Optional, Tuple, List
-import span
+from typing import List
 import time
 import chromadb
 import structlog
@@ -142,7 +141,7 @@ class ChromaVectorDriver(VectorStorageDriver):
 
     async def cleanup(self):
         """Xóa các entry đã hết hạn TTL khỏi collection."""
-        with tracer.start_as_current_span("chroma_cleanup"):
+        with tracer.start_as_current_span("chroma_cleanup") as span:
             try:
                 current_time = time.time()
                 # Lấy các entry có trường expires_at nhỏ hơn thời gian hiện tại

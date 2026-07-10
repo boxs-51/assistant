@@ -2,6 +2,7 @@ from fastapi import Request
 from fastapi.responses import JSONResponse
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
+import fnmatch
 
 from .manager import AuthenticationManager
 from .exceptions import AuthenticationError, InvalidCredentialsError
@@ -13,14 +14,20 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
         super().__init__(app)
         self.public_paths = public_paths
 
+    def _is_public(self, path: str) -> bool:
+        """Kiểm tra xem một đường dẫn có khớp với bất kỳ mẫu công khai nào không."""
+        for pattern in self.public_paths:
+            if fnmatch.fnmatch(path, pattern):
+                return True
+        return False
+
     async def dispatch(self, request: Request, call_next):
         # Tự động bỏ qua tất cả các request OPTIONS (dành cho CORS preflight)
         # CORSMiddleware sẽ xử lý chúng sau.
         if request.method == "OPTIONS":
             return await call_next(request)
 
-        # Bỏ qua xác thực cho các public endpoints (e.g., /docs, /health, /auth/*)
-        if any(request.url.path.startswith(path) for path in self.public_paths):
+        if self._is_public(request.url.path):
             return await call_next(request)
 
         try:

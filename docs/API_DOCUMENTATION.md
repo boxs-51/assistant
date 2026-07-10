@@ -47,18 +47,20 @@ Tiền tố chung: `/admin`
 Tiền tố chung: `/auth`  
 *Xử lý quy trình quản lý định danh người dùng, cấp phát mã JWT và tạo/thu hồi API Key.*
 
-| Endpoint & Method                     | Dữ liệu đầu vào (Input)                                      | Dữ liệu đầu ra (Output) / Phản hồi                                                                                                        |
-| :------------------------------------ | :----------------------------------------------------------- | :---------------------------------------------------------------------------------------------------------------------------------------- |
-| `POST /auth/register`                 | `UserCreateSchema` (JSON gồm email, password, name...)       | `TokenSchema` chứa `access_token` và `refresh_token` khi đăng ký thành công. Trả về mã lỗi 400 nếu thông tin trùng lặp hoặc không hợp lệ. |
-| `POST /auth/login`                    | `LoginRequestSchema` (Thông tin tài khoản email và mật khẩu) | `TokenSchema` (Mã Token truy cập). Lỗi 401 Unauthorized kèm header WWW-Authenticate nếu sai thông tin xác thực.                           |
-| `POST /auth/refresh`                  | `RefreshRequestSchema` (Chuỗi `refresh_token`)               | `AccessTokenSchema` cấp mới chuỗi Access Token mới để duy trì phiên làm việc của Client.                                                  |
-| `POST /auth/logout`                   | `RefreshRequestSchema` (Chuỗi `refresh_token` cần hủy)       | Trả về mã HTTP trạng thái `204 No Content`. Phía Client cần chủ động xóa token khỏi bộ nhớ thiết bị.                                      |
-| `GET /auth/oauth/login/{provider}`    | Tham số đường dẫn `provider` (Ví dụ: `github`, `google`)     | Redirect hướng người dùng trực tiếp sang trang xác thực tài khoản của bên thứ ba được chỉ định.                                           |
-| `GET /auth/oauth/callback/{provider}` | Nhận mã code xác thực từ OAuth Provider phản hồi             | Tự động chuẩn hóa email, chuyển hướng về `FRONTEND_OAUTH_CALLBACK_URL` kèm theo các chuỗi tham số Token tương ứng.                        |
-| `POST /auth/api-keys`                 | `APIKeyCreateSchema` (Cấu hình quyền hạn khóa)               | `APIKeyResponseSchema` (Thông tin khóa API được khởi tạo kèm chuỗi secret hiển thị một lần). Yêu cầu xác thực JWT.                        |
-| `GET /auth/api-keys`                  | Không có input body. Xác thực qua JWT Header.                | Danh sách `List[APIKeyInfoSchema]` hiển thị các thông tin cấu hình cơ bản về khóa API của người dùng đó.                                  |
-| `DELETE /auth/api-keys/{key_id}`      | Tham số đường dẫn `key_id`                                   | Mã trạng thái `204 No Content` biểu thị thu hồi/vô hiệu hóa khóa thành công.                                                              |
-| `GET /auth/me`                        | Xác thực JWT Header.                                         | `UserMeSchema` chứa thông tin hồ sơ chi tiết của tài khoản đang thực hiện phiên làm việc.                                                 |
+| Endpoint & Method | Dữ liệu đầu vào (Input) | Dữ liệu đầu ra (Output) / Phản hồi |
+| :--- | :--- | :--- |
+| `POST /auth/register/initiate` | `UserCreateSchema` (JSON gồm email, password) | `{"status": "success", "message": "OTP has been sent."}`. Lỗi 429 nếu yêu cầu gửi lại OTP quá nhanh. Lỗi 400 nếu email đã tồn tại. |
+| `POST /auth/register/verify` | `VerifyOTPRequest` (JSON gồm email, otp) | `TokenSchema` chứa `access_token` và `refresh_token` khi xác thực OTP thành công. Lỗi 400 nếu OTP không hợp lệ. |
+| `POST /auth/login` | `LoginRequestSchema` (Thông tin tài khoản email và mật khẩu) | `TokenSchema` (Mã Token truy cập). Lỗi 401 Unauthorized nếu sai thông tin xác thực. |
+| `POST /auth/refresh` | `RefreshRequestSchema` (Chuỗi `refresh_token`) | `AccessTokenSchema` cấp mới chuỗi Access Token để duy trì phiên làm việc. |
+| `POST /auth/logout` | `RefreshRequestSchema` (Chuỗi `refresh_token` cần hủy) | Trả về mã HTTP `204 No Content`. Client cần chủ động xóa token khỏi bộ nhớ. |
+| `GET /auth/oauth/login/{provider}` | Tham số đường dẫn `provider` (Ví dụ: `github`, `google`) | Redirect người dùng sang trang xác thực của OAuth provider. |
+| `GET /auth/oauth/callback/{provider}` | Nhận mã code xác thực từ OAuth Provider | Tự động xử lý, tạo/đăng nhập người dùng và chuyển hướng về `FRONTEND_OAUTH_CALLBACK_URL` kèm theo token. |
+| `POST /auth/oauth/{provider}` | `OAuthUserInfoSchema` (Thông tin người dùng từ provider) | `TokenSchema`. Dùng khi client tự xử lý luồng OAuth và gửi thông tin người dùng về server. |
+| `POST /auth/api-keys` | `APIKeyCreateSchema` (Tên gợi nhớ cho khóa) | `APIKeyResponseSchema` (Thông tin khóa API được tạo, bao gồm chuỗi secret hiển thị một lần). Yêu cầu xác thực JWT. |
+| `GET /auth/api-keys` | Không có. Xác thực qua JWT Header. | Danh sách `List[APIKeyInfoSchema]` hiển thị các thông tin cơ bản về các khóa API của người dùng. |
+| `DELETE /auth/api-keys/{key_id}` | Tham số đường dẫn `key_id` | Mã trạng thái `204 No Content` báo hiệu thu hồi khóa thành công. |
+| `GET /auth/me` | Không có. Xác thực qua JWT Header. | `UserMeSchema` chứa thông tin hồ sơ (ID, email, roles) của tài khoản đang đăng nhập. |
 
 ---
 
@@ -94,14 +96,14 @@ Tiền tố chung: `/v1/files`
 ### 5.1 Lấy danh sách tệp tin
 * **Method:** `GET`
 * **URL:** `/v1/files/`
-* **Tham số truy vấn (Query Params):** `provider_name` (bắt buộc), `page_size` (tùy chọn phân trang), `page_token` (mã trang tiếp theo).
+* **Tham số truy vấn (Query Params):** `provider_name` (bắt buộc), `page_size` (tùy chọn), `page_token` (tùy chọn).
 * **Dữ liệu đầu ra:** Danh sách mảng thông tin các tệp tin lưu trữ sẵn có trên hệ thống đích.
 
 ### 5.2 Tải tệp tin lên hệ thống (Upload via Stream)
 * **Method:** `POST`
 * **URL:** `/v1/files/`
 * **Dữ liệu đầu vào (Multipart/Form-Data):**
-    * Tham số URL Query: `provider_name`, `display_name` (tùy chọn tên hiển thị).
+    * Tham số URL Query: `provider_name` (bắt buộc), `display_name` (tùy chọn).
     * Dữ liệu File Form: Đối tượng tệp tin nhị phân `file` (kiểu dữ liệu `UploadFile`).
 * **Dữ liệu đầu ra:** Đối tượng JSON chứa kết quả định danh và đường dẫn lưu trữ tệp tin thành công trên provider.
 
@@ -109,8 +111,8 @@ Tiền tố chung: `/v1/files`
 * **Method:** `GET`
 * **URL:** `/v1/files/{file_id:path}`
 * **Tham số truy vấn:**
-    * `provider_name`: Tên nhà cung cấp đích (e.g., openai, gemini).
-    * `action`: Nhận giá trị cấu hình literal gồm `metadata` (để lấy thông tin JSON của tệp) hoặc `download` (để phát trực tiếp luồng dữ liệu nhị phân nguyên bản).
+    * `provider_name`: Tên nhà cung cấp đích (bắt buộc).
+    * `action`: Nhận một trong hai giá trị: `metadata` (mặc định) để lấy thông tin tệp, hoặc `download` để tải nội dung tệp.
 * **Dữ liệu đầu ra:** Trả về thông tin JSON chi tiết hoặc một luồng byte nhị phân `StreamingResponse` đính kèm header cấu hình tải về tương ứng `Content-Disposition: attachment`.
 
 ### 5.4 Xóa tệp tin khỏi hệ thống lưu trữ
@@ -126,17 +128,19 @@ Tiền tố chung: `/v1/files`
 ### 6.1 Lấy danh sách mô hình AI khả dụng
 * **Method:** `GET`
 * **URL:** `/v1/models/`
-* **Tham số truy vấn:** `provider_name` (Xác định nhà cung cấp cần liệt kê).
+* **Tham số truy vấn:** `provider_name` (bắt buộc, xác định nhà cung cấp cần liệt kê).
 * **Đặc trưng xử lý:** Sau khi nhận danh sách thô từ đối tác bên thứ ba, hệ thống chạy qua `capability_manager.enrich_capabilities` để bổ sung thông tin tính năng đặc trưng riêng biệt được hệ thống AI Gateway hỗ trợ.
+* **Dữ liệu đầu ra:** Danh sách các model đã được làm giàu thông tin.
 
 ### 6.2 Xem chi tiết tính năng của một mô hình cụ thể
 * **Method:** `GET`
 * **URL:** `/v1/models/{model_id:path}`
+* **Tham số truy vấn:** `provider_name` (bắt buộc).
 * **Dữ liệu đầu ra:** Cấu trúc JSON làm giàu thông tin mô hình chi tiết sau khi đã qua bộ bổ sung tính năng.
 
 ### 6.3 Các Endpoints Giám sát Hệ thống (Liveness & Readiness Probes)
 Các endpoints này được thiết kế để phục vụ hệ thống tự động hóa điều phối như Kubernetes hoặc bảng điều khiển nội bộ:
-* `GET /health`: Kiểm tra khả năng sống của tiến trình độc lập (Liveness Probe). Trả về nhanh `{"status": "ok"}`.
-* `GET /ready`: Kiểm tra sự sẵn sàng hoạt động của các thành phần liên kết hạ tầng (Readiness Probe). Thực hiện ping kiểm tra kết nối Redis Driver và thử nghiệm kết nối mạng đến cổng dịch vụ của đối tác cấu hình LLM (như OpenAI /models API). Trả về `{"status": "ready"}` hoặc mã lỗi `503 Service Unavailable` nếu hỏng kết nối.
-* `GET /metrics`: Cung cấp dữ liệu thô phục vụ cho hệ thống Prometheus thực hiện thu thập dữ liệu (Scraping) dưới dạng text thuần (`text/plain`).
-* `GET /stats`: Trả về JSON chứa số liệu cấu hình trực quan như phần trăm tải CPU (`cpu_usage_percent`), dung lượng bộ nhớ RAM tiêu thụ (`memory_usage_mb`), tên cổng và phiên bản chạy ứng dụng phục vụ dashboard nội bộ.
+* `GET /health`: **Liveness Probe.** Kiểm tra khả năng sống của tiến trình độc lập. Luôn trả về `{"status": "ok"}` nếu ứng dụng đang chạy.
+* `GET /ready`: **Readiness Probe.** Kiểm tra sự sẵn sàng của các dịch vụ phụ thuộc (Redis, LLM Providers). Trả về `{"status": "ready"}` nếu tất cả các kết nối đều tốt, ngược lại trả về lỗi `503 Service Unavailable`.
+* `GET /metrics`: **Prometheus Endpoint.** Cung cấp dữ liệu thô phục vụ cho hệ thống Prometheus thu thập (scrape) dưới dạng `text/plain`.
+* `GET /stats`: **Internal Statistics.** Trả về JSON chứa các số liệu hoạt động như phần trăm tải CPU, dung lượng bộ nhớ RAM tiêu thụ, tên và phiên bản của gateway.

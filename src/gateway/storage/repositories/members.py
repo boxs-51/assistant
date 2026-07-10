@@ -1,6 +1,7 @@
 import structlog
 from typing import Optional, List
 from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..interfaces.repository import BaseRepository
 from ..interfaces.database import DatabaseDriver
@@ -12,8 +13,8 @@ class MemberRepository(BaseRepository):
     """
     Repository cho các thao tác trên đối tượng Member.
     """
-    def __init__(self, db_driver: DatabaseDriver):
-        self.db_driver = db_driver
+    def __init__(self, session: AsyncSession):
+        self.session = session
 
     async def create(self, organization_id: str, user_id: str, role: str) -> Member:
         """Thêm một user vào một organization với một vai trò cụ thể."""
@@ -22,9 +23,7 @@ class MemberRepository(BaseRepository):
             user_id=user_id,
             role=role
         )
-        async with self.db_driver.get_session() as session:
-            session.add(new_member)
-            await session.commit()
-            await session.refresh(new_member)
-            logger.info("New member added to organization", user_id=user_id, org_id=organization_id, role=role)
-            return new_member
+        self.session.add(new_member)
+        await self.session.flush()
+        logger.info("New member added to session", user_id=user_id, org_id=organization_id, role=role)
+        return new_member

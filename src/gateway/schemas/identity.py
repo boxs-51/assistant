@@ -1,24 +1,31 @@
 from pydantic import BaseModel, Field
-from typing import List, Optional, Literal
+from typing import List, Optional, Literal, Set
 
 class Identity(BaseModel):
     """
     Đối tượng chứa thông tin định danh của chủ thể sau khi xác thực.
     Đây là "Single Source of Truth" cho các tầng phía sau.
     """
-    # ID chính
+    # === ID chính ===
     user_id: Optional[str] = None
     organization_id: Optional[str] = None
     application_id: Optional[str] = None
     api_key_id: Optional[str] = None
+    session_id: Optional[str] = None # ID của session (ví dụ: từ Redis)
+    tenant_id: Optional[str] = None  # Dành cho kiến trúc Multi-Tenant
+
+    # === Thông tin request ===
+    request_id: Optional[str] = None # ID để trace request end-to-end
+    device_id: Optional[str] = None  # ID của thiết bị client
 
     # Loại xác thực
-    auth_type: Literal["jwt", "api_key"]
+    auth_type: Literal["jwt", "api_key", "admin_key"]
 
     # Thông tin về gói dịch vụ và quyền
     plan: str = "free"
     roles: List[str] = Field(default_factory=list)
     permissions: List[str] = Field(default_factory=list)
+    scopes: Set[str] = Field(default_factory=set, description="Các quyền truy cập được cấp (vd: 'gmail.read', 'drive.write')")
 
     def get_rate_limit_key(self) -> str:
         """
@@ -29,4 +36,3 @@ class Identity(BaseModel):
 
     class Config:
         frozen = True # Immutable, đảm bảo identity không bị thay đổi sau khi tạo
-

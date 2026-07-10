@@ -13,6 +13,8 @@ from ..repositories.organizations import OrganizationRepository
 from ..repositories.applications import ApplicationRepository
 from ..repositories.members import MemberRepository
 from ..repositories.oauth_accounts import OAuthAccountRepository
+from ..repositories.pending_registrations import PendingRegistrationRepository
+from ...authentication.permission import PermissionHelper
 from ..drivers.chroma.driver import ChromaVectorDriver
 from ..services.embedding_service import EmbeddingService
 from ..repositories.conversations import ConversationRepository
@@ -76,24 +78,20 @@ class StorageEngine:
 
     def _initialize_repositories(self):
         """Khởi tạo các repository và inject các driver cần thiết vào chúng."""
-        logger.info("Initializing repositories...")
+        logger.info("Initializing non-transactional repositories...")
         
         # Lấy các driver đã được đăng ký
         sqlite_driver = self.drivers.get("sqlite")
         redis_driver = self.drivers.get("redis")
         
-        # Khởi tạo và đăng ký các repository phụ thuộc vào SQLite
-        if sqlite_driver:
-            self.repositories.register("users", UserRepository(db_driver=sqlite_driver))
-            self.repositories.register("organizations", OrganizationRepository(db_driver=sqlite_driver))
-            self.repositories.register("applications", ApplicationRepository(db_driver=sqlite_driver))
-            self.repositories.register("members", MemberRepository(db_driver=sqlite_driver))
-            self.repositories.register("api_keys", APIKeyRepository(db_driver=sqlite_driver))
-            self.repositories.register("oauth_accounts", OAuthAccountRepository(db_driver=sqlite_driver))
-            self.repositories.register("conversations", ConversationRepository(db_driver=sqlite_driver))
-        else:
+        # Với kiến trúc Unit of Work, các repository liên quan đến SQL (User, Org, etc.)
+        # sẽ được khởi tạo bên trong chính UnitOfWork context.
+        # StorageEngine chỉ cần đăng ký các repository không thuộc về transaction của DB,
+        # ví dụ như các repository tương tác với Redis, S3, etc.
+        if not sqlite_driver:
             logger.warning(
-                "SQLite driver not found, SQL-dependent repositories will not be available."
+                "SQLite driver not found. SQL-dependent operations must be performed "
+                "within a Unit of Work context."
             )
 
         # Khởi tạo và đăng ký các repository phụ thuộc vào Redis
@@ -111,7 +109,7 @@ class StorageEngine:
         # Semantic Cache Service
         chroma_driver = self.drivers.get("chroma")
         if chroma_driver:
-            embedding_service = EmbeddingService(self.config.semantic_cache.model_dump())
+            embedding_service = EmbeddingService(settings.semantic_cache.model_dump())
             self.services["embedding_service"] = embedding_service
             
             from ..services.semantic_cache_service import SemanticCacheService

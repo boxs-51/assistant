@@ -24,7 +24,13 @@ if config.config_file_name is not None:
 # --- THAY ĐỔI QUAN TRỌNG ---
 # Import Base từ model của chúng ta để Alembic có thể "thấy" được các table
 from src.gateway.storage.models.sql.base import Base
-from src.gateway.storage.models.sql import user, api_key, oauth_account, member , application ,organization # Import tất cả các model bạn muốn Alembic quản lý
+from src.gateway.storage.models.sql import (
+    user, api_key, 
+    oauth_account, member , 
+    application ,organization,
+    permission, conversation, 
+    pending_registration
+) # Import tất cả các model bạn muốn Alembic quản lý
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---
@@ -96,3 +102,6 @@ if context.is_offline_mode():
     run_migrations_offline()
 else:
     run_migrations_online()
+
+#alembic revision --autogenerate -m "commit"
+#alembic upgrade head

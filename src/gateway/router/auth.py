@@ -12,8 +12,16 @@ from ..schemas.auth import (
     UserMeSchema, VerifyOTPRequest
 )
 from ..authentication.exceptions import InvalidCredentialsError, OTPCooldownError, OTPInvalidError
-from ..authentication.services.services import AuthenticationService
+# from ..authentication.services.services import AuthenticationService
+from ..authentication.services.otp_service import OTPStorageService
 from ..authentication.services.api_key_service import APIKeyService
+from ..authentication.services.token_service import TokenService
+from ..authentication.services.registration_service import RegistrationService
+from ..authentication.services.login_service import LoginService
+from ..authentication.services.oauth_service import OAuthService
+from ..authentication.services.user_service import UserService
+from ..storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ..authentication.services.authentication_facade import AuthenticationFacade
 from ..storage.core.manager import StorageEngine
 from ..config import settings
 from ..authentication.dependency import get_current_identity
@@ -23,52 +31,61 @@ router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = structlog.get_logger(__name__)
 
 
-
-def get_auth_service(request: Request) -> AuthenticationService:
-    """FastAPI Dependency để lấy AuthenticationService."""
+def get_otp_service(request: Request) -> OTPStorageService:
+    """FastAPI Dependency để lấy OTPStorageService."""
     storage: StorageEngine = request.app.state.storage
-    user_repo = storage.repositories.get("users")
+    redis_driver = storage.drivers.get("redis")
+    uow_factory = get_uow_factory(request)
+    return OTPStorageService(redis_driver._client if redis_driver else None, uow_factory)
+
+def get_uow_factory(request: Request):
+    """FastAPI Dependency để lấy Unit of Work Factory."""
+    storage: StorageEngine = request.app.state.storage
+    db_driver = storage.drivers.get("sqlite") # Hoặc postgres
+    return lambda: SqlAlchemyUnitOfWork(db_driver)
+
+def get_auth_facade(request: Request) -> AuthenticationFacade:
+    """FastAPI Dependency để lấy AuthenticationFacade."""
+    storage: StorageEngine = request.app.state.storage
+    
+    # Khởi tạo các service con
+    otp_service = get_otp_service(request)
+    uow_factory = get_uow_factory(request)
     session_repo = storage.repositories.get("sessions")
-    oauth_repo = storage.repositories.get("oauth_accounts")
-    org_repo = storage.repositories.get("organizations")
-    member_repo = storage.repositories.get("members")
-    redis_client = storage.drivers.get("redis")._client
-    if not all([user_repo, session_repo, oauth_repo, org_repo, member_repo]):
-        logger.error("Authentication repositories not initialized. Service cannot be created.")
-        raise HTTPException(status_code=503, detail="Authentication service is temporarily unavailable.")
-        
-    return AuthenticationService(
-        user_repo=user_repo, 
-        session_repo=session_repo, 
-        oauth_repo=oauth_repo,
-        org_repo=org_repo,
-        member_repo=member_repo,
-        redis_client = redis_client
+    token_service = TokenService(
+        uow_factory=uow_factory, 
+        session_repo=session_repo)
+    registration_service = RegistrationService(uow_factory, otp_service, token_service)
+    login_service = LoginService(uow_factory, token_service)
+    oauth_service = OAuthService(uow_factory, token_service)
+    user_service = UserService(uow_factory)
+
+    # Khởi tạo Facade
+    return AuthenticationFacade(
+        registration_service=registration_service,
+        login_service=login_service,
+        oauth_service=oauth_service,
+        token_service=token_service,
+        user_service=user_service,
     )
 
 def get_api_key_service(request: Request) -> APIKeyService:
     """FastAPI Dependency để lấy APIKeyService."""
     storage: StorageEngine = request.app.state.storage
-    api_key_repo = storage.repositories.get("api_keys")
-    app_repo = storage.repositories.get("applications")
-    org_repo = storage.repositories.get("organizations")
+    uow_factory = get_uow_factory(request)
 
-    if not all([api_key_repo, app_repo, org_repo]):
-        logger.error("API Key repositories not initialized. Service cannot be created.")
-        raise HTTPException(status_code=503, detail="API Key service is temporarily unavailable.")
-
-    return APIKeyService(api_key_repo=api_key_repo, app_repo=app_repo, org_repo=org_repo)
+    return APIKeyService(uow_factory=uow_factory)
 
 @router.post("/register/initiate")
 async def register_or_resend_otp(
     user_data: UserCreateSchema,
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Endpoint xử lý Đăng ký ban đầu VÀ Gửi lại mã OTP (Resend).
     """
     try:
-        result = await auth_service.initiate_registration(user_data)
+        result = await auth_facade.initiate_registration(user_data)
         return result
     except OTPCooldownError as cooldown_err:
         # Báo cáo cụ thể số giây còn lại cho phía Client cấu hình UI chặn nút bấm (Disable Button)
@@ -86,13 +103,13 @@ async def register_or_resend_otp(
 @router.post("/register/verify", response_model=TokenSchema)
 async def verify_otp_and_complete(
     payload: VerifyOTPRequest,
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Endpoint nhận OTP từ Client để xác thực hoàn tất đăng ký.
     """
     try:
-        tokens = await auth_service.confirm_registration(payload.email, payload.otp)
+        tokens = await auth_facade.confirm_registration(payload.email, payload.otp)
         return tokens
     except OTPInvalidError as otp_err:
         raise HTTPException(
@@ -100,29 +117,14 @@ async def verify_otp_and_complete(
             detail={"error": "invalid_or_expired_otp", "message": str(otp_err)}
         )
     
-@router.post("/register", response_model=TokenSchema, status_code=status.HTTP_201_CREATED)
-async def register_user(
-    user_data: UserCreateSchema,
-    auth_service: AuthenticationService = Depends(get_auth_service)
-):
-    """Endpoint để đăng ký người dùng mới."""
-    try:
-        tokens = await auth_service.register_user(user_data)
-        return tokens
-    except InvalidCredentialsError as e:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=e.detail)
-    except Exception as e:
-        logger.error("Error during user registration", error=str(e), exc_info=True)
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="An internal error occurred.")
-
 @router.post("/login", response_model=TokenSchema)
 async def login_for_access_token(
     login_data: LoginRequestSchema,
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """Endpoint để đăng nhập và nhận token."""
     try:
-        tokens = await auth_service.login(login_data)
+        tokens = await auth_facade.login(login_data)
         return tokens
     except InvalidCredentialsError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.detail, headers={"WWW-Authenticate": "Bearer"})
@@ -130,13 +132,13 @@ async def login_for_access_token(
 @router.post("/refresh", response_model=AccessTokenSchema)
 async def refresh_token(
     refresh_data: RefreshRequestSchema,
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Làm mới access token bằng refresh token.
     """
     try:
-        new_token = await auth_service.refresh_access_token(refresh_data.refresh_token)
+        new_token = await auth_facade.refresh_access_token(refresh_data.refresh_token)
         return new_token
     except InvalidCredentialsError as e:
         # Nếu refresh token không hợp lệ, yêu cầu đăng nhập lại
@@ -145,14 +147,14 @@ async def refresh_token(
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     refresh_data: RefreshRequestSchema,
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Đăng xuất và thu hồi refresh token.
     Client nên xóa access token và refresh token ở phía của mình sau khi gọi endpoint này.
     """
     try:
-        await auth_service.logout(refresh_data.refresh_token)
+        await auth_facade.logout(refresh_data.refresh_token)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     except Exception as e:
         logger.error("Error during logout", error=str(e), exc_info=True)
@@ -177,11 +179,12 @@ async def oauth_login_redirect(provider: str, request: Request):
 async def oauth_callback(
     provider: str,
     request: Request,
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Xử lý callback từ OAuth provider sau khi người dùng xác thực.
     """
+
     try:
         token = await request.app.state.oauth.create_client(provider).authorize_access_token(request)
         user_info_resp = await request.app.state.oauth.create_client(provider).userinfo(token=token)
@@ -199,9 +202,15 @@ async def oauth_callback(
             email = user_info_resp.get('email')
             provider_user_id = user_info_resp.get('sub')
 
-        user_schema = OAuthUserInfoSchema(email=email, provider_user_id=provider_user_id)
+        user_schema = OAuthUserInfoSchema(
+            email=email, 
+            provider=user_info_resp.get('provider'),
+            provider_user_id=provider_user_id, 
+            name=user_info_resp.get('name'),
+            profile_url=user_info_resp.get('picture_url')
+        )
         
-        tokens = await auth_service.handle_oauth_callback(provider, user_schema)
+        tokens = await auth_facade.handle_oauth_callback(provider, user_schema)
 
         # Chuyển hướng người dùng về frontend với token trong query params.
         # Frontend sẽ đọc các token này từ URL, lưu vào local storage/cookie và xóa chúng khỏi URL.
@@ -219,7 +228,7 @@ async def oauth_callback(
 async def oauth_login(
     provider: str,
     user_info: OAuthUserInfoSchema,
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Endpoint để xử lý callback sau khi người dùng xác thực thành công với OAuth provider.
@@ -227,7 +236,7 @@ async def oauth_login(
     lấy thông tin người dùng và gửi đến endpoint này.
     """
     try:
-        tokens = await auth_service.handle_oauth_callback(provider, user_info)
+        tokens = await auth_facade.handle_oauth_callback(provider, user_info)
         return tokens
     except Exception as e:
         logger.error("Error during OAuth callback handling", provider=provider, error=str(e), exc_info=True)
@@ -286,7 +295,7 @@ async def revoke_api_key(
 @router.get("/me", response_model=UserMeSchema)
 async def get_current_user(
     identity: Identity = Depends(get_current_identity),
-    auth_service: AuthenticationService = Depends(get_auth_service)
+    auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Lấy thông tin của người dùng đã được xác thực (qua JWT).
@@ -295,7 +304,7 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This action requires user authentication via JWT.")
     
     try:
-        user_info = await auth_service.get_current_user_info(identity)
+        user_info = await auth_facade.get_current_user_info(identity)
         return user_info
     except InvalidCredentialsError as e:
         # Nếu user không được tìm thấy trong DB vì một lý do nào đó

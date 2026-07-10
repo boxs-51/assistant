@@ -5,7 +5,7 @@ import httpx
 import structlog
 from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-
+from starlette.middleware.sessions import SessionMiddleware
 
 
 from .config.core import ConfigLoader, ConfigurationRegistry
@@ -15,6 +15,12 @@ from .circuit_breaker import CircuitBreakerManager
 from .authentication.oauth import create_oauth_client
 from .authentication.manager import AuthenticationManager
 from .router.auth import router as auth_router
+from .authentication.services.api_key_service import APIKeyService
+from .authentication.services.token_service import TokenService
+from .authentication.authenticators.api_key_authenticator import APIKeyAuthenticator
+from .authentication.authenticators.jwt_authenticator import JWTAuthenticator
+from .storage.core.unit_of_work import SqlAlchemyUnitOfWork
+
 from .authentication.middleware import AuthenticationMiddleware
 from .middleware.observability import observability_middleware
 
@@ -49,15 +55,17 @@ origins = [
 app.add_middleware(
     AuthenticationMiddleware,
     public_paths=[
-        "/docs", "/openapi.json", "/health", "/ready", "/metrics", "/stats",
-        # Chỉ các endpoint cụ thể trong /auth là public
-        "/auth/login",
-        "/auth/register",
-        "/auth/refresh",
-        "/auth/oauth"
+        "/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats",
+        "/auth/*"  # Sử dụng wildcard để mở tất cả các endpoint dưới /auth
     ]
 )
-
+SECRET_KEY="09d25e094faa6ca2556c818166b7a9563"
+app.add_middleware(
+    SessionMiddleware,
+    secret_key=SECRET_KEY, # Đảm bảo đã định nghĩa SECRET_KEY trong file config/env của bạn
+    session_cookie="oauth_session", # Tùy chọn đặt tên cookie
+    max_age=600 # Session chỉ cần sống khoảng 10 phút để phục vụ luồng login
+)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=origins,
@@ -86,6 +94,7 @@ async def startup_event():
     app_config = loader.load_config()
     ConfigurationRegistry.set_config(app_config)
     #settings = ConfigurationRegistry.get_config()
+
     # Cấu hình logging ngay khi khởi động
     config = ObservabilityConfig(service_name=settings.gateway.name,
                                  service_version=settings.gateway.version,
@@ -103,7 +112,7 @@ async def startup_event():
     app.state.storage = storage_engine
     logger.info("Storage Engine connected.")
     # -------------------------------------------------
-    app.state.cache = app.state.storage.services("semantic_cache")
+    app.state.cache = app.state.storage.services.get("semantic_cache")
     
     # --- Centralized Managers ---
     # CircuitBreakerManager giờ được dùng chung cho cả Router và Rate Limiter
@@ -113,10 +122,24 @@ async def startup_event():
         circuit_breaker_manager=circuit_breaker_manager)
 
     # --- Authentication Manager Initialization ---
+    # 1. Tạo các dependency cần thiết cho services
+    db_driver = storage_engine.drivers.get("sqlite")
+    uow_factory = lambda: SqlAlchemyUnitOfWork(db_driver)
+    session_repo = storage_engine.repositories.get("sessions")
+
+    # 2. Khởi tạo các service mà AuthenticationManager cần
+    token_service = TokenService(uow_factory=uow_factory, session_repo=session_repo)
+    api_key_service = APIKeyService(uow_factory=uow_factory)
+
+    # 3. Khởi tạo các chiến lược xác thực (Authenticators)
+    api_key_authenticator = APIKeyAuthenticator(api_key_service)
+    jwt_authenticator = JWTAuthenticator(token_service, uow_factory)
+
+    # 4. Khởi tạo AuthenticationManager với danh sách các chiến lược
+    # Thứ tự trong danh sách này rất quan trọng, nó quyết định độ ưu tiên xác thực.
     app.state.auth_manager = AuthenticationManager(
-        user_repo=storage_engine.repositories.get("users"),
-        api_key_repo=storage_engine.repositories.get("api_keys"),
-        session_repo=storage_engine.repositories.get("sessions"))
+        authenticators=[api_key_authenticator, jwt_authenticator]
+    )
     logger.info("Authentication Manager initialized.")
 
     # --- OAuth Client Initialization ---

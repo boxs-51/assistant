@@ -1,16 +1,25 @@
-import { CONFIG, AppState } from './config.js';
+import { CONFIG } from './config.js';
+import { AppState } from './state.js';
 
 export const GatewayAPI = {
     // --- AUTH ENDPOINTS ---
     getAuthBaseUrl() {
         return CONFIG.AUTH_API_URL;
     },
-
-    async register(email, password) {
-        return await fetch(`${CONFIG.AUTH_API_URL}/register`, {
+    
+    async initiateRegistration(email, password) {
+        return await fetch(`${CONFIG.AUTH_API_URL}/register/initiate`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ email, password })
+        });
+    },
+
+    async verifyOtp(email, otp) {
+        return await fetch(`${CONFIG.AUTH_API_URL}/register/verify`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ email, otp })
         });
     },
 

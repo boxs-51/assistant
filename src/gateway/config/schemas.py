@@ -59,7 +59,6 @@ class DriverConfig(BaseModel):
     path: Optional[str] = None
     password: Optional[str] = None
 
-
 class StorageSettings(BaseModel):
     drivers: Dict[str, DriverConfig] = Field(default_factory=dict)
 

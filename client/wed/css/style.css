@@ -49,6 +49,10 @@ body {
     width: 400px;
     text-align: center;
 }
+.auth-view {
+    display: flex;
+    flex-direction: column;
+}
 
 #auth-buttons {
     display: flex;
@@ -309,4 +313,36 @@ button.secondary:hover {
     color: #a6e3a1;
     border-top: 1px solid var(--border);
     display: none;
+}
+
+/* Streaming Cursor Effect */
+.streaming-cursor {
+    display: inline-block;
+    width: 8px;
+    height: 1.2em;
+    background-color: var(--accent);
+    margin-left: 2px;
+    animation: blink 1s infinite;
+    vertical-align: text-bottom;
+}
+
+@keyframes blink {
+    0%, 100% { opacity: 1; }
+    50% { opacity: 0; }
+}
+
+/* Image display in assistant message */
+.message.assistant img {
+    max-width: 100%;
+    border-radius: 8px;
+    margin-top: 10px;
+    border: 1px solid var(--border);
+}
+
+/* Right pane for image display */
+#image-label img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+    border-radius: 8px;
 }

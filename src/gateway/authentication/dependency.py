@@ -4,7 +4,7 @@ from ..schemas.identity import Identity
 from ..config import settings
 
 # Lấy danh sách IP được phép từ file cấu hình (Mặc định cho phép localhost nếu không cấu hình)
-ALLOWED_ADMIN_IPS = getattr(settings.auth.admin_ips, "allowed_ips", ["127.0.0.1", "::1"])
+
 
 async def verify_admin_ip(request: Request):
     """
@@ -16,7 +16,7 @@ async def verify_admin_ip(request: Request):
         client_ip = x_forwarded_for.split(",")[0].strip()
     else:
         client_ip = request.client.host if request.client else None
-
+    ALLOWED_ADMIN_IPS = getattr(settings.auth.admin_ips, "allowed_ips", ["127.0.0.1", "::1"])
     if not client_ip or client_ip not in ALLOWED_ADMIN_IPS:
         import structlog
         logger = structlog.get_logger(__name__)

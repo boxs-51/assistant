@@ -4,7 +4,7 @@ import structlog
 from typing import Callable, Awaitable, AsyncGenerator, Any
 
 from ..config import settings
-from ..middlewareimport observability as gateway_metrics
+from ..middleware.observability import gateway_metrics
 from .exceptions import ProviderError
 from .providers.core.provider import BaseProvider
 from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
