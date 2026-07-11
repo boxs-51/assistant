@@ -1,16 +1,22 @@
 import structlog
 from abc import ABC, abstractmethod
+from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..interfaces.database import DatabaseDriver
-from ..repositories.users import UserRepository
-from ..repositories.organizations import OrganizationRepository
-from ..repositories.members import MemberRepository
-from ..repositories.oauth_accounts import OAuthAccountRepository
-from ..repositories.pending_registrations import PendingRegistrationRepository
-from ..repositories.api_keys import APIKeyRepository
-from ..repositories.applications import ApplicationRepository
-from ..repositories.conversations import ConversationRepository
+from ..repositories.user_data.users import UserRepository
+from ..repositories.user_data.organizations import OrganizationRepository
+from ..repositories.user_data.members import MemberRepository
+from ..repositories.user_data.oauth_accounts import OAuthAccountRepository
+from ..repositories.user_data.pending_registrations import PendingRegistrationRepository
+from ..repositories.user_data.api_keys import APIKeyRepository
+from ..repositories.user_data.applications import ApplicationRepository
+from ..repositories.chat_data.projects import ProjectRepository
+from ..repositories.chat_data.sessions import SessionRepository
+from ..repositories.chat_data.attachments import AttachmentRepository
+
+from ...event_bus.bus import EventBus
+from .events import StorageEventFactory
 from ...authentication.permission import PermissionHelper
 
 logger = structlog.get_logger(__name__)
@@ -23,7 +29,9 @@ class AbstractUnitOfWork(ABC):
     pending_registrations: PendingRegistrationRepository
     api_keys: APIKeyRepository
     applications: ApplicationRepository
-    conversations: ConversationRepository
+    projects: ProjectRepository
+    sessions: SessionRepository
+    attachments: AttachmentRepository
     permissions: PermissionHelper
 
     async def __aenter__(self):
@@ -41,9 +49,10 @@ class AbstractUnitOfWork(ABC):
         raise NotImplementedError
 
 class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
-    def __init__(self, db_driver: DatabaseDriver):
+    def __init__(self, db_driver: DatabaseDriver, event_bus: EventBus):
         self._session_ctx = None
         self._session_factory = db_driver.get_session
+        self._event_bus = event_bus
 
     async def __aenter__(self) -> "SqlAlchemyUnitOfWork":
         self._session_ctx: AsyncSession = self._session_factory()
@@ -56,7 +65,9 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.pending_registrations = PendingRegistrationRepository(self.session)
         self.api_keys = APIKeyRepository(self.session)
         self.applications = ApplicationRepository(self.session)
-        self.conversations = ConversationRepository(self.session)
+        self.projects = ProjectRepository(self.session)
+        self.sessions = SessionRepository(self.session)
+        self.attachments = AttachmentRepository(self.session)
         self.permissions = PermissionHelper(self.session)
         return self
 
@@ -70,7 +81,17 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
                 await self._session_ctx.__aexit__(exc_type, exc_val, exc_tb)
 
     async def commit(self):
+        """
+        Commit transaction và phát các sự kiện tương ứng.
+        """
+        # Tạo sự kiện từ các thay đổi trong session TRƯỚC khi commit
+        storage_events = StorageEventFactory.create_events_from_session(self.session)
+        
         await self.session.commit()
+        
+        # Sau khi commit thành công, publish các sự kiện
+        for event in storage_events:
+            self._event_bus.publish(event) # Fire-and-forget
 
     async def rollback(self):
         await self.session.rollback()

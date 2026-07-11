@@ -2,10 +2,11 @@ from fastapi import FastAPI
 
 from fastapi.middleware.cors import CORSMiddleware
 import httpx
+from .event_bus.bus import EventBus
+from .event_bus.manager import EventingManager # Đổi tên thành EventingManager
+from .context.manager import ContextEngine # Đổi tên thành ContextEngine
 import structlog
-from opentelemetry import trace
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-from starlette.middleware.sessions import SessionMiddleware
 
 
 from .config.core import ConfigLoader, ConfigurationRegistry
@@ -18,10 +19,12 @@ from .router.auth import router as auth_router
 from .authentication.services.api_key_service import APIKeyService
 from .authentication.services.token_service import TokenService
 from .authentication.authenticators.api_key_authenticator import APIKeyAuthenticator
+from .tool.executor import ExecutorRegistry, LocalExecutor, McpExecutor, NativeExecutor, WorkflowExecutor
+from .tool import GatewayToolManager
+from .tool._mcp.mcp_manager import GatewayMcpManager
 from .authentication.authenticators.jwt_authenticator import JWTAuthenticator
 from .storage.core.unit_of_work import SqlAlchemyUnitOfWork
-
-from .authentication.middleware import AuthenticationMiddleware
+from .middleware.factory import create_middleware_stack
 from .middleware.observability import observability_middleware
 
 from .storage.core.manager import StorageEngine
@@ -30,51 +33,24 @@ from .router.models import router as models_router
 from .router.chat import router as chat_router
 from .fillter import InputFillter, OutputFillter
 from ..guardrail.guar import GuardrailSystem
+from .agent.registry import AgentRegistry
+from .router.agent import router as agent_router
+from .tool.registry import ToolRegistry
+from .router.tool import router as tool_router
+from .router.events import router as events_router
 from .router.embeddings import router as embeddings_router
 from .router.admin import router as admin_router
 from .router.health import router as health_router
 from .config import settings
+from .schemas.enums import ToolType
 
-from shared_core.observability import ObservabilityConfig ,LoggingConfig, TracingConfig
+from shared_core.observability import ObservabilityConfig, LoggingConfig, TracingConfig
 from .middleware.observability import gateway_metrics
-from .config import settings
 
 app = FastAPI(title="AI Gateway")
-tracer = trace.get_tracer(__name__)
 logger = structlog.get_logger(__name__)
 
-origins = [
-    "http://localhost:3000",
-    "http://127.0.0.1:3000",
-    "http://localhost:5500",
-    "*",
-]
-
-# Thêm middleware xác thực mới
-# Middleware này phải được thêm TRƯỚC CORSMiddleware để nó không can thiệp vào các request OPTIONS của CORS.
-app.add_middleware(
-    AuthenticationMiddleware,
-    public_paths=[
-        "/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats",
-        "/auth/*"  # Sử dụng wildcard để mở tất cả các endpoint dưới /auth
-    ]
-)
-SECRET_KEY="09d25e094faa6ca2556c818166b7a9563"
-app.add_middleware(
-    SessionMiddleware,
-    secret_key=SECRET_KEY, # Đảm bảo đã định nghĩa SECRET_KEY trong file config/env của bạn
-    session_cookie="oauth_session", # Tùy chọn đặt tên cookie
-    max_age=600 # Session chỉ cần sống khoảng 10 phút để phục vụ luồng login
-)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],  # Cho phép tất cả các phương thức bao gồm OPTIONS, GET, POST, DELETE
-    allow_headers=["*"],  # Cho phép tất cả các headers (như Authorization)
-)
-
-app.middleware("http")(observability_middleware)
+create_middleware_stack(app)
 
 # Import các router từ các module
 app.include_router(auth_router)
@@ -83,6 +59,9 @@ app.include_router(models_router)
 app.include_router(chat_router)
 app.include_router(embeddings_router)
 app.include_router(admin_router)
+app.include_router(agent_router)
+app.include_router(tool_router)
+app.include_router(events_router)
 app.include_router(health_router)
 
 @app.on_event("startup")
@@ -93,7 +72,7 @@ async def startup_event():
     loader = ConfigLoader(default_config_path="config/gateway/default.yaml")
     app_config = loader.load_config()
     ConfigurationRegistry.set_config(app_config)
-    #settings = ConfigurationRegistry.get_config()
+    app.state.config = ConfigurationRegistry.get_config()
 
     # Cấu hình logging ngay khi khởi động
     config = ObservabilityConfig(service_name=settings.gateway.name,
@@ -114,6 +93,26 @@ async def startup_event():
     # -------------------------------------------------
     app.state.cache = app.state.storage.services.get("semantic_cache")
     
+    # --- Agent & Tool Registries ---
+    # Khởi tạo các registry để quản lý định nghĩa
+    app.state.agent_registry = AgentRegistry()
+    app.state.tool_registry = ToolRegistry()
+    logger.info("Agent and Tool registries initialized.")
+
+    # --- Event Bus & Context Manager Initialization ---
+    eventing_manager = EventingManager()
+    eventing_manager.register_subscribers()
+    app.state.eventing_manager = eventing_manager
+    # Cung cấp các thành phần con để các module khác có thể truy cập trực tiếp
+    app.state.event_bus = eventing_manager.bus
+    logger.info("Eventing System (Manager, Bus, Registry, Subscribers) initialized.")
+
+    # ContextEngine giờ đây sử dụng UoW Factory để truy cập DB
+    db_driver = storage_engine.drivers.get("sqlite")
+    uow_factory = lambda: SqlAlchemyUnitOfWork(db_driver)
+    app.state.context_manager = ContextEngine(storage_engine, uow_factory)
+    logger.info("Context Session Manager initialized.")
+
     # --- Centralized Managers ---
     # CircuitBreakerManager giờ được dùng chung cho cả Router và Rate Limiter
     circuit_breaker_manager = CircuitBreakerManager()
@@ -124,7 +123,6 @@ async def startup_event():
     # --- Authentication Manager Initialization ---
     # 1. Tạo các dependency cần thiết cho services
     db_driver = storage_engine.drivers.get("sqlite")
-    uow_factory = lambda: SqlAlchemyUnitOfWork(db_driver)
     session_repo = storage_engine.repositories.get("sessions")
 
     # 2. Khởi tạo các service mà AuthenticationManager cần
@@ -142,6 +140,27 @@ async def startup_event():
     )
     logger.info("Authentication Manager initialized.")
 
+    # --- Tool Runtime Initialization ---
+    # 1. Khởi tạo các executor cụ thể
+    mcp_manager = GatewayMcpManager() # Giả sử đã có
+    local_executor = LocalExecutor()
+    mcp_executor = McpExecutor(mcp_manager)
+    native_executor = NativeExecutor()
+
+    # 2. Khởi tạo Registry và đăng ký các executor
+    executor_registry = ExecutorRegistry()
+    executor_registry.register(ToolType.LOCAL, local_executor)
+    executor_registry.register(ToolType.MCP, mcp_executor)
+    executor_registry.register(ToolType.NATIVE, native_executor)
+
+    # 3. WorkflowExecutor cần chính ExecutorRegistry để hoạt động, inject nó vào
+    workflow_executor = WorkflowExecutor(executor_registry, app.state.tool_registry)
+    executor_registry.register(ToolType.WORKFLOW, workflow_executor)
+
+    # 4. Khởi tạo ToolManager với các registry đã hoàn chỉnh
+    app.state.tool_manager = GatewayToolManager(app.state.tool_registry, executor_registry, app.state.event_bus)
+    logger.info("Tool Runtime (Manager & Executors) initialized.")
+
     # --- OAuth Client Initialization ---
     app.state.oauth = create_oauth_client()
     logger.info("OAuth clients initialized.")
@@ -156,7 +175,6 @@ async def startup_event():
     app.state.output_fillter = OutputFillter(guardrail_system)
     # ----------------------------------
     app.state.http_client = httpx.AsyncClient(timeout=settings.provider.timeout) # type: ignore
-    app.state.tracer = trace.get_tracer(__name__)
     logger.info("Gateway startup complete.")
 
 @app.on_event("shutdown")

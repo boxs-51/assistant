@@ -141,3 +141,473 @@ gateway/
 3.  **Hoàn thiện tài liệu:** Viết tài liệu hướng dẫn cách thêm một `Driver` mới, một `Repository` mới và cách sử dụng `StorageEngine` trong một module mới.
 
 ---
+
+Những điểm mình sẽ thay đổi
+1. Không gọi là Storage Engine nữa
+
+Mình sẽ đổi thành
+
+Storage Runtime
+
+vì nó không chỉ lưu dữ liệu.
+
+Ví dụ:
+
+Connection Pool
+Cache
+Transaction
+Repository
+Event
+Lock
+Index
+Replication
+Snapshot
+
+đều thuộc Runtime.
+
+2. Storage không chỉ có Repository
+
+Trong bản thiết kế hiện tại
+
+Service
+
+↓
+
+Repository
+
+↓
+
+Driver
+
+Theo mình sẽ thiếu rất nhiều.
+
+Nên là
+
+Service
+
+↓
+
+Storage Runtime
+
+↓
+
+Repository
+
+↓
+
+Driver
+
+Storage Runtime sẽ chịu trách nhiệm:
+
+Repository Registry
+Driver Registry
+Cache Runtime
+Transaction Runtime
+Connection Manager
+Event Publisher
+Lock Manager
+Metadata
+Health Check
+3. Driver không nên được Repository gọi trực tiếp
+
+Hiện tại
+
+Repository
+
+↓
+
+SQLite Driver
+
+Theo mình nên
+
+Repository
+
+↓
+
+Storage Context
+
+↓
+
+Driver
+
+Storage Context giống DbContext.
+
+Ví dụ
+
+Storage Context
+
+database
+
+cache
+
+vector
+
+object
+
+queue
+
+Repository chỉ hỏi Context.
+
+Không biết Driver là gì.
+
+4. Repository không nên chỉ CRUD
+
+Gateway sau này có
+
+Agent
+Workflow
+MCP
+OAuth
+Billing
+
+Repository nên hỗ trợ
+
+Query
+
+Search
+
+Batch
+
+Stream
+
+Watch
+
+Observe
+
+Transaction
+
+Ví dụ
+
+await message_repo.watch(...)
+
+thay vì chỉ
+
+get()
+
+update()
+
+delete()
+5. Storage Runtime phải phát Event
+
+Ví dụ
+
+UserRepository.create()
+
+Sau khi thành công
+
+Storage Runtime publish
+
+storage.user.created
+
+Event Bus sẽ nhận.
+
+Plugin có thể subscribe.
+
+Không cần sửa Repository.
+
+6. Cache không nên nằm trong Repository
+
+Hiện tại
+
+Repository
+
+↓
+
+Redis
+
+Theo mình
+
+Repository
+
+↓
+
+Storage Runtime
+
+↓
+
+Cache Layer
+
+↓
+
+Database
+
+Repository không cần biết cache.
+
+Storage Runtime quyết định
+
+Read
+
+↓
+
+Cache
+
+↓
+
+Miss
+
+↓
+
+Database
+
+↓
+
+Cache
+7. Vector cũng vậy
+
+Không nên
+
+SemanticCache
+
+↓
+
+Qdrant
+
+Mà
+
+SemanticCache
+
+↓
+
+Storage Runtime
+
+↓
+
+Vector Service
+
+↓
+
+Qdrant
+
+Sau này đổi Milvus.
+
+Không sửa SemanticCache.
+
+8. Object Storage
+
+Không nên
+
+FileRepository
+
+↓
+
+MinIO
+
+Mà
+
+FileRepository
+
+↓
+
+Storage Runtime
+
+↓
+
+Object Service
+
+↓
+
+S3
+
+MinIO
+
+Azure
+
+GCS
+9. Thêm Metadata Registry
+
+Storage Runtime nên biết
+
+User
+
+↓
+
+Database
+
+Postgres
+
+Table=user
+Embedding
+
+↓
+
+Vector
+
+Qdrant
+
+Collection=document
+File
+
+↓
+
+Object
+
+Bucket=file
+
+Repository không cần hardcode.
+
+10. Thêm Connection Runtime
+
+Hiện tại Driver tự connect.
+
+Mình sẽ tách
+
+Connection Manager
+
+↓
+
+Pool
+
+↓
+
+Driver
+
+để
+
+reconnect
+health check
+failover
+11. Thêm Lock Runtime
+
+Ví dụ
+
+Session A
+
+đang update.
+
+Storage Runtime
+
+Acquire Lock
+
+↓
+
+Repository
+
+↓
+
+Release Lock
+
+không để Repository tự xử lý.
+
+12. Thêm Storage Event
+
+Ví dụ
+
+Insert
+
+↓
+
+Publish
+storage.inserted
+Updated
+
+↓
+
+storage.updated
+Deleted
+
+↓
+
+storage.deleted
+
+Monitoring Runtime chỉ cần subscribe.
+
+13. Transaction Runtime
+
+Không chỉ SQL.
+
+Có thể
+
+Database
+
++
+
+Redis
+
++
+
+Vector
+
++
+
+Object
+
+Transaction Runtime sẽ hỗ trợ:
+
+Saga
+Compensating Action
+Distributed Transaction (khi phù hợp)
+
+thay vì chỉ SQL Transaction.
+
+14. Storage Runtime trong toàn hệ thống
+
+Theo kiến trúc Gateway mà chúng ta trao đổi trước đó, mình sẽ đặt nó ngang hàng với các Runtime khác:
+
+                    AI Gateway
+
+────────────────────────────────────────────
+
+Ingress Runtime
+
+Session Runtime
+
+Context Runtime
+
+Workflow Runtime
+
+Agent Runtime
+
+Tool Runtime
+
+Provider Runtime
+
+Plugin Runtime
+
+Capability Runtime
+
+Storage Runtime
+
+Cache Runtime
+
+Event Bus Runtime
+
+Monitoring Runtime
+
+────────────────────────────────────────────
+
+Lúc này:
+
+Agent Runtime không biết PostgreSQL.
+Tool Runtime không biết Redis.
+Plugin Runtime không biết S3.
+
+Tất cả đều gọi Storage Runtime.
+
+Kiến trúc Storage Runtime mình đề xuất
+Storage Runtime
+│
+├── Repository Registry
+│
+├── Driver Registry
+│
+├── Connection Manager
+│
+├── Transaction Manager
+│
+├── Cache Manager
+│
+├── Lock Manager
+│
+├── Metadata Registry
+│
+├── Event Publisher
+│
+├── Health Monitor
+│
+└── Storage Context
+        │
+        ├── Database Driver
+        ├── Cache Driver
+        ├── Object Driver
+        ├── Vector Driver
+        └── Queue Driver

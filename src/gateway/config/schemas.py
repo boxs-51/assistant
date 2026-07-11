@@ -13,6 +13,7 @@ class GatewaySettings(BaseModel):
     port: int = 8000
     debug: bool = False
 
+    allowed_origins: list[str] = ["*"]
 class OAuthClientConfig(BaseModel):
     client_id: str
     client_secret: str
@@ -23,6 +24,8 @@ class OAuthSettings(BaseModel):
 
 class AuthenticationSettings(BaseModel):
     admin_ips: Dict[str, str] = {}
+    public_paths: list[str] = ["/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats", "/auth/*"]
+    session_secret_key: str = "change-this-in-production"
 
     jwt_secret_key: str = "change-me"
     jwt_algorithm: str = "HS256"

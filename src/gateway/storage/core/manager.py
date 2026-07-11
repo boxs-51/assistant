@@ -6,20 +6,13 @@ from .registry import DriverRegistry, RepositoryRegistry
 # --- Tạm thời import trực tiếp, sau sẽ thay bằng cơ chế import động ---
 from ..drivers.redis.driver import RedisDriver
 from ..drivers.sqlite.driver import SQLiteDriver
-from ..repositories.users import UserRepository
-from ..repositories.api_keys import APIKeyRepository
 from ..repositories.sessions import SessionRepository
-from ..repositories.organizations import OrganizationRepository
-from ..repositories.applications import ApplicationRepository
-from ..repositories.members import MemberRepository
-from ..repositories.oauth_accounts import OAuthAccountRepository
-from ..repositories.pending_registrations import PendingRegistrationRepository
-from ...authentication.permission import PermissionHelper
 from ..drivers.chroma.driver import ChromaVectorDriver
 from ..services.embedding_service import EmbeddingService
-from ..repositories.conversations import ConversationRepository
+
 
 from ...config import settings
+from ...event_bus.bus import EventBus
 
 logger = structlog.get_logger(__name__)
 
@@ -27,10 +20,11 @@ class StorageEngine:
     """
     Điểm truy cập chính, điều phối toàn bộ Storage Framework.
     """
-    def __init__(self):
+    def __init__(self, event_bus: EventBus = None):
         self.config = settings.storage
         self.drivers = DriverRegistry()
         self.repositories = RepositoryRegistry()
+        self.event_bus = event_bus
         self.services = {} # Để lưu các service phức tạp hơn (e.g., SemanticCacheService)
 
     async def connect(self):
