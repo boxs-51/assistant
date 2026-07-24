@@ -30,6 +30,10 @@ export function setupEventHandlers() {
         AuthManager.logout();
     });
 
+    document.getElementById('guest-login-btn').addEventListener('click', () => {
+        UIRenderer.enterGuestMode();
+    });
+
     document.getElementById('google-login-btn').addEventListener('click', () => {
         // Logic chuyển hướng đến endpoint OAuth của server
         window.location.href = 'http://localhost:8000/auth/oauth/login/google';

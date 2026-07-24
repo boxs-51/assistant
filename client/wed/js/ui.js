@@ -83,6 +83,11 @@ export const UIRenderer = {
         }
     },
 
+    enterGuestMode() {
+        const loginModal = document.getElementById('login-modal-overlay');
+        loginModal.style.display = 'none';
+    },
+
     // Render danh sách API Keys
     renderApiKeyList(keys, onRevoke) {
         const listDiv = document.getElementById('api-key-list');

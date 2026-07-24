@@ -1,0 +1,31 @@
+{
+  "general": {
+    "defaultApprovalMode": "auto"
+  },
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-filesystem",
+        "D:/ProJecy2/Im_player"
+      ]
+    },
+    "git": {
+      "command": "uvx",
+      "args": [
+        "mcp-server-git",
+        "--repository",
+        "D:/ProJecy2/Im_player"
+      ]
+    },
+    "ripgrep": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@modelcontextprotocol/server-ripgrep"
+      ]
+    }
+  }
+
+}

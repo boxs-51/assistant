@@ -1,0 +1,22 @@
+{
+  "agent": {
+    "max_steps": 15,
+    "temperature": 0.2
+  },
+  "tools_config": {
+    "allowed_local_tools": ["*"],
+    "blocked_local_tools": ["delete_path"]
+  },
+  "mcp_servers": {
+    "filesystem": {
+      "enabled": true,
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "D:\\ProJecy2\\imgui_player"]
+    },
+    "sqlite": {
+      "enabled": false,
+      "command": "uvx",
+      "args": ["mcp-server-sqlite", "--db-path", "./test.db"]
+    }
+  }
+}
