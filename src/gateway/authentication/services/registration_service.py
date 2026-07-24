@@ -1,6 +1,8 @@
 import structlog
 import secrets
 
+from ...event_bus.bus import EventBus
+from ...schemas.event import BaseEvent
 from ...schemas.auth import UserCreateSchema, TokenSchema
 from ..exceptions import InvalidCredentialsError, OTPCooldownError, OTPInvalidError
 from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
@@ -16,11 +18,13 @@ class RegistrationService:
         self,
         uow_factory: Callable[[], SqlAlchemyUnitOfWork],
         otp_storage: OTPStorageService,
-        token_service: TokenService
+        token_service: TokenService,
+        event_bus: EventBus
     ):
         self.uow_factory = uow_factory
         self.otp_storage = otp_storage
         self.token_service = token_service
+        self.event_bus = event_bus
 
     def _generate_otp(self) -> str:
         """Sinh chuỗi số ngẫu nhiên an toàn bảo mật gồm 6 chữ số."""
@@ -62,5 +66,16 @@ class RegistrationService:
             new_org = await uow.organizations.create(name=org_name, owner_id=new_user.id)
             await uow.members.create(organization_id=new_org.id, user_id=new_user.id, role="admin")
             await uow.commit()
+
+            # Phát sự kiện user.created sau khi đã commit thành công
+            user_created_event = BaseEvent(
+                event_name="user.created",
+                payload={
+                    "user_id": new_user.id,
+                    "email": new_user.email,
+                    "organization_id": new_org.id,
+                }
+            )
+            await self.event_bus.publish(user_created_event)
 
             return await self.token_service.create_user_tokens(new_user.id, new_user.email)

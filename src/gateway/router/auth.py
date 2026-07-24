@@ -1,6 +1,8 @@
+import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import RedirectResponse, JSONResponse, Response
 import structlog
+from ..schemas.event import BaseEvent
 from urllib.parse import urlencode
 from typing import List
 from ..schemas.auth import (
@@ -53,11 +55,13 @@ def get_auth_facade(request: Request) -> AuthenticationFacade:
     uow_factory = get_uow_factory(request)
     session_repo = storage.repositories.get("sessions")
     token_service = TokenService(
-        uow_factory=uow_factory, 
+        uow_factory=uow_factory,
         session_repo=session_repo)
-    registration_service = RegistrationService(uow_factory, otp_service, token_service)
+    # Lấy EventBus từ EventingManager
+    event_bus = request.app.state.event_manager.bus
+    registration_service = RegistrationService(uow_factory, otp_service, token_service, event_bus)
     login_service = LoginService(uow_factory, token_service)
-    oauth_service = OAuthService(uow_factory, token_service)
+    oauth_service = OAuthService(uow_factory, token_service, event_bus)
     user_service = UserService(uow_factory)
 
     # Khởi tạo Facade
@@ -119,26 +123,45 @@ async def verify_otp_and_complete(
     
 @router.post("/login", response_model=TokenSchema)
 async def login_for_access_token(
+    request: Request, 
     login_data: LoginRequestSchema,
     auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """Endpoint để đăng nhập và nhận token."""
+    event_bus = request.app.state.event_manager.bus
     try:
         tokens = await auth_facade.login(login_data)
+        
+        # Publish sự kiện đăng nhập thành công
+        asyncio.create_task(event_bus.publish(BaseEvent(
+            event_name="auth.user.logged_in",
+            payload={
+                "email": login_data.email,
+                "method": "password"
+            }
+        )))
         return tokens
     except InvalidCredentialsError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.detail, headers={"WWW-Authenticate": "Bearer"})
 
 @router.post("/refresh", response_model=AccessTokenSchema)
 async def refresh_token(
+    request: Request, 
     refresh_data: RefreshRequestSchema,
     auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
     """
     Làm mới access token bằng refresh token.
     """
+    event_bus = request.app.state.event_manager.bus
     try:
         new_token = await auth_facade.refresh_access_token(refresh_data.refresh_token)
+        
+        # Publish sự kiện làm mới token
+        asyncio.create_task(event_bus.publish(BaseEvent(
+            event_name="auth.token.refreshed",
+            payload={} # Có thể thêm user_id nếu cần
+        )))
         return new_token
     except InvalidCredentialsError as e:
         # Nếu refresh token không hợp lệ, yêu cầu đăng nhập lại
@@ -146,6 +169,7 @@ async def refresh_token(
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
+    request: Request, 
     refresh_data: RefreshRequestSchema,
     auth_facade: AuthenticationFacade = Depends(get_auth_facade)
 ):
@@ -153,8 +177,16 @@ async def logout(
     Đăng xuất và thu hồi refresh token.
     Client nên xóa access token và refresh token ở phía của mình sau khi gọi endpoint này.
     """
+    event_bus = request.app.state.event_manager.bus
     try:
         await auth_facade.logout(refresh_data.refresh_token)
+        
+        # Publish sự kiện đăng xuất
+        asyncio.create_task(event_bus.publish(BaseEvent(
+            event_name="auth.user.logged_out",
+            payload={} # Có thể thêm user_id nếu cần
+        )))
+
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     except Exception as e:
         logger.error("Error during logout", error=str(e), exc_info=True)
@@ -244,6 +276,7 @@ async def oauth_login(
 
 @router.post("/api-keys", response_model=APIKeyResponseSchema, status_code=status.HTTP_201_CREATED)
 async def create_api_key(
+    request: Request, 
     key_data: APIKeyCreateSchema,
     identity: Identity = Depends(get_current_identity),
     api_key_service: APIKeyService = Depends(get_api_key_service)
@@ -251,11 +284,18 @@ async def create_api_key(
     """
     Tạo một API key mới cho người dùng đã được xác thực (qua JWT).
     """
+    event_bus = request.app.state.event_manager.bus
     if identity.auth_type != 'jwt':
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="API keys can only be created by authenticated users.")
     
     try:
-        return await api_key_service.create_api_key(key_data, identity)
+        response = await api_key_service.create_api_key(key_data, identity)
+        # Publish sự kiện tạo API key
+        asyncio.create_task(event_bus.publish(BaseEvent(
+            event_name="auth.api_key.created",
+            payload={"key_id": response.id, "name": response.name, "user_id": identity.user_id}
+        )))
+        return response
     except Exception as e:
         logger.error("Failed to create API key", error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred while creating the API key.")
@@ -276,6 +316,7 @@ async def list_api_keys(
 
 @router.delete("/api-keys/{key_id}", status_code=status.HTTP_204_NO_CONTENT)
 async def revoke_api_key(
+    request: Request, 
     key_id: str,
     identity: Identity = Depends(get_current_identity),
     api_key_service: APIKeyService = Depends(get_api_key_service)
@@ -283,6 +324,7 @@ async def revoke_api_key(
     """
     Thu hồi (vô hiệu hóa) một API key.
     """
+    event_bus = request.app.state.event_manager.bus
     if identity.auth_type != 'jwt':
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This action requires user authentication.")
 
@@ -290,6 +332,11 @@ async def revoke_api_key(
     if not success:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found or you do not have permission to revoke it.")
     
+    # Publish sự kiện thu hồi API key
+    asyncio.create_task(event_bus.publish(BaseEvent(
+        event_name="auth.api_key.revoked",
+        payload={"key_id": key_id, "user_id": identity.user_id}
+    )))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @router.get("/me", response_model=UserMeSchema)

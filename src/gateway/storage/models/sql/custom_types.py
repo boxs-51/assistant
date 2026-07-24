@@ -1,5 +1,5 @@
 from sqlalchemy.types import TypeDecorator, String
-
+import uuid
 class CUID(TypeDecorator):
     """
     Lưu trữ các giá trị ID dưới dạng String trong database.
@@ -9,3 +9,6 @@ class CUID(TypeDecorator):
 
     def __init__(self, length=255, *args, **kwargs):
         super().__init__(length=length, *args, **kwargs)
+
+def default_uuid_str():
+    return str(uuid.uuid4())

@@ -7,6 +7,7 @@ from pydantic.networks import HttpUrl
 class UserCreateSchema(BaseModel):
     email: EmailStr
     password: str = Field(..., min_length=6, description="Mật khẩu tối thiểu 6 ký tự")
+    name: str = Field(None, description="Họ và tên đầy đủ")
 
 class LoginRequestSchema(BaseModel):
     email: EmailStr

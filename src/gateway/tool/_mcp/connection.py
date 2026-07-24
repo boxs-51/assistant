@@ -1,6 +1,7 @@
 import asyncio
 from enum import Enum
 from typing import Dict, Any, List, Optional
+from aiohttp import ClientSession
 
 
 class ConnectionStatus(Enum):

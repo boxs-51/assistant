@@ -32,6 +32,7 @@ class GatewayChatRequest(GatewayBaseModel):
 
     model: str = Field(..., description="Định danh model sử dụng (e.g., gpt-4o, claude-3-5-sonnet)")
     messages: List[GatewayMessage] = Field(..., description="Danh sách lịch sử hội thoại")
+    session_id: Optional[str] = Field(default=None, description="ID của phiên hội thoại để duy trì ngữ cảnh. Nếu bỏ trống, một session mới sẽ được tạo.")
     tools: Optional[List[GatewayToolDefinition]] = Field(default=None, description="Danh sách công cụ hỗ trợ (Function Calling)")
     
     # Gom cụm các cấu hình và metadata

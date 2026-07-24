@@ -1,6 +1,8 @@
 import structlog
 import hashlib
 
+from ...event_bus.bus import EventBus
+from ...schemas.event import BaseEvent
 from ...schemas.auth import OAuthUserInfoSchema, TokenSchema
 from .token_service import TokenService
 from .. import password as PwdHelper
@@ -13,10 +15,12 @@ class OAuthService:
     def __init__(
         self,
         uow_factory: Callable[[], SqlAlchemyUnitOfWork],
-        token_service: TokenService
+        token_service: TokenService,
+        event_bus: EventBus
     ):
         self.uow_factory = uow_factory
         self.token_service = token_service
+        self.event_bus = event_bus
 
     async def handle_oauth_callback(self, provider: str, oauth_user_info: OAuthUserInfoSchema) -> TokenSchema:
         async with self.uow_factory() as uow:
@@ -48,8 +52,19 @@ class OAuthService:
                 new_org = await uow.organizations.create(name=org_name, owner_id=user.id)
                 await uow.members.create(organization_id=new_org.id, user_id=user.id, role="admin")
 
+                # Phát sự kiện user.created sau khi tạo user mới qua OAuth
+                user_created_event = BaseEvent(
+                    event_name="user.created",
+                    payload={
+                        "user_id": user.id,
+                        "email": user.email,
+                        "organization_id": new_org.id,
+                    }
+                )
+                await self.event_bus.publish(user_created_event)
+
             logger.info("User found/created, creating new OAuth link.", user_id=user.id, provider=provider)
             await uow.oauth_accounts.create(user.id, provider, oauth_user_info.provider_user_id)
-            
+
             await uow.commit()
             return await self.token_service.create_user_tokens(user.id, user.email)

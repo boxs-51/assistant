@@ -23,14 +23,17 @@ if config.config_file_name is not None:
 
 # --- THAY ĐỔI QUAN TRỌNG ---
 # Import Base từ model của chúng ta để Alembic có thể "thấy" được các table
+from src.gateway.storage.models.sql.user_data import (
+    api_key, application, 
+    member, oauth_account, 
+    organization, pending_registration, 
+    permission, user
+)
 from src.gateway.storage.models.sql.base import Base
-from src.gateway.storage.models.sql import (
-    user, api_key, 
-    oauth_account, member , 
-    application ,organization,
-    permission, conversation, 
-    pending_registration
-) # Import tất cả các model bạn muốn Alembic quản lý
+from src.gateway.storage.models.sql.chat_data import (
+    attachment, project,
+    session
+) 
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---
