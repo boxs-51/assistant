@@ -14,6 +14,7 @@ class MessageContentPart(GatewayBaseModel):
     Thiết kế lại để sử dụng GatewayAttachment.
     """
     type: MessageContentType
+    text : str = None
     data: Union[
         TextContent,
         ImageContent,

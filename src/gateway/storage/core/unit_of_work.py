@@ -1,6 +1,6 @@
 import structlog
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, TYPE_CHECKING
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..interfaces.database import DatabaseDriver
@@ -15,9 +15,11 @@ from ..repositories.chat_data.projects import ProjectRepository
 from ..repositories.chat_data.sessions import SessionRepository
 from ..repositories.chat_data.attachments import AttachmentRepository
 
-from ...event_bus.bus import EventBus
 from .events import StorageEventFactory
 from ...authentication.permission import PermissionHelper
+
+if TYPE_CHECKING:
+    from ...event_bus.bus import EventBus
 
 logger = structlog.get_logger(__name__)
 
@@ -49,7 +51,7 @@ class AbstractUnitOfWork(ABC):
         raise NotImplementedError
 
 class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
-    def __init__(self, db_driver: DatabaseDriver, event_bus: EventBus):
+    def __init__(self, db_driver: DatabaseDriver, event_bus: "EventBus"):
         self._session_ctx = None
         self._session_factory = db_driver.get_session
         self._event_bus = event_bus
@@ -90,8 +92,8 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         await self.session.commit()
         
         # Sau khi commit thành công, publish các sự kiện
-        for event in storage_events:
-            self._event_bus.publish(event) # Fire-and-forget
+        # for event in storage_events:
+        #     self._event_bus.publish(event) # Fire-and-forget
 
     async def rollback(self):
         await self.session.rollback()

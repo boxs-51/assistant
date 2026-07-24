@@ -12,7 +12,7 @@ from ..services.embedding_service import EmbeddingService
 
 
 from ...config import settings
-from ...event_bus.bus import EventBus
+#from ...event_bus.manager import EventBus
 
 logger = structlog.get_logger(__name__)
 
@@ -20,11 +20,10 @@ class StorageEngine:
     """
     Điểm truy cập chính, điều phối toàn bộ Storage Framework.
     """
-    def __init__(self, event_bus: EventBus = None):
+    def __init__(self):
         self.config = settings.storage
         self.drivers = DriverRegistry()
         self.repositories = RepositoryRegistry()
-        self.event_bus = event_bus
         self.services = {} # Để lưu các service phức tạp hơn (e.g., SemanticCacheService)
 
     async def connect(self):

@@ -23,6 +23,8 @@ class OAuthSettings(BaseModel):
     github: Optional[OAuthClientConfig] = None
 
 class AuthenticationSettings(BaseModel):
+    enable: bool = True
+
     admin_ips: Dict[str, str] = {}
     public_paths: list[str] = ["/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats", "/auth/*"]
     session_secret_key: str = "change-this-in-production"

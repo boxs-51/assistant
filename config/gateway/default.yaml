@@ -35,7 +35,7 @@ frontend:
   oauth_callback_url: "http://localhost:8000/auth/oauth/callback"
 
 auth:
-  enable_auth: false
+  enable: False
 
   jwt_secret_key: "change-me"
   jwt_algorithm: "HS256"

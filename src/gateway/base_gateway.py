@@ -99,19 +99,21 @@ async def startup_event():
     app.state.tool_registry = ToolRegistry()
     logger.info("Agent and Tool registries initialized.")
 
-    # --- Event Bus & Context Manager Initialization ---
-    eventing_manager = EventingManager()
-    eventing_manager.register_subscribers()
-    app.state.eventing_manager = eventing_manager
-    # Cung cấp các thành phần con để các module khác có thể truy cập trực tiếp
-    app.state.event_bus = eventing_manager.bus
-    logger.info("Eventing System (Manager, Bus, Registry, Subscribers) initialized.")
+
 
     # ContextEngine giờ đây sử dụng UoW Factory để truy cập DB
     db_driver = storage_engine.drivers.get("sqlite")
     uow_factory = lambda: SqlAlchemyUnitOfWork(db_driver)
     app.state.context_manager = ContextEngine(storage_engine, uow_factory)
     logger.info("Context Session Manager initialized.")
+
+    # --- Event Bus & Context Manager Initialization ---
+    eventing_manager = EventingManager(storage_engine=storage_engine,context_engine=app.state.context_manager)
+    eventing_manager.register_subscribers()
+    app.state.eventing_manager = eventing_manager
+    # Cung cấp các thành phần con để các module khác có thể truy cập trực tiếp
+    app.state.event_bus = eventing_manager.bus
+    logger.info("Eventing System (Manager, Bus, Registry, Subscribers) initialized.")
 
     # --- Centralized Managers ---
     # CircuitBreakerManager giờ được dùng chung cho cả Router và Rate Limiter

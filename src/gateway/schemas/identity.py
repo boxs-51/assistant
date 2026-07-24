@@ -19,7 +19,7 @@ class Identity(BaseModel):
     device_id: Optional[str] = None  # ID của thiết bị client
 
     # Loại xác thực
-    auth_type: Literal["jwt", "api_key", "admin_key"]
+    auth_type: Literal["jwt", "api_key", "admin_key", "guest"]
 
     # Thông tin về gói dịch vụ và quyền
     plan: str = "free"

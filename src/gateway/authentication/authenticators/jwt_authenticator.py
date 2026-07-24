@@ -8,6 +8,9 @@ from typing import Callable
 
 logger = structlog.get_logger(__name__)
 
+# TODO: Đặt chuỗi Guest Pass Token cố định hoặc lấy từ config/settings
+GUEST_PASS_TOKEN = "YOUR_GUEST_PASS_JWT_HERE"
+
 class JWTAuthenticator(AuthenticatorInterface):
     def __init__(self, token_service: TokenService, uow_factory: Callable[[], SqlAlchemyUnitOfWork]):
         self.token_service = token_service
@@ -20,6 +23,30 @@ class JWTAuthenticator(AuthenticatorInterface):
     async def authenticate(self, token: str) -> Identity:
         """Ủy quyền cho TokenService để xác thực JWT."""
         logger.debug("Attempting JWT authentication via authenticator strategy.")
+
+        # =========================================================================
+        # [GUEST AUTHENTICATION START] - VỊ TRÍ XÁC THỰC MÁY KHÁCH (GUEST/ANONYMOUS)
+        # -------------------------------------------------------------------------
+        # Lưu ý: Phần này dùng để xử lý tạm thời cho các yêu cầu từ máy khách chưa đăng nhập.
+        # Khi hệ thống chuyển sang sinh Guest Pass JWT động từ backend,
+        # hãy thay đổi logic so sánh static token này bằng hàm verify JWT riêng cho Guest.
+        # =========================================================================
+        if token == GUEST_PASS_TOKEN:
+            logger.info("Authenticated as Guest/Anonymous user.")
+            return Identity(
+                auth_type="guest",
+                user_id="guest_anonymous",
+                organization_id=None,
+                session_id=None,
+                plan="guest",
+                roles=["guest"],
+                permissions=["read:public"],  # Quyền hạn tối thiểu dành cho Guest
+                scopes={"guest"}
+            )
+        # =========================================================================
+        # [GUEST AUTHENTICATION END]
+        # =========================================================================
+
         # 1. Xác thực JWT và lấy Identity cơ bản (chưa có permissions)
         base_identity = self.token_service.verify_access_token(token)
 

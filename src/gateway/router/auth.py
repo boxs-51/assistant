@@ -133,13 +133,13 @@ async def login_for_access_token(
         tokens = await auth_facade.login(login_data)
         
         # Publish sự kiện đăng nhập thành công
-        asyncio.create_task(event_bus.publish(BaseEvent(
-            event_name="auth.user.logged_in",
-            payload={
-                "email": login_data.email,
-                "method": "password"
-            }
-        )))
+        # asyncio.create_task(event_bus.publish(BaseEvent(
+        #     event_name="auth.user.logged_in",
+        #     payload={
+        #         "email": login_data.email,
+        #         "method": "password"
+        #     }
+        # )))
         return tokens
     except InvalidCredentialsError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.detail, headers={"WWW-Authenticate": "Bearer"})
@@ -158,11 +158,11 @@ async def refresh_token(
         new_token = await auth_facade.refresh_access_token(refresh_data.refresh_token)
         
         # Publish sự kiện làm mới token
-        asyncio.create_task(event_bus.publish(BaseEvent(
-            event_name="auth.token.refreshed",
-            payload={} # Có thể thêm user_id nếu cần
-        )))
-        return new_token
+        # asyncio.create_task(event_bus.publish(BaseEvent(
+        #     event_name="auth.token.refreshed",
+        #     payload={} # Có thể thêm user_id nếu cần
+        # )))
+        # return new_token
     except InvalidCredentialsError as e:
         # Nếu refresh token không hợp lệ, yêu cầu đăng nhập lại
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.detail)
@@ -182,10 +182,10 @@ async def logout(
         await auth_facade.logout(refresh_data.refresh_token)
         
         # Publish sự kiện đăng xuất
-        asyncio.create_task(event_bus.publish(BaseEvent(
-            event_name="auth.user.logged_out",
-            payload={} # Có thể thêm user_id nếu cần
-        )))
+        # asyncio.create_task(event_bus.publish(BaseEvent(
+        #     event_name="auth.user.logged_out",
+        #     payload={} # Có thể thêm user_id nếu cần
+        # )))
 
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     except Exception as e:
@@ -291,10 +291,10 @@ async def create_api_key(
     try:
         response = await api_key_service.create_api_key(key_data, identity)
         # Publish sự kiện tạo API key
-        asyncio.create_task(event_bus.publish(BaseEvent(
-            event_name="auth.api_key.created",
-            payload={"key_id": response.id, "name": response.name, "user_id": identity.user_id}
-        )))
+        # asyncio.create_task(event_bus.publish(BaseEvent(
+        #     event_name="auth.api_key.created",
+        #     payload={"key_id": response.id, "name": response.name, "user_id": identity.user_id}
+        # )))
         return response
     except Exception as e:
         logger.error("Failed to create API key", error=str(e), exc_info=True)
@@ -333,10 +333,10 @@ async def revoke_api_key(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found or you do not have permission to revoke it.")
     
     # Publish sự kiện thu hồi API key
-    asyncio.create_task(event_bus.publish(BaseEvent(
-        event_name="auth.api_key.revoked",
-        payload={"key_id": key_id, "user_id": identity.user_id}
-    )))
+    # asyncio.create_task(event_bus.publish(BaseEvent(
+    #     event_name="auth.api_key.revoked",
+    #     payload={"key_id": key_id, "user_id": identity.user_id}
+    # )))
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @router.get("/me", response_model=UserMeSchema)

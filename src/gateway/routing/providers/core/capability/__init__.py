@@ -144,7 +144,7 @@ class ModelCapabilityManager:
                     provider=provider.name, 
                     model=target_model_name
                 )
-                model_info_obj = await provider.model(
+                model_info_obj = await provider.models.model(
                     model_name=target_model_name, 
                     http_client=http_client, 
                     timeout=timeout
@@ -152,7 +152,7 @@ class ModelCapabilityManager:
                 model_info_list = [model_info_obj]
             else:
                 logger.debug("Fetching complete models list for capability cache", provider=provider.name)
-                model_list_obj = await provider.models(http_client=http_client, timeout=timeout)
+                model_list_obj = await provider.models.models(http_client=http_client, timeout=timeout)
                 model_info_list = model_list_obj.data
                 self._models_cache = []  # Reset cache danh sách cũ nếu làm mới toàn bộ
 

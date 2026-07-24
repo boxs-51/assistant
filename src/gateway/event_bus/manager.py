@@ -41,7 +41,7 @@ class EventingManager:
             registry=self.registry,
             queue=self.bus.queue,
             dependency_container=self, # Tự inject chính nó làm container
-            cache_driver=self.storage.get_driver("cache"),
+            cache_driver=self.storage.drivers.get("cache"),
             uow_factory=self.uow_factory
         )
         self.ws_manager = WebSocketConnectionManager()

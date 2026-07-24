@@ -28,7 +28,7 @@ class GatewayToolDefinition(GatewayBaseModel):
         description="JSON Schema định nghĩa các tham số đầu vào (type, properties, required, v.v.)."
     )
     
-    tool_type: ToolType = Field(..., description="Loại tool để Gateway biết cách điều phối thực thi.")
+    tool_type: Optional[ToolType] = Field(default=None, description="Loại tool để Gateway biết cách điều phối thực thi.")
     source_server: Optional[str] = Field(
         default=None, 
         description="Tên của MCP Server phụ trách nếu tool_type là MCP (e.g., 'gdrive', 'github')."

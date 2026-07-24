@@ -4,13 +4,15 @@ import inspect
 import traceback
 import functools
 from collections import defaultdict
-from typing import Tuple, Awaitable, Dict, Any, Callable, Mapping, Type
+from typing import Tuple, Awaitable, Dict, Any, Callable, Mapping, Type, List, TYPE_CHECKING
 from enum import IntEnum
 
 from ..schemas.event import BaseEvent
 from .registry import EventRegistry
-from ..storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from ..storage.interfaces.cache import CacheDriver
+
+if TYPE_CHECKING:
+    from ..storage.core.unit_of_work import SqlAlchemyUnitOfWork
 
 
 class EventPriority(IntEnum):
@@ -32,7 +34,7 @@ class EventDispatcher:
         queue: asyncio.Queue,
         dependency_container: Any, # Thường là EventingManager
         cache_driver: CacheDriver,
-        uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+        uow_factory: Callable[[], "SqlAlchemyUnitOfWork"],
         max_retries: int = 3,
         idempotency_ttl_seconds: int = 3600, # 1 giờ
     ):
@@ -225,5 +227,5 @@ class EventBus:
         # PriorityQueue sắp xếp theo giá trị nhỏ nhất trước
         self._queue.put_nowait((priority.value, event, future))
         
-        logger.info("Event enqueued for publishing", event_name=event.event_name, event_id=event.id, priority=priority.name)
+        logger.info("Event enqueued for publishing", event_name=event.event_name, event_id=event.event_id, priority=priority.name)
         return future

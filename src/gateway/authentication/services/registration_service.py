@@ -68,14 +68,14 @@ class RegistrationService:
             await uow.commit()
 
             # Phát sự kiện user.created sau khi đã commit thành công
-            user_created_event = BaseEvent(
-                event_name="user.created",
-                payload={
-                    "user_id": new_user.id,
-                    "email": new_user.email,
-                    "organization_id": new_org.id,
-                }
-            )
-            await self.event_bus.publish(user_created_event)
+            # user_created_event = BaseEvent(
+            #     event_name="user.created",
+            #     payload={
+            #         "user_id": new_user.id,
+            #         "email": new_user.email,
+            #         "organization_id": new_org.id,
+            #     }
+            # )
+            # await self.event_bus.publish(user_created_event)
 
             return await self.token_service.create_user_tokens(new_user.id, new_user.email)

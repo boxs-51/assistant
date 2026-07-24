@@ -60,7 +60,7 @@ async def get_model_details_proxy(
         model_data = await provider.models.model(
             http_client=request.app.state.http_client,
             timeout=settings.provider.timeout,
-            model=model_id
+            model_name=model_id
         )
         enriched_list = provider.capability_manager.enrich_capabilities(model_data)
         return enriched_list

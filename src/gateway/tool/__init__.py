@@ -48,15 +48,15 @@ class GatewayToolManager:
         
         # 3. Phát sự kiện bắt đầu thực thi
         start_time = time.monotonic()
-        await self.event_bus.publish(BaseEvent(
-            event_name="tool.execution.started",
-            payload={
-                "tool_name": tool_name,
-                "arguments": arguments,
-                "session_id": identity.session_id,
-                "user_id": identity.user_id,
-            }
-        ))
+        # await self.event_bus.publish(BaseEvent(
+        #     event_name="tool.execution.started",
+        #     payload={
+        #         "tool_name": tool_name,
+        #         "arguments": arguments,
+        #         "session_id": identity.session_id,
+        #         "user_id": identity.user_id,
+        #     }
+        # ))
 
         is_error = False
         result = ""
@@ -70,15 +70,15 @@ class GatewayToolManager:
         finally:
             # 5. Phát sự kiện kết thúc thực thi
             duration_ms = (time.monotonic() - start_time) * 1000
-            await self.event_bus.publish(BaseEvent(
-                event_name="tool.execution.completed",
-                payload={
-                    "tool_name": tool_name,
-                    "duration_ms": round(duration_ms, 2),
-                    "is_error": is_error,
-                    "session_id": identity.session_id,
-                    "user_id": identity.user_id,
-                }
-            ))
+            # await self.event_bus.publish(BaseEvent(
+            #     event_name="tool.execution.completed",
+            #     payload={
+            #         "tool_name": tool_name,
+            #         "duration_ms": round(duration_ms, 2),
+            #         "is_error": is_error,
+            #         "session_id": identity.session_id,
+            #         "user_id": identity.user_id,
+            #     }
+            # ))
         
         return result

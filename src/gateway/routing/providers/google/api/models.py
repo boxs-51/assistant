@@ -112,7 +112,7 @@ class GoogleModels(ModelProvider):
         """
         http_client = kwargs.get("http_client")
         timeout = kwargs.get("timeout")
-        raw_model_name = kwargs.get("model")
+        raw_model_name = kwargs.get("model_name")
 
         if not raw_model_name:
             logger.error("Missing required parameter 'model_name' in model details request")

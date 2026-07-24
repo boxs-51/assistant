@@ -53,15 +53,15 @@ class OAuthService:
                 await uow.members.create(organization_id=new_org.id, user_id=user.id, role="admin")
 
                 # Phát sự kiện user.created sau khi tạo user mới qua OAuth
-                user_created_event = BaseEvent(
-                    event_name="user.created",
-                    payload={
-                        "user_id": user.id,
-                        "email": user.email,
-                        "organization_id": new_org.id,
-                    }
-                )
-                await self.event_bus.publish(user_created_event)
+                # user_created_event = BaseEvent(
+                #     event_name="user.created",
+                #     payload={
+                #         "user_id": user.id,
+                #         "email": user.email,
+                #         "organization_id": new_org.id,
+                #     }
+                # )
+                # await self.event_bus.publish(user_created_event)
 
             logger.info("User found/created, creating new OAuth link.", user_id=user.id, provider=provider)
             await uow.oauth_accounts.create(user.id, provider, oauth_user_info.provider_user_id)

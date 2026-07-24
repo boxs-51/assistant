@@ -284,73 +284,73 @@ async def chat_completions_proxy(
     event_bus = request.app.state.event_bus
 
     # Phát sự kiện đầu tiên của luồng xử lý
-    asyncio.create_task(event_bus.publish(BaseEvent(
-        event_name="gateway.request.received",
-        payload={"path": request.url.path, "client": request.client.host}
-    )))
+    #await event_bus.publish(BaseEvent(
+    #    event_name="gateway.request.received",
+    #    payload={"path": request.url.path, "client": request.client.host}
+    #))
 
     # --- Pipeline xử lý Request ---
 
     # 1. Đọc và kiểm tra cấu trúc dữ liệu đầu vào (Validation)
     chat_request = await parse_and_validate_request(request)
-
+    logger.debug("noi dung request", json=chat_request)
     # 2. Quản lý Session và Ngữ cảnh
-    context_engine: ContextEngine = request.app.state.context_manager
-    session: Session
-    SUMMARY_THRESHOLD = 10 # Tóm tắt sau mỗi 10 tin nhắn
+    #context_engine: ContextEngine = request.app.state.context_manager
+    #session: Session
+    #SUMMARY_THRESHOLD = 10 # Tóm tắt sau mỗi 10 tin nhắn
 
-    if chat_request.session_id:
-        try:
+    #if chat_request.session_id:
+    #    try:
             # Tải toàn bộ ngữ cảnh, bao gồm cả session
-            context_object = await context_engine.load_context(chat_request.session_id, identity)
-            session = context_object.session
+    #        context_object = await context_engine.load_context(chat_request.session_id, identity)
+    #        session = context_object.session
             # Nạp lại lịch sử hội thoại từ DB vào request hiện tại
-            chat_request.messages = session.messages + chat_request.messages
-            asyncio.create_task(event_bus.publish(BaseEvent(event_name="context.session.loaded", payload={"session_id": session.session_id})))
-        except ValueError:
+    #        chat_request.messages = session.messages + chat_request.messages
+    #        asyncio.create_task(event_bus.publish(BaseEvent(event_name="context.session.loaded", payload={"session_id": session.session_id})))
+    #    except ValueError:
             # Nếu session không tồn tại, tạo mới
-            logger.warning("Client provided non-existent session_id, creating a new one.", old_session_id=chat_request.session_id, user_id=identity.user_id)
-            session = await context_engine.create_new_session(identity)
-            asyncio.create_task(event_bus.publish(BaseEvent(
-                event_name="chat.session.started",
-                payload={"session_id": session.session_id, "user_id": identity.user_id}
-            )))
-    else:
+    #        logger.warning("Client provided non-existent session_id, creating a new one.", old_session_id=chat_request.session_id, user_id=identity.user_id)
+    #        session = await context_engine.create_new_session(identity)
+    #        asyncio.create_task(event_bus.publish(BaseEvent(
+    #            event_name="chat.session.started",
+    #            payload={"session_id": session.session_id, "user_id": identity.user_id}
+    #        )))
+    #else:
         # Nếu không có session_id, tạo session mới
-        session = await context_engine.create_new_session(identity)
-        asyncio.create_task(event_bus.publish(BaseEvent(
-            event_name="chat.session.started",
-            payload={"session_id": session.session_id, "user_id": identity.user_id}
-        )))
-    chat_request.session_id = session.session_id # Gán lại session_id để các bước sau sử dụng
+    #    session = await context_engine.create_new_session(identity)
+    #    asyncio.create_task(event_bus.publish(BaseEvent(
+    #        event_name="chat.session.started",
+    #        payload={"session_id": session.session_id, "user_id": identity.user_id}
+    #    )))
+    #chat_request.session_id = session.session_id # Gán lại session_id để các bước sau sử dụng
     
     # Kích hoạt sự kiện tóm tắt nếu cần
-    if len(session.messages) > 0 and len(session.messages) % SUMMARY_THRESHOLD == 0:
-        await request.app.state.event_bus.publish(BaseEvent(event_name="session.summary.needed", payload={"session_id": session.session_id}))
+    #if len(session.messages) > 0 and len(session.messages) % SUMMARY_THRESHOLD == 0:
+    #    await request.app.state.event_bus.publish(BaseEvent(event_name="session.summary.needed", payload={"session_id": session.session_id}))
 
 
     # 3. Bóc tách Prompt chính và sinh chuỗi khóa Cache định danh (Cache Key)
-    user_prompt, cache_key = extract_prompt_and_cache_key(chat_request)
+    #user_prompt, cache_key = extract_prompt_and_cache_key(chat_request)
 
     # 4. TỐI ƯU HÓA: Chạy song song các tác vụ không phụ thuộc (Guardrail & Rate Limit)
-    await asyncio.gather( # type: ignore
-        run_input_guardrail(request, user_prompt),
-        run_rate_limiter(request, identity)
-    )
+    #await asyncio.gather( # type: ignore
+    #    run_input_guardrail(request, user_prompt),
+    #    run_rate_limiter(request, identity)
+    #)
 
     # 5. Kiểm tra Semantic Cache xem câu hỏi đã từng được trả lời chưa
-    cached_result = await request.app.state.cache.get(cache_key)
-    if cached_result:
-        cached_response, _ = cached_result
-        with tracer.start_as_current_span("process_cached_response"):
-            gateway_metrics.metrics.increment_success() # type: ignore
-            latency = time.time() - start_time
-            gateway_metrics.metrics.record_latency("cache", "N/A", latency)
+    #cached_result = await request.app.state.cache.get(cache_key)
+    #if cached_result:
+    #    cached_response, _ = cached_result
+    #    with tracer.start_as_current_span("process_cached_response"):
+    #        gateway_metrics.metrics.increment_success() # type: ignore
+    #        latency = time.time() - start_time
+    #        gateway_metrics.metrics.record_latency("cache", "N/A", latency)
             
-            safe_cached_response = request.app.state.output_fillter.sanitize(cached_response)
-            return {"choices": [{"message": {"role": "assistant", "content": safe_cached_response}}]}
+    #        safe_cached_response = request.app.state.output_fillter.sanitize(cached_response)
+    #        return {"choices": [{"message": {"role": "assistant", "content": safe_cached_response}}]}
 
-    body_dict = chat_request.model_dump()
+    #body_dict = chat_request.model_dump()
 
     try:
         if chat_request.config.stream:
