@@ -5,7 +5,7 @@ from enum import Enum
 import structlog
 
 from .middleware import observability as gateway_metrics
-from .config import settings
+from ..config import settings
 
 logger = structlog.get_logger(__name__)
 

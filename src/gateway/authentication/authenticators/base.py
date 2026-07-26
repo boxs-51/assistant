@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Optional
 
-from ...schemas.identity import Identity
+from ....schemas.identity import Identity
 
 class AuthenticatorInterface(ABC):
     """

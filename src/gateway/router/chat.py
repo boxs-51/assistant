@@ -10,20 +10,20 @@ from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 from opentelemetry import trace
 
-from ..schemas import (
+from ...schemas import (
     GatewayChatRequest, GatewayResponse,
     GatewayMessage, GatewayToolCall, 
     GatewayToolResult, FinishReason, 
     MessageContentType, TextContent, 
     MessageContentPart)
-from ..schemas.event import BaseEvent
-from ..schemas.identity import Identity
-from ..schemas.session import Session
+from ...schemas.event import BaseEvent
+from ...schemas.identity import Identity
+from ...schemas.session import Session
 from ..authentication.dependency import get_current_identity
-from ..routing.exceptions import NoAvailableProviderError
+from ...provider.exceptions import NoAvailableProviderError
 from ..middleware.observability import gateway_metrics
-from ..tool import GatewayToolManager
-from ..context.manager import ContextEngine
+from ...tool import GatewayToolManager
+from ...context.manager import ContextEngine
 
 router = APIRouter(tags=["LLM APIs"])
 tracer = trace.get_tracer(__name__)
@@ -293,7 +293,6 @@ async def chat_completions_proxy(
 
     # 1. Đọc và kiểm tra cấu trúc dữ liệu đầu vào (Validation)
     chat_request = await parse_and_validate_request(request)
-    logger.debug("noi dung request", json=chat_request)
     # 2. Quản lý Session và Ngữ cảnh
     #context_engine: ContextEngine = request.app.state.context_manager
     #session: Session

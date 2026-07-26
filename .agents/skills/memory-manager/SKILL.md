@@ -1,11 +1,9 @@
 ---
 name: memory-manager
-description: Điều phối, tải (Load), cập nhật (Update), kiểm tra độ tin cậy (Confidence) và lưu trữ (Persist) tri thức kiến trúc dự án giữa các Session. Đảm bảo quy tắc Staging -> Validation -> Project Memory.
+description: Điều phối, tải (Load), cập nhật (Update), kiểm tra độ tin cậy (Confidence) và lưu trữ (Persist) tri thức kiến trúc dự án giữa các Session. Đảm bảo quy tắc Staging -> Validation -> Project Memory.Skill này luôn chạy **ĐẦU TIÊN (Pre-execution)** và **CUỐI CÙNG (Post-execution)** trong mọi workflow của người dùng.
 ---
 
 # Quy Trình Quản Lý Bộ Nhớ Kiến Trúc (Architecture Memory Orchestration)
-
-Skill này luôn chạy **ĐẦU TIÊN (Pre-execution)** và **CUỐI CÙNG (Post-execution)** trong mọi workflow của người dùng.
 
 ---
 

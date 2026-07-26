@@ -5,8 +5,8 @@ import structlog
 import io
 
 from ..authentication.dependency import get_current_identity
-from ..schemas.identity import Identity
-from ..config import settings
+from ...schemas.identity import Identity
+from ...config import settings
 
 router = APIRouter(prefix="/v1/files", tags=["Files"])
 logger = structlog.get_logger(__name__)

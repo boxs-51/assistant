@@ -2,7 +2,7 @@ from authlib.integrations.starlette_client import OAuth
 from typing import Dict, Any
 import structlog
 
-from ..config import settings
+from ...config import settings
 
 
 logger = structlog.get_logger(__name__)

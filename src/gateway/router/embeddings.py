@@ -2,9 +2,9 @@ import structlog
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
-from ..schemas.identity import Identity
+from ...schemas.identity import Identity
 from ..authentication.dependency import get_current_identity
-from ..routing.exceptions import NoAvailableProviderError
+from ...provider.exceptions import NoAvailableProviderError
 
 router = APIRouter(prefix="/v1", tags=["LLM APIs"])
 logger = structlog.get_logger(__name__)

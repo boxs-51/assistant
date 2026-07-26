@@ -1,7 +1,7 @@
 from typing import AsyncGenerator
 
-from ..config import settings
-from ...guardrail.guar import GuardrailSystem
+from ...config import settings
+from .guar import GuardrailSystem
 
 class InputFillter:
     """Adapter để tích hợp Input của hệ thống lõi vào Gateway."""

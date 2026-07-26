@@ -3,7 +3,7 @@ from fastapi.responses import StreamingResponse
 import psutil
 from prometheus_client import generate_latest
 
-from ..config import settings
+from ...config import settings
 
 router = APIRouter(tags=["Health"])
 

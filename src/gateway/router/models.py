@@ -2,8 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, status, Request, Query
 import structlog
 
 from ..authentication.dependency import get_current_identity
-from ..schemas.identity import Identity
-from ..config import settings
+from ...schemas.identity import Identity
+from ...config import settings
 
 router = APIRouter(prefix="/v1/models", tags=["Models"])
 logger = structlog.get_logger(__name__)

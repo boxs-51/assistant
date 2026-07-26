@@ -1,11 +1,11 @@
 import structlog
 import secrets
 
-from ...event_bus.bus import EventBus
-from ...schemas.event import BaseEvent
-from ...schemas.auth import UserCreateSchema, TokenSchema
+from ....event_bus.bus import EventBus
+from ....schemas.event import BaseEvent
+from ....schemas.auth import UserCreateSchema, TokenSchema
 from ..exceptions import InvalidCredentialsError, OTPCooldownError, OTPInvalidError
-from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ....storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from .otp_service import OTPStorageService
 from .token_service import TokenService
 from .. import password as PwdHelper

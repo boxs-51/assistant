@@ -2,9 +2,9 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Request
 import structlog
 import json
 
-from ..event_bus.ws_manager import WebSocketConnectionManager
+from ...event_bus.ws_manager import WebSocketConnectionManager
 from ..authentication.dependency import get_current_identity
-from ..schemas.identity import Identity
+from ...schemas.identity import Identity
 
 router = APIRouter(prefix="/v1/events", tags=["Events"])
 logger = structlog.get_logger(__name__)

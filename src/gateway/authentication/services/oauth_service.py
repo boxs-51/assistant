@@ -1,12 +1,12 @@
 import structlog
 import hashlib
 
-from ...event_bus.bus import EventBus
-from ...schemas.event import BaseEvent
-from ...schemas.auth import OAuthUserInfoSchema, TokenSchema
+from ....event_bus.bus import EventBus
+from ....schemas.event import BaseEvent
+from ....schemas.auth import OAuthUserInfoSchema, TokenSchema
 from .token_service import TokenService
 from .. import password as PwdHelper
-from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ....storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable
 
 logger = structlog.get_logger(__name__)

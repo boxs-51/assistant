@@ -4,7 +4,7 @@ import structlog
 from typing import List
 
 from .exceptions import AuthenticationError, InvalidCredentialsError
-from ..schemas.identity import Identity
+from ...schemas.identity import Identity
 from .authenticators.base import AuthenticatorInterface
 
 logger = structlog.get_logger(__name__)

@@ -2,7 +2,7 @@ import structlog
 
 from .base import AuthenticatorInterface
 from ..services.api_key_service import APIKeyService
-from ...schemas.identity import Identity
+from ....schemas.identity import Identity
 
 logger = structlog.get_logger(__name__)
 

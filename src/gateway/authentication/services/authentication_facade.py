@@ -1,8 +1,8 @@
-from ...schemas.auth import (
+from ....schemas.auth import (
     UserCreateSchema, LoginRequestSchema, TokenSchema,
     OAuthUserInfoSchema, AccessTokenSchema, UserMeSchema
 )
-from ...schemas.identity import Identity
+from ....schemas.identity import Identity
 
 from .registration_service import RegistrationService
 from .login_service import LoginService

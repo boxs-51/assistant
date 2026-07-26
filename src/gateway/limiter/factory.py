@@ -4,7 +4,7 @@ from .algorithms.base import BaseRateLimiter
 from .algorithms.token_bucket import TokenBucketLimiter
 from .algorithms.sliding_window import SlidingWindowLimiter
 from .storage.base import BaseStorage
-from ..config.schemas import ConfigSchema
+from ...config.schemas import ConfigSchema
 
 
 class RateLimiterFactory:

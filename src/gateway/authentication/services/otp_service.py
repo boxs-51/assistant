@@ -3,7 +3,7 @@ import structlog
 from datetime import datetime, timezone
 from typing import Optional, Callable
 
-from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ....storage.core.unit_of_work import SqlAlchemyUnitOfWork
 
 logger = structlog.get_logger(__name__)
 

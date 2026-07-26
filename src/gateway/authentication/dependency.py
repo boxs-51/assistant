@@ -1,7 +1,7 @@
 # authentication/dependency.py
 from fastapi import Request, HTTPException, status, Depends
-from ..schemas.identity import Identity
-from ..config import settings
+from ...schemas.identity import Identity
+from ...config import settings
 
 # Lấy danh sách IP được phép từ file cấu hình (Mặc định cho phép localhost nếu không cấu hình)
 

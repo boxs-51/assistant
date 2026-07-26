@@ -2,10 +2,10 @@ from fastapi import APIRouter, Depends, Request, status
 import structlog
 from typing import List
 
-from ..schemas.tool import GatewayToolDefinition
-from ..schemas.identity import Identity
+from ...schemas.tool import GatewayToolDefinition
+from ...schemas.identity import Identity
 from ..authentication.dependency import get_current_identity
-from ..tool.registry import ToolRegistry
+from ...tool.registry import ToolRegistry
 
 router = APIRouter(prefix="/v1/tools", tags=["Tools"])
 logger = structlog.get_logger(__name__)

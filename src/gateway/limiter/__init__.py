@@ -3,11 +3,11 @@ from redis.exceptions import RedisError
 from .storage.redis_storage import RedisStorage
 from .factory import RateLimiterFactory
 from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
-from ..storage.interfaces.cache import CacheDriver
-from ..schemas.identity import Identity
+from ...storage.interfaces.cache import CacheDriver
+from ...schemas.identity import Identity
 from ..middleware.observability import  gateway_metrics
 
-from ..config import settings
+from ...config import settings
 
 logger = structlog.get_logger(__name__)
 

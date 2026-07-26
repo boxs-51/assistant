@@ -3,10 +3,10 @@ from typing import Optional, List
 import hashlib
 import secrets
 
-from ...schemas.auth import APIKeyCreateSchema, APIKeyResponseSchema, APIKeyInfoSchema
-from ...schemas.identity import Identity
+from ....schemas.auth import APIKeyCreateSchema, APIKeyResponseSchema, APIKeyInfoSchema
+from ....schemas.identity import Identity
 from .. import api_key as APIKeyHelper
-from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ....storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from ..exceptions import InvalidCredentialsError, AuthenticationError
 from typing import Callable
 

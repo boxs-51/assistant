@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import selectinload
 
-from ..storage.models.sql.user_data.permission import Role
+from ...storage.models.sql.user_data.permission import Role
 
 class PermissionHelper:
     """

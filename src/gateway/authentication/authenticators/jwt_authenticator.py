@@ -2,8 +2,8 @@ import structlog
 
 from .base import AuthenticatorInterface
 from ..services.token_service import TokenService
-from ...schemas.identity import Identity
-from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ....schemas.identity import Identity
+from ....storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable
 
 logger = structlog.get_logger(__name__)

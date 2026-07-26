@@ -1,9 +1,9 @@
 import structlog
 
-from ...schemas.auth import UserMeSchema
-from ...schemas.identity import Identity
+from ....schemas.auth import UserMeSchema
+from ....schemas.identity import Identity
 from ..exceptions import InvalidCredentialsError
-from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ....storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable
 
 logger = structlog.get_logger(__name__)

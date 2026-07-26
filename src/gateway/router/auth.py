@@ -2,10 +2,10 @@ import asyncio
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from fastapi.responses import RedirectResponse, JSONResponse, Response
 import structlog
-from ..schemas.event import BaseEvent
+from ...schemas.event import BaseEvent
 from urllib.parse import urlencode
 from typing import List
-from ..schemas.auth import (
+from ...schemas.auth import (
     UserCreateSchema, LoginRequestSchema,
     TokenSchema,
     OAuthUserInfoSchema, RefreshRequestSchema,
@@ -22,12 +22,12 @@ from ..authentication.services.registration_service import RegistrationService
 from ..authentication.services.login_service import LoginService
 from ..authentication.services.oauth_service import OAuthService
 from ..authentication.services.user_service import UserService
-from ..storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ...storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from ..authentication.services.authentication_facade import AuthenticationFacade
-from ..storage.core.manager import StorageEngine
-from ..config import settings
+from ...storage.core.manager import StorageEngine
+from ...config import settings
 from ..authentication.dependency import get_current_identity
-from ..schemas.identity import Identity
+from ...schemas.identity import Identity
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = structlog.get_logger(__name__)
