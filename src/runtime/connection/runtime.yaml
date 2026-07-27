@@ -1,0 +1,19 @@
+# runtime.yaml - Part of the Connection Runtime
+id: com.gemini.connection_runtime
+name: Connection Runtime
+version: 1.0.0
+
+dependencies:
+  # This runtime might depend on an EventBus runtime or others in the future.
+  # For now, it has no hard dependencies on other business runtimes.
+
+exports:
+  - ConnectionService
+
+permissions:
+  network:
+    - listen: true
+    - connect: false
+
+metadata:
+  description: "Manages client connections, transport protocols, and initial routing."

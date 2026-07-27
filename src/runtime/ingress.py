@@ -1,7 +1,7 @@
 import hmac
 import hashlib
 from typing import Any, Dict, Optional
-from ..schemas.runtime.runtime import RuntimeCommand
+from ..domain.schemas.runtime.runtime import RuntimeCommand
 
 class IngressRuntime:
     def __init__(self, idempotency_store: Dict[str, Any]):

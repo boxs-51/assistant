@@ -1,0 +1,21 @@
+# runtime.yaml - Manifest for the Execution Runtime
+id: com.gemini.execution_runtime
+name: Execution Runtime
+version: 1.0.0
+
+dependencies:
+  # This runtime will likely depend on the EventBus and maybe a Storage runtime.
+  # - com.gemini.event_runtime
+  # - com.gemini.storage_runtime
+
+exports:
+  - ExecutionService
+
+permissions:
+  # This runtime doesn't directly access network or filesystem.
+  # It orchestrates other runtimes via events.
+  network: false
+  filesystem: false
+
+metadata:
+  description: "Manages the lifecycle of stateful, long-running executions."

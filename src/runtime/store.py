@@ -1,8 +1,8 @@
 import json
 from typing import List, Dict, Any
 from datetime import datetime
-from ..schemas.runtime.runtime import RuntimeEvent
-from storage.interfaces.database import DatabaseDriver
+from ..domain.schemas.runtime.runtime import RuntimeEvent
+from infrastructure.storage.interfaces.database import DatabaseDriver
 
 class EventStore:
     """

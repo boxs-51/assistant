@@ -3,14 +3,14 @@ import structlog
 
 from typing import Callable, Awaitable, AsyncGenerator, Any
 
-from ..config import settings
-from ..gateway.middleware.observability import gateway_metrics
+from ..infrastructure.config import settings
+from ..transport.gateway.middleware.observability import gateway_metrics
 from .exceptions import ProviderError
 from .core.provider import BaseProvider
-from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
+from ..domain.schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 
 from .policies.retry import RetryPolicy
-from ..gateway.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ..transport.gateway.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
 logger = structlog.get_logger(__name__)
 

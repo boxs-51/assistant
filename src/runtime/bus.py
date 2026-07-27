@@ -1,6 +1,6 @@
 import asyncio
 from typing import Dict, List, Callable, Any
-from ..schemas.runtime.runtime import RuntimeEvent
+from ..domain.schemas.runtime.runtime import RuntimeEvent
 
 class InternalEventBus:
     def __init__(self):

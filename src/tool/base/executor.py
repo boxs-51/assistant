@@ -1,7 +1,7 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Any, Callable
 
-from ...schemas.tool import GatewayToolDefinition
+from ...domain.schemas.tool import GatewayToolDefinition
 
 class BaseExecutor(ABC):
     @abstractmethod

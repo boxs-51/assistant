@@ -5,7 +5,7 @@ import json
 import httpx
 from typing import List, Any, Dict, AsyncGenerator, Tuple, Optional
 
-from .....schemas import (
+from .....domain.schemas import (
     TextContent,
     MessageContentPart,
     GatewayAttachment,

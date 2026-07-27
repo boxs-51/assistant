@@ -14,7 +14,7 @@ from ..core import (
     ModelCapabilityManager, ProviderCapability,
     ModelMapper
 )
-from ...config import settings
+from ...infrastructure.config import settings
 from .api import GoogleChat, GoogleFiles, GoogleModels, GoogleEmbeddings
 
 logger = structlog.get_logger(__name__)

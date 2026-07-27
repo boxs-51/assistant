@@ -1,6 +1,6 @@
 from typing import Dict, Any
 from ..base.executor import BaseExecutor
-from ...schemas import GatewayToolDefinition
+from ...domain.schemas import GatewayToolDefinition
 from .mcp_manager import GatewayMcpManager
 from ..credential import CredentialManager
 

@@ -6,7 +6,7 @@ import re
 import json
 
 from ...file_extension import FileHelper
-from .....schemas import GatewayToolDefinition
+from .....domain.schemas import GatewayToolDefinition
 from .acttachment import (
     MediaContentHandler,
     BaseAttachmentHandler,
@@ -14,7 +14,7 @@ from .acttachment import (
     UrlContextHandler,
     OpenAiVisionFallbackHandler
 )
-from .....schemas import GatewayToolResult
+from .....domain.schemas import GatewayToolResult
 import structlog
 logger = structlog.get_logger(__name__)
 

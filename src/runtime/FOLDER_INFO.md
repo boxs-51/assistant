@@ -7,6 +7,9 @@
 
 # 📂 Thư Mục: `runtime`
 
+> ⚠️ **Implementation Status: In Progress (Phase 1)**
+> This directory contains the foundational implementation for the **AI Runtime Backend**, as specified in the project's architecture documents. The current code represents the initial steps of **Phase 1: Runtime Foundation**. It includes a working `SessionActor` and `DistributedSessionLock`, which are the core components of the future stateful execution environment. This document describes the **target architecture** for this module, which is being implemented incrementally.
+
 ## 1. Architecture Decisions & Design Patterns
 Module `runtime` định nghĩa một nền tảng thực thi cho các session có trạng thái, chạy dài hạn và có khả năng mở rộng. Kiến trúc này khác biệt cơ bản so với mô hình request-response không trạng thái của `gateway` và hướng tới việc xây dựng các agent phức tạp.
 

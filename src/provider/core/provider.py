@@ -2,7 +2,7 @@
 from .auth import AuthStrategy
 from .api import ApiType
 from .endpoint import EndpointBuilder
-from ...schemas import ProviderCapability, ModelCapability
+from ...domain.schemas import ProviderCapability, ModelCapability
 from .api_mapper import ApiTypeMapper
 from .capability import ModelCapabilityManager
 from .model_mapper import ModelMapper

@@ -1,7 +1,7 @@
 from typing import Dict, List, Optional
 import structlog
 
-from ..schemas.agent import AgentDefinition
+from ..domain.schemas.agent import AgentDefinition
 
 logger = structlog.get_logger(__name__)
 

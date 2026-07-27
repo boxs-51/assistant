@@ -5,14 +5,14 @@ import asyncio
 import structlog
 from opentelemetry import trace
 
-from ..config import settings
+from ..infrastructure.config import settings
 from .exceptions import NoAvailableProviderError, ProviderError
 from .executor import ProviderExecutor
 from .policies.routing_policy import RoutingPolicy 
 from .registry import ProviderRegistry
 from .discovery import ProviderDiscovery
-from ..gateway.circuit_breaker import CircuitBreakerManager
-from ..schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
+from ..transport.gateway.circuit_breaker import CircuitBreakerManager
+from ..domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
 from .core.provider import BaseProvider
 
 import asyncio, anyio

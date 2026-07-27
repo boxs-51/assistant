@@ -5,7 +5,7 @@ import httpx
 import structlog
 from typing import Dict, Any, List, Set, TYPE_CHECKING, Optional, Union
 
-from ....schemas import ModelInfo, ModelList ,ModelCapability, ProviderCapability
+from ....domain.schemas import ModelInfo, ModelList ,ModelCapability, ProviderCapability
 
 if TYPE_CHECKING:
     from ..provider import BaseProvider

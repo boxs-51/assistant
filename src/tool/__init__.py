@@ -1,13 +1,13 @@
 import time
 from typing import Dict, Any, List, Optional
 
-from ..schemas import GatewayToolDefinition, ToolType
-from ..schemas.identity import  Identity
-from ..schemas.event import BaseEvent
+from ..domain.schemas import GatewayToolDefinition, ToolType
+from ..domain.schemas.identity import  Identity
+from ..domain.schemas.event import BaseEvent
 
 from .executor import ExecutorRegistry
 from .registry import ToolRegistry
-from ..event_bus.bus import EventBus
+from ..infrastructure.event_bus.bus import EventBus
 
 
 class GatewayToolManager:

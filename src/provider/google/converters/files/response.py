@@ -1,7 +1,7 @@
 import datetime
 from typing import List, Dict, Any, Optional
 
-from .....schemas import (
+from .....domain.schemas import (
     GatewayAttachment,
     FileMetadata
 
