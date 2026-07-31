@@ -208,11 +208,17 @@ class EventBus:
     def __init__(self, priority_map: Mapping[str, EventPriority]):
         self._queue: asyncio.PriorityQueue[Tuple[int, BaseEvent, asyncio.Future]] = asyncio.PriorityQueue()
         self._priority_map = priority_map
+        self._subscribers: Dict[str, list[Callable[[BaseEvent], Awaitable[None]]]] = {}
         logger.info("EventBus initialized with PriorityQueue.")
 
     @property
     def queue(self) -> asyncio.PriorityQueue:
         return self._queue
+
+    def subscribe(self, event_name: str, handler: Callable[[BaseEvent], Awaitable[None]]):
+        if event_name not in self._subscribers:
+            self._subscribers[event_name] = []
+        self._subscribers[event_name].append(handler)
 
     def publish(self, event: BaseEvent) -> asyncio.Future:
         """
