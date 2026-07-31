@@ -3,7 +3,7 @@ import asyncio
 
 from ...core import BaseProvider, ApiType
 from ...core.interfaces.model import ModelProvider
-from ....schemas import ModelInfo, ModelList
+from ....domain.schemas import ModelInfo, ModelList
 
 class OllamaModels(ModelProvider):
     def __init__(self, provider: BaseProvider):

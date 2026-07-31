@@ -1,7 +1,7 @@
 from typing import Dict, Any, List
 
 from ...core import ApiType, BaseProvider
-from ....schemas import (
+from ....domain.schemas import (
     ModelInfo, ModelList,
     ContextLimits, PricingInfo
 )

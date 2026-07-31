@@ -7,7 +7,7 @@ from ..core import (
     ModelCapabilityManager, ModelMapper
 )
 
-from ...config import settings
+from ...infrastructure.config import settings
 from .api.chats import OllamaChats
 from .api.models import OllamaModels
 

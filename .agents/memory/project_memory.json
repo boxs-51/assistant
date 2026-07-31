@@ -1,0 +1,50 @@
+{
+  "migration_progress": {
+    "current_phase": "Phase 3 - Execution Layer",
+    "next_phase": "Phase 4 - Capability Layer",
+    "last_updated": "2026-07-26",
+    "summary": "[VERIFIED] Source code analysis confirms Phase 1 (Runtime Foundation) and Phase 2 (Connection Layer) are fully implemented. Phase 3 is currently in progress, with the initial ExecutionRuntime created. The next step is to begin work on Phase 4."
+  },
+  "constraints": [],
+  "decisions": [
+    {
+      "id": "DEC_001",
+      "decision": "Adopt an Execution-centric model for all tasks.",
+      "reason": "To support long-running, pausable, and cancellable workflows, moving beyond the simple stateless request/response model.",
+      "date": "2026-07-26"
+    }
+  ],
+  "knowledge_graph": {
+    "RuntimeKernel": {
+      "description": "The central coordinator for the AI Runtime Backend, managing the lifecycle of all runtimes.",
+      "depends_on": ["RuntimeRegistry", "LifecycleState"]
+    },
+    "ConnectionRuntime": {
+      "description": "Manages client connections, transport, heartbeat, and initial message routing.",
+      "depends_on": ["ClientRegistry", "HeartbeatManager", "RoutingManager", "TransportManager"]
+    },
+    "ExecutionRuntime": {
+      "description": "Manages the lifecycle of Executions (create, get, update state, cancel).",
+      "depends_on": ["IExecutionStore", "Execution"]
+    },
+    "IExecutionStore": {
+      "description": "Abstract interface for a storage backend for Executions.",
+      "is_interface": true,
+      "implementations": ["InMemoryStore", "RedisStore", "SQLStore (TBD)"]
+    }
+  },
+  "symbol_index": {
+    "RuntimeKernel::startup": {
+      "file": "src/runtime/kernel/kernel.py",
+      "description": "Starts the kernel and all registered runtimes in a controlled sequence."
+    },
+    "ConnectionRuntime::_handle_register_message": {
+      "file": "src/runtime/connection/connection_runtime.py",
+      "description": "Handles a 'REGISTER' message from a new client, adding it to the client registry."
+    },
+    "ExecutionRuntime::create_execution": {
+      "file": "src/runtime/execution/execution_runtime.py",
+      "description": "Creates a new Execution object, persists it, and returns it. This is the starting point for any new trackable task."
+    }
+  }
+}

@@ -1,6 +1,6 @@
 from ...core.interfaces.chat import ChatProvider
 from ...core import ApiType, BaseProvider
-from ....schemas import GatewayResponse, GatewayStreamChunk
+from ....domain.schemas import GatewayResponse, GatewayStreamChunk
 from typing import AsyncGenerator, Dict, Any
 
 from ..converters.chats.request import RequestChats 

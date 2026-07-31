@@ -4,8 +4,8 @@ import json
 import re
 import structlog
 
-from ..schemas import GatewayToolDefinition, ToolType
-from ..schemas.workflow import WorkflowDefinition
+from ..domain.schemas import GatewayToolDefinition, ToolType
+from ..domain.schemas.workflow import WorkflowDefinition
 from .credential import CredentialManager
 from .base.executor import BaseExecutor
 

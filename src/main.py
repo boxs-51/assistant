@@ -6,27 +6,28 @@ import structlog
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 # Config & Observability
-from .config import settings
-from .config.core import ConfigLoader, ConfigurationRegistry
-from shared_core.observability import ObservabilityConfig, LoggingConfig, TracingConfig
-from .gateway.middleware.observability import gateway_metrics
-from .gateway.middleware.factory import create_middleware_stack
+from .infrastructure.config import settings
+from .infrastructure.config.core import ConfigLoader, ConfigurationRegistry
+from .infrastructure.observability import ObservabilityConfig, LoggingConfig, TracingConfig
+
+from .transport.gateway.middleware.metris import setup_gateway_observability
+from .transport.gateway.middleware.factory import create_middleware_stack
 
 # Storage & UoW
-from .storage.core.manager import StorageEngine
-from .storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from .infrastructure.storage.core.manager import StorageEngine
+from .infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 
 # Security & Gateway Infrastructure
-from .gateway.limiter import RateLimiterManager
-from .gateway.circuit_breaker import CircuitBreakerManager
-from .gateway.authentication.oauth import create_oauth_client
-from .gateway.authentication.manager import AuthenticationManager
-from .gateway.authentication.services.api_key_service import APIKeyService
-from .gateway.authentication.services.token_service import TokenService
-from .gateway.authentication.authenticators.api_key_authenticator import APIKeyAuthenticator
-from .gateway.authentication.authenticators.jwt_authenticator import JWTAuthenticator
+from .transport.gateway.limiter import RateLimiterManager
+from .transport.gateway.circuit_breaker import CircuitBreakerManager
+from .transport.gateway.authentication.oauth import create_oauth_client
+from .transport.gateway.authentication.manager import AuthenticationManager
+from .transport.gateway.authentication.services.api_key_service import APIKeyService
+from .transport.gateway.authentication.services.token_service import TokenService
+from .transport.gateway.authentication.authenticators.api_key_authenticator import APIKeyAuthenticator
+from .transport.gateway.authentication.authenticators.jwt_authenticator import JWTAuthenticator
 
-from .event_bus.bus import EventBus
+from .infrastructure.event_bus.bus import EventBus
 # Kernel & Runtimes
 from src.kernel.lifecycle import RuntimeRegistry, LifecycleManager
 
@@ -38,18 +39,18 @@ from src.runtimes.provider.runtime import ProviderRuntime
 from src.runtimes.event.runtime import EventRuntime
 
 # Routers
-from .gateway.router.auth import router as auth_router
-from .gateway.router.agent import router as agent_router
-from .gateway.router.tool import router as tool_router
-from .gateway.router.events import router as events_router
-from .gateway.router.admin import router as admin_router
-from src.gateway.http import (
-    chat_router,
-    files_router,
-    models_router,
-    health_router,
-    embeddings_router,
+from .transport.gateway.router.auth import router as auth_router
+from .transport.gateway.router.agent import router as agent_router
+from .transport.gateway.router.tool import router as tool_router
+from .transport.gateway.router.events import router as events_router
+from .transport.gateway.router.admin import router as admin_router
+
+from .transport.gateway.http import (
+    chat_router, embeddings_router, 
+    files_router, health_router,
+    models_router
 )
+
 
 logger = structlog.get_logger(__name__)
 
@@ -74,7 +75,7 @@ def bootstrap_observability(app: FastAPI) -> None:
             otlp_endpoint=settings.tracing.otlp_endpoint,
         ),
     )
-    gateway_metrics.setup_gateway_observability(obs_config)
+    setup_gateway_observability(obs_config)
     FastAPIInstrumentor.instrument_app(app)
 
 

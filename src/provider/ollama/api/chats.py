@@ -2,7 +2,7 @@ from typing import AsyncGenerator, Dict, Any
 
 from ...core.interfaces.chat import ChatProvider
 from ...core import ApiType, BaseProvider
-from ....schemas import GatewayResponse, GatewayStreamChunk
+from ....domain.schemas import GatewayResponse, GatewayStreamChunk
 
 from ..converters.chat.request import RequestChats
 from ..converters.chat.response import ResponseChats

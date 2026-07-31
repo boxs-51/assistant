@@ -4,7 +4,7 @@ import json
 from typing import AsyncGenerator
 
 from ....exceptions import ResponseValidationError
-from .....schemas import (
+from .....domain.schemas import (
     GatewayResponse,
     GatewayStreamChunk
 )

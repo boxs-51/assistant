@@ -3,14 +3,13 @@ import structlog
 
 from typing import Callable, Awaitable, AsyncGenerator, Any
 
-from ..config import settings
-from ..gateway.middleware.observability import gateway_metrics
+from ..infrastructure.config import settings
 from .exceptions import ProviderError
 from .core.provider import BaseProvider
-from ..schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
+from ..domain.schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 
 from .policies.retry import RetryPolicy
-from ..gateway.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ..transport.gateway.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
 logger = structlog.get_logger(__name__)
 
@@ -84,7 +83,6 @@ class ProviderExecutor:
             else:
                 error_label = "unexpected_error"
             
-            gateway_metrics.metrics.increment_provider_errors(provider.name, error_label)
             logger.warning(
                 "Provider execution failed after all retries.",
                 provider=provider.name, error=str(e), error_type=type(e).__name__
@@ -123,7 +121,6 @@ class ProviderExecutor:
             else:
                 error_label = "unexpected_error"
             
-            gateway_metrics.metrics.increment_provider_errors(provider.name, error_label)
             logger.warning(
                 "Provider stream execution failed.", provider=provider.name, error=str(e), error_type=type(e).__name__
             )
@@ -163,7 +160,6 @@ class ProviderExecutor:
             else:
                 error_label = "unexpected_error"
 
-            gateway_metrics.metrics.increment_provider_errors(provider.name, error_label)
             logger.warning(
                 "Provider generic execution failed after all retries.",
                 provider=provider.name, error=str(e), error_type=type(e).__name__

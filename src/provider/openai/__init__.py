@@ -9,8 +9,8 @@ from ..core import (
     ModelMapper
 )
 
-from ...config import settings
-from ...schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo
+from ...infrastructure.config import settings
+from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo
 
 from .api.chats import OpenAIChats
 

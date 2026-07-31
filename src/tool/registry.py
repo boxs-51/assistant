@@ -1,7 +1,7 @@
 import structlog
 from typing import Dict, Optional, List
 
-from ..schemas.tool import GatewayToolDefinition
+from ..domain.schemas.tool import GatewayToolDefinition
 
 logger = structlog.get_logger(__name__)
 

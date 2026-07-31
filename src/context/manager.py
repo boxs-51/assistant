@@ -5,15 +5,15 @@ import structlog
 import json
 from sqlalchemy.orm import selectinload
 
-from ..schemas.session import Session, SessionStatus
-from ..schemas.context import ContextObject, Project, GatewayAttachment
-from ..schemas.request import GatewayChatRequest, GatewayMessage
-from ..schemas.identity import Identity
+from ..domain.schemas.session import Session, SessionStatus
+from ..domain.schemas.context import ContextObject, Project, GatewayAttachment
+from ..domain.schemas.request import GatewayChatRequest, GatewayMessage
+from ..domain.schemas.identity import Identity
 
-from ..storage.core.manager import StorageEngine
-from ..storage.core.unit_of_work import SqlAlchemyUnitOfWork
-from ..storage.repositories.chat_data.projects import ProjectRepository
-from ..storage.repositories.chat_data.sessions import SessionRepository
+from ..infrastructure.storage.core.manager import StorageEngine
+from ..infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ..infrastructure.storage.repositories.chat_data.projects import ProjectRepository
+from ..infrastructure.storage.repositories.chat_data.sessions import SessionRepository
 
 logger = structlog.get_logger(__name__)
 

@@ -4,6 +4,6 @@ __pycache__
 *.env
 
 data/
-memory/
+/memory/
 1.0.0
 .cache
