@@ -3,9 +3,9 @@ from typing import Optional, List
 import hashlib
 import secrets
 
-from .....schemas.auth import APIKeyCreateSchema, APIKeyResponseSchema, APIKeyInfoSchema
-from .....schemas.identity import Identity
-from .....gateway.authentication import api_key as APIKeyHelper
+from .....domain.schemas.auth import APIKeyCreateSchema, APIKeyResponseSchema, APIKeyInfoSchema
+from .....domain.schemas.identity import Identity
+from .....transport.gateway.authentication import api_key as APIKeyHelper
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from ..exceptions import InvalidCredentialsError, AuthenticationError
 from typing import Callable

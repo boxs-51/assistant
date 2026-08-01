@@ -1,13 +1,13 @@
 import structlog
 import hashlib
 
-from .....schemas.auth import TokenSchema, AccessTokenSchema
+from .....domain.schemas.auth import TokenSchema, AccessTokenSchema
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from .....infrastructure.storage.repositories.sessions import SessionRepository
 from ..jwt import JwtHelper
 from .....infrastructure.config import settings
 from ..exceptions import InvalidCredentialsError
-from .....schemas.identity import Identity
+from .....domain.schemas.identity import Identity
 from typing import Callable
 
 logger = structlog.get_logger(__name__)

@@ -2,7 +2,7 @@ import structlog
 from redis.exceptions import RedisError
 from .storage.redis_storage import RedisStorage
 from .factory import RateLimiterFactory
-from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ....circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 from ....infrastructure.storage.interfaces.cache import CacheDriver
 from ....domain.schemas.identity import Identity
 

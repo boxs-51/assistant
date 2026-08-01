@@ -1,7 +1,7 @@
 from prometheus_client import Counter, Histogram, Gauge
 # Lưu ý: Thay đổi đường dẫn import này cho đúng với cấu trúc thư mục thực tế của bạn
-from infrastructure.observability.metrics import BaseMetrics
-from infrastructure.observability import init_observability, ObservabilityConfig
+from ....infrastructure.observability.metrics import BaseMetrics
+from ....infrastructure.observability import init_observability, ObservabilityConfig
 
 class GatewayMetrics(BaseMetrics):
     def __init__(self, namespace: str):

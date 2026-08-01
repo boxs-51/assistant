@@ -11,7 +11,7 @@ from .executor import ProviderExecutor
 from .policies.routing_policy import RoutingPolicy 
 from .registry import ProviderRegistry
 from .discovery import ProviderDiscovery
-from ..transport.gateway.circuit_breaker import CircuitBreakerManager
+from ..circuit_breaker import CircuitBreakerManager
 from ..domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
 from .core.provider import BaseProvider
 

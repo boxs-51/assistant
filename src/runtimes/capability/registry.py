@@ -1,8 +1,8 @@
 # src/runtime/runtimes/capability/registry.py
 import structlog
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Any
 from .drivers.base import BaseCapabilityDriver, CapabilityDefinition
-from ....schemas.identity import Identity
+from ...domain.schemas.identity import Identity
 
 logger = structlog.get_logger(__name__)
 

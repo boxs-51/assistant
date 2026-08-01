@@ -4,7 +4,7 @@ from fastapi import APIRouter, Request, HTTPException
 from fastapi.responses import StreamingResponse
 from prometheus_client import generate_latest
 
-from ...config import settings
+from ....infrastructure.config import settings
 
 router = APIRouter(tags=["Health"])
 

@@ -10,7 +10,7 @@ from ..exceptions import (
     ProviderUnavailableError,    # Mới thêm: Có thể retry
     ProviderAuthenticationError  # Mới thêm: Không thể retry
 )
-from ...transport.gateway.circuit_breaker import CircuitBreakerOpenError
+from ...circuit_breaker import CircuitBreakerOpenError
 from ...infrastructure.config import settings
 
 logger = structlog.get_logger(__name__)

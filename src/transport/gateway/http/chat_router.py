@@ -1,4 +1,4 @@
-# src/gateway/http/chat_router.py
+# src/transport/http/routes/chat.py
 import time
 import json
 import uuid
@@ -10,7 +10,7 @@ from fastapi import APIRouter, Request, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
-from ....domain.schemas import GatewayChatRequest, GatewayResponse
+from ....domain.schemas import GatewayChatRequest
 from ....domain.schemas.identity import Identity
 from ..authentication.dependency import get_current_identity
 from ....domain.schemas.event import BaseEvent
@@ -37,23 +37,23 @@ async def parse_and_validate_request(request: Request) -> GatewayChatRequest:
 async def chat_completions_proxy(
     request: Request, identity: Identity = Depends(get_current_identity)
 ):
-    """
-    HTTP Adapter Endpoint:
-    Đóng vai trò là Transport Layer - Nhận request, phát Event sang Runtime, và trả phản hồi.
-    """
-    start_time = time.time()
     chat_request = await parse_and_validate_request(request)
-    session_id = chat_request.session_id if hasattr(chat_request, "session_id") and chat_request.session_id else str(uuid.uuid4())
-    
+    session_id = (
+        chat_request.session_id
+        if hasattr(chat_request, "session_id") and chat_request.session_id
+        else str(uuid.uuid4())
+    )
+
     event_bus = request.app.state.event_bus
     is_stream = bool(chat_request.config and chat_request.config.stream)
 
-    # 1. STREAMING RESPONSE VIA EVENT BRIDGE
+    # ------------------------------------------------------------------
+    # 1. STREAMING RESPONSE VIA SSE BRIDGE
+    # ------------------------------------------------------------------
     if is_stream:
         async def event_stream_bridge() -> AsyncGenerator[str, None]:
             queue: asyncio.Queue = asyncio.Queue()
 
-            # Tự đăng ký handler tạm thời nhận Stream Chunk cho Session này
             async def _on_chunk(evt: BaseEvent):
                 if evt.session_id == session_id:
                     await queue.put(evt.payload.get("sse"))
@@ -64,36 +64,70 @@ async def chat_completions_proxy(
 
             async def _on_fail(evt: BaseEvent):
                 if evt.session_id == session_id:
-                    await queue.put({"error": evt.payload.get("error")})
+                    await queue.put({"error": evt.payload.get("error", "Unknown stream error")})
 
-            event_bus.subscribe("ProviderStreamChunk", _on_chunk)
-            event_bus.subscribe("ProviderStreamCompleted", _on_complete)
-            event_bus.subscribe("ProviderFailed", _on_fail)
+            # 1. Register local handlers
+            event_bus.subscribe("provider.stream.chunk_emitted", _on_chunk)
+            event_bus.subscribe("provider.stream.completed", _on_complete)
+            event_bus.subscribe("provider.failed", _on_fail)
 
-            # Phát Event sang Provider Runtime yêu cầu bắt đầu xử lý
-            await event_bus.publish(BaseEvent(
-                event_name="ExecuteProvider",
-                session_id=session_id,
-                payload={"request_body": chat_request.model_dump(exclude_none=True), "is_stream": True}
-            ))
+            yield ": ping\n\n"
+            try:
+                # 2. Publish request event và chờ Enqueue thành công
+                await event_bus.publish(
+                    BaseEvent(
+                        event_name="transport.event.request_received",
+                        session_id=session_id,
+                        payload={
+                            "request_body": chat_request.model_dump(exclude_none=True),
+                            "identity": identity.model_dump() if hasattr(identity, "model_dump") else str(identity)
+                        },
+                    )
+                )
 
-            while True:
-                item = await queue.get()
-                if item == "[DONE]":
-                    yield "data: [DONE]\n\n"
-                    break
-                elif isinstance(item, dict) and "error" in item:
-                    yield f"data: {json.dumps(item)}\n\n"
-                    yield "data: [DONE]\n\n"
-                    break
-                else:
-                    yield str(item)
+                # 3. Stream Consumption Loop
+                while True:
+                    if await request.is_disconnected():
+                        logger.warning("Client disconnected from SSE stream", session_id=session_id)
+                        break
 
-        return StreamingResponse(event_stream_bridge(), media_type="text/event-stream")
+                    try:
+                        item = await asyncio.wait_for(queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        continue
 
-    # 2. NON-STREAMING RESPONSE VIA EVENT WAIT
+                    if item == "[DONE]":
+                        yield "data: [DONE]\n\n"
+                        break
+                    elif isinstance(item, dict) and "error" in item:
+                        yield f"data: {json.dumps(item)}\n\n"
+                        yield "data: [DONE]\n\n"
+                        break
+                    else:
+                        yield str(item)
+
+            finally:
+                # Clean up local event listeners
+                event_bus.unsubscribe("provider.stream.chunk_emitted", _on_chunk)
+                event_bus.unsubscribe("provider.stream.completed", _on_complete)
+                event_bus.unsubscribe("provider.failed", _on_fail)
+
+        return StreamingResponse(
+            event_stream_bridge(), 
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            }
+        )
+
+    # ------------------------------------------------------------------
+    # 2. NON-STREAMING RESPONSE VIA FUTURE WAIT
+    # ------------------------------------------------------------------
     else:
-        future = asyncio.get_running_loop().create_future()
+        loop = asyncio.get_running_loop()
+        future = loop.create_future()
 
         async def _on_response(evt: BaseEvent):
             if evt.session_id == session_id and not future.done():
@@ -101,23 +135,38 @@ async def chat_completions_proxy(
 
         async def _on_failure(evt: BaseEvent):
             if evt.session_id == session_id and not future.done():
-                future.set_exception(HTTPException(
-                    status_code=evt.payload.get("status_code", 500),
-                    detail=evt.payload.get("error", "Provider execution failed")
-                ))
+                future.set_exception(
+                    HTTPException(
+                        status_code=evt.payload.get("status_code", 500),
+                        detail=evt.payload.get("error", "Provider execution failed"),
+                    )
+                )
 
-        event_bus.subscribe("ProviderResponded", _on_response)
-        event_bus.subscribe("ProviderFailed", _on_failure)
-
-        # Trực tiếp phát BaseEvent sang Runtime Kernel
-        await event_bus.publish(BaseEvent(
-            event_name="ExecuteProvider",
-            session_id=session_id,
-            payload={"request_body": chat_request.model_dump(exclude_none=True), "is_stream": False}
-        ))
+        event_bus.subscribe("provider.chat.responded", _on_response)
+        event_bus.subscribe("provider.failed", _on_failure)
 
         try:
-            payload = await asyncio.wait_for(future, timeout=settings.provider.timeout)
-            return payload["response"]
+            await event_bus.publish(
+                BaseEvent(
+                    event_name="transport.event.request_received",
+                    session_id=session_id,
+                    payload={
+                        "request_body": chat_request.model_dump(exclude_none=True),
+                        "identity": identity.model_dump() if hasattr(identity, "model_dump") else str(identity)
+                    },
+                )
+            )
+
+            payload = await asyncio.wait_for(
+                future, timeout=getattr(settings.provider, "timeout", 60.0)
+            )
+            return payload.get("response", payload)
+
         except asyncio.TimeoutError:
-            raise HTTPException(status_code=504, detail="Provider execution timed out.")
+            raise HTTPException(
+                status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+                detail="Provider execution timed out.",
+            )
+        finally:
+            event_bus.unsubscribe("provider.chat.responded", _on_response)
+            event_bus.unsubscribe("provider.failed", _on_failure)

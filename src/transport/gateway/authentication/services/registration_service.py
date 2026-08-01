@@ -8,7 +8,7 @@ from ..exceptions import InvalidCredentialsError, OTPCooldownError, OTPInvalidEr
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from .otp_service import OTPStorageService
 from .token_service import TokenService
-from .....gateway.authentication import password as PwdHelper
+from .....transport.gateway.authentication import password as PwdHelper
 from typing import Callable
 
 logger = structlog.get_logger(__name__)

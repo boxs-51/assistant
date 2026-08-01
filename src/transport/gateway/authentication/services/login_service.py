@@ -1,9 +1,9 @@
 import structlog
 
-from .....schemas.auth import LoginRequestSchema, TokenSchema
+from .....domain.schemas.auth import LoginRequestSchema, TokenSchema
 from ..exceptions import InvalidCredentialsError
 from .token_service import TokenService
-from .....gateway.authentication import password as PwdHelper
+from .....transport.gateway.authentication import password as PwdHelper
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable
 

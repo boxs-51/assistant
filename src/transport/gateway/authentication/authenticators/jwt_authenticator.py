@@ -2,7 +2,7 @@ import structlog
 
 from .base import AuthenticatorInterface
 from ..services.token_service import TokenService
-from .....schemas.identity import Identity
+from .....domain.schemas.identity import Identity
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable
 

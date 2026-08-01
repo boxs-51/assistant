@@ -2,6 +2,7 @@ import re
 import uuid
 import time
 import json
+import codecs
 import httpx
 from typing import List, Any, Dict, AsyncGenerator, Tuple, Optional
 
@@ -268,96 +269,129 @@ class ResponseChats:
     async def adapt_chat_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
         """
         Chuẩn hóa stream của Gemini, xử lý bóc tách Text, Code Log, 
-        các cấu trúc đa phương tiện và Streaming Tool Calls.
+        cấu trúc đa phương tiện và Streaming Tool Calls thời gian thực.
         """
         stream_id = f"chatcmpl-{uuid.uuid4()}"
         buffer = ""
+        
+        # Tạo Incremental Decoder để xử lý byte chunk UTF-8 không bị đứt đoạn
+        decoder = codecs.getincrementaldecoder('utf-8')(errors='replace')
 
-        async for chunk in response.aiter_text():
-            buffer += chunk
+        async for byte_chunk in response.aiter_bytes():
+            if not byte_chunk:
+                continue
+
+            # Decode an toàn: Các byte lẻ của ký tự đa byte sẽ được giữ lại cho lần lặp sau
+            buffer += decoder.decode(byte_chunk, final=False)
+            
+            # Xử lý toàn bộ các đối tượng JSON hoàn chỉnh trong buffer
             while True:
-                buffer = buffer.lstrip()
-                if buffer.startswith('['):
-                    buffer = buffer[1:].lstrip()
-                if buffer.startswith(','):
-                    buffer = buffer[1:].lstrip()
-                if buffer.startswith(']'):
-                    buffer = buffer[1:].lstrip()
-                    break
-
                 if not buffer:
                     break
 
-                try:
-                    obj, idx = json.JSONDecoder().raw_decode(buffer)
-                    buffer = buffer[idx:].lstrip()
+                # Tìm vị trí bắt đầu của JSON Object
+                start_index = buffer.find('{')
+                if start_index == -1:
+                    # Nếu không chứa '{', loại bỏ khoảng trắng hoặc ký tự phân tách mảng JSON
+                    if buffer.strip() in "[],":
+                        buffer = ""
+                    break
+                
+                # Bỏ qua các ký tự thừa trước ký tự '{'
+                buffer = buffer[start_index:]
+                nesting_level = 0
+                end_index = -1
 
-                    chunk_metadata = {}
-                    finish_reason = None
-                    parsed_parts = []
-                    tool_calls = []
+                for i, char in enumerate(buffer):
+                    if char == '{':
+                        nesting_level += 1
+                    elif char == '}':
+                        nesting_level -= 1
+                        if nesting_level == 0:
+                            end_index = i + 1
+                            break
+                
+                # Khi tìm thấy một JSON Object hoàn chỉnh
+                if end_index != -1:
+                    json_str = buffer[:end_index]
+                    buffer = buffer[end_index:]
+                    
+                    try:
+                        obj = json.loads(json_str)
 
-                    if "candidates" in obj:
-                        candidate = obj["candidates"][0]
+                        chunk_metadata = {}
+                        finish_reason = None
+                        parsed_parts = []
+                        tool_calls = []
 
-                        if "finishReason" in candidate:
-                            gemini_finish_reason = candidate["finishReason"].upper()
-                            reason_mapping = {
-                                "STOP": "stop",
-                                "MAX_TOKENS": "length",
-                                "SAFETY": "content_filter",
-                                "RECITATION": "content_filter",
-                            }
-                            finish_reason = reason_mapping.get(gemini_finish_reason, "stop")
+                        if "candidates" in obj and obj["candidates"]:
+                            candidate = obj["candidates"][0]
 
-                        if "content" in candidate and "parts" in candidate["content"]:
-                            parts = candidate["content"]["parts"]
+                            if "finishReason" in candidate:
+                                gemini_finish_reason = candidate["finishReason"].upper()
+                                reason_mapping = {
+                                    "STOP": "stop",
+                                    "MAX_TOKENS": "length",
+                                    "SAFETY": "content_filter",
+                                    "RECITATION": "content_filter",
+                                }
+                                finish_reason = reason_mapping.get(gemini_finish_reason, "stop")
 
-                            # Chạy hàm bóc tách để phân lập text / code / file và tool_calls
-                            parsed_parts, tool_calls = self._parse_gemini_parts_to_content(parts)
+                            if "content" in candidate and "parts" in candidate["content"]:
+                                parts = candidate["content"]["parts"]
+                                parsed_parts, tool_calls = self._parse_gemini_parts_to_content(parts)
 
-                            if parsed_parts:
-                                chunk_metadata["content_parts"] = [p.model_dump(exclude_none=True) for p in parsed_parts]
+                                if parsed_parts:
+                                    chunk_metadata["content_parts"] = [
+                                        p.model_dump(exclude_none=True) for p in parsed_parts
+                                    ]
 
-                            if tool_calls and finish_reason == "stop":
-                                finish_reason = "tool_calls"
+                                if tool_calls and finish_reason == "stop":
+                                    finish_reason = "tool_calls"
+                        
+                        text_delta = ""
+                        for part in parsed_parts:
+                            if part.type == "text" and isinstance(part.data, TextContent):
+                                text_delta += part.data.data
 
-                    # Trích xuất text_delta
-                    text_delta = ""
-                    for part in parsed_parts:
-                        if part.type == "text" and isinstance(part.data, TextContent):
-                            text_delta += part.data.data
+                        gateway_usage = None
+                        if "usageMetadata" in obj:
+                            usage_data = obj["usageMetadata"]
+                            gateway_usage = GatewayUsage(
+                                prompt_tokens=usage_data.get("promptTokenCount", 0),
+                                completion_tokens=usage_data.get("candidatesTokenCount", 0),
+                                total_tokens=usage_data.get("totalTokenCount", 0)
+                            )
+                        
+                        if not text_delta and not tool_calls and not finish_reason and not gateway_usage:
+                            continue
 
-                    gateway_usage = None
-                    if "usageMetadata" in obj:
-                        usage_data = obj["usageMetadata"]
-                        gateway_usage = GatewayUsage(
-                            prompt_tokens=usage_data.get("promptTokenCount", 0),
-                            completion_tokens=usage_data.get("candidatesTokenCount", 0),
-                            total_tokens=usage_data.get("totalTokenCount", 0)
+                        yield GatewayStreamChunk(
+                            id=stream_id,
+                            model=obj.get("modelVersion", "gemini-model"),
+                            choices=[GatewayStreamChoice(
+                                index=0,
+                                delta=GatewayStreamDelta(
+                                    content=text_delta if text_delta else None,
+                                    role="assistant",
+                                    tool_calls=tool_calls if tool_calls else None
+                                ),
+                                finish_reason=finish_reason
+                            )],
+                            provider="gemini",
+                            created=int(time.time()),
+                            usage=gateway_usage,
+                            metadata=chunk_metadata if chunk_metadata else {}
                         )
 
-                    # Kiểm tra nếu chunk không mang thông tin mới (text, tool call, finish reason, usage) thì bỏ qua
-                    if not text_delta and not tool_calls and not finish_reason and not gateway_usage:
+                    except json.JSONDecodeError:
+                        logger.warning("Failed to decode JSON object from stream", json_chunk=json_str)
                         continue
-
-                    yield GatewayStreamChunk(
-                        id=stream_id,
-                        model=obj.get("modelVersion", "gemini-model"),
-                        choices=[GatewayStreamChoice(
-                            index=0,
-                            delta=GatewayStreamDelta(
-                                content=text_delta if text_delta else None,
-                                role="assistant",
-                                tool_calls=tool_calls if tool_calls else None
-                            ),
-                            finish_reason=finish_reason
-                        )],
-                        provider="gemini",
-                        created=int(time.time()),
-                        usage=gateway_usage,
-                        metadata=chunk_metadata if chunk_metadata else {}
-                    )
-
-                except json.JSONDecodeError:
+                else:
+                    # Chưa nhận đủ byte để đóng ngoặc '}', dừng lại chờ chunk kế tiếp
                     break
+
+        # Flush nốt byte còn dư nếu luồng kết thúc đột ngột
+        final_str = decoder.decode(b'', final=True)
+        if final_str:
+            buffer += final_str

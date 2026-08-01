@@ -1,6 +1,6 @@
 import structlog
 
-from ...schemas.event import BaseEvent
+from ...domain.schemas.event import BaseEvent
 from .ws_manager import WebSocketConnectionManager
 from ...context.manager import ContextEngine
 from ..storage.repositories.sessions import SessionRepository

@@ -3,14 +3,14 @@ import io
 import uuid
 import asyncio
 import structlog
-from typing import Optional, Literal
+from typing import Optional, Literal, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, UploadFile, File
 from fastapi.responses import StreamingResponse, Response
 
 from ..authentication.dependency import get_current_identity
-from ...schemas.identity import Identity
-from ....kernel.base import Event
-from ...config import settings
+from ....domain.schemas.identity import Identity
+from ....domain.schemas.event import BaseEvent
+from ....infrastructure.config import settings
 
 router = APIRouter(prefix="/v1/files", tags=["Files"])
 logger = structlog.get_logger(__name__)
@@ -19,22 +19,22 @@ async def _dispatch_file_event(event_bus, payload: dict) -> Any:
     session_id = str(uuid.uuid4())
     future = asyncio.get_running_loop().create_future()
 
-    async def _on_success(evt: Event):
+    async def _on_success(evt: BaseEvent):
         if evt.session_id == session_id and not future.done():
             future.set_result(evt.payload.get("result"))
 
-    async def _on_failure(evt: Event):
+    async def _on_failure(evt: BaseEvent):
         if evt.session_id == session_id and not future.done():
             future.set_exception(HTTPException(
                 status_code=evt.payload.get("status_code", 500),
                 detail=evt.payload.get("error", "File operation failed.")
             ))
 
-    event_bus.subscribe("FileOperationResponded", _on_success)
-    event_bus.subscribe("ProviderFailed", _on_failure)
+    event_bus.subscribe("provider.file.responded", _on_success)
+    event_bus.subscribe("provider.failed", _on_failure)
 
-    await event_bus.publish(Event(
-        event_name="ExecuteFileOperation",
+    await event_bus.publish(BaseEvent(
+        event_name="provider.file.execute",
         session_id=session_id,
         payload=payload
     ))

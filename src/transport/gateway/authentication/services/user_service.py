@@ -1,7 +1,7 @@
 import structlog
 
-from .....schemas.auth import UserMeSchema
-from .....schemas.identity import Identity
+from .....domain.schemas.auth import UserMeSchema
+from .....domain.schemas.identity import Identity
 from ..exceptions import InvalidCredentialsError
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable

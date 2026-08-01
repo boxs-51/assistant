@@ -1,7 +1,7 @@
 from abc import ABC
 from typing import Dict, Any, Optional
 import httpx
-from ...gateway.circuit_breaker import CircuitBreakerManager
+from ...circuit_breaker import CircuitBreakerManager
 from ..policies.routing_policy import RoutingPolicy
 from ..executor import ProviderExecutor
 

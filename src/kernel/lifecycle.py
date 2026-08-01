@@ -1,46 +1,104 @@
 # src/kernel/lifecycle.py
+import logging
+
+#from ..kernel.kernel import RuntimeKernel
+
+from .registry import RuntimeRegistry, DependencyResolver
+from .base import LifecycleState, HealthStatus, RuntimeContext
+import asyncio
 import structlog
-from typing import Dict, List
-from .base import BaseRuntime, EventBus
+from typing import Any, Dict, Optional
 
 logger = structlog.get_logger(__name__)
-
-class RuntimeRegistry:
-    def __init__(self):
-        self._runtimes: Dict[str, BaseRuntime] = {}
-
-    def register(self, runtime: BaseRuntime):
-        self._runtimes[runtime.name] = runtime
-
-    def get(self, name: str) -> BaseRuntime:
-        if name not in self._runtimes:
-            raise KeyError(f"Runtime '{name}' is not registered.")
-        return self._runtimes[name]
-
 class LifecycleManager:
-    def __init__(self, registry: RuntimeRegistry, event_bus: EventBus):
+    """Quản lý chuyển đổi trạng thái Vòng đời của toàn bộ hệ thống."""
+
+    def __init__(self, registry: RuntimeRegistry, kernel: Any):
         self.registry = registry
-        self.event_bus = event_bus
-        self._boot_order: List[str] = []
+        self.kernel = kernel
 
-    def set_boot_order(self, order: List[str]):
-        self._boot_order = order
+    async def initialize_all(self, global_config: Dict[str, Any]) -> None:
+        runtimes = self.registry.list_all()
+        init_order = DependencyResolver.resolve_order(runtimes)
 
-    async def boot_sequence(self, global_context: Dict[str, Any]):
-        # Initialize
-        for name in self._boot_order:
-            rt = self.registry.get(name)
-            logger.info("Initializing runtime", runtime=name)
-            await rt.initialize(global_context)
+        logger.info(f"Thứ tự khởi tạo Runtime: {' -> '.join(init_order)}")
 
-        # Start
-        for name in self._boot_order:
-            rt = self.registry.get(name)
-            logger.info("Starting runtime", runtime=name)
-            await rt.start()
+        for r_id in init_order:
+            runtime = self.registry.get(r_id)
+            if not runtime:
+                continue
 
-    async def shutdown_sequence(self):
-        for name in reversed(self._boot_order):
-            rt = self.registry.get(name)
-            logger.info("Stopping runtime", runtime=name)
-            await rt.stop()
+            ctx = RuntimeContext(
+                kernel=self.kernel,
+                config=global_config.get(r_id, {}),
+                logger=structlog.get_logger(f"Runtime[{r_id}]"),
+                event_bus=self.kernel.event_bus,
+                storage=None,
+                metrics=None,
+                clock=None,
+            )
+            await runtime.initialize(ctx)
+            logger.info(f"Runtime '{r_id}' -> State: {runtime.state.value}")
+
+    async def start_all(self) -> None:
+        runtimes = self.registry.list_all()
+        start_order = DependencyResolver.resolve_order(runtimes)
+
+        for r_id in start_order:
+            runtime = self.registry.get(r_id)
+            if runtime and runtime.state == LifecycleState.INITIALIZED:
+                await runtime.start()
+                runtime.state = LifecycleState.RUNNING
+                logger.info(f"Runtime '{r_id}' -> State: {runtime.state.value}")
+
+    async def stop_all(self) -> None:
+        runtimes = self.registry.list_all()
+        # Dừng theo thứ tự ngược lại (Reverse Order)
+        stop_order = list(reversed(DependencyResolver.resolve_order(runtimes)))
+
+        for r_id in stop_order:
+            runtime = self.registry.get(r_id)
+            if runtime and runtime.state in [LifecycleState.RUNNING, LifecycleState.STARTED, LifecycleState.PAUSED]:
+                runtime.state = LifecycleState.STOPPING
+                await runtime.stop()
+                runtime.state = LifecycleState.STOPPED
+                await runtime.dispose()
+                logger.info(f"Runtime '{r_id}' -> State: {runtime.state.value}")
+
+class HealthMonitor:
+    """Định kỳ Heartbeat kiểm tra sức khỏe và Recovery nếu Runtime bị Crash."""
+
+    def __init__(self, registry: RuntimeRegistry, kernel: Any, interval_sec: int = 5):
+        self.registry = registry
+        self.kernel = kernel
+        self.interval_sec = interval_sec
+        self._monitor_task: Optional[asyncio.Task] = None
+        self._running = False
+
+    def start(self) -> None:
+        self._running = True
+        self._monitor_task = asyncio.create_task(self._check_loop())
+        logger.info("Health Monitor đã kích hoạt.")
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._monitor_task:
+            self._monitor_task.cancel()
+
+    async def _check_loop(self) -> None:
+        while self._running:
+            try:
+                await asyncio.sleep(self.interval_sec)
+                for runtime in self.registry.list_all():
+                    if runtime.state == LifecycleState.RUNNING:
+                        try:
+                            health = await runtime.check_health()
+                            if health == HealthStatus.FAILED:
+                                logger.error(f"⚠️ Runtime '{runtime.manifest.id}' FAILED! Kích hoạt Recovery...")
+                                await self.kernel.recover_runtime(runtime.manifest.id)
+                        except Exception as e:
+                            logger.error(f"Lỗi khi kiểm tra Health Check của '{runtime.manifest.id}': {e}")
+                            runtime.state = LifecycleState.FAILED
+                            await self.kernel.recover_runtime(runtime.manifest.id)
+            except asyncio.CancelledError:
+                break

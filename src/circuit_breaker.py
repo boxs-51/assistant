@@ -4,7 +4,7 @@ from typing import Dict, Optional, Any
 from enum import Enum
 import structlog
 
-from ...infrastructure.config import settings
+from .infrastructure.config import settings
 
 logger = structlog.get_logger(__name__)
 

@@ -5,6 +5,10 @@ import httpx
 import structlog
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
+from .infrastructure.event_bus.manager import EventingManager
+
+from .kernel.kernel import RuntimeKernel
+
 # Config & Observability
 from .infrastructure.config import settings
 from .infrastructure.config.core import ConfigLoader, ConfigurationRegistry
@@ -19,7 +23,7 @@ from .infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 
 # Security & Gateway Infrastructure
 from .transport.gateway.limiter import RateLimiterManager
-from .transport.gateway.circuit_breaker import CircuitBreakerManager
+from .circuit_breaker import CircuitBreakerManager
 from .transport.gateway.authentication.oauth import create_oauth_client
 from .transport.gateway.authentication.manager import AuthenticationManager
 from .transport.gateway.authentication.services.api_key_service import APIKeyService
@@ -37,6 +41,8 @@ from src.runtimes.workflow.runtime import WorkflowRuntime
 from src.runtimes.capability.runtime import CapabilityRuntime
 from src.runtimes.provider.runtime import ProviderRuntime
 from src.runtimes.event.runtime import EventRuntime
+from src.runtimes.context.runtime import ContextRuntime
+
 
 # Routers
 from .transport.gateway.router.auth import router as auth_router
@@ -121,44 +127,32 @@ async def bootstrap_runtime_kernel(
     uow_factory: Any,
     http_client: httpx.AsyncClient,
     cb_manager: CircuitBreakerManager,
-) -> LifecycleManager:
+) -> RuntimeKernel:
     """Khởi tạo EventBus, các Runtimes và kích hoạt Boot Sequence cho Kernel."""
-    event_bus = EventBus()
-    registry = RuntimeRegistry()
-    lifecycle_manager = LifecycleManager(registry, event_bus)
-
+    eventing_manager = EventingManager(storage_engine=storage_engine)
+    eventing_manager.register_subscribers()
+    kernel = RuntimeKernel(eventing_manager)
+    event_runtime = EventRuntime()
+    kernel.register_runtime(event_runtime)
     # Đăng ký Runtimes
-    registry.register(ConnectionRuntime(event_bus))
-    registry.register(SessionRuntime(event_bus))
-    registry.register(WorkflowRuntime(event_bus))
-    registry.register(CapabilityRuntime(event_bus))
-    registry.register(ProviderRuntime(event_bus, cb_manager))
-    registry.register(EventRuntime(event_bus))
-
-    # Thiết lập thứ tự Boot
-    boot_order = [
-        "EventRuntime",
-        "ConnectionRuntime",
-        "CapabilityRuntime",
-        "ProviderRuntime",
-        "ContextRuntime",
-        "SessionRuntime",
-        "WorkflowRuntime",
-    ]
-    lifecycle_manager.set_boot_order(boot_order)
+    kernel.register_runtime(ContextRuntime())
+    kernel.register_runtime(ConnectionRuntime())
+    kernel.register_runtime(SessionRuntime())
+    kernel.register_runtime(WorkflowRuntime())
+    kernel.register_runtime(CapabilityRuntime())
+    kernel.register_runtime(ProviderRuntime(cb_manager))
 
     # Boot Kernel với Global Context
-    global_context = {
+    global_config = {
         "storage_engine": storage_engine,
         "uow_factory": uow_factory,
         "http_client": http_client,
     }
     
-    app.state.event_bus = event_bus
-    await lifecycle_manager.boot_sequence(global_context=global_context)
-    
+    await kernel.bootstrap(global_config=global_config)
+    app.state.event_bus = eventing_manager.bus
     logger.info("AI Runtime Kernel & Runtimes booted successfully.")
-    return lifecycle_manager
+    return kernel
 
 
 # ==============================================================================
@@ -170,16 +164,17 @@ async def lifespan(app: FastAPI):
     """Quản lý tập trung toàn bộ vòng đời ứng dụng (Startup & Graceful Shutdown)."""
     logger.info("Starting AI Gateway Application...")
 
+    # 1. Startup Sequence
+    bootstrap_observability(app)
+
     # Shared Instances
     cb_manager = CircuitBreakerManager()
     http_client = httpx.AsyncClient(timeout=settings.provider.timeout)
     app.state.http_client = http_client
 
-    # 1. Startup Sequence
-    bootstrap_observability(app)
     storage_engine, uow_factory = await bootstrap_storage(app)
     bootstrap_security(app, storage_engine, uow_factory, cb_manager)
-    lifecycle_manager = await bootstrap_runtime_kernel(
+    kernel = await bootstrap_runtime_kernel(
         app, storage_engine, uow_factory, http_client, cb_manager
     )
 
@@ -188,7 +183,7 @@ async def lifespan(app: FastAPI):
     # 2. Shutdown Sequence
     logger.info("Initiating Application Shutdown sequence...")
 
-    await lifecycle_manager.shutdown_sequence()
+    await kernel.shutdown()
 
     if hasattr(app.state, "http_client"):
         await app.state.http_client.aclose()

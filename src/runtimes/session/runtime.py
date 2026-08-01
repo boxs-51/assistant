@@ -1,19 +1,32 @@
 # src/runtimes/session/runtime.py
-from ...kernel.base import BaseRuntime
-from ...kernel.event import Event, EventBus
 from typing import Dict, Any
+import structlog
+
+from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...infrastructure.event_bus.bus import EventBus
+from ...domain.schemas.event import BaseEvent
+
+logger = structlog.get_logger(__name__)
+
 
 class SessionRuntime(BaseRuntime):
-    def __init__(self, event_bus: EventBus):
-        super().__init__(name="SessionRuntime")
-        self.event_bus = event_bus
+    def __init__(self):
+        manifest = RuntimeManifest(
+            id="session_runtime",
+            name="SessionRuntime",
+            version="1.0.0"
+        )
+        super().__init__(manifest=manifest)
+        self.event_bus = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
     async def initialize(self, context: Dict[str, Any]) -> None:
-        # Subscribe các event liên quan đến khởi tạo session hoặc kết thúc câu thoại
-        self.event_bus.subscribe("RequestReceived", self._on_request_received)
-        self.event_bus.subscribe("ProviderResponded", self._on_provider_responded)
+        # Subscribe các event theo chuẩn tên mới
+        self.event_bus = context.event_bus
+        self.event_bus.subscribe("transport.event.request_received", self._on_request_received)
+        self.event_bus.subscribe("provider.execution.succeeded", self._on_provider_responded)
         self._is_initialized = True
+        logger.info("SessionRuntime initialized")
 
     async def start(self) -> None:
         self._is_running = True
@@ -21,16 +34,22 @@ class SessionRuntime(BaseRuntime):
     async def stop(self) -> None:
         self._is_running = False
 
-    async def _on_request_received(self, event: Event):
+    async def _on_request_received(self, event: BaseEvent):
+        """Xử lý khi có request HTTP/WS mới vào hệ thống."""
         session_id = event.session_id
-        # Nạp trạng thái session/history từ StorageEngine (nếu cần)
-        # Bắn Event yêu cầu Workflow Runtime bắt đầu luồng xử lý
-        await self.event_bus.publish(Event(
-            event_name="SessionLoaded",
+        logger.debug("Handling request received, loading session", session_id=session_id)
+        
+        # Nạp trạng thái session/history từ StorageEngine...
+        
+        # Bắn Event báo hiệu Session đã load xong
+        await self.event_bus.publish(BaseEvent(
+            event_name="session.event.loaded",
             session_id=session_id,
             payload=event.payload
         ))
 
-    async def _on_provider_responded(self, event: Event):
-        # Lưu câu trả lời mới vào Memory / Storage
+    async def _on_provider_responded(self, event: BaseEvent):
+        """Lưu câu trả lời/lịch sử mới của LLM vào Memory hoặc Storage Engine."""
+        logger.debug("Saving provider response to session memory", session_id=event.session_id)
+        # Logic lưu trữ vào DB/Memory...
         pass

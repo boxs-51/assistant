@@ -5,7 +5,7 @@ from .....infrastructure.event_bus.bus import EventBus
 from .....domain.schemas.event import BaseEvent
 from .....domain.schemas.auth import OAuthUserInfoSchema, TokenSchema
 from .token_service import TokenService
-from .....gateway.authentication import password as PwdHelper
+from .....transport.gateway.authentication import password as PwdHelper
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable
 

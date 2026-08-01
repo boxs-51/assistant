@@ -39,3 +39,11 @@ class WebSocketConnectionManager:
         for connection, subscriptions in self.active_connections.items():
             if event_name in subscriptions:
                 await connection.send_text(message)
+
+    async def shutdown(self):
+        """Đóng tất cả các kết nối WebSocket đang hoạt động."""
+        logger.info(f"Closing {len(self.active_connections)} active WebSocket connections.")
+        for connection in list(self.active_connections.keys()):
+            await connection.close(code=1001) # 1001: Going Away
+        self.active_connections.clear()
+        logger.info("All WebSocket connections have been closed.")

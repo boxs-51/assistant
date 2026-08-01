@@ -5,10 +5,10 @@ import structlog
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
-from ...schemas.identity import Identity
+from ....domain.schemas.identity import Identity
+from ....domain.schemas.event import BaseEvent
 from ..authentication.dependency import get_current_identity
-from ....kernel.base import Event
-from ...config import settings
+from ....infrastructure.config import settings
 
 router = APIRouter(prefix="/v1", tags=["LLM APIs"])
 logger = structlog.get_logger(__name__)
@@ -30,23 +30,23 @@ async def embeddings_proxy(
     event_bus = request.app.state.event_bus
     future = asyncio.get_running_loop().create_future()
 
-    async def _on_responded(evt: Event):
+    async def _on_responded(evt: BaseEvent):
         if evt.session_id == session_id and not future.done():
             future.set_result(evt.payload.get("response"))
 
-    async def _on_failure(evt: Event):
+    async def _on_failure(evt: BaseEvent):
         if evt.session_id == session_id and not future.done():
             future.set_exception(HTTPException(
                 status_code=evt.payload.get("status_code", 500),
                 detail=evt.payload.get("error", "Embeddings execution failed")
             ))
 
-    event_bus.subscribe("EmbeddingsResponded", _on_responded)
-    event_bus.subscribe("ProviderFailed", _on_failure)
+    event_bus.subscribe("provider.embeddings.responded", _on_responded)
+    event_bus.subscribe("provider.failed", _on_failure)
 
     # Phát Event yêu cầu Runtime thực thi Embeddings
-    await event_bus.publish(Event(
-        event_name="ExecuteEmbeddings",
+    await event_bus.publish(BaseEvent(
+        event_name="provider.embeddings.execute",
         session_id=session_id,
         payload={"request_body": body}
     ))

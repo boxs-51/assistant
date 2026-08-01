@@ -49,13 +49,13 @@ class GoogleChat(ChatProvider):
 
         action = "streamGenerateContent"
 
-        response = await self.provider.send(
+        async with self.provider.send_stream(
             client=client,
             api_type=ApiType.CHAT_COMPLETIONS,
             json=prepared_body,
             timeout=timeout,
             model=translated_model,
             action=action
-        )
-        async for chunk in self.response.adapt_chat_stream(response=response):
-            yield chunk
+        )as response:
+            async for chunk in self.response.adapt_chat_stream(response=response):
+                yield chunk

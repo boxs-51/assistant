@@ -2,7 +2,7 @@ import io
 import httpx
 from typing import Dict, Any
 from .base import BaseExecutionHandler
-from ...config import settings
+from ...infrastructure.config import settings
 
 class FileOperationHandler(BaseExecutionHandler):
     """Xử lý các tác vụ quản lý tập tin (List, Upload, Metadata, Download, Delete)."""

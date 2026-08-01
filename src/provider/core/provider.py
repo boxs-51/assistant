@@ -9,7 +9,8 @@ from .model_mapper import ModelMapper
 from abc import ABC, abstractmethod
 import httpx
 import structlog
-from typing import Dict, Any, Set, Union
+from typing import Dict, Any, Set, Union, AsyncIterator
+from contextlib import asynccontextmanager
 
 logger = structlog.get_logger(__name__)
 
@@ -196,6 +197,84 @@ class BaseProvider(ABC):
             # Bắt lỗi kết nối vật lý (Ví dụ: Timeout, DNS thất bại, rớt mạng)
             logger.error(
                 "HTTP Request Network/Connection Error",
+                provider=self.name,
+                url=str(exc.request.url),
+                error_type=type(exc).__name__,
+                message=str(exc)
+            )
+            raise exc
+
+    @asynccontextmanager
+    async def send_stream(
+        self,
+        client: httpx.AsyncClient,
+        api_type: Union[ApiType, str],
+        *,
+        method: str = "POST",
+        json: Dict[str, Any] | None = None,
+        data: Dict[str, Any] | None = None,
+        params: Dict[str, Any] | None = None,
+        files: Any = None,
+        headers: Dict[str, str] | None = None,
+        timeout: float,
+        **endpoint_kwargs,
+    ) -> AsyncIterator[httpx.Response]:
+        """
+        Gửi HTTP Streaming request (Real-time).
+        Sử dụng client.stream(...) để nhận dữ liệu qua TCP stream ngay lập tức.
+        """
+        if headers is None:
+            headers = {"Content-Type": "application/json"}
+            
+        request_url = self.build_endpoint(api_type, **endpoint_kwargs)
+        auth_url, auth_headers = self.auth.prepare_request(request_url, headers)
+        
+        masked_headers = {k: (v if "key" not in k.lower() and "auth" not in k.lower() else "***") for k, v in auth_headers.items()}
+        logger.info(
+            "Starting Outgoing HTTP Stream Request",
+            provider=self.name,
+            api_type=str(api_type),
+            method=method,
+            endpoint_kwargs=endpoint_kwargs,
+            url=auth_url,
+            headers=masked_headers
+        )
+
+        try:
+            # ⚡ BẮT BUỘC DÙNG client.stream DẠNG ASYNC CONTEXT MANAGER
+            async with client.stream(
+                method=method,
+                url=auth_url,
+                json=json,
+                data=data,
+                files=files,
+                params=params,
+                headers=auth_headers,
+                timeout=timeout,
+            ) as response:
+                response.raise_for_status()
+                yield response
+
+        except httpx.HTTPStatusError as exc:
+            # Nếu dùng response.stream(), phải đọc response nội dung qua exc.response.aread()
+            await exc.response.aread()
+            try:
+                error_body = exc.response.json()
+            except Exception:
+                error_body = exc.response.text
+
+            logger.error(
+                "HTTP Status Error from Provider Stream",
+                provider=self.name,
+                status_code=exc.response.status_code,
+                url=str(exc.request.url),
+                error_response=error_body
+            )
+            raise exc
+
+        except httpx.RequestError as exc:
+            logger.error(
+                "HTTP Request Stream Network/Connection Error",
                 provider=self.name,
                 url=str(exc.request.url),
                 error_type=type(exc).__name__,

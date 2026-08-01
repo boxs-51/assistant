@@ -9,7 +9,7 @@ from .core.provider import BaseProvider
 from ..domain.schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 
 from .policies.retry import RetryPolicy
-from ..transport.gateway.circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 
 logger = structlog.get_logger(__name__)
 

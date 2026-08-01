@@ -1,3 +1,4 @@
+#src\infrastructure\event_bus\registry.py
 from collections import defaultdict
 import structlog
 from typing import Callable, List, Dict, Awaitable, Any
@@ -23,6 +24,15 @@ class EventRegistry:
         self._handlers_by_name[event_name].append(handler)
         logger.debug("New event handler registered", event_name=event_name, handler_name=handler.__name__)
 
+    def unregister(self, event_name: str, handler: EventHandler):
+        """Hủy đăng ký một hàm xử lý khỏi một sự kiện cụ thể."""
+        if event_name in self._handlers_by_name:
+            try:
+                self._handlers_by_name[event_name].remove(handler)
+                logger.debug("Event handler unregistered", event_name=event_name, handler_name=handler.__name__)
+            except ValueError:
+                logger.warning("Handler not found for event", event_name=event_name, handler_name=handler.__name__)
+                
     def subscribe(self, event_name: str) -> Callable[[EventHandler], EventHandler]:
         """
         Decorator để đăng ký một hàm xử lý cho một sự kiện.
@@ -35,6 +45,9 @@ class EventRegistry:
             self.register(event_name, handler)
             return handler
         return decorator
+    
+    def unsubscribe(self, event_name: str, handler: EventHandler) -> None:
+        self.unregister(event_name, handler)
 
     def register_for_all(self, handler: EventHandler):
         """Đăng ký một hàm xử lý sẽ được gọi cho mọi sự kiện được phát ra."""
