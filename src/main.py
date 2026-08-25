@@ -63,6 +63,7 @@ from .application.container import ApplicationContainer
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
 from .runtimes.agent.coordinator import MultiAgentCoordinator
+from .runtimes.agent.persistence import DurableAgentStore
 logger = structlog.get_logger(__name__)
 
 
@@ -151,7 +152,10 @@ async def bootstrap_runtime_kernel(
         eventing_manager=eventing_manager,
         agent_registry=agent_registry,
         tool_registry=ToolRegistry(),
-        multi_agent_coordinator=MultiAgentCoordinator(agent_registry),
+        multi_agent_coordinator=MultiAgentCoordinator(
+            agent_registry,
+            durable_store=DurableAgentStore(eventing_manager.uow_factory),
+        ),
         **(security_services or {}),
     )
     eventing_manager.set_dependency_container(container)
@@ -184,6 +188,23 @@ async def bootstrap_runtime_kernel(
     container.capability_runtime = kernel.registry.get("capability_runtime")
     container.provider_runtime = kernel.registry.get("provider_runtime")
     container.tool_registry = ToolRegistry(container.capability_runtime.registry)
+
+    async def execute_registered_agent_task(task):
+        agent = container.agent_registry.get(task.assigned_agent_id)
+        if agent is None:
+            raise LookupError(f"Agent '{task.assigned_agent_id}' is not registered.")
+        request_body = dict(task.input)
+        request_body.setdefault("model", request_body.get("model", ""))
+        request_body["messages"] = [
+            {"role": "system", "content": agent.instruction},
+            *request_body.get("messages", [{"role": "user", "content": request_body.get("prompt", "")}]),
+        ]
+        response = await container.provider_runtime.chat_handler.execute_with_fallback(
+            container.http_client, request_body
+        )
+        return response.model_dump()
+
+    container.multi_agent_coordinator.executor = execute_registered_agent_task
 
     app.state.container = container
     app.state.event_bus = container.event_bus

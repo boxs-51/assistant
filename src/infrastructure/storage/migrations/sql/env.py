@@ -34,6 +34,7 @@ from infrastructure.storage.models.sql.base import Base
 from infrastructure.storage.models.sql.chat_data import (
     session
 ) 
+from infrastructure.storage.models.sql import agent
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---

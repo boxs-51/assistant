@@ -32,10 +32,11 @@ Phạm vi này là nền tảng control/orchestration ban đầu cho multi-agent
 | Owner/membership isolation | Hoàn thành |
 | Opt-in API routes | Hoàn thành |
 | Backward compatibility với API cũ | Được giữ nguyên |
-| SQL persistence | Chưa triển khai |
-| Parallel agent execution | Chưa triển khai |
-| Supervisor strategy | Chưa triển khai |
-| Agent inference loop | Chưa triển khai |
+| SQL persistence | Đã bổ sung model/repository/migration; cần chạy migration môi trường triển khai |
+| Execution envelope/state machine | Đã triển khai |
+| Parallel agent execution | Đã triển khai bounded coordinator method |
+| Supervisor strategy | Đã triển khai sequential supervisor method |
+| Agent inference loop | Đã nối task executor opt-in với ProviderRuntime; tool-loop đầy đủ còn tiếp tục |
 | Distributed coordination | Chưa triển khai |
 
 ---
@@ -345,19 +346,19 @@ Các file Phase 4 cũng đã được kiểm tra bằng Pylance và không có l
 
 ## 10. Giới hạn hiện tại
 
-### 10.1. In-memory state
+### 10.1. Runtime cache vẫn giữ in-memory
 
-Session, task và message hiện lưu trong memory của process:
+Coordinator vẫn giữ cache object trong memory để phục vụ request nhanh; các thao tác async mới đồng thời ghi qua durable store:
 
 ```text
-_process restart -> state mất
+_process restart -> cache mất, dữ liệu SQL còn nếu migration đã chạy
 ```
 
 Chưa phù hợp cho production multi-instance.
 
-### 10.2. Chưa có agent execution loop
+### 10.2. Agent execution loop còn ở mức provider task
 
-Coordinator mới quản lý control flow và metadata. Nó chưa tự:
+Coordinator đã thực thi task qua callback ProviderRuntime, nhưng chưa tự:
 
 ```text
 load context
@@ -367,9 +368,9 @@ execute capability
 resume inference
 ```
 
-### 10.3. Chưa có parallel execution
+### 10.3. Parallel execution chưa durable scheduler
 
-Chưa hỗ trợ chạy nhiều agent song song với:
+Đã hỗ trợ bounded `asyncio.gather`; chưa có scheduler durable với:
 
 ```text
 concurrency limit
@@ -377,9 +378,9 @@ join/barrier
 partial failure policy
 ```
 
-### 10.4. Chưa có supervisor
+### 10.4. Supervisor mới là sequential policy
 
-Chưa có strategy:
+Chưa có policy engine đầy đủ cho:
 
 ```text
 supervisor
@@ -391,7 +392,7 @@ retry-and-review
 
 ### 10.5. Chưa có durable event log
 
-Message/task lifecycle chưa được ghi vào SQL hoặc event store.
+Message/task/execution records đã có SQL model/repository; event log/replay riêng chưa triển khai.
 
 ---
 

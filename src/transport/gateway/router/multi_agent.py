@@ -34,7 +34,7 @@ async def create_agent_session(
     identity: Identity = Depends(get_current_identity),
 ):
     try:
-        return coordinator(request).create_session(identity, body.agent_ids)
+        return await coordinator(request).create_session_async(identity, body.agent_ids)
     except Exception as error:
         raise map_error(error) from error
 
@@ -71,7 +71,7 @@ async def send_agent_message(
     identity: Identity = Depends(get_current_identity),
 ):
     try:
-        return coordinator(request).send_message(
+        return await coordinator(request).send_message_async(
             session_id=body.session_id,
             sender_id=body.sender_id,
             message_type=body.message_type,
@@ -90,7 +90,7 @@ async def create_agent_task(
     identity: Identity = Depends(get_current_identity),
 ):
     try:
-        return coordinator(request).create_task(
+        return await coordinator(request).create_task_async(
             session_id=body.session_id,
             assigned_agent_id=body.assigned_agent_id,
             task_input=body.input,
@@ -133,5 +133,34 @@ async def close_agent_session(
 ):
     try:
         return coordinator(request).close_session(session_id, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/execute")
+async def execute_agent_task(
+    task_id: str,
+    request: Request,
+    identity: Identity = Depends(get_current_identity),
+):
+    """Execute a task through an opt-in application callback when configured."""
+    runtime = coordinator(request)
+    executor = getattr(runtime, "executor", None)
+    if executor is None:
+        raise HTTPException(status_code=503, detail="Agent execution runtime is unavailable.")
+    try:
+        return await runtime.execute_task(task_id, identity, executor)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.get("/executions/{execution_id}")
+async def get_agent_execution(
+    execution_id: str,
+    request: Request,
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return coordinator(request).get_execution(execution_id, identity)
     except Exception as error:
         raise map_error(error) from error

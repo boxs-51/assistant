@@ -14,6 +14,7 @@ from ..repositories.user_data.applications import ApplicationRepository
 from ..repositories.chat_data.projects import ProjectRepository
 from ..repositories.chat_data.sessions import SessionRepository
 from ..repositories.chat_data.attachments import AttachmentRepository
+from ..repositories.agent import AgentRepository
 
 from .events import StorageEventFactory
 from ....transport.gateway.authentication.permission import PermissionHelper
@@ -35,6 +36,7 @@ class AbstractUnitOfWork(ABC):
     sessions: SessionRepository
     attachments: AttachmentRepository
     permissions: PermissionHelper
+    agents: AgentRepository
 
     async def __aenter__(self):
         raise NotImplementedError
@@ -71,6 +73,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.sessions = SessionRepository(self.session)
         self.attachments = AttachmentRepository(self.session)
         self.permissions = PermissionHelper(self.session)
+        self.agents = AgentRepository(self.session)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
