@@ -37,6 +37,7 @@ class RuntimeContext:
     config: Dict[str, Any]
     logger: structlog.BoundLogger
     event_bus: EventBus
+    container: Any = None
     storage: Any = None
     metrics: Any = None
     clock: Any = None

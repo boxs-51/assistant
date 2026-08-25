@@ -50,6 +50,7 @@ from .transport.gateway.router.agent import router as agent_router
 from .transport.gateway.router.tool import router as tool_router
 from .transport.gateway.router.events import router as events_router
 from .transport.gateway.router.admin import router as admin_router
+from .transport.gateway.router.multi_agent import router as multi_agent_router
 
 from .transport.gateway.http import (
     chat_router, embeddings_router, 
@@ -57,7 +58,11 @@ from .transport.gateway.http import (
     models_router
 )
 
-
+from .provider import LegacyModelRouterFacade
+from .application.container import ApplicationContainer
+from .agent.registry import AgentRegistry
+from .tool.registry import ToolRegistry
+from .runtimes.agent.coordinator import MultiAgentCoordinator
 logger = structlog.get_logger(__name__)
 
 
@@ -98,7 +103,7 @@ async def bootstrap_storage(app: FastAPI) -> Tuple[StorageEngine, Any]:
     return storage_engine, uow_factory
 
 
-def bootstrap_security(app: FastAPI, storage_engine: StorageEngine, uow_factory: Any, cb_manager: CircuitBreakerManager) -> None:
+def bootstrap_security(app: FastAPI, storage_engine: StorageEngine, uow_factory: Any, cb_manager: CircuitBreakerManager) -> Dict[str, Any]:
     """Khởi tạo các dịch vụ Xác thực, OAuth và Rate Limiting."""
     redis_client = storage_engine.drivers.get("redis")._client
     
@@ -119,6 +124,11 @@ def bootstrap_security(app: FastAPI, storage_engine: StorageEngine, uow_factory:
     )
     app.state.oauth = create_oauth_client()
     logger.info("Authentication & Security Managers initialized.")
+    return {
+        "auth_manager": app.state.auth_manager,
+        "oauth": app.state.oauth,
+        "limiter": app.state.limiter,
+    }
 
 
 async def bootstrap_runtime_kernel(
@@ -127,10 +137,24 @@ async def bootstrap_runtime_kernel(
     uow_factory: Any,
     http_client: httpx.AsyncClient,
     cb_manager: CircuitBreakerManager,
+    security_services: Dict[str, Any] = None,
 ) -> RuntimeKernel:
     """Khởi tạo EventBus, các Runtimes và kích hoạt Boot Sequence cho Kernel."""
     eventing_manager = EventingManager(storage_engine=storage_engine)
     eventing_manager.register_subscribers()
+    agent_registry = AgentRegistry()
+    container = ApplicationContainer(
+        config=getattr(app.state, "config", {}),
+        storage=storage_engine,
+        uow_factory=eventing_manager.uow_factory,
+        http_client=http_client,
+        eventing_manager=eventing_manager,
+        agent_registry=agent_registry,
+        tool_registry=ToolRegistry(),
+        multi_agent_coordinator=MultiAgentCoordinator(agent_registry),
+        **(security_services or {}),
+    )
+    eventing_manager.set_dependency_container(container)
     kernel = RuntimeKernel(eventing_manager)
     event_runtime = EventRuntime()
     kernel.register_runtime(event_runtime)
@@ -145,12 +169,30 @@ async def bootstrap_runtime_kernel(
     # Boot Kernel với Global Context
     global_config = {
         "storage_engine": storage_engine,
-        "uow_factory": uow_factory,
+        "uow_factory": container.uow_factory,
         "http_client": http_client,
+        "container": container,
     }
     
     await kernel.bootstrap(global_config=global_config)
-    app.state.event_bus = eventing_manager.bus
+    container.runtime_kernel = kernel
+    container.event_runtime = kernel.registry.get("event_runtime")
+    container.context_runtime = kernel.registry.get("context_runtime")
+    container.connection_runtime = kernel.registry.get("connection_runtime")
+    container.session_runtime = kernel.registry.get("session_runtime")
+    container.workflow_runtime = kernel.registry.get("workflow_runtime")
+    container.capability_runtime = kernel.registry.get("capability_runtime")
+    container.provider_runtime = kernel.registry.get("provider_runtime")
+    container.tool_registry = ToolRegistry(container.capability_runtime.registry)
+
+    app.state.container = container
+    app.state.event_bus = container.event_bus
+    app.state.event_manager = eventing_manager
+    app.state.runtime_kernel = container.runtime_kernel
+    app.state.provider_runtime = container.provider_runtime
+    app.state.router = LegacyModelRouterFacade(container.provider_runtime)
+    app.state.agent_registry = container.agent_registry
+    app.state.tool_registry = container.tool_registry
     logger.info("AI Runtime Kernel & Runtimes booted successfully.")
     return kernel
 
@@ -173,9 +215,9 @@ async def lifespan(app: FastAPI):
     app.state.http_client = http_client
 
     storage_engine, uow_factory = await bootstrap_storage(app)
-    bootstrap_security(app, storage_engine, uow_factory, cb_manager)
+    security_services = bootstrap_security(app, storage_engine, uow_factory, cb_manager)
     kernel = await bootstrap_runtime_kernel(
-        app, storage_engine, uow_factory, http_client, cb_manager
+        app, storage_engine, uow_factory, http_client, cb_manager, security_services
     )
 
     yield  # --- APPLICATION IS RUNNING AND SERVING TRAFFIC ---
@@ -211,6 +253,7 @@ def create_app() -> FastAPI:
     app_instance.include_router(agent_router)
     app_instance.include_router(tool_router)
     app_instance.include_router(events_router)
+    app_instance.include_router(multi_agent_router)
     app_instance.include_router(health_router.router)
 
     return app_instance

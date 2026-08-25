@@ -30,12 +30,13 @@ class LifecycleManager:
 
             ctx = RuntimeContext(
                 kernel=self.kernel,
-                config=global_config.get(r_id, {}),
+                config=global_config,
                 logger=structlog.get_logger(f"Runtime[{r_id}]"),
                 event_bus=self.kernel.event_bus,
-                storage=None,
-                metrics=None,
-                clock=None,
+                container=global_config.get("container"),
+                storage=global_config.get("storage_engine"),
+                metrics=global_config.get("metrics"),
+                clock=global_config.get("clock"),
             )
             await runtime.initialize(ctx)
             logger.info(f"Runtime '{r_id}' -> State: {runtime.state.value}")

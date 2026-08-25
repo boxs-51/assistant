@@ -4,14 +4,9 @@ from ...domain.schemas.event import BaseEvent
 from .ws_manager import WebSocketConnectionManager
 from ...context.manager import ContextEngine
 from ..storage.repositories.sessions import SessionRepository
-from .registry import EventRegistry
 
 logger = structlog.get_logger(__name__)
 
-# Khởi tạo một instance registry toàn cục để các decorator có thể sử dụng
-registry = EventRegistry()
-
-@registry.subscribe("system.event.failed")
 async def handle_failed_event_dlq(event: BaseEvent):
     """
     Dead Letter Queue (DLQ) handler.
@@ -25,7 +20,6 @@ async def handle_failed_event_dlq(event: BaseEvent):
         error_details=payload, # Ghi lại toàn bộ payload của sự kiện lỗi
     )
 
-@registry.subscribe("user.created")
 async def handle_user_created(event: BaseEvent, session_repo: SessionRepository):
     """
     Một ví dụ về hàm xử lý sự kiện (event handler).
@@ -34,7 +28,6 @@ async def handle_user_created(event: BaseEvent, session_repo: SessionRepository)
     """
     logger.info("🎉 New user has registered!", user_id=event.payload.get("user_id"), repo_instance=session_repo.__class__.__name__)
 
-@registry.subscribe("chat.session.started")
 async def handle_chat_session_started(event: BaseEvent):
     """
     Hàm xử lý khi một phiên hội thoại mới bắt đầu.
@@ -43,7 +36,6 @@ async def handle_chat_session_started(event: BaseEvent):
     """
     logger.info("🚀 New chat session started", session_id=event.payload.get("session_id"), user_id=event.payload.get("user_id"))
 
-@registry.subscribe("tool.execution.started")
 async def handle_tool_execution_started(event: BaseEvent):
     """Lắng nghe sự kiện khi một tool bắt đầu được thực thi."""
     logger.info(
@@ -52,7 +44,6 @@ async def handle_tool_execution_started(event: BaseEvent):
         session_id=event.payload.get("session_id"),
     )
 
-@registry.subscribe("tool.execution.completed")
 async def handle_tool_execution_completed(event: BaseEvent):
     """Lắng nghe sự kiện khi một tool thực thi xong."""
     logger.info(
@@ -61,7 +52,6 @@ async def handle_tool_execution_completed(event: BaseEvent):
         session_id=event.payload.get("session_id"),
     )
 
-@registry.subscribe_to_all()
 async def broadcast_to_websockets(event: BaseEvent, ws_manager: WebSocketConnectionManager):
     """
     Handler này lắng nghe TẤT CẢ các sự kiện và chuyển tiếp đến WebSocket clients.
@@ -69,7 +59,6 @@ async def broadcast_to_websockets(event: BaseEvent, ws_manager: WebSocketConnect
     """
     logger.debug("Sending event to subscribed WebSocket clients", event_name=event.event_name)
     await ws_manager.send_to_subscribers(event.event_name, event.model_dump())
-@registry.subscribe("session.summary.needed")
 async def handle_session_summary_needed(event: BaseEvent, context_engine: ContextEngine):
     """
     Lắng nghe sự kiện cần tóm tắt session và ủy quyền cho ContextEngine.
@@ -78,5 +67,15 @@ async def handle_session_summary_needed(event: BaseEvent, context_engine: Contex
     session_id = event.payload.get("session_id")
     if session_id:
         logger.info("Triggering session summary", session_id=session_id)
+
+
+def register_subscribers(registry):
+    registry.register("system.event.failed", handle_failed_event_dlq)
+    registry.register("user.created", handle_user_created)
+    registry.register("chat.session.started", handle_chat_session_started)
+    registry.register("tool.execution.started", handle_tool_execution_started)
+    registry.register("tool.execution.completed", handle_tool_execution_completed)
+    registry.register_for_all(broadcast_to_websockets)
+    registry.register("session.summary.needed", handle_session_summary_needed)
         # Giả sử ContextEngine có phương thức này
         # await context_engine.summarize_session(session_id)

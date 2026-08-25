@@ -1,13 +1,14 @@
 # src/runtime/runtimes/capability/drivers/base.py
 from abc import ABC, abstractmethod
 from typing import Any, Dict
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 class CapabilityDefinition(BaseModel):
     name: str
     description: str
     parameters: Dict[str, Any]  # JSON Schema tuân thủ OpenAPI/OpenAI tool format
     require_auth: bool = False
+    required_scopes: list[str] = Field(default_factory=list)
 
 class BaseCapabilityDriver(ABC):
     """Interface chuẩn cho mọi loại Tool/Capability trong hệ thống."""

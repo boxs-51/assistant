@@ -3,8 +3,9 @@ import asyncio
 from typing import Type, Any
 
 from ..storage.core.manager import StorageEngine
-from ..storage.repositories.sessions import SessionRepository
+from ..storage.repositories.chat_data.sessions import SessionRepository
 from ..storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ..storage.interfaces.repository import BaseRepository
 from .bus import EventBus, EventDispatcher, EventPriority
 from .registry import EventRegistry
 from .ws_manager import WebSocketConnectionManager
@@ -38,16 +39,22 @@ class EventingManager:
             registry=self.registry,
             queue=self.bus.queue,
             dependency_container=self,
-            cache_driver=self.storage.drivers.get("cache"),
+            cache_driver=self.storage.drivers.get("redis"),
             uow_factory=self.uow_factory
         )
         self.ws_manager = WebSocketConnectionManager()
         self.dispatcher_task: asyncio.Task = None
+        self._dependency_container = self
         logger.info("EventingManager initialized with Bus, Shared Registry, Dispatcher, and WebSocket Manager.")
 
     def register_subscribers(self):
         from . import subscribers
-        logger.info("Subscribers module imported, auto-registration complete.")
+        subscribers.register_subscribers(self.registry)
+        logger.info("Built-in subscribers registered on shared event registry.")
+
+    def set_dependency_container(self, container: Any):
+        self._dependency_container = container
+        self.dispatcher._dependency_container = container
 
     def start(self):
         if self.dispatcher_task is None:
@@ -67,6 +74,11 @@ class EventingManager:
         logger.info("EventingManager has been shut down.")
 
     def get_dependency(self, dep_type: Type) -> Any:
+        if self._dependency_container is not self:
+            dependency = self._dependency_container.resolve(dep_type)
+            if dependency is not None:
+                return dependency
+
         if dep_type is WebSocketConnectionManager:
             return self.ws_manager
         if dep_type is StorageEngine:
@@ -74,7 +86,7 @@ class EventingManager:
         
         try:
             # Kiểm tra lớp cha của Repo
-            if hasattr(SessionRepository, '__base__') and issubclass(dep_type, SessionRepository.__base__):
+            if isinstance(dep_type, type) and issubclass(dep_type, BaseRepository):
                 return dep_type
         except TypeError:
             pass

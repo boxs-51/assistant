@@ -8,6 +8,7 @@ from .drivers.base import BaseCapabilityDriver
 from ...domain.schemas.identity import Identity
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
+from ...application.policy.authorization import AuthorizationService
 
 logger = structlog.get_logger(__name__)
 
@@ -24,6 +25,7 @@ class CapabilityRuntime(BaseRuntime):
         super().__init__(manifest=manifest)
         self.event_bus = None
         self.registry = CapabilityRegistry()
+        self.authorization = AuthorizationService()
 
     async def initialize(self, context: Dict[str, Any]) -> None:
         # Lắng nghe Command yêu cầu thực thi Tool từ EventBus
@@ -72,7 +74,18 @@ class CapabilityRuntime(BaseRuntime):
         self.registry.register_capability(driver)
 
     async def get_available_tools(self, identity: Identity):
-        return await self.registry.get_accessible_tools(identity)
+        return [
+            {
+                "type": "function",
+                "function": {
+                    "name": driver.definition.name,
+                    "description": driver.definition.description,
+                    "parameters": driver.definition.parameters,
+                },
+            }
+            for driver in self.registry.get_all_drivers()
+            if self.authorization.is_allowed(identity, driver)
+        ]
 
     async def execute_tool(
         self, 
@@ -84,6 +97,8 @@ class CapabilityRuntime(BaseRuntime):
         driver = self.registry.get_driver(tool_name)
         if not driver:
             raise ValueError(f"Capability/Tool '{tool_name}' not found.")
+        if not self.authorization.is_allowed(identity, driver):
+            raise PermissionError(f"Capability/Tool '{tool_name}' is not authorized.")
 
         exec_context = context or {}
         exec_context["identity"] = identity

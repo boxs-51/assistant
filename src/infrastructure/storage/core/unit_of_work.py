@@ -51,7 +51,7 @@ class AbstractUnitOfWork(ABC):
         raise NotImplementedError
 
 class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
-    def __init__(self, db_driver: DatabaseDriver, event_bus: "EventBus"):
+    def __init__(self, db_driver: DatabaseDriver, event_bus: "EventBus" = None):
         self._session_ctx = None
         self._session_factory = db_driver.get_session
         self._event_bus = event_bus

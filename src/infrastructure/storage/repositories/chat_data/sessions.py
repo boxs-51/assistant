@@ -16,9 +16,17 @@ class SessionRepository(BaseRepository):
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def create_session(self, user_id: str, organization_id: str, project_id: Optional[str] = None, title: Optional[str] = None) -> Session:
+    async def create_session(
+        self,
+        user_id: str,
+        organization_id: str,
+        project_id: Optional[str] = None,
+        title: Optional[str] = None,
+        session_id: Optional[str] = None,
+    ) -> Session:
         """Tạo một phiên hội thoại (session) mới."""
         new_session = Session(
+            id=session_id,
             user_id=user_id, 
             organization_id=organization_id, 
             project_id=project_id,

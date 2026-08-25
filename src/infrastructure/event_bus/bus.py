@@ -136,7 +136,7 @@ class EventDispatcher:
         logger.info("EventDispatcher loop starting...")
         while True:
             try:
-                priority, event, future = await self._queue.get()
+                _, _, event, future = await self._queue.get()
                 asyncio.create_task(self._dispatch_event_task(event, future))
                 self._queue.task_done()
             except Exception as e:
@@ -182,9 +182,10 @@ class EventBus:
     để nhất quán với Dispatcher.
     """
     def __init__(self, registry: EventRegistry, priority_map: Mapping[str, EventPriority]):
-        self._queue: asyncio.PriorityQueue[Tuple[int, BaseEvent, asyncio.Future]] = asyncio.PriorityQueue()
+        self._queue: asyncio.PriorityQueue[Tuple[int, int, BaseEvent, asyncio.Future]] = asyncio.PriorityQueue()
         self._registry = registry
         self._priority_map = priority_map
+        self._sequence = 0
         logger.info("EventBus initialized with PriorityQueue & Shared Registry.")
 
     @property
@@ -203,11 +204,12 @@ class EventBus:
         Phát sự kiện vào Queue. 
         Trả về Future cho phép caller await nếu cần (Fire-and-Forget thì không await).
         """
-        future = asyncio.Future()
+        future = asyncio.get_event_loop().create_future()
         priority = self._priority_map.get(event.event_name, EventPriority.NORMAL)
+        self._sequence += 1
         
         event_id = getattr(event, 'event_id', None) or getattr(event, 'id', 'unknown')
-        self._queue.put_nowait((priority.value, event, future))
+        self._queue.put_nowait((priority.value, self._sequence, event, future))
         
         logger.info("Event enqueued for publishing", event_name=event.event_name, event_id=event_id, priority=priority.name)
         return future
