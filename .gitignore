@@ -1,5 +1,4 @@
 *venv
-
 __pycache__
 *.env
 .pytest_cache
@@ -7,6 +6,6 @@ __pycache__
 data/
 /memory/
 1.0.0
-.cache
+.cache/
 
 *.zip

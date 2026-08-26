@@ -1,5 +1,6 @@
 import asyncio
 
+import pytest
 from src.application.container import ApplicationContainer
 from src.infrastructure.event_bus.bus import EventBus, EventPriority
 from src.infrastructure.event_bus.registry import EventRegistry
@@ -35,8 +36,8 @@ def test_builtin_subscribers_use_the_shared_registry():
     assert len(registry.get_handlers("system.event.failed")) == 2
     assert len(registry.get_handlers("unknown.event")) == 1
 
-
-def test_equal_priority_events_are_orderable_without_comparing_events():
+@pytest.mark.asyncio
+async def test_equal_priority_events_are_orderable_without_comparing_events():
     registry = EventRegistry()
     bus = EventBus(registry, {"test.event": EventPriority.NORMAL})
 

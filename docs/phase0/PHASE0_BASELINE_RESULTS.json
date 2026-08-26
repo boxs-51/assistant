@@ -1,0 +1,27 @@
+{
+  "mock": {
+    "name": "mock_provider_runtime",
+    "total_requests": 200,
+    "successful_requests": 200,
+    "failed_requests": 0,
+    "error_rate_percent": 0.0,
+    "throughput_requests_per_second": 30764.635007502937,
+    "wall_time_seconds": 0.00650097099969571,
+    "latency_min_ms": 0.16781300018919865,
+    "latency_avg_ms": 0.3568117049871944,
+    "latency_p50_ms": 0.3125209998415812,
+    "latency_p95_ms": 0.884647300085817,
+    "latency_p99_ms": 0.9958127798563509,
+    "latency_max_ms": 1.0200869996879192
+  },
+  "circuit_breaker": {
+    "final_state": "closed",
+    "blocked_request_observed": true,
+    "open_transitions": 1,
+    "reopen_transitions": 0,
+    "half_open_transitions": 1,
+    "close_transitions": 1,
+    "blocked_requests": 1,
+    "half_open_trials": 1
+  }
+}

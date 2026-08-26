@@ -32,6 +32,16 @@ class CircuitBreaker:
         self._failure_count = 0
         self._success_count = 0
         self._last_failure_time = 0.0
+
+        # Monotonic counters for Phase 0 diagnostics and baseline benchmarks.
+        self._metrics = {
+            "open_transitions": 0,
+            "reopen_transitions": 0,
+            "half_open_transitions": 0,
+            "close_transitions": 0,
+            "blocked_requests": 0,
+            "half_open_trials": 0,
+        }
         
         # Lock để đảm bảo các thao tác cập nhật state là an toàn
         self._state_lock = asyncio.Lock()
@@ -48,6 +58,7 @@ class CircuitBreaker:
             if self._state == CircuitBreakerState.OPEN and self._is_reset_timeout_expired():
                 self._state = CircuitBreakerState.HALF_OPEN
                 self._success_count = 0 # Reset success count for the new trial
+                self._metrics["half_open_transitions"] += 1
                 logger.warning("Circuit breaker is now HALF_OPEN. Allowing a trial request.", provider=self.provider_name)
             return self._state
 
@@ -63,12 +74,14 @@ class CircuitBreaker:
         current_state = await self.state
 
         if current_state == CircuitBreakerState.OPEN:
+            self._metrics["blocked_requests"] += 1
             raise CircuitBreakerOpenError(f"Circuit is open for provider {self.provider_name}")
 
         if current_state == CircuitBreakerState.HALF_OPEN:
             # Chỉ cho phép một coroutine duy nhất đi qua ở trạng thái HALF_OPEN
             if not self._half_open_lock.locked():
                 await self._half_open_lock.acquire()
+                self._metrics["blocked_requests"] += 1
                 # Nếu coroutine này thành công, nó sẽ release lock trong on_success
                 # Nếu thất bại, nó sẽ release lock trong on_failure
             else:
@@ -82,6 +95,7 @@ class CircuitBreaker:
                 self._success_count += 1
                 if self._success_count >= self.success_threshold:
                     self._state = CircuitBreakerState.CLOSED
+                    self._metrics["blocked_requests"] += 1
                     self._failure_count = 0
                     self._success_count = 0
                     logger.info("Circuit breaker has been CLOSED due to successful trial.", provider=self.provider_name)
@@ -97,6 +111,7 @@ class CircuitBreaker:
         async with self._state_lock:
             if self._state == CircuitBreakerState.HALF_OPEN:
                 self._state = CircuitBreakerState.OPEN
+                self._metrics["blocked_requests"] += 1
                 self._last_failure_time = time.monotonic()
                 logger.warning("Circuit breaker has been RE-OPENED from half-open state due to trial failure.", provider=self.provider_name)
                 # Release lock sau khi thử thất bại
@@ -106,6 +121,7 @@ class CircuitBreaker:
                 self._failure_count += 1
                 if self._failure_count >= self.failure_threshold:
                     self._state = CircuitBreakerState.OPEN
+                    self._metrics["blocked_requests"] += 1
                     self._last_failure_time = time.monotonic()
                     logger.error("Circuit breaker has been OPENED due to failures.", provider=self.provider_name, failure_count=self._failure_count)
 
@@ -133,6 +149,10 @@ class CircuitBreaker:
     def current_state(self) -> CircuitBreakerState:
         """Trả về trạng thái nội bộ mà không kích hoạt logic chuyển đổi."""
         return self._state
+
+    def metrics_snapshot(self) -> Dict[str, int]:
+        """Return a stable copy of transition/call counters for diagnostics and benchmarks."""
+        return dict(self._metrics)
 
 class CircuitBreakerManager:
     """

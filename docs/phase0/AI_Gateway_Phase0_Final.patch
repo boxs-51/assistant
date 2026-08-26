@@ -1,0 +1,1052 @@
+--- a/src/circuit_breaker.py
++++ b/src/circuit_breaker.py
+@@ -32,6 +32,16 @@
+         self._failure_count = 0
+         self._success_count = 0
+         self._last_failure_time = 0.0
++
++        # Monotonic counters for Phase 0 diagnostics and baseline benchmarks.
++        self._metrics = {
++            "open_transitions": 0,
++            "reopen_transitions": 0,
++            "half_open_transitions": 0,
++            "close_transitions": 0,
++            "blocked_requests": 0,
++            "half_open_trials": 0,
++        }
+         
+         # Lock để đảm bảo các thao tác cập nhật state là an toàn
+         self._state_lock = asyncio.Lock()
+@@ -48,6 +58,7 @@
+             if self._state == CircuitBreakerState.OPEN and self._is_reset_timeout_expired():
+                 self._state = CircuitBreakerState.HALF_OPEN
+                 self._success_count = 0 # Reset success count for the new trial
++                self._metrics["half_open_transitions"] += 1
+                 logger.warning("Circuit breaker is now HALF_OPEN. Allowing a trial request.", provider=self.provider_name)
+             return self._state
+ 
+@@ -63,12 +74,14 @@
+         current_state = await self.state
+ 
+         if current_state == CircuitBreakerState.OPEN:
++            self._metrics["blocked_requests"] += 1
+             raise CircuitBreakerOpenError(f"Circuit is open for provider {self.provider_name}")
+ 
+         if current_state == CircuitBreakerState.HALF_OPEN:
+             # Chỉ cho phép một coroutine duy nhất đi qua ở trạng thái HALF_OPEN
+             if not self._half_open_lock.locked():
+                 await self._half_open_lock.acquire()
++                self._metrics["half_open_trials"] += 1
+                 # Nếu coroutine này thành công, nó sẽ release lock trong on_success
+                 # Nếu thất bại, nó sẽ release lock trong on_failure
+             else:
+@@ -82,6 +95,7 @@
+                 self._success_count += 1
+                 if self._success_count >= self.success_threshold:
+                     self._state = CircuitBreakerState.CLOSED
++                    self._metrics["close_transitions"] += 1
+                     self._failure_count = 0
+                     self._success_count = 0
+                     logger.info("Circuit breaker has been CLOSED due to successful trial.", provider=self.provider_name)
+@@ -97,6 +111,7 @@
+         async with self._state_lock:
+             if self._state == CircuitBreakerState.HALF_OPEN:
+                 self._state = CircuitBreakerState.OPEN
++                self._metrics["reopen_transitions"] += 1
+                 self._last_failure_time = time.monotonic()
+                 logger.warning("Circuit breaker has been RE-OPENED from half-open state due to trial failure.", provider=self.provider_name)
+                 # Release lock sau khi thử thất bại
+@@ -106,6 +121,7 @@
+                 self._failure_count += 1
+                 if self._failure_count >= self.failure_threshold:
+                     self._state = CircuitBreakerState.OPEN
++                    self._metrics["open_transitions"] += 1
+                     self._last_failure_time = time.monotonic()
+                     logger.error("Circuit breaker has been OPENED due to failures.", provider=self.provider_name, failure_count=self._failure_count)
+ 
+@@ -134,6 +150,10 @@
+         """Trả về trạng thái nội bộ mà không kích hoạt logic chuyển đổi."""
+         return self._state
+ 
++    def metrics_snapshot(self) -> Dict[str, int]:
++        """Return a stable copy of transition/call counters for diagnostics and benchmarks."""
++        return dict(self._metrics)
++
+ class CircuitBreakerManager:
+     """
+     Quản lý tập trung vòng đời của tất cả các đối tượng CircuitBreaker.
+--- a/src/infrastructure/config/schemas.py
++++ b/src/infrastructure/config/schemas.py
+@@ -80,6 +80,7 @@
+ 
+ class ProviderSettings(BaseModel):
+     timeout: int = 60
++    mock_enabled: bool = False
+     retry: int = 2
+     enable_fallback: bool = True
+     priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama"])
+--- a/src/provider/discovery.py
++++ b/src/provider/discovery.py
+@@ -17,6 +17,8 @@
+         """Chạy quá trình khám phá và đăng ký."""
+         logger.info("Starting provider discovery...")
+         for name, provider_class in ProviderFactory._provider_classes.items():
++            if name == "mock" and not provider_class.is_configured():
++                continue
+             # Ủy quyền việc kiểm tra cấu hình cho chính lớp Provider
+             if provider_class.is_configured():
+                 provider_instance = ProviderFactory.create_provider(name)
+--- a/src/provider/factory.py
++++ b/src/provider/factory.py
+@@ -4,6 +4,7 @@
+ from .openai import OpenAIProvider
+ from .ollama import OllamaProvider
+ from .google import GoogleProvider
++from .mock import MockProvider
+ 
+ class ProviderFactory:
+     """
+@@ -14,6 +15,7 @@
+         "openai": OpenAIProvider,
+         "ollama": OllamaProvider,
+         "gemini": GoogleProvider,
++        "mock": MockProvider,
+     }
+ 
+     @classmethod
+--- a/src/provider/handlers/embedding_handler.py
++++ b/src/provider/handlers/embedding_handler.py
+@@ -1,11 +1,33 @@
+ import httpx
+ from typing import Dict, Any
+ from .base import BaseExecutionHandler
++from ...domain.schemas import ModelCapability
++from ...infrastructure.config import settings
++from ..exceptions import NoAvailableProviderError, ProviderError
+ 
+ class EmbeddingExecutionHandler(BaseExecutionHandler):
+-    """Xử lý tạo Vector Embeddings."""
++    """Xử lý tạo Vector Embeddings qua ProviderRuntime."""
+ 
+     async def execute(self, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> Any:
+-        # Tùy biến logic thực thi embedding theo quy trình của bạn tại đây
+-        # Ví dụ gọi thông qua provider hoặc routing policy riêng
+-        pass
+\ No newline at end of file
++        model = body.get("model")
++        initial_chain = self.routing_policy.get_fallback_chain(model)
++        if not initial_chain:
++            raise NoAvailableProviderError(f"No provider configured for model '{model}'.")
++
++        last_error = None
++        for provider in await self._get_healthy_fallback_chain(initial_chain):
++            try:
++                if not await provider.has_capability(
++                    model, ModelCapability.EMBEDDINGS, http_client, settings.provider.timeout
++                ):
++                    continue
++                return await self.executor.execute_generic(
++                    provider=provider,
++                    execution_callable=lambda p=provider: p.embeddings.embeddings(
++                        http_client=http_client, body=body, timeout=settings.provider.timeout
++                    ),
++                )
++            except (ProviderError, httpx.RequestError, httpx.HTTPStatusError) as exc:
++                last_error = exc
++                continue
++        raise NoAvailableProviderError("All embedding providers are unavailable or unsupported.") from last_error
+--- /dev/null
++++ b/src/provider/mock/__init__.py
+@@ -0,0 +1,3 @@
++from .provider import MockProvider
++
++__all__ = ["MockProvider"]
+--- /dev/null
++++ b/src/provider/mock/provider.py
+@@ -0,0 +1,255 @@
++"""Deterministic offline provider used by Phase 0 tests and local E2E runs."""
++
++from __future__ import annotations
++
++import hashlib
++import math
++import os
++import time
++import uuid
++from io import BytesIO
++from typing import Any, AsyncGenerator, Dict, Optional
++
++from ..core import (
++    ApiTypeMapper,
++    BaseProvider,
++    EndpointBuilder,
++    ModelCapabilityManager,
++    ModelMapper,
++    NoAuth,
++)
++from ...infrastructure.config import settings
++from ...domain.schemas import (
++    GatewayChoice,
++    GatewayMessage,
++    GatewayResponse,
++    GatewayStreamChunk,
++    GatewayStreamChoice,
++    GatewayStreamDelta,
++    GatewayUsage,
++    ModelCapability,
++    ModelInfo,
++    ModelList,
++    ContextLimits,
++)
++
++MOCK_MODEL = "mock-chat"
++MOCK_EMBEDDING_MODEL = "mock-embedding"
++
++
++class MockChat:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++
++    @staticmethod
++    def _last_user_text(body: Dict[str, Any]) -> str:
++        messages = body.get("messages") or []
++        for message in reversed(messages):
++            if message.get("role") == "user":
++                content = message.get("content", "")
++                if isinstance(content, str):
++                    return content
++                return str(content)
++        return ""
++
++    async def chat(self, **kwargs) -> GatewayResponse:
++        body = kwargs.get("body") or {}
++        model = body.get("model") or MOCK_MODEL
++        text = self._last_user_text(body)
++        answer = f"mock:{text}" if text else "mock:ok"
++        prompt_tokens = max(1, len(text.split())) if text else 1
++        completion_tokens = max(1, len(answer.split()))
++        return GatewayResponse(
++            id=f"mock-{uuid.uuid4().hex}",
++            model=model,
++            provider=self.provider.name,
++            choices=[GatewayChoice(
++                index=0,
++                message=GatewayMessage(role="assistant", content=answer),
++                finish_reason="stop",
++            )],
++            usage=GatewayUsage(
++                prompt_tokens=prompt_tokens,
++                completion_tokens=completion_tokens,
++                total_tokens=prompt_tokens + completion_tokens,
++            ),
++            metadata={"mock": True},
++        )
++
++    async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
++        body = kwargs.get("body") or {}
++        model = body.get("model") or MOCK_MODEL
++        text = self._last_user_text(body)
++        answer = f"mock:{text}" if text else "mock:ok"
++        words = answer.split(" ")
++        for index, word in enumerate(words):
++            yield GatewayStreamChunk(
++                id=f"mock-stream-{uuid.uuid4().hex}",
++                model=model,
++                provider=self.provider.name,
++                choices=[GatewayStreamChoice(
++                    index=0,
++                    delta=GatewayStreamDelta(
++                        content=(word + (" " if index < len(words) - 1 else "")),
++                        role="assistant" if index == 0 else None,
++                    ),
++                    finish_reason="stop" if index == len(words) - 1 else None,
++                )],
++                metadata={"mock": True},
++            )
++
++
++class MockModels:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++
++    def _model(self, model_id: str, embedding: bool = False) -> ModelInfo:
++        caps = {ModelCapability.EMBEDDINGS, ModelCapability.EMBEDDINGS_BATCH} if embedding else {
++            ModelCapability.CHAT,
++            ModelCapability.CHAT_STREAM,
++            ModelCapability.TOKEN_COUNT,
++            ModelCapability.JSON_MODE,
++            ModelCapability.STRUCTURED_OUTPUT,
++            ModelCapability.TOOL_CALLING,
++        }
++        return ModelInfo(
++            id=model_id,
++            display_name=model_id,
++            provider=self.provider.name,
++            family="mock",
++            version="1.0",
++            description="Deterministic offline Phase 0 mock model",
++            limits=ContextLimits(context_window=32768, max_output_tokens=4096),
++            capabilities=caps,
++            owned_by="phase0",
++            metadata={"mock": True},
++        )
++
++    async def models(self, **kwargs) -> ModelList:
++        return ModelList(data=[self._model(MOCK_MODEL), self._model(MOCK_EMBEDDING_MODEL, embedding=True)])
++
++    async def model(self, **kwargs) -> ModelInfo:
++        model_id = kwargs.get("model_name") or MOCK_MODEL
++        return self._model(model_id, embedding="embedding" in model_id)
++
++
++class MockEmbeddings:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++
++    @staticmethod
++    def _vector(text: str, dimensions: int = 8) -> list[float]:
++        digest = hashlib.sha256(text.encode("utf-8")).digest()
++        raw = [int.from_bytes(digest[i:i + 4], "big") / 2**32 for i in range(0, dimensions * 4, 4)]
++        norm = math.sqrt(sum(x * x for x in raw)) or 1.0
++        return [x / norm for x in raw]
++
++    async def embeddings(self, **kwargs) -> Dict[str, Any]:
++        body = kwargs.get("body") or {}
++        model = body.get("model") or MOCK_EMBEDDING_MODEL
++        inputs = body.get("input", [])
++        if isinstance(inputs, str):
++            inputs = [inputs]
++        return {
++            "object": "list",
++            "model": model,
++            "data": [
++                {"object": "embedding", "index": i, "embedding": self._vector(str(value))}
++                for i, value in enumerate(inputs)
++            ],
++            "usage": {"prompt_tokens": sum(max(1, len(str(x).split())) for x in inputs), "total_tokens": sum(max(1, len(str(x).split())) for x in inputs)},
++        }
++
++
++class MockFiles:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++        self._files: Dict[str, Dict[str, Any]] = {}
++
++    async def list_files(self, **kwargs) -> Dict[str, Any]:
++        return {"object": "list", "data": list(self._files.values()), "next_page_token": None}
++
++    async def upload_file(self, **kwargs) -> Dict[str, Any]:
++        stream = kwargs["file_stream"]
++        content = stream.read()
++        file_id = f"mock-file-{uuid.uuid4().hex}"
++        entry = {
++            "name": file_id,
++            "display_name": kwargs.get("display_name") or file_id,
++            "mime_type": kwargs.get("mime_type") or "application/octet-stream",
++            "size": len(content),
++            "bytes": content,
++            "created": int(time.time()),
++        }
++        self._files[file_id] = entry
++        return {k: v for k, v in entry.items() if k != "bytes"}
++
++    async def get_file(self, **kwargs) -> Dict[str, Any]:
++        file_id = kwargs["file_id"]
++        entry = self._files[file_id]
++        return {k: v for k, v in entry.items() if k != "bytes"}
++
++    async def download_file(self, **kwargs) -> bytes:
++        return self._files[kwargs["file_id"]]["bytes"]
++
++    async def delete_file(self, **kwargs) -> bool:
++        return self._files.pop(kwargs["file_id"], None) is not None
++
++
++class MockProvider(BaseProvider):
++    """Provider with zero network I/O and deterministic responses."""
++
++    def __init__(self):
++        super().__init__(
++            provider_name="mock",
++            auth_strategy=NoAuth(),
++            endpoint_builder=EndpointBuilder(base_url="http://mock.invalid"),
++            api_mapper=ApiTypeMapper(api_map={}),
++            model_mapper=ModelMapper(model_map={
++                MOCK_MODEL: MOCK_MODEL,
++                MOCK_EMBEDDING_MODEL: MOCK_EMBEDDING_MODEL,
++            }),
++            capability_manager=ModelCapabilityManager(provider_name="mock"),
++        )
++        self.chat = MockChat(self)
++        self.models = MockModels(self)
++        self.embeddings = MockEmbeddings(self)
++        self.files = MockFiles(self)
++
++    @classmethod
++    def is_configured(cls) -> bool:
++        env_enabled = os.getenv("GATEWAY_PROVIDER__MOCK_ENABLED", "").lower() in {"1", "true", "yes", "on"}
++        try:
++            configured = bool(settings.provider.mock_enabled)
++        except RuntimeError:
++            configured = False
++        return env_enabled or configured
++
++    async def has_capability(self, model_name: str, capability: ModelCapability, http_client, timeout: float) -> bool:
++        if model_name == MOCK_EMBEDDING_MODEL:
++            return capability in {ModelCapability.EMBEDDINGS, ModelCapability.EMBEDDINGS_BATCH}
++        if model_name == MOCK_MODEL:
++            return capability in {
++                ModelCapability.CHAT,
++                ModelCapability.CHAT_STREAM,
++                ModelCapability.TOKEN_COUNT,
++                ModelCapability.JSON_MODE,
++                ModelCapability.STRUCTURED_OUTPUT,
++                ModelCapability.TOOL_CALLING,
++            }
++        return False
++
++    async def models_info(self, **kwargs):
++        return await self.models.models(**kwargs)
++
++    async def moderation(self, **kwargs):
++        raise NotImplementedError("Mock provider does not implement moderation")
++
++    async def computer_use(self, **kwargs):
++        raise NotImplementedError("Mock provider does not implement computer_use")
++
++    async def provider_info(self, **kwargs):
++        return {"name": self.name, "version": "1.0", "mock": True}
++
++    async def health(self, **kwargs):
++        return {"status": "ok", "provider": self.name, "mock": True}
+--- /dev/null
++++ b/tests/architecture/test_phase0_provider.py
+@@ -0,0 +1,46 @@
++import pytest
++
++from src.domain.schemas import ModelCapability
++from src.provider.mock.provider import MockProvider, MOCK_MODEL
++from src.provider.registry import ProviderRegistry
++from src.provider.policies.routing_policy import RoutingPolicy
++
++
++def test_mock_provider_registers_like_a_normal_provider(monkeypatch):
++    monkeypatch.setenv("GATEWAY_PROVIDER__MOCK_ENABLED", "true")
++    provider = MockProvider()
++    registry = ProviderRegistry()
++    registry.register(provider)
++
++    assert registry.get_provider("mock") is provider
++    assert registry.list_all_providers()["mock"].name == "mock"
++
++
++@pytest.mark.asyncio
++async def test_mock_provider_capability_does_not_touch_http_client():
++    provider = MockProvider()
++    sentinel = object()
++    assert await provider.has_capability(MOCK_MODEL, ModelCapability.CHAT, sentinel, 1.0)
++
++@pytest.mark.asyncio
++async def test_mock_is_not_discovered_when_disabled(monkeypatch):
++    monkeypatch.delenv("GATEWAY_PROVIDER__MOCK_ENABLED", raising=False)
++    from src.infrastructure.config import ConfigurationRegistry
++    from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
++    ConfigurationRegistry.set_config(ConfigSchema(provider=ProviderSettings(priority=["mock"], mock_enabled=False)))
++    registry = ProviderRegistry()
++    from src.provider.discovery import ProviderDiscovery
++    ProviderDiscovery(registry).run()
++    assert "mock" not in registry.list_all_providers()
++
++
++def test_mock_does_not_enter_default_fallback_chain_implicitly(monkeypatch):
++    monkeypatch.setenv("GATEWAY_PROVIDER__MOCK_ENABLED", "true")
++    from src.infrastructure.config import ConfigurationRegistry
++    from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
++    ConfigurationRegistry.set_config(ConfigSchema(provider=ProviderSettings(priority=["openai"], mock_enabled=True)))
++    from src.provider.mock.provider import MockProvider
++    providers = {"openai": MockProvider(), "mock": MockProvider()}
++    providers["openai"].name = "openai"
++    policy = RoutingPolicy(providers)
++    assert [provider.name for provider in policy.get_fallback_chain("unknown-model")] == ["openai"]
+--- /dev/null
++++ b/tests/e2e/conftest.py
+@@ -0,0 +1,23 @@
++"""Shared fixtures/helpers for live E2E tests.
++
++These tests intentionally talk to a running Gateway over HTTP. They are skipped unless
++PHASE0_LIVE_BASE_URL is set, so the normal unit/architecture suite remains offline.
++"""
++
++import os
++
++import pytest
++
++
++@pytest.fixture(scope="session")
++def live_base_url():
++    url = os.getenv("PHASE0_LIVE_BASE_URL")
++    if not url:
++        pytest.skip("Set PHASE0_LIVE_BASE_URL to run live Phase 0 E2E tests")
++    return url.rstrip("/")
++
++
++@pytest.fixture(scope="session")
++def live_headers():
++    token = os.getenv("PHASE0_LIVE_AUTH_TOKEN")
++    return {"Authorization": f"Bearer {token}"} if token else {}
+--- /dev/null
++++ b/tests/e2e/test_phase0_live.py
+@@ -0,0 +1,140 @@
++import httpx
++import pytest
++
++
++@pytest.mark.asyncio
++async def test_live_health_and_readiness(live_base_url, live_headers):
++    async with httpx.AsyncClient(timeout=15) as client:
++        health = await client.get(f"{live_base_url}/health", headers=live_headers)
++        assert health.status_code == 200
++        assert health.json().get("status") == "ok"
++
++        ready = await client.get(f"{live_base_url}/ready", headers=live_headers)
++        assert ready.status_code == 200
++        assert ready.json().get("status") == "ready"
++
++
++@pytest.mark.asyncio
++async def test_live_chat_with_mock_provider(live_base_url, live_headers):
++    payload = {
++        "model": "mock-chat",
++        "provider": "mock",
++        "messages": [{"role": "user", "content": "phase0"}],
++        "config": {"stream": False},
++    }
++    async with httpx.AsyncClient(timeout=30) as client:
++        response = await client.post(
++            f"{live_base_url}/v1/chat/completions",
++            json=payload,
++            headers=live_headers,
++        )
++    assert response.status_code == 200, response.text
++    body = response.json()
++    assert body["provider"] == "mock"
++    assert body["choices"][0]["message"]["content"] == "mock:phase0"
++
++
++@pytest.mark.asyncio
++async def test_live_stream_with_mock_provider(live_base_url, live_headers):
++    payload = {
++        "model": "mock-chat",
++        "provider": "mock",
++        "messages": [{"role": "user", "content": "hello world"}],
++        "config": {"stream": True},
++    }
++    async with httpx.AsyncClient(timeout=30) as client:
++        async with client.stream(
++            "POST",
++            f"{live_base_url}/v1/chat/completions",
++            json=payload,
++            headers=live_headers,
++        ) as response:
++            assert response.status_code == 200, await response.aread()
++            body = ""
++            async for chunk in response.aiter_text():
++                body += chunk
++
++    assert "mock:hello" in body
++    assert "mock:world" in body
++    assert "[DONE]" in body
++
++
++@pytest.mark.asyncio
++async def test_live_embeddings_with_mock_provider(live_base_url, live_headers):
++    payload = {
++        "model": "mock-embedding",
++        "provider": "mock",
++        "input": ["hello", "world"],
++    }
++    async with httpx.AsyncClient(timeout=30) as client:
++        response = await client.post(
++            f"{live_base_url}/v1/embeddings",
++            json=payload,
++            headers=live_headers,
++        )
++    assert response.status_code == 200, response.text
++    body = response.json()
++    assert len(body["data"]) == 2
++    assert body["data"][0]["object"] == "embedding"
++    assert len(body["data"][0]["embedding"]) == 8
++
++
++@pytest.mark.asyncio
++async def test_live_models_with_mock_provider(live_base_url, live_headers):
++    async with httpx.AsyncClient(timeout=30) as client:
++        response = await client.get(
++            f"{live_base_url}/v1/models/",
++            params={"provider_name": "mock"},
++            headers=live_headers,
++        )
++    assert response.status_code == 200, response.text
++    model_ids = {item["id"] for item in response.json()["data"]}
++    assert {"mock-chat", "mock-embedding"}.issubset(model_ids)
++
++@pytest.mark.asyncio
++async def test_live_auth_rejects_missing_credentials(live_base_url):
++    async with httpx.AsyncClient(timeout=15) as client:
++        response = await client.post(
++            f"{live_base_url}/v1/chat/completions",
++            json={
++                "model": "mock-chat",
++                "messages": [{"role": "user", "content": "unauthorized"}],
++            },
++        )
++    assert response.status_code == 401
++
++
++@pytest.mark.asyncio
++async def test_live_file_round_trip_with_mock_provider(live_base_url, live_headers):
++    async with httpx.AsyncClient(timeout=30) as client:
++        upload = await client.post(
++            f"{live_base_url}/v1/files/",
++            params={"provider_name": "mock", "display_name": "phase0.txt"},
++            files={"file": ("phase0.txt", b"phase0-live", "text/plain")},
++            headers=live_headers,
++        )
++        assert upload.status_code == 200, upload.text
++        file_id = upload.json()["name"]
++
++        metadata = await client.get(
++            f"{live_base_url}/v1/files/{file_id}",
++            params={"provider_name": "mock", "action": "metadata"},
++            headers=live_headers,
++        )
++        assert metadata.status_code == 200, metadata.text
++        assert metadata.json()["display_name"] == "phase0.txt"
++
++        download = await client.get(
++            f"{live_base_url}/v1/files/{file_id}",
++            params={"provider_name": "mock", "action": "download"},
++            headers=live_headers,
++        )
++        assert download.status_code == 200
++        assert download.content == b"phase0-live"
++
++        delete = await client.delete(
++            f"{live_base_url}/v1/files/{file_id}",
++            params={"provider_name": "mock"},
++            headers=live_headers,
++        )
++        assert delete.status_code == 204
+--- /dev/null
++++ b/tests/providers/test_mock_provider.py
+@@ -0,0 +1,67 @@
++import pytest
++
++from src.domain.schemas import ModelCapability
++from src.provider.mock.provider import MockProvider, MOCK_MODEL, MOCK_EMBEDDING_MODEL
++
++
++@pytest.mark.asyncio
++async def test_mock_chat_is_deterministic_and_offline():
++    provider = MockProvider()
++    result = await provider.chat.chat(body={
++        "model": MOCK_MODEL,
++        "messages": [{"role": "user", "content": "hello world"}],
++    })
++
++    assert result.provider == "mock"
++    assert result.model == MOCK_MODEL
++    assert result.choices[0].message.content == "mock:hello world"
++    assert await provider.has_capability(MOCK_MODEL, ModelCapability.CHAT, None, 1) is True
++    assert await provider.has_capability(MOCK_MODEL, ModelCapability.CHAT_STREAM, None, 1) is True
++
++
++@pytest.mark.asyncio
++async def test_mock_stream_emits_chunks_without_network():
++    provider = MockProvider()
++    chunks = [chunk async for chunk in provider.chat.chat_stream(body={
++        "model": MOCK_MODEL,
++        "messages": [{"role": "user", "content": "one two"}],
++    })]
++
++    assert len(chunks) == 2
++    assert "mock:one" in chunks[0].choices[0].delta.content
++    assert chunks[-1].choices[0].finish_reason == "stop"
++
++
++@pytest.mark.asyncio
++async def test_mock_embeddings_are_stable():
++    provider = MockProvider()
++    first = await provider.embeddings.embeddings(body={
++        "model": MOCK_EMBEDDING_MODEL,
++        "input": ["hello"],
++    })
++    second = await provider.embeddings.embeddings(body={
++        "model": MOCK_EMBEDDING_MODEL,
++        "input": ["hello"],
++    })
++
++    assert first == second
++    assert len(first["data"][0]["embedding"]) == 8
++    assert await provider.has_capability(MOCK_EMBEDDING_MODEL, ModelCapability.EMBEDDINGS, None, 1) is True
++
++
++@pytest.mark.asyncio
++async def test_mock_files_round_trip():
++    provider = MockProvider()
++    uploaded = await provider.files.upload_file(
++        file_stream=__import__("io").BytesIO(b"phase0"),
++        file_size=6,
++        mime_type="text/plain",
++        display_name="phase0.txt",
++    )
++    file_id = uploaded["name"]
++
++    meta = await provider.files.get_file(file_id=file_id)
++    payload = await provider.files.download_file(file_id=file_id)
++    assert meta["display_name"] == "phase0.txt"
++    assert payload == b"phase0"
++    assert await provider.files.delete_file(file_id=file_id) is True
+--- /dev/null
++++ b/tests/providers/test_mock_runtime_flow.py
+@@ -0,0 +1,78 @@
++from types import SimpleNamespace
++
++import httpx
++import pytest
++
++from src.circuit_breaker import CircuitBreakerManager
++from src.infrastructure.config import ConfigurationRegistry
++from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
++from src.provider.discovery import ProviderDiscovery
++from src.provider.policies.routing_policy import RoutingPolicy
++from src.provider.registry import ProviderRegistry
++from src.provider.executor import ProviderExecutor
++from src.provider.handlers.chat_handler import ChatExecutionHandler
++from src.provider.handlers.embedding_handler import EmbeddingExecutionHandler
++from src.provider.handlers.model_handler import ModelOperationHandler
++from src.provider.handlers.file_handler import FileOperationHandler
++
++
++@pytest.fixture(autouse=True)
++def mock_config():
++    ConfigurationRegistry.set_config(ConfigSchema(
++        provider=ProviderSettings(
++            priority=["mock"],
++            mock_enabled=True,
++            timeout=5,
++        )
++    ))
++
++
++@pytest.mark.asyncio
++async def test_mock_provider_exercises_provider_runtime_handlers_end_to_end():
++    registry = ProviderRegistry()
++    ProviderDiscovery(registry).run()
++    providers = registry.list_all_providers()
++    assert "mock" in providers
++
++    routing = RoutingPolicy(providers)
++    executor = ProviderExecutor(CircuitBreakerManager())
++    http_client = httpx.AsyncClient()
++    kwargs = dict(
++        providers=providers,
++        routing_policy=routing,
++        executor=executor,
++        circuit_breaker_manager=executor.breaker_manager,
++    )
++    chat_handler = ChatExecutionHandler(**kwargs)
++    embedding_handler = EmbeddingExecutionHandler(**kwargs)
++    model_handler = ModelOperationHandler(**kwargs)
++    file_handler = FileOperationHandler(**kwargs)
++
++    try:
++        chat = await chat_handler.execute_with_fallback(http_client, {
++            "model": "mock-chat",
++            "messages": [{"role": "user", "content": "phase0"}],
++        })
++        assert chat.provider == "mock"
++        assert chat.choices[0].message.content == "mock:phase0"
++
++        embedding = await embedding_handler.execute(http_client, {
++            "model": "mock-embedding",
++            "input": ["phase0"],
++        })
++        assert embedding["data"][0]["embedding"]
++
++        models = await model_handler.execute("mock", None, http_client)
++        assert {item.id for item in models.data} == {"mock-chat", "mock-embedding"}
++
++        uploaded = await file_handler.execute({
++            "action": "upload",
++            "provider_name": "mock",
++            "file_bytes": b"e2e",
++            "file_size": 3,
++            "mime_type": "text/plain",
++            "display_name": "e2e.txt",
++        }, http_client)
++        assert uploaded["display_name"] == "e2e.txt"
++    finally:
++        await http_client.aclose()
+--- /dev/null
++++ b/tests/tools_test_phase0_baseline.py
+@@ -0,0 +1,41 @@
++import asyncio
++from pathlib import Path
++import sys
++
++sys.path.insert(0, str(Path(__file__).parents[1]))
++
++from tools.phase0_baseline_benchmark import percentile
++from src.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError
++
++
++def test_percentile_interpolation():
++    samples = [1.0, 2.0, 3.0, 4.0, 5.0]
++    assert percentile(samples, 50) == 3.0
++    assert percentile(samples, 95) == 4.8
++    assert percentile(samples, 99) == 4.96
++
++
++def test_percentile_empty_is_nan():
++    assert percentile([], 50) != percentile([], 50)
++
++
++def test_circuit_breaker_metrics_capture_lifecycle():
++    async def run():
++        breaker = CircuitBreaker("test", failure_threshold=2, reset_timeout=0.001, success_threshold=1)
++        await breaker.on_failure()
++        await breaker.on_failure()
++        try:
++            await breaker.before_request()
++        except CircuitBreakerOpenError:
++            pass
++        await asyncio.sleep(0.003)
++        await breaker.before_request()
++        await breaker.on_success()
++        metrics = breaker.metrics_snapshot()
++        assert metrics["open_transitions"] == 1
++        assert metrics["half_open_transitions"] == 1
++        assert metrics["half_open_trials"] == 1
++        assert metrics["blocked_requests"] == 1
++        assert metrics["close_transitions"] == 1
++        assert breaker.current_state.value == "closed"
++    asyncio.run(run())
+--- /dev/null
++++ b/tools/phase0_live_e2e.py
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python3
++"""Run Phase 0 live E2E tests against an already running Gateway."""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++
++
++if __name__ == "__main__":
++    base_url = os.getenv("PHASE0_LIVE_BASE_URL")
++    if not base_url:
++        raise SystemExit("PHASE0_LIVE_BASE_URL is required, e.g. http://127.0.0.1:8000")
++    env = dict(os.environ)
++    env.setdefault("PHASE0_LIVE_BASE_URL", base_url)
++    raise SystemExit(subprocess.call([
++        sys.executable,
++        "-m",
++        "pytest",
++        "-q",
++        "tests/e2e/test_phase0_live.py",
++        *sys.argv[1:],
++    ], env=env))
+--- /dev/null
++++ b/tools/phase0_baseline_benchmark.py
+@@ -0,0 +1,188 @@
++#!/usr/bin/env python3
++"""Phase 0 deterministic baseline benchmark.
++
++Measures Provider Runtime latency/throughput/error-rate using the offline MockProvider and
++runs a synthetic Circuit Breaker lifecycle probe. An optional live HTTP mode measures the
++running Gateway without requiring any external AI API.
++"""
++from __future__ import annotations
++
++import argparse
++import asyncio
++import json
++import math
++import os
++import statistics
++import time
++from dataclasses import asdict, dataclass
++from pathlib import Path
++from typing import Awaitable, Callable
++
++import httpx
++
++from src.circuit_breaker import CircuitBreaker, CircuitBreakerOpenError, CircuitBreakerManager
++from src.infrastructure.config import ConfigurationRegistry
++from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
++from src.provider.discovery import ProviderDiscovery
++from src.provider.executor import ProviderExecutor
++from src.provider.handlers.chat_handler import ChatExecutionHandler
++from src.provider.policies.routing_policy import RoutingPolicy
++from src.provider.registry import ProviderRegistry
++
++
++@dataclass
++class BenchmarkResult:
++    name: str
++    total_requests: int
++    successful_requests: int
++    failed_requests: int
++    error_rate_percent: float
++    throughput_requests_per_second: float
++    wall_time_seconds: float
++    latency_min_ms: float
++    latency_avg_ms: float
++    latency_p50_ms: float
++    latency_p95_ms: float
++    latency_p99_ms: float
++    latency_max_ms: float
++
++
++def percentile(samples: list[float], pct: float) -> float:
++    if not samples:
++        return math.nan
++    ordered = sorted(samples)
++    if len(ordered) == 1:
++        return ordered[0]
++    rank = (len(ordered) - 1) * pct / 100.0
++    low = math.floor(rank)
++    high = math.ceil(rank)
++    if low == high:
++        return ordered[low]
++    return ordered[low] + (ordered[high] - ordered[low]) * (rank - low)
++
++
++async def benchmark(operation: Callable[[], Awaitable[object]], *, name: str, total: int, concurrency: int) -> BenchmarkResult:
++    started = time.perf_counter()
++    semaphore = asyncio.Semaphore(max(1, concurrency))
++    latencies: list[float] = []
++    successes = 0
++    failures = 0
++
++    async def one() -> None:
++        nonlocal successes, failures
++        async with semaphore:
++            t0 = time.perf_counter()
++            try:
++                await operation()
++            except Exception:
++                failures += 1
++            else:
++                successes += 1
++            finally:
++                latencies.append((time.perf_counter() - t0) * 1000.0)
++
++    await asyncio.gather(*(one() for _ in range(total)))
++    wall = time.perf_counter() - started
++    error_rate = (failures / total * 100.0) if total else 0.0
++    return BenchmarkResult(
++        name=name,
++        total_requests=total,
++        successful_requests=successes,
++        failed_requests=failures,
++        error_rate_percent=error_rate,
++        throughput_requests_per_second=(total / wall) if wall else 0.0,
++        wall_time_seconds=wall,
++        latency_min_ms=min(latencies) if latencies else math.nan,
++        latency_avg_ms=statistics.fmean(latencies) if latencies else math.nan,
++        latency_p50_ms=percentile(latencies, 50),
++        latency_p95_ms=percentile(latencies, 95),
++        latency_p99_ms=percentile(latencies, 99),
++        latency_max_ms=max(latencies) if latencies else math.nan,
++    )
++
++
++async def build_mock_runtime() -> tuple[ChatExecutionHandler, httpx.AsyncClient]:
++    ConfigurationRegistry.set_config(ConfigSchema(
++        provider=ProviderSettings(priority=["mock"], mock_enabled=True, timeout=5, retry=0),
++    ))
++    registry = ProviderRegistry()
++    ProviderDiscovery(registry).run()
++    providers = registry.list_all_providers()
++    manager = CircuitBreakerManager()
++    executor = ProviderExecutor(manager)
++    runtime = ChatExecutionHandler(
++        providers=providers,
++        routing_policy=RoutingPolicy(providers),
++        executor=executor,
++        circuit_breaker_manager=manager,
++    )
++    return runtime, httpx.AsyncClient()
++
++
++async def run_mock(total: int, concurrency: int) -> BenchmarkResult:
++    handler, client = await build_mock_runtime()
++    try:
++        payload = {"model": "mock-chat", "provider": "mock", "messages": [{"role": "user", "content": "phase0 baseline"}]}
++        async def operation() -> object:
++            return await handler.execute_with_fallback(client, payload)
++        return await benchmark(operation, name="mock_provider_runtime", total=total, concurrency=concurrency)
++    finally:
++        await client.aclose()
++
++
++async def run_live(base_url: str, token: str | None, total: int, concurrency: int) -> BenchmarkResult:
++    headers = {"Authorization": f"Bearer {token}"} if token else {}
++    payload = {"model": "mock-chat", "provider": "mock", "messages": [{"role": "user", "content": "phase0 live baseline"}]}
++    async with httpx.AsyncClient(base_url=base_url.rstrip("/"), headers=headers, timeout=30.0) as client:
++        async def operation() -> object:
++            response = await client.post("/v1/chat/completions", json=payload)
++            response.raise_for_status()
++            return response
++        return await benchmark(operation, name="live_gateway_http", total=total, concurrency=concurrency)
++
++
++async def circuit_breaker_probe() -> dict[str, object]:
++    breaker = CircuitBreaker(provider_name="phase0-probe", failure_threshold=3, reset_timeout=0.02, success_threshold=1)
++    for _ in range(3):
++        await breaker.on_failure()
++    blocked = False
++    try:
++        await breaker.before_request()
++    except CircuitBreakerOpenError:
++        blocked = True
++    await asyncio.sleep(0.03)
++    await breaker.before_request()
++    await breaker.on_success()
++    return {
++        "final_state": breaker.current_state.value,
++        "blocked_request_observed": blocked,
++        **breaker.metrics_snapshot(),
++    }
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("--requests", type=int, default=200)
++    parser.add_argument("--concurrency", type=int, default=20)
++    parser.add_argument("--live-url", default=os.getenv("PHASE0_LIVE_BASE_URL"))
++    parser.add_argument("--live-token", default=os.getenv("PHASE0_LIVE_AUTH_TOKEN"))
++    parser.add_argument("--output", default="artifacts/phase0-baseline.json")
++    parser.add_argument("--skip-live", action="store_true")
++    return parser.parse_args()
++
++
++async def main() -> None:
++    args = parse_args()
++    if args.requests <= 0 or args.concurrency <= 0:
++        raise SystemExit("--requests and --concurrency must be positive")
++    results = {"mock": asdict(await run_mock(args.requests, args.concurrency)), "circuit_breaker": await circuit_breaker_probe()}
++    if not args.skip_live and args.live_url:
++        results["live"] = asdict(await run_live(args.live_url, args.live_token, args.requests, args.concurrency))
++    path = Path(args.output)
++    path.parent.mkdir(parents=True, exist_ok=True)
++    path.write_text(json.dumps(results, indent=2, allow_nan=False), encoding="utf-8")
++    print(json.dumps(results, indent=2))
++
++
++if __name__ == "__main__":
++    asyncio.run(main())

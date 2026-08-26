@@ -4,6 +4,7 @@ from .core.provider import BaseProvider
 from .openai import OpenAIProvider
 from .ollama import OllamaProvider
 from .google import GoogleProvider
+from .mock import MockProvider
 
 class ProviderFactory:
     """
@@ -14,6 +15,7 @@ class ProviderFactory:
         "openai": OpenAIProvider,
         "ollama": OllamaProvider,
         "gemini": GoogleProvider,
+        "mock": MockProvider,
     }
 
     @classmethod

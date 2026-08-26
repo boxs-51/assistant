@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field, AnyHttpUrl, model_validator
+from pydantic import BaseModel, Field, AnyHttpUrl, model_validator, ConfigDict
 from typing import Dict, Optional
 # =================================================================
 # CONFIGURATION SCHEMAS
@@ -80,6 +80,7 @@ class CircuitBreakerSettings(BaseModel):
 
 class ProviderSettings(BaseModel):
     timeout: int = 60
+    mock_enabled: bool = False
     retry: int = 2
     enable_fallback: bool = True
     priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama"])
@@ -148,10 +149,7 @@ class ConfigSchema(BaseModel):
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     frontend: FrontendSettings = Field(default_factory=FrontendSettings)
 
-
-
-    class Config:
-        extra = "forbid" # Ném lỗi nếu có key không xác định trong cấu hình
+    model_config = ConfigDict(frozen=True, populate_by_name=True)
 
     @model_validator(mode='after')
     def check_config_consistency(self) -> 'ConfigSchema':
@@ -185,4 +183,3 @@ class ConfigSchema(BaseModel):
                 pass
 
         return self
-    

@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 import time
 from typing import Optional
 
@@ -16,5 +16,4 @@ class ProviderEntry(BaseModel):
     registered_at: float = Field(default_factory=time.time)
     last_check_at: Optional[float] = None
 
-    class Config:
-        arbitrary_types_allowed = True # Cho phép Pydantic chứa đối tượng BaseProvider
+    model_config = ConfigDict(arbitrary_types_allowed=True)

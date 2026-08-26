@@ -1,0 +1,1662 @@
+Binary files /mnt/data/original_gateway/src/__pycache__/circuit_breaker.cpython-313.pyc and /mnt/data/work_gateway/src/__pycache__/circuit_breaker.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/__pycache__/main.cpython-313.pyc and /mnt/data/work_gateway/src/__pycache__/main.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/agent/__pycache__/registry.cpython-313.pyc and /mnt/data/work_gateway/src/agent/__pycache__/registry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/api/v1/__pycache__/admin.cpython-313.pyc and /mnt/data/work_gateway/src/api/v1/__pycache__/admin.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/application/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/application/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/application/__pycache__/container.cpython-313.pyc and /mnt/data/work_gateway/src/application/__pycache__/container.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/application/policy/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/application/policy/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/application/policy/__pycache__/authorization.cpython-313.pyc and /mnt/data/work_gateway/src/application/policy/__pycache__/authorization.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/context/__pycache__/manager.cpython-313.pyc and /mnt/data/work_gateway/src/context/__pycache__/manager.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/agent.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/agent.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/agent_execution.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/agent_execution.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/attachment.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/attachment.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/auth.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/auth.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/context.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/context.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/enums.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/enums.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/error.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/error.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/event.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/event.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/execution.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/execution.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/identity.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/identity.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/message.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/message.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/model.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/model.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/multi_agent.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/multi_agent.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/pricing.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/pricing.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/provider.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/provider.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/request.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/request.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/response.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/response.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/session.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/session.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/tool.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/tool.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/usage.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/usage.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/user.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/user.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/__pycache__/workflow.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/__pycache__/workflow.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/domain/schemas/runtime/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/domain/schemas/runtime/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/__pycache__/core.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/__pycache__/core.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/__pycache__/exceptions.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/__pycache__/exceptions.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/__pycache__/merge.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/__pycache__/merge.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/__pycache__/schemas.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/__pycache__/schemas.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/__pycache__/utils.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/__pycache__/utils.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/src/infrastructure/config/schemas.py /mnt/data/work_gateway/src/infrastructure/config/schemas.py
+--- /mnt/data/original_gateway/src/infrastructure/config/schemas.py	2026-08-01 06:02:24.000000000 +0000
++++ /mnt/data/work_gateway/src/infrastructure/config/schemas.py	2026-08-26 05:39:31.213920954 +0000
+@@ -1,188 +1,189 @@
+-from pydantic import BaseModel, Field, AnyHttpUrl, model_validator
+-from typing import Dict, Optional
+-# =================================================================
+-# CONFIGURATION SCHEMAS
+-# Đây là các Pydantic Model định nghĩa cấu trúc của cấu hình.
+-# Chúng chỉ dùng để xác thực, không tự động tải từ bất kỳ nguồn nào.
+-# =================================================================
+-
+-class GatewaySettings(BaseModel):
+-    name: str = "AI Gateway"
+-    version: str = "1.0.0"
+-    host: str = "0.0.0.0"
+-    port: int = 8000
+-    debug: bool = False
+-
+-    allowed_origins: list[str] = ["*"]
+-class OAuthClientConfig(BaseModel):
+-    client_id: str
+-    client_secret: str
+-
+-class OAuthSettings(BaseModel):
+-    google: Optional[OAuthClientConfig] = None
+-    github: Optional[OAuthClientConfig] = None
+-
+-class AuthenticationSettings(BaseModel):
+-    enable: bool = True
+-
+-    admin_ips: Dict[str, str] = {}
+-    public_paths: list[str] = ["/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats", "/auth/*"]
+-    session_secret_key: str = "change-this-in-production"
+-
+-    jwt_secret_key: str = "change-me"
+-    jwt_algorithm: str = "HS256"
+-    jwt_expiration: int = 3600
+-
+-    access_token_expire_minutes: int = 30
+-    refresh_token_expire_days: int = 30
+-
+-class FrontendSettings(BaseModel):
+-    oauth_callback_url: Optional[str] = None
+-
+-class FillterSettings(BaseModel):
+-    enable_input_fillter: bool = True
+-    enable_output_fillter: bool = True
+-
+-class RateLimitSettings(BaseModel):
+-    algorithm: str = "token_bucket"
+-    capacity: int = 100
+-    refill_rate: float = 5.0
+-    limit: int = 100
+-    window_size: int = 60
+-    fail_mode: str = "open"  # 'open' hoặc 'closed'
+-
+-class RedisSettings(BaseModel):
+-    url: str = "redis://localhost:6379/0"
+-    cache_expire_seconds: int = 3600
+-    key_prefix: str = "aigateway"
+-
+-class DriverConfig(BaseModel):
+-    enabled: bool = True
+-    url: Optional[str] = None
+-    host: Optional[str] = None
+-    port: Optional[int] = None
+-    path: Optional[str] = None
+-    password: Optional[str] = None
+-
+-class StorageSettings(BaseModel):
+-    drivers: Dict[str, DriverConfig] = Field(default_factory=dict)
+-
+-class CircuitBreakerProviderSettings(BaseModel):
+-    """Cấu hình ngưỡng cho một Circuit Breaker cụ thể."""
+-    failure_threshold: int = 3
+-    reset_timeout: int = 10 # seconds
+-    success_threshold: int = 1
+-
+-class CircuitBreakerSettings(BaseModel):
+-    default: CircuitBreakerProviderSettings = Field(default_factory=CircuitBreakerProviderSettings)
+-    providers: dict[str, CircuitBreakerProviderSettings] = Field(default_factory=dict)
+-
+-
+-class ProviderSettings(BaseModel):
+-    timeout: int = 60
+-    retry: int = 2
+-    enable_fallback: bool = True
+-    priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama"])
+-    routing_rules_path: str = "config/routing/routing_rules.yaml"
+-
+-class OpenAISettings(BaseModel):
+-    api_key: str = ""
+-    base_url: AnyHttpUrl = "https://api.openai.com/v1"
+-
+-class AnthropicSettings(BaseModel):
+-    api_key: str = ""
+-    base_url: AnyHttpUrl = "https://api.anthropic.com"
+-
+-class GeminiSettings(BaseModel):
+-    api_key: str = ""
+-    base_url: AnyHttpUrl = "https://generativelanguage.googleapis.com"
+-
+-class OllamaSettings(BaseModel):
+-    base_url: AnyHttpUrl = "http://127.0.0.1:11434"
+-
+-class LoggingSettings(BaseModel):
+-    level: str = "INFO"
+-    file: str = "gateway.log"
+-
+-class MetricsSettings(BaseModel):
+-    enable: bool = True
+-    port: int = 9090
+-
+-class TracingSettings(BaseModel):
+-    enable: bool = False
+-    otlp_endpoint: str = "http://localhost:4318"
+-
+-class SemanticCacheSettings(BaseModel):
+-    similarity_threshold: float = 0.95
+-    embedding_model: str = "all-MiniLM-L6-v2"
+-    embedding_device: str = "cpu"
+-    collection: str = "semantic_cache"
+-    path: str = "./data/chroma_cache"
+-    embedding_cache_folder: str = "./data/embedding_models"
+-
+-class TokenBudgetSettings(BaseModel):
+-    max_input_tokens: int = 32000
+-    max_output_tokens: int = 4096
+-
+-class ConfigSchema(BaseModel):
+-    """
+-    Schema xác thực cuối cùng cho toàn bộ cấu hình ứng dụng.
+-    Đây là "Single Source of Truth" sau khi cấu hình đã được tải và hợp nhất.
+-    """
+-    gateway: GatewaySettings = Field(default_factory=GatewaySettings)
+-    fillter: FillterSettings = Field(default_factory=FillterSettings)
+-    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
+-    circuit_breaker: CircuitBreakerSettings = Field(default_factory=CircuitBreakerSettings)
+-    redis: RedisSettings = Field(default_factory=RedisSettings)
+-    provider: ProviderSettings = Field(default_factory=ProviderSettings)
+-    openai: OpenAISettings = Field(default_factory=OpenAISettings)
+-    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
+-    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
+-    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
+-    logging: LoggingSettings = Field(default_factory=LoggingSettings)
+-    metrics: MetricsSettings = Field(default_factory=MetricsSettings)
+-    tracing: TracingSettings = Field(default_factory=TracingSettings)
+-    semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
+-    storage: StorageSettings = Field(default_factory=StorageSettings)
+-    auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
+-    oauth: OAuthSettings = Field(default_factory=OAuthSettings)
+-    frontend: FrontendSettings = Field(default_factory=FrontendSettings)
+-
+-
+-
+-    class Config:
+-        extra = "forbid" # Ném lỗi nếu có key không xác định trong cấu hình
+-
+-    @model_validator(mode='after')
+-    def check_config_consistency(self) -> 'ConfigSchema':
+-        """
+-        Thực hiện các quy tắc xác thực chéo (cross-field validation) sau khi
+-        tất cả các giá trị đã được parse.
+-        """
+-        # 1. Xác thực logic fallback của provider
+-        if self.provider.enable_fallback and not self.provider.priority:
+-            raise ValueError(
+-                "Provider 'priority' list cannot be empty when 'enable_fallback' is true."
+-            )
+-
+-        # 2. Xác thực API key cho các provider có trong danh sách ưu tiên
+-        # Logic mới: Chỉ yêu cầu API key nếu provider đó có trong danh sách ưu tiên
+-        # VÀ key đó không được cung cấp. Điều này cho phép ứng dụng khởi động
+-        # mà không cần key nếu các provider đó không được sử dụng.
+-        if self.provider.priority:
+-            if "openai" in self.provider.priority and not self.openai.api_key:
+-                # Thay vì ném lỗi, chúng ta sẽ ghi một cảnh báo.
+-                # Lỗi thực sự sẽ xảy ra khi cố gắng sử dụng provider này (trong ProviderDiscovery).
+-                # Điều này cho phép gateway khởi động mà không cần tất cả các key.
+-                pass # Bỏ qua lỗi ở đây
+-            
+-            if "anthropic" in self.provider.priority and not self.anthropic.api_key:
+-                # Tương tự, bỏ qua lỗi ở đây
+-                pass
+-
+-            if "gemini" in self.provider.priority and not self.gemini.api_key:
+-                # Tương tự, bỏ qua lỗi ở đây
+-                pass
+-
+-        return self
++from pydantic import BaseModel, Field, AnyHttpUrl, model_validator
++from typing import Dict, Optional
++# =================================================================
++# CONFIGURATION SCHEMAS
++# Đây là các Pydantic Model định nghĩa cấu trúc của cấu hình.
++# Chúng chỉ dùng để xác thực, không tự động tải từ bất kỳ nguồn nào.
++# =================================================================
++
++class GatewaySettings(BaseModel):
++    name: str = "AI Gateway"
++    version: str = "1.0.0"
++    host: str = "0.0.0.0"
++    port: int = 8000
++    debug: bool = False
++
++    allowed_origins: list[str] = ["*"]
++class OAuthClientConfig(BaseModel):
++    client_id: str
++    client_secret: str
++
++class OAuthSettings(BaseModel):
++    google: Optional[OAuthClientConfig] = None
++    github: Optional[OAuthClientConfig] = None
++
++class AuthenticationSettings(BaseModel):
++    enable: bool = True
++
++    admin_ips: Dict[str, str] = {}
++    public_paths: list[str] = ["/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats", "/auth/*"]
++    session_secret_key: str = "change-this-in-production"
++
++    jwt_secret_key: str = "change-me"
++    jwt_algorithm: str = "HS256"
++    jwt_expiration: int = 3600
++
++    access_token_expire_minutes: int = 30
++    refresh_token_expire_days: int = 30
++
++class FrontendSettings(BaseModel):
++    oauth_callback_url: Optional[str] = None
++
++class FillterSettings(BaseModel):
++    enable_input_fillter: bool = True
++    enable_output_fillter: bool = True
++
++class RateLimitSettings(BaseModel):
++    algorithm: str = "token_bucket"
++    capacity: int = 100
++    refill_rate: float = 5.0
++    limit: int = 100
++    window_size: int = 60
++    fail_mode: str = "open"  # 'open' hoặc 'closed'
++
++class RedisSettings(BaseModel):
++    url: str = "redis://localhost:6379/0"
++    cache_expire_seconds: int = 3600
++    key_prefix: str = "aigateway"
++
++class DriverConfig(BaseModel):
++    enabled: bool = True
++    url: Optional[str] = None
++    host: Optional[str] = None
++    port: Optional[int] = None
++    path: Optional[str] = None
++    password: Optional[str] = None
++
++class StorageSettings(BaseModel):
++    drivers: Dict[str, DriverConfig] = Field(default_factory=dict)
++
++class CircuitBreakerProviderSettings(BaseModel):
++    """Cấu hình ngưỡng cho một Circuit Breaker cụ thể."""
++    failure_threshold: int = 3
++    reset_timeout: int = 10 # seconds
++    success_threshold: int = 1
++
++class CircuitBreakerSettings(BaseModel):
++    default: CircuitBreakerProviderSettings = Field(default_factory=CircuitBreakerProviderSettings)
++    providers: dict[str, CircuitBreakerProviderSettings] = Field(default_factory=dict)
++
++
++class ProviderSettings(BaseModel):
++    timeout: int = 60
++    mock_enabled: bool = False
++    retry: int = 2
++    enable_fallback: bool = True
++    priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama"])
++    routing_rules_path: str = "config/routing/routing_rules.yaml"
++
++class OpenAISettings(BaseModel):
++    api_key: str = ""
++    base_url: AnyHttpUrl = "https://api.openai.com/v1"
++
++class AnthropicSettings(BaseModel):
++    api_key: str = ""
++    base_url: AnyHttpUrl = "https://api.anthropic.com"
++
++class GeminiSettings(BaseModel):
++    api_key: str = ""
++    base_url: AnyHttpUrl = "https://generativelanguage.googleapis.com"
++
++class OllamaSettings(BaseModel):
++    base_url: AnyHttpUrl = "http://127.0.0.1:11434"
++
++class LoggingSettings(BaseModel):
++    level: str = "INFO"
++    file: str = "gateway.log"
++
++class MetricsSettings(BaseModel):
++    enable: bool = True
++    port: int = 9090
++
++class TracingSettings(BaseModel):
++    enable: bool = False
++    otlp_endpoint: str = "http://localhost:4318"
++
++class SemanticCacheSettings(BaseModel):
++    similarity_threshold: float = 0.95
++    embedding_model: str = "all-MiniLM-L6-v2"
++    embedding_device: str = "cpu"
++    collection: str = "semantic_cache"
++    path: str = "./data/chroma_cache"
++    embedding_cache_folder: str = "./data/embedding_models"
++
++class TokenBudgetSettings(BaseModel):
++    max_input_tokens: int = 32000
++    max_output_tokens: int = 4096
++
++class ConfigSchema(BaseModel):
++    """
++    Schema xác thực cuối cùng cho toàn bộ cấu hình ứng dụng.
++    Đây là "Single Source of Truth" sau khi cấu hình đã được tải và hợp nhất.
++    """
++    gateway: GatewaySettings = Field(default_factory=GatewaySettings)
++    fillter: FillterSettings = Field(default_factory=FillterSettings)
++    rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
++    circuit_breaker: CircuitBreakerSettings = Field(default_factory=CircuitBreakerSettings)
++    redis: RedisSettings = Field(default_factory=RedisSettings)
++    provider: ProviderSettings = Field(default_factory=ProviderSettings)
++    openai: OpenAISettings = Field(default_factory=OpenAISettings)
++    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
++    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
++    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
++    logging: LoggingSettings = Field(default_factory=LoggingSettings)
++    metrics: MetricsSettings = Field(default_factory=MetricsSettings)
++    tracing: TracingSettings = Field(default_factory=TracingSettings)
++    semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
++    storage: StorageSettings = Field(default_factory=StorageSettings)
++    auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
++    oauth: OAuthSettings = Field(default_factory=OAuthSettings)
++    frontend: FrontendSettings = Field(default_factory=FrontendSettings)
++
++
++
++    class Config:
++        extra = "forbid" # Ném lỗi nếu có key không xác định trong cấu hình
++
++    @model_validator(mode='after')
++    def check_config_consistency(self) -> 'ConfigSchema':
++        """
++        Thực hiện các quy tắc xác thực chéo (cross-field validation) sau khi
++        tất cả các giá trị đã được parse.
++        """
++        # 1. Xác thực logic fallback của provider
++        if self.provider.enable_fallback and not self.provider.priority:
++            raise ValueError(
++                "Provider 'priority' list cannot be empty when 'enable_fallback' is true."
++            )
++
++        # 2. Xác thực API key cho các provider có trong danh sách ưu tiên
++        # Logic mới: Chỉ yêu cầu API key nếu provider đó có trong danh sách ưu tiên
++        # VÀ key đó không được cung cấp. Điều này cho phép ứng dụng khởi động
++        # mà không cần key nếu các provider đó không được sử dụng.
++        if self.provider.priority:
++            if "openai" in self.provider.priority and not self.openai.api_key:
++                # Thay vì ném lỗi, chúng ta sẽ ghi một cảnh báo.
++                # Lỗi thực sự sẽ xảy ra khi cố gắng sử dụng provider này (trong ProviderDiscovery).
++                # Điều này cho phép gateway khởi động mà không cần tất cả các key.
++                pass # Bỏ qua lỗi ở đây
++            
++            if "anthropic" in self.provider.priority and not self.anthropic.api_key:
++                # Tương tự, bỏ qua lỗi ở đây
++                pass
++
++            if "gemini" in self.provider.priority and not self.gemini.api_key:
++                # Tương tự, bỏ qua lỗi ở đây
++                pass
++
++        return self
+     
+\ No newline at end of file
+Binary files /mnt/data/original_gateway/src/infrastructure/config/sources/__pycache__/dotenv_loader.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/sources/__pycache__/dotenv_loader.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/sources/__pycache__/env_loader.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/sources/__pycache__/env_loader.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/config/sources/__pycache__/yaml_loader.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/config/sources/__pycache__/yaml_loader.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/event_bus/__pycache__/bus.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/event_bus/__pycache__/bus.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/event_bus/__pycache__/manager.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/event_bus/__pycache__/manager.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/event_bus/__pycache__/registry.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/event_bus/__pycache__/registry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/event_bus/__pycache__/subscribers.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/event_bus/__pycache__/subscribers.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/event_bus/__pycache__/ws_manager.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/event_bus/__pycache__/ws_manager.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/observability/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/observability/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/observability/__pycache__/config.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/observability/__pycache__/config.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/observability/__pycache__/logging.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/observability/__pycache__/logging.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/observability/__pycache__/metrics.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/observability/__pycache__/metrics.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/observability/__pycache__/tracing.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/observability/__pycache__/tracing.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/core/__pycache__/dependency.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/core/__pycache__/dependency.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/core/__pycache__/events.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/core/__pycache__/events.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/core/__pycache__/exceptions.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/core/__pycache__/exceptions.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/core/__pycache__/manager.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/core/__pycache__/manager.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/core/__pycache__/registry.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/core/__pycache__/registry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/core/__pycache__/transaction.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/core/__pycache__/transaction.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/core/__pycache__/unit_of_work.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/core/__pycache__/unit_of_work.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/drivers/chroma/__pycache__/driver.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/drivers/chroma/__pycache__/driver.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/drivers/redis/__pycache__/driver.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/drivers/redis/__pycache__/driver.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/drivers/sqlite/__pycache__/driver.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/drivers/sqlite/__pycache__/driver.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/entities/__pycache__/apikey.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/entities/__pycache__/apikey.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/entities/__pycache__/organization.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/entities/__pycache__/organization.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/entities/__pycache__/user.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/entities/__pycache__/user.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/interfaces/__pycache__/cache.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/interfaces/__pycache__/cache.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/interfaces/__pycache__/database.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/interfaces/__pycache__/database.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/interfaces/__pycache__/object.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/interfaces/__pycache__/object.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/interfaces/__pycache__/repository.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/interfaces/__pycache__/repository.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/interfaces/__pycache__/vector.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/interfaces/__pycache__/vector.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/migrations/sql/__pycache__/env.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/migrations/sql/__pycache__/env.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/migrations/sql/versions/__pycache__/2b8eaa45108e_database.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/migrations/sql/versions/__pycache__/2b8eaa45108e_database.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/migrations/sql/versions/__pycache__/4f_phase4_multi_agent.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/migrations/sql/versions/__pycache__/4f_phase4_multi_agent.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/chroma/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/chroma/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/__pycache__/custom_types.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/__pycache__/custom_types.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/execution.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/execution.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/message.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/message.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/session.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/session.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/task.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/agent/__pycache__/task.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/chat_data/__pycache__/attachment.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/chat_data/__pycache__/attachment.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/chat_data/__pycache__/project.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/chat_data/__pycache__/project.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/chat_data/__pycache__/session.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/chat_data/__pycache__/session.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/api_key.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/api_key.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/application.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/application.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/member.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/member.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/oauth_account.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/oauth_account.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/organization.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/organization.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/pending_registration.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/pending_registration.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/permission.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/permission.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/user.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/models/sql/user_data/__pycache__/user.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/__pycache__/agent.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/__pycache__/agent.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/__pycache__/sessions.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/__pycache__/sessions.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/chat_data/__pycache__/attachments.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/chat_data/__pycache__/attachments.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/chat_data/__pycache__/projects.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/chat_data/__pycache__/projects.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/chat_data/__pycache__/sessions.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/chat_data/__pycache__/sessions.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/api_keys.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/api_keys.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/applications.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/applications.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/members.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/members.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/oauth_accounts.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/oauth_accounts.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/organizations.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/organizations.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/pending_registrations.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/pending_registrations.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/users.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/repositories/user_data/__pycache__/users.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/services/__pycache__/embedding_service.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/services/__pycache__/embedding_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/infrastructure/storage/services/__pycache__/semantic_cache_service.cpython-313.pyc and /mnt/data/work_gateway/src/infrastructure/storage/services/__pycache__/semantic_cache_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/kernel/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/kernel/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/kernel/__pycache__/event.cpython-313.pyc and /mnt/data/work_gateway/src/kernel/__pycache__/event.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/kernel/__pycache__/kernel.cpython-313.pyc and /mnt/data/work_gateway/src/kernel/__pycache__/kernel.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/kernel/__pycache__/lifecycle.cpython-313.pyc and /mnt/data/work_gateway/src/kernel/__pycache__/lifecycle.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/kernel/__pycache__/registry.cpython-313.pyc and /mnt/data/work_gateway/src/kernel/__pycache__/registry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/kernel/events/__pycache__/provider.cpython-313.pyc and /mnt/data/work_gateway/src/kernel/events/__pycache__/provider.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/kernel/events/__pycache__/provider_extended.cpython-313.pyc and /mnt/data/work_gateway/src/kernel/events/__pycache__/provider_extended.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/__pycache__/discovery.cpython-313.pyc and /mnt/data/work_gateway/src/provider/__pycache__/discovery.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/__pycache__/exceptions.cpython-313.pyc and /mnt/data/work_gateway/src/provider/__pycache__/exceptions.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/__pycache__/executor.cpython-313.pyc and /mnt/data/work_gateway/src/provider/__pycache__/executor.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/__pycache__/factory.cpython-313.pyc and /mnt/data/work_gateway/src/provider/__pycache__/factory.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/__pycache__/models.cpython-313.pyc and /mnt/data/work_gateway/src/provider/__pycache__/models.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/__pycache__/registry.cpython-313.pyc and /mnt/data/work_gateway/src/provider/__pycache__/registry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/__pycache__/api.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/__pycache__/api.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/__pycache__/api_mapper.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/__pycache__/api_mapper.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/__pycache__/auth.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/__pycache__/auth.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/__pycache__/endpoint.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/__pycache__/endpoint.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/__pycache__/model_mapper.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/__pycache__/model_mapper.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/__pycache__/provider.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/__pycache__/provider.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/capability/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/capability/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/audio.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/audio.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/batch.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/batch.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/cache.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/cache.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/chat.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/chat.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/embedding.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/embedding.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/file.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/file.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/fine_tune.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/fine_tune.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/image.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/image.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/live.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/live.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/model.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/model.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/reranking.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/reranking.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/tokens.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/tokens.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/video.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/video.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/core/interfaces/__pycache__/vision.cpython-313.pyc and /mnt/data/work_gateway/src/provider/core/interfaces/__pycache__/vision.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/src/provider/discovery.py /mnt/data/work_gateway/src/provider/discovery.py
+--- /mnt/data/original_gateway/src/provider/discovery.py	2026-06-28 22:21:50.000000000 +0000
++++ /mnt/data/work_gateway/src/provider/discovery.py	2026-08-26 05:39:31.214203769 +0000
+@@ -1,24 +1,26 @@
+-import structlog
+-
+-from .factory import ProviderFactory
+-from .registry import ProviderRegistry
+-
+-logger = structlog.get_logger(__name__)
+-
+-class ProviderDiscovery:
+-    """
+-    Tự động khám phá các provider dựa trên cấu hình hệ thống
+-    và đăng ký chúng vào ProviderRegistry.
+-    """
+-    def __init__(self, registry: ProviderRegistry):
+-        self.registry = registry
+-
+-    def run(self):
+-        """Chạy quá trình khám phá và đăng ký."""
+-        logger.info("Starting provider discovery...")
+-        for name, provider_class in ProviderFactory._provider_classes.items():
+-            # Ủy quyền việc kiểm tra cấu hình cho chính lớp Provider
+-            if provider_class.is_configured():
+-                provider_instance = ProviderFactory.create_provider(name)
+-                if provider_instance:
++import structlog
++
++from .factory import ProviderFactory
++from .registry import ProviderRegistry
++
++logger = structlog.get_logger(__name__)
++
++class ProviderDiscovery:
++    """
++    Tự động khám phá các provider dựa trên cấu hình hệ thống
++    và đăng ký chúng vào ProviderRegistry.
++    """
++    def __init__(self, registry: ProviderRegistry):
++        self.registry = registry
++
++    def run(self):
++        """Chạy quá trình khám phá và đăng ký."""
++        logger.info("Starting provider discovery...")
++        for name, provider_class in ProviderFactory._provider_classes.items():
++            if name == "mock" and not provider_class.is_configured():
++                continue
++            # Ủy quyền việc kiểm tra cấu hình cho chính lớp Provider
++            if provider_class.is_configured():
++                provider_instance = ProviderFactory.create_provider(name)
++                if provider_instance:
+                     self.registry.register(provider_instance)
+\ No newline at end of file
+diff -ruN /mnt/data/original_gateway/src/provider/factory.py /mnt/data/work_gateway/src/provider/factory.py
+--- /mnt/data/original_gateway/src/provider/factory.py	2026-07-25 12:12:28.000000000 +0000
++++ /mnt/data/work_gateway/src/provider/factory.py	2026-08-26 05:39:31.214100734 +0000
+@@ -1,25 +1,27 @@
+-from typing import Dict, Type, Optional
+-
+-from .core.provider import BaseProvider
+-from .openai import OpenAIProvider
+-from .ollama import OllamaProvider
+-from .google import GoogleProvider
+-
+-class ProviderFactory:
+-    """
+-    Tạo các instance của các lớp provider cụ thể.
+-    Đây là nơi duy nhất trong hệ thống có kiến thức về các lớp triển khai provider.
+-    """
+-    _provider_classes: Dict[str, Type[BaseProvider]] = {
+-        "openai": OpenAIProvider,
+-        "ollama": OllamaProvider,
+-        "gemini": GoogleProvider,
+-    }
+-
+-    @classmethod
+-    def create_provider(cls, name: str) -> Optional[BaseProvider]:
+-        """Tạo một provider instance dựa trên tên."""
+-        provider_class = cls._provider_classes.get(name)
+-        if provider_class:
+-            return provider_class()
++from typing import Dict, Type, Optional
++
++from .core.provider import BaseProvider
++from .openai import OpenAIProvider
++from .ollama import OllamaProvider
++from .google import GoogleProvider
++from .mock import MockProvider
++
++class ProviderFactory:
++    """
++    Tạo các instance của các lớp provider cụ thể.
++    Đây là nơi duy nhất trong hệ thống có kiến thức về các lớp triển khai provider.
++    """
++    _provider_classes: Dict[str, Type[BaseProvider]] = {
++        "openai": OpenAIProvider,
++        "ollama": OllamaProvider,
++        "gemini": GoogleProvider,
++        "mock": MockProvider,
++    }
++
++    @classmethod
++    def create_provider(cls, name: str) -> Optional[BaseProvider]:
++        """Tạo một provider instance dựa trên tên."""
++        provider_class = cls._provider_classes.get(name)
++        if provider_class:
++            return provider_class()
+         return None
+\ No newline at end of file
+Binary files /mnt/data/original_gateway/src/provider/google/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/__pycache__/file_extension.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/__pycache__/file_extension.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/api/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/api/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/api/__pycache__/chats.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/api/__pycache__/chats.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/api/__pycache__/embeddings.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/api/__pycache__/embeddings.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/api/__pycache__/files.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/api/__pycache__/files.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/api/__pycache__/models.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/api/__pycache__/models.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/converters/chats/__pycache__/acttachment.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/converters/chats/__pycache__/acttachment.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/converters/chats/__pycache__/request.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/converters/chats/__pycache__/request.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/converters/chats/__pycache__/response.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/converters/chats/__pycache__/response.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/converters/embeddings/__pycache__/request.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/converters/embeddings/__pycache__/request.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/converters/embeddings/__pycache__/response.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/converters/embeddings/__pycache__/response.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/google/converters/files/__pycache__/response.cpython-313.pyc and /mnt/data/work_gateway/src/provider/google/converters/files/__pycache__/response.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/handlers/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/provider/handlers/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/handlers/__pycache__/chat_handler.cpython-313.pyc and /mnt/data/work_gateway/src/provider/handlers/__pycache__/chat_handler.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/handlers/__pycache__/embedding_handler.cpython-313.pyc and /mnt/data/work_gateway/src/provider/handlers/__pycache__/embedding_handler.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/handlers/__pycache__/file_handler.cpython-313.pyc and /mnt/data/work_gateway/src/provider/handlers/__pycache__/file_handler.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/handlers/__pycache__/model_handler.cpython-313.pyc and /mnt/data/work_gateway/src/provider/handlers/__pycache__/model_handler.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/src/provider/handlers/embedding_handler.py /mnt/data/work_gateway/src/provider/handlers/embedding_handler.py
+--- /mnt/data/original_gateway/src/provider/handlers/embedding_handler.py	2026-08-01 01:07:20.000000000 +0000
++++ /mnt/data/work_gateway/src/provider/handlers/embedding_handler.py	2026-08-26 05:39:31.214393695 +0000
+@@ -1,11 +1,33 @@
+-import httpx
+-from typing import Dict, Any
+-from .base import BaseExecutionHandler
+-
+-class EmbeddingExecutionHandler(BaseExecutionHandler):
+-    """Xử lý tạo Vector Embeddings."""
+-
+-    async def execute(self, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> Any:
+-        # Tùy biến logic thực thi embedding theo quy trình của bạn tại đây
+-        # Ví dụ gọi thông qua provider hoặc routing policy riêng
+-        pass
+\ No newline at end of file
++import httpx
++from typing import Dict, Any
++from .base import BaseExecutionHandler
++from ...domain.schemas import ModelCapability
++from ...infrastructure.config import settings
++from ..exceptions import NoAvailableProviderError
++
++class EmbeddingExecutionHandler(BaseExecutionHandler):
++    """Xử lý tạo Vector Embeddings qua ProviderRuntime."""
++
++    async def execute(self, http_client: httpx.AsyncClient, body: Dict[str, Any]) -> Any:
++        model = body.get("model")
++        initial_chain = self.routing_policy.get_fallback_chain(model)
++        if not initial_chain:
++            raise NoAvailableProviderError(f"No provider configured for model '{model}'.")
++
++        last_error = None
++        for provider in await self._get_healthy_fallback_chain(initial_chain):
++            try:
++                if not await provider.has_capability(
++                    model, ModelCapability.EMBEDDINGS, http_client, settings.provider.timeout
++                ):
++                    continue
++                return await self.executor.execute_generic(
++                    provider=provider,
++                    execution_callable=lambda p=provider: p.embeddings.embeddings(
++                        http_client=http_client, body=body, timeout=settings.provider.timeout
++                    ),
++                )
++            except Exception as exc:
++                last_error = exc
++                continue
++        raise NoAvailableProviderError("All embedding providers are unavailable or unsupported.") from last_error
+diff -ruN /mnt/data/original_gateway/src/provider/mock/__init__.py /mnt/data/work_gateway/src/provider/mock/__init__.py
+--- /mnt/data/original_gateway/src/provider/mock/__init__.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/src/provider/mock/__init__.py	2026-08-26 05:39:30.728408768 +0000
+@@ -0,0 +1,3 @@
++from .provider import MockProvider
++
++__all__ = ["MockProvider"]
+Binary files /mnt/data/original_gateway/src/provider/mock/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/mock/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/mock/__pycache__/provider.cpython-313.pyc and /mnt/data/work_gateway/src/provider/mock/__pycache__/provider.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/src/provider/mock/provider.py /mnt/data/work_gateway/src/provider/mock/provider.py
+--- /mnt/data/original_gateway/src/provider/mock/provider.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/src/provider/mock/provider.py	2026-08-26 05:40:11.125783451 +0000
+@@ -0,0 +1,255 @@
++"""Deterministic offline provider used by Phase 0 tests and local E2E runs."""
++
++from __future__ import annotations
++
++import hashlib
++import math
++import os
++import time
++import uuid
++from io import BytesIO
++from typing import Any, AsyncGenerator, Dict, Optional
++
++from ..core import (
++    ApiTypeMapper,
++    BaseProvider,
++    EndpointBuilder,
++    ModelCapabilityManager,
++    ModelMapper,
++    NoAuth,
++)
++from ...infrastructure.config import settings
++from ...domain.schemas import (
++    GatewayChoice,
++    GatewayMessage,
++    GatewayResponse,
++    GatewayStreamChunk,
++    GatewayStreamChoice,
++    GatewayStreamDelta,
++    GatewayUsage,
++    ModelCapability,
++    ModelInfo,
++    ModelList,
++    ContextLimits,
++)
++
++MOCK_MODEL = "mock-chat"
++MOCK_EMBEDDING_MODEL = "mock-embedding"
++
++
++class MockChat:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++
++    @staticmethod
++    def _last_user_text(body: Dict[str, Any]) -> str:
++        messages = body.get("messages") or []
++        for message in reversed(messages):
++            if message.get("role") == "user":
++                content = message.get("content", "")
++                if isinstance(content, str):
++                    return content
++                return str(content)
++        return ""
++
++    async def chat(self, **kwargs) -> GatewayResponse:
++        body = kwargs.get("body") or {}
++        model = body.get("model") or MOCK_MODEL
++        text = self._last_user_text(body)
++        answer = f"mock:{text}" if text else "mock:ok"
++        prompt_tokens = max(1, len(text.split())) if text else 1
++        completion_tokens = max(1, len(answer.split()))
++        return GatewayResponse(
++            id=f"mock-{uuid.uuid4().hex}",
++            model=model,
++            provider=self.provider.name,
++            choices=[GatewayChoice(
++                index=0,
++                message=GatewayMessage(role="assistant", content=answer),
++                finish_reason="stop",
++            )],
++            usage=GatewayUsage(
++                prompt_tokens=prompt_tokens,
++                completion_tokens=completion_tokens,
++                total_tokens=prompt_tokens + completion_tokens,
++            ),
++            metadata={"mock": True},
++        )
++
++    async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
++        body = kwargs.get("body") or {}
++        model = body.get("model") or MOCK_MODEL
++        text = self._last_user_text(body)
++        answer = f"mock:{text}" if text else "mock:ok"
++        words = answer.split(" ")
++        for index, word in enumerate(words):
++            yield GatewayStreamChunk(
++                id=f"mock-stream-{uuid.uuid4().hex}",
++                model=model,
++                provider=self.provider.name,
++                choices=[GatewayStreamChoice(
++                    index=0,
++                    delta=GatewayStreamDelta(
++                        content=(word + (" " if index < len(words) - 1 else "")),
++                        role="assistant" if index == 0 else None,
++                    ),
++                    finish_reason="stop" if index == len(words) - 1 else None,
++                )],
++                metadata={"mock": True},
++            )
++
++
++class MockModels:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++
++    def _model(self, model_id: str, embedding: bool = False) -> ModelInfo:
++        caps = {ModelCapability.EMBEDDINGS, ModelCapability.EMBEDDINGS_BATCH} if embedding else {
++            ModelCapability.CHAT,
++            ModelCapability.CHAT_STREAM,
++            ModelCapability.TOKEN_COUNT,
++            ModelCapability.JSON_MODE,
++            ModelCapability.STRUCTURED_OUTPUT,
++            ModelCapability.TOOL_CALLING,
++        }
++        return ModelInfo(
++            id=model_id,
++            display_name=model_id,
++            provider=self.provider.name,
++            family="mock",
++            version="1.0",
++            description="Deterministic offline Phase 0 mock model",
++            limits=ContextLimits(context_window=32768, max_output_tokens=4096),
++            capabilities=caps,
++            owned_by="phase0",
++            metadata={"mock": True},
++        )
++
++    async def models(self, **kwargs) -> ModelList:
++        return ModelList(data=[self._model(MOCK_MODEL), self._model(MOCK_EMBEDDING_MODEL, embedding=True)])
++
++    async def model(self, **kwargs) -> ModelInfo:
++        model_id = kwargs.get("model_name") or MOCK_MODEL
++        return self._model(model_id, embedding="embedding" in model_id)
++
++
++class MockEmbeddings:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++
++    @staticmethod
++    def _vector(text: str, dimensions: int = 8) -> list[float]:
++        digest = hashlib.sha256(text.encode("utf-8")).digest()
++        raw = [int.from_bytes(digest[i:i + 4], "big") / 2**32 for i in range(0, dimensions * 4, 4)]
++        norm = math.sqrt(sum(x * x for x in raw)) or 1.0
++        return [x / norm for x in raw]
++
++    async def embeddings(self, **kwargs) -> Dict[str, Any]:
++        body = kwargs.get("body") or {}
++        model = body.get("model") or MOCK_EMBEDDING_MODEL
++        inputs = body.get("input", [])
++        if isinstance(inputs, str):
++            inputs = [inputs]
++        return {
++            "object": "list",
++            "model": model,
++            "data": [
++                {"object": "embedding", "index": i, "embedding": self._vector(str(value))}
++                for i, value in enumerate(inputs)
++            ],
++            "usage": {"prompt_tokens": sum(max(1, len(str(x).split())) for x in inputs), "total_tokens": sum(max(1, len(str(x).split())) for x in inputs)},
++        }
++
++
++class MockFiles:
++    def __init__(self, provider: "MockProvider"):
++        self.provider = provider
++        self._files: Dict[str, Dict[str, Any]] = {}
++
++    async def list_files(self, **kwargs) -> Dict[str, Any]:
++        return {"object": "list", "data": list(self._files.values()), "next_page_token": None}
++
++    async def upload_file(self, **kwargs) -> Dict[str, Any]:
++        stream = kwargs["file_stream"]
++        content = stream.read()
++        file_id = f"mock-file-{uuid.uuid4().hex}"
++        entry = {
++            "name": file_id,
++            "display_name": kwargs.get("display_name") or file_id,
++            "mime_type": kwargs.get("mime_type") or "application/octet-stream",
++            "size": len(content),
++            "bytes": content,
++            "created": int(time.time()),
++        }
++        self._files[file_id] = entry
++        return {k: v for k, v in entry.items() if k != "bytes"}
++
++    async def get_file(self, **kwargs) -> Dict[str, Any]:
++        file_id = kwargs["file_id"]
++        entry = self._files[file_id]
++        return {k: v for k, v in entry.items() if k != "bytes"}
++
++    async def download_file(self, **kwargs) -> bytes:
++        return self._files[kwargs["file_id"]]["bytes"]
++
++    async def delete_file(self, **kwargs) -> bool:
++        return self._files.pop(kwargs["file_id"], None) is not None
++
++
++class MockProvider(BaseProvider):
++    """Provider with zero network I/O and deterministic responses."""
++
++    def __init__(self):
++        super().__init__(
++            provider_name="mock",
++            auth_strategy=NoAuth(),
++            endpoint_builder=EndpointBuilder(base_url="http://mock.invalid"),
++            api_mapper=ApiTypeMapper(api_map={}),
++            model_mapper=ModelMapper(model_map={
++                MOCK_MODEL: MOCK_MODEL,
++                MOCK_EMBEDDING_MODEL: MOCK_EMBEDDING_MODEL,
++            }),
++            capability_manager=ModelCapabilityManager(provider_name="mock"),
++        )
++        self.chat = MockChat(self)
++        self.models = MockModels(self)
++        self.embeddings = MockEmbeddings(self)
++        self.files = MockFiles(self)
++
++    @classmethod
++    def is_configured(cls) -> bool:
++        env_enabled = os.getenv("GATEWAY_PROVIDER__MOCK_ENABLED", "").lower() in {"1", "true", "yes", "on"}
++        try:
++            configured = bool(settings.provider.mock_enabled)
++        except RuntimeError:
++            configured = False
++        return env_enabled or configured
++
++    async def has_capability(self, model_name: str, capability: ModelCapability, http_client, timeout: float) -> bool:
++        if model_name == MOCK_EMBEDDING_MODEL:
++            return capability in {ModelCapability.EMBEDDINGS, ModelCapability.EMBEDDINGS_BATCH}
++        if model_name == MOCK_MODEL:
++            return capability in {
++                ModelCapability.CHAT,
++                ModelCapability.CHAT_STREAM,
++                ModelCapability.TOKEN_COUNT,
++                ModelCapability.JSON_MODE,
++                ModelCapability.STRUCTURED_OUTPUT,
++                ModelCapability.TOOL_CALLING,
++            }
++        return False
++
++    async def models_info(self, **kwargs):
++        return await self.models.models(**kwargs)
++
++    async def moderation(self, **kwargs):
++        raise NotImplementedError("Mock provider does not implement moderation")
++
++    async def computer_use(self, **kwargs):
++        raise NotImplementedError("Mock provider does not implement computer_use")
++
++    async def provider_info(self, **kwargs):
++        return {"name": self.name, "version": "1.0", "mock": True}
++
++    async def health(self, **kwargs):
++        return {"status": "ok", "provider": self.name, "mock": True}
+Binary files /mnt/data/original_gateway/src/provider/ollama/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/ollama/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/ollama/api/__pycache__/chats.cpython-313.pyc and /mnt/data/work_gateway/src/provider/ollama/api/__pycache__/chats.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/ollama/api/__pycache__/models.cpython-313.pyc and /mnt/data/work_gateway/src/provider/ollama/api/__pycache__/models.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/ollama/converters/chat/__pycache__/request.cpython-313.pyc and /mnt/data/work_gateway/src/provider/ollama/converters/chat/__pycache__/request.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/ollama/converters/chat/__pycache__/response.cpython-313.pyc and /mnt/data/work_gateway/src/provider/ollama/converters/chat/__pycache__/response.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/openai/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/provider/openai/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/openai/api/__pycache__/chats.cpython-313.pyc and /mnt/data/work_gateway/src/provider/openai/api/__pycache__/chats.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/openai/converters/chats/__pycache__/request.cpython-313.pyc and /mnt/data/work_gateway/src/provider/openai/converters/chats/__pycache__/request.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/openai/converters/chats/__pycache__/response.cpython-313.pyc and /mnt/data/work_gateway/src/provider/openai/converters/chats/__pycache__/response.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/policies/__pycache__/load_balancer.cpython-313.pyc and /mnt/data/work_gateway/src/provider/policies/__pycache__/load_balancer.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/policies/__pycache__/retry.cpython-313.pyc and /mnt/data/work_gateway/src/provider/policies/__pycache__/retry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/provider/policies/__pycache__/routing_policy.cpython-313.pyc and /mnt/data/work_gateway/src/provider/policies/__pycache__/routing_policy.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/src/provider/policies/routing_policy.py /mnt/data/work_gateway/src/provider/policies/routing_policy.py
+--- /mnt/data/original_gateway/src/provider/policies/routing_policy.py	2026-08-01 06:02:24.000000000 +0000
++++ /mnt/data/work_gateway/src/provider/policies/routing_policy.py	2026-08-26 05:39:31.214321707 +0000
+@@ -1,95 +1,98 @@
+-import structlog
+-import fnmatch
+-import yaml
+-import os
+-import asyncio
+-
+-from typing import Dict, List
+-
+-from ...infrastructure.config import settings
+-from ..core.provider import BaseProvider
+-
+-logger = structlog.get_logger(__name__)
+-
+-class RoutingPolicy:
+-    """
+-    REFACTORED: Chứa logic phân giải model thành chuỗi provider.
+-    Hỗ trợ tải quy tắc từ file YAML và reload nóng (hot-reload).
+-    """
+-    def __init__(self, providers: Dict[str, BaseProvider]):
+-        self.providers = providers
+-        self._default_chain: List[BaseProvider] = []
+-        self._rules: List[Dict] = []
+-        self._reload_lock = asyncio.Lock() # Lock để đảm bảo an toàn khi reload
+-        self._initialize()
+-
+-    def _initialize(self):
+-        """
+-        Khởi tạo các quy tắc định tuyến và chuỗi fallback mặc định từ settings.
+-        """
+-        # Xây dựng chuỗi fallback mặc định từ config
+-        self._default_chain = [self.providers[name] for name in settings.provider.priority if name in self.providers]
+-        logger.info(
+-            "Default chain",
+-            chain=[p.name for p in self._default_chain]
+-        )
+-        # Tải quy tắc từ file YAML
+-        self._load_rules_from_file()
+-
+-    def _load_rules_from_file(self):
+-        """Tải và xử lý các quy tắc định tuyến từ file YAML."""
+-        new_rules = []
+-        if not os.path.exists(settings.provider.routing_rules_path):
+-            logger.error("Routing rules file not found.", path=settings.provider.routing_rules_path)
+-            self._rules = []
+-            
+-            return
+-
+-        try:
+-            with open(settings.provider.routing_rules_path, 'r', encoding='utf-8') as f:
+-                config = yaml.safe_load(f)
+-
+-            routing_rules_config = config.get("rules", [])
+-
+-            for rule_config in routing_rules_config:
+-                # Log cảnh báo nếu một provider trong quy tắc không được cấu hình/khả dụng.
+-                for p_name in rule_config.get("provider_chain", []):
+-                    if p_name not in self.providers:
+-                        logger.warning(
+-                            "Provider in routing rule is not available/configured.",
+-                            rule_name=rule_config.get("name"), missing_provider=p_name
+-                        )
+-                
+-                provider_chain = [self.providers[p_name] for p_name in rule_config.get("provider_chain", []) if p_name in self.providers]
+-                
+-                if provider_chain:
+-                    new_rules.append({"models": rule_config["models"], "chain": provider_chain})
+-            
+-            self._rules = new_rules
+-            logger.info("Routing rules loaded successfully.", rule_count=len(self._rules), path=settings.provider.routing_rules_path)
+-
+-        except (yaml.YAMLError, FileNotFoundError, Exception) as e:
+-            logger.error("Failed to load or parse routing rules file. No rules will be applied.", error=str(e), path=settings.provider.routing_rules_path)
+-            self._rules = [] # Xóa các quy tắc cũ nếu file mới bị lỗi để tránh hành vi không mong muốn
+-
+-    async def reload_rules(self) -> bool:
+-        """Tải lại các quy tắc định tuyến từ file một cách an toàn."""
+-        async with self._reload_lock:
+-            logger.info("Attempting to hot-reload routing rules...")
+-            try:
+-                self._load_rules_from_file()
+-                return True
+-            except Exception:
+-                logger.error("Hot-reload of routing rules failed.", exc_info=True)
+-                return False
+-
+-    def get_fallback_chain(self, model: str) -> List[BaseProvider]:
+-        """Lấy chuỗi fallback các provider phù hợp cho một model cụ thể."""
+-        for rule in self._rules:
+-            for model_pattern in rule["models"]:
+-                if fnmatch.fnmatch(model, model_pattern):
+-                    logger.debug("Routing rule matched", model=model, pattern=model_pattern, chain=[p.name for p in rule["chain"]])
+-                    return rule["chain"]
+-        
+-        logger.debug("No specific routing rule matched, using default chain", model=model)
++import structlog
++import fnmatch
++import yaml
++import os
++import asyncio
++
++from typing import Dict, List
++
++from ...infrastructure.config import settings
++from ..core.provider import BaseProvider
++
++logger = structlog.get_logger(__name__)
++
++class RoutingPolicy:
++    """
++    REFACTORED: Chứa logic phân giải model thành chuỗi provider.
++    Hỗ trợ tải quy tắc từ file YAML và reload nóng (hot-reload).
++    """
++    def __init__(self, providers: Dict[str, BaseProvider]):
++        self.providers = providers
++        self._default_chain: List[BaseProvider] = []
++        self._rules: List[Dict] = []
++        self._reload_lock = asyncio.Lock() # Lock để đảm bảo an toàn khi reload
++        self._initialize()
++
++    def _initialize(self):
++        """
++        Khởi tạo các quy tắc định tuyến và chuỗi fallback mặc định từ settings.
++        """
++        # Xây dựng chuỗi fallback mặc định từ config
++        self._default_chain = [self.providers[name] for name in settings.provider.priority if name in self.providers]
++        if "mock" in self.providers and "mock" not in [p.name for p in self._default_chain]:
++            # Offline Phase 0 mode: mock is appended only when explicitly enabled.
++            self._default_chain.append(self.providers["mock"])
++        logger.info(
++            "Default chain",
++            chain=[p.name for p in self._default_chain]
++        )
++        # Tải quy tắc từ file YAML
++        self._load_rules_from_file()
++
++    def _load_rules_from_file(self):
++        """Tải và xử lý các quy tắc định tuyến từ file YAML."""
++        new_rules = []
++        if not os.path.exists(settings.provider.routing_rules_path):
++            logger.error("Routing rules file not found.", path=settings.provider.routing_rules_path)
++            self._rules = []
++            
++            return
++
++        try:
++            with open(settings.provider.routing_rules_path, 'r', encoding='utf-8') as f:
++                config = yaml.safe_load(f)
++
++            routing_rules_config = config.get("rules", [])
++
++            for rule_config in routing_rules_config:
++                # Log cảnh báo nếu một provider trong quy tắc không được cấu hình/khả dụng.
++                for p_name in rule_config.get("provider_chain", []):
++                    if p_name not in self.providers:
++                        logger.warning(
++                            "Provider in routing rule is not available/configured.",
++                            rule_name=rule_config.get("name"), missing_provider=p_name
++                        )
++                
++                provider_chain = [self.providers[p_name] for p_name in rule_config.get("provider_chain", []) if p_name in self.providers]
++                
++                if provider_chain:
++                    new_rules.append({"models": rule_config["models"], "chain": provider_chain})
++            
++            self._rules = new_rules
++            logger.info("Routing rules loaded successfully.", rule_count=len(self._rules), path=settings.provider.routing_rules_path)
++
++        except (yaml.YAMLError, FileNotFoundError, Exception) as e:
++            logger.error("Failed to load or parse routing rules file. No rules will be applied.", error=str(e), path=settings.provider.routing_rules_path)
++            self._rules = [] # Xóa các quy tắc cũ nếu file mới bị lỗi để tránh hành vi không mong muốn
++
++    async def reload_rules(self) -> bool:
++        """Tải lại các quy tắc định tuyến từ file một cách an toàn."""
++        async with self._reload_lock:
++            logger.info("Attempting to hot-reload routing rules...")
++            try:
++                self._load_rules_from_file()
++                return True
++            except Exception:
++                logger.error("Hot-reload of routing rules failed.", exc_info=True)
++                return False
++
++    def get_fallback_chain(self, model: str) -> List[BaseProvider]:
++        """Lấy chuỗi fallback các provider phù hợp cho một model cụ thể."""
++        for rule in self._rules:
++            for model_pattern in rule["models"]:
++                if fnmatch.fnmatch(model, model_pattern):
++                    logger.debug("Routing rule matched", model=model, pattern=model_pattern, chain=[p.name for p in rule["chain"]])
++                    return rule["chain"]
++        
++        logger.debug("No specific routing rule matched, using default chain", model=model)
+         return self._default_chain
+\ No newline at end of file
+Binary files /mnt/data/original_gateway/src/runtimes/agent/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/agent/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/agent/__pycache__/coordinator.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/agent/__pycache__/coordinator.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/agent/__pycache__/persistence.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/agent/__pycache__/persistence.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/agent/__pycache__/state_machine.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/agent/__pycache__/state_machine.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/capability/__pycache__/registry.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/capability/__pycache__/registry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/capability/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/capability/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/capability/drivers/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/capability/drivers/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/capability/drivers/__pycache__/python_driver.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/capability/drivers/__pycache__/python_driver.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/connection/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/connection/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/connection/__pycache__/session.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/connection/__pycache__/session.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/context/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/context/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/event/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/event/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/provider/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/provider/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/session/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/session/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/runtimes/workflow/__pycache__/runtime.cpython-313.pyc and /mnt/data/work_gateway/src/runtimes/workflow/__pycache__/runtime.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/services/__pycache__/admin_service.cpython-313.pyc and /mnt/data/work_gateway/src/services/__pycache__/admin_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/tool/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/__pycache__/credential.cpython-313.pyc and /mnt/data/work_gateway/src/tool/__pycache__/credential.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/__pycache__/executor.cpython-313.pyc and /mnt/data/work_gateway/src/tool/__pycache__/executor.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/__pycache__/registry.cpython-313.pyc and /mnt/data/work_gateway/src/tool/__pycache__/registry.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/_mcp/__pycache__/connection.cpython-313.pyc and /mnt/data/work_gateway/src/tool/_mcp/__pycache__/connection.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/_mcp/__pycache__/executor.cpython-313.pyc and /mnt/data/work_gateway/src/tool/_mcp/__pycache__/executor.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/_mcp/__pycache__/factory.cpython-313.pyc and /mnt/data/work_gateway/src/tool/_mcp/__pycache__/factory.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/_mcp/__pycache__/mcp_manager.cpython-313.pyc and /mnt/data/work_gateway/src/tool/_mcp/__pycache__/mcp_manager.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/tool/base/__pycache__/executor.cpython-313.pyc and /mnt/data/work_gateway/src/tool/base/__pycache__/executor.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/__pycache__/dependencies.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/__pycache__/dependencies.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/api_key.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/api_key.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/dependency.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/dependency.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/exceptions.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/exceptions.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/jwt.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/jwt.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/manager.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/manager.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/middleware.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/middleware.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/oauth.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/oauth.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/password.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/password.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/__pycache__/permission.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/__pycache__/permission.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/authenticators/__pycache__/api_key_authenticator.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/authenticators/__pycache__/api_key_authenticator.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/authenticators/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/authenticators/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/authenticators/__pycache__/jwt_authenticator.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/authenticators/__pycache__/jwt_authenticator.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/api_key_service.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/api_key_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/authentication_facade.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/authentication_facade.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/login_service.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/login_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/oauth_service.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/oauth_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/otp_service.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/otp_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/registration_service.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/registration_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/token_service.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/token_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/authentication/services/__pycache__/user_service.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/authentication/services/__pycache__/user_service.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/fillter/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/fillter/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/fillter/__pycache__/guar.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/fillter/__pycache__/guar.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/fillter/__pycache__/manager.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/fillter/__pycache__/manager.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/http/__pycache__/chat_router.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/http/__pycache__/chat_router.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/http/__pycache__/embeddings_router.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/http/__pycache__/embeddings_router.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/http/__pycache__/files_router.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/http/__pycache__/files_router.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/http/__pycache__/health_router.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/http/__pycache__/health_router.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/http/__pycache__/models_router.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/http/__pycache__/models_router.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/__pycache__/__init__.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/__pycache__/__init__.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/__pycache__/factory.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/__pycache__/factory.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/algorithms/__pycache__/base.cpython-312.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/algorithms/__pycache__/base.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/algorithms/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/algorithms/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/algorithms/__pycache__/sliding_window.cpython-312.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/algorithms/__pycache__/sliding_window.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/algorithms/__pycache__/sliding_window.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/algorithms/__pycache__/sliding_window.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/algorithms/__pycache__/token_bucket.cpython-312.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/algorithms/__pycache__/token_bucket.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/algorithms/__pycache__/token_bucket.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/algorithms/__pycache__/token_bucket.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/storage/__pycache__/base.cpython-312.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/storage/__pycache__/base.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/storage/__pycache__/base.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/storage/__pycache__/base.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/storage/__pycache__/redis_storage.cpython-312.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/storage/__pycache__/redis_storage.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/limiter/storage/__pycache__/redis_storage.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/limiter/storage/__pycache__/redis_storage.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/middleware/__pycache__/factory.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/middleware/__pycache__/factory.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/middleware/__pycache__/metris.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/middleware/__pycache__/metris.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/middleware/__pycache__/observability.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/middleware/__pycache__/observability.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/admin.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/admin.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/agent.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/agent.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/auth.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/auth.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/chat.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/chat.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/embeddings.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/embeddings.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/events.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/events.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/files.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/files.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/health.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/health.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/models.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/models.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/multi_agent.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/multi_agent.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/src/transport/gateway/router/__pycache__/tool.cpython-313.pyc and /mnt/data/work_gateway/src/transport/gateway/router/__pycache__/tool.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase0_provider.cpython-313-pytest-9.0.2.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase0_provider.cpython-313-pytest-9.0.2.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase0_provider.cpython-313.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase0_provider.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase1.cpython-312-pytest-9.1.1.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase1.cpython-312-pytest-9.1.1.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase1.cpython-312.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase1.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase1.cpython-313.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase1.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase2.cpython-312-pytest-9.1.1.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase2.cpython-312-pytest-9.1.1.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase2.cpython-312.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase2.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase2.cpython-313.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase2.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase3.cpython-312-pytest-9.1.1.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase3.cpython-312-pytest-9.1.1.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase3.cpython-312.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase3.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase3.cpython-313.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase3.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase4_execution.cpython-312-pytest-9.1.1.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase4_execution.cpython-312-pytest-9.1.1.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase4_execution.cpython-312.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase4_execution.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase4_execution.cpython-313.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase4_execution.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase4_multi_agent.cpython-312-pytest-9.1.1.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase4_multi_agent.cpython-312-pytest-9.1.1.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase4_multi_agent.cpython-312.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase4_multi_agent.cpython-312.pyc differ
+Binary files /mnt/data/original_gateway/tests/architecture/__pycache__/test_phase4_multi_agent.cpython-313.pyc and /mnt/data/work_gateway/tests/architecture/__pycache__/test_phase4_multi_agent.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/tests/architecture/test_phase0_provider.py /mnt/data/work_gateway/tests/architecture/test_phase0_provider.py
+--- /mnt/data/original_gateway/tests/architecture/test_phase0_provider.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/tests/architecture/test_phase0_provider.py	2026-08-26 05:39:43.350278022 +0000
+@@ -0,0 +1,23 @@
++import pytest
++
++from src.domain.schemas import ModelCapability
++from src.provider.mock.provider import MockProvider, MOCK_MODEL
++from src.provider.registry import ProviderRegistry
++from src.provider.policies.routing_policy import RoutingPolicy
++
++
++def test_mock_provider_registers_like_a_normal_provider(monkeypatch):
++    monkeypatch.setenv("GATEWAY_PROVIDER__MOCK_ENABLED", "true")
++    provider = MockProvider()
++    registry = ProviderRegistry()
++    registry.register(provider)
++
++    assert registry.get_provider("mock") is provider
++    assert registry.list_all_providers()["mock"].name == "mock"
++
++
++@pytest.mark.asyncio
++async def test_mock_provider_capability_does_not_touch_http_client():
++    provider = MockProvider()
++    sentinel = object()
++    assert await provider.has_capability(MOCK_MODEL, ModelCapability.CHAT, sentinel, 1.0)
+Binary files /mnt/data/original_gateway/tests/e2e/__pycache__/conftest.cpython-313.pyc and /mnt/data/work_gateway/tests/e2e/__pycache__/conftest.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/e2e/__pycache__/test_phase0_live.cpython-313.pyc and /mnt/data/work_gateway/tests/e2e/__pycache__/test_phase0_live.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/tests/e2e/conftest.py /mnt/data/work_gateway/tests/e2e/conftest.py
+--- /mnt/data/original_gateway/tests/e2e/conftest.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/tests/e2e/conftest.py	2026-08-26 05:39:43.350979259 +0000
+@@ -0,0 +1,23 @@
++"""Shared fixtures/helpers for live E2E tests.
++
++These tests intentionally talk to a running Gateway over HTTP. They are skipped unless
++PHASE0_LIVE_BASE_URL is set, so the normal unit/architecture suite remains offline.
++"""
++
++import os
++
++import pytest
++
++
++@pytest.fixture(scope="session")
++def live_base_url():
++    url = os.getenv("PHASE0_LIVE_BASE_URL")
++    if not url:
++        pytest.skip("Set PHASE0_LIVE_BASE_URL to run live Phase 0 E2E tests")
++    return url.rstrip("/")
++
++
++@pytest.fixture(scope="session")
++def live_headers():
++    token = os.getenv("PHASE0_LIVE_AUTH_TOKEN")
++    return {"Authorization": f"Bearer {token}"} if token else {}
+diff -ruN /mnt/data/original_gateway/tests/e2e/test_phase0_live.py /mnt/data/work_gateway/tests/e2e/test_phase0_live.py
+--- /mnt/data/original_gateway/tests/e2e/test_phase0_live.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/tests/e2e/test_phase0_live.py	2026-08-26 05:40:53.175342311 +0000
+@@ -0,0 +1,140 @@
++import httpx
++import pytest
++
++
++@pytest.mark.asyncio
++async def test_live_health_and_readiness(live_base_url, live_headers):
++    async with httpx.AsyncClient(timeout=15) as client:
++        health = await client.get(f"{live_base_url}/health", headers=live_headers)
++        assert health.status_code == 200
++        assert health.json().get("status") == "ok"
++
++        ready = await client.get(f"{live_base_url}/ready", headers=live_headers)
++        assert ready.status_code == 200
++        assert ready.json().get("status") == "ready"
++
++
++@pytest.mark.asyncio
++async def test_live_chat_with_mock_provider(live_base_url, live_headers):
++    payload = {
++        "model": "mock-chat",
++        "provider": "mock",
++        "messages": [{"role": "user", "content": "phase0"}],
++        "config": {"stream": False},
++    }
++    async with httpx.AsyncClient(timeout=30) as client:
++        response = await client.post(
++            f"{live_base_url}/v1/chat/completions",
++            json=payload,
++            headers=live_headers,
++        )
++    assert response.status_code == 200, response.text
++    body = response.json()
++    assert body["provider"] == "mock"
++    assert body["choices"][0]["message"]["content"] == "mock:phase0"
++
++
++@pytest.mark.asyncio
++async def test_live_stream_with_mock_provider(live_base_url, live_headers):
++    payload = {
++        "model": "mock-chat",
++        "provider": "mock",
++        "messages": [{"role": "user", "content": "hello world"}],
++        "config": {"stream": True},
++    }
++    async with httpx.AsyncClient(timeout=30) as client:
++        async with client.stream(
++            "POST",
++            f"{live_base_url}/v1/chat/completions",
++            json=payload,
++            headers=live_headers,
++        ) as response:
++            assert response.status_code == 200, await response.aread()
++            body = ""
++            async for chunk in response.aiter_text():
++                body += chunk
++
++    assert "mock:hello" in body
++    assert "mock:world" in body
++    assert "[DONE]" in body
++
++
++@pytest.mark.asyncio
++async def test_live_embeddings_with_mock_provider(live_base_url, live_headers):
++    payload = {
++        "model": "mock-embedding",
++        "provider": "mock",
++        "input": ["hello", "world"],
++    }
++    async with httpx.AsyncClient(timeout=30) as client:
++        response = await client.post(
++            f"{live_base_url}/v1/embeddings",
++            json=payload,
++            headers=live_headers,
++        )
++    assert response.status_code == 200, response.text
++    body = response.json()
++    assert len(body["data"]) == 2
++    assert body["data"][0]["object"] == "embedding"
++    assert len(body["data"][0]["embedding"]) == 8
++
++
++@pytest.mark.asyncio
++async def test_live_models_with_mock_provider(live_base_url, live_headers):
++    async with httpx.AsyncClient(timeout=30) as client:
++        response = await client.get(
++            f"{live_base_url}/v1/models/",
++            params={"provider_name": "mock"},
++            headers=live_headers,
++        )
++    assert response.status_code == 200, response.text
++    model_ids = {item["id"] for item in response.json()["data"]}
++    assert {"mock-chat", "mock-embedding"}.issubset(model_ids)
++
++@pytest.mark.asyncio
++async def test_live_auth_rejects_missing_credentials(live_base_url):
++    async with httpx.AsyncClient(timeout=15) as client:
++        response = await client.post(
++            f"{live_base_url}/v1/chat/completions",
++            json={
++                "model": "mock-chat",
++                "messages": [{"role": "user", "content": "unauthorized"}],
++            },
++        )
++    assert response.status_code == 401
++
++
++@pytest.mark.asyncio
++async def test_live_file_round_trip_with_mock_provider(live_base_url, live_headers):
++    async with httpx.AsyncClient(timeout=30) as client:
++        upload = await client.post(
++            f"{live_base_url}/v1/files/",
++            params={"provider_name": "mock", "display_name": "phase0.txt"},
++            files={"file": ("phase0.txt", b"phase0-live", "text/plain")},
++            headers=live_headers,
++        )
++        assert upload.status_code == 200, upload.text
++        file_id = upload.json()["name"]
++
++        metadata = await client.get(
++            f"{live_base_url}/v1/files/{file_id}",
++            params={"provider_name": "mock", "action": "metadata"},
++            headers=live_headers,
++        )
++        assert metadata.status_code == 200, metadata.text
++        assert metadata.json()["display_name"] == "phase0.txt"
++
++        download = await client.get(
++            f"{live_base_url}/v1/files/{file_id}",
++            params={"provider_name": "mock", "action": "download"},
++            headers=live_headers,
++        )
++        assert download.status_code == 200
++        assert download.content == b"phase0-live"
++
++        delete = await client.delete(
++            f"{live_base_url}/v1/files/{file_id}",
++            params={"provider_name": "mock"},
++            headers=live_headers,
++        )
++        assert delete.status_code == 204
+Binary files /mnt/data/original_gateway/tests/providers/__pycache__/test_mock_provider.cpython-313-pytest-9.0.2.pyc and /mnt/data/work_gateway/tests/providers/__pycache__/test_mock_provider.cpython-313-pytest-9.0.2.pyc differ
+Binary files /mnt/data/original_gateway/tests/providers/__pycache__/test_mock_provider.cpython-313.pyc and /mnt/data/work_gateway/tests/providers/__pycache__/test_mock_provider.cpython-313.pyc differ
+Binary files /mnt/data/original_gateway/tests/providers/__pycache__/test_mock_runtime_flow.cpython-313-pytest-9.0.2.pyc and /mnt/data/work_gateway/tests/providers/__pycache__/test_mock_runtime_flow.cpython-313-pytest-9.0.2.pyc differ
+Binary files /mnt/data/original_gateway/tests/providers/__pycache__/test_mock_runtime_flow.cpython-313.pyc and /mnt/data/work_gateway/tests/providers/__pycache__/test_mock_runtime_flow.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/tests/providers/test_mock_provider.py /mnt/data/work_gateway/tests/providers/test_mock_provider.py
+--- /mnt/data/original_gateway/tests/providers/test_mock_provider.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/tests/providers/test_mock_provider.py	2026-08-26 05:39:43.349370796 +0000
+@@ -0,0 +1,67 @@
++import pytest
++
++from src.domain.schemas import ModelCapability
++from src.provider.mock.provider import MockProvider, MOCK_MODEL, MOCK_EMBEDDING_MODEL
++
++
++@pytest.mark.asyncio
++async def test_mock_chat_is_deterministic_and_offline():
++    provider = MockProvider()
++    result = await provider.chat.chat(body={
++        "model": MOCK_MODEL,
++        "messages": [{"role": "user", "content": "hello world"}],
++    })
++
++    assert result.provider == "mock"
++    assert result.model == MOCK_MODEL
++    assert result.choices[0].message.content == "mock:hello world"
++    assert await provider.has_capability(MOCK_MODEL, ModelCapability.CHAT, None, 1) is True
++    assert await provider.has_capability(MOCK_MODEL, ModelCapability.CHAT_STREAM, None, 1) is True
++
++
++@pytest.mark.asyncio
++async def test_mock_stream_emits_chunks_without_network():
++    provider = MockProvider()
++    chunks = [chunk async for chunk in provider.chat.chat_stream(body={
++        "model": MOCK_MODEL,
++        "messages": [{"role": "user", "content": "one two"}],
++    })]
++
++    assert len(chunks) == 2
++    assert "mock:one" in chunks[0].choices[0].delta.content
++    assert chunks[-1].choices[0].finish_reason == "stop"
++
++
++@pytest.mark.asyncio
++async def test_mock_embeddings_are_stable():
++    provider = MockProvider()
++    first = await provider.embeddings.embeddings(body={
++        "model": MOCK_EMBEDDING_MODEL,
++        "input": ["hello"],
++    })
++    second = await provider.embeddings.embeddings(body={
++        "model": MOCK_EMBEDDING_MODEL,
++        "input": ["hello"],
++    })
++
++    assert first == second
++    assert len(first["data"][0]["embedding"]) == 8
++    assert await provider.has_capability(MOCK_EMBEDDING_MODEL, ModelCapability.EMBEDDINGS, None, 1) is True
++
++
++@pytest.mark.asyncio
++async def test_mock_files_round_trip():
++    provider = MockProvider()
++    uploaded = await provider.files.upload_file(
++        file_stream=__import__("io").BytesIO(b"phase0"),
++        file_size=6,
++        mime_type="text/plain",
++        display_name="phase0.txt",
++    )
++    file_id = uploaded["name"]
++
++    meta = await provider.files.get_file(file_id=file_id)
++    payload = await provider.files.download_file(file_id=file_id)
++    assert meta["display_name"] == "phase0.txt"
++    assert payload == b"phase0"
++    assert await provider.files.delete_file(file_id=file_id) is True
+diff -ruN /mnt/data/original_gateway/tests/providers/test_mock_runtime_flow.py /mnt/data/work_gateway/tests/providers/test_mock_runtime_flow.py
+--- /mnt/data/original_gateway/tests/providers/test_mock_runtime_flow.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/tests/providers/test_mock_runtime_flow.py	2026-08-26 05:40:38.543276918 +0000
+@@ -0,0 +1,78 @@
++from types import SimpleNamespace
++
++import httpx
++import pytest
++
++from src.circuit_breaker import CircuitBreakerManager
++from src.infrastructure.config import ConfigurationRegistry
++from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
++from src.provider.discovery import ProviderDiscovery
++from src.provider.policies.routing_policy import RoutingPolicy
++from src.provider.registry import ProviderRegistry
++from src.provider.executor import ProviderExecutor
++from src.provider.handlers.chat_handler import ChatExecutionHandler
++from src.provider.handlers.embedding_handler import EmbeddingExecutionHandler
++from src.provider.handlers.model_handler import ModelOperationHandler
++from src.provider.handlers.file_handler import FileOperationHandler
++
++
++@pytest.fixture(autouse=True)
++def mock_config():
++    ConfigurationRegistry.set_config(ConfigSchema(
++        provider=ProviderSettings(
++            priority=["mock"],
++            mock_enabled=True,
++            timeout=5,
++        )
++    ))
++
++
++@pytest.mark.asyncio
++async def test_mock_provider_exercises_provider_runtime_handlers_end_to_end():
++    registry = ProviderRegistry()
++    ProviderDiscovery(registry).run()
++    providers = registry.list_all_providers()
++    assert "mock" in providers
++
++    routing = RoutingPolicy(providers)
++    executor = ProviderExecutor(CircuitBreakerManager())
++    http_client = httpx.AsyncClient()
++    kwargs = dict(
++        providers=providers,
++        routing_policy=routing,
++        executor=executor,
++        circuit_breaker_manager=executor.breaker_manager,
++    )
++    chat_handler = ChatExecutionHandler(**kwargs)
++    embedding_handler = EmbeddingExecutionHandler(**kwargs)
++    model_handler = ModelOperationHandler(**kwargs)
++    file_handler = FileOperationHandler(**kwargs)
++
++    try:
++        chat = await chat_handler.execute_with_fallback(http_client, {
++            "model": "mock-chat",
++            "messages": [{"role": "user", "content": "phase0"}],
++        })
++        assert chat.provider == "mock"
++        assert chat.choices[0].message.content == "mock:phase0"
++
++        embedding = await embedding_handler.execute(http_client, {
++            "model": "mock-embedding",
++            "input": ["phase0"],
++        })
++        assert embedding["data"][0]["embedding"]
++
++        models = await model_handler.execute("mock", None, http_client)
++        assert {item.id for item in models.data} == {"mock-chat", "mock-embedding"}
++
++        uploaded = await file_handler.execute({
++            "action": "upload",
++            "provider_name": "mock",
++            "file_bytes": b"e2e",
++            "file_size": 3,
++            "mime_type": "text/plain",
++            "display_name": "e2e.txt",
++        }, http_client)
++        assert uploaded["display_name"] == "e2e.txt"
++    finally:
++        await http_client.aclose()
+Binary files /mnt/data/original_gateway/tools/__pycache__/phase0_live_e2e.cpython-313.pyc and /mnt/data/work_gateway/tools/__pycache__/phase0_live_e2e.cpython-313.pyc differ
+diff -ruN /mnt/data/original_gateway/tools/phase0_live_e2e.py /mnt/data/work_gateway/tools/phase0_live_e2e.py
+--- /mnt/data/original_gateway/tools/phase0_live_e2e.py	1970-01-01 00:00:00.000000000 +0000
++++ /mnt/data/work_gateway/tools/phase0_live_e2e.py	2026-08-26 05:39:43.352491807 +0000
+@@ -0,0 +1,24 @@
++#!/usr/bin/env python3
++"""Run Phase 0 live E2E tests against an already running Gateway."""
++
++from __future__ import annotations
++
++import os
++import subprocess
++import sys
++
++
++if __name__ == "__main__":
++    base_url = os.getenv("PHASE0_LIVE_BASE_URL")
++    if not base_url:
++        raise SystemExit("PHASE0_LIVE_BASE_URL is required, e.g. http://127.0.0.1:8000")
++    env = dict(os.environ)
++    env.setdefault("PHASE0_LIVE_BASE_URL", base_url)
++    raise SystemExit(subprocess.call([
++        sys.executable,
++        "-m",
++        "pytest",
++        "-q",
++        "tests/e2e/test_phase0_live.py",
++        *sys.argv[1:],
++    ], env=env))

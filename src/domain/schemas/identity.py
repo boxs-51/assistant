@@ -1,4 +1,4 @@
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional, Literal, Set
 
 class Identity(BaseModel):
@@ -34,5 +34,4 @@ class Identity(BaseModel):
         """
         return self.api_key_id or self.organization_id or self.user_id or "anonymous"
 
-    class Config:
-        frozen = True # Immutable, đảm bảo identity không bị thay đổi sau khi tạo
+    model_config = ConfigDict(frozen = True)
