@@ -2,7 +2,7 @@
 import structlog
 from typing import Any, Dict, Optional
 
-from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from .registry import CapabilityRegistry
 from .drivers.base import BaseCapabilityDriver
 from ...domain.schemas.identity import Identity
@@ -27,7 +27,7 @@ class CapabilityRuntime(BaseRuntime):
         self.registry = CapabilityRegistry()
         self.authorization = AuthorizationService()
 
-    async def initialize(self, context: Dict[str, Any]) -> None:
+    async def initialize(self, context: RuntimeContext) -> None:
         # Lắng nghe Command yêu cầu thực thi Tool từ EventBus
         self.event_bus = context.event_bus
         self.event_bus.subscribe("capability.command.execute", self._handle_execute_command)

@@ -2,7 +2,7 @@
 from typing import Dict, Any
 import structlog
 
-from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 from ...domain.schemas.identity import Identity
@@ -22,10 +22,10 @@ class SessionRuntime(BaseRuntime):
         self.uow_factory = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
 
-    async def initialize(self, context: Dict[str, Any]) -> None:
+    async def initialize(self, context: RuntimeContext) -> None:
         # Subscribe các event theo chuẩn tên mới
         self.event_bus = context.event_bus
-        self.uow_factory = context.config.get("uow_factory")
+        self.uow_factory = context.uow_factory
         if self.uow_factory is None:
             raise ValueError("SessionRuntime requires uow_factory.")
         self.event_bus.subscribe("transport.event.request_received", self._on_request_received)

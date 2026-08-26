@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import httpx
 import structlog
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
 
 from ..infrastructure.event_bus.bus import EventBus
+
+if TYPE_CHECKING:
+    from ..application.container import ApplicationContainer
+    from .kernel import RuntimeKernel
 
 logger = structlog.get_logger(__name__)
 
@@ -30,16 +35,20 @@ class HealthStatus(Enum):
     FAILED = "Failed"
 
 
-@dataclass
+@dataclass(slots=True)
 class RuntimeContext:
-    """Context cấp cho từng Runtime. Runtime KHÔNG tự đọc Global State."""
-    kernel: Any
-    config: Dict[str, Any]
+    """Single dependency boundary shared by every runtime instance."""
+
+    kernel: "RuntimeKernel"
+    container: "ApplicationContainer"
+    config: Any
     logger: structlog.BoundLogger
     event_bus: EventBus
-    container: Any = None
-    storage: Any = None
+    storage: Any
+    uow_factory: Callable[[], Any]
+    http_client: httpx.AsyncClient
     metrics: Any = None
+    tracer: Any = None
     clock: Any = None
 
 

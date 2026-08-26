@@ -4,7 +4,7 @@ import structlog
 
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
-from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 
 logger = structlog.get_logger(__name__)
 
@@ -19,7 +19,7 @@ class WorkflowRuntime(BaseRuntime):
         super().__init__(manifest=manifest)
         self.event_bus = None
 
-    async def initialize(self, context: Dict[str, Any]) -> None:
+    async def initialize(self, context: RuntimeContext) -> None:
         self.event_bus = context.event_bus
         # Lắng nghe các Domain Event từ các Runtime khác
         self.event_bus.subscribe("session.event.loaded", self._handle_session_loaded)

@@ -3,7 +3,7 @@ import httpx
 import structlog
 from typing import Dict, Any, Optional
 
-from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 
 from ...provider.registry import ProviderRegistry
 from ...provider.discovery import ProviderDiscovery
@@ -53,9 +53,9 @@ class ProviderRuntime(BaseRuntime):
 
         self.event_bus: Optional[EventBus] = None
 
-    async def initialize(self, context: Dict[str, Any]) -> None:
+    async def initialize(self, context: RuntimeContext) -> None:
         """Khởi tạo Discovery, Registry & khởi tạo Handlers."""
-        self._http_client = context.config.get("http_client") or httpx.AsyncClient()
+        self._http_client = context.http_client
         
         self.provider_registry = ProviderRegistry()
         discovery = ProviderDiscovery(registry=self.provider_registry)

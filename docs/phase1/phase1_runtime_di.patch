@@ -1,0 +1,867 @@
+--- a/src/application/container.py
++++ b/src/application/container.py
+@@ -4,31 +4,53 @@
+ 
+ @dataclass
+ class ApplicationContainer:
+-    """Application-wide dependency graph owned by the bootstrap process."""
++    """Application-wide dependency graph owned by the bootstrap process.
++
++    ``app.state.container`` is the only FastAPI application-state attachment.
++    Application/runtime code must resolve dependencies from this object rather
++    than from individual ``app.state`` fields.
++    """
+ 
+     config: Any
+     storage: Any
+     uow_factory: Callable[[], Any]
+     http_client: Any
+     eventing_manager: Any
++
+     runtime_kernel: Optional[Any] = None
++    event_runtime: Optional[Any] = None
++    context_runtime: Optional[Any] = None
++    connection_runtime: Optional[Any] = None
++    session_runtime: Optional[Any] = None
++    workflow_runtime: Optional[Any] = None
++    capability_runtime: Optional[Any] = None
+     provider_runtime: Optional[Any] = None
+-    session_runtime: Optional[Any] = None
+-    context_runtime: Optional[Any] = None
+-    capability_runtime: Optional[Any] = None
+-    workflow_runtime: Optional[Any] = None
+-    connection_runtime: Optional[Any] = None
+-    event_runtime: Optional[Any] = None
++
+     auth_manager: Optional[Any] = None
+     oauth: Optional[Any] = None
+     limiter: Optional[Any] = None
++    circuit_breaker_manager: Optional[Any] = None
++
+     agent_registry: Optional[Any] = None
+     tool_registry: Optional[Any] = None
+     multi_agent_coordinator: Optional[Any] = None
+ 
++    legacy_model_router: Optional[Any] = None
++
++    metrics: Optional[Any] = None
++    tracer: Optional[Any] = None
++    clock: Optional[Any] = None
++
+     @property
+     def event_bus(self):
+         return self.eventing_manager.bus
++
++    def bind_runtime(self, runtime_id: str, runtime: Any) -> None:
++        if not runtime_id:
++            raise ValueError("runtime_id must not be empty")
++        if runtime is None:
++            raise ValueError(f"runtime '{runtime_id}' must not be None")
++        setattr(self, runtime_id, runtime)
+ 
+     def get(self, name: str, default: Any = None) -> Any:
+         return getattr(self, name, default)
+
+--- a/src/kernel/base.py
++++ b/src/kernel/base.py
+@@ -1,12 +1,17 @@
+ from __future__ import annotations
+ 
++import httpx
+ import structlog
+ from abc import ABC, abstractmethod
+ from dataclasses import dataclass, field
+ from enum import Enum
+-from typing import Any, Dict, List, Optional
++from typing import Any, Callable, Dict, List, Optional, TYPE_CHECKING
+ 
+ from ..infrastructure.event_bus.bus import EventBus
++
++if TYPE_CHECKING:
++    from ..application.container import ApplicationContainer
++    from .kernel import RuntimeKernel
+ 
+ logger = structlog.get_logger(__name__)
+ 
+@@ -30,16 +35,20 @@
+     FAILED = "Failed"
+ 
+ 
+-@dataclass
++@dataclass(slots=True)
+ class RuntimeContext:
+-    """Context cấp cho từng Runtime. Runtime KHÔNG tự đọc Global State."""
+-    kernel: Any
+-    config: Dict[str, Any]
++    """Single dependency boundary shared by every runtime instance."""
++
++    kernel: "RuntimeKernel"
++    container: "ApplicationContainer"
++    config: Any
+     logger: structlog.BoundLogger
+     event_bus: EventBus
+-    container: Any = None
+-    storage: Any = None
++    storage: Any
++    uow_factory: Callable[[], Any]
++    http_client: httpx.AsyncClient
+     metrics: Any = None
++    tracer: Any = None
+     clock: Any = None
+ 
+ 
+
+--- a/src/kernel/lifecycle.py
++++ b/src/kernel/lifecycle.py
+@@ -1,45 +1,45 @@
+ # src/kernel/lifecycle.py
+-import logging
++import asyncio
++from typing import Any, Optional
+ 
+-#from ..kernel.kernel import RuntimeKernel
++import structlog
+ 
+ from .registry import RuntimeRegistry, DependencyResolver
+ from .base import LifecycleState, HealthStatus, RuntimeContext
+-import asyncio
+-import structlog
+-from typing import Any, Dict, Optional
+ 
+ logger = structlog.get_logger(__name__)
++
++
+ class LifecycleManager:
+-    """Quản lý chuyển đổi trạng thái Vòng đời của toàn bộ hệ thống."""
++    """Quản lý lifecycle của toàn bộ runtime bằng một RuntimeContext duy nhất."""
+ 
+     def __init__(self, registry: RuntimeRegistry, kernel: Any):
+         self.registry = registry
+         self.kernel = kernel
+ 
+-    async def initialize_all(self, global_config: Dict[str, Any]) -> None:
++    async def initialize_all(self, context: RuntimeContext) -> None:
+         runtimes = self.registry.list_all()
+         init_order = DependencyResolver.resolve_order(runtimes)
+ 
+-        logger.info(f"Thứ tự khởi tạo Runtime: {' -> '.join(init_order)}")
++        logger.info(
++            "Runtime initialization order",
++            order=init_order,
++        )
+ 
+         for r_id in init_order:
+             runtime = self.registry.get(r_id)
+-            if not runtime:
++            if runtime is None:
+                 continue
+ 
+-            ctx = RuntimeContext(
+-                kernel=self.kernel,
+-                config=global_config,
+-                logger=structlog.get_logger(f"Runtime[{r_id}]"),
+-                event_bus=self.kernel.event_bus,
+-                container=global_config.get("container"),
+-                storage=global_config.get("storage_engine"),
+-                metrics=global_config.get("metrics"),
+-                clock=global_config.get("clock"),
++            await runtime.initialize(context)
++            if runtime.state != LifecycleState.INITIALIZED:
++                runtime.state = LifecycleState.INITIALIZED
++
++            logger.info(
++                "Runtime initialized",
++                runtime_id=r_id,
++                state=runtime.state.value,
+             )
+-            await runtime.initialize(ctx)
+-            logger.info(f"Runtime '{r_id}' -> State: {runtime.state.value}")
+ 
+     async def start_all(self) -> None:
+         runtimes = self.registry.list_all()
+@@ -50,26 +50,53 @@
+             if runtime and runtime.state == LifecycleState.INITIALIZED:
+                 await runtime.start()
+                 runtime.state = LifecycleState.RUNNING
+-                logger.info(f"Runtime '{r_id}' -> State: {runtime.state.value}")
++                logger.info(
++                    "Runtime started",
++                    runtime_id=r_id,
++                    state=runtime.state.value,
++                )
+ 
+     async def stop_all(self) -> None:
+         runtimes = self.registry.list_all()
+-        # Dừng theo thứ tự ngược lại (Reverse Order)
+-        stop_order = list(reversed(DependencyResolver.resolve_order(runtimes)))
++        stop_order = list(
++            reversed(DependencyResolver.resolve_order(runtimes))
++        )
+ 
+         for r_id in stop_order:
+             runtime = self.registry.get(r_id)
+-            if runtime and runtime.state in [LifecycleState.RUNNING, LifecycleState.STARTED, LifecycleState.PAUSED]:
+-                runtime.state = LifecycleState.STOPPING
++            if not runtime:
++                continue
++
++            if runtime.state not in (
++                LifecycleState.RUNNING,
++                LifecycleState.STARTED,
++                LifecycleState.PAUSED,
++            ):
++                continue
++
++            runtime.state = LifecycleState.STOPPING
++            try:
+                 await runtime.stop()
++            finally:
+                 runtime.state = LifecycleState.STOPPED
+                 await runtime.dispose()
+-                logger.info(f"Runtime '{r_id}' -> State: {runtime.state.value}")
++
++            logger.info(
++                "Runtime stopped",
++                runtime_id=r_id,
++                state=runtime.state.value,
++            )
++
+ 
+ class HealthMonitor:
+-    """Định kỳ Heartbeat kiểm tra sức khỏe và Recovery nếu Runtime bị Crash."""
++    """Định kỳ kiểm tra sức khỏe runtime và kích hoạt recovery."""
+ 
+-    def __init__(self, registry: RuntimeRegistry, kernel: Any, interval_sec: int = 5):
++    def __init__(
++        self,
++        registry: RuntimeRegistry,
++        kernel: Any,
++        interval_sec: int = 5,
++    ):
+         self.registry = registry
+         self.kernel = kernel
+         self.interval_sec = interval_sec
+@@ -77,29 +104,53 @@
+         self._running = False
+ 
+     def start(self) -> None:
++        if self._running:
++            return
+         self._running = True
+         self._monitor_task = asyncio.create_task(self._check_loop())
+-        logger.info("Health Monitor đã kích hoạt.")
++        logger.info("Health Monitor started")
+ 
+     async def stop(self) -> None:
+         self._running = False
+-        if self._monitor_task:
+-            self._monitor_task.cancel()
++
++        task = self._monitor_task
++        self._monitor_task = None
++
++        if task:
++            task.cancel()
++            try:
++                await task
++            except asyncio.CancelledError:
++                pass
+ 
+     async def _check_loop(self) -> None:
+         while self._running:
+             try:
+                 await asyncio.sleep(self.interval_sec)
++
+                 for runtime in self.registry.list_all():
+-                    if runtime.state == LifecycleState.RUNNING:
+-                        try:
+-                            health = await runtime.check_health()
+-                            if health == HealthStatus.FAILED:
+-                                logger.error(f"⚠️ Runtime '{runtime.manifest.id}' FAILED! Kích hoạt Recovery...")
+-                                await self.kernel.recover_runtime(runtime.manifest.id)
+-                        except Exception as e:
+-                            logger.error(f"Lỗi khi kiểm tra Health Check của '{runtime.manifest.id}': {e}")
+-                            runtime.state = LifecycleState.FAILED
+-                            await self.kernel.recover_runtime(runtime.manifest.id)
++                    if runtime.state != LifecycleState.RUNNING:
++                        continue
++
++                    try:
++                        health = await runtime.check_health()
++                        if health == HealthStatus.FAILED:
++                            logger.error(
++                                "Runtime health check failed",
++                                runtime_id=runtime.manifest.id,
++                            )
++                            await self.kernel.recover_runtime(
++                                runtime.manifest.id
++                            )
++                    except Exception as exc:
++                        logger.exception(
++                            "Runtime health check raised",
++                            runtime_id=runtime.manifest.id,
++                            error=str(exc),
++                        )
++                        runtime.state = LifecycleState.FAILED
++                        await self.kernel.recover_runtime(
++                            runtime.manifest.id
++                        )
+             except asyncio.CancelledError:
+                 break
+
+--- a/src/kernel/kernel.py
++++ b/src/kernel/kernel.py
+@@ -1,36 +1,68 @@
+-from typing import Any, Dict, Optional
++from typing import Optional
++
+ import structlog
+ 
++from ..application.container import ApplicationContainer
+ from ..infrastructure.event_bus.manager import EventingManager
+ 
+-from .base import BaseRuntime, LifecycleState
++from .base import BaseRuntime, LifecycleState, RuntimeContext
+ from .lifecycle import HealthMonitor, LifecycleManager
+ from .registry import RuntimeRegistry
+ 
+ logger = structlog.get_logger(__name__)
+ 
++
+ class RuntimeKernel:
+-    def __init__(self,eventing_manager: EventingManager):
++    def __init__(
++        self,
++        eventing_manager: EventingManager,
++        container: ApplicationContainer,
++    ):
+         self.eventing_manager = eventing_manager
+         self.event_bus = eventing_manager.bus
++        self.container = container
++
+         self.registry = RuntimeRegistry()
+-        self.lifecycle_manager = LifecycleManager(self.registry, self)
+-        self.health_monitor = HealthMonitor(self.registry, self)
++        self.lifecycle_manager = LifecycleManager(
++            self.registry,
++            self,
++        )
++        self.health_monitor = HealthMonitor(
++            self.registry,
++            self,
++        )
++        self.context: Optional[RuntimeContext] = None
+ 
+     def register_runtime(self, runtime: BaseRuntime) -> None:
+         self.registry.register(runtime)
+ 
+     def get_service(self, service_name: str) -> Optional[BaseRuntime]:
+-        """Dành cho Hạ Tầng (Infrastructure Services) - Section 9."""
++        """Dành cho Infrastructure Services."""
+         return self.registry.get_service(service_name)
+ 
+-    async def bootstrap(self, global_config: Dict[str, Any]) -> None:
+-        """Boot process của toàn hệ thống (Section 7)."""
++    async def bootstrap(self) -> None:
++        """Bootstrap toàn bộ runtime bằng một RuntimeContext dùng chung."""
+         logger.info("=== BẮT ĐẦU BOOTSTRAP RUNTIME KERNEL ===")
++
++        self.context = RuntimeContext(
++            kernel=self,
++            container=self.container,
++            config=self.container.config,
++            logger=logger,
++            event_bus=self.container.event_bus,
++            storage=self.container.storage,
++            uow_factory=self.container.uow_factory,
++            http_client=self.container.http_client,
++            metrics=self.container.metrics,
++            tracer=self.container.tracer,
++            clock=self.container.clock,
++        )
++
+         self.eventing_manager.start()
+-        await self.lifecycle_manager.initialize_all(global_config)
++        await self.lifecycle_manager.initialize_all(self.context)
+         await self.lifecycle_manager.start_all()
+         self.health_monitor.start()
++
+         logger.info("=== RUNTIME KERNEL ĐÃ SẴN SÀNG CHẠY ===")
+ 
+     async def shutdown(self) -> None:
+@@ -41,21 +73,32 @@
+         logger.info("=== HE THONG DA DISPOSED AN TOAN ===")
+ 
+     async def recover_runtime(self, runtime_id: str) -> None:
+-        """Khôi phục Runtime nếu bị Crash (Section 16)."""
++        """Khôi phục Runtime nếu bị Crash."""
+         runtime = self.registry.get(runtime_id)
+-        if not runtime:
++        if not runtime or self.context is None:
+             return
+ 
+-        logger.warning(f"[Recovery Engine] Đang tái tạo Runtime: {runtime_id}")
++        logger.warning(
++            "[Recovery Engine] Recreating Runtime",
++            runtime_id=runtime_id,
++        )
++
+         try:
+             await runtime.stop()
+             await runtime.dispose()
+ 
+-            # Giả lập Re-initialize & Re-start
+-            runtime.initialize(runtime.context)
++            runtime.initialize(self.context)
+             await runtime.start()
+             runtime.state = LifecycleState.RUNNING
+-            logger.info(f"[Recovery Engine] Tái tạo thành công Runtime '{runtime_id}' -> State: RUNNING")
++
++            logger.info(
++                "[Recovery Engine] Runtime recovered",
++                runtime_id=runtime_id,
++            )
+         except Exception as ex:
+-            logger.critical(f"[Recovery Engine] Tái tạo Runtime '{runtime_id}' THẤT BẠI: {ex}")
++            logger.critical(
++                "[Recovery Engine] Runtime recovery failed",
++                runtime_id=runtime_id,
++                error=str(ex),
++            )
+             runtime.state = LifecycleState.FAILED
+
+--- a/src/transport/gateway/dependencies.py
++++ b/src/transport/gateway/dependencies.py
+@@ -28,3 +28,23 @@
+ 
+ def get_capability_runtime(request: Request):
+     return get_container(request).require("capability_runtime")
++
++
++def get_event_bus(request: Request):
++    return get_container(request).require("event_bus")
++
++
++def get_http_client(request: Request):
++    return get_container(request).require("http_client")
++
++
++def get_auth_manager(request: Request):
++    return get_container(request).require("auth_manager")
++
++
++def get_circuit_breaker_manager(request: Request):
++    return get_container(request).require("circuit_breaker_manager")
++
++
++def get_legacy_model_router(request: Request):
++    return get_container(request).require("legacy_model_router")
+
+--- a/src/transport/gateway/authentication/middleware.py
++++ b/src/transport/gateway/authentication/middleware.py
+@@ -1,4 +1,5 @@
+         try:
+-            # Lấy auth_manager từ app.state
+-            auth_manager: AuthenticationManager = request.app.state.auth_manager
++            # ``app.state.container`` is the only application-state dependency boundary.
++            container = request.app.state.container
++            auth_manager: AuthenticationManager = container.require("auth_manager")
+             identity = await auth_manager.authenticate(request)
+
+
+# SEMANTIC PATCH: src/runtimes/provider/runtime.py
+
+- import time
+import httpx
+import structlog
+from typing import Dict, Any, Optional
+
+from ...kernel.base import BaseRuntime, RuntimeManifest
+
+from ...provider.registry import ProviderRegistry
+from ...provider.discovery import ProviderDiscovery
+from ...provider.policies.routing_policy import RoutingPolicy
+from ...provider.executor import ProviderExecutor
+from ...provider.exceptions import NoAvailableProviderError
+from ...infrastructure.event_bus.bus import EventBus
+from ...domain.schemas.event import BaseEvent
+#from ....src.circuit_breaker import CircuitBreakerManager
+
+# Import các Handlers mới tách
+from ...provider.handlers.chat_handler import ChatExecutionHandler
+from ...provider.handlers.embedding_handler import EmbeddingExecutionHandler
+from ...provider.handlers.model_handler import ModelOperationHandler
+from ...provider.handlers.file_handler import FileOperationHandler
+
+logger = structlog.get_logger(__name__)
+
+class ProviderRuntime(BaseRuntime):
+    """
+    PROVIDER RUNTIME
+    Sở hữu: Provider Registry, Discovery, Circuit Breakers, Fallback Chains.
+    Ủy quyền xử lý chi tiết cho các Handlers chuyên biệt.
+    """
+
+    def __init__(self, circuit_breaker_manager: Any):
+        manifest = RuntimeManifest(
+            id="provider_runtime",
+            name="ProviderRuntime",
+            version="1.0.0",
+            dependencies=["event_runtime"]  # Khai báo dependency nếu cần
+        )
+        super().__init__(manifest)
+        self.circuit_breaker_manager = circuit_breaker_manager
+
+        self.provider_registry: Optional[ProviderRegistry] = None
+        self.executor: Optional[ProviderExecutor] = None
+        self.routing_policy: Optional[RoutingPolicy] = None
+        self.providers: Dict[str, Any] = {}
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+        # Handlers
+        self.chat_handler: Optional[ChatExecutionHandler] = None
+        self.embedding_handler: Optional[EmbeddingExecutionHandler] = None
+        self.model_handler: Optional[ModelOperationHandler] = None
+        self.file_handler: Optional[FileOperationHandler] = None
+
+        self.event_bus: Optional[EventBus] = None
+
+    async def initialize(self, context: Dict[str, Any]) -> None:
+        """Khởi tạo Discovery, Registry & khởi tạo Handlers."""
+        self._http_client = context.config.get("http_client") or httpx.AsyncClient()
+
+        self.provider_registry = ProviderRegistry()
+        discovery = ProviderDiscovery(registry=self.provider_registry)
+        discovery.run()
+
+        self.providers = self.provider_registry.list_all_providers()
+        if not self.providers:
+            raise RuntimeError("Configuration Error: No LLM providers are enabled.")
+
+        self.routing_policy = RoutingPolicy(providers=self.providers)
+        self.executor = ProviderExecutor(self.circuit_breaker_manager)
+
+        # Khởi tạo các Sub-handlers
+        handler_kwargs = {
+            "providers": self.providers,
+            "routing_policy": self.routing_policy,
+            "executor": self.executor,
+            "circuit_breaker_manager": self.circuit_breaker_manager,
+        }
+        self.chat_handler = ChatExecutionHandler(**handler_kwargs)
+        self.embedding_handler = EmbeddingExecutionHandler(**handler_kwargs)
+        self.model_handler = ModelOperationHandler(**handler_kwargs)
+        self.file_handler = FileOperationHandler(**handler_kwargs)
+
+        # Đăng ký Event Handlers
+        self.event_bus = context.event_bus
+
+        self.event_bus.subscribe("provider.chat.execute", self._handle_execute_chat)
+        self.event_bus.subscribe("provider.embeddings.execute", self._handle_execute_embeddings)
+        self.event_bus.subscribe("provider.model.execute", self._handle_model_operation)
+        self.event_bus.subscribe("provider.file.execute", self._handle_file_operation)
+
+        self._is_initialized = True
+        logger.info("ProviderRuntime initialized", providers=list(self.providers.keys()))
++ import time
+import httpx
+import structlog
+from typing import Dict, Any, Optional
+
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+
+from ...provider.registry import ProviderRegistry
+from ...provider.discovery import ProviderDiscovery
+from ...provider.policies.routing_policy import RoutingPolicy
+from ...provider.executor import ProviderExecutor
+from ...provider.exceptions import NoAvailableProviderError
+from ...infrastructure.event_bus.bus import EventBus
+from ...domain.schemas.event import BaseEvent
+#from ....src.circuit_breaker import CircuitBreakerManager
+
+# Import các Handlers mới tách
+from ...provider.handlers.chat_handler import ChatExecutionHandler
+from ...provider.handlers.embedding_handler import EmbeddingExecutionHandler
+from ...provider.handlers.model_handler import ModelOperationHandler
+from ...provider.handlers.file_handler import FileOperationHandler
+
+logger = structlog.get_logger(__name__)
+
+class ProviderRuntime(BaseRuntime):
+    """
+    PROVIDER RUNTIME
+    Sở hữu: Provider Registry, Discovery, Circuit Breakers, Fallback Chains.
+    Ủy quyền xử lý chi tiết cho các Handlers chuyên biệt.
+    """
+
+    def __init__(self, circuit_breaker_manager: Any):
+        manifest = RuntimeManifest(
+            id="provider_runtime",
+            name="ProviderRuntime",
+            version="1.0.0",
+            dependencies=["event_runtime"]  # Khai báo dependency nếu cần
+        )
+        super().__init__(manifest)
+        self.circuit_breaker_manager = circuit_breaker_manager
+
+        self.provider_registry: Optional[ProviderRegistry] = None
+        self.executor: Optional[ProviderExecutor] = None
+        self.routing_policy: Optional[RoutingPolicy] = None
+        self.providers: Dict[str, Any] = {}
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+        # Handlers
+        self.chat_handler: Optional[ChatExecutionHandler] = None
+        self.embedding_handler: Optional[EmbeddingExecutionHandler] = None
+        self.model_handler: Optional[ModelOperationHandler] = None
+        self.file_handler: Optional[FileOperationHandler] = None
+
+        self.event_bus: Optional[EventBus] = None
+
+    async def initialize(self, context: RuntimeContext) -> None:
+        """Khởi tạo Discovery, Registry & các execution handlers."""
+        self._http_client = context.http_client
+
+        self.provider_registry = ProviderRegistry()
+        discovery = ProviderDiscovery(registry=self.provider_registry)
+        discovery.run()
+
+        self.providers = self.provider_registry.list_all_providers()
+        if not self.providers:
+            raise RuntimeError("Configuration Error: No LLM providers are enabled.")
+
+        self.routing_policy = RoutingPolicy(providers=self.providers)
+        self.executor = ProviderExecutor(self.circuit_breaker_manager)
+
+        # Khởi tạo các Sub-handlers
+        handler_kwargs = {
+            "providers": self.providers,
+            "routing_policy": self.routing_policy,
+            "executor": self.executor,
+            "circuit_breaker_manager": self.circuit_breaker_manager,
+        }
+        self.chat_handler = ChatExecutionHandler(**handler_kwargs)
+        self.embedding_handler = EmbeddingExecutionHandler(**handler_kwargs)
+        self.model_handler = ModelOperationHandler(**handler_kwargs)
+        self.file_handler = FileOperationHandler(**handler_kwargs)
+
+        # Đăng ký Event Handlers
+        self.event_bus = context.event_bus
+
+        self.event_bus.subscribe("provider.chat.execute", self._handle_execute_chat)
+        self.event_bus.subscribe("provider.embeddings.execute", self._handle_execute_embeddings)
+        self.event_bus.subscribe("provider.model.execute", self._handle_model_operation)
+        self.event_bus.subscribe("provider.file.execute", self._handle_file_operation)
+
+        self._is_initialized = True
+        logger.info("ProviderRuntime initialized", providers=list(self.providers.keys()))
+
+
+# SEMANTIC PATCH: src/runtimes/context/runtime.py
+
+- # src/runtimes/context/runtime.py
+
+from typing import Any, List
+import structlog
+
+from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...domain.schemas.event import BaseEvent
+from ...domain.schemas.request import GatewayChatRequest
+from ...domain.schemas.message import GatewayMessage
+from ...domain.schemas.enums import MessageContentType
+from ...context.manager import ContextEngine
+from ...domain.schemas.identity import Identity
+
+logger = structlog.get_logger(__name__)
+
+
+class ContextRuntime(BaseRuntime):
+    def __init__(self):
+        manifest = RuntimeManifest(
+            id="context_runtime",
+            name="ContextRuntime",
+            version="1.0.0"
+        )
+        super().__init__(manifest=manifest)
+        self.event_bus = None
+        self.context_engine = None
+
+    async def initialize(self, context: Any) -> None:
+        # Hỗ trợ cả Dict hoặc Dependency Container Object
+        self.event_bus = context.get("event_bus") if isinstance(context, dict) else getattr(context, "event_bus", None)
+        if not self.event_bus:
+            raise ValueError("ContextRuntime requires 'event_bus' in initialization context.")
+
+        storage = context.storage if not isinstance(context, dict) else context.get("storage")
+        uow_factory = context.config.get("uow_factory") if not isinstance(context, dict) else context.get("uow_factory")
+        if storage is None or uow_factory is None:
+            raise ValueError("ContextRuntime requires storage and uow_factory.")
+        self.context_engine = ContextEngine(storage, uow_factory)
+
+        self.event_bus.subscribe("context.command.build", self._handle_build_context)
++ # src/runtimes/context/runtime.py
+
+import structlog
+
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+from ...domain.schemas.event import BaseEvent
+from ...domain.schemas.identity import Identity
+from ...context.manager import ContextEngine
+
+logger = structlog.get_logger(__name__)
+
+
+class ContextRuntime(BaseRuntime):
+    def __init__(self):
+        manifest = RuntimeManifest(
+            id="context_runtime",
+            name="ContextRuntime",
+            version="1.0.0"
+        )
+        super().__init__(manifest=manifest)
+        self.event_bus = None
+        self.context_engine = None
+
+    async def initialize(self, context: RuntimeContext) -> None:
+        self.event_bus = context.event_bus
+        if self.event_bus is None:
+            raise ValueError("ContextRuntime requires event_bus.")
+
+        if context.storage is None or context.uow_factory is None:
+            raise ValueError("ContextRuntime requires storage and uow_factory.")
+
+        self.context_engine = ContextEngine(
+            context.storage,
+            context.uow_factory,
+        )
+
+        self.event_bus.subscribe("context.command.build", self._handle_build_context)
+
+
+# SEMANTIC PATCH: src/runtimes/session/runtime.py
+
+- # src/runtimes/session/runtime.py
+from typing import Dict, Any
+import structlog
+
+from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...infrastructure.event_bus.bus import EventBus
+from ...domain.schemas.event import BaseEvent
+from ...domain.schemas.identity import Identity
+
+logger = structlog.get_logger(__name__)
+
+
+class SessionRuntime(BaseRuntime):
+    def __init__(self):
+        manifest = RuntimeManifest(
+            id="session_runtime",
+            name="SessionRuntime",
+            version="1.0.0"
+        )
+        super().__init__(manifest=manifest)
+        self.event_bus = None
+        self.uow_factory = None
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+
+    async def initialize(self, context: Dict[str, Any]) -> None:
+        # Subscribe các event theo chuẩn tên mới
+        self.event_bus = context.event_bus
+        self.uow_factory = context.config.get("uow_factory")
++ # src/runtimes/session/runtime.py
+from typing import Dict, Any
+import structlog
+
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+from ...domain.schemas.event import BaseEvent
+from ...domain.schemas.identity import Identity
+
+logger = structlog.get_logger(__name__)
+
+
+class SessionRuntime(BaseRuntime):
+    def __init__(self):
+        manifest = RuntimeManifest(
+            id="session_runtime",
+            name="SessionRuntime",
+            version="1.0.0"
+        )
+        super().__init__(manifest=manifest)
+        self.event_bus = None
+        self.uow_factory = None
+        self._sessions: Dict[str, Dict[str, Any]] = {}
+
+    async def initialize(self, context: RuntimeContext) -> None:
+        self.event_bus = context.event_bus
+        self.uow_factory = context.uow_factory
+
+
+# SEMANTIC PATCH: src/runtime/runtimes/capability/runtime.py
+
+- import structlog
+from typing import Any, Dict, Optional
+
+from ...kernel.base import BaseRuntime, RuntimeManifest
++ import structlog
+from typing import Any, Dict, Optional
+
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+
+- async def initialize(self, context: Dict[str, Any]) -> None:
++ async def initialize(self, context: RuntimeContext) -> None:
+
+
+# SEMANTIC PATCH: src/runtimes/connection/runtime.py
+
+- from ...kernel.base import BaseRuntime, RuntimeManifest
++ from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+
+- async def initialize(self, context: Dict[str, Any]) -> None:
++ async def initialize(self, context: RuntimeContext) -> None:
+
+
+# SEMANTIC PATCH: src/runtimes/workflow/runtime.py
+
+- from ...kernel.base import BaseRuntime, RuntimeManifest
++ from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+
+- async def initialize(self, context: Dict[str, Any]) -> None:
++ async def initialize(self, context: RuntimeContext) -> None:
+
+
+# SEMANTIC PATCH: src/main.py
+- bootstrap_observability(app) -> bootstrap_observability() returning config; no app.state.config.
+- bootstrap_storage(app) -> bootstrap_storage(); no app.state.storage.
+- bootstrap_security(app, ...) -> bootstrap_security(...); no app.state auth/limiter/oauth.
+- Add circuit_breaker_manager and legacy_model_router to ApplicationContainer.
+- Construct ApplicationContainer before RuntimeKernel, then RuntimeKernel(eventing_manager, container).
+- Set container.runtime_kernel before kernel.bootstrap().
+- Bind all Runtime instances to container before kernel.bootstrap().
+- Replace kernel.bootstrap(global_config=...) with kernel.bootstrap().
+- Store LegacyModelRouterFacade as container.legacy_model_router.
+- Set only app.state.container.
+- Use lifespan locals for http_client/storage and cleanup in finally.
+
+
+# SEMANTIC PATCH: src/transport/gateway/router/chat.py
+- inject ApplicationContainer via Depends(get_container).
+- pass container into stream/non-stream helpers.
+- replace request.app.state.router with container.require("legacy_model_router").
+- replace request.app.state.http_client with container.require("http_client").
+- replace request.app.state.output_filter with container.get("output_filter").
+- preserve current legacy provider behavior.
+
+
+# SEMANTIC PATCH: src/transport/gateway/router/admin.py
+- replace request.app.state.router.* with container dependency injection.
+- use container.require("provider_runtime").routing_policy.
+- use container.require("circuit_breaker_manager").
+- add missing FastAPI imports in current file.
+
+
+# TEST PATCH: tests/architecture/test_phase1.py
+- retain current tests.
+- add container.bind_runtime identity test.
+- add RuntimeContext first-class dependency test.
+- add AST guard forbidding direct app.state access outside main.py/dependencies.py.
+- add kernel/container shared identity test.

@@ -3,7 +3,7 @@ import asyncio
 import structlog
 from typing import Dict, Any, Optional
 
-from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from .session import ConnectionRegistry
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
@@ -25,7 +25,7 @@ class ConnectionRuntime(BaseRuntime):
         self.registry = ConnectionRegistry()
         self._heartbeat_task: Optional[asyncio.Task] = None
 
-    async def initialize(self, context: Dict[str, Any]) -> None:
+    async def initialize(self, context: RuntimeContext) -> None:
         # Subscribe Command gửi tin nhắn tới Client
         self.event_bus = context.event_bus
         self.event_bus.subscribe("connection.command.send", self._handle_send_command)

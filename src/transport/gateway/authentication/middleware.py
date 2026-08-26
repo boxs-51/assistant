@@ -31,8 +31,9 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         try:
-            # Lấy auth_manager từ app.state
-            auth_manager: AuthenticationManager = request.app.state.auth_manager
+            # ``app.state.container`` is the only application-state dependency boundary.
+            container = request.app.state.container
+            auth_manager: AuthenticationManager = container.require("auth_manager")
             identity = await auth_manager.authenticate(request)
             request.state.identity = identity
             # Gắn thông tin identity vào log context để dễ dàng truy vết

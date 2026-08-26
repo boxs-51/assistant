@@ -3,11 +3,8 @@
 from typing import Any, List
 import structlog
 
-from ...kernel.base import BaseRuntime, RuntimeManifest
+from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from ...domain.schemas.event import BaseEvent
-from ...domain.schemas.request import GatewayChatRequest
-from ...domain.schemas.message import GatewayMessage
-from ...domain.schemas.enums import MessageContentType
 from ...context.manager import ContextEngine
 from ...domain.schemas.identity import Identity
 
@@ -25,17 +22,16 @@ class ContextRuntime(BaseRuntime):
         self.event_bus = None
         self.context_engine = None
 
-    async def initialize(self, context: Any) -> None:
+    async def initialize(self, context: RuntimeContext) -> None:
         # Hỗ trợ cả Dict hoặc Dependency Container Object
-        self.event_bus = context.get("event_bus") if isinstance(context, dict) else getattr(context, "event_bus", None)
+        self.event_bus = context.event_bus
         if not self.event_bus:
             raise ValueError("ContextRuntime requires 'event_bus' in initialization context.")
 
-        storage = context.storage if not isinstance(context, dict) else context.get("storage")
-        uow_factory = context.config.get("uow_factory") if not isinstance(context, dict) else context.get("uow_factory")
-        if storage is None or uow_factory is None:
+        if context.storage is None or context.uow_factory is None:
             raise ValueError("ContextRuntime requires storage and uow_factory.")
-        self.context_engine = ContextEngine(storage, uow_factory)
+        
+        self.context_engine = ContextEngine(context.storage, context.uow_factory)
 
         self.event_bus.subscribe("context.command.build", self._handle_build_context)
         self._is_initialized = True

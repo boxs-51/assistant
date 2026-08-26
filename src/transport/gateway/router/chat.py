@@ -11,6 +11,8 @@ from opentelemetry import trace
 from ....domain.schemas import GatewayChatRequest, GatewayResponse, FinishReason
 from ....domain.schemas.identity import Identity
 from ..authentication.dependency import get_current_identity
+from ..dependencies import get_container
+from ....application.container import ApplicationContainer
 from ....provider.exceptions import NoAvailableProviderError
 
 router = APIRouter(tags=["LLM APIs"])
@@ -38,11 +40,12 @@ async def parse_and_validate_request(request: Request) -> GatewayChatRequest:
             },
         )
 
+
 async def generate_stream_response(
-    request: Request,
     chat_request: GatewayChatRequest,
     identity: Identity,
     start_time: float,
+    container: ApplicationContainer,
 ) -> AsyncGenerator[str, None]:
     """
     Generator xử lý luồng dữ liệu Streaming trực tiếp từ LLM Router.
@@ -51,8 +54,11 @@ async def generate_stream_response(
     body_dict = chat_request.model_dump(exclude_none=True)
 
     try:
-        stream_chunks = request.app.state.router.stream_with_fallback(
-            http_client=request.app.state.http_client, body=body_dict
+        legacy_router = container.require("legacy_model_router")
+        http_client = container.require("http_client")
+
+        stream_chunks = legacy_router.stream_with_fallback(
+            http_client=http_client, body=body_dict
         )
 
         detected_provider = None
@@ -70,7 +76,6 @@ async def generate_stream_response(
 
         # Kết thúc stream thành công
         latency = time.time() - start_time
-        #if detected_provider and detected_model:
 
         yield "data: [DONE]\n\n"
 
@@ -81,19 +86,22 @@ async def generate_stream_response(
 
 
 async def handle_non_stream_response(
-    request: Request,
     chat_request: GatewayChatRequest,
     identity: Identity,
     start_time: float,
+    container: ApplicationContainer,
 ) -> GatewayResponse:
     """
     Hàm xử lý dữ liệu Non-Streaming (Sync) trực tiếp từ LLM Router.
     """
     body_dict = chat_request.model_dump(exclude_none=True)
 
+    legacy_router = container.require("legacy_model_router")
+    http_client = container.require("http_client")
+
     # 1. Gọi trực tiếp Model Router xử lý
-    gateway_response: GatewayResponse = await request.app.state.router.execute_with_fallback(
-        http_client=request.app.state.http_client, body=body_dict
+    gateway_response: GatewayResponse = await legacy_router.execute_with_fallback(
+        http_client=http_client, body=body_dict
     )
 
     # 2. Xử lý Output Sanitization (Lọc nội dung nếu có config)
@@ -111,9 +119,10 @@ async def handle_non_stream_response(
                 if part.type == "text" and hasattr(part.data, "data")
             )
 
-        # Sử dụng output_filter nếu đã được cấu hình trên app state
-        if hasattr(request.app.state, "output_filter") and request.app.state.output_filter:
-            safe_content = request.app.state.output_filter.sanitize(final_content)
+        # Sử dụng output_filter lấy từ container
+        output_filter = container.get("output_filter")
+        if output_filter:
+            safe_content = output_filter.sanitize(final_content)
             gateway_response.choices[0].message.content = safe_content
 
         latency = time.time() - start_time
@@ -123,7 +132,9 @@ async def handle_non_stream_response(
 
 @router.post("/v1/chat/completions")
 async def chat_completions_proxy(
-    request: Request, identity: Identity = Depends(get_current_identity)
+    request: Request,
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
 ):
     """Endpoint proxy mỏng xử lý Request chat completions."""
     start_time = time.time()
@@ -135,11 +146,15 @@ async def chat_completions_proxy(
     try:
         if chat_request.config and chat_request.config.stream:
             return StreamingResponse(
-                generate_stream_response(request, chat_request, identity, start_time),
+                generate_stream_response(
+                    chat_request, identity, start_time, container
+                ),
                 media_type="text/event-stream",
             )
         else:
-            return await handle_non_stream_response(request, chat_request, identity, start_time)
+            return await handle_non_stream_response(
+                chat_request, identity, start_time, container
+            )
 
     except NoAvailableProviderError as e:
         trace.get_current_span().record_exception(e)
