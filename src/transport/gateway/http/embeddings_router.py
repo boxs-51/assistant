@@ -2,6 +2,7 @@
 import uuid
 import asyncio
 import structlog
+from typing import Any
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
@@ -9,6 +10,7 @@ from ....domain.schemas.identity import Identity
 from ....domain.schemas.event import BaseEvent
 from ..authentication.dependency import get_current_identity
 from ....infrastructure.config import settings
+from ..dependencies import get_event_bus
 
 router = APIRouter(prefix="/v1", tags=["LLM APIs"])
 logger = structlog.get_logger(__name__)
@@ -16,7 +18,8 @@ logger = structlog.get_logger(__name__)
 @router.post("/embeddings")
 async def embeddings_proxy(
     request: Request, 
-    identity: Identity = Depends(get_current_identity)
+    identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     """
     HTTP Transport Adapter cho Vector Embeddings.
@@ -27,7 +30,6 @@ async def embeddings_proxy(
         raise HTTPException(status_code=400, detail="Invalid request body.")
 
     session_id = str(uuid.uuid4())
-    event_bus = request.app.state.event_bus
     future = asyncio.get_running_loop().create_future()
 
     async def _on_responded(evt: BaseEvent):

@@ -16,7 +16,7 @@ import statistics
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Awaitable, Callable
+from typing import Awaitable, Callable, Optional
 
 import httpx
 
@@ -39,17 +39,17 @@ class BenchmarkResult:
     error_rate_percent: float
     throughput_requests_per_second: float
     wall_time_seconds: float
-    latency_min_ms: float
-    latency_avg_ms: float
-    latency_p50_ms: float
-    latency_p95_ms: float
-    latency_p99_ms: float
-    latency_max_ms: float
+    latency_min_ms: Optional[float]
+    latency_avg_ms: Optional[float]
+    latency_p50_ms: Optional[float]
+    latency_p95_ms: Optional[float]
+    latency_p99_ms: Optional[float]
+    latency_max_ms: Optional[float]
 
 
-def percentile(samples: list[float], pct: float) -> float:
+def percentile(samples: list[float], pct: float) -> Optional[float]:
     if not samples:
-        return math.nan
+        return None
     ordered = sorted(samples)
     if len(ordered) == 1:
         return ordered[0]
@@ -58,7 +58,7 @@ def percentile(samples: list[float], pct: float) -> float:
     high = math.ceil(rank)
     if low == high:
         return ordered[low]
-    return ordered[low]  (ordered[high] - ordered[low]) * (rank - low)
+    return ordered[low] + (ordered[high] - ordered[low]) * (rank - low)
 
 
 async def benchmark(operation: Callable[[], Awaitable[object]], *, name: str, total: int, concurrency: int) -> BenchmarkResult:
@@ -75,15 +75,16 @@ async def benchmark(operation: Callable[[], Awaitable[object]], *, name: str, to
             try:
                 await operation()
             except Exception:
-                failures = 1
+                failures += 1
             else:
-                successes = 1
+                successes += 1
             finally:
                 latencies.append((time.perf_counter() - t0) * 1000.0)
 
     await asyncio.gather(*(one() for _ in range(total)))
     wall = time.perf_counter() - started
     error_rate = (failures / total * 100.0) if total else 0.0
+    
     return BenchmarkResult(
         name=name,
         total_requests=total,
@@ -92,12 +93,12 @@ async def benchmark(operation: Callable[[], Awaitable[object]], *, name: str, to
         error_rate_percent=error_rate,
         throughput_requests_per_second=(total / wall) if wall else 0.0,
         wall_time_seconds=wall,
-        latency_min_ms=min(latencies) if latencies else math.nan,
-        latency_avg_ms=statistics.fmean(latencies) if latencies else math.nan,
+        latency_min_ms=min(latencies) if latencies else None,
+        latency_avg_ms=statistics.fmean(latencies) if latencies else None,
         latency_p50_ms=percentile(latencies, 50),
         latency_p95_ms=percentile(latencies, 95),
         latency_p99_ms=percentile(latencies, 99),
-        latency_max_ms=max(latencies) if latencies else math.nan,
+        latency_max_ms=max(latencies) if latencies else None,
     )
 
 

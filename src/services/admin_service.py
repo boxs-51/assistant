@@ -2,19 +2,17 @@ from typing import Dict, Any, List
 import structlog
 from fastapi import Request
 
+from ..application.container import ApplicationContainer
+
 logger = structlog.get_logger(__name__)
 
 class AdminService:
     """Service điều phối các thao tác Quản trị hệ thống."""
 
-    def __init__(self, request: Request):
-        # Lấy trực tiếp router / runtime instances từ app state
-        self.routing_policy = getattr(request.app.state, "router", None) and getattr(
-            request.app.state.router, "routing_policy", None
-        )
-        self.circuit_breaker_manager = getattr(
-            request.app.state, "router", None
-        ) and getattr(request.app.state.router, "circuit_breaker_manager", None)
+    def __init__(self, container: ApplicationContainer):
+
+        self.routing_policy = container.legacy_model_router.routing_policy()
+        self.circuit_breaker_manager = container.legacy_model_router.circuit_breaker_manager()
 
     async def reload_routing_rules(self) -> bool:
         """Tải lại nóng các quy tắc định tuyến."""

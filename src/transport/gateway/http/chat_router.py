@@ -4,7 +4,7 @@ import json
 import uuid
 import asyncio
 import structlog
-from typing import AsyncGenerator
+from typing import AsyncGenerator, Any
 
 from fastapi import APIRouter, Request, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
@@ -15,6 +15,7 @@ from ....domain.schemas.identity import Identity
 from ..authentication.dependency import get_current_identity
 from ....domain.schemas.event import BaseEvent
 from ....infrastructure.config import settings
+from ..dependencies import get_event_bus
 
 router = APIRouter(tags=["LLM APIs Transport Layer"])
 logger = structlog.get_logger(__name__)
@@ -35,7 +36,9 @@ async def parse_and_validate_request(request: Request) -> GatewayChatRequest:
 
 @router.post("/v1/chat/completions")
 async def chat_completions_proxy(
-    request: Request, identity: Identity = Depends(get_current_identity)
+    request: Request, 
+    identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     chat_request = await parse_and_validate_request(request)
     session_id = (
@@ -43,8 +46,6 @@ async def chat_completions_proxy(
         if hasattr(chat_request, "session_id") and chat_request.session_id
         else str(uuid.uuid4())
     )
-
-    event_bus = request.app.state.event_bus
     is_stream = bool(chat_request.config and chat_request.config.stream)
 
     # ------------------------------------------------------------------

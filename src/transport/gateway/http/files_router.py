@@ -11,6 +11,7 @@ from ..authentication.dependency import get_current_identity
 from ....domain.schemas.identity import Identity
 from ....domain.schemas.event import BaseEvent
 from ....infrastructure.config import settings
+from ..dependencies import get_event_bus
 
 router = APIRouter(prefix="/v1/files", tags=["Files"])
 logger = structlog.get_logger(__name__)
@@ -51,10 +52,11 @@ async def list_files_proxy(
     provider_name: str = Query(..., description="Tên nhà cung cấp"),
     page_size: Optional[int] = Query(None, alias="page_size"),
     page_token: Optional[str] = Query(None, alias="page_token"),
-    identity: Identity = Depends(get_current_identity)
+    identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     structlog.contextvars.bind_contextvars(provider_name=provider_name)
-    return await _dispatch_file_event(request.app.state.event_bus, {
+    return await _dispatch_file_event(event_bus, {
         "action": "list",
         "provider_name": provider_name,
         "page_size": page_size,
@@ -68,11 +70,12 @@ async def upload_file_proxy(
     provider_name: str = Query(..., description="Tên nhà cung cấp"),
     display_name: Optional[str] = Query(None, description="Tên hiển thị tùy chọn"),
     file: UploadFile = File(..., description="Tệp tin cần tải lên"),
-    identity: Identity = Depends(get_current_identity)
+    identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     structlog.contextvars.bind_contextvars(provider_name=provider_name)
     content = await file.read()
-    return await _dispatch_file_event(request.app.state.event_bus, {
+    return await _dispatch_file_event(event_bus, {
         "action": "upload",
         "provider_name": provider_name,
         "file_bytes": content,
@@ -88,18 +91,19 @@ async def get_or_download_file_proxy(
     file_id: str,
     provider_name: str = Query(..., description="Tên nhà cung cấp"),
     action: Literal["metadata", "download"] = Query("metadata", description="Hành động: lấy thông tin hoặc tải file"),
-    identity: Identity = Depends(get_current_identity)
+    identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     structlog.contextvars.bind_contextvars(file_id=file_id, provider_name=provider_name)
     
     if action == "metadata":
-        return await _dispatch_file_event(request.app.state.event_bus, {
+        return await _dispatch_file_event(event_bus, {
             "action": "get_metadata",
             "provider_name": provider_name,
             "file_id": file_id
         })
     else:
-        file_res = await _dispatch_file_event(request.app.state.event_bus, {
+        file_res = await _dispatch_file_event(event_bus, {
             "action": "download",
             "provider_name": provider_name,
             "file_id": file_id
@@ -116,10 +120,11 @@ async def delete_file_proxy(
     request: Request,
     file_id: str,
     provider_name: str = Query(..., description="Tên nhà cung cấp"),
-    identity: Identity = Depends(get_current_identity)
+    identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     structlog.contextvars.bind_contextvars(file_id=file_id, provider_name=provider_name)
-    success = await _dispatch_file_event(request.app.state.event_bus, {
+    success = await _dispatch_file_event(event_bus, {
         "action": "delete",
         "provider_name": provider_name,
         "file_id": file_id

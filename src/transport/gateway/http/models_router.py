@@ -9,6 +9,7 @@ from ..authentication.dependency import get_current_identity
 from ....domain.schemas.identity import Identity
 from ....domain.schemas.event import BaseEvent
 from ....infrastructure.config import settings
+from ..dependencies import get_event_bus
 
 router = APIRouter(prefix="/v1/models", tags=["Models"])
 logger = structlog.get_logger(__name__)
@@ -48,10 +49,11 @@ async def list_models_proxy(
     request: Request,
     provider_name: str,
     identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     structlog.contextvars.bind_contextvars(provider_name=provider_name)
     return await _dispatch_model_event(
-        request.app.state.event_bus, 
+        event_bus, 
         {"provider_name": provider_name}
     )
 
@@ -61,10 +63,11 @@ async def get_model_details_proxy(
     request: Request,
     model_id: str,
     provider_name: str = Query(..., description="Tên nhà cung cấp (e.g., gemini, openai)"),
-    identity: Identity = Depends(get_current_identity)
+    identity: Identity = Depends(get_current_identity),
+    event_bus: Any = Depends(get_event_bus)
 ):
     structlog.contextvars.bind_contextvars(model_id=model_id, provider_name=provider_name)
     return await _dispatch_model_event(
-        request.app.state.event_bus, 
+        event_bus, 
         {"provider_name": provider_name, "model_id": model_id}
     )
