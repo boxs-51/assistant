@@ -49,7 +49,7 @@ from .transport.gateway.router.events import router as events_router
 from .transport.gateway.router.admin import router as admin_router
 from .transport.gateway.router.multi_agent import router as multi_agent_router
 
-from .transport.gateway.http import (
+from .transport.gateway.api.v1 import (
     chat_router, embeddings_router, 
     files_router, health_router,
     models_router
@@ -107,10 +107,10 @@ def bootstrap_security(
     cb_manager: CircuitBreakerManager
 ) -> Dict[str, Any]:
     """Khởi tạo các dịch vụ Xác thực, OAuth và Rate Limiting."""
-    redis_client = storage_engine.drivers.get("redis")._client
+    cache_driver = storage_engine.get_cache_driver()
     
     limiter = RateLimiterManager(
-        cache_driver=redis_client,
+        cache_driver=cache_driver,
         circuit_breaker_manager=cb_manager
     )
 

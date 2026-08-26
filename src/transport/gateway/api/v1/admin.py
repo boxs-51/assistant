@@ -1,8 +1,8 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
-from ...transport.gateway.authentication.dependency import require_permission, verify_admin_ip
-from ...services.admin_service import AdminService
+from ...authentication.dependency import require_permission, verify_admin_ip
+from .....services.admin_service import AdminService
 
 router = APIRouter(
     prefix="/admin",

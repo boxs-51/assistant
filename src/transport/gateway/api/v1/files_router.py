@@ -7,16 +7,18 @@ from typing import Optional, Literal, Any
 from fastapi import APIRouter, Depends, HTTPException, Request, Query, UploadFile, File
 from fastapi.responses import StreamingResponse, Response
 
-from ..authentication.dependency import get_current_identity
-from ....domain.schemas.identity import Identity
-from ....domain.schemas.event import BaseEvent
-from ....infrastructure.config import settings
-from ..dependencies import get_event_bus
+from ...authentication.dependency import get_current_identity
+from .....domain.schemas.identity import Identity
+from .....domain.schemas.event import BaseEvent
+
+from ...dependencies import get_event_bus, get_config
+from .....infrastructure.config.core import ConfigSchema
+from .....infrastructure.event_bus.bus import EventBus
 
 router = APIRouter(prefix="/v1/files", tags=["Files"])
 logger = structlog.get_logger(__name__)
 
-async def _dispatch_file_event(event_bus, payload: dict) -> Any:
+async def _dispatch_file_event(event_bus: EventBus,config: ConfigSchema, payload: dict) -> Any:
     session_id = str(uuid.uuid4())
     future = asyncio.get_running_loop().create_future()
 
@@ -41,7 +43,7 @@ async def _dispatch_file_event(event_bus, payload: dict) -> Any:
     ))
 
     try:
-        return await asyncio.wait_for(future, timeout=settings.provider.timeout)
+        return await asyncio.wait_for(future, timeout=config.provider.timeout)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="File operation timed out.")
 
@@ -53,10 +55,11 @@ async def list_files_proxy(
     page_size: Optional[int] = Query(None, alias="page_size"),
     page_token: Optional[str] = Query(None, alias="page_token"),
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config: ConfigSchema = Depends(get_config)
 ):
     structlog.contextvars.bind_contextvars(provider_name=provider_name)
-    return await _dispatch_file_event(event_bus, {
+    return await _dispatch_file_event(event_bus, config, {
         "action": "list",
         "provider_name": provider_name,
         "page_size": page_size,
@@ -71,11 +74,12 @@ async def upload_file_proxy(
     display_name: Optional[str] = Query(None, description="Tên hiển thị tùy chọn"),
     file: UploadFile = File(..., description="Tệp tin cần tải lên"),
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config: ConfigSchema = Depends(get_config)
 ):
     structlog.contextvars.bind_contextvars(provider_name=provider_name)
     content = await file.read()
-    return await _dispatch_file_event(event_bus, {
+    return await _dispatch_file_event(event_bus, config, {
         "action": "upload",
         "provider_name": provider_name,
         "file_bytes": content,
@@ -92,18 +96,19 @@ async def get_or_download_file_proxy(
     provider_name: str = Query(..., description="Tên nhà cung cấp"),
     action: Literal["metadata", "download"] = Query("metadata", description="Hành động: lấy thông tin hoặc tải file"),
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config: ConfigSchema = Depends(get_config)
 ):
     structlog.contextvars.bind_contextvars(file_id=file_id, provider_name=provider_name)
     
     if action == "metadata":
-        return await _dispatch_file_event(event_bus, {
+        return await _dispatch_file_event(event_bus, config, {
             "action": "get_metadata",
             "provider_name": provider_name,
             "file_id": file_id
         })
     else:
-        file_res = await _dispatch_file_event(event_bus, {
+        file_res = await _dispatch_file_event(event_bus, config, {
             "action": "download",
             "provider_name": provider_name,
             "file_id": file_id
@@ -121,10 +126,11 @@ async def delete_file_proxy(
     file_id: str,
     provider_name: str = Query(..., description="Tên nhà cung cấp"),
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config: ConfigSchema = Depends(get_config)
 ):
     structlog.contextvars.bind_contextvars(file_id=file_id, provider_name=provider_name)
-    success = await _dispatch_file_event(event_bus, {
+    success = await _dispatch_file_event(event_bus, config, {
         "action": "delete",
         "provider_name": provider_name,
         "file_id": file_id

@@ -10,12 +10,15 @@ from fastapi import APIRouter, Request, HTTPException, Depends, status
 from fastapi.responses import StreamingResponse
 from pydantic import ValidationError
 
-from ....domain.schemas import GatewayChatRequest
-from ....domain.schemas.identity import Identity
-from ..authentication.dependency import get_current_identity
-from ....domain.schemas.event import BaseEvent
-from ....infrastructure.config import settings
-from ..dependencies import get_event_bus
+from .....domain.schemas import GatewayChatRequest
+from .....domain.schemas.identity import Identity
+from ...authentication.dependency import get_current_identity
+from .....domain.schemas.event import BaseEvent
+from .....infrastructure.config import settings
+from ...dependencies import get_event_bus, get_config
+from .....infrastructure.config.core import ConfigSchema
+from .....infrastructure.event_bus.bus import EventBus
+
 
 router = APIRouter(tags=["LLM APIs Transport Layer"])
 logger = structlog.get_logger(__name__)
@@ -38,7 +41,8 @@ async def parse_and_validate_request(request: Request) -> GatewayChatRequest:
 async def chat_completions_proxy(
     request: Request, 
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config : ConfigSchema = Depends(get_config)
 ):
     chat_request = await parse_and_validate_request(request)
     session_id = (
@@ -159,7 +163,7 @@ async def chat_completions_proxy(
             )
 
             payload = await asyncio.wait_for(
-                future, timeout=getattr(settings.provider, "timeout", 60.0)
+                future, timeout=getattr(config.provider, "timeout", 60.0)
             )
             return payload.get("response", payload)
 

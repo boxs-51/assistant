@@ -1,6 +1,6 @@
 import structlog
 from typing import Optional
-from redis.exceptions import ConnectionError, TimeoutError  # Import thêm lỗi để bắt
+from redis.exceptions import RedisError
 
 from ..interfaces.repository import BaseRepository
 from ..interfaces.cache import CacheDriver
@@ -25,7 +25,7 @@ class SessionRepository(BaseRepository):
         try:
             await self.cache_driver.set(key, user_id, expire=expires_in_seconds)
             logger.debug("Refresh token saved to cache", key=key, user_id=user_id)
-        except (ConnectionError, TimeoutError, Exception) as e:
+        except (RedisError, RuntimeError) as e:
             # Bắt lỗi khi không có Redis, ghi log và cho qua để không làm sập luồng login
             logger.warning("Redis is not available. Skipping token storage.", error=str(e))
 
@@ -36,7 +36,7 @@ class SessionRepository(BaseRepository):
         key = f"{self.prefix}{token_hash}"
         try:
             return await self.cache_driver.get(key)
-        except (ConnectionError, TimeoutError, Exception) as e:
+        except (RedisError, RuntimeError) as e:
             logger.warning("Redis is not available. Cannot fetch token.", error=str(e))
             return None  # Trả về None tạm thời
 
@@ -46,5 +46,5 @@ class SessionRepository(BaseRepository):
         try:
             await self.cache_driver.delete(key)
             logger.debug("Refresh token deleted from cache", key=key)
-        except (ConnectionError, TimeoutError, Exception) as e:
+        except (RedisError, RuntimeError) as e:
             logger.warning("Redis is not available. Cannot delete token.", error=str(e))

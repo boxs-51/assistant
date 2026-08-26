@@ -1,8 +1,8 @@
 import structlog
-from typing import Dict, Any
+from typing import Any
 
 from .registry import DriverRegistry, RepositoryRegistry
-
+from ..interfaces.cache import CacheDriver
 # --- Tạm thời import trực tiếp, sau sẽ thay bằng cơ chế import động ---
 from ..drivers.redis.driver import RedisDriver
 from ..drivers.sqlite.driver import SQLiteDriver
@@ -36,6 +36,23 @@ class StorageEngine:
         await self.drivers.connect_all()
         self._initialize_repositories()
         logger.info("Storage Engine started successfully.")
+
+    def get_cache_driver(self) -> CacheDriver:
+        """
+        Trả về cache driver đã được cấu hình.
+
+        Application layer chỉ làm việc với CacheDriver abstraction,
+        không truy cập raw Redis client.
+        """
+        driver = self.drivers.get("redis")
+        if driver is None:
+            raise RuntimeError("Redis cache driver is not configured")
+
+        if not isinstance(driver, CacheDriver):
+           raise TypeError("Configured Redis driver is not a CacheDriver")
+
+        return driver
+
 
     async def disconnect(self):
         """Ngắt kết nối tất cả các driver một cách an toàn."""

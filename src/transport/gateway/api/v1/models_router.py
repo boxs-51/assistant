@@ -5,16 +5,18 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
 from typing import Any
 
-from ..authentication.dependency import get_current_identity
-from ....domain.schemas.identity import Identity
-from ....domain.schemas.event import BaseEvent
-from ....infrastructure.config import settings
-from ..dependencies import get_event_bus
+from ...authentication.dependency import get_current_identity
+from .....domain.schemas.identity import Identity
+from .....domain.schemas.event import BaseEvent
+
+from ...dependencies import get_event_bus, get_config
+from .....infrastructure.config.core import ConfigSchema
+from .....infrastructure.event_bus.bus import EventBus
 
 router = APIRouter(prefix="/v1/models", tags=["Models"])
 logger = structlog.get_logger(__name__)
 
-async def _dispatch_model_event(event_bus, payload: dict) -> Any:
+async def _dispatch_model_event(event_bus: EventBus, config: ConfigSchema, payload: dict) -> Any:
     session_id = str(uuid.uuid4())
     future = asyncio.get_running_loop().create_future()
 
@@ -39,7 +41,7 @@ async def _dispatch_model_event(event_bus, payload: dict) -> Any:
     ))
 
     try:
-        return await asyncio.wait_for(future, timeout=settings.provider.timeout)
+        return await asyncio.wait_for(future, timeout=config.provider.timeout)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Model query timed out.")
 
@@ -49,11 +51,12 @@ async def list_models_proxy(
     request: Request,
     provider_name: str,
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config: ConfigSchema = Depends(get_config)
 ):
     structlog.contextvars.bind_contextvars(provider_name=provider_name)
     return await _dispatch_model_event(
-        event_bus, 
+        event_bus, config,
         {"provider_name": provider_name}
     )
 
@@ -64,10 +67,11 @@ async def get_model_details_proxy(
     model_id: str,
     provider_name: str = Query(..., description="Tên nhà cung cấp (e.g., gemini, openai)"),
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config: ConfigSchema = Depends(get_config)
 ):
     structlog.contextvars.bind_contextvars(model_id=model_id, provider_name=provider_name)
     return await _dispatch_model_event(
-        event_bus, 
+        event_bus, config,
         {"provider_name": provider_name, "model_id": model_id}
     )

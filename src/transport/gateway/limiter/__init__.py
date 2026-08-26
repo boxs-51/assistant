@@ -1,7 +1,7 @@
 import structlog
 from redis.exceptions import RedisError
-from .storage.redis_storage import RedisStorage
 from .factory import RateLimiterFactory
+from .storage.redis_storage import RedisStorage
 from ....circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 from ....infrastructure.storage.interfaces.cache import CacheDriver
 from ....domain.schemas.identity import Identity
@@ -16,12 +16,16 @@ class RateLimiterManager:
     Sử dụng RateLimiterFactory để tạo ra thuật toán limiter phù hợp.
     """
     def __init__(self, cache_driver: CacheDriver, circuit_breaker_manager: CircuitBreakerManager):
-        # Dependency Injection: Nhận CacheDriver từ bên ngoài
-        storage = RedisStorage(cache_driver) # Tạm thời vẫn dùng raw client
+        # Dependency Injection: chỉ nhận CacheDriver abstraction.
+        #
+        # RedisStorage không thực hiện network I/O trong constructor.
+        storage = RedisStorage(cache_driver)
+
         self.circuit_breaker_manager = circuit_breaker_manager
         # Factory sẽ đọc config và tạo ra limiter tương ứng.
         # Truyền cả hai phần của config để factory có thể linh hoạt.
         self.config = settings
+
         self.limiter = RateLimiterFactory.create_limiter(
             algorithm=self.config.rate_limit.algorithm.lower(),
             storage=storage,
@@ -32,9 +36,8 @@ class RateLimiterManager:
         """
         Kiểm tra xem một request có được phép hay không.
         """
-        # Nếu Redis không được kết nối, tạm thời cho qua và ghi log.
-        if not self.limiter or not self.limiter.storage.redis:
-            logger.warning("Rate limiter is bypassed because Redis is not connected.")
+
+        if not self.limiter:
             return True, 0.0
 
         # Lấy breaker cho Redis rate limiter từ manager
@@ -57,6 +60,7 @@ class RateLimiterManager:
         except RedisError as e:
             # 4. Thông báo thất bại cho breaker
             await breaker.on_failure()
+            logger.warning("Redis rate limiter backend failed.", error=str(e))
             return self._apply_fail_over_strategy()
 
     def _apply_fail_over_strategy(self) -> tuple[bool, float]:

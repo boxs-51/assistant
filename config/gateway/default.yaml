@@ -50,6 +50,7 @@ rate_limit:
   refill_rate: 5.0
   limit: 100
   window_size: 60
+  fail_mode: "open"
 
 circuit_breaker:
   default:
@@ -62,9 +63,6 @@ circuit_breaker:
       reset_timeout: 5     # Thời gian reset ngắn hơn
       success_threshold: 1
 
-redis:
-  url: "redis://localhost:6379/0"
-  cache_expire_seconds: 3600
 
 provider:
   timeout: 60

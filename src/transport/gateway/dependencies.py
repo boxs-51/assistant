@@ -48,3 +48,6 @@ def get_circuit_breaker_manager(request: Request):
 
 def get_legacy_model_router(request: Request):
     return get_container(request).require("legacy_model_router")
+
+def get_config(request: Request):
+    return get_container(request).require("config")

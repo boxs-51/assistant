@@ -40,17 +40,57 @@ class DriverRegistry:
     async def connect_all(self):
         """Kết nối tất cả các driver đã đăng ký."""
         logger.info("Connecting all registered drivers...")
-        for name, driver in self._drivers.items():
-            await driver.connect()
-            logger.debug("Driver connected", driver_name=name)
+
+        connected = []
+
+        try:
+            for name, driver in self._drivers.items():
+                await driver.connect()
+                connected.append((name, driver))
+                logger.debug("Driver connected", driver_name=name)
+        except Exception:
+            logger.error(
+                "Failed to connect storage drivers. "
+                "Rolling back already connected drivers.",
+                exc_info=True,
+            )
+
+            # Roll back theo reverse order để tránh để lại resource mở.
+            for name, driver in reversed(connected):
+                try:
+                    await driver.disconnect()
+                    logger.debug(
+                        "Rolled back driver connection",
+                        driver_name=name,
+                    )
+                except Exception:
+                    logger.error(
+                        "Failed to rollback driver connection",
+                        driver_name=name,
+                        exc_info=True,
+                    )
+
+            raise
+
         logger.info("All drivers connected.")
 
     async def disconnect_all(self):
         """Ngắt kết nối tất cả các driver."""
         logger.info("Disconnecting all registered drivers...")
-        for name, driver in self._drivers.items():
-            await driver.disconnect()
-            logger.debug("Driver disconnected", driver_name=name)
+
+        # Disconnect reverse registration order để phù hợp với lifecycle dependency.
+        for name, driver in reversed(list(self._drivers.items())):
+            try:
+                await driver.disconnect()
+                logger.debug("Driver disconnected", driver_name=name)
+            except Exception:
+                # Một driver lỗi không được ngăn driver còn lại shutdown.
+                logger.error(
+                    "Failed to disconnect driver",
+                    driver_name=name,
+                    exc_info=True,
+                )
+
         logger.info("All drivers disconnected.")
 
 class RepositoryRegistry:

@@ -6,11 +6,13 @@ from typing import Any
 from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import JSONResponse
 
-from ....domain.schemas.identity import Identity
-from ....domain.schemas.event import BaseEvent
-from ..authentication.dependency import get_current_identity
-from ....infrastructure.config import settings
-from ..dependencies import get_event_bus
+from .....domain.schemas.identity import Identity
+from .....domain.schemas.event import BaseEvent
+from ...authentication.dependency import get_current_identity
+
+from ...dependencies import get_event_bus, get_config
+from .....infrastructure.config.core import ConfigSchema
+from .....infrastructure.event_bus.bus import EventBus
 
 router = APIRouter(prefix="/v1", tags=["LLM APIs"])
 logger = structlog.get_logger(__name__)
@@ -19,7 +21,8 @@ logger = structlog.get_logger(__name__)
 async def embeddings_proxy(
     request: Request, 
     identity: Identity = Depends(get_current_identity),
-    event_bus: Any = Depends(get_event_bus)
+    event_bus: EventBus = Depends(get_event_bus),
+    config: ConfigSchema = Depends(get_config)
 ):
     """
     HTTP Transport Adapter cho Vector Embeddings.
@@ -54,7 +57,7 @@ async def embeddings_proxy(
     ))
 
     try:
-        response_data = await asyncio.wait_for(future, timeout=settings.provider.timeout)
+        response_data = await asyncio.wait_for(future, timeout=config.provider.timeout)
         return JSONResponse(content=response_data)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Embeddings request timed out.")

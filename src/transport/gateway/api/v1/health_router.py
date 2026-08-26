@@ -1,10 +1,11 @@
 # src/gateway/http/health_router.py
 import psutil
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
 from prometheus_client import generate_latest
 
-from ....infrastructure.config import settings
+from ...dependencies import get_config
+from .....infrastructure.config.core import ConfigSchema
 
 router = APIRouter(tags=["Health"])
 
@@ -41,12 +42,12 @@ def get_metrics():
     return StreamingResponse(generate_latest(), media_type="text/plain")
 
 @router.get("/stats")
-async def get_stats():
+async def get_stats(config: ConfigSchema = Depends(get_config)):
     """Thống kê tài nguyên hệ thống."""
     process = psutil.Process()
     return {
-        "gateway_name": settings.gateway.name,
-        "gateway_version": settings.gateway.version,
+        "gateway_name": config.gateway.name,
+        "gateway_version": config.gateway.version,
         "cpu_usage_percent": process.cpu_percent(interval=0.1),
         "memory_usage_mb": process.memory_info().rss / (1024 * 1024),
     }

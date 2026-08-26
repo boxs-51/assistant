@@ -1,19 +1,28 @@
 from abc import ABC, abstractmethod
 from typing import Any, Optional
 
+
 class CacheDriver(ABC):
     """
-    Interface trừu tượng cho tất cả các driver cache (ví dụ: Redis).
+    Interface trừu tượng cho các cache driver.
+
+    Application/transport layer không được phụ thuộc vào implementation
+    cụ thể như redis.Redis.
     """
 
     @abstractmethod
-    async def connect(self):
+    async def connect(self) -> None:
         """Khởi tạo và kiểm tra kết nối đến cache server."""
         pass
 
     @abstractmethod
-    async def disconnect(self):
+    async def disconnect(self) -> None:
         """Đóng kết nối đến cache server."""
+        pass
+
+    @abstractmethod
+    async def ping(self) -> bool:
+        """Kiểm tra cache backend có khả dụng hay không."""
         pass
 
     @abstractmethod
@@ -22,11 +31,30 @@ class CacheDriver(ABC):
         pass
 
     @abstractmethod
-    async def set(self, key: str, value: Any, expire: Optional[int] = None):
-        """Lưu một cặp key-value vào cache, có thể có thời gian hết hạn."""
+    async def set(
+        self,
+        key: str,
+        value: Any,
+        expire: Optional[int] = None,
+    ) -> None:
+        """Lưu một cặp key-value vào cache bằng key."""
         pass
 
     @abstractmethod
-    async def delete(self, key: str):
+    async def delete(self, key: str) -> None:
         """Xóa một key khỏi cache."""
+        pass
+
+    @abstractmethod
+    async def execute_script(
+        self,
+        script: str,
+        keys: list[str],
+        args: list[Any],
+    ) -> Any:
+        """
+        Thực thi một atomic backend script.
+
+        Interface không expose Redis Script object hoặc redis.Redis.
+        """
         pass
