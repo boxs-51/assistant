@@ -125,12 +125,38 @@ class EventDispatcher:
     async def _is_event_processed(self, event_id: str) -> bool:
         if not self._cache_driver:
             return False
-        return await self._cache_driver.exists(f"processed_event:{event_id}")
+
+        try:
+            return await self._cache_driver.exists(
+                f"processed_event:{event_id}"
+            )
+        except Exception as exc:
+            logger.warning(
+                "Idempotency store unavailable; "
+                "continuing event processing without idempotency check",
+                event_id=event_id,
+                error=str(exc),
+                exc_info=True,
+            )
+            return False
 
     async def _mark_event_as_processed(self, event_id: str):
         if not self._cache_driver:
             return
-        await self._cache_driver.set(f"processed_event:{event_id}", "processed", ttl=self._idempotency_ttl)
+
+        try:
+            await self._cache_driver.set(
+                f"processed_event:{event_id}",
+                "processed",
+                expire=self._idempotency_ttl,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Failed to persist event idempotency marker",
+                event_id=event_id,
+                error=str(exc),
+                exc_info=True,
+            )
 
     async def start(self):
         logger.info("EventDispatcher loop starting...")

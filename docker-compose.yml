@@ -1,0 +1,88 @@
+services:
+
+  gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: aigateway
+
+    env_file:
+      - .env
+
+    ports:
+      - "8080:8080"
+
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+    restart: unless-stopped
+
+    volumes:
+      - ./src:/app/src
+
+    networks:
+      - aigateway
+
+  redis:
+    image: redis:8-alpine
+
+    container_name: aigateway-redis
+
+    command:
+      - redis-server
+      - --appendonly
+      - yes
+
+    volumes:
+      - redis_data:/data
+
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+    restart: unless-stopped
+
+    networks:
+      - aigateway
+
+  postgres:
+    image: postgres:17-alpine
+
+    container_name: aigateway-postgres
+
+    environment:
+      POSTGRES_DB: aigateway
+      POSTGRES_USER: aigateway
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U aigateway -d aigateway"
+        ]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+    restart: unless-stopped
+
+    networks:
+      - aigateway
+
+volumes:
+  redis_data:
+  postgres_data:
+
+networks:
+  aigateway:
+    driver: bridge
