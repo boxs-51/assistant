@@ -9,7 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
-from infrastructure.storage.models.sql.custom_types import CUID
+from src.infrastructure.storage.models.sql.custom_types import CUID
 
 # revision identifiers, used by Alembic.
 revision: str = '2b8eaa45108e'

@@ -58,6 +58,7 @@ class RedisSettings(BaseModel):
 
 class DriverConfig(BaseModel):
     enabled: bool = True
+    required: bool = False
     url: Optional[str] = None
     host: Optional[str] = None
     port: Optional[int] = None

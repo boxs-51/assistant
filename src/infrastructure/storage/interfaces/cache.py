@@ -44,17 +44,3 @@ class CacheDriver(ABC):
     async def delete(self, key: str) -> None:
         """Xóa một key khỏi cache."""
         pass
-
-    @abstractmethod
-    async def execute_script(
-        self,
-        script: str,
-        keys: list[str],
-        args: list[Any],
-    ) -> Any:
-        """
-        Thực thi một atomic backend script.
-
-        Interface không expose Redis Script object hoặc redis.Redis.
-        """
-        pass

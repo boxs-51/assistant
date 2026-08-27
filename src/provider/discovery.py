@@ -18,6 +18,9 @@ class ProviderDiscovery:
         logger.info("Starting provider discovery...")
         for name, provider_class in ProviderFactory._provider_classes.items():
             if name == "mock" and not provider_class.is_configured():
+                provider_instance = ProviderFactory.create_provider(name)
+                if provider_instance:
+                    self.registry.register(provider_instance)
                 continue
             # Ủy quyền việc kiểm tra cấu hình cho chính lớp Provider
             if provider_class.is_configured():

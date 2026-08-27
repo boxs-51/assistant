@@ -111,6 +111,7 @@ class EventDispatcher:
                         handler_name=handler_name
                     )
                     dlq_event = BaseEvent(
+                        session_id=getattr(event, "session_id", "system"),
                         event_name="system.event.failed",
                         payload={
                             "failed_event": event.model_dump(),
@@ -119,7 +120,7 @@ class EventDispatcher:
                             "stack_trace": traceback.format_exc(),
                         }
                     )
-                    asyncio.create_task(self._dependency_container.bus.publish(dlq_event))
+                    asyncio.create_task(self._dependency_container.event_bus.publish(dlq_event))
                     raise
 
     async def _is_event_processed(self, event_id: str) -> bool:

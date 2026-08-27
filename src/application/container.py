@@ -65,6 +65,22 @@ class ApplicationContainer:
             return context_engine
         return None
 
+    def get_dependency(self, dependency_type: type) -> Any:
+        """Giải phóng dependency instance từ container hoặc trả về Class Type 
+        để EventDispatcher tự bind thông qua UnitOfWork.
+        """
+        # 1. Tìm instance đã khởi tạo trong container (VD: Config, Cache, Runtimes)
+        instance = self.resolve(dependency_type)
+        if instance is not None:
+            return instance
+
+        # 2. Nếu là Repository Type (chưa có instance trong Container vì nằm trong UoW),
+        # trả về type class để EventDispatcher đẩy vào repo_types_needed
+        if isinstance(dependency_type, type):
+            return dependency_type
+
+        return None
+
     def require(self, name: str) -> Any:
         value = self.get(name)
         if value is None:

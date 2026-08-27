@@ -39,7 +39,7 @@ class EventingManager:
             registry=self.registry,
             queue=self.bus.queue,
             dependency_container=self,
-            cache_driver=self.storage.drivers.get("redis"),
+            cache_driver=self.storage.get_cache_driver(),
             uow_factory=self.uow_factory
         )
         self.ws_manager = WebSocketConnectionManager()

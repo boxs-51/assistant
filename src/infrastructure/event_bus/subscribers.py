@@ -52,11 +52,14 @@ async def handle_tool_execution_completed(event: BaseEvent):
         session_id=event.payload.get("session_id"),
     )
 
-async def broadcast_to_websockets(event: BaseEvent, ws_manager: WebSocketConnectionManager):
+async def broadcast_to_websockets(event: BaseEvent, ws_manager: WebSocketConnectionManager = None):
     """
     Handler này lắng nghe TẤT CẢ các sự kiện và chuyển tiếp đến WebSocket clients.
     Nó tự động nhận `ws_manager` nhờ Dependency Injection.
     """
+    if not ws_manager:
+        # Fallback to fetching manager instance or log warning
+        ...
     logger.debug("Sending event to subscribed WebSocket clients", event_name=event.event_name)
     await ws_manager.send_to_subscribers(event.event_name, event.model_dump())
 async def handle_session_summary_needed(event: BaseEvent, context_engine: ContextEngine):
@@ -75,7 +78,7 @@ def register_subscribers(registry):
     registry.register("chat.session.started", handle_chat_session_started)
     registry.register("tool.execution.started", handle_tool_execution_started)
     registry.register("tool.execution.completed", handle_tool_execution_completed)
-    registry.register_for_all(broadcast_to_websockets)
+    #registry.register_for_all(broadcast_to_websockets)
     registry.register("session.summary.needed", handle_session_summary_needed)
         # Giả sử ContextEngine có phương thức này
         # await context_engine.summarize_session(session_id)

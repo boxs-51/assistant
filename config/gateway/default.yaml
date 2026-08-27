@@ -6,13 +6,19 @@ storage:
   drivers:
     redis:
       enabled: true
+      required: false
       url: "redis://localhost:6379/0"
     sqlite:
       enabled: true
+      required: true
       path: "data/gateway_storage.db"
     chroma:
       enabled: true
+      required: false
       path: "data/gateway_chroma"
+    in-memory:
+      enabled: true
+      required: false
 
 
 gateway:

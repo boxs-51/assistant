@@ -6,10 +6,10 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-from infrastructure.storage.models.sql.chat_data import attachment
-from infrastructure.storage.models.sql.chat_data import project
-from infrastructure.storage.models.sql.user_data import api_key, application, member, oauth_account, organization, pending_registration
-from infrastructure.storage.models.sql.user_data import permission
+from src.infrastructure.storage.models.sql.chat_data import attachment
+from src.infrastructure.storage.models.sql.chat_data import project
+from src.infrastructure.storage.models.sql.user_data import api_key, application, member, oauth_account, organization, pending_registration
+from src.infrastructure.storage.models.sql.user_data import permission
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -27,14 +27,14 @@ if config.config_file_name is not None:
 
 # --- THAY ĐỔI QUAN TRỌNG ---
 # Import Base từ model của chúng ta để Alembic có thể "thấy" được các table
-from infrastructure.storage.models.sql.user_data import (
+from src.infrastructure.storage.models.sql.user_data import (
     user
 )
-from infrastructure.storage.models.sql.base import Base
-from infrastructure.storage.models.sql.chat_data import (
+from src.infrastructure.storage.models.sql.base import Base
+from src.infrastructure.storage.models.sql.chat_data import (
     session
 ) 
-from infrastructure.storage.models.sql import agent
+from src.infrastructure.storage.models.sql import agent
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---
@@ -75,7 +75,9 @@ def run_migrations_offline() -> None:
 
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    context.configure(connection=connection, 
+                      target_metadata=target_metadata,
+                      render_as_batch=True)
 
     with context.begin_transaction():
         context.run_migrations()
