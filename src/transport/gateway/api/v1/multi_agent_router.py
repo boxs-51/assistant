@@ -1,15 +1,15 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 
-from ....application.container import ApplicationContainer
-from ....domain.schemas.identity import Identity
-from ....domain.schemas.multi_agent import (
+from .....application.container import ApplicationContainer
+from .....domain.schemas.identity import Identity
+from .....domain.schemas.multi_agent import (
     AgentJoinRequest,
     AgentMessageRequest,
     AgentSessionCreateRequest,
     AgentTaskCreateRequest,
 )
-from ..authentication.dependency import get_current_identity
-from ..dependencies import get_container
+from ...authentication.dependency import get_current_identity
+from ...dependencies import get_container
 
 router = APIRouter(prefix="/v1/multi-agent", tags=["Multi-Agent"])
 

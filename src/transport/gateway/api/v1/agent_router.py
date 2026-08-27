@@ -1,13 +1,13 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 import structlog
 
-from ....domain.schemas.agent import AgentDefinition, AgentRegistrationResponse
-from ....domain.schemas.identity import Identity
-from ..authentication.dependency import get_current_identity
-from ..dependencies import get_container
-from ....application.container import ApplicationContainer
-from ....agent.registry import AgentRegistry
-from ....tool.registry import ToolRegistry # Đảm bảo import từ gateway.tool.registry
+from .....domain.schemas.agent import AgentDefinition, AgentRegistrationResponse
+from .....domain.schemas.identity import Identity
+from ...authentication.dependency import get_current_identity
+from ...dependencies import get_container
+from .....application.container import ApplicationContainer
+from .....agent.registry import AgentRegistry
+from .....tool.registry import ToolRegistry # Đảm bảo import từ gateway.tool.registry
 
 router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 logger = structlog.get_logger(__name__)

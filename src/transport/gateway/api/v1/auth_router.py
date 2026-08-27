@@ -6,8 +6,8 @@ import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from ....application.container import ApplicationContainer
-from ....domain.schemas.auth import (
+from .....application.container import ApplicationContainer
+from .....domain.schemas.auth import (
     AccessTokenSchema,
     APIKeyCreateSchema,
     APIKeyInfoSchema,
@@ -20,26 +20,26 @@ from ....domain.schemas.auth import (
     UserMeSchema,
     VerifyOTPRequest,
 )
-from ....domain.schemas.event import BaseEvent
-from ....domain.schemas.identity import Identity
-from ....infrastructure.config import settings
-from ....infrastructure.storage.core.manager import StorageEngine
-from ....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
-from ..authentication.dependency import get_current_identity
-from ..authentication.exceptions import (
+from .....domain.schemas.event import BaseEvent
+from .....domain.schemas.identity import Identity
+from .....infrastructure.config import settings
+from .....infrastructure.storage.core.manager import StorageEngine
+from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from ...authentication.dependency import get_current_identity
+from ...authentication.exceptions import (
     InvalidCredentialsError,
     OTPCooldownError,
     OTPInvalidError,
 )
-from ..authentication.services.api_key_service import APIKeyService
-from ..authentication.services.authentication_facade import AuthenticationFacade
-from ..authentication.services.login_service import LoginService
-from ..authentication.services.oauth_service import OAuthService
-from ..authentication.services.otp_service import OTPStorageService
-from ..authentication.services.registration_service import RegistrationService
-from ..authentication.services.token_service import TokenService
-from ..authentication.services.user_service import UserService
-from ..dependencies import get_container
+from ...authentication.services.api_key_service import APIKeyService
+from ...authentication.services.authentication_facade import AuthenticationFacade
+from ...authentication.services.login_service import LoginService
+from ...authentication.services.oauth_service import OAuthService
+from ...authentication.services.otp_service import OTPStorageService
+from ...authentication.services.registration_service import RegistrationService
+from ...authentication.services.token_service import TokenService
+from ...authentication.services.user_service import UserService
+from ...dependencies import get_container
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 logger = structlog.get_logger(__name__)

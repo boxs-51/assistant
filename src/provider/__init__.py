@@ -23,8 +23,8 @@ class ModelRouter:
     """
     Deprecated provider execution path retained for external compatibility.
 
-    New application code must use ProviderRuntime through
-    LegacyModelRouterFacade until the legacy transport is removed.
+    New application code must use ProviderRuntime. This deprecated class remains
+    only as a temporary external-compatibility boundary.
     """
     def __init__(self, circuit_breaker_manager: CircuitBreakerManager):
         warnings.warn(
@@ -215,51 +215,3 @@ class ModelRouter:
                 tg.start_soon(provider.models, http_client, settings.provider.timeout)
         # Đây là một cách đơn giản, trong thực tế cần xử lý lỗi cho từng provider
         return [{"provider": "example", "models": []}] # Placeholder
-
-
-class LegacyModelRouterFacade:
-    """Compatibility API backed by the canonical ProviderRuntime handlers."""
-
-    def __init__(self, provider_runtime):
-        self._provider_runtime = provider_runtime
-
-    @property
-    def providers(self):
-        return provider_runtime_value(self._provider_runtime, "providers", {})
-
-    @property
-    def routing_policy(self):
-        return provider_runtime_value(self._provider_runtime, "routing_policy")
-
-    @property
-    def executor(self):
-        return provider_runtime_value(self._provider_runtime, "executor")
-
-    @property
-    def circuit_breaker_manager(self):
-        return self._provider_runtime.circuit_breaker_manager
-
-    async def execute_with_fallback(self, http_client, body):
-        return await self._provider_runtime.chat_handler.execute_with_fallback(http_client, body)
-
-    async def stream_with_fallback(self, http_client, body):
-        async for chunk in self._provider_runtime.chat_handler.stream_with_fallback(http_client, body):
-            yield chunk
-
-    async def execute_embeddings(self, http_client, body):
-        return await self._provider_runtime.embedding_handler.execute(http_client, body)
-
-    async def list_models(self, http_client):
-        models = []
-        for provider_name in self.providers:
-            models.append(await self._provider_runtime.model_handler.execute(
-                provider_name=provider_name,
-                model_id=None,
-                http_client=http_client,
-            ))
-        return models
-
-
-def provider_runtime_value(provider_runtime, name, default=None):
-    value = getattr(provider_runtime, name, default)
-    return default if value is None else value

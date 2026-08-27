@@ -1,43 +1,51 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.responses import JSONResponse
 
-from ...authentication.dependency import require_permission, verify_admin_ip
+from .....application.container import ApplicationContainer
 from .....services.admin_service import AdminService
+from ...authentication.dependency import require_permission, verify_admin_ip
+from ...dependencies import get_container
 
 router = APIRouter(
     prefix="/admin",
     tags=["Admin"],
     dependencies=[
-        Depends(verify_admin_ip),                  # Lớp 1: IP Whitelist
-        Depends(require_permission("admin:write"))  # Lớp 2: Permission mặc định cho nhánh Admin
-    ]
+        Depends(verify_admin_ip),
+        Depends(require_permission("admin:write")),
+    ],
 )
+
+
+def get_admin_service(
+    container: ApplicationContainer = Depends(get_container),
+) -> AdminService:
+    return AdminService(container)
 
 
 @router.post(
     "/reload/routing",
     summary="Hot-reload quy tắc định tuyến",
-    description="Tải lại các rules từ YAML mà không cần khởi động lại Gateway."
+    description="Tải lại các rules từ YAML mà không cần khởi động lại Gateway.",
 )
-async def reload_routing_rules(admin_service: AdminService = Depends()):
-    """Endpoint reload routing policy."""
+async def reload_routing_rules(
+    admin_service: AdminService = Depends(get_admin_service),
+):
     success = await admin_service.reload_routing_rules()
-    
     if not success:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to reload routing rules. Check system logs for details."
+            detail="Failed to reload routing rules. Check system logs for details.",
         )
-        
     return {"status": "success", "message": "Routing rules reloaded successfully."}
 
 
 @router.get(
     "/circuit-breakers/status",
     summary="Trạng thái Circuit Breakers",
-    dependencies=[Depends(require_permission("admin:read"))]  # Ghi đè chỉ yêu cầu admin:read cho endpoint này
+    dependencies=[Depends(require_permission("admin:read"))],
 )
-async def get_circuit_breaker_statuses(admin_service: AdminService = Depends()):
-    """Endpoint kiểm tra trạng thái Circuit Breaker."""
+async def get_circuit_breaker_statuses(
+    admin_service: AdminService = Depends(get_admin_service),
+):
     statuses = await admin_service.get_circuit_breaker_statuses()
     return JSONResponse(content=statuses)

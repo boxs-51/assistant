@@ -41,21 +41,20 @@ from src.runtimes.provider.runtime import ProviderRuntime
 from src.runtimes.event.runtime import EventRuntime
 from src.runtimes.context.runtime import ContextRuntime
 
-# Routers
-from .transport.gateway.router.auth import router as auth_router
-from .transport.gateway.router.agent import router as agent_router
-from .transport.gateway.router.tool import router as tool_router
-from .transport.gateway.router.events import router as events_router
-from .transport.gateway.router.admin import router as admin_router
-from .transport.gateway.router.multi_agent import router as multi_agent_router
-
+# Canonical versioned HTTP transport routers
 from .transport.gateway.api.v1 import (
-    chat_router, embeddings_router, 
-    files_router, health_router,
-    models_router
+    admin as admin_router,
+    agent_router,
+    auth_router,
+    chat_router,
+    embeddings_router,
+    events_router,
+    files_router,
+    health_router,
+    models_router,
+    multi_agent_router,
+    tool_router,
 )
-
-from .provider import LegacyModelRouterFacade
 from .application.container import ApplicationContainer
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
@@ -186,9 +185,6 @@ async def bootstrap_runtime_kernel(
     if container.capability_runtime and hasattr(container.capability_runtime, "registry"):
         container.tool_registry = ToolRegistry(container.capability_runtime.registry)
 
-    # Bind LegacyModelRouterFacade vào container
-    container.legacy_model_router = LegacyModelRouterFacade(container.provider_runtime)
-
     # 4. Bootstrap Kernel (RuntimeContext tự động được khởi tạo bên trong)
     await kernel.bootstrap()
 
@@ -263,17 +259,17 @@ def create_app() -> FastAPI:
     # Middleware Stack
     create_middleware_stack(app_instance)
 
-    # Route Registrations
-    app_instance.include_router(auth_router)
+    # Route Registrations: api/v1 is the sole HTTP router surface.
+    app_instance.include_router(auth_router.router)
     app_instance.include_router(files_router.router)
     app_instance.include_router(models_router.router)
     app_instance.include_router(chat_router.router)
     app_instance.include_router(embeddings_router.router)
-    app_instance.include_router(admin_router)
-    app_instance.include_router(agent_router)
-    app_instance.include_router(tool_router)
-    app_instance.include_router(events_router)
-    app_instance.include_router(multi_agent_router)
+    app_instance.include_router(admin_router.router)
+    app_instance.include_router(agent_router.router)
+    app_instance.include_router(tool_router.router)
+    app_instance.include_router(events_router.router)
+    app_instance.include_router(multi_agent_router.router)
     app_instance.include_router(health_router.router)
 
     return app_instance

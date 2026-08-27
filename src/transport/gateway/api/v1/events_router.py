@@ -2,11 +2,11 @@ import json
 import structlog
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends
 
-from ....infrastructure.event_bus.ws_manager import WebSocketConnectionManager
-from ..authentication.dependency import get_current_identity
-from ....domain.schemas.identity import Identity
-from ..dependencies import get_container
-from ....application.container import ApplicationContainer
+from .....infrastructure.event_bus.ws_manager import WebSocketConnectionManager
+from ...authentication.dependency import get_current_identity
+from .....domain.schemas.identity import Identity
+from ...dependencies import get_container
+from .....application.container import ApplicationContainer
 
 router = APIRouter(prefix="/v1/events", tags=["Events"])
 logger = structlog.get_logger(__name__)

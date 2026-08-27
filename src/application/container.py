@@ -35,8 +35,6 @@ class ApplicationContainer:
     tool_registry: Optional[Any] = None
     multi_agent_coordinator: Optional[Any] = None
 
-    legacy_model_router: Optional[Any] = None
-
     metrics: Optional[Any] = None
     tracer: Optional[Any] = None
     clock: Optional[Any] = None
