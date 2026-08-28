@@ -1,255 +1,260 @@
-"""Deterministic offline provider used by Phase 0 tests and local E2E runs."""
-
+"""Deterministic, zero-network provider for offline unit/runtime/API tests."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import math
 import os
 import time
-import uuid
+from typing import Any, AsyncGenerator, Dict
 from io import BytesIO
-from typing import Any, AsyncGenerator, Dict, Optional
 
-from ..core import (
-    ApiTypeMapper,
-    BaseProvider,
-    EndpointBuilder,
-    ModelCapabilityManager,
-    ModelMapper,
-    NoAuth,
+from ..core import ApiTypeMapper, BaseProvider, EndpointBuilder, ModelCapabilityManager, ModelMapper, NoAuth
+from ..exceptions import ProviderError
+from .errors import build_mock_error
+from .scenarios import MockScenario
+from .state import MockState
+from ...domain.schemas import (
+    ContextLimits, GatewayChoice, GatewayMessage, GatewayResponse,
+    GatewayStreamChoice, GatewayStreamChunk, GatewayStreamDelta, GatewayUsage,
+    ModelCapability, ModelInfo, ModelList,
 )
 from ...infrastructure.config import settings
-from ...domain.schemas import (
-    GatewayChoice,
-    GatewayMessage,
-    GatewayResponse,
-    GatewayStreamChunk,
-    GatewayStreamChoice,
-    GatewayStreamDelta,
-    GatewayUsage,
-    ModelCapability,
-    ModelInfo,
-    ModelList,
-    ContextLimits,
-)
 
-MOCK_MODEL = "mock-chat"
+MOCK_CHAT_MODEL = "mock-chat"
 MOCK_EMBEDDING_MODEL = "mock-embedding"
+MOCK_VISION_MODEL = "mock-vision"
+MOCK_AUDIO_MODEL = "mock-audio"
+MOCK_IMAGE_MODEL = "mock-image"
+MOCK_VIDEO_MODEL = "mock-video"
+MOCK_TOOL_MODEL = "mock-tool"
+MOCK_BATCH_MODEL = "mock-batch"
+MOCK_RERANK_MODEL = "mock-rerank"
+MOCK_REASONING_MODEL = "mock-reasoning"
+MOCK_MODEL = MOCK_CHAT_MODEL
+
+MODEL_CAPABILITIES: dict[str, set[ModelCapability]] = {
+    MOCK_CHAT_MODEL: {
+        ModelCapability.CHAT, ModelCapability.CHAT_STREAM, ModelCapability.CHAT_BATCH,
+        ModelCapability.TOKEN_COUNT, ModelCapability.TOKENIZE,
+        ModelCapability.TOOL_CALLING, ModelCapability.WEB_SEARCH,
+        ModelCapability.CODE_EXECUTION, ModelCapability.JSON_MODE,
+        ModelCapability.STRUCTURED_OUTPUT,
+    },
+    MOCK_EMBEDDING_MODEL: {
+        ModelCapability.EMBEDDINGS, ModelCapability.EMBEDDINGS_BATCH,
+        ModelCapability.TOKEN_COUNT, ModelCapability.TOKENIZE,
+    },
+    MOCK_VISION_MODEL: {
+        ModelCapability.CHAT, ModelCapability.CHAT_STREAM,
+        ModelCapability.VISION, ModelCapability.OCR,
+    },
+    MOCK_AUDIO_MODEL: {
+        ModelCapability.SPEECH_TO_TEXT, ModelCapability.SPEECH_TO_TEXT_STREAM,
+        ModelCapability.TEXT_TO_SPEECH, ModelCapability.TEXT_TO_SPEECH_STREAM,
+        ModelCapability.AUDIO_TRANSLATION,
+    },
+    MOCK_IMAGE_MODEL: {
+        ModelCapability.IMAGE_GENERATION, ModelCapability.IMAGE_EDIT, ModelCapability.IMAGE_VARIATION,
+    },
+    MOCK_VIDEO_MODEL: {ModelCapability.VIDEO_GENERATION, ModelCapability.VIDEO_UNDERSTANDING},
+    MOCK_TOOL_MODEL: {ModelCapability.TOOL_CALLING, ModelCapability.WEB_SEARCH, ModelCapability.CODE_EXECUTION},
+    MOCK_BATCH_MODEL: {ModelCapability.CHAT_BATCH, ModelCapability.EMBEDDINGS_BATCH},
+    MOCK_RERANK_MODEL: {ModelCapability.RERANK},
+    MOCK_REASONING_MODEL: {ModelCapability.CHAT, ModelCapability.CHAT_STREAM, ModelCapability.TOKEN_COUNT, ModelCapability.JSON_MODE, ModelCapability.STRUCTURED_OUTPUT},
+}
 
 
 class MockChat:
-    def __init__(self, provider: "MockProvider"):
-        self.provider = provider
+    def __init__(self, provider): self.provider = provider
 
     @staticmethod
-    def _last_user_text(body: Dict[str, Any]) -> str:
-        messages = body.get("messages") or []
-        for message in reversed(messages):
+    def _text(body):
+        for message in reversed(body.get("messages") or []):
             if message.get("role") == "user":
-                content = message.get("content", "")
-                if isinstance(content, str):
-                    return content
-                return str(content)
+                value = message.get("content", "")
+                return value if isinstance(value, str) else str(value)
         return ""
 
-    async def chat(self, **kwargs) -> GatewayResponse:
+    async def chat(self, **kwargs):
+        self.provider._before("chat")
         body = kwargs.get("body") or {}
-        model = body.get("model") or MOCK_MODEL
-        text = self._last_user_text(body)
-        answer = f"mock:{text}" if text else "mock:ok"
-        prompt_tokens = max(1, len(text.split())) if text else 1
+        model = body.get("model") or MOCK_CHAT_MODEL
+        text = self._text(body)
+        answer = self.provider.scenario.fixed_chat_response or (f"mock:{text}" if text else "mock:ok")
+        prompt_tokens = max(1, len(text.split()))
         completion_tokens = max(1, len(answer.split()))
         return GatewayResponse(
-           id=f"mock-{uuid.uuid4().hex}",
-           model=model,
-            provider=self.provider.name,
-           choices=[GatewayChoice(
-               index=0,
-                message=GatewayMessage(role="assistant", content=answer),
-                finish_reason="stop",
-            )],
-            usage=GatewayUsage(
-               prompt_tokens=prompt_tokens,
-                completion_tokens=completion_tokens,
-                total_tokens=prompt_tokens + completion_tokens,
-            ),
-            metadata={"mock": True},
+            id=self.provider.state.stable_id("chat", self.provider.request_key(body)),
+            model=model, provider=self.provider.name,
+            choices=[GatewayChoice(index=0, message=GatewayMessage(role="assistant", content=answer), finish_reason="stop")],
+            usage=GatewayUsage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=prompt_tokens + completion_tokens),
+            metadata={"mock": True, "scenario": self.provider.scenario.name},
         )
 
     async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
+        self.provider._before("chat_stream")
         body = kwargs.get("body") or {}
-        model = body.get("model") or MOCK_MODEL
-        text = self._last_user_text(body)
-        answer = f"mock:{text}" if text else "mock:ok"
-        words = answer.split(" ")
-        for index, word in enumerate(words):
+        model = body.get("model") or MOCK_CHAT_MODEL
+        text = self._text(body)
+        answer = self.provider.scenario.fixed_chat_response or (f"mock:{text}" if text else "mock:ok")
+        words = answer.split()
+        size = max(1, self.provider.scenario.stream_chunk_size)
+        chunk_number = 0
+        request_key = self.provider.request_key(body)
+        for start in range(0, len(words), size):
+            if self.provider.scenario.fail_after_chunks is not None and chunk_number >= self.provider.scenario.fail_after_chunks:
+                self.provider._raise_fault("chat_stream")
+            part = " ".join(words[start:start + size])
+            if start + size < len(words): part += " "
+            if self.provider.scenario.latency_ms:
+                await asyncio.sleep(self.provider.scenario.latency_ms / 1000)
             yield GatewayStreamChunk(
-                id=f"mock-stream-{uuid.uuid4().hex}",
-                model=model,
-                provider=self.provider.name,
-                choices=[GatewayStreamChoice(
-                    index=0,
-                    delta=GatewayStreamDelta(
-                        content=(word + (" " if index < len(words) - 1 else "")),
-                        role="assistant" if index == 0 else None,
-                    ),
-                    finish_reason="stop" if index == len(words) - 1 else None,
-                )],
-                metadata={"mock": True},
+                id=self.provider.state.stable_id("stream", request_key), model=model, provider=self.provider.name,
+                choices=[GatewayStreamChoice(index=0, delta=GatewayStreamDelta(content=part, role="assistant" if start == 0 else None), finish_reason="stop" if start + size >= len(words) else None)],
+                metadata={"mock": True, "scenario": self.provider.scenario.name},
             )
+            chunk_number += 1
 
 
 class MockModels:
-    def __init__(self, provider: "MockProvider"):
-        self.provider = provider
-
-    def _model(self, model_id: str, embedding: bool = False) -> ModelInfo:
-        caps = {ModelCapability.EMBEDDINGS, ModelCapability.EMBEDDINGS_BATCH} if embedding else {
-            ModelCapability.CHAT,
-            ModelCapability.CHAT_STREAM,
-            ModelCapability.TOKEN_COUNT,
-            ModelCapability.JSON_MODE,
-            ModelCapability.STRUCTURED_OUTPUT,
-            ModelCapability.TOOL_CALLING,
-        }
+    def __init__(self, provider): self.provider = provider
+    def _model(self, model_id):
         return ModelInfo(
-            id=model_id,
-            display_name=model_id,
-            provider=self.provider.name,
-            family="mock",
-            version="1.0",
-            description="Deterministic offline Phase 0 mock model",
+            id=model_id, display_name=model_id, provider=self.provider.name,
+            family="mock", version="1.0", description="Deterministic zero-network mock model",
             limits=ContextLimits(context_window=32768, max_output_tokens=4096),
-            capabilities=caps,
-            owned_by="phase0",
-            metadata={"mock": True},
+            capabilities=MODEL_CAPABILITIES[model_id], owned_by="assistant-tests", metadata={"mock": True}, created=0,
         )
-
-    async def models(self, **kwargs) -> ModelList:
-        return ModelList(data=[self._model(MOCK_MODEL), self._model(MOCK_EMBEDDING_MODEL, embedding=True)])
-
-    async def model(self, **kwargs) -> ModelInfo:
-        model_id = kwargs.get("model_name") or MOCK_MODEL
-        return self._model(model_id, embedding="embedding" in model_id)
+    async def models(self, **kwargs):
+        self.provider._before("models")
+        return ModelList(data=[self._model(mid) for mid in MODEL_CAPABILITIES])
+    async def model(self, **kwargs):
+        self.provider._before("model")
+        model_id = kwargs.get("model_name") or MOCK_CHAT_MODEL
+        if model_id not in MODEL_CAPABILITIES: raise KeyError(f"Model '{model_id}' not found in mock provider.")
+        return self._model(model_id)
 
 
 class MockEmbeddings:
-    def __init__(self, provider: "MockProvider"):
-        self.provider = provider
-
+    def __init__(self, provider): self.provider = provider
     @staticmethod
-    def _vector(text: str, dimensions: int = 8) -> list[float]:
-        digest = hashlib.sha256(text.encode("utf-8")).digest()
-        raw = [int.from_bytes(digest[i:i + 4], "big") / 2**32 for i in range(0, dimensions * 4, 4)]
-        norm = math.sqrt(sum(x * x for x in raw)) or 1.0
-        return [x / norm for x in raw]
-
-    async def embeddings(self, **kwargs) -> Dict[str, Any]:
+    def _vector(text: str, dimensions: int = 8):
+        digest = hashlib.sha256(text.encode()).digest()
+        raw = [int.from_bytes(digest[i:i+4], "big") / 2**32 for i in range(0, dimensions * 4, 4)]
+        norm = math.sqrt(sum(v*v for v in raw)) or 1.0
+        return [v / norm for v in raw]
+    async def embeddings(self, **kwargs):
+        self.provider._before("embeddings")
         body = kwargs.get("body") or {}
-        model = body.get("model") or MOCK_EMBEDDING_MODEL
         inputs = body.get("input", [])
-        if isinstance(inputs, str):
-            inputs = [inputs]
-        return {
-            "object": "list",
-            "model": model,
-            "data": [
-                {"object": "embedding", "index": i, "embedding": self._vector(str(value))}
-                for i, value in enumerate(inputs)
-            ],
-            "usage": {"prompt_tokens": sum(max(1, len(str(x).split())) for x in inputs), "total_tokens": sum(max(1, len(str(x).split())) for x in inputs)},
-        }
+        if isinstance(inputs, str): inputs = [inputs]
+        tokens = sum(max(1, len(str(x).split())) for x in inputs)
+        return {"object":"list", "model":body.get("model") or MOCK_EMBEDDING_MODEL,
+                "data":[{"object":"embedding","index":i,"embedding":self._vector(str(x))} for i,x in enumerate(inputs)],
+                "usage":{"prompt_tokens":tokens,"total_tokens":tokens}}
 
 
 class MockFiles:
-    def __init__(self, provider: "MockProvider"):
-        self.provider = provider
-        self._files: Dict[str, Dict[str, Any]] = {}
-
-    async def list_files(self, **kwargs) -> Dict[str, Any]:
-        return {"object": "list", "data": list(self._files.values()), "next_page_token": None}
-
-    async def upload_file(self, **kwargs) -> Dict[str, Any]:
+    def __init__(self, provider): self.provider = provider
+    async def list_files(self, **kwargs):
+        self.provider._before("files.list")
+        return {"object":"list", "data":[{k:v for k,v in x.items() if k != "bytes"} for x in self.provider.state.files.values()], "next_page_token":None}
+    async def upload_file(self, **kwargs):
+        self.provider._before("files.upload")
         stream = kwargs["file_stream"]
         content = stream.read()
-        file_id = f"mock-file-{uuid.uuid4().hex}"
-        entry = {
-            "name": file_id,
-            "display_name": kwargs.get("display_name") or file_id,
-            "mime_type": kwargs.get("mime_type") or "application/octet-stream",
-            "size": len(content),
-            "bytes": content,
-            "created": int(time.time()),
-        }
-        self._files[file_id] = entry
-        return {k: v for k, v in entry.items() if k != "bytes"}
+        display = kwargs.get("display_name") or "file"
+        file_id = self.provider.state.stable_id("file", display + ":" + hashlib.sha1(content).hexdigest())
+        self.provider.state.files[file_id] = {"name":file_id, "display_name":display, "mime_type":kwargs.get("mime_type") or "application/octet-stream", "size":len(content), "bytes":content, "created":0}
+        return {k:v for k,v in self.provider.state.files[file_id].items() if k != "bytes"}
+    async def get_file(self, **kwargs):
+        self.provider._before("files.get")
+        file_id = kwargs.get("file_id") or kwargs.get("file_name")
+        return {k:v for k,v in self.provider.state.files[file_id].items() if k != "bytes"}
+    async def download_file(self, **kwargs):
+        self.provider._before("files.download")
+        file_id = kwargs.get("file_id") or kwargs.get("file_name")
+        return self.provider.state.files[file_id]["bytes"]
+    async def delete_file(self, **kwargs):
+        self.provider._before("files.delete")
+        file_id = kwargs.get("file_id") or kwargs.get("file_name")
+        return self.provider.state.files.pop(file_id, None) is not None
 
-    async def get_file(self, **kwargs) -> Dict[str, Any]:
-        file_id = kwargs["file_id"]
-        entry = self._files[file_id]
-        return {k: v for k, v in entry.items() if k != "bytes"}
 
-    async def download_file(self, **kwargs) -> bytes:
-        return self._files[kwargs["file_id"]]["bytes"]
+class MockAudio:
+    def __init__(self, provider): self.provider = provider
+    async def speech_to_text(self, **kwargs): self.provider._before("audio.stt"); return {"text":"mock transcription","language":kwargs.get("language","en"),"mock":True}
+    async def text_to_speech(self, **kwargs): self.provider._before("audio.tts"); return {"audio":f"MOCK-AUDIO:{kwargs.get('text','')}".encode(),"format":kwargs.get("format","wav"),"mock":True}
+    async def audio_translation(self, **kwargs): self.provider._before("audio.translation"); return {"text":"mock translated audio","mock":True}
 
-    async def delete_file(self, **kwargs) -> bool:
-        return self._files.pop(kwargs["file_id"], None) is not None
+class MockVision:
+    def __init__(self, provider): self.provider = provider
+    async def vision(self, **kwargs): self.provider._before("vision"); return {"labels":["mock-object"],"text":"mock OCR text","confidence":0.99,"mock":True}
+
+class MockImage:
+    def __init__(self, provider): self.provider = provider
+    async def image_generation(self, **kwargs): self.provider._before("image.generate"); return {"created":0,"data":[{"b64_json":"bW9jay1pbWFnZQ=="}],"mock":True}
+    async def image_edit(self, **kwargs): self.provider._before("image.edit"); return {"created":0,"data":[{"b64_json":"bW9jay1pbWFnZS1lZGl0"}],"mock":True}
+    async def image_variation(self, **kwargs): self.provider._before("image.variation"); return {"created":0,"data":[{"b64_json":"bW9jay1pbWFnZS12YXJpYXRpb24="}],"mock":True}
+
+class MockVideo:
+    def __init__(self, provider): self.provider = provider
+    async def video_generation(self, **kwargs):
+        self.provider._before("video.generate"); jid=self.provider.state.stable_id("video",self.provider.request_key(kwargs)); self.provider.state.jobs[jid]={"id":jid,"status":"completed","mock":True}; return dict(self.provider.state.jobs[jid])
+    async def video_understanding(self, **kwargs): self.provider._before("video.understand"); return {"labels":["mock-video"],"summary":"mock video understanding","mock":True}
+
+class MockBatch:
+    def __init__(self, provider): self.provider = provider
+    async def create_batch(self, **kwargs):
+        self.provider._before("batch.create"); body=kwargs.get("body") or kwargs; bid=self.provider.state.stable_id("batch",self.provider.request_key(body)); self.provider.state.batches[bid]={"id":bid,"status":"completed","mock":True}; return dict(self.provider.state.batches[bid])
+    async def batch_status(self, **kwargs): self.provider._before("batch.status"); return dict(self.provider.state.batches[kwargs["batch_id"]])
+
+class MockTokens:
+    def __init__(self, provider): self.provider = provider
+    async def count_tokens(self, **kwargs): self.provider._before("tokens.count"); body=kwargs.get("body") or kwargs; text=str(body.get("text") or body.get("input") or ""); return {"total_tokens":len(text.split()),"tokens":len(text.split()),"mock":True}
+
+class MockReranking:
+    def __init__(self, provider): self.provider = provider
+    async def rerank(self, **kwargs):
+        self.provider._before("rerank"); docs=list(kwargs.get("documents") or []); return {"results":[{"index":i,"relevance_score":round(1-i/max(1,len(docs)),6)} for i,_ in enumerate(docs)],"mock":True}
+
+class MockTooling:
+    def __init__(self, provider): self.provider = provider
+    async def web_search(self, **kwargs): self.provider._before("web_search"); return {"query":kwargs.get("query",""),"results":[],"mock":True}
+    async def code_execution(self, **kwargs): self.provider._before("code_execution"); return {"stdout":"mock code execution","stderr":"","exit_code":0,"mock":True}
 
 
 class MockProvider(BaseProvider):
-    """Provider with zero network I/O and deterministic responses."""
-
-    def __init__(self):
-        super().__init__(
-            provider_name="mock",
-            auth_strategy=NoAuth(),
-            endpoint_builder=EndpointBuilder(base_url="http://mock.invalid"),
-            api_mapper=ApiTypeMapper(api_map={}),
-            model_mapper=ModelMapper(model_map={
-                MOCK_MODEL: MOCK_MODEL,
-                MOCK_EMBEDDING_MODEL: MOCK_EMBEDDING_MODEL,
-            }),
-            capability_manager=ModelCapabilityManager(provider_name="mock"),
-        )
-        self.chat = MockChat(self)
-        self.models = MockModels(self)
-        self.embeddings = MockEmbeddings(self)
-        self.files = MockFiles(self)
+    """Provider that never performs outbound network I/O."""
+    def __init__(self, *, seed="assistant-offline-mock", scenario: MockScenario | None = None):
+        super().__init__(provider_name="mock", auth_strategy=NoAuth(), endpoint_builder=EndpointBuilder(base_url="http://mock.invalid"), api_mapper=ApiTypeMapper(api_map={}), model_mapper=ModelMapper(model_map={m:m for m in MODEL_CAPABILITIES}), capability_manager=ModelCapabilityManager(provider_name="mock"))
+        self.state=MockState(seed); self.scenario=(scenario or MockScenario()).clone()
+        self.chat=MockChat(self); self.models=MockModels(self); self.embeddings=MockEmbeddings(self); self.files=MockFiles(self)
+        self.audio=MockAudio(self); self.vision=MockVision(self); self.image=MockImage(self); self.video=MockVideo(self)
+        self.batch=MockBatch(self); self.tokens=MockTokens(self); self.reranking=MockReranking(self); self.tooling=MockTooling(self)
 
     @classmethod
-    def is_configured(cls) -> bool:
-        env_enabled = os.getenv("GATEWAY_PROVIDER__MOCK_ENABLED", "").lower() in {"1", "true", "yes", "on"}
-        try:
-            configured = bool(settings.provider.mock_enabled)
-        except RuntimeError:
-            configured = False
-        return env_enabled or configured
+    def is_configured(cls):
+        env=os.getenv("GATEWAY_PROVIDER__MOCK_ENABLED","").lower() in {"1","true","yes","on"}
+        try: return env or bool(settings.provider.mock_enabled)
+        except Exception: return env
 
-    async def has_capability(self, model_name: str, capability: ModelCapability, http_client, timeout: float) -> bool:
-        if model_name == MOCK_EMBEDDING_MODEL:
-            return capability in {ModelCapability.EMBEDDINGS, ModelCapability.EMBEDDINGS_BATCH}
-        if model_name == MOCK_MODEL:
-            return capability in {
-                ModelCapability.CHAT,
-                ModelCapability.CHAT_STREAM,
-                ModelCapability.TOKEN_COUNT,
-                ModelCapability.JSON_MODE,
-                ModelCapability.STRUCTURED_OUTPUT,
-                ModelCapability.TOOL_CALLING,
-            }
-        return False
-
-    async def models_info(self, **kwargs):
-        return await self.models.models(**kwargs)
-
-    async def moderation(self, **kwargs):
-        raise NotImplementedError("Mock provider does not implement moderation")
-
-    async def computer_use(self, **kwargs):
-        raise NotImplementedError("Mock provider does not implement computer_use")
-
-    async def provider_info(self, **kwargs):
-        return {"name": self.name, "version": "1.0", "mock": True}
-
-    async def health(self, **kwargs):
-        return {"status": "ok", "provider": self.name, "mock": True}
+    def request_key(self, payload): return hashlib.sha256(repr(payload).encode()).hexdigest()[:24]
+    def _raise_fault(self, operation):
+        s=self.scenario
+        if not s.error_type or (s.fail_operations and operation not in s.fail_operations): return
+        if s.fail_next > 0: s.fail_next -= 1; return
+        raise build_mock_error(provider_name=self.name,error_type=s.error_type,message=s.error_message,status_code=s.error_status_code,error_code=s.error_code)
+    def _before(self, operation):
+        self.state.count(operation); self._raise_fault(operation)
+        if self.scenario.latency_ms: time.sleep(self.scenario.latency_ms/1000)
+    async def has_capability(self, model_name, capability, http_client, timeout): return capability in MODEL_CAPABILITIES.get(model_name,set())
+    async def send(self,*args,**kwargs): raise ProviderError("Mock network I/O is forbidden",provider_name=self.name,error_code="mock_network_forbidden",is_network_error=True)
+    async def send_stream(self,*args,**kwargs): raise ProviderError("Mock network streaming I/O is forbidden",provider_name=self.name,error_code="mock_network_forbidden",is_network_error=True)
+    async def moderation(self,**kwargs): self._before("moderation"); return {"flagged":False,"categories":{},"scores":{},"mock":True}
+    async def computer_use(self,**kwargs): self._before("computer_use"); return {"actions":[],"status":"completed","mock":True}
+    async def provider_info(self,**kwargs): self._before("provider_info"); return {"name":"mock","version":"1.0","mock":True,"network":False,"models":list(MODEL_CAPABILITIES)}
+    async def health(self,**kwargs): self._before("health"); return {"status":"ok","provider":"mock","mock":True,"network":False}
+    def snapshot(self): return self.state.snapshot()
+    def reset(self): self.state.reset(); self.scenario=MockScenario()

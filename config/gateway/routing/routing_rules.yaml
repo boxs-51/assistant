@@ -4,34 +4,34 @@
 # Các quy tắc được xử lý từ trên xuống dưới. Quy tắc đầu tiên khớp sẽ được sử dụng.
 # Hỗ trợ wildcard matching (ví dụ: "gpt-4*").
 
-rules:
-  - name: "OpenAI Models"
-    models:
-      - "gpt-4o"
-      - "gpt-3.5-turbo"
-      - "gpt-4*"
-    provider_chain:
-      - "openai"
-      - "gemini"
-      - "anthropic"
+# rules:
+#   - name: "OpenAI Models"
+#     models:
+#       - "gpt-4o"
+#       - "gpt-3.5-turbo"
+#       - "gpt-4*"
+#     provider_chain:
+#       - "openai"
+#       - "gemini"
+#       - "anthropic"
 
-  - name: "Google Models"
-    models:
-      - "gemini-pro"
-      - "gemini-1.5-pro"
-      - "gemini*"
-    provider_chain:
-      - "gemini"
-      - "openai"
-      - "anthropic"
+#   - name: "Google Models"
+#     models:
+#       - "gemini-pro"
+#       - "gemini-1.5-pro"
+#       - "gemini*"
+#     provider_chain:
+#       - "gemini"
+#       - "openai"
+#       - "anthropic"
 
-  - name: "Local Models"
-    models:
-      - "llama*"
-      - "codellama*"
-      - "mistral*"
-      - "phi3*"
-      - "gemma*"
-    provider_chain:
-      - "ollama"
-      - "openai" # Fallback to cloud if local fails
+#   - name: "Local Models"
+#     models:
+#       - "llama*"
+#       - "codellama*"
+#       - "mistral*"
+#       - "phi3*"
+#       - "gemma*"
+#     provider_chain:
+#       - "ollama"
+#       - "openai" # Fallback to cloud if local fails

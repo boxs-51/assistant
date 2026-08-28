@@ -17,13 +17,11 @@ class ProviderDiscovery:
         """Chạy quá trình khám phá và đăng ký."""
         logger.info("Starting provider discovery...")
         for name, provider_class in ProviderFactory._provider_classes.items():
-            if name == "mock" and not provider_class.is_configured():
-                provider_instance = ProviderFactory.create_provider(name)
-                if provider_instance:
-                    self.registry.register(provider_instance)
+            # Mock is intentionally opt-in. Real providers use the same rule:
+            # an unconfigured provider is never registered.
+            if not provider_class.is_configured():
+                logger.info("Provider skipped because it is not configured", provider=name)
                 continue
-            # Ủy quyền việc kiểm tra cấu hình cho chính lớp Provider
-            if provider_class.is_configured():
-                provider_instance = ProviderFactory.create_provider(name)
-                if provider_instance:
-                    self.registry.register(provider_instance)
+            provider_instance = ProviderFactory.create_provider(name)
+            if provider_instance:
+                self.registry.register(provider_instance)

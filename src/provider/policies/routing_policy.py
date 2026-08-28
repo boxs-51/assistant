@@ -28,10 +28,13 @@ class RoutingPolicy:
         Khởi tạo các quy tắc định tuyến và chuỗi fallback mặc định từ settings.
         """
         # Xây dựng chuỗi fallback mặc định từ config
-        self._default_chain = [self.providers[name] for name in settings.provider.priority if name in self.providers]
-        #if "mock" in self.providers and "mock" not in [p.name for p in self._default_chain]:
-            # Offline Phase 0 mode: mock is appended only when explicitly enabled.
-        #    self._default_chain.append(self.providers["mock"])
+        self._default_chain = [
+            self.providers[name]
+            for name in settings.provider.priority
+            if name in self.providers
+        ]
+        if settings.provider.mock_enabled and settings.provider.priority == ["mock"] and "mock" in self.providers:
+            self._default_chain = [self.providers["mock"]]
         logger.info(
             "Default chain",
             chain=[p.name for p in self._default_chain]

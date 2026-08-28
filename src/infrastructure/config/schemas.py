@@ -82,6 +82,8 @@ class CircuitBreakerSettings(BaseModel):
 class ProviderSettings(BaseModel):
     timeout: int = 60
     mock_enabled: bool = False
+    mock_seed: str = "assistant-offline-mock"
+    mock_scenario: str = "success"
     retry: int = 2
     enable_fallback: bool = True
     priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama"])
