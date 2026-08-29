@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from dataclasses import dataclass, field
 
 
@@ -11,7 +12,9 @@ class MockScenario:
     error_status_code: int | None = None
     error_code: str | None = None
     fail_operations: set[str] = field(default_factory=set)
-    fail_next: int = 0
+    # None means persistent when error_type is set; N means exactly N failures.
+    fail_next: int | None = None
+    # N means emit N complete chunks, then fail before chunk N+1.
     fail_after_chunks: int | None = None
     stream_chunk_size: int = 1
     fixed_chat_response: str | None = None

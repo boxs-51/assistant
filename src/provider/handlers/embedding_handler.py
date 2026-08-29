@@ -18,13 +18,13 @@ class EmbeddingExecutionHandler(BaseExecutionHandler):
         for provider in await self._get_healthy_fallback_chain(initial_chain):
             try:
                 if not await provider.has_capability(
-                    model, ModelCapability.EMBEDDINGS, http_client, settings.provider.timeout
+                    model, ModelCapability.EMBEDDINGS, http_client, self.timeout
                 ):
                     continue
                 return await self.executor.execute_generic(
                     provider=provider,
                     execution_callable=lambda p=provider: p.embeddings.embeddings(
-                        http_client=http_client, body=body, timeout=settings.provider.timeout
+                        http_client=http_client, body=body, timeout=self.timeout
                     ),
                 )
             except Exception as exc:

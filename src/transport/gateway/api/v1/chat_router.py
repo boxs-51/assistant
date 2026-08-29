@@ -81,7 +81,7 @@ async def chat_completions_proxy(
                 # 2. Publish request event và chờ Enqueue thành công
                 await event_bus.publish(
                     BaseEvent(
-                        event_name="transport.event.request_received",
+                        event_name="provider.chat.execute",
                         session_id=session_id,
                         payload={
                             "request_body": chat_request.model_dump(exclude_none=True),
@@ -153,7 +153,7 @@ async def chat_completions_proxy(
         try:
             await event_bus.publish(
                 BaseEvent(
-                    event_name="transport.event.request_received",
+                    event_name="provider.chat.execute",
                     session_id=session_id,
                     payload={
                         "request_body": chat_request.model_dump(exclude_none=True),

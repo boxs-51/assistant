@@ -2,23 +2,33 @@ import structlog
 
 from .factory import ProviderFactory
 from .registry import ProviderRegistry
+from ..infrastructure.config.schemas import ProviderSettings
 
 logger = structlog.get_logger(__name__)
 
+
 class ProviderDiscovery:
-    """
-    Tự động khám phá các provider dựa trên cấu hình hệ thống
-    và đăng ký chúng vào ProviderRegistry.
-    """
-    def __init__(self, registry: ProviderRegistry):
+    """Discover providers without instantiating disabled/offline providers."""
+
+    def __init__(self, registry: ProviderRegistry, config: ProviderSettings = None):
         self.registry = registry
+        self.config = config
 
     def run(self):
-        """Chạy quá trình khám phá và đăng ký."""
         logger.info("Starting provider discovery...")
+
+        if self.config is not None:
+            priority = self.config.priority
+            mock_enabled = self.config.mock_enabled
+
+            if mock_enabled and priority == ["mock"]:
+                provider_instance = ProviderFactory.create_provider("mock")
+                if provider_instance:
+                    self.registry.register(provider_instance)
+                logger.info("Strict offline mock-only discovery enabled")
+                return
+
         for name, provider_class in ProviderFactory._provider_classes.items():
-            # Mock is intentionally opt-in. Real providers use the same rule:
-            # an unconfigured provider is never registered.
             if not provider_class.is_configured():
                 logger.info("Provider skipped because it is not configured", provider=name)
                 continue

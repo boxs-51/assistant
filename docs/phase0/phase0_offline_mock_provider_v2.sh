@@ -41,7 +41,7 @@ mkdir -p src/provider/mock tests/providers tests/e2e docs/phase0
 # 1) Clean DI primitives: RetryPolicy no longer needs global configuration when
 #    the caller supplies max_retries; ProviderExecutor propagates explicit DI.
 # -----------------------------------------------------------------------------
-python - <<'PY'
+./.venv/Scripts/python.exe - <<'PY'
 from pathlib import Path
 
 p = Path("src/provider/policies/retry.py")
@@ -100,7 +100,7 @@ PY
 # -----------------------------------------------------------------------------
 # 2) RoutingPolicy receives priority/rules path through DI.
 # -----------------------------------------------------------------------------
-python - <<'PY'
+./.venv/Scripts/python.exe - <<'PY'
 from pathlib import Path
 p = Path("src/provider/policies/routing_policy.py")
 s = p.read_text(encoding="utf-8")
@@ -203,7 +203,7 @@ PY
 # 4) Handler DI: timeout comes from the runtime/application context instead of
 #    the global settings singleton.
 # -----------------------------------------------------------------------------
-python - <<'PY'
+./.venv/Scripts/python.exe - <<'PY'
 from pathlib import Path
 
 p = Path("src/provider/handlers/base.py")
@@ -252,7 +252,7 @@ PY
 #    routing, executor, handlers. This removes hidden config dependency from the
 #    actual runtime execution path.
 # -----------------------------------------------------------------------------
-python - <<'PY'
+./.venv/Scripts/python.exe - <<'PY'
 from pathlib import Path
 p = Path("src/runtimes/provider/runtime.py")
 s = p.read_text(encoding="utf-8")
@@ -282,7 +282,7 @@ PY
 #    provider.chat.execute; there is no production subscriber that translates
 #    transport.event.request_received into that command.
 # -----------------------------------------------------------------------------
-python - <<'PY'
+./.venv/Scripts/python.exe - <<'PY'
 from pathlib import Path
 p = Path("src/transport/gateway/api/v1/chat_router.py")
 s = p.read_text(encoding="utf-8")
@@ -339,7 +339,7 @@ PY
 # -----------------------------------------------------------------------------
 # 8) Patch MockProvider semantics in-place.
 # -----------------------------------------------------------------------------
-python - <<'PY'
+./.venv/Scripts/python.exe - <<'PY'
 from pathlib import Path
 p = Path("src/provider/mock/provider.py")
 s = p.read_text(encoding="utf-8")
@@ -348,28 +348,14 @@ s = s.replace(
 ''',
 '''        self.provider._before("chat_stream")
 ''', 1)
-old = '''    def _raise_fault(self, operation: str) -> None:
-        scenario = self.scenario
-        if scenario.error_type and (
-            not scenario.fail_operations or operation in scenario.fail_operations
-        ):
-            if scenario.fail_next > 0:
-                scenario.fail_next -= 1
-            else:
-                raise build_mock_error(
-                    provider_name=self.name,
-                    error_type=scenario.error_type,
-                    message=scenario.error_message,
-                    status_code=scenario.error_status_code,
-                    error_code=scenario.error_code,
-                )
-
-    def _before(self, operation: str) -> None:
-        self.state.count(operation)
-        self._raise_fault(operation)
-        if self.scenario.latency_ms:
-            import time
-            time.sleep(self.scenario.latency_ms / 1000)
+old = '''    def _raise_fault(self, operation):
+        s=self.scenario
+        if not s.error_type or (s.fail_operations and operation not in s.fail_operations): return
+        if s.fail_next > 0: s.fail_next -= 1; return
+        raise build_mock_error(provider_name=self.name,error_type=s.error_type,message=s.error_message,status_code=s.error_status_code,error_code=s.error_code)
+    def _before(self, operation):
+        self.state.count(operation); self._raise_fault(operation)
+        if self.scenario.latency_ms: time.sleep(self.scenario.latency_ms/1000)
 '''
 new = '''    def _raise_fault(self, operation: str) -> None:
         scenario = self.scenario
@@ -1167,7 +1153,7 @@ MD
 # -----------------------------------------------------------------------------
 # 12) Static checks.
 # -----------------------------------------------------------------------------
-python -m compileall -q \
+./.venv/Scripts/python.exe -m compileall -q \
   src/provider/mock \
   src/provider/discovery.py \
   src/provider/policies/routing_policy.py \

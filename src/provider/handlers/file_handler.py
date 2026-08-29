@@ -17,7 +17,7 @@ class FileOperationHandler(BaseExecutionHandler):
         if not provider:
             raise KeyError(f"Provider '{provider_name}' not found.")
 
-        timeout = settings.provider.timeout
+        timeout = self.timeout
 
         if action == "list":
             return await provider.files.list_files(

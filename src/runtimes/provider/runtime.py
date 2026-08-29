@@ -58,15 +58,15 @@ class ProviderRuntime(BaseRuntime):
         self._http_client = context.http_client
         
         self.provider_registry = ProviderRegistry()
-        discovery = ProviderDiscovery(registry=self.provider_registry)
+        discovery = ProviderDiscovery(registry=self.provider_registry, config=context.config.provider)
         discovery.run()
 
         self.providers = self.provider_registry.list_all_providers()
         if not self.providers:
             raise RuntimeError("Configuration Error: No LLM providers are enabled.")
 
-        self.routing_policy = RoutingPolicy(providers=self.providers)
-        self.executor = ProviderExecutor(self.circuit_breaker_manager)
+        self.routing_policy = RoutingPolicy(providers=self.providers, config=context.config.provider)
+        self.executor = ProviderExecutor(self.circuit_breaker_manager, config=context.config)
 
         # Khởi tạo các Sub-handlers
         handler_kwargs = {
@@ -74,6 +74,7 @@ class ProviderRuntime(BaseRuntime):
             "routing_policy": self.routing_policy,
             "executor": self.executor,
             "circuit_breaker_manager": self.circuit_breaker_manager,
+            "timeout": context.config.provider.timeout,
         }
         self.chat_handler = ChatExecutionHandler(**handler_kwargs)
         self.embedding_handler = EmbeddingExecutionHandler(**handler_kwargs)

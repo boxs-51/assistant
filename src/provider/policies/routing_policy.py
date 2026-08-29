@@ -6,7 +6,8 @@ import asyncio
 
 from typing import Dict, List
 
-from ...infrastructure.config import settings
+from ...infrastructure.config.schemas import ProviderSettings
+
 from ..core.provider import BaseProvider
 
 logger = structlog.get_logger(__name__)
@@ -16,24 +17,32 @@ class RoutingPolicy:
     REFACTORED: Chứa logic phân giải model thành chuỗi provider.
     Hỗ trợ tải quy tắc từ file YAML và reload nóng (hot-reload).
     """
-    def __init__(self, providers: Dict[str, BaseProvider]):
+    def __init__(
+        self,
+        providers: Dict[str, BaseProvider],
+        *,
+        priority: List[str] | None = None,
+        rules_path: str | None = None,
+        config: ProviderSettings = None,
+    ):
         self.providers = providers
         self._default_chain: List[BaseProvider] = []
         self._rules: List[Dict] = []
-        self._reload_lock = asyncio.Lock() # Lock để đảm bảo an toàn khi reload
+        self._reload_lock = asyncio.Lock()
+        self._config = config
         self._initialize()
 
     def _initialize(self):
         """
-        Khởi tạo các quy tắc định tuyến và chuỗi fallback mặc định từ settings.
+        Khởi tạo các quy tắc định tuyến và chuỗi fallback mặc định từ config.
         """
         # Xây dựng chuỗi fallback mặc định từ config
         self._default_chain = [
             self.providers[name]
-            for name in settings.provider.priority
+            for name in self._config.priority
             if name in self.providers
         ]
-        if settings.provider.mock_enabled and settings.provider.priority == ["mock"] and "mock" in self.providers:
+        if self._config.mock_enabled and self._config.priority == ["mock"] and "mock" in self.providers:
             self._default_chain = [self.providers["mock"]]
         logger.info(
             "Default chain",
@@ -45,14 +54,14 @@ class RoutingPolicy:
     def _load_rules_from_file(self):
         """Tải và xử lý các quy tắc định tuyến từ file YAML."""
         new_rules = []
-        if not os.path.exists(settings.provider.routing_rules_path):
-            logger.error("Routing rules file not found.", path=settings.provider.routing_rules_path)
+        if not os.path.exists(self._config.routing_rules_path):
+            logger.error("Routing rules file not found.", path=self._config.routing_rules_path)
             self._rules = []
             
             return
 
         try:
-            with open(settings.provider.routing_rules_path, 'r', encoding='utf-8') as f:
+            with open(self._config.routing_rules_path, 'r', encoding='utf-8') as f:
                 config = yaml.safe_load(f)
             routing_rules_config = config.get("rules", [])
 
@@ -71,10 +80,10 @@ class RoutingPolicy:
                     new_rules.append({"models": rule_config["models"], "chain": provider_chain})
             
             self._rules = new_rules
-            logger.info("Routing rules loaded successfully.", rule_count=len(self._rules), path=settings.provider.routing_rules_path)
+            logger.info("Routing rules loaded successfully.", rule_count=len(self._rules), path=self._config.routing_rules_path)
 
         except (yaml.YAMLError, FileNotFoundError, Exception) as e:
-            logger.error("Failed to load or parse routing rules file. No rules will be applied.", error=str(e), path=settings.provider.routing_rules_path)
+            logger.error("Failed to load or parse routing rules file. No rules will be applied.", error=str(e), path=self._config.routing_rules_path)
             self._rules = [] # Xóa các quy tắc cũ nếu file mới bị lỗi để tránh hành vi không mong muốn
 
     async def reload_rules(self) -> bool:

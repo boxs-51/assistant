@@ -4,7 +4,7 @@ from typing import Dict, Optional, Any
 from enum import Enum
 import structlog
 
-from .infrastructure.config import settings
+from .infrastructure.config.schemas import CircuitBreakerSettings
 
 logger = structlog.get_logger(__name__)
 
@@ -159,9 +159,10 @@ class CircuitBreakerManager:
     Quản lý tập trung vòng đời của tất cả các đối tượng CircuitBreaker.
     Đảm bảo mỗi provider có một circuit breaker duy nhất.
     """
-    def __init__(self):
+    def __init__(self, config: CircuitBreakerSettings):
         self._breakers: Dict[str, CircuitBreaker] = {}
         self._lock = asyncio.Lock()
+        self._config = config
 
     async def get_breaker(self, provider_name: str) -> CircuitBreaker:
         """Lấy hoặc tạo một CircuitBreaker cho một provider cụ thể."""
@@ -170,8 +171,9 @@ class CircuitBreakerManager:
             async with self._lock:
                 if provider_name not in self._breakers:
                     # Lấy cấu hình cho provider này, hoặc dùng default nếu không có
-                    provider_settings = settings.circuit_breaker.providers.get(
-                        provider_name, settings.circuit_breaker.default
+                    
+                    provider_settings = self._config.providers.get(
+                        provider_name, self._config.default
                     )
                     logger.info(
                         "Creating new circuit breaker",

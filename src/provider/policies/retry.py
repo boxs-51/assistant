@@ -11,7 +11,7 @@ from ..exceptions import (
     ProviderAuthenticationError  # Mới thêm: Không thể retry
 )
 from ...circuit_breaker import CircuitBreakerOpenError
-from ...infrastructure.config import settings
+from ...infrastructure.config.schemas import ProviderSettings
 
 logger = structlog.get_logger(__name__)
 
@@ -20,12 +20,16 @@ class RetryPolicy:
     REFACTORED (v3): Chứa logic về việc thử lại (retry) một cách độc lập.
     Đã cập nhật để nhận diện chính xác các mã lỗi, quota, rate limit từ API Custom Exceptions.
     """
-    def __init__(self, max_retries: int | None = None):
+    def __init__(self, max_retries: int | None = None, config: ProviderSettings = None):
+        """Create a retry policy from explicit DI.
+
+        ``config`` is retained only for compatibility with the application
+        bootstrap. Unit/offline tests should pass ``max_retries`` directly.
         """
-        Khởi tạo RetryPolicy.
-        :param max_retries: Số lần thử lại tối đa. Nếu là None, sẽ lấy từ cấu hình.
-        """
-        self.max_retries = max_retries if max_retries is not None else settings.provider.retry
+        if max_retries is not None:
+            self.max_retries = max_retries
+        elif config is not None:
+            self.max_retries = config.provider.retry
 
     def _is_retryable(self, error: Exception) -> bool:
         """Kiểm tra xem một lỗi có nên được thử lại hay không dựa trên mã lỗi API."""

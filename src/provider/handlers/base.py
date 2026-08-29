@@ -13,12 +13,14 @@ class BaseExecutionHandler(ABC):
         providers: Dict[str, Any],
         routing_policy: Optional[RoutingPolicy],
         executor: ProviderExecutor,
-        circuit_breaker_manager: CircuitBreakerManager
+        circuit_breaker_manager: CircuitBreakerManager,
+        timeout: float | None = None,
     ):
         self.providers = providers
         self.routing_policy = routing_policy
         self.executor = executor
         self.circuit_breaker_manager = circuit_breaker_manager
+        self.timeout = 60.0 if timeout is None else float(timeout)
 
     async def _get_healthy_fallback_chain(self, initial_chain: list) -> list:
         import asyncio

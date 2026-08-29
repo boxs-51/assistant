@@ -16,13 +16,13 @@ class ModelOperationHandler(BaseExecutionHandler):
         if model_id:
             model_data = await provider.models.model(
                 http_client=http_client,
-                timeout=settings.provider.timeout,
+                timeout=self.timeout,
                 model_name=model_id
             )
             return provider.capability_manager.enrich_capabilities(model_data)
 
         models_data = await provider.models.models(
             http_client=http_client,
-            timeout=settings.provider.timeout
+            timeout=self.timeout
         )
         return provider.capability_manager.enrich_capabilities(models_data)

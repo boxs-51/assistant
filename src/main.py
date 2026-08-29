@@ -10,8 +10,7 @@ from .infrastructure.event_bus.manager import EventingManager
 from .kernel.kernel import RuntimeKernel
 
 # Config & Observability
-from .infrastructure.config import settings
-from .infrastructure.config.core import ConfigLoader, ConfigurationRegistry
+from .infrastructure.config import settings, ConfigLoader, ConfigurationRegistry, ConfigManager
 from .infrastructure.observability import ObservabilityConfig, LoggingConfig, TracingConfig
 
 from .transport.gateway.middleware.metris import setup_gateway_observability
@@ -70,10 +69,9 @@ logger = structlog.get_logger(__name__)
 
 def bootstrap_observability() -> Any:
     """Tải cấu hình gateway và kích hoạt hệ thống Observability (Metrics & Tracing)."""
-    loader = ConfigLoader(default_config_path="config/gateway/default.yaml")
-    app_config = loader.load_config()
-    ConfigurationRegistry.set_config(app_config)
-    config = ConfigurationRegistry.get_config()
+    _config_manager = ConfigManager().get_instance()
+    _config = _config_manager.initialize()
+    ConfigurationRegistry.set_config(_config)
 
     obs_config = ObservabilityConfig(
         service_name=settings.gateway.name,
@@ -85,7 +83,7 @@ def bootstrap_observability() -> Any:
         ),
     )
     setup_gateway_observability(obs_config)
-    return config
+    return _config, _config_manager
 
 
 async def bootstrap_storage() -> Tuple[StorageEngine, Any]:
@@ -220,11 +218,11 @@ async def lifespan(app: FastAPI):
     logger.info("Starting AI Gateway Application...")
 
     # 1. Startup Sequence
-    config = bootstrap_observability()
+    config, config_manager = bootstrap_observability()
     FastAPIInstrumentor.instrument_app(app)
 
     # Local resources
-    cb_manager = CircuitBreakerManager()
+    cb_manager = CircuitBreakerManager(config=config.circuit_breaker)
     http_client = httpx.AsyncClient(timeout=settings.provider.timeout)
     storage_engine, uow_factory = await bootstrap_storage()
 

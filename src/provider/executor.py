@@ -3,7 +3,7 @@ import structlog
 
 from typing import Callable, Awaitable, AsyncGenerator, Any
 
-from ..infrastructure.config import settings
+from ..infrastructure.config.schemas import ProviderSettings
 from .exceptions import ProviderError
 from .core.provider import BaseProvider
 from ..domain.schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
@@ -18,10 +18,20 @@ class ProviderExecutor:
     REFACTORED (v2): Lớp điều phối việc thực thi một request đến một provider duy nhất.
     Nó điều phối các policy theo đúng kiến trúc resilience (Polly, Resilience4j).
     """
-    def __init__(self, circuit_breaker_manager: CircuitBreakerManager):
-        # Dependency Injection: Nhận các manager/policy từ bên ngoài
+    def __init__(
+        self,
+        circuit_breaker_manager: CircuitBreakerManager,
+        retry_policy: RetryPolicy | None = None,
+        *,
+        max_retries: int | None = None,
+        config: ProviderSettings = None,
+    ):
+        """Create an executor from explicit resilience dependencies."""
         self.breaker_manager = circuit_breaker_manager
-        self.retry_policy = RetryPolicy()
+        self.retry_policy = retry_policy or RetryPolicy(
+            max_retries=max_retries,
+            config=config,
+        )
 
     async def is_provider_healthy(self, provider_name: str) -> bool:
         """Kiểm tra xem circuit breaker của provider có đang mở hay không."""

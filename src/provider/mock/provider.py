@@ -93,7 +93,7 @@ class MockChat:
         )
 
     async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
-        self.provider._before("chat_stream")
+        self.provider._check_stream_fault(operation="chat_stream", phase="pre_stream")
         body = kwargs.get("body") or {}
         model = body.get("model") or MOCK_CHAT_MODEL
         text = self._text(body)
@@ -104,7 +104,11 @@ class MockChat:
         request_key = self.provider.request_key(body)
         for start in range(0, len(words), size):
             if self.provider.scenario.fail_after_chunks is not None and chunk_number >= self.provider.scenario.fail_after_chunks:
-                self.provider._raise_fault("chat_stream")
+                self.provider._check_stream_fault(
+                    operation="chat_stream", 
+                    phase="mid_stream", 
+                    chunk_number=chunk_number
+                )
             part = " ".join(words[start:start + size])
             if start + size < len(words): part += " "
             if self.provider.scenario.latency_ms:
@@ -115,6 +119,7 @@ class MockChat:
                 metadata={"mock": True, "scenario": self.provider.scenario.name},
             )
             chunk_number += 1
+        self.provider._check_stream_fault(operation="chat_stream", phase="post_stream")
 
 
 class MockModels:
@@ -241,14 +246,64 @@ class MockProvider(BaseProvider):
         except Exception: return env
 
     def request_key(self, payload): return hashlib.sha256(repr(payload).encode()).hexdigest()[:24]
-    def _raise_fault(self, operation):
-        s=self.scenario
-        if not s.error_type or (s.fail_operations and operation not in s.fail_operations): return
-        if s.fail_next > 0: s.fail_next -= 1; return
-        raise build_mock_error(provider_name=self.name,error_type=s.error_type,message=s.error_message,status_code=s.error_status_code,error_code=s.error_code)
-    def _before(self, operation):
-        self.state.count(operation); self._raise_fault(operation)
-        if self.scenario.latency_ms: time.sleep(self.scenario.latency_ms/1000)
+    def _raise_fault(self, operation: str) -> None:
+        scenario = self.scenario
+        if not scenario.error_type:
+            return
+        
+        if scenario.fail_operations and operation not in scenario.fail_operations:
+            return
+
+        if scenario.fail_next is not None:
+            if scenario.fail_next <= 0:
+                return
+            scenario.fail_next -= 1
+
+        raise build_mock_error(
+            provider_name=self.name,
+            error_type=scenario.error_type,
+            message=scenario.error_message,
+            status_code=scenario.error_status_code,
+            error_code=scenario.error_code,
+        )
+
+    async def _before_async(self, operation: str) -> None:
+        self.state.count(operation)
+        self._raise_fault(operation)
+        if self.scenario.latency_ms:
+            await asyncio.sleep(self.scenario.latency_ms / 1000)
+
+    def _before(self, operation: str) -> None:
+        self.state.count(operation)
+        self._raise_fault(operation)
+
+    
+    def _check_stream_fault(self, operation: str, phase: str, chunk_number: int = 0) -> None:
+        """Kiểm tra và kích hoạt lỗi stream theo 3 giai đoạn."""
+        scenario = self.scenario
+        if not scenario.error_type:
+            return
+
+        # 1. PRE-STREAM: Lỗi xảy ra TRƯỚC KHI stream bắt đầu (auth failure, connection refused...)
+        if phase == "pre_stream":
+            self.state.count(operation)
+            # Nếu cấu hình ngắt giữa chừng (fail_after_chunks > 0), bỏ qua phase pre_stream
+            if scenario.fail_after_chunks is not None and scenario.fail_after_chunks > 0:
+                return
+            # Ngược lại (fail_after_chunks == 0 hoặc không set), ném lỗi ngay lập tức
+            self._raise_fault(operation)
+
+        # 2. MID-STREAM: Lỗi xảy ra TRONG LÚC đang stream (rớt mạng giữa chừng)
+        elif phase == "mid_stream":
+            if scenario.fail_after_chunks is not None and scenario.fail_after_chunks > 0:
+                if chunk_number >= scenario.fail_after_chunks:
+                    self._raise_fault(operation)
+
+        # 3. POST-STREAM: Lỗi xảy ra SAU KHI stream kết thúc (lỗi cleanup, timeout closing...)
+        elif phase == "post_stream":
+            if getattr(scenario, "fail_post_stream", False):
+                self._raise_fault(operation)
+                
     async def has_capability(self, model_name, capability, http_client, timeout): return capability in MODEL_CAPABILITIES.get(model_name,set())
     async def send(self,*args,**kwargs): raise ProviderError("Mock network I/O is forbidden",provider_name=self.name,error_code="mock_network_forbidden",is_network_error=True)
     async def send_stream(self,*args,**kwargs): raise ProviderError("Mock network streaming I/O is forbidden",provider_name=self.name,error_code="mock_network_forbidden",is_network_error=True)

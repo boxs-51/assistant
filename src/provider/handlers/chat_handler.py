@@ -41,7 +41,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 span.set_attribute("provider.name", provider.name)
                 try:
                     if not await provider.has_capability(
-                        body.get("model"), ModelCapability.CHAT, http_client, settings.provider.timeout
+                        body.get("model"), ModelCapability.CHAT, http_client, self.timeout
                     ):
                         continue
 
@@ -70,7 +70,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
             execution_chain = [preferred_provider] + others
 
         stream_check_coroutines = [
-            p.has_capability(model, ModelCapability.CHAT_STREAM, http_client, settings.provider.timeout)
+            p.has_capability(model, ModelCapability.CHAT_STREAM, http_client, self.timeout)
             for p in execution_chain
         ]
         stream_check_results = await asyncio.gather(*stream_check_coroutines, return_exceptions=True)
