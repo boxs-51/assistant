@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional
 
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
-from .registry import CapabilityRegistry
+from .registry import CapabilityRegistry, CapabilityState
 from .drivers.base import BaseCapabilityDriver
 from .contracts.context import CapabilityExecutionContext
 from .contracts.error import CapabilityError
@@ -35,8 +35,9 @@ class CapabilityRuntime(BaseRuntime):
         )
         super().__init__(manifest=manifest)
         self.event_bus = None
-        self.registry = CapabilityRegistry()
-        self.authorization = AuthorizationService()
+        self.registry = registry if registry is not None else CapabilityRegistry()
+        self.authorization = authorization if authorization is not None else AuthorizationService()
+        
         self._subscribed = False
         self.mcp_manager = None
 
@@ -137,13 +138,40 @@ class CapabilityRuntime(BaseRuntime):
         ]
 
     async def check_health(self):
-        for driver in self.registry.get_all_drivers():
+        failed = False
+        for record in self.registry.list_records():
+            driver = record.driver
+            if driver is None:
+                continue
             try:
                 if not await driver.check_health():
-                    return self._failed_health_status()
+                    failed = True
+                    if record.definition.source == "MCP":
+                        self.registry.set_state(
+                            record.id,
+                            CapabilityState.UNAVAILABLE,
+                        )
+                    else:
+                        return self._failed_health_status()
+                elif record.definition.source == "MCP":
+                    self.registry.set_state(
+                        record.id,
+                        CapabilityState.ENABLED,
+                    )
             except Exception:
-                return self._failed_health_status()
-        return self._healthy_health_status()
+                failed = True
+                if record.definition.source == "MCP":
+                    self.registry.set_state(
+                        record.id,
+                        CapabilityState.UNAVAILABLE,
+                    )
+                else:
+                    return self._failed_health_status()
+        return (
+            self._failed_health_status()
+            if failed
+            else self._healthy_health_status()
+        )
 
     @staticmethod
     def _healthy_health_status():

@@ -64,6 +64,24 @@ class CapabilityRegistry:
         logger.info("Capability registered", capability_id=capability_id)
         return record
 
+    def set_state(
+        self,
+        name: str,
+        state: CapabilityState,
+    ) -> Optional[CapabilityRecord]:
+        """Atomically update one capability lifecycle/availability state."""
+        with self._lock:
+            record = self._records.get(name)
+            if record is None:
+                return None
+            updated = CapabilityRecord(
+                definition=record.definition,
+                driver=record.driver,
+                state=state,
+            )
+            self._records[name] = updated
+            return updated
+
     def register_definition(self, definition: CapabilityDefinition):
         """Compatibility/discovery registration without claiming executability."""
         capability_id = definition.capability_id

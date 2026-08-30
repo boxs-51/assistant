@@ -19,6 +19,7 @@ from .transport.gateway.middleware.factory import create_middleware_stack
 # Storage & UoW
 from .infrastructure.storage.core.manager import StorageEngine
 from .infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from .infrastructure.mcp.mcp_manager import GatewayMcpManager
 
 # Security & Gateway Infrastructure
 from .transport.gateway.limiter import RateLimiterManager

@@ -2,14 +2,16 @@ import pytest
 
 from src.application.policy.authorization import AuthorizationService
 from src.domain.schemas.identity import Identity
+from src.runtimes.capability.registry import CapabilityRegistry, CapabilityState
 from src.runtimes.capability.contracts.context import CapabilityExecutionContext
 from src.runtimes.capability.contracts.error import CapabilityError
 from src.runtimes.capability.contracts.result import CapabilityResult
 from src.runtimes.capability.drivers.base import BaseCapabilityDriver, CapabilityDefinition
+from src.runtimes.capability.drivers.mcp_driver import McpCapabilityDriver
 from src.runtimes.capability.runtime import CapabilityRuntime
 from src.tool.registry import ToolRegistry
 from src.domain.schemas.tool import GatewayToolDefinition
-
+from src.kernel.base import HealthStatus
 
 class EchoDriver(BaseCapabilityDriver):
     async def execute(self, context, arguments):
@@ -152,3 +154,62 @@ async def test_execute_capability_returns_normalized_result_and_legacy_api_still
         {"value": "legacy"},
         identity,
     ) == "legacy"
+
+def test_capability_runtime_uses_injected_dependencies():
+    registry = CapabilityRegistry()
+    authorization = AuthorizationService()
+
+    runtime = CapabilityRuntime(
+        registry=registry,
+        authorization=authorization,
+    )
+
+    assert runtime.registry is registry
+    assert runtime.authorization is authorization
+
+
+@pytest.mark.asyncio
+async def test_mcp_capability_transitions_unavailable_and_recovers():
+    class FakeMcpManager:
+        def __init__(self):
+            self.available = True
+
+        def get_raw_session(self, _server_name):
+            return object() if self.available else None
+
+    manager = FakeMcpManager()
+    registry = CapabilityRegistry()
+    runtime = CapabilityRuntime(registry=registry)
+    runtime.mcp_manager = manager
+
+    definition = CapabilityDefinition(
+        id="github:search",
+        name="github:search",
+        description="Search GitHub",
+        source="MCP",
+        execution_kind="MCP",
+        metadata={
+            "mcp_server": "github",
+            "mcp_tool_name": "search",
+        },
+    )
+    runtime.register_capability(
+        McpCapabilityDriver(definition, manager)
+    )
+
+    assert registry.get("github:search").state is CapabilityState.ENABLED
+    assert await runtime.check_health()
+    assert registry.get("github:search").state is CapabilityState.ENABLED
+
+    manager.available = False
+    assert await runtime.check_health() == HealthStatus.FAILED
+    assert (
+        registry.get("github:search").state
+        is CapabilityState.UNAVAILABLE
+    )
+    assert registry.get_driver("github:search") is None
+
+    manager.available = True
+    assert await runtime.check_health() == HealthStatus.HEALTHY
+    assert registry.get("github:search").state is CapabilityState.ENABLED
+    assert registry.get_driver("github:search") is not None
