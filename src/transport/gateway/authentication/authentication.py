@@ -1,16 +1,16 @@
-from .....domain.schemas.auth import (
+from ....domain.schemas.auth import (
     UserCreateSchema, LoginRequestSchema, TokenSchema,
     OAuthUserInfoSchema, AccessTokenSchema, UserMeSchema
 )
-from .....domain.schemas.identity import Identity
+from ....domain.schemas.identity import Identity
 
-from .registration_service import RegistrationService
-from .login_service import LoginService
-from .oauth_service import OAuthService
-from .token_service import TokenService
-from .user_service import UserService
+from .services.registration_service import RegistrationService
+from .services.login_service import LoginService
+from .services.oauth_service import OAuthService
+from .services.token_service import TokenService
+from .services.user_service import UserService
 
-class AuthenticationFacade:
+class Authentication:
     def __init__(
         self,
         registration_service: RegistrationService,

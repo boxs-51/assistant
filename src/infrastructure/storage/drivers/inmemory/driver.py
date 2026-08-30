@@ -1,7 +1,8 @@
 import asyncio
 import time
-from typing import Any, Optional, Dict
+from typing import Any, Optional
 
+from ....config.schemas import DriverConfig
 from ...interfaces.cache import CacheDriver
 
 
@@ -23,8 +24,8 @@ class InMemoryDriver(CacheDriver):
     - multi-instance deployment
     """
 
-    def __init__(self, config: Optional[Dict[str, Any]] = None):
-        self.config = config or {}
+    def __init__(self, config: DriverConfig):
+        self.config = config 
 
         self._data: dict[str, Any] = {}
         self._expires: dict[str, float] = {}

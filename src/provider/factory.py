@@ -1,5 +1,6 @@
 from typing import Dict, Type, Optional
 
+from ..infrastructure.config.schemas import ProviderConfig
 from .core.provider import BaseProvider
 from .openai import OpenAIProvider
 from .ollama import OllamaProvider
@@ -19,9 +20,9 @@ class ProviderFactory:
     }
 
     @classmethod
-    def create_provider(cls, name: str) -> Optional[BaseProvider]:
+    def create_provider(cls, name: str, config: ProviderConfig) -> Optional[BaseProvider]:
         """Tạo một provider instance dựa trên tên."""
         provider_class = cls._provider_classes.get(name)
         if provider_class:
-            return provider_class()
+            return provider_class(config=config)
         return None

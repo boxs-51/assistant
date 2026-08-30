@@ -42,7 +42,7 @@ class RoutingPolicy:
             for name in self._config.priority
             if name in self.providers
         ]
-        if self._config.mock_enabled and self._config.priority == ["mock"] and "mock" in self.providers:
+        if self._config.configs.get("mock").enabled:
             self._default_chain = [self.providers["mock"]]
         logger.info(
             "Default chain",

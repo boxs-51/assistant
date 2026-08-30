@@ -3,7 +3,7 @@ import structlog
 
 from .base import BaseRateLimiter
 from ..storage.base import BaseStorage
-from .....infrastructure.config.schemas import ConfigSchema
+from .....infrastructure.config.schemas import RateLimitSettings
 
 logger = structlog.get_logger(__name__)
 
@@ -25,18 +25,16 @@ class SlidingWindowLimiter(BaseRateLimiter):
             )
 
     @classmethod
-    def from_config(cls: Type["SlidingWindowLimiter"], storage: BaseStorage, config: ConfigSchema) -> "SlidingWindowLimiter":
+    def from_config(cls: Type["SlidingWindowLimiter"], storage: BaseStorage, config: RateLimitSettings) -> "SlidingWindowLimiter":
         """Tạo SlidingWindowLimiter từ cấu hình ứng dụng."""
-        rate_limit_settings = config.rate_limit
-        redis_settings = config.redis
 
         logger.info(
             "Initializing SlidingWindowLimiter",
-            limit=rate_limit_settings.limit,
-            window_size=rate_limit_settings.window_size,
-            ttl=redis_settings.cache_expire_seconds
+            limit=config.limit,
+            window_size=config.window_size,
+            ttl=config.cache_expire_seconds
         )
-        return cls(storage, rate_limit_settings.limit, rate_limit_settings.window_size, redis_settings.cache_expire_seconds)
+        return cls(storage, config.limit, config.window_size, config.cache_expire_seconds)
 
     async def is_allowed(self, key: str, cost: int = 1) -> Tuple[bool, int, float]:
         # Thuật toán Sliding Window đơn giản không tính đến 'cost', mỗi request là 1.

@@ -282,9 +282,8 @@ class BaseProvider(ABC):
             )
             raise exc
 
-    @classmethod
     @abstractmethod
-    def is_configured(cls) -> bool:
+    def is_configured(self) -> bool:
         """Kiểm tra xem provider đã được cấu hình đúng cách hay chưa."""
         raise NotImplementedError
 

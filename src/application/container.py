@@ -16,6 +16,7 @@ class ApplicationContainer:
     uow_factory: Callable[[], Any]
     http_client: Any
     eventing_manager: Any
+    event_bus: Any
 
     runtime_kernel: Optional[Any] = None
     event_runtime: Optional[Any] = None
@@ -26,7 +27,9 @@ class ApplicationContainer:
     capability_runtime: Optional[Any] = None
     provider_runtime: Optional[Any] = None
 
+    api_key_service: Optional[Any] = None
     auth_manager: Optional[Any] = None
+    auth: Optional[Any] = None
     oauth: Optional[Any] = None
     limiter: Optional[Any] = None
     circuit_breaker_manager: Optional[Any] = None
@@ -39,9 +42,6 @@ class ApplicationContainer:
     tracer: Optional[Any] = None
     clock: Optional[Any] = None
 
-    @property
-    def event_bus(self):
-        return self.eventing_manager.bus
 
     def bind_runtime(self, runtime_id: str, runtime: Any) -> None:
         if not runtime_id:

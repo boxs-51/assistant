@@ -1,5 +1,5 @@
 import asyncio
-from typing import List, Union
+from typing import List, Union, Any, Dict
 from functools import lru_cache
 import os
 from opentelemetry import trace
@@ -14,7 +14,7 @@ class EmbeddingService:
     - Model được load một lần khi khởi tạo.
     - Chạy tác vụ encode trên một luồng riêng để không block event loop.
     """
-    def __init__(self, config: dict):
+    def __init__(self, config: Dict[str, Any]):
         self.config = config
         self._model = None
         try:

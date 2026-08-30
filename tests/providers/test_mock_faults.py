@@ -2,7 +2,7 @@ import pytest
 
 from src.provider.mock import MockProvider, MockScenario
 from src.provider.exceptions import ProviderRateLimitError, ProviderUnavailableError
-
+from src.infrastructure.config.schemas import ProviderConfig
 
 @pytest.mark.asyncio
 async def test_persistent_rate_limit_fault():
@@ -11,7 +11,8 @@ async def test_persistent_rate_limit_fault():
             name="rate-limit",
             error_type="rate_limit",
             fail_operations={"chat"},
-        )
+        ),
+        config=ProviderConfig(base_url="http://mock.invalid")
     )
     with pytest.raises(ProviderRateLimitError):
         await p.chat.chat(body={"model": "mock-chat", "messages": [{"role": "user", "content": "x"}]})
@@ -25,7 +26,8 @@ async def test_fail_next_means_exactly_next_n_calls():
             error_type="rate_limit",
             fail_operations={"chat"},
             fail_next=1,
-        )
+        ),
+        config=ProviderConfig(base_url="http://mock.invalid")
     )
     with pytest.raises(ProviderRateLimitError):
         await p.chat.chat(body={"model": "mock-chat", "messages": [{"role": "user", "content": "x"}]})
@@ -41,7 +43,8 @@ async def test_stream_fault_after_first_chunk():
             name="stream-fail",
             error_type="service_unavailable",
             fail_after_chunks=1,
-        )
+        ),
+        config=ProviderConfig(base_url="http://mock.invalid")
     )
     chunks = []
     with pytest.raises(ProviderUnavailableError):
@@ -59,7 +62,8 @@ async def test_stream_fault_before_first_chunk_when_zero():
             name="stream-fail-zero",
             error_type="service_unavailable",
             fail_after_chunks=0,
-        )
+        ),
+        config=ProviderConfig(base_url="http://mock.invalid")
     )
     with pytest.raises(ProviderUnavailableError):
         async for _ in p.chat.chat_stream(

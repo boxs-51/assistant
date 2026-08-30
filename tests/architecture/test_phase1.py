@@ -25,6 +25,7 @@ def test_application_container_resolves_registered_dependencies():
         http_client=object(),
         eventing_manager=EventingStub(),
         provider_runtime=provider_runtime,
+        event_bus=EventingStub().bus,
     )
 
     assert container.require("provider_runtime") is provider_runtime
@@ -65,6 +66,7 @@ def test_container_bind_runtime_identity():
         uow_factory=lambda: None,
         http_client=object(),
         eventing_manager=EventingStub(),
+        event_bus=EventingStub().bus,
     )
     runtime_obj = object()
     container.bind_runtime("custom_runtime", runtime_obj)
@@ -80,6 +82,7 @@ def test_runtime_context_first_class_dependency():
         uow_factory=lambda: None,
         http_client=object(),
         eventing_manager=EventingStub(),
+        event_bus=EventingStub().bus,
     )
     runtime_context = RuntimeContext(
         kernel=object(),
@@ -143,6 +146,7 @@ def test_kernel_container_shared_identity():
         uow_factory=lambda: None,
         http_client=object(),
         eventing_manager=EventingStub(),
+        event_bus=EventingStub().bus,
     )
     kernel_stub = object()
     container.bind_runtime("kernel", kernel_stub)

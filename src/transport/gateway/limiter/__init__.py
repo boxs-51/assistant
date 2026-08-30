@@ -6,8 +6,7 @@ from ....circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
 from ....infrastructure.storage.interfaces.cache import CacheDriver
 from ....domain.schemas.identity import Identity
 
-from ....infrastructure.config import settings
-
+from ....infrastructure.config.schemas import RateLimitSettings
 logger = structlog.get_logger(__name__)
 
 class RateLimiterManager:
@@ -15,7 +14,7 @@ class RateLimiterManager:
     REFACTORED: Lớp quản lý chính, đóng vai trò là entry point cho hệ thống.
     Sử dụng RateLimiterFactory để tạo ra thuật toán limiter phù hợp.
     """
-    def __init__(self, cache_driver: CacheDriver, circuit_breaker_manager: CircuitBreakerManager):
+    def __init__(self, cache_driver: CacheDriver, circuit_breaker_manager: CircuitBreakerManager, config: RateLimitSettings):
         # Dependency Injection: chỉ nhận CacheDriver abstraction.
         #
         # RedisStorage không thực hiện network I/O trong constructor.
@@ -24,12 +23,11 @@ class RateLimiterManager:
         self.circuit_breaker_manager = circuit_breaker_manager
         # Factory sẽ đọc config và tạo ra limiter tương ứng.
         # Truyền cả hai phần của config để factory có thể linh hoạt.
-        self.config = settings
 
         self.limiter = RateLimiterFactory.create_limiter(
-            algorithm=self.config.rate_limit.algorithm.lower(),
+            algorithm=config.algorithm.lower(),
             storage=storage,
-            config=self.config # Truyền toàn bộ object config
+            config=config # Truyền toàn bộ object config
         )
 
     async def is_allowed(self, identity: Identity, cost: int = 1) -> tuple[bool, float]:

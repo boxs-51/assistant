@@ -2,10 +2,11 @@ import pytest
 from io import BytesIO
 from src.domain.schemas import ModelCapability
 from src.provider.mock import MockProvider
+from src.infrastructure.config.schemas import ProviderConfig
 
 @pytest.mark.asyncio
 async def test_chat_is_deterministic():
-    p=MockProvider()
+    p=MockProvider(config=ProviderConfig(base_url="http://mock.invalid"))
     body={"model":"mock-chat","messages":[{"role":"user","content":"hello world"}]}
     a=await p.chat.chat(body=body); b=await p.chat.chat(body=body)
     assert a.id == b.id
@@ -14,13 +15,14 @@ async def test_chat_is_deterministic():
 
 @pytest.mark.asyncio
 async def test_embeddings_are_deterministic():
-    p=MockProvider()
+    p=MockProvider(config=ProviderConfig(base_url="http://mock.invalid"))
     body={"model":"mock-embedding","input":["hello"]}
     assert await p.embeddings.embeddings(body=body) == await p.embeddings.embeddings(body=body)
 
 @pytest.mark.asyncio
 async def test_files_round_trip_and_reset():
-    p=MockProvider(seed="test")
+    p=MockProvider(config=ProviderConfig(base_url="http://mock.invalid",
+                                       options={"seed" : "test"}))
     f=await p.files.upload_file(file_stream=BytesIO(b"hello"),file_size=5,mime_type="text/plain",display_name="a.txt")
     fid=f["name"]
     assert await p.files.download_file(file_id=fid) == b"hello"
@@ -30,7 +32,7 @@ async def test_files_round_trip_and_reset():
 
 @pytest.mark.asyncio
 async def test_network_guard():
-    p=MockProvider()
+    p=MockProvider(config=ProviderConfig(base_url="http://mock.invalid"))
     with pytest.raises(Exception) as exc:
         await p.send(None,"whatever",timeout=1)
     assert "mock_network_forbidden" in str(exc.value.error_code)

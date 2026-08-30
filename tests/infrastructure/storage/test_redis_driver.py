@@ -2,10 +2,17 @@ import pytest
 from unittest.mock import AsyncMock, patch
 
 from src.infrastructure.storage.drivers.redis.driver import RedisDriver
+from src.infrastructure.config.schemas import DriverConfig
 
+@pytest.fixture
+def config():
+    return DriverConfig(
+            options = 
+                {"url": "redis://localhost:6379/0"}
+    )
 
 @pytest.mark.asyncio
-async def test_connect_success():
+async def test_connect_success(config):
     client = AsyncMock()
     client.ping.return_value = True
 
@@ -13,9 +20,7 @@ async def test_connect_success():
         "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
-        driver = RedisDriver({
-            "url": "redis://localhost:6379/0",
-        })
+        driver = RedisDriver(config)
 
         await driver.connect()
 
@@ -24,7 +29,7 @@ async def test_connect_success():
 
 
 @pytest.mark.asyncio
-async def test_connect_failure_closes_client_and_raises():
+async def test_connect_failure_closes_client_and_raises(config):
     client = AsyncMock()
     client.ping.side_effect = RuntimeError("redis unavailable")
 
@@ -32,9 +37,7 @@ async def test_connect_failure_closes_client_and_raises():
         "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
-        driver = RedisDriver({
-            "url": "redis://localhost:6379/0",
-        })
+        driver = RedisDriver(config)
 
         with pytest.raises(RuntimeError, match="redis unavailable"):
             await driver.connect()
@@ -45,7 +48,7 @@ async def test_connect_failure_closes_client_and_raises():
 
 
 @pytest.mark.asyncio
-async def test_disconnect_is_idempotent():
+async def test_disconnect_is_idempotent(config):
     client = AsyncMock()
     client.ping.return_value = True
 
@@ -53,9 +56,7 @@ async def test_disconnect_is_idempotent():
         "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
-        driver = RedisDriver({
-            "url": "redis://localhost:6379/0",
-        })
+        driver = RedisDriver(config)
 
         await driver.connect()
         await driver.disconnect()
@@ -67,7 +68,7 @@ async def test_disconnect_is_idempotent():
 
 
 @pytest.mark.asyncio
-async def test_get_uses_cache_driver():
+async def test_get_uses_cache_driver(config):
     client = AsyncMock()
     client.ping.return_value = True
     client.get.return_value = "value"
@@ -76,9 +77,7 @@ async def test_get_uses_cache_driver():
         "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
-        driver = RedisDriver({
-            "url": "redis://localhost:6379/0",
-        })
+        driver = RedisDriver(config)
         await driver.connect()
         result = await driver.get("key")
 
@@ -87,7 +86,7 @@ async def test_get_uses_cache_driver():
 
 
 @pytest.mark.asyncio
-async def test_execute_script_falls_back_to_eval_on_noscript():
+async def test_execute_script_falls_back_to_eval_on_noscript(config):
     client = AsyncMock()
     client.ping.return_value = True
 
@@ -103,9 +102,7 @@ async def test_execute_script_falls_back_to_eval_on_noscript():
         "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
-        driver = RedisDriver({
-            "url": "redis://localhost:6379/0",
-        })
+        driver = RedisDriver(config)
 
         await driver.connect()
 
@@ -121,10 +118,8 @@ async def test_execute_script_falls_back_to_eval_on_noscript():
 
 
 @pytest.mark.asyncio
-async def test_operation_before_connect_fails_fast():
-    driver = RedisDriver({
-        "url": "redis://localhost:6379/0",
-    })
+async def test_operation_before_connect_fails_fast(config):
+    driver = RedisDriver(config)
 
     with pytest.raises(RuntimeError, match="not connected"):
         await driver.get("key")

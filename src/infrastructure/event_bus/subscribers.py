@@ -20,6 +20,9 @@ async def handle_failed_event_dlq(event: BaseEvent):
         error_details=payload, # Ghi lại toàn bộ payload của sự kiện lỗi
     )
 
+async def  handle_failed_event(event: BaseEvent):
+    pass
+
 async def handle_user_created(event: BaseEvent, session_repo: SessionRepository):
     """
     Một ví dụ về hàm xử lý sự kiện (event handler).
@@ -27,6 +30,9 @@ async def handle_user_created(event: BaseEvent, session_repo: SessionRepository)
     Nó tự động nhận `session_repo` nhờ Dependency Injection.
     """
     logger.info("🎉 New user has registered!", user_id=event.payload.get("user_id"), repo_instance=session_repo.__class__.__name__)
+
+async def handle_user_welcome_email(event: BaseEvent):
+    pass
 
 async def handle_chat_session_started(event: BaseEvent):
     """
@@ -71,13 +77,18 @@ async def handle_session_summary_needed(event: BaseEvent, context_engine: Contex
     if session_id:
         logger.info("Triggering session summary", session_id=session_id)
 
+async def  handle_unknown_event(event: BaseEvent):
+    pass
 
 def register_subscribers(registry):
     registry.register("system.event.failed", handle_failed_event_dlq)
+    registry.register("system.event.failed", handle_failed_event)
     registry.register("user.created", handle_user_created)
+    registry.register("user.created", handle_user_welcome_email)
     registry.register("chat.session.started", handle_chat_session_started)
     registry.register("tool.execution.started", handle_tool_execution_started)
     registry.register("tool.execution.completed", handle_tool_execution_completed)
+    registry.register("unknown.event", handle_unknown_event)
     #registry.register_for_all(broadcast_to_websockets)
     registry.register("session.summary.needed", handle_session_summary_needed)
         # Giả sử ContextEngine có phương thức này

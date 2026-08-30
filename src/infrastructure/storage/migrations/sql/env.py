@@ -40,7 +40,7 @@ target_metadata = Base.metadata
 # --- CẤU HÌNH DATABASE URL ---
 # Lấy URL từ cấu hình của ứng dụng thay vì hardcode
 # Tạm thời chúng ta sẽ hardcode URL của SQLite để đơn giản hóa
-# Trong thực tế, bạn sẽ đọc từ file settings của ứng dụng
+# Trong thực tế, bạn sẽ đọc từ file config của ứng dụng
 DB_URL = "sqlite+aiosqlite:///gateway_storage.db"
 config.set_main_option("sqlalchemy.url", DB_URL)
 

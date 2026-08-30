@@ -2,7 +2,7 @@ from typing import Annotated
 from fastapi import Depends
 from .schemas import (
     ConfigSchema, GatewaySettings, AuthenticationSettings, 
-    ProviderSettings, OpenAISettings, RedisSettings
+    ProviderSettings, OpenAISettings
 )
 from .manager import ConfigManager
 
@@ -15,24 +15,24 @@ def get_settings(
     return manager.config
 
 def get_auth_settings(
-    settings: ConfigSchema = Depends(get_settings)
+    config: ConfigSchema = Depends(get_settings)
 ) -> AuthenticationSettings:
-    return settings.auth
+    return config.auth
 
 def get_gateway_settings(
-    settings: ConfigSchema = Depends(get_settings)
+    config: ConfigSchema = Depends(get_settings)
 ) -> GatewaySettings:
-    return settings.gateway
+    return config.gateway
 
 def get_provider_settings(
-    settings: ConfigSchema = Depends(get_settings)
+    config: ConfigSchema = Depends(get_settings)
 ) -> ProviderSettings:
-    return settings.provider
+    return config.provider
 
 def get_openai_settings(
-    settings: ConfigSchema = Depends(get_settings)
+    config: ConfigSchema = Depends(get_settings)
 ) -> OpenAISettings:
-    return settings.openai
+    return config.openai
 
 # --- Type Aliases hỗ trợ Clean Code trong Router (FastAPI 0.95+) ---
 SettingsDep = Annotated[ConfigSchema, Depends(get_settings)]

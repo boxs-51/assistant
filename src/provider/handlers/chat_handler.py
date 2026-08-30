@@ -7,7 +7,6 @@ from opentelemetry import trace
 from .base import BaseExecutionHandler
 from ..exceptions import NoAvailableProviderError, ProviderError
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
-from ...infrastructure.config import settings
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)

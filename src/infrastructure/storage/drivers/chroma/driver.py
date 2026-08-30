@@ -9,7 +9,7 @@ from opentelemetry import trace
 
 from ...interfaces.vector import VectorStorageDriver
 from ...models.chroma.base import CacheEntry, CacheMetadata, CacheGetResult# Vẫn giữ models ở đây
-from ....config import settings
+from ....config.schemas import DriverConfig
 
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
@@ -20,14 +20,17 @@ class ChromaVectorDriver(VectorStorageDriver):
     Triển khai Vector Storage Driver sử dụng ChromaDB.
     Đây là một driver cụ thể của VectorStorageDriver interface.
     """
-    def __init__(self, config: dict):
+    def __init__(self, config: DriverConfig):
         self.config = config
-        chroma_path = self.config.get("path", "./chroma_db")
+        self.threshold = config.options.get("threshold", 0.95)
+        self.expire = config.options.get("expire", 3600)
+
+        chroma_path = config.options.get("path", "./chroma_db")
         logger.info("Initializing ChromaDB driver...", path=chroma_path)
-        os.makedirs(os.path.dirname(settings.semantic_cache.path), exist_ok=True)
+        os.makedirs(os.path.dirname(chroma_path), exist_ok=True)
         self.client = chromadb.PersistentClient(path=chroma_path)
         self.collection = self.client.get_or_create_collection(
-            name=self.config.get("collection", "default_collection"),
+            name=config.options.get("collection", "default_collection"),
             metadata={"hnsw:space": "cosine"}
         )
         logger.info("ChromaDB backend is ready.")
@@ -50,7 +53,7 @@ class ChromaVectorDriver(VectorStorageDriver):
                     span.set_attribute("best_distance", distance)
 
                     # Chỉ xử lý nếu kết quả trả về nằm trong ngưỡng cho phép
-                    if distance > settings.semantic_cache.similarity_threshold:
+                    if distance > self.threshold:
                         return None, distance, "below_threshold"
 
                     # Khôi phục CacheEntry từ metadata
@@ -94,8 +97,8 @@ class ChromaVectorDriver(VectorStorageDriver):
         with tracer.start_as_current_span("chroma_upsert"):
             try:
                 # Cập nhật thời gian hết hạn cho metadata trước khi lưu
-                if settings.redis.cache_expire_seconds > 0:
-                    entry.metadata.expires_at = time.time() + settings.redis.cache_expire_seconds
+                if self.expire > 0:
+                    entry.metadata.expires_at = time.time() + self.expire
 
                 await asyncio.to_thread(
                     self.collection.upsert,
@@ -116,8 +119,8 @@ class ChromaVectorDriver(VectorStorageDriver):
         with tracer.start_as_current_span("chroma_batch_upsert"):
             try:
                 for entry in entries:
-                    if settings.redis.cache_expire_seconds > 0:
-                        entry.metadata.expires_at = time.time() + settings.redis.cache_expire_seconds
+                    if self.expire > 0:
+                        entry.metadata.expires_at = time.time() + self.expire
                 
                 await asyncio.to_thread(
                     self.collection.upsert,

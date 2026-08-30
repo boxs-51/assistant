@@ -14,7 +14,6 @@ from .....domain.schemas import GatewayChatRequest
 from .....domain.schemas.identity import Identity
 from ...authentication.dependency import get_current_identity
 from .....domain.schemas.event import BaseEvent
-from .....infrastructure.config import settings
 from ...dependencies import get_event_bus, get_config
 from .....infrastructure.config.core import ConfigSchema
 from .....infrastructure.event_bus.bus import EventBus
@@ -71,14 +70,15 @@ async def chat_completions_proxy(
                 if evt.session_id == session_id:
                     await queue.put({"error": evt.payload.get("error", "Unknown stream error")})
 
-            # 1. Register local handlers
-            event_bus.subscribe("provider.stream.chunk_emitted", _on_chunk)
-            event_bus.subscribe("provider.stream.completed", _on_complete)
-            event_bus.subscribe("provider.failed", _on_fail)
-
             yield ": ping\n\n"
+
             try:
-                # 2. Publish request event và chờ Enqueue thành công
+                # 1. Đăng ký handlers bên trong try block
+                event_bus.subscribe("provider.stream.chunk_emitted", _on_chunk)
+                event_bus.subscribe("provider.stream.completed", _on_complete)
+                event_bus.subscribe("provider.failed", _on_fail)
+
+                # 2. Publish request event
                 await event_bus.publish(
                     BaseEvent(
                         event_name="provider.chat.execute",
@@ -109,10 +109,10 @@ async def chat_completions_proxy(
                         yield "data: [DONE]\n\n"
                         break
                     else:
-                        yield str(item)
+                        yield str(item) if str(item).startswith("data:") else f"data: {json.dumps(item)}\n\n"
 
             finally:
-                # Clean up local event listeners
+                # 4. Luôn đảm bảo dọn dẹp listeners
                 event_bus.unsubscribe("provider.stream.chunk_emitted", _on_chunk)
                 event_bus.unsubscribe("provider.stream.completed", _on_complete)
                 event_bus.unsubscribe("provider.failed", _on_fail)

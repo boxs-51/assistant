@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock
 
 from src.transport.gateway.limiter import RateLimiterManager
 from src.circuit_breaker import CircuitBreakerManager
+from src.infrastructure.config.schemas import CircuitBreakerSettings, RateLimitSettings
 
 
 class FakeCacheDriver:
@@ -32,7 +33,8 @@ class FakeCacheDriver:
 async def test_manager_accepts_cache_driver_abstraction():
     manager = RateLimiterManager(
         cache_driver=FakeCacheDriver(),
-        circuit_breaker_manager=CircuitBreakerManager(),
+        circuit_breaker_manager=CircuitBreakerManager(CircuitBreakerSettings()),
+        config=RateLimitSettings()
     )
 
     assert manager.limiter is not None

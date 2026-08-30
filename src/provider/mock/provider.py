@@ -8,7 +8,7 @@ import os
 import time
 from typing import Any, AsyncGenerator, Dict
 from io import BytesIO
-
+import structlog
 from ..core import ApiTypeMapper, BaseProvider, EndpointBuilder, ModelCapabilityManager, ModelMapper, NoAuth
 from ..exceptions import ProviderError
 from .errors import build_mock_error
@@ -19,7 +19,10 @@ from ...domain.schemas import (
     GatewayStreamChoice, GatewayStreamChunk, GatewayStreamDelta, GatewayUsage,
     ModelCapability, ModelInfo, ModelList,
 )
-from ...infrastructure.config import settings
+
+from ...infrastructure.config.schemas import ProviderConfig
+
+logger = structlog.get_logger(__name__)
 
 MOCK_CHAT_MODEL = "mock-chat"
 MOCK_EMBEDDING_MODEL = "mock-embedding"
@@ -66,59 +69,123 @@ MODEL_CAPABILITIES: dict[str, set[ModelCapability]] = {
 
 
 class MockChat:
-    def __init__(self, provider): self.provider = provider
+    def __init__(self, provider):
+        self.provider = provider
 
     @staticmethod
-    def _text(body):
-        for message in reversed(body.get("messages") or []):
+    def _text(body: Dict[str, Any]) -> str:
+        messages = body.get("messages") or []
+        for message in reversed(messages):
             if message.get("role") == "user":
                 value = message.get("content", "")
-                return value if isinstance(value, str) else str(value)
+                if isinstance(value, str):
+                    return value
+                if isinstance(value, list):
+                    parts = []
+                    for item in value:
+                        if isinstance(item, str):
+                            parts.append(item)
+                        elif isinstance(item, dict) and item.get("type") == "text":
+                            parts.append(item.get("text", ""))
+                    return " ".join(parts)
+                return str(value)
         return ""
 
-    async def chat(self, **kwargs):
+    def _build_chat_answer(self, text: str) -> str:
+        if self.provider.scenario.fixed_chat_response is not None:
+            return self.provider.scenario.fixed_chat_response
+        if text:
+            return f"mock:{text}"
+        return "mock:ok"
+
+    def _build_stream_answer(self, text: str) -> str:
+        if self.provider.scenario.fixed_chat_response is not None:
+            return self.provider.scenario.fixed_chat_response
+        if text:
+            return " ".join(f"mock:{word}" for word in text.split())
+        return "mock:ok"
+
+    async def chat(self, **kwargs) -> GatewayResponse:
         self.provider._before("chat")
         body = kwargs.get("body") or {}
         model = body.get("model") or MOCK_CHAT_MODEL
         text = self._text(body)
-        answer = self.provider.scenario.fixed_chat_response or (f"mock:{text}" if text else "mock:ok")
-        prompt_tokens = max(1, len(text.split()))
-        completion_tokens = max(1, len(answer.split()))
+        answer = self._build_chat_answer(text)
+
+        prompt_tokens = max(1, len(text.split())) if text else 1
+        completion_tokens = max(1, len(answer.split())) if answer else 1
+
         return GatewayResponse(
             id=self.provider.state.stable_id("chat", self.provider.request_key(body)),
-            model=model, provider=self.provider.name,
-            choices=[GatewayChoice(index=0, message=GatewayMessage(role="assistant", content=answer), finish_reason="stop")],
-            usage=GatewayUsage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens, total_tokens=prompt_tokens + completion_tokens),
+            model=model,
+            provider=self.provider.name,
+            choices=[
+                GatewayChoice(
+                    index=0,
+                    message=GatewayMessage(role="assistant", content=answer),
+                    finish_reason="stop"
+                )
+            ],
+            usage=GatewayUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens
+            ),
             metadata={"mock": True, "scenario": self.provider.scenario.name},
         )
 
     async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
+        self.provider._before("chat_stream")
         self.provider._check_stream_fault(operation="chat_stream", phase="pre_stream")
+
         body = kwargs.get("body") or {}
         model = body.get("model") or MOCK_CHAT_MODEL
         text = self._text(body)
-        answer = self.provider.scenario.fixed_chat_response or (f"mock:{text}" if text else "mock:ok")
-        words = answer.split()
+        answer = self._build_stream_answer(text)
+
+        words = answer.split() if answer else [""]
         size = max(1, self.provider.scenario.stream_chunk_size)
         chunk_number = 0
         request_key = self.provider.request_key(body)
-        for start in range(0, len(words), size):
-            if self.provider.scenario.fail_after_chunks is not None and chunk_number >= self.provider.scenario.fail_after_chunks:
+        total_words = len(words)
+
+        for start in range(0, total_words, size):
+            if (
+                self.provider.scenario.fail_after_chunks is not None
+                and chunk_number >= self.provider.scenario.fail_after_chunks
+            ):
                 self.provider._check_stream_fault(
-                    operation="chat_stream", 
-                    phase="mid_stream", 
+                    operation="chat_stream",
+                    phase="mid_stream",
                     chunk_number=chunk_number
                 )
+
+            is_last_chunk = (start + size) >= total_words
             part = " ".join(words[start:start + size])
-            if start + size < len(words): part += " "
+            if not is_last_chunk:
+                part += " "
+
             if self.provider.scenario.latency_ms:
-                await asyncio.sleep(self.provider.scenario.latency_ms / 1000)
+                await asyncio.sleep(self.provider.scenario.latency_ms / 1000.0)
+
             yield GatewayStreamChunk(
-                id=self.provider.state.stable_id("stream", request_key), model=model, provider=self.provider.name,
-                choices=[GatewayStreamChoice(index=0, delta=GatewayStreamDelta(content=part, role="assistant" if start == 0 else None), finish_reason="stop" if start + size >= len(words) else None)],
+                id=self.provider.state.stable_id("stream", request_key),
+                model=model,
+                provider=self.provider.name,
+                choices=[
+                    GatewayStreamChoice(
+                        index=0,
+                        delta=GatewayStreamDelta(
+                            content=part,
+                            role="assistant" if start == 0 else None
+                        ),
+                        finish_reason="stop" if is_last_chunk else None
+                    )
+                ],
                 metadata={"mock": True, "scenario": self.provider.scenario.name},
             )
             chunk_number += 1
+
         self.provider._check_stream_fault(operation="chat_stream", phase="post_stream")
 
 
@@ -161,26 +228,57 @@ class MockEmbeddings:
 
 
 class MockFiles:
-    def __init__(self, provider): self.provider = provider
+    def __init__(self, provider): 
+        self.provider = provider
+
     async def list_files(self, **kwargs):
         self.provider._before("files.list")
-        return {"object":"list", "data":[{k:v for k,v in x.items() if k != "bytes"} for x in self.provider.state.files.values()], "next_page_token":None}
+        return {
+            "object": "list", 
+            "data": [{k: v for k, v in x.items() if k != "bytes"} for x in self.provider.state.files.values()], 
+            "next_page_token": None
+        }
+
     async def upload_file(self, **kwargs):
         self.provider._before("files.upload")
         stream = kwargs["file_stream"]
         content = stream.read()
         display = kwargs.get("display_name") or "file"
         file_id = self.provider.state.stable_id("file", display + ":" + hashlib.sha1(content).hexdigest())
-        self.provider.state.files[file_id] = {"name":file_id, "display_name":display, "mime_type":kwargs.get("mime_type") or "application/octet-stream", "size":len(content), "bytes":content, "created":0}
-        return {k:v for k,v in self.provider.state.files[file_id].items() if k != "bytes"}
+        
+        file_data = {
+            "name": file_id,
+            "display_name": display,
+            "filename": display,
+            "mime_type": kwargs.get("mime_type") or "application/octet-stream",
+            "size": len(content),
+            "bytes": content,
+            "created": 0,
+            "uri": f"mock://files/{file_id}"
+        }
+        self.provider.state.files[file_id] = file_data
+        return {k: v for k, v in file_data.items() if k != "bytes"}
+
     async def get_file(self, **kwargs):
         self.provider._before("files.get")
         file_id = kwargs.get("file_id") or kwargs.get("file_name")
-        return {k:v for k,v in self.provider.state.files[file_id].items() if k != "bytes"}
+        file_data = self.provider.state.files.get(file_id)
+        if not file_data:
+            raise KeyError(f"File '{file_id}' not found.")
+        return {k: v for k, v in file_data.items() if k != "bytes"}
+
     async def download_file(self, **kwargs):
         self.provider._before("files.download")
         file_id = kwargs.get("file_id") or kwargs.get("file_name")
-        return self.provider.state.files[file_id]["bytes"]
+        uri = kwargs.get("uri")
+
+        if not file_id and uri:
+            file_id = uri.split("/")[-1]
+
+        if file_id in self.provider.state.files:
+            return self.provider.state.files[file_id]["bytes"]
+        raise KeyError(f"File '{file_id}' not found for download.")
+
     async def delete_file(self, **kwargs):
         self.provider._before("files.delete")
         file_id = kwargs.get("file_id") or kwargs.get("file_name")
@@ -232,18 +330,26 @@ class MockTooling:
 
 class MockProvider(BaseProvider):
     """Provider that never performs outbound network I/O."""
-    def __init__(self, *, seed="assistant-offline-mock", scenario: MockScenario | None = None):
-        super().__init__(provider_name="mock", auth_strategy=NoAuth(), endpoint_builder=EndpointBuilder(base_url="http://mock.invalid"), api_mapper=ApiTypeMapper(api_map={}), model_mapper=ModelMapper(model_map={m:m for m in MODEL_CAPABILITIES}), capability_manager=ModelCapabilityManager(provider_name="mock"))
+    def __init__(self, *, config: ProviderConfig, scenario: MockScenario | None = None):
+
+        super().__init__(
+            provider_name="mock", 
+            auth_strategy=NoAuth(), 
+            endpoint_builder=EndpointBuilder(base_url=config.base_url), 
+            api_mapper=ApiTypeMapper(api_map={}), 
+            model_mapper=ModelMapper(model_map={m:m for m in MODEL_CAPABILITIES}), 
+            capability_manager=ModelCapabilityManager(provider_name="mock"))
+        
+        self.config = config
+        seed = config.options.get("seed", "assistant-offline-mock")
         self.state=MockState(seed); self.scenario=(scenario or MockScenario()).clone()
         self.chat=MockChat(self); self.models=MockModels(self); self.embeddings=MockEmbeddings(self); self.files=MockFiles(self)
         self.audio=MockAudio(self); self.vision=MockVision(self); self.image=MockImage(self); self.video=MockVideo(self)
         self.batch=MockBatch(self); self.tokens=MockTokens(self); self.reranking=MockReranking(self); self.tooling=MockTooling(self)
+        logger.info("Strict offline mock-only discovery enabled")
 
-    @classmethod
-    def is_configured(cls):
-        env=os.getenv("GATEWAY_PROVIDER__MOCK_ENABLED","").lower() in {"1","true","yes","on"}
-        try: return env or bool(settings.provider.mock_enabled)
-        except Exception: return env
+    def is_configured(self):
+        return bool(self.config.enabled)
 
     def request_key(self, payload): return hashlib.sha256(repr(payload).encode()).hexdigest()[:24]
     def _raise_fault(self, operation: str) -> None:
@@ -274,8 +380,14 @@ class MockProvider(BaseProvider):
             await asyncio.sleep(self.scenario.latency_ms / 1000)
 
     def _before(self, operation: str) -> None:
-        self.state.count(operation)
-        self._raise_fault(operation)
+        # Chỉ ném lỗi nếu operation nằm trong danh sách fail_operations bắt buộc
+        if operation in self.scenario.fail_operations:
+            self._raise_fault(operation)
+            
+        # Hoặc xử lý đếm số lần fail_next
+        if self.scenario.fail_next is not None and self.scenario.fail_next > 0:
+            self.scenario.fail_next -= 1
+            self._raise_fault(operation)
 
     
     def _check_stream_fault(self, operation: str, phase: str, chunk_number: int = 0) -> None:

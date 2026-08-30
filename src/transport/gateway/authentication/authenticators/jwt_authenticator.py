@@ -8,7 +8,7 @@ from typing import Callable
 
 logger = structlog.get_logger(__name__)
 
-# TODO: Đặt chuỗi Guest Pass Token cố định hoặc lấy từ config/settings
+# TODO: Đặt chuỗi Guest Pass Token cố định hoặc lấy từ config
 GUEST_PASS_TOKEN = "YOUR_GUEST_PASS_JWT_HERE"
 
 class JWTAuthenticator(AuthenticatorInterface):

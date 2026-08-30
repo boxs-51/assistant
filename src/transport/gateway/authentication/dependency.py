@@ -1,12 +1,22 @@
 # authentication/dependency.py
 from fastapi import Request, HTTPException, status, Depends
+from typing import Any
 from ....domain.schemas.identity import Identity
-from ....infrastructure.config import settings
+from ....infrastructure.config import ConfigSchema
+from ....application import ApplicationContainer
+from ...gateway.dependencies import get_config, get_container
+
 
 # Lấy danh sách IP được phép từ file cấu hình (Mặc định cho phép localhost nếu không cấu hình)
 
+def get_api_key_service(
+    container: ApplicationContainer = Depends(get_container)
+) -> Any:
+    """FastAPI Dependency để lấy APIKeyService."""
+    return container.require("api_key_service")
 
-async def verify_admin_ip(request: Request):
+
+async def verify_admin_ip(request: Request, config: ConfigSchema = Depends(get_config)):
     """
     Dependency kiểm tra IP Client có thuộc danh sách Whitelist cho Admin hay không.
     """
@@ -16,7 +26,7 @@ async def verify_admin_ip(request: Request):
         client_ip = x_forwarded_for.split(",")[0].strip()
     else:
         client_ip = request.client.host if request.client else None
-    ALLOWED_ADMIN_IPS = getattr(settings.auth.admin_ips, "allowed_ips", ["127.0.0.1", "::1"])
+    ALLOWED_ADMIN_IPS = getattr(config.auth.admin_ips, "allowed_ips", ["127.0.0.1", "::1"])
     if not client_ip or client_ip not in ALLOWED_ADMIN_IPS:
         import structlog
         logger = structlog.get_logger(__name__)

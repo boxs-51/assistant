@@ -1,6 +1,7 @@
 import pytest
 from src.domain.schemas import ModelCapability
 from src.provider.mock import MODEL_CAPABILITIES, MockProvider
+from src.infrastructure.config.schemas import ProviderConfig
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,capability", [
@@ -14,13 +15,13 @@ from src.provider.mock import MODEL_CAPABILITIES, MockProvider
     ("mock-rerank", ModelCapability.RERANK),
 ])
 async def test_capability_matrix(model, capability):
-    provider=MockProvider()
+    provider=MockProvider(config=ProviderConfig(base_url="http://mock.invalid"))
     assert capability in MODEL_CAPABILITIES[model]
     assert await provider.has_capability(model, capability, None, 1) is True
 
 @pytest.mark.asyncio
 async def test_all_mock_capabilities_are_offline():
-    p=MockProvider()
+    p=MockProvider(config=ProviderConfig(base_url="http://mock.invalid"))
     assert (await p.audio.speech_to_text())["mock"]
     assert (await p.audio.text_to_speech(text="hello"))["mock"]
     assert (await p.audio.audio_translation())["mock"]

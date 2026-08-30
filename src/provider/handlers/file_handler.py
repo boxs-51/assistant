@@ -2,7 +2,6 @@ import io
 import httpx
 from typing import Dict, Any
 from .base import BaseExecutionHandler
-from ...infrastructure.config import settings
 
 class FileOperationHandler(BaseExecutionHandler):
     """Xử lý các tác vụ quản lý tập tin (List, Upload, Metadata, Download, Delete)."""
@@ -47,15 +46,25 @@ class FileOperationHandler(BaseExecutionHandler):
                 timeout=timeout,
                 file_name=payload.get("file_id")
             )
-            if not meta.uri:
+
+            # Safely extract attributes from dict or object
+            get_val = lambda k, default=None: meta.get(k, default) if isinstance(meta, dict) else getattr(meta, k, default)
+
+            uri = get_val("uri")
+            mime_type = get_val("mime_type", "application/octet-stream")
+            filename = get_val("filename") or get_val("display_name", "file")
+
+            if not uri:
                 raise ValueError("File does not expose a valid download URI.")
             
             file_bytes = await provider.files.download_file(
                 http_client=http_client,
                 timeout=timeout,
-                uri=meta.uri
+                file_id=payload.get("file_id"),
+                uri=uri
             )
-            return {"bytes": file_bytes, "mime_type": meta.mime_type, "filename": meta.filename}
+            return {"bytes": file_bytes, "mime_type": mime_type, "filename": filename}
+        
         elif action == "delete":
             return await provider.files.delete_file(
                 http_client=http_client,

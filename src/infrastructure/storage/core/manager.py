@@ -12,7 +12,7 @@ from ..drivers.chroma.driver import ChromaVectorDriver
 from ..repositories.sessions import SessionRepository
 from ..services.embedding_service import EmbeddingService
 
-from ...config import settings
+from ...config.schemas import ConfigSchema
 
 
 logger = structlog.get_logger(__name__)
@@ -32,8 +32,8 @@ class StorageEngine:
     StorageEngine không chứa business logic của từng loại cache.
     """
 
-    def __init__(self):
-        self.config = settings.storage
+    def __init__(self, config: ConfigSchema):
+        self.config = config
 
         self.drivers = DriverRegistry()
         self.repositories = RepositoryRegistry()
@@ -237,7 +237,7 @@ class StorageEngine:
             "in-memory": InMemoryDriver,
         }
 
-        if not self.config.drivers:
+        if not self.config.storage.drivers:
             logger.warning(
                 "No 'drivers' section found in storage "
                 "configuration."
@@ -245,7 +245,7 @@ class StorageEngine:
             return
 
         for driver_name, driver_config in (
-            self.config.drivers.items()
+            self.config.storage.drivers.items()
         ):
             if not driver_config.enabled:
                 logger.debug(
@@ -290,7 +290,7 @@ class StorageEngine:
             )
 
             instance = driver_class(
-                driver_config.model_dump()
+                driver_config
             )
 
             self.drivers.register(
@@ -379,7 +379,7 @@ class StorageEngine:
             chroma_driver = self.drivers.get("chroma")
 
             embedding_service = EmbeddingService(
-                settings.semantic_cache.model_dump()
+                self.config.semantic_cache.model_dump()
             )
 
             self.services[

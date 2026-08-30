@@ -2,7 +2,6 @@ import httpx
 from typing import Dict, Any
 from .base import BaseExecutionHandler
 from ...domain.schemas import ModelCapability
-from ...infrastructure.config import settings
 from ..exceptions import NoAvailableProviderError
 
 class EmbeddingExecutionHandler(BaseExecutionHandler):

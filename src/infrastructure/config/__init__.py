@@ -1,6 +1,10 @@
 from typing import Any
 from .core import ConfigurationRegistry, ConfigLoader
-from .schemas import ConfigSchema
+from .schemas import (ConfigSchema, CircuitBreakerProviderSettings, AuthenticationSettings,
+                      CircuitBreakerSettings, DriverConfig, FillterSettings, FrontendSettings,
+                      GatewaySettings, LoggingSettings, MetricsSettings, OAuthClientConfig,
+                      OAuthSettings, ProviderConfig, ProviderSettings, RateLimitSettings, SemanticCacheSettings,
+                      StorageSettings, TokenBudgetSettings, TracingSettings)
 from .base import BaseConfigSource
 from .exceptions import ConfigError, ConfigValidationError
 from .manager import ConfigManager
@@ -41,4 +45,8 @@ settings: ConfigSchema = _SettingsProxy() # type: ignore
 
 __all__ = ["ConfigurationRegistry", "ConfigLoader", "ConfigSchema",
            "BaseConfigSource", "ConfigError", "ConfigValidationError",
-           "ConfigManager"]
+           "ConfigManager", "CircuitBreakerProviderSettings", "AuthenticationSettings",
+            "CircuitBreakerSettings", "DriverConfig", "FillterSettings", "FrontendSettings",
+            "GatewaySettings", "LoggingSettings", "MetricsSettings", "OAuthClientConfig",
+            "OAuthSettings", "ProviderConfig", "ProviderSettings", "RateLimitSettings", "SemanticCacheSettings",
+            "StorageSettings", "TokenBudgetSettings", "TracingSettings"]

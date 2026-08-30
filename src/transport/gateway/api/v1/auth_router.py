@@ -5,8 +5,8 @@ from urllib.parse import urlencode
 import structlog
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse, RedirectResponse
+from authlib.integrations.starlette_client import OAuth
 
-from .....application.container import ApplicationContainer
 from .....domain.schemas.auth import (
     AccessTokenSchema,
     APIKeyCreateSchema,
@@ -20,11 +20,9 @@ from .....domain.schemas.auth import (
     UserMeSchema,
     VerifyOTPRequest,
 )
-from .....domain.schemas.event import BaseEvent
+from .....infrastructure.event_bus import EventBus
 from .....domain.schemas.identity import Identity
-from .....infrastructure.config import settings
-from .....infrastructure.storage.core.manager import StorageEngine
-from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from .....infrastructure.config import ConfigSchema 
 from ...authentication.dependency import get_current_identity
 from ...authentication.exceptions import (
     InvalidCredentialsError,
@@ -32,76 +30,18 @@ from ...authentication.exceptions import (
     OTPInvalidError,
 )
 from ...authentication.services.api_key_service import APIKeyService
-from ...authentication.services.authentication_facade import AuthenticationFacade
-from ...authentication.services.login_service import LoginService
-from ...authentication.services.oauth_service import OAuthService
-from ...authentication.services.otp_service import OTPStorageService
-from ...authentication.services.registration_service import RegistrationService
-from ...authentication.services.token_service import TokenService
-from ...authentication.services.user_service import UserService
-from ...dependencies import get_container
+from ...authentication.authentication import Authentication
 
-router = APIRouter(prefix="/auth", tags=["Authentication"])
+from ...authentication.dependency import get_api_key_service
+from ...dependencies import get_config, get_event_bus, get_oauth, get_auth
+
+router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
 logger = structlog.get_logger(__name__)
-
-
-def get_uow_factory(container: ApplicationContainer = Depends(get_container)):
-    """FastAPI Dependency để lấy Unit of Work Factory."""
-    storage: StorageEngine = container.storage
-    db_driver = storage.drivers.get("sqlite")
-    return lambda: SqlAlchemyUnitOfWork(db_driver)
-
-
-def get_otp_service(
-    container: ApplicationContainer = Depends(get_container),
-    uow_factory=Depends(get_uow_factory),
-) -> OTPStorageService:
-    """FastAPI Dependency để lấy OTPStorageService."""
-    storage: StorageEngine = container.storage
-    redis_driver = storage.drivers.get("redis")
-    return OTPStorageService(redis_driver._client if redis_driver else None, uow_factory)
-
-
-def get_auth_facade(
-    container: ApplicationContainer = Depends(get_container),
-    uow_factory=Depends(get_uow_factory),
-    otp_service: OTPStorageService = Depends(get_otp_service),
-) -> AuthenticationFacade:
-    """FastAPI Dependency để lấy AuthenticationFacade."""
-    storage: StorageEngine = container.storage
-    session_repo = storage.repositories.get("sessions")
-
-    token_service = TokenService(
-        uow_factory=uow_factory,
-        session_repo=session_repo,
-    )
-    event_bus = container.eventing_manager.bus
-
-    registration_service = RegistrationService(uow_factory, otp_service, token_service, event_bus)
-    login_service = LoginService(uow_factory, token_service)
-    oauth_service = OAuthService(uow_factory, token_service, event_bus)
-    user_service = UserService(uow_factory)
-
-    return AuthenticationFacade(
-        registration_service=registration_service,
-        login_service=login_service,
-        oauth_service=oauth_service,
-        token_service=token_service,
-        user_service=user_service,
-    )
-
-
-def get_api_key_service(
-    uow_factory=Depends(get_uow_factory),
-) -> APIKeyService:
-    """FastAPI Dependency để lấy APIKeyService."""
-    return APIKeyService(uow_factory=uow_factory)
-
 
 @router.post("/register/initiate")
 async def register_or_resend_otp(
     user_data: UserCreateSchema,
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
+    auth_facade: Authentication = Depends(get_auth),
 ):
     """
     Endpoint xử lý Đăng ký ban đầu VÀ Gửi lại mã OTP (Resend).
@@ -125,7 +65,7 @@ async def register_or_resend_otp(
 @router.post("/register/verify", response_model=TokenSchema)
 async def verify_otp_and_complete(
     payload: VerifyOTPRequest,
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
+    auth_facade: Authentication = Depends(get_auth),
 ):
     """
     Endpoint nhận OTP từ Client để xác thực hoàn tất đăng ký.
@@ -143,11 +83,10 @@ async def verify_otp_and_complete(
 @router.post("/login", response_model=TokenSchema)
 async def login_for_access_token(
     login_data: LoginRequestSchema,
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
-    container: ApplicationContainer = Depends(get_container),
+    auth_facade: Authentication = Depends(get_auth),
+    event_bus: EventBus = Depends(get_event_bus),
 ):
     """Endpoint để đăng nhập và nhận token."""
-    event_bus = container.eventing_manager.bus
     try:
         tokens = await auth_facade.login(login_data)
         return tokens
@@ -162,13 +101,12 @@ async def login_for_access_token(
 @router.post("/refresh", response_model=AccessTokenSchema)
 async def refresh_token(
     refresh_data: RefreshRequestSchema,
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
-    container: ApplicationContainer = Depends(get_container),
+    auth_facade: Authentication = Depends(get_auth),
+    event_bus: EventBus = Depends(get_event_bus),
 ):
     """
     Làm mới access token bằng refresh token.
     """
-    event_bus = container.eventing_manager.bus
     try:
         new_token = await auth_facade.refresh_access_token(refresh_data.refresh_token)
         return new_token
@@ -179,14 +117,13 @@ async def refresh_token(
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
     refresh_data: RefreshRequestSchema,
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
-    container: ApplicationContainer = Depends(get_container),
+    auth_facade: Authentication = Depends(get_auth),
+    event_bus: EventBus = Depends(get_event_bus),
 ):
     """
     Đăng xuất và thu hồi refresh token.
     Client nên xóa access token và refresh token ở phía của mình sau khi gọi endpoint này.
     """
-    event_bus = container.eventing_manager.bus
     try:
         await auth_facade.logout(refresh_data.refresh_token)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
@@ -199,12 +136,11 @@ async def logout(
 async def oauth_login_redirect(
     provider: str,
     request: Request,
-    container: ApplicationContainer = Depends(get_container),
+    oauth: OAuth = Depends(get_oauth),
 ):
     """
     Bắt đầu luồng đăng nhập OAuth bằng cách redirect người dùng đến trang của provider.
     """
-    oauth = container.get("oauth")
     if not oauth or provider not in oauth._clients:
         raise HTTPException(status_code=404, detail=f"OAuth provider '{provider}' not configured.")
 
@@ -216,13 +152,13 @@ async def oauth_login_redirect(
 async def oauth_callback(
     provider: str,
     request: Request,
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
-    container: ApplicationContainer = Depends(get_container),
+    auth_facade: Authentication = Depends(get_auth),
+    oauth: OAuth = Depends(get_oauth),
+    config: ConfigSchema = Depends(get_config),
 ):
     """
     Xử lý callback từ OAuth provider sau khi người dùng xác thực.
     """
-    oauth = container.get("oauth")
     oauth_client = oauth.create_client(provider) if oauth else None
     if not oauth_client:
         raise HTTPException(
@@ -255,7 +191,7 @@ async def oauth_callback(
 
         tokens = await auth_facade.handle_oauth_callback(provider, user_schema)
 
-        redirect_url = settings.frontend.oauth_callback_url
+        redirect_url = config.frontend.oauth_callback_url
         if not redirect_url:
             logger.warning("FRONTEND_OAUTH_CALLBACK_URL is not set. Returning tokens as JSON.")
             return JSONResponse(content=tokens.model_dump())
@@ -270,7 +206,7 @@ async def oauth_callback(
 async def oauth_login(
     provider: str,
     user_info: OAuthUserInfoSchema,
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
+    auth_facade: Authentication = Depends(get_auth),
 ):
     """
     Endpoint để xử lý callback sau khi người dùng xác thực thành công với OAuth provider.
@@ -293,12 +229,11 @@ async def create_api_key(
     key_data: APIKeyCreateSchema,
     identity: Identity = Depends(get_current_identity),
     api_key_service: APIKeyService = Depends(get_api_key_service),
-    container: ApplicationContainer = Depends(get_container),
+    event_bus: EventBus = Depends(get_event_bus),
 ):
     """
     Tạo một API key mới cho người dùng đã được xác thực (qua JWT).
     """
-    event_bus = container.eventing_manager.bus
     if identity.auth_type != "jwt":
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -317,6 +252,7 @@ async def create_api_key(
 async def list_api_keys(
     identity: Identity = Depends(get_current_identity),
     api_key_service: APIKeyService = Depends(get_api_key_service),
+    event_bus: EventBus = Depends(get_event_bus),
 ):
     """
     Liệt kê tất cả các API key của người dùng đã xác thực.
@@ -333,12 +269,11 @@ async def revoke_api_key(
     key_id: str,
     identity: Identity = Depends(get_current_identity),
     api_key_service: APIKeyService = Depends(get_api_key_service),
-    container: ApplicationContainer = Depends(get_container),
+    event_bus: EventBus = Depends(get_event_bus),
 ):
     """
     Thu hồi (vô hiệu hóa) một API key.
     """
-    event_bus = container.eventing_manager.bus
     if identity.auth_type != "jwt":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="This action requires user authentication.")
 
@@ -355,7 +290,8 @@ async def revoke_api_key(
 @router.get("/me", response_model=UserMeSchema)
 async def get_current_user(
     identity: Identity = Depends(get_current_identity),
-    auth_facade: AuthenticationFacade = Depends(get_auth_facade),
+    auth_facade: Authentication = Depends(get_auth),
+    event_bus: EventBus = Depends(get_event_bus),
 ):
     """
     Lấy thông tin của người dùng đã được xác thực (qua JWT).

@@ -1,7 +1,6 @@
 import httpx
 from typing import Dict, Any, Optional
 from .base import BaseExecutionHandler
-from ...infrastructure.config import settings
 
 class ModelOperationHandler(BaseExecutionHandler):
     """Xử lý tra cứu danh sách hoặc thông tin chi tiết Model từ các Provider."""

@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from src.domain.schemas.event import BaseEvent
 from src.domain.schemas.identity import Identity
-from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
+from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings, ProviderConfig, CircuitBreakerSettings, CircuitBreakerProviderSettings
 from src.provider.mock import MockProvider
 from src.provider.policies.routing_policy import RoutingPolicy
 from src.provider.executor import ProviderExecutor
@@ -32,9 +32,8 @@ from src.transport.gateway.api.v1 import (
     multi_agent_router,
     tool_router,
 )
-from src.transport.gateway.api.v1.auth_router import get_auth_facade, get_api_key_service
-from src.transport.gateway.authentication.dependency import get_current_identity, verify_admin_ip
-from src.transport.gateway.dependencies import get_container
+from src.transport.gateway.authentication.dependency import get_current_identity, verify_admin_ip, get_api_key_service
+from src.transport.gateway.dependencies import get_container, get_auth
 
 
 class InlineEventBus:
@@ -228,15 +227,17 @@ def offline_app():
     )
 
     config = ConfigSchema(
-        provider=ProviderSettings(priority=["mock"], mock_enabled=True, timeout=5, retry=0)
+        provider=ProviderSettings(priority=["mock"], timeout=5, retry=0,
+        config={"mock" : ProviderConfig(enabled=True, base_url = "http://testserver",options = {"seed" : "v1-offline"})}),
+        circuit_breaker=CircuitBreakerSettings()
     )
     bus = InlineEventBus()
     ws = FakeWS()
-    provider = MockProvider(seed="v1-offline")
-    breakers = CircuitBreakerManager()
+    provider = MockProvider(config=ProviderConfig(enabled=True, base_url = "http://testserver",options = {"seed" : "v1-offline"}))
+    breakers = CircuitBreakerManager(config=config.circuit_breaker)
     executor = ProviderExecutor(breakers, max_retries=0)
     providers = {"mock": provider}
-    routing = RoutingPolicy(providers, config=config)
+    routing = RoutingPolicy(providers, config=config.provider)
     handler_kwargs = dict(
         providers=providers,
         routing_policy=routing,
@@ -368,6 +369,7 @@ def offline_app():
         storage=SimpleNamespace(drivers={}, repositories={}),
         http_client=runtime._http_client,
         eventing_manager=SimpleNamespace(bus=bus, ws_manager=ws),
+        event_bus=bus,
         provider_runtime=runtime,
         circuit_breaker_manager=breakers,
         agent_registry=agent_registry,
@@ -375,7 +377,9 @@ def offline_app():
         multi_agent_coordinator=FakeCoordinator(),
         oauth=FakeOAuth(),
     )
-
+    container.require = lambda key: getattr(container, key)
+    app.state.container = container
+    
     for router in [
         auth_router.router,
         files_router.router,
@@ -394,15 +398,15 @@ def offline_app():
     app.dependency_overrides[get_container] = lambda: container
     app.dependency_overrides[get_current_identity] = lambda: identity
     app.dependency_overrides[verify_admin_ip] = lambda: None
-    app.dependency_overrides[get_auth_facade] = lambda: FakeAuthFacade()
+    app.dependency_overrides[get_auth] = lambda: FakeAuthFacade()
     app.dependency_overrides[get_api_key_service] = lambda: FakeAPIKeys()
 
     yield app
-    asyncio.get_event_loop().run_until_complete(runtime._http_client.aclose())
+    asyncio.run(runtime._http_client.aclose())
 
 
 @pytest.mark.asyncio
-async def test_v1_provider_apis_are_offline(offline_app):
+async def test_v1_provider_apis_are_offline(offline_app: FastAPI):
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         chat = await client.post(
@@ -459,7 +463,7 @@ async def test_v1_provider_apis_are_offline(offline_app):
 
 
 @pytest.mark.asyncio
-async def test_v1_streaming_chat_is_offline(offline_app):
+async def test_v1_streaming_chat_is_offline(offline_app: FastAPI):
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         async with client.stream(
@@ -481,7 +485,7 @@ async def test_v1_streaming_chat_is_offline(offline_app):
 
 
 @pytest.mark.asyncio
-async def test_v1_auth_api_is_offline(offline_app):
+async def test_v1_auth_api_is_offline(offline_app: FastAPI):
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         assert (await client.post("/v1/auth/register/initiate", json={"email":"offline@example.com","password":"secret123","name":"Offline"})).status_code == 200
@@ -497,7 +501,7 @@ async def test_v1_auth_api_is_offline(offline_app):
 
 
 @pytest.mark.asyncio
-async def test_v1_agent_tool_admin_health_multi_agent(offline_app):
+async def test_v1_agent_tool_admin_health_multi_agent(offline_app: FastAPI):
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         tool = {"name":"offline.tool","description":"offline","parameters":{"type":"object","properties":{}}}
@@ -525,7 +529,7 @@ async def test_v1_agent_tool_admin_health_multi_agent(offline_app):
         assert (await client.get("/stats")).status_code == 200
 
 
-def test_v1_events_websocket_offline(offline_app):
+def test_v1_events_websocket_offline(offline_app: FastAPI):
     with TestClient(offline_app) as client:
         with client.websocket_connect("/v1/events/ws") as ws:
             ws.send_json({"action":"subscribe","event_name":"mock.event"})

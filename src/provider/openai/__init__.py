@@ -9,7 +9,7 @@ from ..core import (
     ModelMapper
 )
 
-from ...infrastructure.config import settings
+from ...infrastructure.config.schemas import ProviderConfig
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo
 
 from .api.chats import OpenAIChats
@@ -32,11 +32,11 @@ OPENAI_API_MAP = {
 
 class OpenAIProvider(BaseProvider):
     """Nhà cung cấp cho các mô hình của OpenAI hoặc các API tương thích OpenAI."""
-    def __init__(self):
+    def __init__(self, config: ProviderConfig):
         super().__init__(
             provider_name="openai",
-            auth_strategy=BearerToken(api_key=str(settings.openai.api_key)),
-            endpoint_builder=EndpointBuilder(base_url=str(settings.openai.base_url)),
+            auth_strategy=BearerToken(api_key=str(config.api_key)),
+            endpoint_builder=EndpointBuilder(base_url=str(config.base_url)),
             api_mapper=ApiTypeMapper(api_map=OPENAI_API_MAP),
             model_mapper=ModelMapper(model_map=OPENAI_MODEL_MAP),
             capability_manager=ModelCapabilityManager(provider_name="openai"),
@@ -46,12 +46,12 @@ class OpenAIProvider(BaseProvider):
                 ProviderCapability.FINE_TUNING,
             }
         )
+        self.config = config
         self.chat = OpenAIChats(provider=self)
 
-    @classmethod
-    def is_configured(cls) -> bool:
+    def is_configured(self) -> bool:
         """Kiểm tra xem OpenAI API key đã được cung cấp hay chưa."""
-        return bool(settings.openai.api_key)
+        return bool(self.config.api_key)
 
 
 

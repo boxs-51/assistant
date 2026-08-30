@@ -14,7 +14,7 @@ from ..core import (
     ModelCapabilityManager, ProviderCapability,
     ModelMapper
 )
-from ...infrastructure.config import settings
+from ...infrastructure.config.schemas import ProviderConfig
 from .api import GoogleChat, GoogleFiles, GoogleModels, GoogleEmbeddings
 
 logger = structlog.get_logger(__name__)
@@ -52,12 +52,12 @@ GOOGLE_API_MAP = {
 
 class GoogleProvider(BaseProvider):
     """Nhà cung cấp cho Gemini API, được lắp ráp từ các thành phần chuyên biệt."""
-    def __init__(self):
+    def __init__(self, config: ProviderConfig):
         # 3. Lắp ráp các thành phần (Composition)
         super().__init__(
             provider_name="gemini",
-            auth_strategy=ApiKeyInQuery(api_key=str(settings.gemini.api_key), key_name="key"),
-            endpoint_builder=EndpointBuilder(base_url=str(settings.gemini.base_url)),
+            auth_strategy=ApiKeyInQuery(api_key=str(config.api_key), key_name="key"),
+            endpoint_builder=EndpointBuilder(base_url=str(config.base_url)),
             api_mapper=ApiTypeMapper(api_map=GOOGLE_API_MAP),
             model_mapper=ModelMapper(model_map=GOOGLE_MODEL_MAP),
             capability_manager=ModelCapabilityManager(provider_name="gemini"), # Có thể tạo GeminiCapabilityManager riêng sau này
@@ -66,15 +66,15 @@ class GoogleProvider(BaseProvider):
                 ProviderCapability.FINE_TUNING,
             }
         )
+        self.config = config
         self.chat = GoogleChat(provider=self)
         self.files = GoogleFiles(provider=self)
         self.models = GoogleModels(provider=self)
         self.embeddings = GoogleEmbeddings(provider=self)
 
-    @classmethod
-    def is_configured(cls) -> bool:
+    def is_configured(self) -> bool:
         """Kiểm tra xem Gemini API key đã được cung cấp hay chưa."""
-        return bool(settings.gemini.api_key)
+        return bool(self.config.api_key)
 
 
     async def image_generation(self, **kwargs) -> Dict[str, Any]:

@@ -5,7 +5,6 @@ from typing import Optional, Tuple, List
 import structlog
 from opentelemetry import trace
 
-from ...config import settings
 from ..interfaces.vector import VectorStorageDriver
 from .embedding_service import EmbeddingService
 from ..models.chroma.base import CacheEntry, CacheMetadata

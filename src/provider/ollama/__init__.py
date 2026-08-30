@@ -7,7 +7,7 @@ from ..core import (
     ModelCapabilityManager, ModelMapper
 )
 
-from ...infrastructure.config import settings
+from ...infrastructure.config.schemas import ProviderConfig
 from .api.chats import OllamaChats
 from .api.models import OllamaModels
 
@@ -22,22 +22,22 @@ OLLAMA_API_MAP = {
 
 class OllamaProvider(BaseProvider):
     """Nhà cung cấp cho các mô hình local qua Ollama."""
-    def __init__(self):
+    def __init__(self, config: ProviderConfig):
         super().__init__(
             provider_name="ollama",
             auth_strategy=NoAuth(),
-            endpoint_builder=EndpointBuilder(base_url=str(settings.ollama.base_url)),
+            endpoint_builder=EndpointBuilder(base_url=str(config.base_url)),
             api_mapper=ApiTypeMapper(api_map=OLLAMA_API_MAP),
             model_mapper=ModelMapper(model_map=OLLAMA_MODEL_MAP),
             capability_manager=ModelCapabilityManager(provider_name="ollama")
         )
+        self.config = config
         self.chat = OllamaChats(provider=self)
         self.models = OllamaModels(provider=self)
 
-    @classmethod
-    def is_configured(cls) -> bool:
+    def is_configured(self) -> bool:
         """Kiểm tra xem Ollama base URL đã được cung cấp hay chưa."""
-        return bool(settings.ollama.base_url)
+        return bool(self.config.base_url)
 
     async def moderation(self, **kwargs) -> Any: raise NotImplementedError
     async def provider_info(self, **kwargs) -> Any: raise NotImplementedError

@@ -5,7 +5,7 @@ from .....domain.schemas.auth import TokenSchema, AccessTokenSchema
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from .....infrastructure.storage.repositories.sessions import SessionRepository
 from ..jwt import JwtHelper
-from .....infrastructure.config import settings
+from .....infrastructure.config import AuthenticationSettings
 from ..exceptions import InvalidCredentialsError
 from .....domain.schemas.identity import Identity
 from typing import Callable
@@ -16,12 +16,13 @@ ADMIN_EMAILS = ["manager.admin@gmail.com", "superdev@gmail.com"]
 class TokenService:
     def __init__(self,
                  uow_factory: SqlAlchemyUnitOfWork,
-                 session_repo: SessionRepository
+                 session_repo: SessionRepository,
+                 config: AuthenticationSettings,
 ):
-        self.config = settings
+        self.config = config
         self.uow_factory = uow_factory
         self.session_repo = session_repo
-        self.jwt = JwtHelper(settings)
+        self.jwt = JwtHelper(config)
 
     async def create_user_tokens(self, user_id: str, email: str) -> TokenSchema:
         """Tạo và lưu trữ access và refresh token cho một người dùng."""

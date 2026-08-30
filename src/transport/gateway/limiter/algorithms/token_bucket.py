@@ -3,7 +3,7 @@ import structlog
 
 from .base import BaseRateLimiter
 from ..storage.base import BaseStorage
-from .....infrastructure.config.schemas import ConfigSchema
+from .....infrastructure.config.schemas import RateLimitSettings
 
 logger = structlog.get_logger(__name__)
 
@@ -17,19 +17,17 @@ class TokenBucketLimiter(BaseRateLimiter):
         self.ttl = ttl
 
     @classmethod
-    def from_config(cls: Type["TokenBucketLimiter"], storage: BaseStorage, config: ConfigSchema) -> "TokenBucketLimiter":
+    def from_config(cls: Type["TokenBucketLimiter"], storage: BaseStorage, config: RateLimitSettings) -> "TokenBucketLimiter":
         """Tạo TokenBucketLimiter từ cấu hình ứng dụng."""
-        rate_limit_settings = config.rate_limit
-        redis_settings = config.redis
 
         logger.info(
             "Initializing TokenBucketLimiter",
-            capacity=rate_limit_settings.capacity,
-            refill_rate=rate_limit_settings.refill_rate,
-            ttl=redis_settings.cache_expire_seconds
+            capacity=config.capacity,
+            refill_rate=config.refill_rate,
+            ttl=config.cache_expire_seconds
         )
 
-        return cls(storage, rate_limit_settings.capacity, rate_limit_settings.refill_rate, redis_settings.cache_expire_seconds)
+        return cls(storage, config.capacity, config.refill_rate, config.cache_expire_seconds)
 
     async def is_allowed(self, key: str, cost: int = 1) -> Tuple[bool, int, float]:
         # Thay vì gọi một method cụ thể, giờ đây nó gọi executor chung.

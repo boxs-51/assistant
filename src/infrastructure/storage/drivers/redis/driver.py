@@ -4,6 +4,7 @@ import redis.asyncio as redis
 from redis.exceptions import RedisError, NoScriptError
 from typing import Any, Optional, Dict
 
+from ....config.schemas import DriverConfig
 from ...interfaces.cache import CacheDriver
 
 logger = structlog.get_logger(__name__)
@@ -12,13 +13,9 @@ logger = structlog.get_logger(__name__)
 class RedisDriver(CacheDriver):
     """Implementation của CacheDriver cho Redis."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: DriverConfig):
         self.config = config
-        self.url = config.get("url")
-
-        if not self.url:
-            raise ValueError("Redis config must contain a 'url'")
-
+        self.url = config.options.get("url", "redis://localhost:6379/0")
         self._client: Optional[redis.Redis] = None
         self._connected = False
 

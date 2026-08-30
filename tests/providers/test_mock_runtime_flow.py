@@ -2,7 +2,7 @@ import httpx
 import pytest
 
 from src.circuit_breaker import CircuitBreakerManager
-from src.infrastructure.config.schemas import (ConfigSchema, ProviderSettings,
+from src.infrastructure.config.schemas import (ConfigSchema, ProviderSettings,ProviderConfig,
                                                CircuitBreakerSettings, CircuitBreakerProviderSettings)
 from src.provider.discovery import ProviderDiscovery
 from src.provider.policies.routing_policy import RoutingPolicy
@@ -19,9 +19,11 @@ def offline_config():
     return ConfigSchema(
         provider=ProviderSettings(
             priority=["mock"],
-            mock_enabled=True,
             timeout=5,
             retry=0,
+            configs={
+                "mock" : ProviderConfig(enabled=True)
+            }
         ),
         circuit_breaker=CircuitBreakerSettings(
             default=CircuitBreakerProviderSettings(

@@ -51,6 +51,7 @@ async def test_disconnect_all_continues_after_failure():
     registry.register("broken", broken)
     registry.register("healthy", healthy)
 
+    await registry.connect_all()
     await registry.disconnect_all()
 
     assert broken.disconnected is True

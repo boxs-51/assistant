@@ -1,18 +1,16 @@
 from authlib.integrations.starlette_client import OAuth
-from typing import Dict, Any
 import structlog
 
-from ....infrastructure.config import settings
+from ....infrastructure.config import OAuthSettings
 
 
 logger = structlog.get_logger(__name__)
 
-def create_oauth_client() -> OAuth:
+def create_oauth_client(config: OAuthSettings) -> OAuth:
     """
-    Khởi tạo và cấu hình các client OAuth từ settings.
+    Khởi tạo và cấu hình các client OAuth từ config.
     """
     oauth = OAuth()
-    config = settings.oauth
     # Cấu hình Google OAuth Client
     if config and config.google:
         google_settings = config.google

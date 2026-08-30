@@ -10,7 +10,7 @@ from .infrastructure.event_bus.manager import EventingManager
 from .kernel.kernel import RuntimeKernel
 
 # Config & Observability
-from .infrastructure.config import settings, ConfigLoader, ConfigurationRegistry, ConfigManager
+from .infrastructure.config import ConfigurationRegistry, ConfigManager, ConfigSchema
 from .infrastructure.observability import ObservabilityConfig, LoggingConfig, TracingConfig
 
 from .transport.gateway.middleware.metris import setup_gateway_observability
@@ -23,14 +23,16 @@ from .infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 # Security & Gateway Infrastructure
 from .transport.gateway.limiter import RateLimiterManager
 from .circuit_breaker import CircuitBreakerManager
+
 from .transport.gateway.authentication.oauth import create_oauth_client
 from .transport.gateway.authentication.manager import AuthenticationManager
-from .transport.gateway.authentication.services.api_key_service import APIKeyService
-from .transport.gateway.authentication.services.token_service import TokenService
+from .transport.gateway.authentication.authentication import Authentication
+
 from .transport.gateway.authentication.authenticators.api_key_authenticator import APIKeyAuthenticator
 from .transport.gateway.authentication.authenticators.jwt_authenticator import JWTAuthenticator
 
-from .infrastructure.event_bus.bus import EventBus
+from .transport.gateway.authentication.services import (APIKeyService, LoginService, OAuthService,
+OTPStorageService, RegistrationService, TokenService, UserService)
 
 from src.runtimes.connection.runtime import ConnectionRuntime
 from src.runtimes.session.runtime import SessionRuntime
@@ -67,28 +69,28 @@ logger = structlog.get_logger(__name__)
 # BOOTSTRAP FACTORIES
 # ==============================================================================
 
-def bootstrap_observability() -> Any:
+def bootstrap_observability() -> ConfigSchema:
     """Tải cấu hình gateway và kích hoạt hệ thống Observability (Metrics & Tracing)."""
-    _config_manager = ConfigManager().get_instance()
+    _config_manager = ConfigManager().get_instance("config/gateway/default.yaml")
     _config = _config_manager.initialize()
     ConfigurationRegistry.set_config(_config)
 
     obs_config = ObservabilityConfig(
-        service_name=settings.gateway.name,
-        service_version=settings.gateway.version,
-        logging=LoggingConfig(level=settings.logging.level),
+        service_name=_config.gateway.name,
+        service_version=_config.gateway.version,
+        logging=LoggingConfig(level=_config.logging.level),
         tracing=TracingConfig(
-            enable=settings.tracing.enable,
-            otlp_endpoint=settings.tracing.otlp_endpoint,
+            enable=_config.tracing.enable,
+            otlp_endpoint=_config.tracing.otlp_endpoint,
         ),
     )
     setup_gateway_observability(obs_config)
-    return _config, _config_manager
+    return _config
 
 
-async def bootstrap_storage() -> Tuple[StorageEngine, Any]:
+async def bootstrap_storage(config: ConfigSchema) -> Tuple[StorageEngine, Any]:
     """Kết nối cơ sở dữ liệu và tạo Unit of Work Factory."""
-    storage_engine = StorageEngine()
+    storage_engine = StorageEngine(config)
     await storage_engine.connect()
     
     db_driver = storage_engine.drivers.get("sqlite")
@@ -99,9 +101,11 @@ async def bootstrap_storage() -> Tuple[StorageEngine, Any]:
 
 
 def bootstrap_security(
+    config: ConfigSchema,
     storage_engine: StorageEngine, 
     uow_factory: Any, 
-    cb_manager: CircuitBreakerManager
+    cb_manager: CircuitBreakerManager,
+    eventing_manager: EventingManager,
 ) -> Dict[str, Any]:
     """Khởi tạo các dịch vụ Xác thực, OAuth và Rate Limiting."""
     cache_driver = storage_engine.get_cache_driver()
@@ -112,7 +116,7 @@ def bootstrap_security(
     )
 
     session_repo = storage_engine.repositories.get("sessions")
-    token_service = TokenService(uow_factory=uow_factory, session_repo=session_repo)
+    token_service = TokenService(uow_factory=uow_factory, session_repo=session_repo,config=config.auth)
     api_key_service = APIKeyService(uow_factory=uow_factory)
 
     auth_manager = AuthenticationManager(
@@ -121,12 +125,29 @@ def bootstrap_security(
             JWTAuthenticator(token_service, uow_factory),
         ]
     )
-    oauth = create_oauth_client()
+    redis_driver = storage_engine.drivers.get("redis")
+    otp_service = OTPStorageService(redis_driver if redis_driver else None, uow_factory)
+    registration_service = RegistrationService(uow_factory, otp_service, token_service, eventing_manager.bus)
+    login_service = LoginService(uow_factory, token_service)
+    oauth_service = OAuthService(uow_factory, token_service, eventing_manager.bus)
+    user_service = UserService(uow_factory)
+
+    auth = Authentication(
+        registration_service=registration_service,
+        login_service=login_service,
+        oauth_service=oauth_service,
+        token_service=token_service,
+        user_service=user_service,
+    )
+
+    oauth = create_oauth_client(config.oauth)
     logger.info("Authentication & Security Managers initialized.")
     return {
         "auth_manager": auth_manager,
         "oauth": oauth,
         "limiter": limiter,
+        "auth": auth,
+        "api_key_service": api_key_service,
     }
 
 
@@ -136,10 +157,11 @@ async def bootstrap_runtime_kernel(
     uow_factory: Any,
     http_client: httpx.AsyncClient,
     cb_manager: CircuitBreakerManager,
+    eventing_manager: EventingManager,
+
     security_services: Dict[str, Any] = None,
 ) -> ApplicationContainer:
     """Khởi tạo EventBus, Container, các Runtimes và kích hoạt Boot Sequence cho Kernel."""
-    eventing_manager = EventingManager(storage_engine=storage_engine)
     eventing_manager.register_subscribers()
     agent_registry = AgentRegistry()
     
@@ -150,6 +172,7 @@ async def bootstrap_runtime_kernel(
         uow_factory=eventing_manager.uow_factory,
         http_client=http_client,
         eventing_manager=eventing_manager,
+        event_bus=eventing_manager.bus,
         circuit_breaker_manager=cb_manager,
         agent_registry=agent_registry,
         tool_registry=ToolRegistry(),
@@ -218,18 +241,22 @@ async def lifespan(app: FastAPI):
     logger.info("Starting AI Gateway Application...")
 
     # 1. Startup Sequence
-    config, config_manager = bootstrap_observability()
+    config = bootstrap_observability()
     FastAPIInstrumentor.instrument_app(app)
 
     # Local resources
     cb_manager = CircuitBreakerManager(config=config.circuit_breaker)
-    http_client = httpx.AsyncClient(timeout=settings.provider.timeout)
-    storage_engine, uow_factory = await bootstrap_storage()
-
-    security_services = bootstrap_security(storage_engine, uow_factory, cb_manager)
+    http_client = httpx.AsyncClient(timeout=config.provider.timeout)
+    storage_engine, uow_factory = await bootstrap_storage(config)
+    eventing_manager = EventingManager(storage_engine=storage_engine)
+    security_services = bootstrap_security(config=config, storage_engine=storage_engine, 
+                                           uow_factory=uow_factory, cb_manager=cb_manager,
+                                           eventing_manager=eventing_manager)
     
     container = await bootstrap_runtime_kernel(
-        config, storage_engine, uow_factory, http_client, cb_manager, security_services
+        config=config, storage_engine=storage_engine, uow_factory=uow_factory, 
+        http_client=http_client, cb_manager=cb_manager, security_services=security_services, 
+        eventing_manager=eventing_manager
     )
 
     # Chỉ gán duy nhất app.state.container

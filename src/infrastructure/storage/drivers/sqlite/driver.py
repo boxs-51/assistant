@@ -5,14 +5,15 @@ from sqlalchemy import text
 from contextlib import asynccontextmanager
 from ...interfaces.database import DatabaseDriver
 
+from ....config.schemas import DriverConfig
 logger = structlog.get_logger(__name__)
 
 class SQLiteDriver(DatabaseDriver):
     """Implementation của DatabaseDriver cho SQLite."""
 
-    def __init__(self, config: Dict[str, Any]):
+    def __init__(self, config: DriverConfig):
         self.config = config
-        db_path = config.get("path", "gateway_storage.db")
+        db_path = config.options.get("path", "gateway_storage.db")
         # Thêm `check_same_thread=False` cho SQLite khi dùng với asyncio
         self.db_url = f"sqlite+aiosqlite:///{db_path}"
         self._engine = create_async_engine(

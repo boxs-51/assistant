@@ -2,12 +2,11 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
 
-from ....infrastructure.config import ConfigSchema
-# Các cấu hình này nên được đưa vào file settings
+from ....infrastructure.config import ConfigSchema, AuthenticationSettings
 class JwtHelper:
-    def __init__(self, config: ConfigSchema):
+    def __init__(self, config: AuthenticationSettings):
         
-        self.config = config.auth
+        self.config = config
         self.SECRET_KEY = self.config.jwt_secret_key
         self.ALGORITHM = self.config.jwt_algorithm
         self.ACCESS_TOKEN_EXPIRE_MINUTES = self.config.access_token_expire_minutes

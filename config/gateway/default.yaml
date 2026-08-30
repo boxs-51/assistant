@@ -7,15 +7,18 @@ storage:
     redis:
       enabled: true
       required: false
-      url: "redis://localhost:6379/0"
+      options:
+        url: "redis://localhost:6379/0"
     sqlite:
       enabled: true
       required: true
-      path: "data/gateway_storage.db"
+      options:
+        path: "data/gateway_storage.db"
     chroma:
       enabled: true
       required: false
-      path: "data/gateway_chroma"
+      options:
+        path: "data/gateway_chroma"
     in-memory:
       enabled: true
       required: false
@@ -74,23 +77,38 @@ provider:
   timeout: 60
   retry: 2
   enable_fallback: true
-  priority: ["openai", "anthropic", "gemini", "ollama"]
+  priority:
+      - "openai"
+      - "gemini"
+      - "ollama"
+
   routing_rules_path: "config/gateway/routing/routing_rules.yaml"
+  configs:
+      openai:
+        enabled: false
+        api_key: ""
+        base_url: "https://api.openai.com/v1"
 
-openai:
-  api_key: ""
-  base_url: "https://api.openai.com/v1"
+      anthropic:
+        enabled: false
+        api_key: ""
+        base_url: "https://api.anthropic.com"
 
-anthropic:
-  api_key: ""
-  base_url: "https://api.anthropic.com"
+      gemini:
+        enabled: true
+        api_key: ""
+        base_url: "https://generativelanguage.googleapis.com"
 
-gemini:
-  api_key: ""
-  base_url: "https://generativelanguage.googleapis.com"
-
-ollama:
-  base_url: "http://127.0.0.1:11434"
+      ollama:
+        enabled: false
+        api_key: ""
+        base_url: "http://127.0.0.1:11434"
+      mock:
+        enabled: false
+        api_key: ""
+        base_url: "http://mock.invalid"
+        options:
+          seek: "assistant-offline-mock"
 
 logging:
   level: "INFO"

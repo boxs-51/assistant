@@ -1,7 +1,6 @@
 import psutil
-from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import StreamingResponse
-from prometheus_client import generate_latest
+from fastapi import APIRouter, Depends, HTTPException, Response
+from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
 from .....application.container import ApplicationContainer
 from ...dependencies import get_container
@@ -41,7 +40,7 @@ async def readiness_check(
 @router.get("/metrics")
 def get_metrics():
     """Prometheus metrics scraper."""
-    return StreamingResponse(generate_latest(), media_type="text/plain")
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 
 @router.get("/stats")

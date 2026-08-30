@@ -9,7 +9,7 @@ logger = structlog.get_logger(__name__)
 class ProviderRegistry:
     """
     REFACTORED: Kho chứa (repository) thuần túy để quản lý các ProviderEntry.
-    Hoàn toàn không biết về settings hay các lớp provider cụ thể.
+    Hoàn toàn không biết về config hay các lớp provider cụ thể.
     """
     def __init__(self):
         self._entries: Dict[str, ProviderEntry] = {}

@@ -7,7 +7,7 @@ from ...authentication.dependency import require_permission, verify_admin_ip
 from ...dependencies import get_container
 
 router = APIRouter(
-    prefix="/admin",
+    prefix="/v1/admin",
     tags=["Admin"],
     dependencies=[
         Depends(verify_admin_ip),

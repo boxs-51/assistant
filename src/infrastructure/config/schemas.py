@@ -1,5 +1,5 @@
 from pydantic import BaseModel, Field, AnyHttpUrl, model_validator, ConfigDict
-from typing import Dict, Optional
+from typing import Dict, Optional, Any
 # =================================================================
 # CONFIGURATION SCHEMAS
 # Đây là các Pydantic Model định nghĩa cấu trúc của cấu hình.
@@ -49,21 +49,15 @@ class RateLimitSettings(BaseModel):
     refill_rate: float = 5.0
     limit: int = 100
     window_size: int = 60
+    cache_expire_seconds: int = 3600
     fail_mode: str = "open"  # 'open' hoặc 'closed'
 
-class RedisSettings(BaseModel):
-    url: str = "redis://localhost:6379/0"
-    cache_expire_seconds: int = 3600
-    key_prefix: str = "aigateway"
 
 class DriverConfig(BaseModel):
     enabled: bool = True
     required: bool = False
-    url: Optional[str] = None
-    host: Optional[str] = None
-    port: Optional[int] = None
-    path: Optional[str] = None
-    password: Optional[str] = None
+
+    options: Dict[str, Any] = Field(default_factory=dict)
 
 class StorageSettings(BaseModel):
     drivers: Dict[str, DriverConfig] = Field(default_factory=dict)
@@ -78,31 +72,30 @@ class CircuitBreakerSettings(BaseModel):
     default: CircuitBreakerProviderSettings = Field(default_factory=CircuitBreakerProviderSettings)
     providers: dict[str, CircuitBreakerProviderSettings] = Field(default_factory=dict)
 
+class ProviderConfig(BaseModel):
+    enabled: bool = False
+    api_key: str = ""
+    base_url: Optional[AnyHttpUrl] = None
 
+    options: Dict[str, Any] = Field(default_factory=dict)
+    
 class ProviderSettings(BaseModel):
     timeout: int = 60
-    mock_enabled: bool = False
-    mock_seed: str = "assistant-offline-mock"
-    mock_scenario: str = "success"
     retry: int = 2
     enable_fallback: bool = True
-    priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama"])
+    priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama", "mock"])
     routing_rules_path: str = "config/routing/routing_rules.yaml"
-
-class OpenAISettings(BaseModel):
-    api_key: str = ""
-    base_url: AnyHttpUrl = "https://api.openai.com/v1"
-
-class AnthropicSettings(BaseModel):
-    api_key: str = ""
-    base_url: AnyHttpUrl = "https://api.anthropic.com"
-
-class GeminiSettings(BaseModel):
-    api_key: str = ""
-    base_url: AnyHttpUrl = "https://generativelanguage.googleapis.com"
-
-class OllamaSettings(BaseModel):
-    base_url: AnyHttpUrl = "http://127.0.0.1:11434"
+    
+    # Danh sách cấu hình chi tiết cho từng provider
+    configs: Dict[str, ProviderConfig] = Field(
+        default_factory=lambda: {
+            "openai": ProviderConfig(base_url="https://api.openai.com/v1"),
+            "anthropic": ProviderConfig(base_url="https://api.anthropic.com"),
+            "gemini": ProviderConfig(base_url="https://generativelanguage.googleapis.com"),
+            "ollama": ProviderConfig(base_url="http://127.0.0.1:11434"),
+            "mock": ProviderConfig(base_url="http://mock.invalid"),
+        }
+    )
 
 class LoggingSettings(BaseModel):
     level: str = "INFO"
@@ -117,11 +110,8 @@ class TracingSettings(BaseModel):
     otlp_endpoint: str = "http://localhost:4318"
 
 class SemanticCacheSettings(BaseModel):
-    similarity_threshold: float = 0.95
     embedding_model: str = "all-MiniLM-L6-v2"
     embedding_device: str = "cpu"
-    collection: str = "semantic_cache"
-    path: str = "./data/chroma_cache"
     embedding_cache_folder: str = "./data/embedding_models"
 
 class TokenBudgetSettings(BaseModel):
@@ -137,12 +127,7 @@ class ConfigSchema(BaseModel):
     fillter: FillterSettings = Field(default_factory=FillterSettings)
     rate_limit: RateLimitSettings = Field(default_factory=RateLimitSettings)
     circuit_breaker: CircuitBreakerSettings = Field(default_factory=CircuitBreakerSettings)
-    redis: RedisSettings = Field(default_factory=RedisSettings)
     provider: ProviderSettings = Field(default_factory=ProviderSettings)
-    openai: OpenAISettings = Field(default_factory=OpenAISettings)
-    anthropic: AnthropicSettings = Field(default_factory=AnthropicSettings)
-    gemini: GeminiSettings = Field(default_factory=GeminiSettings)
-    ollama: OllamaSettings = Field(default_factory=OllamaSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     tracing: TracingSettings = Field(default_factory=TracingSettings)
@@ -156,33 +141,8 @@ class ConfigSchema(BaseModel):
 
     @model_validator(mode='after')
     def check_config_consistency(self) -> 'ConfigSchema':
-        """
-        Thực hiện các quy tắc xác thực chéo (cross-field validation) sau khi
-        tất cả các giá trị đã được parse.
-        """
-        # 1. Xác thực logic fallback của provider
         if self.provider.enable_fallback and not self.provider.priority:
             raise ValueError(
                 "Provider 'priority' list cannot be empty when 'enable_fallback' is true."
             )
-
-        # 2. Xác thực API key cho các provider có trong danh sách ưu tiên
-        # Logic mới: Chỉ yêu cầu API key nếu provider đó có trong danh sách ưu tiên
-        # VÀ key đó không được cung cấp. Điều này cho phép ứng dụng khởi động
-        # mà không cần key nếu các provider đó không được sử dụng.
-        if self.provider.priority:
-            if "openai" in self.provider.priority and not self.openai.api_key:
-                # Thay vì ném lỗi, chúng ta sẽ ghi một cảnh báo.
-                # Lỗi thực sự sẽ xảy ra khi cố gắng sử dụng provider này (trong ProviderDiscovery).
-                # Điều này cho phép gateway khởi động mà không cần tất cả các key.
-                pass # Bỏ qua lỗi ở đây
-            
-            if "anthropic" in self.provider.priority and not self.anthropic.api_key:
-                # Tương tự, bỏ qua lỗi ở đây
-                pass
-
-            if "gemini" in self.provider.priority and not self.gemini.api_key:
-                # Tương tự, bỏ qua lỗi ở đây
-                pass
-
         return self

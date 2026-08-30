@@ -1,7 +1,7 @@
 from typing import Any, Optional
 from .schemas import (
     ConfigSchema, GatewaySettings, AuthenticationSettings, 
-    ProviderSettings, OpenAISettings, RedisSettings
+    ProviderSettings
 )
 from .core import ConfigLoader
 
@@ -56,8 +56,6 @@ class ConfigManager:
     def get_gateway(self) -> GatewaySettings: return self.config.gateway
     def get_auth(self) -> AuthenticationSettings: return self.config.auth
     def get_provider(self) -> ProviderSettings: return self.config.provider
-    def get_openai(self) -> OpenAISettings: return self.config.openai
-    def get_redis(self) -> RedisSettings: return self.config.redis
 
     # --- Utility Business Helpers ---
     def is_provider_active(self, provider_name: str) -> bool:
