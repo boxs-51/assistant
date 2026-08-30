@@ -1,26 +1,40 @@
 # src/runtime/runtimes/capability/drivers/base.py
 from abc import ABC, abstractmethod
-from typing import Any, Dict
-from pydantic import BaseModel, Field
+from typing import Any, Mapping
 
-class CapabilityDefinition(BaseModel):
-    name: str
-    description: str
-    parameters: Dict[str, Any]  # JSON Schema tuân thủ OpenAPI/OpenAI tool format
-    require_auth: bool = False
-    required_scopes: list[str] = Field(default_factory=list)
+from ..contracts.context import CapabilityExecutionContext
+from ..contracts.definition import CapabilityDefinition
 
 class BaseCapabilityDriver(ABC):
-    """Interface chuẩn cho mọi loại Tool/Capability trong hệ thống."""
+    """Execution boundary for one concrete capability implementation."""
+
     
     def __init__(self, definition: CapabilityDefinition):
         self.definition = definition
 
     @property
     def name(self) -> str:
-        return self.definition.name
+        return self.definition.capability_id
+
+    async def initialize(self, context: Any) -> None:
+        """Optional lifecycle hook for resource-backed drivers."""
+        return None
+
+    async def check_health(self) -> bool:
+        return True
+
+    async def dispose(self) -> None:
+        return None
 
     @abstractmethod
-    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> Any:
-        """Hàm thực thi logic chính của Tool."""
+    async def execute(
+        self,
+        context: CapabilityExecutionContext,
+        arguments: Mapping[str, Any],
+    ) -> Any:
+        """Execute one invocation.
+
+        The return value may remain a raw Python value for compatibility; the
+        CapabilityRuntime normalizes it into ``CapabilityResult``.
+        """
         pass

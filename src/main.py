@@ -57,8 +57,10 @@ from .transport.gateway.api.v1 import (
     tool_router,
 )
 from .application.container import ApplicationContainer
+from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
+from .runtimes.capability.registry import CapabilityRegistry
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 
@@ -164,7 +166,9 @@ async def bootstrap_runtime_kernel(
     """Khởi tạo EventBus, Container, các Runtimes và kích hoạt Boot Sequence cho Kernel."""
     eventing_manager.register_subscribers()
     agent_registry = AgentRegistry()
-    
+    capability_registry = CapabilityRegistry()
+    authorization_service = AuthorizationService()
+
     # 1. Tạo ApplicationContainer trước
     container = ApplicationContainer(
         config=config,
@@ -172,10 +176,13 @@ async def bootstrap_runtime_kernel(
         uow_factory=eventing_manager.uow_factory,
         http_client=http_client,
         eventing_manager=eventing_manager,
+        mcp_manager=GatewayMcpManager(),
         event_bus=eventing_manager.bus,
         circuit_breaker_manager=cb_manager,
         agent_registry=agent_registry,
         tool_registry=ToolRegistry(),
+        capability_registry=capability_registry,
+        authorization_service=authorization_service,
         multi_agent_coordinator=MultiAgentCoordinator(
             agent_registry,
             durable_store=DurableAgentStore(eventing_manager.uow_factory),
@@ -183,6 +190,7 @@ async def bootstrap_runtime_kernel(
         **(security_services or {}),
     )
     eventing_manager.set_dependency_container(container)
+    await container.mcp_manager.start_health_checker()
 
     # 2. Tạo RuntimeKernel nhận container
     kernel = RuntimeKernel(eventing_manager, container)
@@ -195,7 +203,13 @@ async def bootstrap_runtime_kernel(
         ("connection_runtime", ConnectionRuntime()),
         ("session_runtime", SessionRuntime()),
         ("workflow_runtime", WorkflowRuntime()),
-        ("capability_runtime", CapabilityRuntime()),
+        (
+            "capability_runtime",
+            CapabilityRuntime(
+                registry=capability_registry,
+                authorization=authorization_service,
+            ),
+        ),
         ("provider_runtime", ProviderRuntime(cb_manager)),
     ]
 
@@ -270,6 +284,9 @@ async def lifespan(app: FastAPI):
 
         if container.runtime_kernel:
             await container.runtime_kernel.shutdown()
+
+        if container.mcp_manager:
+            await container.mcp_manager.stop()
 
         await http_client.aclose()
         await storage_engine.disconnect()

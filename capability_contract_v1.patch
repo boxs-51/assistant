@@ -1,0 +1,915 @@
+*** Begin Patch
+*** Add File: src/runtimes/capability/contracts/__init__.py
++"""Canonical capability execution contracts."""
++
++from .definition import CapabilityDefinition
++from .context import CapabilityExecutionContext
++from .result import CapabilityResult
++from .error import CapabilityError
++
++__all__ = [
++    "CapabilityDefinition",
++    "CapabilityExecutionContext",
++    "CapabilityResult",
++    "CapabilityError",
++]
+*** Add File: src/runtimes/capability/contracts/definition.py
++from typing import Any, Dict, List
++
++from pydantic import BaseModel, ConfigDict, Field
++
++
++class CapabilityDefinition(BaseModel):
++    """Provider-neutral, declarative description of an executable capability.
++
++    ``parameters`` remains accepted as a backwards-compatible alias for
++    ``input_schema`` because the current repository still contains legacy
++    ToolRegistry/provider integrations.
++    """
++
++    model_config = ConfigDict(
++        populate_by_name=True,
++        arbitrary_types_allowed=True,
++        extra="forbid",
++    )
++
++    id: str | None = None
++    version: str = "1.0"
++    name: str
++    description: str
++
++    input_schema: Dict[str, Any] = Field(
++        default_factory=dict,
++        alias="parameters",
++    )
++    output_schema: Dict[str, Any] = Field(default_factory=dict)
++
++    source: str = "BUILTIN"
++    execution_kind: str = "PYTHON"
++
++    require_auth: bool = False
++    required_scopes: List[str] = Field(default_factory=list)
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++    @property
++    def capability_id(self) -> str:
++        return self.id or self.name
++
++    @property
++    def parameters(self) -> Dict[str, Any]:
++        """Legacy read-only view used by existing provider adapters."""
++        return self.input_schema
+*** Add File: src/runtimes/capability/contracts/context.py
++from __future__ import annotations
++
++import asyncio
++import time
++import uuid
++from dataclasses import dataclass, field
++from typing import Any, Dict, Optional
++
++from ....domain.schemas.identity import Identity
++
++
++@dataclass(slots=True)
++class CapabilityExecutionContext:
++    """Request-scoped context for exactly one capability invocation."""
++
++    identity: Identity | None
++    execution_id: str
++    invocation_id: str
++    request_id: str | None = None
++    session_id: str | None = None
++    workflow_id: str | None = None
++    deadline: float | None = None
++    attempt: int = 1
++    metadata: Dict[str, Any] = field(default_factory=dict)
++    cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
++
++    @classmethod
++    def create(
++        cls,
++        *,
++        identity: Identity | None,
++        execution_id: str | None = None,
++        invocation_id: str | None = None,
++        request_id: str | None = None,
++        session_id: str | None = None,
++        workflow_id: str | None = None,
++        timeout_seconds: float | None = None,
++        attempt: int = 1,
++        metadata: Optional[Dict[str, Any]] = None,
++    ) -> "CapabilityExecutionContext":
++        now = time.monotonic()
++        deadline = now + timeout_seconds if timeout_seconds is not None else None
++        return cls(
++            identity=identity,
++            execution_id=execution_id or f"exec_{uuid.uuid4().hex}",
++            invocation_id=invocation_id or f"capinv_{uuid.uuid4().hex}",
++            request_id=request_id or getattr(identity, "request_id", None),
++            session_id=session_id or getattr(identity, "session_id", None),
++            workflow_id=workflow_id,
++            deadline=deadline,
++            attempt=attempt,
++            metadata=dict(metadata or {}),
++        )
++
++    @property
++    def remaining_seconds(self) -> float | None:
++        if self.deadline is None:
++            return None
++        return max(0.0, self.deadline - time.monotonic())
++
++    @property
++    def cancelled(self) -> bool:
++        return self.cancellation_event.is_set()
++
++    def cancel(self) -> None:
++        self.cancellation_event.set()
+*** Add File: src/runtimes/capability/contracts/result.py
++from datetime import datetime, timezone
++from typing import Any, Dict
++
++from pydantic import BaseModel, ConfigDict, Field
++
++
++class CapabilityResult(BaseModel):
++    """Normalized successful result of a single capability invocation."""
++
++    model_config = ConfigDict(arbitrary_types_allowed=True)
++
++    invocation_id: str
++    capability_id: str
++    success: bool = True
++    output: Any = None
++    output_type: str = "unknown"
++    started_at: datetime = Field(
++        default_factory=lambda: datetime.now(timezone.utc)
++    )
++    completed_at: datetime = Field(
++        default_factory=lambda: datetime.now(timezone.utc)
++    )
++    duration_ms: float = 0.0
++    metadata: Dict[str, Any] = Field(default_factory=dict)
+*** Add File: src/runtimes/capability/contracts/error.py
++import asyncio
++from dataclasses import dataclass, field
++from typing import Any, Dict, Optional
++
++
++@dataclass
++class CapabilityError(Exception):
++    """Stable machine-readable failure contract and runtime exception."""
++
++    code: str
++    message: str
++    category: str = "INTERNAL"
++    retryable: bool = False
++    safe_for_client: bool = False
++    cause_type: Optional[str] = None
++    capability_id: Optional[str] = None
++    invocation_id: Optional[str] = None
++    details: Dict[str, Any] = field(default_factory=dict)
++
++    def __post_init__(self) -> None:
++        Exception.__init__(self, self.message)
++
++    def model_dump(self) -> Dict[str, Any]:
++        return {
++            "code": self.code,
++            "message": self.message,
++            "category": self.category,
++            "retryable": self.retryable,
++            "safe_for_client": self.safe_for_client,
++            "cause_type": self.cause_type,
++            "capability_id": self.capability_id,
++            "invocation_id": self.invocation_id,
++            "details": dict(self.details),
++        }
++
++    @classmethod
++    def from_exception(
++        cls,
++        exc: BaseException,
++        *,
++        capability_id: str | None = None,
++        invocation_id: str | None = None,
++    ) -> "CapabilityError":
++        if isinstance(exc, PermissionError):
++            category = "AUTHORIZATION"
++            code = "CAPABILITY_UNAUTHORIZED"
++            safe = True
++        elif isinstance(exc, ValueError):
++            category = "VALIDATION"
++            code = "CAPABILITY_INVALID_ARGUMENT"
++            safe = True
++        elif isinstance(exc, asyncio.CancelledError):
++            category = "CANCELLED"
++            code = "CAPABILITY_CANCELLED"
++            safe = True
++        else:
++            category = "INTERNAL"
++            code = "CAPABILITY_EXECUTION_FAILED"
++            safe = False
++        return cls(
++            code=code,
++            message=str(exc),
++            category=category,
++            retryable=False,
++            safe_for_client=safe,
++            cause_type=type(exc).__name__,
++            capability_id=capability_id,
++            invocation_id=invocation_id,
++        )
+*** Update File: src/runtimes/capability/drivers/base.py
+@@
+ from abc import ABC, abstractmethod
+-from typing import Any, Dict
+-from pydantic import BaseModel, Field
+-
+-class CapabilityDefinition(BaseModel):
+-    name: str
+-    description: str
+-    parameters: Dict[str, Any]  # JSON Schema tuân thủ OpenAPI/OpenAI tool format
+-    require_auth: bool = False
+-    required_scopes: list[str] = Field(default_factory=list)
++from typing import Any, Mapping
++
++from ..contracts.context import CapabilityExecutionContext
++from ..contracts.definition import CapabilityDefinition
+ 
+ class BaseCapabilityDriver(ABC):
+-    """Interface chuẩn cho mọi loại Tool/Capability trong hệ thống."""
+-    
++    """Execution boundary for one concrete capability implementation."""
++
+     def __init__(self, definition: CapabilityDefinition):
+         self.definition = definition
+ 
+     @property
+     def name(self) -> str:
+-        return self.definition.name
++        return self.definition.capability_id
++
++    async def initialize(self, context: Any) -> None:
++        """Optional lifecycle hook for resource-backed drivers."""
++        return None
++
++    async def check_health(self) -> bool:
++        return True
++
++    async def dispose(self) -> None:
++        return None
+ 
+     @abstractmethod
+-    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> Any:
+-        """Hàm thực thi logic chính của Tool."""
++    async def execute(
++        self,
++        context: CapabilityExecutionContext,
++        arguments: Mapping[str, Any],
++    ) -> Any:
++        """Execute one invocation.
++
++        The return value may remain a raw Python value for compatibility; the
++        CapabilityRuntime normalizes it into ``CapabilityResult``.
++        """
+         pass
+*** Update File: src/runtimes/capability/drivers/python_driver.py
+@@
+-from typing import Any, Callable, Dict, Coroutine
+-from .base import BaseCapabilityDriver, CapabilityDefinition
++import asyncio
++from typing import Any, Callable, Mapping
++
++from ..contracts.context import CapabilityExecutionContext
++from .base import BaseCapabilityDriver, CapabilityDefinition
+ 
+ class PythonCapabilityDriver(BaseCapabilityDriver):
+-    """Driver cho phép chạy các hàm Python (Sync hoặc Async)."""
++    """Driver for sync/async Python callables."""
+@@
+-    async def execute(self, arguments: Dict[str, Any], context: Dict[str, Any]) -> Any:
+-        import asyncio
++    async def execute(
++        self,
++        context: CapabilityExecutionContext,
++        arguments: Mapping[str, Any],
++    ) -> Any:
+         if asyncio.iscoroutinefunction(self._handler):
+             return await self._handler(**arguments)
+         return self._handler(**arguments)
+*** Update File: src/runtimes/capability/registry.py
+@@
+-from typing import Dict, List, Optional, Any
++from dataclasses import dataclass
++from enum import Enum
++from threading import RLock
++from typing import Dict, List, Optional
+ import structlog
+-from .drivers.base import BaseCapabilityDriver, CapabilityDefinition
+-from ...domain.schemas.identity import Identity
++
++from .contracts.definition import CapabilityDefinition
++from .drivers.base import BaseCapabilityDriver
+ 
+ logger = structlog.get_logger(__name__)
+ 
++
++class CapabilityState(str, Enum):
++    DISCOVERED = "DISCOVERED"
++    REGISTERED = "REGISTERED"
++    ENABLED = "ENABLED"
++    DISABLED = "DISABLED"
++    DEGRADED = "DEGRADED"
++    UNAVAILABLE = "UNAVAILABLE"
++    REMOVED = "REMOVED"
++
++
++@dataclass(frozen=True, slots=True)
++class CapabilityRecord:
++    definition: CapabilityDefinition
++    driver: Optional[BaseCapabilityDriver] = None
++    state: CapabilityState = CapabilityState.DISCOVERED
++
++    @property
++    def id(self) -> str:
++        return self.definition.capability_id
++
++    @property
++    def executable(self) -> bool:
++        return self.driver is not None and self.state not in {
++            CapabilityState.DISABLED,
++            CapabilityState.UNAVAILABLE,
++            CapabilityState.REMOVED,
++        }
++
++
+ class CapabilityRegistry:
+     def __init__(self):
+-        self._drivers: Dict[str, BaseCapabilityDriver] = {}
+-        self._definitions: Dict[str, CapabilityDefinition] = {}
++        self._records: Dict[str, CapabilityRecord] = {}
++        self._lock = RLock()
+ 
+     def register_capability(self, driver: BaseCapabilityDriver):
+-        if driver.name in self._drivers:
+-            logger.warning("Overwriting existing capability", name=driver.name)
+-        self._drivers[driver.name] = driver
+-        self._definitions[driver.name] = driver.definition
+-        logger.info("Capability registered", name=driver.name)
++        definition = driver.definition
++        capability_id = definition.capability_id
++        with self._lock:
++            existing = self._records.get(capability_id)
++            if existing and existing.driver is not None:
++                logger.warning(
++                    "Replacing existing executable capability",
++                    capability_id=capability_id,
++                )
++            record = CapabilityRecord(
++                definition=definition,
++                driver=driver,
++                state=CapabilityState.ENABLED,
++            )
++            self._records[capability_id] = record
++        logger.info("Capability registered", capability_id=capability_id)
++        return record
+ 
+     def register_definition(self, definition: CapabilityDefinition):
+-        self._definitions[definition.name] = definition
+-        logger.info("Capability definition registered", name=definition.name)
++        """Compatibility/discovery registration without claiming executability."""
++        capability_id = definition.capability_id
++        with self._lock:
++            existing = self._records.get(capability_id)
++            if existing and existing.driver is not None:
++                return existing
++            record = CapabilityRecord(
++                definition=definition,
++                driver=None,
++                state=CapabilityState.DISCOVERED,
++            )
++            self._records[capability_id] = record
++        logger.info("Capability definition discovered", capability_id=capability_id)
++        return record
+ 
+     def get_driver(self, name: str) -> Optional[BaseCapabilityDriver]:
+-        return self._drivers.get(name)
++        record = self.get(name)
++        return record.driver if record and record.executable else None
+ 
+     def get_all_drivers(self) -> List[BaseCapabilityDriver]:
+-        return list(self._drivers.values())
++        with self._lock:
++            return [
++                record.driver
++                for record in self._records.values()
++                if record.executable and record.driver is not None
++            ]
+ 
+     def get_definition(self, name: str) -> Optional[CapabilityDefinition]:
+-        return self._definitions.get(name)
++        record = self.get(name)
++        return record.definition if record else None
+ 
+-    async def get_accessible_tools(self, identity: Identity) -> List[Dict[str, Any]]:
+-        """
+-        Lọc danh sách Tools dạng JSON Schema mà Identity hiện tại được phép dùng
+-        (Dùng để gửi vào request của LLM).
+-        """
+-        tools_schema = []
+-        for definition in self._definitions.values():
+-            tools_schema.append({
+-                "type": "function",
+-                "function": {
+-                    "name": definition.name,
+-                    "description": definition.description,
+-                    "parameters": definition.parameters,
+-                }
+-            })
+-        return tools_schema
++    def get(self, name: str) -> Optional[CapabilityRecord]:
++        with self._lock:
++            return self._records.get(name)
++
++    def list_records(self) -> List[CapabilityRecord]:
++        with self._lock:
++            return list(self._records.values())
++
++    def unregister(self, name: str) -> Optional[CapabilityRecord]:
++        with self._lock:
++            record = self._records.pop(name, None)
++        if record:
++            logger.info("Capability unregistered", capability_id=name)
++        return record
+*** Update File: src/runtimes/capability/runtime.py
+@@
+-import structlog
+-from typing import Any, Dict, Optional
++import asyncio
++import structlog
++import time
++from datetime import datetime, timezone
++from typing import Any, Dict, Mapping, Optional
+@@
+ from .registry import CapabilityRegistry
+ from .drivers.base import BaseCapabilityDriver
++from .contracts.context import CapabilityExecutionContext
++from .contracts.error import CapabilityError
++from .contracts.result import CapabilityResult
+ from ...domain.schemas.identity import Identity
+-from ...infrastructure.event_bus.bus import EventBus
+ from ...domain.schemas.event import BaseEvent
+@@
+ class CapabilityRuntime(BaseRuntime):
+@@
+-    def __init__(self):
++    def __init__(
++        self,
++        registry: CapabilityRegistry | None = None,
++        authorization: AuthorizationService | None = None,
++    ):
+         self.event_bus = None
+         self.registry = registry or CapabilityRegistry()
+         self.authorization = authorization or AuthorizationService()
++        self._subscribed = False
+ 
+     async def initialize(self, context: RuntimeContext) -> None:
+-        # Lắng nghe Command yêu cầu thực thi Tool từ EventBus
++        super().initialize(context)
+         self.event_bus = context.event_bus
+-        self.event_bus.subscribe("capability.command.execute", self._handle_execute_command)
++        if not self._subscribed:
++            self.event_bus.subscribe(
++                "capability.command.execute",
++                self._handle_execute_command,
++            )
++            self._subscribed = True
+         self._is_initialized = True
+         logger.info("Capability Runtime initialized.")
+ 
+     async def start(self) -> None:
++        if self.state.name == "DISPOSED":
++            raise RuntimeError("Cannot start a disposed CapabilityRuntime.")
+         self._is_running = True
+         logger.info("Capability Runtime started.")
+ 
+     async def stop(self) -> None:
+         self._is_running = False
++        if self.event_bus is not None and self._subscribed:
++            self.event_bus.unsubscribe(
++                "capability.command.execute",
++                self._handle_execute_command,
++            )
++            self._subscribed = False
+         logger.info("Capability Runtime stopped.")
+@@
+-        tool_name = event.payload.get("tool_name")
++        capability_id = (
++            event.payload.get("capability_id")
++            or event.payload.get("tool_name")
++        )
+         arguments = event.payload.get("arguments", {})
+         identity = event.payload.get("identity")
+ 
+         try:
+-            result = await self.execute_tool(
+-                tool_name=tool_name,
++            result = await self.execute_capability(
++                capability_id=capability_id,
+                 arguments=arguments,
+                 identity=identity,
+-                context=event.payload.get("context")
++                execution_id=event.payload.get("execution_id"),
++                request_id=event.payload.get("request_id"),
++                session_id=event.session_id,
++                workflow_id=event.payload.get("workflow_id"),
+             )
+-            
+-            # Phát Event thông báo Tool đã chạy xong
+             await self.event_bus.publish(BaseEvent(
+                 event_name="capability.event.executed",
+                 session_id=event.session_id,
+-                payload={"tool_name": tool_name, "result": result}
++                payload={
++                    "capability_id": capability_id,
++                    "tool_name": capability_id,
++                    "result": result.output,
++                    "capability_result": result.model_dump(mode="json"),
++                },
+             ))
+         except Exception as e:
+-            logger.error("Failed to process capability execution command", tool_name=tool_name, error=str(e))
++            logger.error(
++                "Failed to process capability execution command",
++                capability_id=capability_id,
++                error=str(e),
++            )
+             await self.event_bus.publish(BaseEvent(
+                 event_name="capability.event.failed",
+                 session_id=event.session_id,
+-                payload={"tool_name": tool_name, "error": str(e)}
++                payload={
++                    "capability_id": capability_id,
++                    "tool_name": capability_id,
++                    "error": str(e),
++                    "capability_error": (
++                        e.model_dump() if isinstance(e, CapabilityError) else
++                        CapabilityError.from_exception(
++                            e,
++                            capability_id=capability_id,
++                        ).model_dump()
++                    ),
++                },
+             ))
+@@
+     def register_tool(self, driver: BaseCapabilityDriver):
++        """Backward-compatible alias for capability registration."""
+         self.registry.register_capability(driver)
+ 
+-    async def get_available_tools(self, identity: Identity):
++    def register_capability(self, driver: BaseCapabilityDriver):
++        return self.registry.register_capability(driver)
++
++    async def get_available_capabilities(self, identity: Identity):
+         return [
+-            {
+-                "type": "function",
+-                "function": {
+-                    "name": driver.definition.name,
+-                    "description": driver.definition.description,
+-                    "parameters": driver.definition.parameters,
+-                },
+-            }
++            driver.definition
+             for driver in self.registry.get_all_drivers()
+             if self.authorization.is_allowed(identity, driver)
+         ]
+ 
+-    async def execute_tool(
++    async def check_health(self):
++        for driver in self.registry.get_all_drivers():
++            try:
++                if not await driver.check_health():
++                    return self._failed_health_status()
++            except Exception:
++                return self._failed_health_status()
++        return self._healthy_health_status()
++
++    @staticmethod
++    def _healthy_health_status():
++        from ...kernel.base import HealthStatus
++        return HealthStatus.HEALTHY
++
++    @staticmethod
++    def _failed_health_status():
++        from ...kernel.base import HealthStatus
++        return HealthStatus.FAILED
++
++    async def execute_capability(
+         self, 
+-        tool_name: str, 
+-        arguments: Dict[str, Any], 
++        capability_id: str,
++        arguments: Mapping[str, Any],
+         identity: Identity,
+-        context: Optional[Dict[str, Any]] = None
+-    ) -> Any:
+-        driver = self.registry.get_driver(tool_name)
++        *,
++        execution_id: str | None = None,
++        request_id: str | None = None,
++        session_id: str | None = None,
++        workflow_id: str | None = None,
++        timeout_seconds: float | None = None,
++        metadata: Optional[Dict[str, Any]] = None,
++    ) -> CapabilityResult:
++        started = time.perf_counter()
++        driver = self.registry.get_driver(capability_id)
+         if not driver:
+-            raise ValueError(f"Capability/Tool '{tool_name}' not found.")
++            raise ValueError(f"Capability '{capability_id}' not found or unavailable.")
+         if not self.authorization.is_allowed(identity, driver):
+-            raise PermissionError(f"Capability/Tool '{tool_name}' is not authorized.")
++            raise PermissionError(f"Capability '{capability_id}' is not authorized.")
+ 
+-        exec_context = context or {}
+-        exec_context["identity"] = identity
++        context = CapabilityExecutionContext.create(
++            identity=identity,
++            execution_id=execution_id,
++            request_id=request_id,
++            session_id=session_id,
++            workflow_id=workflow_id,
++            timeout_seconds=timeout_seconds,
++            metadata=metadata,
++        )
+ 
+-        logger.info("Executing capability", tool_name=tool_name, arguments=arguments)
+-        return await driver.execute(arguments, exec_context)
++        logger.info(
++            "Executing capability",
++            capability_id=capability_id,
++            invocation_id=context.invocation_id,
++        )
++        started_at = datetime.now(timezone.utc)
++        try:
++            if context.cancelled:
++                raise asyncio.CancelledError()
++            driver_task = driver.execute(context, dict(arguments))
++            if context.remaining_seconds is not None:
++                raw_output = await asyncio.wait_for(
++                    driver_task,
++                    timeout=context.remaining_seconds,
++                )
++            else:
++                raw_output = await driver_task
++        except asyncio.TimeoutError as exc:
++            raise CapabilityError(
++                code="CAPABILITY_TIMEOUT",
++                message=f"Capability '{capability_id}' timed out.",
++                category="TIMEOUT",
++                retryable=True,
++                safe_for_client=True,
++                cause_type=type(exc).__name__,
++                capability_id=capability_id,
++                invocation_id=context.invocation_id,
++            ) from exc
++        except asyncio.CancelledError as exc:
++            raise CapabilityError(
++                code="CAPABILITY_CANCELLED",
++                message=f"Capability '{capability_id}' was cancelled.",
++                category="CANCELLED",
++                retryable=False,
++                safe_for_client=True,
++                cause_type=type(exc).__name__,
++                capability_id=capability_id,
++                invocation_id=context.invocation_id,
++            ) from exc
++        except CapabilityError:
++            raise
++        except Exception as exc:
++            raise CapabilityError.from_exception(
++                exc,
++                capability_id=capability_id,
++                invocation_id=context.invocation_id,
++            ) from exc
++
++        completed_at = time.perf_counter()
++        completed_at_utc = datetime.now(timezone.utc)
++        return CapabilityResult(
++            invocation_id=context.invocation_id,
++            capability_id=capability_id,
++            output=raw_output,
++            output_type=type(raw_output).__name__,
++            started_at=started_at,
++            completed_at=completed_at_utc,
++            duration_ms=(completed_at - started) * 1000,
++            metadata={"attempt": context.attempt},
++        )
++
++    async def execute_tool(
++        self,
++        tool_name: str,
++        arguments: Dict[str, Any],
++        identity: Identity,
++        context: Optional[Dict[str, Any]] = None,
++    ) -> Any:
++        """Compatibility wrapper for the legacy Tool API."""
++        context = context or {}
++        result = await self.execute_capability(
++            capability_id=tool_name,
++            arguments=arguments,
++            identity=identity,
++            execution_id=context.get("execution_id"),
++            request_id=context.get("request_id"),
++            session_id=context.get("session_id"),
++            workflow_id=context.get("workflow_id"),
++            metadata={
++                key: value
++                for key, value in context.items()
++                if key not in {
++                    "execution_id",
++                    "request_id",
++                    "session_id",
++                    "workflow_id",
++                    "identity",
++                }
++            },
++        )
++        return result.output
++
++    async def get_available_tools(self, identity: Identity):
++        """Compatibility view; provider adapters can migrate later."""
++        return [
++            {
++                "type": "function",
++                "function": {
++                    "name": definition.name,
++                    "description": definition.description,
++                    "parameters": definition.parameters,
++                },
++            }
++            for definition in await self.get_available_capabilities(identity)
++        ]
+*** Update File: src/application/container.py
+@@
+     workflow_runtime: Optional[Any] = None
+     capability_runtime: Optional[Any] = None
++    capability_registry: Optional[Any] = None
++    authorization_service: Optional[Any] = None
+     provider_runtime: Optional[Any] = None
+*** Update File: src/main.py
+@@
+ from .application.container import ApplicationContainer
++from .application.policy.authorization import AuthorizationService
+ from .agent.registry import AgentRegistry
+ from .tool.registry import ToolRegistry
++from .runtimes.capability.registry import CapabilityRegistry
+@@
+     agent_registry = AgentRegistry()
++    capability_registry = CapabilityRegistry()
++    authorization_service = AuthorizationService()
+@@
+         eventing_manager=eventing_manager,
+         circuit_breaker_manager=cb_manager,
+         agent_registry=agent_registry,
++        capability_registry=capability_registry,
++        authorization_service=authorization_service,
+         tool_registry=ToolRegistry(),
+@@
+         ("workflow_runtime", WorkflowRuntime()),
+-        ("capability_runtime", CapabilityRuntime()),
++        (
++            "capability_runtime",
++            CapabilityRuntime(
++                registry=capability_registry,
++                authorization=authorization_service,
++            ),
++        ),
+*** End Patch
+*** Update File: tests/architecture/test_phase3.py
+@@
+ from src.application.policy.authorization import AuthorizationService
+ from src.domain.schemas.identity import Identity
++from src.runtimes.capability.contracts.context import CapabilityExecutionContext
++from src.runtimes.capability.contracts.error import CapabilityError
++from src.runtimes.capability.contracts.result import CapabilityResult
+ from src.runtimes.capability.drivers.base import BaseCapabilityDriver, CapabilityDefinition
+@@
+ class EchoDriver(BaseCapabilityDriver):
+-    async def execute(self, arguments, context):
++    async def execute(self, context, arguments):
+         return arguments["value"]
+@@
+ def test_tool_registry_delegates_metadata_to_capability_registry():
+@@
+     assert runtime.registry.get_definition("local.echo") is not None
+     assert registry.get("local.echo").name == "local.echo"
++
++
++def test_capability_definition_is_transport_neutral():
++    definition = CapabilityDefinition(
++        id="github.search",
++        version="1.0",
++        name="github.search",
++        description="Search GitHub",
++        parameters={"type": "object", "properties": {"query": {"type": "string"}}},
++        output_schema={"type": "object"},
++        source="MCP",
++        execution_kind="MCP",
++    )
++    assert definition.capability_id == "github.search"
++    assert definition.parameters["type"] == "object"
++    assert definition.input_schema["type"] == "object"
++
++
++def test_capability_registry_does_not_treat_definition_only_as_executable():
++    from src.runtimes.capability.registry import CapabilityRegistry
++
++    registry = CapabilityRegistry()
++    registry.register_definition(
++        CapabilityDefinition(
++            id="discovered.only",
++            name="discovered.only",
++            description="metadata only",
++        )
++    )
++    assert registry.get_driver("discovered.only") is None
++    assert registry.get("discovered.only").executable is False
++
++
++def test_capability_execution_context_is_invocation_scoped():
++    identity = make_identity("github.read")
++    first = CapabilityExecutionContext.create(identity=identity)
++    second = CapabilityExecutionContext.create(identity=identity)
++    assert first.execution_id != second.execution_id
++    assert first.invocation_id != second.invocation_id
++    assert first.identity is identity
++
++
++def test_capability_error_is_machine_readable():
++    error = CapabilityError.from_exception(
++        PermissionError("denied"),
++        capability_id="github.search",
++        invocation_id="capinv_1",
++    )
++    assert error.code == "CAPABILITY_UNAUTHORIZED"
++    assert error.category == "AUTHORIZATION"
++    assert error.safe_for_client is True
++
++
++@pytest.mark.asyncio
++async def test_execute_capability_returns_normalized_result_and_legacy_api_still_works():
++    runtime = CapabilityRuntime()
++    runtime.register_capability(
++        EchoDriver(
++            CapabilityDefinition(
++                id="local.echo",
++                name="local.echo",
++                description="Echo",
++                parameters={"type": "object"},
++            )
++        )
++    )
++    identity = make_identity()
++    result = await runtime.execute_capability(
++        "local.echo",
++        {"value": "ok"},
++        identity,
++    )
++    assert isinstance(result, CapabilityResult)
++    assert result.success is True
++    assert result.output == "ok"
++    assert result.invocation_id
++    assert await runtime.execute_tool(
++        "local.echo",
++        {"value": "legacy"},
++        identity,
++    ) == "legacy"
+
+@pytest.mark.asyncio
+async def test_capability_runtime_unsubscribes_on_stop_and_can_reinitialize():
+    class Bus:
+        def __init__(self):
+            self.handlers = []
+        def subscribe(self, event_name, handler):
+            self.handlers.append((event_name, handler))
+        def unsubscribe(self, event_name, handler):
+            self.handlers = [x for x in self.handlers if x != (event_name, handler)]
+
+    from src.kernel.base import RuntimeContext
+    from types import SimpleNamespace
+
+    runtime = CapabilityRuntime()
+    bus = Bus()
+    ctx = SimpleNamespace(event_bus=bus)
+    await runtime.initialize(ctx)
+    assert len(bus.handlers) == 1
+    await runtime.stop()
+    assert len(bus.handlers) == 0
+    await runtime.initialize(ctx)
+    assert len(bus.handlers) == 1
+
+*** End Patch

@@ -17,7 +17,8 @@ class ApplicationContainer:
     http_client: Any
     eventing_manager: Any
     event_bus: Any
-
+    
+    mcp_manager: Optional[Any] = None
     runtime_kernel: Optional[Any] = None
     event_runtime: Optional[Any] = None
     context_runtime: Optional[Any] = None
@@ -25,6 +26,8 @@ class ApplicationContainer:
     session_runtime: Optional[Any] = None
     workflow_runtime: Optional[Any] = None
     capability_runtime: Optional[Any] = None
+    capability_registry: Optional[Any] = None
+    authorization_service: Optional[Any] = None
     provider_runtime: Optional[Any] = None
 
     api_key_service: Optional[Any] = None
