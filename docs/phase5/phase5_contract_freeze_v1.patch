@@ -1,0 +1,1026 @@
+diff --git a/src/runtimes/agent/contracts/__init__.py b/src/runtimes/agent/contracts/__init__.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/__init__.py
+@@ -0,0 +1,52 @@
++from .context import AgentExecutionContext
++from .loop import AgentIteration, AgentLoopState, transition, validate_transition
++from .inference import (
++    InferenceMessage,
++    InferencePort,
++    InferenceRequest,
++    InferenceResponse,
++    InferenceToolCall,
++    InferenceToolDefinition,
++    InferenceUsage,
++)
++from .tool import ToolExecutionPort, ToolExecutionRequest, ToolExecutionResult
++from .context_builder import (
++    AgentContextRequest,
++    AgentContextSnapshot,
++    ContextBuilderPort,
++)
++from .policy import AgentExecutionPolicy, AgentToolPolicy, PolicyDecision
++from .events import (
++    AgentEventEnvelope,
++    AgentEventName,
++    AgentEventPublisher,
++    CorrelationContext,
++)
++
++__all__ = [
++    "AgentExecutionContext",
++    "AgentIteration",
++    "AgentLoopState",
++    "transition",
++    "validate_transition",
++    "InferenceMessage",
++    "InferencePort",
++    "InferenceRequest",
++    "InferenceResponse",
++    "InferenceToolCall",
++    "InferenceToolDefinition",
++    "InferenceUsage",
++    "ToolExecutionPort",
++    "ToolExecutionRequest",
++    "ToolExecutionResult",
++    "AgentContextRequest",
++    "AgentContextSnapshot",
++    "ContextBuilderPort",
++    "AgentExecutionPolicy",
++    "AgentToolPolicy",
++    "PolicyDecision",
++    "AgentEventEnvelope",
++    "AgentEventName",
++    "AgentEventPublisher",
++    "CorrelationContext",
++]
+diff --git a/src/runtimes/agent/contracts/context.py b/src/runtimes/agent/contracts/context.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/context.py
+@@ -0,0 +1,95 @@
++from __future__ import annotations
++
++import asyncio
++import time
++from dataclasses import dataclass, field
++from typing import Any, Dict, Optional
++
++from ....domain.schemas.agent import AgentDefinition
++from ....domain.schemas.agent_execution import AgentExecutionLimits
++from ....domain.schemas.identity import Identity
++
++
++@dataclass(slots=True)
++class AgentExecutionContext:
++    """Request scope for one agent execution."""
++
++    execution_id: str
++    agent_id: str
++    session_id: str
++    correlation_id: str
++    identity: Identity
++    limits: AgentExecutionLimits
++
++    request_id: str | None = None
++    parent_execution_id: str | None = None
++    workflow_id: str | None = None
++    agent: AgentDefinition | None = None
++    metadata: Dict[str, Any] = field(default_factory=dict)
++
++    started_monotonic: float = field(default_factory=time.monotonic)
++    deadline: float | None = None
++    iteration: int = 0
++    tool_calls_used: int = 0
++    cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
++
++    @classmethod
++    def create(
++        cls,
++        *,
++        execution_id: str,
++        agent_id: str,
++        session_id: str,
++        correlation_id: str,
++        identity: Identity,
++        limits: AgentExecutionLimits,
++        request_id: str | None = None,
++        parent_execution_id: str | None = None,
++        workflow_id: str | None = None,
++        agent: AgentDefinition | None = None,
++        metadata: Optional[Dict[str, Any]] = None,
++        now_monotonic: float | None = None,
++    ) -> "AgentExecutionContext":
++        started = time.monotonic() if now_monotonic is None else now_monotonic
++        return cls(
++            execution_id=execution_id,
++            agent_id=agent_id,
++            session_id=session_id,
++            correlation_id=correlation_id,
++            identity=identity,
++            limits=limits,
++            request_id=request_id,
++            parent_execution_id=parent_execution_id,
++            workflow_id=workflow_id,
++            agent=agent,
++            metadata=dict(metadata or {}),
++            started_monotonic=started,
++            deadline=started + limits.timeout_seconds,
++        )
++
++    @property
++    def remaining_seconds(self) -> float:
++        if self.deadline is None:
++            return float("inf")
++        return max(0.0, self.deadline - time.monotonic())
++
++    @property
++    def timed_out(self) -> bool:
++        return self.remaining_seconds <= 0.0
++
++    @property
++    def cancelled(self) -> bool:
++        return self.cancellation_event.is_set()
++
++    def cancel(self) -> None:
++        self.cancellation_event.set()
++
++    def next_iteration(self) -> int:
++        self.iteration += 1
++        return self.iteration
++
++    def record_tool_calls(self, count: int = 1) -> int:
++        if count < 0:
++            raise ValueError("tool call count increment must be non-negative")
++        self.tool_calls_used += count
++        return self.tool_calls_used
+diff --git a/src/runtimes/agent/contracts/loop.py b/src/runtimes/agent/contracts/loop.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/loop.py
+@@ -0,0 +1,99 @@
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from datetime import datetime, timezone
++from enum import Enum
++from typing import List, Optional
++
++
++class AgentLoopState(str, Enum):
++    PREPARING = "PREPARING"
++    THINKING = "THINKING"
++    TOOL_CALLING = "TOOL_CALLING"
++    WAITING_TOOL = "WAITING_TOOL"
++    FINALIZING = "FINALIZING"
++    COMPLETED = "COMPLETED"
++    FAILED = "FAILED"
++    CANCELLED = "CANCELLED"
++    TIMEOUT = "TIMEOUT"
++
++
++_ALLOWED_TRANSITIONS = {
++    AgentLoopState.PREPARING: {
++        AgentLoopState.THINKING,
++        AgentLoopState.FAILED,
++        AgentLoopState.CANCELLED,
++        AgentLoopState.TIMEOUT,
++    },
++    AgentLoopState.THINKING: {
++        AgentLoopState.TOOL_CALLING,
++        AgentLoopState.FINALIZING,
++        AgentLoopState.FAILED,
++        AgentLoopState.CANCELLED,
++        AgentLoopState.TIMEOUT,
++    },
++    AgentLoopState.TOOL_CALLING: {
++        AgentLoopState.WAITING_TOOL,
++        AgentLoopState.THINKING,
++        AgentLoopState.FAILED,
++        AgentLoopState.CANCELLED,
++        AgentLoopState.TIMEOUT,
++    },
++    AgentLoopState.WAITING_TOOL: {
++        AgentLoopState.THINKING,
++        AgentLoopState.FAILED,
++        AgentLoopState.CANCELLED,
++        AgentLoopState.TIMEOUT,
++    },
++    AgentLoopState.FINALIZING: {
++        AgentLoopState.COMPLETED,
++        AgentLoopState.FAILED,
++        AgentLoopState.CANCELLED,
++    },
++    AgentLoopState.COMPLETED: set(),
++    AgentLoopState.FAILED: set(),
++    AgentLoopState.CANCELLED: set(),
++    AgentLoopState.TIMEOUT: set(),
++}
++
++
++def validate_transition(
++    current: AgentLoopState,
++    target: AgentLoopState,
++) -> None:
++    if target not in _ALLOWED_TRANSITIONS[current]:
++        raise ValueError(
++            f"Invalid agent loop transition: {current.value} -> {target.value}"
++        )
++
++
++def transition(
++    current: AgentLoopState,
++    target: AgentLoopState,
++) -> AgentLoopState:
++    validate_transition(current, target)
++    return target
++
++
++@dataclass(slots=True)
++class AgentIteration:
++    execution_id: str
++    iteration: int
++    state: AgentLoopState = AgentLoopState.PREPARING
++    inference_request_id: Optional[str] = None
++    tool_call_ids: List[str] = field(default_factory=list)
++    started_at: datetime = field(
++        default_factory=lambda: datetime.now(timezone.utc)
++    )
++    completed_at: Optional[datetime] = None
++    error_code: Optional[str] = None
++
++    def close(
++        self,
++        state: AgentLoopState,
++        *,
++        error_code: str | None = None,
++    ) -> None:
++        self.state = transition(self.state, state)
++        self.error_code = error_code
++        self.completed_at = datetime.now(timezone.utc)
+diff --git a/src/runtimes/agent/contracts/inference.py b/src/runtimes/agent/contracts/inference.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/inference.py
+@@ -0,0 +1,76 @@
++from __future__ import annotations
++
++from typing import Any, Dict, Mapping, Protocol, Sequence
++
++from pydantic import BaseModel, ConfigDict, Field
++
++
++class InferenceMessage(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    role: str
++    content: Any = None
++    tool_calls: list["InferenceToolCall"] = Field(default_factory=list)
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++
++class InferenceToolCall(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    id: str
++    name: str
++    arguments: Dict[str, Any] = Field(default_factory=dict)
++
++
++class InferenceToolDefinition(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    name: str
++    description: str
++    parameters: Dict[str, Any] = Field(default_factory=dict)
++
++
++class InferenceUsage(BaseModel):
++    model_config = ConfigDict(extra="allow")
++
++    prompt_tokens: int = 0
++    completion_tokens: int = 0
++    total_tokens: int = 0
++
++
++class InferenceRequest(BaseModel):
++    """Provider-neutral input to one model inference turn."""
++
++    model_config = ConfigDict(extra="forbid")
++
++    request_id: str
++    execution_id: str
++    iteration: int
++    messages: Sequence[Mapping[str, Any]]
++    tools: Sequence[InferenceToolDefinition] = Field(default_factory=list)
++    model: str | None = None
++    temperature: float | None = None
++    max_output_tokens: int | None = None
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++
++class InferenceResponse(BaseModel):
++    """Provider-neutral output from one model inference turn."""
++
++    model_config = ConfigDict(extra="forbid")
++
++    request_id: str
++    execution_id: str
++    iteration: int
++    message: InferenceMessage
++    finish_reason: str | None = None
++    usage: InferenceUsage = Field(default_factory=InferenceUsage)
++    provider: str
++    model: str
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++
++class InferencePort(Protocol):
++    async def complete(self, request: InferenceRequest) -> InferenceResponse:
++        """Execute one non-streaming inference turn."""
++        ...
+diff --git a/src/runtimes/agent/contracts/tool.py b/src/runtimes/agent/contracts/tool.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/tool.py
+@@ -0,0 +1,53 @@
++from __future__ import annotations
++
++from typing import Any, Dict, Protocol, Sequence
++
++from pydantic import BaseModel, ConfigDict, Field
++
++from .context import AgentExecutionContext
++
++
++class ToolExecutionRequest(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    execution_id: str
++    iteration: int
++    invocation_id: str
++    tool_call_id: str
++    capability_id: str
++    arguments: Dict[str, Any] = Field(default_factory=dict)
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++
++class ToolExecutionResult(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    execution_id: str
++    iteration: int
++    invocation_id: str
++    tool_call_id: str
++    capability_id: str
++    success: bool
++    output: Any = None
++    error_code: str | None = None
++    error_message: str | None = None
++    retryable: bool = False
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++
++class ToolExecutionPort(Protocol):
++    async def execute(
++        self,
++        context: AgentExecutionContext,
++        request: ToolExecutionRequest,
++    ) -> ToolExecutionResult:
++        ...
++
++    async def execute_many(
++        self,
++        context: AgentExecutionContext,
++        requests: Sequence[ToolExecutionRequest],
++        *,
++        max_parallel: int,
++    ) -> Sequence[ToolExecutionResult]:
++        ...
+diff --git a/src/runtimes/agent/contracts/context_builder.py b/src/runtimes/agent/contracts/context_builder.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/context_builder.py
+@@ -0,0 +1,42 @@
++from __future__ import annotations
++
++from typing import Any, Dict, Mapping, Protocol, Sequence
++
++from pydantic import BaseModel, ConfigDict, Field
++
++from .context import AgentExecutionContext
++from .inference import InferenceMessage, InferenceToolDefinition
++from .tool import ToolExecutionResult
++
++
++class AgentContextRequest(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    execution_id: str
++    iteration: int
++    input: Mapping[str, Any] = Field(default_factory=dict)
++    prior_messages: Sequence[Mapping[str, Any]] = Field(default_factory=list)
++    tool_results: Sequence[ToolExecutionResult] = Field(default_factory=list)
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++
++class AgentContextSnapshot(BaseModel):
++    """Snapshot consumed by exactly one inference turn."""
++
++    model_config = ConfigDict(extra="forbid", frozen=True)
++
++    execution_id: str
++    iteration: int
++    messages: Sequence[InferenceMessage] = Field(default_factory=list)
++    tools: Sequence[InferenceToolDefinition] = Field(default_factory=list)
++    token_estimate: int = 0
++    metadata: Dict[str, Any] = Field(default_factory=dict)
++
++
++class ContextBuilderPort(Protocol):
++    async def build(
++        self,
++        context: AgentExecutionContext,
++        request: AgentContextRequest,
++    ) -> AgentContextSnapshot:
++        ...
+diff --git a/src/runtimes/agent/contracts/policy.py b/src/runtimes/agent/contracts/policy.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/policy.py
+@@ -0,0 +1,60 @@
++from __future__ import annotations
++
++from enum import Enum
++from typing import Protocol
++
++from ....domain.schemas.agent_execution import AgentExecutionLimits
++from ....domain.schemas.identity import Identity
++
++from .context import AgentExecutionContext
++from .tool import ToolExecutionRequest
++
++
++class PolicyDecision(str, Enum):
++    ALLOW = "allow"
++    DENY = "deny"
++
++
++class AgentToolPolicy(Protocol):
++    """Controls tool visibility and authorization for an agent."""
++
++    def is_visible(
++        self,
++        *,
++        agent_id: str,
++        capability_id: str,
++    ) -> bool:
++        ...
++
++    def authorize(
++        self,
++        *,
++        identity: Identity,
++        agent_id: str,
++        capability_id: str,
++    ) -> PolicyDecision:
++        ...
++
++
++class AgentExecutionPolicy(Protocol):
++    """Controls execution-level budgets and admission decisions."""
++
++    def check_start(self, context: AgentExecutionContext) -> PolicyDecision:
++        ...
++
++    def check_iteration(
++        self,
++        context: AgentExecutionContext,
++        iteration: int,
++    ) -> PolicyDecision:
++        ...
++
++    def check_tool_call(
++        self,
++        context: AgentExecutionContext,
++        request: ToolExecutionRequest,
++    ) -> PolicyDecision:
++        ...
++
++    def limits(self, context: AgentExecutionContext) -> AgentExecutionLimits:
++        ...
+diff --git a/src/runtimes/agent/contracts/events.py b/src/runtimes/agent/contracts/events.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/contracts/events.py
+@@ -0,0 +1,53 @@
++from __future__ import annotations
++
++import time
++from typing import Any, Dict, Protocol
++
++from pydantic import BaseModel, ConfigDict, Field
++
++
++class AgentEventName:
++    EXECUTION_CREATED = "agent.execution.created"
++    EXECUTION_STARTED = "agent.execution.started"
++    ITERATION_STARTED = "agent.iteration.started"
++    INFERENCE_REQUESTED = "agent.inference.requested"
++    INFERENCE_COMPLETED = "agent.inference.completed"
++    TOOL_REQUESTED = "agent.tool.requested"
++    TOOL_STARTED = "agent.tool.started"
++    TOOL_COMPLETED = "agent.tool.completed"
++    TOOL_FAILED = "agent.tool.failed"
++    ITERATION_COMPLETED = "agent.iteration.completed"
++    EXECUTION_COMPLETED = "agent.execution.completed"
++    EXECUTION_FAILED = "agent.execution.failed"
++    EXECUTION_CANCELLED = "agent.execution.cancelled"
++    EXECUTION_TIMEOUT = "agent.execution.timeout"
++
++
++class CorrelationContext(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    correlation_id: str
++    execution_id: str
++    request_id: str | None = None
++    parent_execution_id: str | None = None
++    iteration_id: str | None = None
++    tool_call_id: str | None = None
++    invocation_id: str | None = None
++    causation_id: str | None = None
++    trace_id: str | None = None
++
++
++class AgentEventEnvelope(BaseModel):
++    model_config = ConfigDict(extra="forbid")
++
++    event_id: str
++    event_name: str
++    event_version: str = "1.0"
++    timestamp: float = Field(default_factory=time.time)
++    correlation: CorrelationContext
++    payload: Dict[str, Any] = Field(default_factory=dict)
++
++
++class AgentEventPublisher(Protocol):
++    async def publish(self, event: AgentEventEnvelope) -> None:
++        ...
+diff --git a/tests/architecture/test_phase5_contracts.py b/tests/architecture/test_phase5_contracts.py
+new file mode 100644
+--- /dev/null
++++ b/tests/architecture/test_phase5_contracts.py
+@@ -0,0 +1,330 @@
++import pytest
++
++from src.domain.schemas.agent import AgentDefinition
++from src.domain.schemas.agent_execution import AgentExecutionLimits
++from src.domain.schemas.identity import Identity
++from src.runtimes.agent.contracts import (
++    AgentContextSnapshot,
++    AgentEventEnvelope,
++    AgentEventName,
++    AgentExecutionContext,
++    AgentIteration,
++    AgentLoopState,
++    CorrelationContext,
++    InferenceMessage,
++    InferencePort,
++    InferenceRequest,
++    InferenceResponse,
++    InferenceToolCall,
++    InferenceToolDefinition,
++    ToolExecutionPort,
++    ToolExecutionRequest,
++    ToolExecutionResult,
++    transition,
++)
++from src.runtimes.agent.contracts.policy import (
++    AgentExecutionPolicy,
++    AgentToolPolicy,
++    PolicyDecision,
++)
++
++
++def make_identity() -> Identity:
++    return Identity(
++        user_id="user-1",
++        organization_id="org-1",
++        auth_type="api_key",
++        scopes={"tools.read"},
++    )
++
++
++def make_context() -> AgentExecutionContext:
++    return AgentExecutionContext.create(
++        execution_id="exec-1",
++        agent_id="agent-1",
++        session_id="session-1",
++        correlation_id="corr-1",
++        identity=make_identity(),
++        limits=AgentExecutionLimits(
++            max_iterations=3,
++            max_tool_calls=4,
++            timeout_seconds=10,
++        ),
++        request_id="req-1",
++        agent=AgentDefinition(
++            name="agent-1",
++            goal="test",
++            instruction="test",
++            tools=["calculator.add"],
++        ),
++        now_monotonic=100.0,
++    )
++
++
++def test_execution_context_has_budget_and_correlation_boundary():
++    context = make_context()
++
++    assert context.execution_id == "exec-1"
++    assert context.correlation_id == "corr-1"
++    assert context.limits.max_iterations == 3
++    assert context.limits.max_tool_calls == 4
++    assert context.iteration == 0
++    assert context.tool_calls_used == 0
++
++    context.next_iteration()
++    context.record_tool_calls(2)
++
++    assert context.iteration == 1
++    assert context.tool_calls_used == 2
++
++
++def test_execution_context_cancellation_is_explicit():
++    context = make_context()
++
++    assert context.cancelled is False
++    context.cancel()
++    assert context.cancelled is True
++
++
++def test_loop_transition_contract_accepts_tool_cycle_and_rejects_terminal_restart():
++    state = AgentLoopState.PREPARING
++    state = transition(state, AgentLoopState.THINKING)
++    state = transition(state, AgentLoopState.TOOL_CALLING)
++    state = transition(state, AgentLoopState.WAITING_TOOL)
++    state = transition(state, AgentLoopState.THINKING)
++    state = transition(state, AgentLoopState.FINALIZING)
++    state = transition(state, AgentLoopState.COMPLETED)
++
++    assert state is AgentLoopState.COMPLETED
++
++    with pytest.raises(ValueError, match="Invalid agent loop transition"):
++        transition(AgentLoopState.COMPLETED, AgentLoopState.THINKING)
++
++
++def test_iteration_preserves_tool_calls_and_rejects_invalid_terminal_transition():
++    iteration = AgentIteration(
++        execution_id="exec-1",
++        iteration=2,
++        state=AgentLoopState.TOOL_CALLING,
++        inference_request_id="inf-1",
++        tool_call_ids=["call-1", "call-2"],
++    )
++
++    iteration.close(AgentLoopState.WAITING_TOOL)
++    assert iteration.state is AgentLoopState.WAITING_TOOL
++    assert iteration.tool_call_ids == ["call-1", "call-2"]
++
++    iteration.close(AgentLoopState.THINKING)
++    with pytest.raises(ValueError):
++        iteration.close(AgentLoopState.COMPLETED)
++
++
++@pytest.mark.asyncio
++async def test_inference_port_contract_is_provider_neutral():
++    class FakeInference:
++        async def complete(self, request: InferenceRequest) -> InferenceResponse:
++            return InferenceResponse(
++                request_id=request.request_id,
++                execution_id=request.execution_id,
++                iteration=request.iteration,
++                message=InferenceMessage(
++                    role="assistant",
++                    tool_calls=[
++                        InferenceToolCall(
++                            id="call-1",
++                            name="calculator.add",
++                            arguments={"a": 10, "b": 32},
++                        )
++                    ],
++                ),
++                provider="mock",
++                model=request.model or "mock-model",
++            )
++
++    port: InferencePort = FakeInference()
++    response = await port.complete(
++        InferenceRequest(
++            request_id="inf-1",
++            execution_id="exec-1",
++            iteration=1,
++            messages=[{"role": "user", "content": "10 + 32"}],
++            tools=[
++                InferenceToolDefinition(
++                    name="calculator.add",
++                    description="Add numbers",
++                    parameters={"type": "object"},
++                )
++            ],
++        )
++    )
++
++    assert response.execution_id == "exec-1"
++    assert response.message.tool_calls[0].name == "calculator.add"
++
++
++@pytest.mark.asyncio
++async def test_tool_execution_port_contract_normalizes_success_and_failure():
++    class FakeToolExecutor:
++        async def execute(self, context, request):
++            return ToolExecutionResult(
++                execution_id=context.execution_id,
++                iteration=request.iteration,
++                invocation_id=request.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=True,
++                output={"result": 42},
++            )
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            assert max_parallel == 2
++            return [await self.execute(context, request) for request in requests]
++
++    port: ToolExecutionPort = FakeToolExecutor()
++    request = ToolExecutionRequest(
++        execution_id="exec-1",
++        iteration=1,
++        invocation_id="inv-1",
++        tool_call_id="call-1",
++        capability_id="calculator.add",
++        arguments={"a": 10, "b": 32},
++    )
++
++    result = await port.execute(make_context(), request)
++
++    assert result.success is True
++    assert result.output == {"result": 42}
++
++
++@pytest.mark.asyncio
++async def test_tool_failure_contract_carries_retryability():
++    class FakeToolExecutor:
++        async def execute(self, context, request):
++            return ToolExecutionResult(
++                execution_id=context.execution_id,
++                iteration=request.iteration,
++                invocation_id=request.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=False,
++                error_code="CAPABILITY_TIMEOUT",
++                error_message="timed out",
++                retryable=True,
++            )
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            return [await self.execute(context, request) for request in requests]
++
++    port: ToolExecutionPort = FakeToolExecutor()
++    result = await port.execute(
++        make_context(),
++        ToolExecutionRequest(
++            execution_id="exec-1",
++            iteration=1,
++            invocation_id="inv-1",
++            tool_call_id="call-1",
++            capability_id="slow.tool",
++        ),
++    )
++
++    assert result.success is False
++    assert result.tool_call_id == "call-1"
++    assert result.error_code == "CAPABILITY_TIMEOUT"
++    assert result.retryable is True
++
++
++def test_context_snapshot_is_frozen():
++    snapshot = AgentContextSnapshot(
++        execution_id="exec-1",
++        iteration=1,
++        messages=[InferenceMessage(role="user", content="hello")],
++        tools=[],
++    )
++
++    with pytest.raises((TypeError, ValueError)):
++        snapshot.iteration = 2
++
++
++def test_correlation_contract_covers_execution_iteration_tool_and_causation():
++    correlation = CorrelationContext(
++        correlation_id="corr-1",
++        execution_id="exec-1",
++        request_id="req-1",
++        parent_execution_id="exec-parent",
++        iteration_id="iter-1",
++        tool_call_id="call-1",
++        invocation_id="inv-1",
++        causation_id="evt-previous",
++        trace_id="trace-1",
++    )
++
++    event = AgentEventEnvelope(
++        event_id="evt-1",
++        event_name=AgentEventName.TOOL_COMPLETED,
++        correlation=correlation,
++        payload={"success": True},
++    )
++
++    assert event.correlation.execution_id == "exec-1"
++    assert event.correlation.tool_call_id == "call-1"
++    assert event.correlation.causation_id == "evt-previous"
++
++
++def test_policy_protocols_are_implementable_without_runtime_coupling():
++    class AllowToolPolicy:
++        def is_visible(self, *, agent_id, capability_id):
++            return capability_id == "calculator.add"
++
++        def authorize(self, *, identity, agent_id, capability_id):
++            return (
++                PolicyDecision.ALLOW
++                if capability_id == "calculator.add"
++                else PolicyDecision.DENY
++            )
++
++    class BasicExecutionPolicy:
++        def check_start(self, context):
++            return PolicyDecision.ALLOW
++
++        def check_iteration(self, context, iteration):
++            return (
++                PolicyDecision.ALLOW
++                if iteration <= context.limits.max_iterations
++                else PolicyDecision.DENY
++            )
++
++        def check_tool_call(self, context, request):
++            return (
++                PolicyDecision.ALLOW
++                if context.tool_calls_used < context.limits.max_tool_calls
++                else PolicyDecision.DENY
++            )
++
++        def limits(self, context):
++            return context.limits
++
++    tool_policy: AgentToolPolicy = AllowToolPolicy()
++    execution_policy: AgentExecutionPolicy = BasicExecutionPolicy()
++    context = make_context()
++
++    request = ToolExecutionRequest(
++        execution_id="exec-1",
++        iteration=1,
++        invocation_id="inv-1",
++        tool_call_id="call-1",
++        capability_id="calculator.add",
++    )
++
++    assert tool_policy.is_visible(
++        agent_id="agent-1",
++        capability_id="calculator.add",
++    )
++    assert tool_policy.authorize(
++        identity=make_identity(),
++        agent_id="agent-1",
++        capability_id="calculator.add",
++    ) is PolicyDecision.ALLOW
++    assert execution_policy.check_start(context) is PolicyDecision.ALLOW
++    assert execution_policy.check_iteration(context, 1) is PolicyDecision.ALLOW
++    assert execution_policy.check_tool_call(context, request) is PolicyDecision.ALLOW
++    assert execution_policy.limits(context).max_tool_calls == 4
+diff --git a/docs/phase5/PHASE5_CONTRACT_FREEZE.md b/docs/phase5/PHASE5_CONTRACT_FREEZE.md
+new file mode 100644
+--- /dev/null
++++ b/docs/phase5/PHASE5_CONTRACT_FREEZE.md
+@@ -0,0 +1,116 @@
++# Phase 5.0 — Agent Runtime Contract Freeze
++
++## Purpose
++
++Freeze the boundaries required to implement a real Agent Runtime after Phase 4.
++
++This phase deliberately contains contracts and contract tests only. It does not implement the Agent Runtime.
++
++## Existing authorities
++
++```text
++MultiAgentCoordinator = task/control plane
++AgentRuntime           = execution plane (future)
++ContextRuntime         = context implementation
++ProviderRuntime        = inference implementation
++CapabilityRuntime      = capability/tool execution implementation
++EventBus               = asynchronous lifecycle/observability transport
++```
++
++The future AgentRuntime must depend on ports, not on ProviderRuntime internals, ToolRegistry, CapabilityRegistry, MCP drivers, or ContextEngine directly.
++
++## Contract package
++
++```text
++src/runtimes/agent/contracts/
++├── context.py
++├── loop.py
++├── inference.py
++├── tool.py
++├── context_builder.py
++├── policy.py
++├── events.py
++└── __init__.py
++```
++
++## Boundaries
++
++### AgentExecutionContext
++
++Carries execution identity, budgets, deadline, cancellation and correlation information.
++
++### AgentLoopState
++
++Describes the internal inference/tool loop. It is deliberately separate from persisted `AgentExecutionState`.
++
++### InferencePort
++
++Provider-neutral request/response boundary. Provider-specific DTOs and Gateway HTTP response models stay outside this boundary.
++
++### ToolExecutionPort
++
++Provider-neutral tool invocation boundary. A later adapter can delegate to CapabilityRuntime.
++
++### ContextBuilderPort
++
++Builds one context snapshot for one inference turn. A later implementation can delegate to ContextRuntime/ContextEngine.
++
++### AgentToolPolicy / AgentExecutionPolicy
++
++Separate tool visibility/authorization from execution-budget admission decisions.
++
++### Correlation / Event contracts
++
++Agent events carry stable execution and causation identifiers:
++
++```text
++request_id
++  ↓
++execution_id
++  ↓
++iteration_id
++  ↓
++tool_call_id
++  ↓
++invocation_id
++```
++
++`correlation_id`, `parent_execution_id`, `causation_id` and optional `trace_id` support parent/child execution and distributed tracing.
++
++## Design rules
++
++1. No AgentRuntime implementation belongs in Phase 5.0.
++2. No changes to ProviderRuntime are required by this freeze.
++3. No changes to ContextRuntime are required by this freeze.
++4. No changes to CapabilityRuntime are required by this freeze.
++5. EventBus is not used as synchronous RPC between runtimes.
++6. `ToolRegistry` remains a compatibility surface; it is not a new AgentRuntime authority.
++7. `GatewayResponse` remains a gateway/provider DTO; it is not the AgentRuntime inference contract.
++8. `AgentExecutionState` remains the persisted execution lifecycle; `AgentLoopState` is runtime-only.
++
++## Acceptance
++
++The contract test suite must establish:
++
++- execution context carries limits and cancellation;
++- loop transitions are explicit and terminal states cannot restart;
++- inference is provider-neutral;
++- tool results have stable execution/tool/invocation identifiers;
++- context snapshots are immutable at the model boundary;
++- tool and execution policies can be substituted;
++- event correlation can represent parent/child and causation chains.
++
++## Non-goals
++
++This phase does not implement:
++
++- AgentRuntime;
++- inference adapters;
++- tool execution coordinator;
++- JSON Schema validator;
++- retry engine;
++- scheduler;
++- persistence adapters;
++- MCP changes;
++- provider cutover;
++- HTTP API changes.

@@ -1,0 +1,738 @@
+*** Begin Patch
+*** Add File: tests/agent/README.md
++# Agent Tool Test Harness — Phase v1
++
++This phase intentionally stays in `tests/` because the current repository does
++not yet contain a production `AgentRuntime` inference/tool loop.  The harness
++uses the real `CapabilityRuntime`, `CapabilityRegistry`, authorization policy,
++`PythonCapabilityDriver`, and `McpCapabilityDriver` contracts already present in
++the repository.
++
++The harness covers:
++
++- deterministic scripted LLM responses;
++- local Python capability execution;
++- MCP capability execution through the real MCP driver contract;
++- execution tracing;
++- permission denial;
++- retryable tool failure;
++- max-iteration protection;
++- parallel tool calls;
++- tool-not-found and MCP-unavailable behavior.
++
++Focused run:
++
++```text
++py -m pytest -q tests/agent
++```
++
++The acceptance boundary is the agent/tool protocol itself.  Once a production
++`AgentRuntime` inference loop is introduced, these fixtures can be injected
++directly into that runtime without changing the capability execution contract.
+
+*** Add File: tests/agent/__init__.py
++"""Agent tool-loop test harness and regression suites."""
++
+
+*** Add File: tests/agent/harness.py
++from __future__ import annotations
++
++import asyncio
++import json
++import time
++import uuid
++from dataclasses import dataclass, field
++from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
++
++from src.application.policy.authorization import AuthorizationService
++from src.domain.schemas import (
++    GatewayChoice,
++    GatewayMessage,
++    GatewayResponse,
++    GatewayToolCall,
++    GatewayToolResult,
++    FunctionCall,
++)
++from src.domain.schemas.agent_execution import AgentExecutionLimits
++from src.domain.schemas.identity import Identity
++from src.runtimes.capability.contracts.definition import CapabilityDefinition
++from src.runtimes.capability.runtime import CapabilityRuntime
++from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
++
++
++@dataclass(frozen=True, slots=True)
++class TraceEvent:
++    name: str
++    sequence: int
++    timestamp: float
++    payload: Dict[str, Any] = field(default_factory=dict)
++
++
++class ExecutionTrace:
++    """Deterministic execution trace used by agent tool-loop assertions."""
++
++    def __init__(self) -> None:
++        self._events: list[TraceEvent] = []
++
++    def emit(self, name: str, **payload: Any) -> TraceEvent:
++        event = TraceEvent(
++            name=name,
++            sequence=len(self._events) + 1,
++            timestamp=time.monotonic(),
++            payload=dict(payload),
++        )
++        self._events.append(event)
++        return event
++
++    @property
++    def events(self) -> tuple[TraceEvent, ...]:
++        return tuple(self._events)
++
++    @property
++    def names(self) -> list[str]:
++        return [event.name for event in self._events]
++
++    def filter(self, name: str) -> list[TraceEvent]:
++        return [event for event in self._events if event.name == name]
++
++    def assert_names(self, expected: Sequence[str]) -> None:
++        actual = self.names
++        assert actual == list(expected), f"trace mismatch: {actual!r} != {list(expected)!r}"
++
++
++class FakeLLM:
++    """Scripted, deterministic LLM stand-in.
++
++    Each script item can be:
++      * a plain string for a final assistant answer
++      * a single GatewayToolCall
++      * a list of GatewayToolCall objects for parallel execution
++      * a callable receiving the current transcript and tool definitions
++    """
++
++    def __init__(self, script: Iterable[Any], *, model: str = "fake-agent-model") -> None:
++        self._script = list(script)
++        self._index = 0
++        self.model = model
++        self.calls = 0
++        self.requests: list[dict[str, Any]] = []
++
++    async def complete(
++        self,
++        messages: Sequence[Mapping[str, Any]],
++        tools: Sequence[CapabilityDefinition],
++    ) -> GatewayResponse:
++        if self._index >= len(self._script):
++            raise AssertionError("FakeLLM script exhausted before the agent completed.")
++
++        item = self._script[self._index]
++        self._index += 1
++        self.calls += 1
++        self.requests.append(
++            {
++                "messages": [dict(message) for message in messages],
++                "tools": [tool.model_dump(mode="json") for tool in tools],
++            }
++        )
++
++        if callable(item):
++            item = item(messages, tools)
++        if asyncio.iscoroutine(item):
++            item = await item
++
++        if isinstance(item, str):
++            message = GatewayMessage(role="assistant", content=item)
++        else:
++            calls = item if isinstance(item, list) else [item]
++            message = GatewayMessage(
++                role="assistant",
++                content="",
++                tool_calls=[self._coerce_tool_call(call) for call in calls],
++            )
++
++        return GatewayResponse(
++            id=f"fake-{self.calls}",
++            model=self.model,
++            provider="fake-llm",
++            choices=[GatewayChoice(index=0, message=message, finish_reason=None)],
++        )
++
++    @staticmethod
++    def _coerce_tool_call(value: Any) -> GatewayToolCall:
++        if isinstance(value, GatewayToolCall):
++            return value
++        if not isinstance(value, Mapping):
++            raise TypeError(f"Unsupported fake tool call: {value!r}")
++        arguments = value.get("arguments", {})
++        if not isinstance(arguments, str):
++            arguments = json.dumps(arguments, sort_keys=True)
++        return GatewayToolCall(
++            id=str(value.get("id") or f"call_{uuid.uuid4().hex[:8]}"),
++            function=FunctionCall(
++                name=str(value["name"]),
++                arguments=arguments,
++            ),
++        )
++
++
++class FakeTool:
++    """Convenience fake tool backed by the real Python capability driver."""
++
++    def __init__(
++        self,
++        runtime: CapabilityRuntime,
++        *,
++        name: str,
++        handler: Callable[..., Any],
++        description: str | None = None,
++        input_schema: Mapping[str, Any] | None = None,
++        require_auth: bool = False,
++        required_scopes: Iterable[str] = (),
++    ) -> None:
++        self.definition = CapabilityDefinition(
++            id=name,
++            name=name,
++            description=description or f"Fake tool {name}",
++            input_schema=dict(input_schema or {"type": "object"}),
++            require_auth=require_auth,
++            required_scopes=list(required_scopes),
++        )
++        self.handler = handler
++        self.calls = 0
++        self.driver = PythonCapabilityDriver(self.definition, self._invoke)
++        runtime.register_capability(self.driver)
++
++    async def _invoke(self, **arguments: Any) -> Any:
++        self.calls += 1
++        value = self.handler(**arguments)
++        if asyncio.iscoroutine(value):
++            return await value
++        return value
++
++
++class AgentToolLoopHarness:
++    """Small production-contract harness for deterministic Agent -> Tool loops.
++
++    It intentionally composes the real CapabilityRuntime instead of inventing a
++    second ToolRegistry/execution implementation in the test suite.
++    """
++
++    def __init__(
++        self,
++        *,
++        llm: FakeLLM,
++        capability_runtime: CapabilityRuntime,
++        identity: Identity,
++        trace: ExecutionTrace | None = None,
++        limits: AgentExecutionLimits | None = None,
++        retryable_errors: bool = True,
++    ) -> None:
++        self.llm = llm
++        self.capability_runtime = capability_runtime
++        self.identity = identity
++        self.trace = trace or ExecutionTrace()
++        self.limits = limits or AgentExecutionLimits()
++        self.retryable_errors = retryable_errors
++
++    async def run(self, prompt: str) -> str:
++        transcript: list[dict[str, Any]] = [
++            {"role": "user", "content": prompt},
++        ]
++        execution_id = f"agent-exec-{uuid.uuid4().hex}"
++        tool_calls_total = 0
++
++        self.trace.emit("agent.started", execution_id=execution_id, prompt=prompt)
++        tools = await self.capability_runtime.get_available_capabilities(self.identity)
++        self.trace.emit(
++            "capabilities.available",
++            execution_id=execution_id,
++            capability_ids=[tool.capability_id for tool in tools],
++        )
++
++        for iteration in range(1, self.limits.max_iterations + 1):
++            self.trace.emit("llm.requested", iteration=iteration)
++            response = await self.llm.complete(transcript, tools)
++            message = response.choices[0].message if response.choices else None
++            if message is None:
++                raise AssertionError("FakeLLM returned no assistant message.")
++
++            if not message.tool_calls:
++                final_text = self._extract_text(message.content)
++                transcript.append({"role": "assistant", "content": final_text})
++                self.trace.emit("agent.completed", execution_id=execution_id, output=final_text)
++                return final_text
++
++            self.trace.emit(
++                "tool.calls.requested",
++                iteration=iteration,
++                count=len(message.tool_calls),
++            )
++            if tool_calls_total + len(message.tool_calls) > self.limits.max_tool_calls:
++                self.trace.emit("agent.failed", code="MAX_TOOL_CALLS_EXCEEDED")
++                raise RuntimeError("MAX_TOOL_CALLS_EXCEEDED")
++
++            transcript.append(
++                {
++                    "role": "assistant",
++                    "content": self._extract_text(message.content),
++                    "tool_calls": [call.model_dump(mode="json") for call in message.tool_calls],
++                }
++            )
++
++            results = await self._execute_tool_calls(
++                message.tool_calls,
++                execution_id=execution_id,
++            )
++            tool_calls_total += len(message.tool_calls)
++            for result in results:
++                transcript.append(
++                    {
++                        "role": "tool",
++                        "tool_call_id": result.tool_call_id,
++                        "name": result.name,
++                        "content": result.content,
++                        "is_error": result.is_error,
++                    }
++                )
++                self.trace.emit(
++                    "tool.result.appended",
++                    tool_call_id=result.tool_call_id,
++                    name=result.name,
++                    is_error=result.is_error,
++                )
++
++        self.trace.emit("agent.failed", code="MAX_ITERATIONS_EXCEEDED")
++        raise RuntimeError("MAX_ITERATIONS_EXCEEDED")
++
++    async def _execute_tool_calls(
++        self,
++        tool_calls: Sequence[GatewayToolCall],
++        *,
++        execution_id: str,
++    ) -> list[GatewayToolResult]:
++        async def run_one(call: GatewayToolCall) -> GatewayToolResult:
++            name = call.function.name
++            self.trace.emit("tool.execution.started", tool_call_id=call.id, name=name)
++
++            record = self.capability_runtime.registry.get(name)
++            if record is None:
++                error = f"Capability '{name}' not found or unavailable."
++                self.trace.emit("tool.execution.failed", tool_call_id=call.id, name=name, code="CAPABILITY_NOT_FOUND")
++                return GatewayToolResult(tool_call_id=call.id, name=name, content=error, is_error=True)
++
++            try:
++                arguments = self._parse_arguments(call.function.arguments)
++                attempts = 0
++                while True:
++                    attempts += 1
++                    try:
++                        result = await self.capability_runtime.execute_capability(
++                            capability_id=name,
++                            arguments=arguments,
++                            identity=self.identity,
++                            execution_id=execution_id,
++                            request_id=self.identity.request_id,
++                            session_id=self.identity.session_id,
++                            metadata={"tool_call_id": call.id, "attempt": attempts},
++                        )
++                        self.trace.emit(
++                            "tool.execution.completed",
++                            tool_call_id=call.id,
++                            name=name,
++                            attempt=attempts,
++                        )
++                        return GatewayToolResult(
++                            tool_call_id=call.id,
++                            name=name,
++                            content=self._serialize_tool_output(result.output),
++                        )
++                    except Exception as exc:
++                        retryable = bool(getattr(exc, "retryable", False))
++                        if self.retryable_errors and retryable and attempts < 3:
++                            self.trace.emit(
++                                "tool.execution.retrying",
++                                tool_call_id=call.id,
++                                name=name,
++                                attempt=attempts,
++                            )
++                            continue
++                        raise
++            except Exception as exc:
++                self.trace.emit(
++                    "tool.execution.failed",
++                    tool_call_id=call.id,
++                    name=name,
++                    error_type=type(exc).__name__,
++                )
++                return GatewayToolResult(
++                    tool_call_id=call.id,
++                    name=name,
++                    content=str(exc),
++                    is_error=True,
++                )
++
++        return list(await asyncio.gather(*(run_one(call) for call in tool_calls)))
++
++    @staticmethod
++    def _parse_arguments(value: str) -> dict[str, Any]:
++        parsed = json.loads(value or "{}")
++        if not isinstance(parsed, dict):
++            raise ValueError("Tool arguments must decode to a JSON object.")
++        return parsed
++
++    @staticmethod
++    def _serialize_tool_output(value: Any) -> str:
++        if isinstance(value, str):
++            return value
++        return json.dumps(value, default=str, sort_keys=True)
++
++    @staticmethod
++    def _extract_text(content: Any) -> str:
++        if isinstance(content, str):
++            return content
++        if isinstance(content, list):
++            parts: list[str] = []
++            for item in content:
++                if isinstance(item, Mapping):
++                    text = item.get("text")
++                    if text:
++                        parts.append(str(text))
++            return "".join(parts)
++        return str(content or "")
++
++
++def make_identity(
++    *,
++    user_id: str = "agent-test-user",
++    scopes: Iterable[str] = (),
++    auth_type: str = "api_key",
++) -> Identity:
++    return Identity(
++        user_id=user_id,
++        auth_type=auth_type,
++        scopes=set(scopes),
++    )
++
+
+*** Add File: tests/agent/test_mcp_harness.py
++from __future__ import annotations
++
++from dataclasses import dataclass
++
++import pytest
++
++from src.runtimes.capability.contracts.definition import CapabilityDefinition
++from src.runtimes.capability.drivers.mcp_driver import McpCapabilityDriver
++from src.runtimes.capability.runtime import CapabilityRuntime
++
++from .harness import AgentToolLoopHarness, ExecutionTrace, FakeLLM, make_identity
++
++
++@dataclass
++class FakeTextContent:
++    text: str
++
++
++@dataclass
++class FakeMcpResult:
++    content: list[FakeTextContent]
++
++
++class FakeMcpSession:
++    def __init__(self, response: str = "repo-a repo-b") -> None:
++        self.response = response
++        self.calls: list[tuple[str, dict]] = []
++
++    async def call_tool(self, name: str, *, arguments: dict):
++        self.calls.append((name, dict(arguments)))
++        return FakeMcpResult([FakeTextContent(self.response)])
++
++
++class FakeMcpManager:
++    def __init__(self, session: FakeMcpSession) -> None:
++        self.session = session
++
++    def get_raw_session(self, server_name: str):
++        return self.session if server_name == "github" else None
++
++
++@pytest.mark.asyncio
++async def test_agent_tool_loop_executes_mcp_capability_through_real_driver():
++    session = FakeMcpSession("repo-a\nrepo-b")
++    runtime = CapabilityRuntime()
++    definition = CapabilityDefinition(
++        id="github:search",
++        name="github:search",
++        description="Search repositories",
++        source="MCP",
++        execution_kind="MCP",
++        input_schema={"type": "object"},
++        metadata={
++            "mcp_server": "github",
++            "mcp_tool_name": "search_repositories",
++        },
++    )
++    runtime.register_capability(McpCapabilityDriver(definition, FakeMcpManager(session)))
++    trace = ExecutionTrace()
++    llm = FakeLLM([
++        {
++            "id": "call-mcp",
++            "name": "github:search",
++            "arguments": {"query": "asyncio"},
++        },
++        "Found repo-a and repo-b.",
++    ])
++
++    result = await AgentToolLoopHarness(
++        llm=llm,
++        capability_runtime=runtime,
++        identity=make_identity(),
++        trace=trace,
++    ).run("Search GitHub for asyncio.")
++
++    assert result == "Found repo-a and repo-b."
++    assert session.calls == [("search_repositories", {"query": "asyncio"})]
++    assert "tool.execution.completed" in trace.names
++
++
++@pytest.mark.asyncio
++async def test_mcp_capability_unavailable_is_reported_without_crashing_agent():
++    runtime = CapabilityRuntime()
++    definition = CapabilityDefinition(
++        id="github:search",
++        name="github:search",
++        description="Search repositories",
++        source="MCP",
++        execution_kind="MCP",
++        metadata={"mcp_server": "github", "mcp_tool_name": "search"},
++    )
++    runtime.register_capability(
++        McpCapabilityDriver(
++            definition,
++            FakeMcpManager(session=None),
++        )
++    )
++    llm = FakeLLM([
++        {"id": "call-mcp-down", "name": "github:search", "arguments": {"query": "x"}},
++        "GitHub is unavailable.",
++    ])
++
++    result = await AgentToolLoopHarness(
++        llm=llm,
++        capability_runtime=runtime,
++        identity=make_identity(),
++    ).run("Search GitHub.")
++
++    assert result == "GitHub is unavailable."
++
+
+*** Add File: tests/agent/test_tool_harness.py
++from __future__ import annotations
++
++import asyncio
++
++import pytest
++
++from src.domain.schemas.agent_execution import AgentExecutionLimits
++from src.runtimes.capability.contracts.definition import CapabilityDefinition
++from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
++from src.runtimes.capability.runtime import CapabilityRuntime
++
++from .harness import AgentToolLoopHarness, ExecutionTrace, FakeLLM, FakeTool, make_identity
++
++
++def register_tool(
++    runtime: CapabilityRuntime,
++    *,
++    name: str,
++    handler,
++    require_auth: bool = False,
++    required_scopes: list[str] | None = None,
++) -> FakeTool:
++    return FakeTool(
++        runtime,
++        name=name,
++        handler=handler,
++        require_auth=require_auth,
++        required_scopes=required_scopes or [],
++    )
++
++
++@pytest.mark.asyncio
++async def test_single_tool_loop_executes_real_capability_runtime():
++    runtime = CapabilityRuntime()
++    register_tool(runtime, name="calculator.add", handler=lambda a, b: a + b)
++    trace = ExecutionTrace()
++    llm = FakeLLM([
++        {"id": "call-1", "name": "calculator.add", "arguments": {"a": 10, "b": 32}},
++        "The answer is 42.",
++    ])
++
++    result = await AgentToolLoopHarness(
++        llm=llm,
++        capability_runtime=runtime,
++        identity=make_identity(),
++        trace=trace,
++    ).run("What is 10 + 32?")
++
++    assert result == "The answer is 42."
++    assert trace.names == [
++        "agent.started",
++        "capabilities.available",
++        "llm.requested",
++        "tool.calls.requested",
++        "tool.execution.started",
++        "tool.execution.completed",
++        "tool.result.appended",
++        "llm.requested",
++        "agent.completed",
++    ]
++
++
++@pytest.mark.asyncio
++async def test_unregistered_tool_is_reported_as_tool_error_and_loop_can_continue():
++    runtime = CapabilityRuntime()
++    trace = ExecutionTrace()
++    llm = FakeLLM([
++        {"id": "call-404", "name": "calculator.missing", "arguments": {}},
++        "I could not execute that tool.",
++    ])
++
++    result = await AgentToolLoopHarness(
++        llm=llm,
++        capability_runtime=runtime,
++        identity=make_identity(),
++        trace=trace,
++    ).run("Use the missing tool.")
++
++    assert result == "I could not execute that tool."
++    failed = trace.filter("tool.execution.failed")
++    assert failed and failed[0].payload["code"] == "CAPABILITY_NOT_FOUND"
++
++
++@pytest.mark.asyncio
++async def test_permission_denied_is_not_executed():
++    calls = 0
++
++    def secret_tool() -> str:
++        nonlocal calls
++        calls += 1
++        return "secret"
++
++    runtime = CapabilityRuntime()
++    register_tool(
++        runtime,
++        name="secret.read",
++        handler=secret_tool,
++        require_auth=True,
++        required_scopes=["secret.read"],
++    )
++    llm = FakeLLM([
++        {"id": "call-deny", "name": "secret.read", "arguments": {}},
++        "Access denied.",
++    ])
++
++    result = await AgentToolLoopHarness(
++        llm=llm,
++        capability_runtime=runtime,
++        identity=make_identity(scopes=[]),
++    ).run("Read the secret.")
++
++    assert result == "Access denied."
++    assert calls == 0
++
++
++@pytest.mark.asyncio
++async def test_retryable_capability_error_retries_then_succeeds():
++    state = {"calls": 0}
++
++    async def flaky_tool() -> str:
++        state["calls"] += 1
++        if state["calls"] < 2:
++            from src.runtimes.capability.contracts.error import CapabilityError
++
++            raise CapabilityError(
++                code="TRANSIENT",
++                message="temporary",
++                retryable=True,
++            )
++        return "ok"
++
++    runtime = CapabilityRuntime()
++    register_tool(runtime, name="flaky.read", handler=flaky_tool)
++    trace = ExecutionTrace()
++    llm = FakeLLM([
++        {"id": "call-retry", "name": "flaky.read", "arguments": {}},
++        "ok",
++    ])
++
++    result = await AgentToolLoopHarness(
++        llm=llm,
++        capability_runtime=runtime,
++        identity=make_identity(),
++        trace=trace,
++    ).run("Read it.")
++
++    assert result == "ok"
++    assert state["calls"] == 2
++    assert len(trace.filter("tool.execution.retrying")) == 1
++
++
++@pytest.mark.asyncio
++async def test_max_iterations_stops_infinite_tool_loop():
++    runtime = CapabilityRuntime()
++    register_tool(runtime, name="loop.noop", handler=lambda: "still working")
++    llm = FakeLLM([
++        {"id": "call-loop-1", "name": "loop.noop", "arguments": {}},
++        {"id": "call-loop-2", "name": "loop.noop", "arguments": {}},
++        {"id": "call-loop-3", "name": "loop.noop", "arguments": {}},
++    ])
++    trace = ExecutionTrace()
++
++    with pytest.raises(RuntimeError, match="MAX_ITERATIONS_EXCEEDED"):
++        await AgentToolLoopHarness(
++            llm=llm,
++            capability_runtime=runtime,
++            identity=make_identity(),
++            trace=trace,
++            limits=AgentExecutionLimits(max_iterations=2, max_tool_calls=10),
++        ).run("Never finish.")
++
++    assert trace.names[-1] == "agent.failed"
++    assert trace.events[-1].payload["code"] == "MAX_ITERATIONS_EXCEEDED"
++
++
++@pytest.mark.asyncio
++async def test_parallel_tool_calls_are_executed_concurrently():
++    barrier = asyncio.Barrier(2)
++
++    async def slow_add(value: int) -> int:
++        await barrier.wait()
++        return value + 1
++
++    runtime = CapabilityRuntime()
++    register_tool(runtime, name="parallel.a", handler=slow_add)
++    register_tool(runtime, name="parallel.b", handler=slow_add)
++    trace = ExecutionTrace()
++    llm = FakeLLM([
++        [
++            {"id": "call-a", "name": "parallel.a", "arguments": {"value": 1}},
++            {"id": "call-b", "name": "parallel.b", "arguments": {"value": 2}},
++        ],
++        "done",
++    ])
++
++    result = await AgentToolLoopHarness(
++        llm=llm,
++        capability_runtime=runtime,
++        identity=make_identity(),
++        trace=trace,
++    ).run("Run both tools.")
++
++    assert result == "done"
++    assert [e.payload["name"] for e in trace.filter("tool.execution.completed")] == [
++        "parallel.a",
++        "parallel.b",
++    ]
++
+*** End Patch
