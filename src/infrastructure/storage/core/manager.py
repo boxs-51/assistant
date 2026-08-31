@@ -336,7 +336,7 @@ class StorageEngine:
         # -----------------------------------------------------
 
         if redis_available:
-            redis_driver = self.drivers.get("redis")
+            redis_driver = self.get_cache_driver()
 
             self.repositories.register(
                 "sessions",

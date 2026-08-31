@@ -81,11 +81,19 @@ class RuntimeKernel:
         )
 
         try:
-            await runtime.stop()
-            await runtime.dispose()
+            # Recovery is a restart, not terminal disposal.  Dispose is
+            # reserved for the final application shutdown path.
+            if runtime.state in (
+                LifecycleState.RUNNING,
+                LifecycleState.STARTED,
+                LifecycleState.PAUSED,
+                LifecycleState.FAILED,
+            ):
+                await runtime.stop()
 
-            # Giả lập Re-initialize & Re-start
-            runtime.initialize(self.context)
+            runtime.state = LifecycleState.STOPPED
+            await runtime.initialize(self.context)
+            runtime.state = LifecycleState.INITIALIZED
             await runtime.start()
             runtime.state = LifecycleState.RUNNING
 

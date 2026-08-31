@@ -20,6 +20,47 @@ class CapabilityState(str, Enum):
     UNAVAILABLE = "UNAVAILABLE"
     REMOVED = "REMOVED"
 
+_ALLOWED_STATE_TRANSITIONS = {
+    CapabilityState.DISCOVERED: {
+        CapabilityState.DISCOVERED,
+        CapabilityState.REGISTERED,
+    },
+    CapabilityState.REGISTERED: {
+        CapabilityState.REGISTERED,
+        CapabilityState.ENABLED,
+        CapabilityState.DISABLED,
+        CapabilityState.REMOVED,
+    },
+    CapabilityState.ENABLED: {
+        CapabilityState.ENABLED,
+        CapabilityState.DEGRADED,
+        CapabilityState.UNAVAILABLE,
+        CapabilityState.DISABLED,
+        CapabilityState.REMOVED,
+    },
+    CapabilityState.DEGRADED: {
+        CapabilityState.DEGRADED,
+        CapabilityState.ENABLED,
+        CapabilityState.UNAVAILABLE,
+        CapabilityState.DISABLED,
+        CapabilityState.REMOVED,
+    },
+    CapabilityState.UNAVAILABLE: {
+        CapabilityState.UNAVAILABLE,
+        CapabilityState.ENABLED,
+        CapabilityState.DEGRADED,
+        CapabilityState.DISABLED,
+        CapabilityState.REMOVED,
+    },
+    CapabilityState.DISABLED: {
+        CapabilityState.DISABLED,
+        CapabilityState.ENABLED,
+        CapabilityState.REMOVED,
+    },
+    CapabilityState.REMOVED: {
+        CapabilityState.REMOVED,
+    },
+}
 
 @dataclass(frozen=True, slots=True)
 class CapabilityRecord:
@@ -74,6 +115,20 @@ class CapabilityRegistry:
             record = self._records.get(name)
             if record is None:
                 return None
+            if state not in _ALLOWED_STATE_TRANSITIONS[record.state]:
+                raise ValueError(
+                    f"Invalid capability state transition: "
+                    f"{record.state.value} -> {state.value} "
+                    f"for '{name}'."
+                )
+            if state in {
+                CapabilityState.ENABLED,
+                CapabilityState.DEGRADED,
+            } and record.driver is None:
+                raise ValueError(
+                    f"Capability '{name}' cannot enter {state.value} "
+                    "without an executable driver."
+                )
             updated = CapabilityRecord(
                 definition=record.definition,
                 driver=record.driver,

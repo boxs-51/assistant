@@ -21,8 +21,10 @@ class ContextRuntime(BaseRuntime):
         super().__init__(manifest=manifest)
         self.event_bus = None
         self.context_engine = None
+        self._subscribed = False
 
     async def initialize(self, context: RuntimeContext) -> None:
+        await super().initialize(context)
         # Hỗ trợ cả Dict hoặc Dependency Container Object
         self.event_bus = context.event_bus
         if not self.event_bus:
@@ -33,7 +35,10 @@ class ContextRuntime(BaseRuntime):
         
         self.context_engine = ContextEngine(context.storage, context.uow_factory)
 
-        self.event_bus.subscribe("context.command.build", self._handle_build_context)
+        if not self._subscribed:
+            self.event_bus.subscribe("context.command.build", self._handle_build_context)
+            self._subscribed = True
+
         self._is_initialized = True
         logger.info("ContextRuntime initialized successfully")
 
@@ -42,6 +47,9 @@ class ContextRuntime(BaseRuntime):
 
     async def stop(self) -> None:
         self._is_running = False
+        if self.event_bus is not None and self._subscribed:
+            self.event_bus.unsubscribe("context.command.build", self._handle_build_context)
+            self._subscribed = False
 
     async def _handle_build_context(self, event: BaseEvent):
         """Xử lý Command yêu cầu dựng Prompt/Context từ Session/History và Request mới."""

@@ -115,7 +115,8 @@ def bootstrap_security(
     
     limiter = RateLimiterManager(
         cache_driver=cache_driver,
-        circuit_breaker_manager=cb_manager
+        circuit_breaker_manager=cb_manager,
+        config=config.rate_limit
     )
 
     session_repo = storage_engine.repositories.get("sessions")
@@ -128,7 +129,7 @@ def bootstrap_security(
             JWTAuthenticator(token_service, uow_factory),
         ]
     )
-    redis_driver = storage_engine.drivers.get("redis")
+    redis_driver = storage_engine.get_cache_driver()
     otp_service = OTPStorageService(redis_driver if redis_driver else None, uow_factory)
     registration_service = RegistrationService(uow_factory, otp_service, token_service, eventing_manager.bus)
     login_service = LoginService(uow_factory, token_service)
@@ -174,7 +175,7 @@ async def bootstrap_runtime_kernel(
     container = ApplicationContainer(
         config=config,
         storage=storage_engine,
-        uow_factory=eventing_manager.uow_factory,
+        uow_factory=uow_factory,
         http_client=http_client,
         eventing_manager=eventing_manager,
         mcp_manager=GatewayMcpManager(),

@@ -112,11 +112,11 @@ class GoogleModels(ModelProvider):
         """
         http_client = kwargs.get("http_client")
         timeout = kwargs.get("timeout")
-        raw_model_name = kwargs.get("model_name")
+        raw_model_name = kwargs.get("model_id")
 
         if not raw_model_name:
-            logger.error("Missing required parameter 'model_name' in model details request")
-            raise ValueError("Parameter 'model_name' is required.")
+            logger.error("Missing required parameter 'model_id' in model details request")
+            raise ValueError("Parameter 'modelmodel_id_name' is required.")
 
         # Chuẩn hóa tên model: loại bỏ "models/" nếu có để dựng endpoint
         clean_model_name = raw_model_name.replace("models/", "")

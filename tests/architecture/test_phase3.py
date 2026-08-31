@@ -202,7 +202,7 @@ async def test_mcp_capability_transitions_unavailable_and_recovers():
     assert registry.get("github:search").state is CapabilityState.ENABLED
 
     manager.available = False
-    assert await runtime.check_health() == HealthStatus.FAILED
+    assert await runtime.check_health() == HealthStatus.DEGRADED
     assert (
         registry.get("github:search").state
         is CapabilityState.UNAVAILABLE
@@ -213,3 +213,53 @@ async def test_mcp_capability_transitions_unavailable_and_recovers():
     assert await runtime.check_health() == HealthStatus.HEALTHY
     assert registry.get("github:search").state is CapabilityState.ENABLED
     assert registry.get_driver("github:search") is not None
+
+
+def test_capability_state_transitions_are_validated():
+    registry = CapabilityRegistry()
+    record = registry.register_definition(
+        CapabilityDefinition(
+            id="discovered.only",
+            name="discovered.only",
+            description="metadata only",
+        )
+    )
+
+    with pytest.raises(ValueError, match="Invalid capability state transition: DISCOVERED -> ENABLED"):
+        registry.set_state(record.id, CapabilityState.ENABLED)
+
+    driver = EchoDriver(CapabilityDefinition(
+        id="local.echo",
+        name="local.echo",
+        description="Echo",
+    ))
+    registry.register_capability(driver)
+    registry.set_state("local.echo", CapabilityState.DISABLED)
+    registry.set_state("local.echo", CapabilityState.ENABLED)
+
+    assert registry.get("local.echo").state is CapabilityState.ENABLED
+
+
+@pytest.mark.asyncio
+async def test_disabled_mcp_capability_is_not_reenabled_by_health_check():
+    class HealthySessionProvider:
+        def get_raw_session(self, _server_name):
+            return object()
+
+    registry = CapabilityRegistry()
+    runtime = CapabilityRuntime(registry=registry)
+    definition = CapabilityDefinition(
+        id="github:search",
+        name="github:search",
+        description="Search GitHub",
+        source="MCP",
+        execution_kind="MCP",
+        metadata={"mcp_server": "github", "mcp_tool_name": "search"},
+    )
+    runtime.register_capability(
+        McpCapabilityDriver(definition, HealthySessionProvider())
+    )
+    registry.set_state("github:search", CapabilityState.DISABLED)
+
+    assert await runtime.check_health() == HealthStatus.HEALTHY
+    assert registry.get("github:search").state is CapabilityState.DISABLED

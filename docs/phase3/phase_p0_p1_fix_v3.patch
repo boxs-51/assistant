@@ -1,0 +1,509 @@
+*** Begin Patch
+*** Update File: src/kernel/base.py
+@@
+-    def initialize(self, context: RuntimeContext) -> None:
++    async def initialize(self, context: RuntimeContext) -> None:
+         self.context = context
+         self.state = LifecycleState.INITIALIZED
+*** Update File: src/kernel/kernel.py
+@@
+     async def recover_runtime(self, runtime_id: str) -> None:
+         """Khôi phục Runtime nếu bị Crash."""
+         runtime = self.registry.get(runtime_id)
+         if not runtime or self.context is None:
+             return
+@@
+         )
+ 
+         try:
+-            await runtime.stop()
+-            await runtime.dispose()
+-
+-            # Giả lập Re-initialize & Re-start
+-            runtime.initialize(self.context)
++            # Recovery is a restart, not terminal disposal.  Dispose is
++            # reserved for the final application shutdown path.
++            if runtime.state in (
++                LifecycleState.RUNNING,
++                LifecycleState.STARTED,
++                LifecycleState.PAUSED,
++                LifecycleState.FAILED,
++            ):
++                await runtime.stop()
++
++            runtime.state = LifecycleState.STOPPED
++            await runtime.initialize(self.context)
++            runtime.state = LifecycleState.INITIALIZED
+             await runtime.start()
+             runtime.state = LifecycleState.RUNNING
+*** Update File: src/runtimes/event/runtime.py
+@@
+     async def initialize(self, context: RuntimeContext) -> None:
+-        super().initialize(context)
++        await super().initialize(context)
+         # Đăng ký subscribers nếu chưa auto-import
+         # context.event_bus đã sẵn sàng để sử dụng
+*** Update File: src/runtimes/connection/runtime.py
+@@
+         super().__init__(manifest=manifest)
+         self.event_bus = None
+         self.registry = ConnectionRegistry()
+         self._heartbeat_task: Optional[asyncio.Task] = None
++        self._subscribed = False
+ 
+     async def initialize(self, context: RuntimeContext) -> None:
++        await super().initialize(context)
+         # Subscribe Command gửi tin nhắn tới Client
+         self.event_bus = context.event_bus
+-        self.event_bus.subscribe("connection.command.send", self._handle_send_command)
++        if not self._subscribed:
++            self.event_bus.subscribe("connection.command.send", self._handle_send_command)
++            self._subscribed = True
+         self._is_initialized = True
+         logger.info("Connection Runtime initialized.")
+@@
+     async def stop(self) -> None:
+         self._is_running = False
++        if self.event_bus is not None and self._subscribed:
++            self.event_bus.unsubscribe("connection.command.send", self._handle_send_command)
++            self._subscribed = False
+         if self._heartbeat_task:
+             self._heartbeat_task.cancel()
++            try:
++                await self._heartbeat_task
++            except asyncio.CancelledError:
++                pass
++            self._heartbeat_task = None
+         logger.info("Connection Runtime stopped.")
+*** Update File: src/runtimes/context/runtime.py
+@@
+         super().__init__(manifest=manifest)
+         self.event_bus = None
+         self.context_engine = None
++        self._subscribed = False
+ 
+     async def initialize(self, context: RuntimeContext) -> None:
++        await super().initialize(context)
+         # Hỗ trợ cả Dict hoặc Dependency Container Object
+         self.event_bus = context.event_bus
+@@
+-        self.event_bus.subscribe("context.command.build", self._handle_build_context)
++        if not self._subscribed:
++            self.event_bus.subscribe("context.command.build", self._handle_build_context)
++            self._subscribed = True
+         self._is_initialized = True
+         logger.info("ContextRuntime initialized successfully")
+@@
+     async def stop(self) -> None:
+         self._is_running = False
++        if self.event_bus is not None and self._subscribed:
++            self.event_bus.unsubscribe("context.command.build", self._handle_build_context)
++            self._subscribed = False
+*** Update File: src/runtimes/session/runtime.py
+@@
+         self.event_bus = None
+         self.uow_factory = None
+         self._sessions: Dict[str, Dict[str, Any]] = {}
++        self._subscribed = False
+ 
+     async def initialize(self, context: RuntimeContext) -> None:
++        await super().initialize(context)
+         # Subscribe các event theo chuẩn tên mới
+         self.event_bus = context.event_bus
+         self.uow_factory = context.uow_factory
+         if self.uow_factory is None:
+             raise ValueError("SessionRuntime requires uow_factory.")
+-        self.event_bus.subscribe("transport.event.request_received", self._on_request_received)
+-        self.event_bus.subscribe("provider.chat.responded", self._on_provider_responded)
++        if not self._subscribed:
++            self.event_bus.subscribe("transport.event.request_received", self._on_request_received)
++            self.event_bus.subscribe("provider.chat.responded", self._on_provider_responded)
++            self._subscribed = True
+         self._is_initialized = True
+         logger.info("SessionRuntime initialized")
+@@
+     async def stop(self) -> None:
+         self._is_running = False
++        if self.event_bus is not None and self._subscribed:
++            self.event_bus.unsubscribe("transport.event.request_received", self._on_request_received)
++            self.event_bus.unsubscribe("provider.chat.responded", self._on_provider_responded)
++            self._subscribed = False
+*** Update File: src/runtimes/provider/runtime.py
+@@
+         self.file_handler: Optional[FileOperationHandler] = None
+ 
+         self.event_bus: Optional[EventBus] = None
++        self._subscribed = False
+ 
+     async def initialize(self, context: RuntimeContext) -> None:
+         """Khởi tạo Discovery, Registry & khởi tạo Handlers."""
++        await super().initialize(context)
+         self._http_client = context.http_client
+@@
+         # Đăng ký Event Handlers
+         self.event_bus = context.event_bus
+ 
+-        self.event_bus.subscribe("provider.chat.execute", self._handle_execute_chat)
+-        self.event_bus.subscribe("provider.embeddings.execute", self._handle_execute_embeddings)
+-        self.event_bus.subscribe("provider.model.execute", self._handle_model_operation)
+-        self.event_bus.subscribe("provider.file.execute", self._handle_file_operation)
++        if not self._subscribed:
++            self.event_bus.subscribe("provider.chat.execute", self._handle_execute_chat)
++            self.event_bus.subscribe("provider.embeddings.execute", self._handle_execute_embeddings)
++            self.event_bus.subscribe("provider.model.execute", self._handle_model_operation)
++            self.event_bus.subscribe("provider.file.execute", self._handle_file_operation)
++            self._subscribed = True
+@@
+     async def stop(self) -> None:
+         self._is_running = False
+-        if self._http_client:
+-            await self._http_client.aclose()
++        if self.event_bus is not None and self._subscribed:
++            self.event_bus.unsubscribe("provider.chat.execute", self._handle_execute_chat)
++            self.event_bus.unsubscribe("provider.embeddings.execute", self._handle_execute_embeddings)
++            self.event_bus.unsubscribe("provider.model.execute", self._handle_model_operation)
++            self.event_bus.unsubscribe("provider.file.execute", self._handle_file_operation)
++            self._subscribed = False
++        # _http_client is injected and owned by ApplicationContainer/main.
++        # Runtime stop/recovery must not close shared application resources.
+         logger.info("ProviderRuntime stopped.")
+*** Update File: src/runtimes/capability/registry.py
+@@
+ class CapabilityState(str, Enum):
+@@
+     REMOVED = "REMOVED"
++
++
++_ALLOWED_STATE_TRANSITIONS = {
++    CapabilityState.DISCOVERED: {
++        CapabilityState.DISCOVERED,
++        CapabilityState.REGISTERED,
++    },
++    CapabilityState.REGISTERED: {
++        CapabilityState.REGISTERED,
++        CapabilityState.ENABLED,
++        CapabilityState.DISABLED,
++        CapabilityState.REMOVED,
++    },
++    CapabilityState.ENABLED: {
++        CapabilityState.ENABLED,
++        CapabilityState.DEGRADED,
++        CapabilityState.UNAVAILABLE,
++        CapabilityState.DISABLED,
++        CapabilityState.REMOVED,
++    },
++    CapabilityState.DEGRADED: {
++        CapabilityState.DEGRADED,
++        CapabilityState.ENABLED,
++        CapabilityState.UNAVAILABLE,
++        CapabilityState.DISABLED,
++        CapabilityState.REMOVED,
++    },
++    CapabilityState.UNAVAILABLE: {
++        CapabilityState.UNAVAILABLE,
++        CapabilityState.ENABLED,
++        CapabilityState.DEGRADED,
++        CapabilityState.DISABLED,
++        CapabilityState.REMOVED,
++    },
++    CapabilityState.DISABLED: {
++        CapabilityState.DISABLED,
++        CapabilityState.ENABLED,
++        CapabilityState.REMOVED,
++    },
++    CapabilityState.REMOVED: {
++        CapabilityState.REMOVED,
++    },
++}
+@@
+         """Atomically update one capability lifecycle/availability state."""
+         with self._lock:
+             record = self._records.get(name)
+             if record is None:
+                 return None
++            if state not in _ALLOWED_STATE_TRANSITIONS[record.state]:
++                raise ValueError(
++                    f"Invalid capability state transition: "
++                    f"{record.state.value} -> {state.value} "
++                    f"for '{name}'."
++                )
++            if state in {
++                CapabilityState.ENABLED,
++                CapabilityState.DEGRADED,
++            } and record.driver is None:
++                raise ValueError(
++                    f"Capability '{name}' cannot enter {state.value} "
++                    "without an executable driver."
++                )
+             updated = CapabilityRecord(
+                 definition=record.definition,
+                 driver=record.driver,
+*** Update File: src/runtimes/capability/runtime.py
+@@
+-from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
++from ...kernel.base import BaseRuntime, HealthStatus, RuntimeContext, RuntimeManifest
+@@
+     async def initialize(self, context: RuntimeContext) -> None:
+-        super().initialize(context)
++        await super().initialize(context)
+         self.event_bus = context.event_bus
+@@
+     async def check_health(self):
+         failed = False
++        degraded = False
+         for record in self.registry.list_records():
+             driver = record.driver
+             if driver is None:
+                 continue
++            if record.state in {
++                CapabilityState.DISABLED,
++                CapabilityState.REMOVED,
++            }:
++                continue
+             try:
+                 if not await driver.check_health():
+-                    failed = True
+                     if record.definition.source == "MCP":
++                        degraded = True
+                         self.registry.set_state(
+                             record.id,
+                             CapabilityState.UNAVAILABLE,
+                         )
+                     else:
++                        failed = True
+                         return self._failed_health_status()
+-                elif record.definition.source == "MCP":
+-                    self.registry.set_state(
+-                        record.id,
+-                        CapabilityState.ENABLED,
+-                    )
++                elif record.state in {
++                    CapabilityState.UNAVAILABLE,
++                    CapabilityState.DEGRADED,
++                }:
++                    self.registry.set_state(
++                        record.id,
++                        CapabilityState.ENABLED,
++                    )
+             except Exception:
+-                failed = True
+                 if record.definition.source == "MCP":
++                    degraded = True
+                     self.registry.set_state(
+                         record.id,
+                         CapabilityState.UNAVAILABLE,
+                     )
+                 else:
++                    failed = True
+                     return self._failed_health_status()
+-        return (
+-            self._failed_health_status()
+-            if failed
+-            else self._healthy_health_status()
+-        )
++        if failed:
++            return self._failed_health_status()
++        if degraded:
++            return HealthStatus.DEGRADED
++        return self._healthy_health_status()
+ 
+     @staticmethod
+     def _healthy_health_status():
+-        from ...kernel.base import HealthStatus
+         return HealthStatus.HEALTHY
+ 
+     @staticmethod
+     def _failed_health_status():
+-        from ...kernel.base import HealthStatus
+         return HealthStatus.FAILED
+*** Update File: src/runtimes/capability/drivers/mcp_driver.py
+@@
+ from typing import Any, Dict, Mapping, Protocol
+ 
+ from ....domain.schemas.identity import Identity
+-from ....infrastructure.mcp.mcp_manager import GatewayMcpManager
+ from ..contracts.context import CapabilityExecutionContext
+ from ..contracts.definition import CapabilityDefinition
+ from .base import BaseCapabilityDriver
++
++
++class McpSessionProvider(Protocol):
++    """Port used by the capability layer to obtain live MCP sessions."""
++
++    def get_raw_session(self, server_name: str) -> Any: ...
+@@
+     def __init__(
+         self,
+         definition: CapabilityDefinition,
+-        mcp_manager: GatewayMcpManager,
++        mcp_manager: McpSessionProvider,
+         credential_resolver: McpCredentialResolver | None = None,
+*** Update File: src/infrastructure/mcp/mcp_manager.py
+@@
+         for _ in range(10):
+             if conn.status == ConnectionStatus.CONNECTED:
+                 return
+             await asyncio.sleep(0.5)
++
++        raise TimeoutError(
++            f"Timed out waiting for MCP server '{server_name}' to connect; "
++            f"status={conn.status.value}, last_error={conn.last_error!r}."
++        )
+*** Update File: src/main.py
+@@
+     container = ApplicationContainer(
+         config=config,
+         storage=storage_engine,
+-        uow_factory=eventing_manager.uow_factory,
++        uow_factory=uow_factory,
+         http_client=http_client,
+*** Update File: Dockerfile
+@@
+-CMD ["python -m", "src.main"]
++CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000"]
+*** Update File: docker-compose.yml
+@@
+     ports:
+-      - "8080:8080"
++      - "8080:8000"
+*** Update File: tests/architecture/test_phase3.py
+@@
+-    assert await runtime.check_health() == HealthStatus.FAILED
++    assert await runtime.check_health() == HealthStatus.DEGRADED
++
++
++def test_capability_state_transitions_are_validated():
++    registry = CapabilityRegistry()
++    record = registry.register_definition(
++        CapabilityDefinition(
++            id="discovered.only",
++            name="discovered.only",
++            description="metadata only",
++        )
++    )
++
++    with pytest.raises(ValueError, match="cannot enter ENABLED"):
++        registry.set_state(record.id, CapabilityState.ENABLED)
++
++    driver = EchoDriver(CapabilityDefinition(
++        id="local.echo",
++        name="local.echo",
++        description="Echo",
++    ))
++    registry.register_capability(driver)
++    registry.set_state("local.echo", CapabilityState.DISABLED)
++    registry.set_state("local.echo", CapabilityState.ENABLED)
++
++    assert registry.get("local.echo").state is CapabilityState.ENABLED
++
++
++@pytest.mark.asyncio
++async def test_disabled_mcp_capability_is_not_reenabled_by_health_check():
++    class HealthySessionProvider:
++        def get_raw_session(self, _server_name):
++            return object()
++
++    registry = CapabilityRegistry()
++    runtime = CapabilityRuntime(registry=registry)
++    definition = CapabilityDefinition(
++        id="github:search",
++        name="github:search",
++        description="Search GitHub",
++        source="MCP",
++        execution_kind="MCP",
++        metadata={"mcp_server": "github", "mcp_tool_name": "search"},
++    )
++    runtime.register_capability(
++        McpCapabilityDriver(definition, HealthySessionProvider())
++    )
++    registry.set_state("github:search", CapabilityState.DISABLED)
++
++    assert await runtime.check_health() == HealthStatus.HEALTHY
++    assert registry.get("github:search").state is CapabilityState.DISABLED
+*** Add File: tests/architecture/test_runtime_recovery.py
++import pytest
++
++from src.kernel.base import LifecycleState
++from src.kernel.kernel import RuntimeKernel
++
++
++class FakeRuntime:
++    class _Manifest:
++        id = "fake_runtime"
++
++    def __init__(self):
++        self.manifest = self._Manifest()
++        self.state = LifecycleState.RUNNING
++        self.stop_calls = 0
++        self.initialize_calls = 0
++        self.start_calls = 0
++        self.dispose_calls = 0
++        self.initialized_context = None
++
++    async def stop(self):
++        self.stop_calls += 1
++        self.state = LifecycleState.STOPPED
++
++    async def initialize(self, context):
++        self.initialize_calls += 1
++        self.initialized_context = context
++        self.state = LifecycleState.INITIALIZED
++
++    async def start(self):
++        self.start_calls += 1
++        self.state = LifecycleState.STARTED
++
++    async def dispose(self):
++        self.dispose_calls += 1
++        self.state = LifecycleState.DISPOSED
++
++
++class FakeRegistry:
++    def __init__(self, runtime):
++        self.runtime = runtime
++
++    def get(self, runtime_id):
++        return self.runtime if runtime_id == "fake_runtime" else None
++
++
++@pytest.mark.asyncio
++async def test_runtime_kernel_recovery_awaits_async_initialize_and_does_not_dispose():
++    runtime = FakeRuntime()
++    context = object()
++
++    kernel = RuntimeKernel.__new__(RuntimeKernel)
++    kernel.registry = FakeRegistry(runtime)
++    kernel.context = context
++
++    await kernel.recover_runtime("fake_runtime")
++
++    assert runtime.stop_calls == 1
++    assert runtime.initialize_calls == 1
++    assert runtime.start_calls == 1
++    assert runtime.dispose_calls == 0
++    assert runtime.initialized_context is context
++    assert runtime.state is LifecycleState.RUNNING
+*** Add File: tests/architecture/test_provider_runtime_lifecycle.py
+import pytest
+
+from src.runtimes.provider.runtime import ProviderRuntime
+
+
+class FakeHttpClient:
+    def __init__(self):
+        self.closed = False
+
+    async def aclose(self):
+        self.closed = True
+
+
+@pytest.mark.asyncio
+async def test_provider_runtime_does_not_close_container_owned_http_client_on_stop():
+    runtime = ProviderRuntime(circuit_breaker_manager=object())
+    client = FakeHttpClient()
+    runtime._http_client = client
+
+    await runtime.stop()
+
+    assert client.closed is False
+*** End Patch

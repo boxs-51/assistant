@@ -111,6 +111,30 @@ class InMemoryDriver(CacheDriver):
 
             return self._data[key]
 
+    async def get_ttl(self, key: str) -> Optional[float]:
+        """
+        Lấy thời gian sống còn lại (TTL) của key (tính bằng giây).
+        """
+        self._require_connected()
+
+        async with self._lock:
+            now = time.monotonic()
+
+            if key not in self._data:
+                return None
+
+            # Nếu key đã hết hạn thì xóa luôn và trả về None
+            if self._is_expired(key, now):
+                self._delete_unlocked(key)
+                return None
+
+            expires_at = self._expires.get(key)
+            if expires_at is None:
+                return None
+
+            # Trả về số giây còn lại (đảm bảo không âm)
+            return max(0.0, expires_at - now)
+
     async def set(
         self,
         key: str,

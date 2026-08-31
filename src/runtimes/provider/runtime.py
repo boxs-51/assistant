@@ -12,7 +12,6 @@ from ...provider.executor import ProviderExecutor
 from ...provider.exceptions import NoAvailableProviderError
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
-#from ....src.circuit_breaker import CircuitBreakerManager
 
 # Import các Handlers mới tách
 from ...provider.handlers.chat_handler import ChatExecutionHandler
@@ -52,9 +51,11 @@ class ProviderRuntime(BaseRuntime):
         self.file_handler: Optional[FileOperationHandler] = None
 
         self.event_bus: Optional[EventBus] = None
+        self._subscribed = False
 
     async def initialize(self, context: RuntimeContext) -> None:
         """Khởi tạo Discovery, Registry & khởi tạo Handlers."""
+        await super().initialize(context)
         self._http_client = context.http_client
         
         self.provider_registry = ProviderRegistry()
@@ -84,10 +85,12 @@ class ProviderRuntime(BaseRuntime):
         # Đăng ký Event Handlers
         self.event_bus = context.event_bus
 
-        self.event_bus.subscribe("provider.chat.execute", self._handle_execute_chat)
-        self.event_bus.subscribe("provider.embeddings.execute", self._handle_execute_embeddings)
-        self.event_bus.subscribe("provider.model.execute", self._handle_model_operation)
-        self.event_bus.subscribe("provider.file.execute", self._handle_file_operation)
+        if not self._subscribed:
+            self.event_bus.subscribe("provider.chat.execute", self._handle_execute_chat)
+            self.event_bus.subscribe("provider.embeddings.execute", self._handle_execute_embeddings)
+            self.event_bus.subscribe("provider.model.execute", self._handle_model_operation)
+            self.event_bus.subscribe("provider.file.execute", self._handle_file_operation)
+            self._subscribed = True
 
         self._is_initialized = True
         logger.info("ProviderRuntime initialized", providers=list(self.providers.keys()))
@@ -98,8 +101,14 @@ class ProviderRuntime(BaseRuntime):
 
     async def stop(self) -> None:
         self._is_running = False
-        if self._http_client:
-            await self._http_client.aclose()
+        if self.event_bus is not None and self._subscribed:
+            self.event_bus.unsubscribe("provider.chat.execute", self._handle_execute_chat)
+            self.event_bus.unsubscribe("provider.embeddings.execute", self._handle_execute_embeddings)
+            self.event_bus.unsubscribe("provider.model.execute", self._handle_model_operation)
+            self.event_bus.unsubscribe("provider.file.execute", self._handle_file_operation)
+            self._subscribed = False
+        # _http_client is injected and owned by ApplicationContainer/main.
+        # Runtime stop/recovery must not close shared application resources.
         logger.info("ProviderRuntime stopped.")
 
     # ------------------------------------------------------------------

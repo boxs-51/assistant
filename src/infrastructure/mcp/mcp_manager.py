@@ -53,6 +53,11 @@ class GatewayMcpManager:
                 return
             await asyncio.sleep(0.5)
 
+        raise TimeoutError(
+            f"Timed out waiting for MCP server '{server_name}' to connect; "
+            f"status={conn.status.value}, last_error={conn.last_error!r}."
+        )
+
     async def start_health_checker(self) -> None:
         if self._health_check_task and not self._health_check_task.done():
             return

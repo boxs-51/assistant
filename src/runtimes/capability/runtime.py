@@ -5,7 +5,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, Mapping, Optional
 
-from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+from ...kernel.base import BaseRuntime, HealthStatus, RuntimeContext, RuntimeManifest
 from .registry import CapabilityRegistry, CapabilityState
 from .drivers.base import BaseCapabilityDriver
 from .contracts.context import CapabilityExecutionContext
@@ -42,7 +42,7 @@ class CapabilityRuntime(BaseRuntime):
         self.mcp_manager = None
 
     async def initialize(self, context: RuntimeContext) -> None:
-        super().initialize(context)
+        await super().initialize(context)
         self.event_bus = context.event_bus
         self.mcp_manager = getattr(context.container, "mcp_manager", None)
         if not self._subscribed:
@@ -139,48 +139,57 @@ class CapabilityRuntime(BaseRuntime):
 
     async def check_health(self):
         failed = False
+        degraded = False
         for record in self.registry.list_records():
             driver = record.driver
             if driver is None:
                 continue
+            if record.state in {
+                CapabilityState.DISABLED,
+                CapabilityState.REMOVED,
+            }:
+                continue
             try:
                 if not await driver.check_health():
-                    failed = True
                     if record.definition.source == "MCP":
+                        degraded = True
                         self.registry.set_state(
                             record.id,
                             CapabilityState.UNAVAILABLE,
                         )
                     else:
+                        failed = True
                         return self._failed_health_status()
-                elif record.definition.source == "MCP":
+                elif record.state in {
+                    CapabilityState.UNAVAILABLE,
+                    CapabilityState.DEGRADED,
+                }:
                     self.registry.set_state(
                         record.id,
                         CapabilityState.ENABLED,
                     )
             except Exception:
-                failed = True
                 if record.definition.source == "MCP":
+                    degraded = True
                     self.registry.set_state(
                         record.id,
                         CapabilityState.UNAVAILABLE,
                     )
                 else:
+                    failed = True
                     return self._failed_health_status()
-        return (
-            self._failed_health_status()
-            if failed
-            else self._healthy_health_status()
-        )
+        if failed:
+            return self._failed_health_status()
+        if degraded:
+            return HealthStatus.DEGRADED
+        return self._healthy_health_status()
 
     @staticmethod
     def _healthy_health_status():
-        from ...kernel.base import HealthStatus
         return HealthStatus.HEALTHY
 
     @staticmethod
     def _failed_health_status():
-        from ...kernel.base import HealthStatus
         return HealthStatus.FAILED
 
     async def discover_mcp_capabilities(self, server_name: str) -> int:

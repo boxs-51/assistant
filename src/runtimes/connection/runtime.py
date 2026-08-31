@@ -24,11 +24,15 @@ class ConnectionRuntime(BaseRuntime):
         self.event_bus = None
         self.registry = ConnectionRegistry()
         self._heartbeat_task: Optional[asyncio.Task] = None
+        self._subscribed = False
 
     async def initialize(self, context: RuntimeContext) -> None:
+        await super().initialize(context)
         # Subscribe Command gửi tin nhắn tới Client
         self.event_bus = context.event_bus
-        self.event_bus.subscribe("connection.command.send", self._handle_send_command)
+        if not self._subscribed:
+            self.event_bus.subscribe("connection.command.send", self._handle_send_command)
+            self._subscribed = True
         self._is_initialized = True
         logger.info("Connection Runtime initialized.")
 
@@ -39,8 +43,16 @@ class ConnectionRuntime(BaseRuntime):
 
     async def stop(self) -> None:
         self._is_running = False
+        if self.event_bus is not None and self._subscribed:
+            self.event_bus.unsubscribe("connection.command.send", self._handle_send_command)
+            self._subscribed = False
         if self._heartbeat_task:
             self._heartbeat_task.cancel()
+            try:
+                await self._heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self._heartbeat_task = None
         logger.info("Connection Runtime stopped.")
 
     async def _handle_send_command(self, event: BaseEvent):

@@ -20,9 +20,9 @@ async def readiness_check(
 ):
     """Kubernetes readiness probe backed by the application dependency graph."""
     try:
-        redis_driver = container.storage.drivers.get("redis")
-        if redis_driver:
-            await redis_driver.ping()
+        cache_driver = container.storage.get_cache_driver()
+        if cache_driver:
+            await cache_driver.ping()
 
         provider_runtime = container.provider_runtime
         if provider_runtime is None or not provider_runtime.providers:

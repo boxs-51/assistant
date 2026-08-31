@@ -3,11 +3,14 @@ from __future__ import annotations
 from typing import Any, Dict, Mapping, Protocol
 
 from ....domain.schemas.identity import Identity
-from ....infrastructure.mcp.mcp_manager import GatewayMcpManager
 from ..contracts.context import CapabilityExecutionContext
 from ..contracts.definition import CapabilityDefinition
 from .base import BaseCapabilityDriver
 
+class McpSessionProvider(Protocol):
+    """Port used by the capability layer to obtain live MCP sessions."""
+
+    def get_raw_session(self, server_name: str) -> Any: ...
 
 class McpCredentialResolver(Protocol):
     """Explicit security boundary for MCP credentials."""
@@ -38,7 +41,7 @@ class McpCapabilityDriver(BaseCapabilityDriver):
     def __init__(
         self,
         definition: CapabilityDefinition,
-        mcp_manager: GatewayMcpManager,
+        mcp_manager: McpSessionProvider,
         credential_resolver: McpCredentialResolver | None = None,
     ) -> None:
         super().__init__(definition)

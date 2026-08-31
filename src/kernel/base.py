@@ -71,7 +71,7 @@ class BaseRuntime(ABC):
         self.context: Optional[RuntimeContext] = None
         self.state: LifecycleState = LifecycleState.CREATED
 
-    def initialize(self, context: RuntimeContext) -> None:
+    async def initialize(self, context: RuntimeContext) -> None:
         self.context = context
         self.state = LifecycleState.INITIALIZED
 

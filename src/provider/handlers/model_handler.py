@@ -12,11 +12,11 @@ class ModelOperationHandler(BaseExecutionHandler):
         if not provider:
             raise KeyError(f"Provider '{provider_name}' not found.")
 
-        if model_id:
+        if model_id and model_id != "":
             model_data = await provider.models.model(
                 http_client=http_client,
                 timeout=self.timeout,
-                model_name=model_id
+                model_id=model_id
             )
             return provider.capability_manager.enrich_capabilities(model_data)
 

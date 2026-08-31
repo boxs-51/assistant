@@ -115,6 +115,24 @@ class RedisDriver(CacheDriver):
             self._connected = False
             raise
 
+    async def get_ttl(self, key: str) -> Optional[float]:
+        client = self._require_client()
+
+        try:
+            pttl = await client.pttl(key)
+
+            # Redis trả về:
+            # -2: Key không tồn tại
+            # -1: Key không có thời gian hết hạn (persist)
+            if pttl < 0:
+                return None
+
+            return pttl / 1000.0
+
+        except RedisError:
+            self._connected = False
+            raise
+
     async def set(
         self,
         key: str,

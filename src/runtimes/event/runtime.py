@@ -11,7 +11,7 @@ class EventRuntime(BaseRuntime):
         super().__init__(manifest)
 
     async def initialize(self, context: RuntimeContext) -> None:
-        super().initialize(context)
+        await super().initialize(context)
         # Đăng ký subscribers nếu chưa auto-import
         # context.event_bus đã sẵn sàng để sử dụng
     async def start(self) -> None:

@@ -21,15 +21,19 @@ class SessionRuntime(BaseRuntime):
         self.event_bus = None
         self.uow_factory = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._subscribed = False
 
     async def initialize(self, context: RuntimeContext) -> None:
+        await super().initialize(context)
         # Subscribe các event theo chuẩn tên mới
         self.event_bus = context.event_bus
         self.uow_factory = context.uow_factory
         if self.uow_factory is None:
             raise ValueError("SessionRuntime requires uow_factory.")
-        self.event_bus.subscribe("transport.event.request_received", self._on_request_received)
-        self.event_bus.subscribe("provider.chat.responded", self._on_provider_responded)
+        if not self._subscribed:
+            self.event_bus.subscribe("transport.event.request_received", self._on_request_received)
+            self.event_bus.subscribe("provider.chat.responded", self._on_provider_responded)
+            self._subscribed = True
         self._is_initialized = True
         logger.info("SessionRuntime initialized")
 
@@ -38,6 +42,10 @@ class SessionRuntime(BaseRuntime):
 
     async def stop(self) -> None:
         self._is_running = False
+        if self.event_bus is not None and self._subscribed:
+            self.event_bus.unsubscribe("transport.event.request_received", self._on_request_received)
+            self.event_bus.unsubscribe("provider.chat.responded", self._on_provider_responded)
+            self._subscribed = False
 
     async def _on_request_received(self, event: BaseEvent):
         """Xử lý khi có request HTTP/WS mới vào hệ thống."""

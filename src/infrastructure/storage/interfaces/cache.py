@@ -31,6 +31,17 @@ class CacheDriver(ABC):
         pass
 
     @abstractmethod
+    async def get_ttl(self, key: str) -> Optional[float]:
+        """
+        Lấy thời gian sống còn lại (TTL) của key tính theo giây.
+
+        Returns:
+            - float: Số giây còn lại trước khi key hết hạn.
+            - None: Nếu key không tồn tại hoặc không thiết lập thời gian hết hạn (persist).
+        """
+        pass
+
+    @abstractmethod
     async def set(
         self,
         key: str,
