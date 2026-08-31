@@ -62,6 +62,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(
         description="Công cụ áp dụng file patch định dạng custom cho dự án."
     )
+    
     parser.add_argument(
         "patch_path",
         type=str,
