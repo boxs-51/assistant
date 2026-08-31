@@ -7,13 +7,13 @@ from .....domain.schemas import (
 
 )
 
-
 import structlog
 logger = structlog.get_logger(__name__)
 
 
 class ResponseFiles():
-
+    
+    @staticmethod
     def _parse_iso_to_timestamp(iso_str: Optional[str]) -> Optional[int]:
         """Hàm trợ giúp convert ISO datetime string từ Google API sang Unix timestamp."""
         if not iso_str:

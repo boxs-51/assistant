@@ -1,0 +1,177 @@
+*** Begin Patch
+*** Update File: src/provider/gemini/api/files.py
+@@
+-from typing import List ,Any, Union, BinaryIO
++from typing import List, Any, Union, BinaryIO
++from urllib.parse import urljoin
+@@
+     async def upload_file(self, **kwargs) -> Any:
+@@
+-        # --- BƯỚC 1: KHỞI TẠO SESSION RESUMABLE UPLOAD ---
++        # --- BƯỚC 1: KHỞI TẠO SESSION RESUMABLE UPLOAD ---
+         file_metadata = {
+             "file": {
+                 "displayName": resolved_display_name,
+             }
+         }
+ 
++        # Gemini resumable upload uses a dedicated upload endpoint.
++        # IMPORTANT: /v1beta/files is the normal Files resource endpoint;
++        # resumable session initialization must target /upload/v1beta/files.
++        base_url = str(self.provider.config.base_url).rstrip("/") + "/"
++        upload_init_url = urljoin(base_url, "upload/v1beta/files")
++
+         init_headers = {
+-            "X-Upload-Content-Length": str(file_size),
+-            "X-Upload-Content-Type": mime_type,
++            "X-Goog-Upload-Protocol": "resumable",
++            "X-Goog-Upload-Command": "start",
++            "X-Goog-Upload-Header-Content-Length": str(file_size),
++            "X-Goog-Upload-Header-Content-Type": mime_type,
++            "Content-Type": "application/json",
+         }
+@@
+-            # Gửi request POST khởi tạo session upload (giữ nguyên)
+-            init_response = await self.provider.send(
+-                client=http_client,
+-                method="POST",
+-                api_type=ApiType.FILES,
+-                params={"uploadType": "resumable"},
+-                headers=init_headers,
+-                json=file_metadata,
+-                timeout=timeout,
+-            )
+-
+-            upload_url = getattr(init_response, "headers", {}).get("Location")
++            # Do not use BaseProvider.send() here: its FILES endpoint resolves to
++            # /v1beta/files, while Gemini resumable initialization is
++            # /upload/v1beta/files.
++            auth_url, auth_headers = self.provider.auth.prepare_request(
++                upload_init_url,
++                dict(init_headers),
++            )
++            init_response = await http_client.request(
++                method="POST",
++                url=auth_url,
++                json=file_metadata,
++                headers=auth_headers,
++                timeout=timeout if timeout else 300.0,
++            )
++            init_response.raise_for_status()
++
++            # Gemini returns the resumable session URL in the
++            # X-Goog-Upload-URL response header, not Location.
++            upload_url = init_response.headers.get("x-goog-upload-url")
+             if not upload_url:
+                 if isinstance(init_response, dict) and "upload_url" in init_response:
+                     upload_url = init_response.get("upload_url")
+                 else:
+-                    raise ValueError("Could not find 'Location' header in Gemini response.")
++                    raise ValueError(
++                        "Gemini resumable upload initialization succeeded but "
++                        "did not return 'X-Goog-Upload-URL'."
++                    )
+@@
+-            # Gửi PUT request stream trực tiếp
+-            upload_response = await http_client.request(
+-                method="PUT",
++            # Gemini resumable upload finalization uses POST plus the
++            # X-Goog-Upload-Offset and X-Goog-Upload-Command headers.
++            upload_response = await http_client.request(
++                method="POST",
+                 url=upload_url,
+                 content=stream_chunk_generator(),  # Truyền async generator vào đây
+                 headers={
+                     "Content-Length": str(file_size),
+                     "Content-Type": mime_type
++                    ,"X-Goog-Upload-Offset": "0"
++                    ,"X-Goog-Upload-Command": "upload, finalize"
+                 },
+                 timeout=timeout if timeout else 300.0
+             )
++
++            upload_response.raise_for_status()
+*** Add File: tests/providers/test_google_file_upload_contract.py
++import httpx
++import pytest
++
++from src.infrastructure.config.schemas import ProviderConfig
++from src.provider.gemini import GeminiProvider
++
++
++class _FakeProviderClient:
++    def __init__(self):
++        self.calls = []
++
++    async def request(self, method, url, **kwargs):
++        self.calls.append((method, url, kwargs))
++
++        if len(self.calls) == 1:
++            return httpx.Response(
++                200,
++                headers={
++                    "X-Goog-Upload-URL": "https://upload.example/session/abc"
++                },
++                request=httpx.Request(method, url),
++            )
++
++        body = await _collect_async_content(kwargs["content"])
++        assert body == b"hello"
++        return httpx.Response(
++            200,
++            json={
++                "file": {
++                    "name": "files/abc",
++                    "displayName": "hello.txt",
++                    "mimeType": "text/plain",
++                    "sizeBytes": "5",
++                    "uri": "https://generativelanguage.googleapis.com/v1beta/files/abc",
++                }
++            },
++            request=httpx.Request(method, url),
++        )
++
++
++async def _collect_async_content(content):
++    chunks = []
++    async for chunk in content:
++        chunks.append(chunk)
++    return b"".join(chunks)
++
++
++@pytest.mark.asyncio
++async def test_gemini_resumable_upload_uses_x_goog_upload_url_and_protocol():
++    provider = GeminiProvider(
++        ProviderConfig(
++            enabled=True,
++            api_key="test-key",
++            base_url="https://generativelanguage.googleapis.com",
++        )
++    )
++    client = _FakeProviderClient()
++
++    result = await provider.files.upload_file(
++        http_client=client,
++        file_stream=__import__("io").BytesIO(b"hello"),
++        file_size=5,
++        mime_type="text/plain",
++        display_name="hello.txt",
++        timeout=10,
++    )
++
++    init_method, init_url, init_kwargs = client.calls[0]
++    assert init_method == "POST"
++    assert init_url == "https://generativelanguage.googleapis.com/upload/v1beta/files?key=test-key"
++    assert init_kwargs["headers"]["X-Goog-Upload-Protocol"] == "resumable"
++    assert init_kwargs["headers"]["X-Goog-Upload-Command"] == "start"
++    assert init_kwargs["headers"]["X-Goog-Upload-Header-Content-Length"] == "5"
++    assert init_kwargs["headers"]["X-Goog-Upload-Header-Content-Type"] == "text/plain"
++
++    upload_method, upload_url, upload_kwargs = client.calls[1]
++    assert upload_method == "POST"
++    assert upload_url == "https://upload.example/session/abc"
++    assert upload_kwargs["headers"]["X-Goog-Upload-Offset"] == "0"
++    assert upload_kwargs["headers"]["X-Goog-Upload-Command"] == "upload, finalize"
++
++    assert result.id == "abc"
+*** End Patch

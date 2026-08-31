@@ -9,7 +9,7 @@ from ...core.interfaces.model import ModelProvider
 import structlog 
 logger = structlog.get_logger(__name__)
 
-class GoogleModels(ModelProvider):
+class GeminiModels(ModelProvider):
     def __init__(self, provider: BaseProvider):
         self.provider = provider
     

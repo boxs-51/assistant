@@ -5,7 +5,7 @@ from ...core.interfaces.embedding import EmbeddingProvider
 from ..converters.embeddings.request import RequestEmbeddings 
 from ..converters.embeddings.response import ResponseEmbeddings 
 
-class GoogleEmbeddings(EmbeddingProvider):
+class GeminiEmbeddings(EmbeddingProvider):
 
     def __init__(self, provider : BaseProvider):
         self.request = RequestEmbeddings()

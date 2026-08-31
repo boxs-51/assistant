@@ -1,4 +1,5 @@
 from typing import List ,Any, Union, BinaryIO
+from urllib.parse import urljoin
 from fastapi import UploadFile
 
 from ..converters.files.response import ResponseFiles 
@@ -9,7 +10,7 @@ from ..file_extension import FileHelper
 import structlog
 logger = structlog.get_logger(__name__)
 
-class GoogleFiles(FileProvider):
+class GeminiFiles(FileProvider):
     def __init__(self, provider: BaseProvider):
         self.response = ResponseFiles()
         self.provider = provider
@@ -209,9 +210,18 @@ class GoogleFiles(FileProvider):
             }
         }
 
+        # Gemini resumable upload uses a dedicated upload endpoint.
+        # IMPORTANT: /v1beta/files is the normal Files resource endpoint;
+        # resumable session initialization must target /upload/v1beta/files.
+        base_url = str(self.provider.config.base_url).rstrip("/") + "/"
+        upload_init_url = urljoin(base_url, "upload/v1beta/files")
+
         init_headers = {
-            "X-Upload-Content-Length": str(file_size),
-            "X-Upload-Content-Type": mime_type,
+            "X-Goog-Upload-Protocol": "resumable",
+            "X-Goog-Upload-Command": "start",
+            "X-Goog-Upload-Header-Content-Length": str(file_size),
+            "X-Goog-Upload-Header-Content-Type": mime_type,
+            "Content-Type": "application/json",
         }
 
         logger.info(
@@ -223,23 +233,33 @@ class GoogleFiles(FileProvider):
         )
 
         try:
-            # Gửi request POST khởi tạo session upload (giữ nguyên)
-            init_response = await self.provider.send(
-                client=http_client,
-                method="POST",
-                api_type=ApiType.FILES,
-                params={"uploadType": "resumable"},
-                headers=init_headers,
-                json=file_metadata,
-                timeout=timeout,
+            # Do not use BaseProvider.send() here: its FILES endpoint resolves to
+            # /v1beta/files, while Gemini resumable initialization is
+            # /upload/v1beta/files.
+            auth_url, auth_headers = self.provider.auth.prepare_request(
+                upload_init_url,
+                dict(init_headers),
             )
+            init_response = await http_client.request(
+                method="POST",
+                url=auth_url,
+                json=file_metadata,
+                headers=auth_headers,
+                timeout=timeout if timeout else 300.0,
+            )
+            init_response.raise_for_status()
 
-            upload_url = getattr(init_response, "headers", {}).get("Location")
+            # Gemini returns the resumable session URL in the
+            # X-Goog-Upload-URL response header, not Location.
+            upload_url = init_response.headers.get("x-goog-upload-url")
             if not upload_url:
                 if isinstance(init_response, dict) and "upload_url" in init_response:
                     upload_url = init_response.get("upload_url")
                 else:
-                    raise ValueError("Could not find 'Location' header in Gemini response.")
+                    raise ValueError(
+                        "Gemini resumable upload initialization succeeded but "
+                        "did not return 'X-Goog-Upload-URL'."
+                    )
 
             logger.info("Resumable upload session created. Streaming data from object...")
 
@@ -264,17 +284,22 @@ class GoogleFiles(FileProvider):
                     while chunk := file_stream.read(chunk_size):
                         yield chunk
 
-            # Gửi PUT request stream trực tiếp
+            # Gemini resumable upload finalization uses POST plus the
+            # X-Goog-Upload-Offset and X-Goog-Upload-Command headers.
             upload_response = await http_client.request(
-                method="PUT",
+                method="POST",
                 url=upload_url,
                 content=stream_chunk_generator(),  # Truyền async generator vào đây
                 headers={
                     "Content-Length": str(file_size),
                     "Content-Type": mime_type
+                    ,"X-Goog-Upload-Offset": "0"
+                    ,"X-Goog-Upload-Command": "upload, finalize"
                 },
                 timeout=timeout if timeout else 300.0
             )
+
+            upload_response.raise_for_status()
 
             logger.info(
                 "Successfully completed stream upload to Gemini",

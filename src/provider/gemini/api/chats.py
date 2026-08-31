@@ -9,7 +9,7 @@ from ..converters.chats.response import ResponseChats
 import structlog
 logger = structlog.get_logger(__name__)
 
-class GoogleChat(ChatProvider):
+class GeminiChat(ChatProvider):
     def __init__(self, provider: BaseProvider):
         self.request = RequestChats()
         self.response = ResponseChats()

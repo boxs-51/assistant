@@ -4,7 +4,7 @@ from ..infrastructure.config.schemas import ProviderConfig
 from .core.provider import BaseProvider
 from .openai import OpenAIProvider
 from .ollama import OllamaProvider
-from .google import GoogleProvider
+from .gemini import GeminiProvider
 from .mock import MockProvider
 
 class ProviderFactory:
@@ -15,7 +15,7 @@ class ProviderFactory:
     _provider_classes: Dict[str, Type[BaseProvider]] = {
         "openai": OpenAIProvider,
         "ollama": OllamaProvider,
-        "gemini": GoogleProvider,
+        "gemini": GeminiProvider,
         "mock": MockProvider,
     }
 

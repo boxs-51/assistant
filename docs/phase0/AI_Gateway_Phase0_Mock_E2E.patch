@@ -586,7 +586,7 @@ diff -ruN /mnt/data/original_gateway/src/provider/factory.py /mnt/data/work_gate
 -from .core.provider import BaseProvider
 -from .openai import OpenAIProvider
 -from .ollama import OllamaProvider
--from .google import GoogleProvider
+-from .gemini import GeminiProvider
 -
 -class ProviderFactory:
 -    """
@@ -596,7 +596,7 @@ diff -ruN /mnt/data/original_gateway/src/provider/factory.py /mnt/data/work_gate
 -    _provider_classes: Dict[str, Type[BaseProvider]] = {
 -        "openai": OpenAIProvider,
 -        "ollama": OllamaProvider,
--        "gemini": GoogleProvider,
+-        "gemini": GeminiProvider,
 -    }
 -
 -    @classmethod
@@ -610,7 +610,7 @@ diff -ruN /mnt/data/original_gateway/src/provider/factory.py /mnt/data/work_gate
 +from .core.provider import BaseProvider
 +from .openai import OpenAIProvider
 +from .ollama import OllamaProvider
-+from .google import GoogleProvider
++from .gemini import GeminiProvider
 +from .mock import MockProvider
 +
 +class ProviderFactory:
@@ -621,7 +621,7 @@ diff -ruN /mnt/data/original_gateway/src/provider/factory.py /mnt/data/work_gate
 +    _provider_classes: Dict[str, Type[BaseProvider]] = {
 +        "openai": OpenAIProvider,
 +        "ollama": OllamaProvider,
-+        "gemini": GoogleProvider,
++        "gemini": GeminiProvider,
 +        "mock": MockProvider,
 +    }
 +

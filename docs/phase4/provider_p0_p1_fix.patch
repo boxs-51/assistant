@@ -227,15 +227,15 @@
 +
 +from src.infrastructure.config.schemas import ProviderConfig
 +from src.provider.core.api import ApiType
-+from src.provider.google import GoogleProvider
-+from src.provider.google.api.embeddings import GoogleEmbeddings
-+from src.provider.google.api.models import GoogleModels
-+from src.provider.google.converters.embeddings.request import RequestEmbeddings
-+from src.provider.google.converters.embeddings.response import ResponseEmbeddings
++from src.provider.gemini import GeminiProvider
++from src.provider.gemini.api.embeddings import GeminiEmbeddings
++from src.provider.gemini.api.models import GeminiModels
++from src.provider.gemini.converters.embeddings.request import RequestEmbeddings
++from src.provider.gemini.converters.embeddings.response import ResponseEmbeddings
 +
 +
-+def _provider() -> GoogleProvider:
-+    return GoogleProvider(
++def _provider() -> GeminiProvider:
++    return GeminiProvider(
 +        config=ProviderConfig(
 +            enabled=True,
 +            api_key="test-key",

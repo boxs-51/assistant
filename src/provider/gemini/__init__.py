@@ -15,7 +15,7 @@ from ..core import (
     ModelMapper
 )
 from ...infrastructure.config.schemas import ProviderConfig
-from .api import GoogleChat, GoogleFiles, GoogleModels, GoogleEmbeddings
+from .api import GeminiChat, GeminiFiles, GeminiModels, GeminiEmbeddings
 
 logger = structlog.get_logger(__name__)
 
@@ -50,7 +50,7 @@ GOOGLE_API_MAP = {
     ApiType.FILES : "v1beta/files", # Endpoint cho File API
 }
 
-class GoogleProvider(BaseProvider):
+class GeminiProvider(BaseProvider):
     """Nhà cung cấp cho Gemini API, được lắp ráp từ các thành phần chuyên biệt."""
     def __init__(self, config: ProviderConfig):
         # 3. Lắp ráp các thành phần (Composition)
@@ -67,10 +67,10 @@ class GoogleProvider(BaseProvider):
             }
         )
         self.config = config
-        self.chat = GoogleChat(provider=self)
-        self.files = GoogleFiles(provider=self)
-        self.models = GoogleModels(provider=self)
-        self.embeddings = GoogleEmbeddings(provider=self)
+        self.chat = GeminiChat(provider=self)
+        self.files = GeminiFiles(provider=self)
+        self.models = GeminiModels(provider=self)
+        self.embeddings = GeminiEmbeddings(provider=self)
 
     def is_configured(self) -> bool:
         """Kiểm tra xem Gemini API key đã được cung cấp hay chưa."""

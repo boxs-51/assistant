@@ -101,7 +101,7 @@
 @@ -4,6 +4,7 @@
  from .openai import OpenAIProvider
  from .ollama import OllamaProvider
- from .google import GoogleProvider
+ from .gemini import GeminiProvider
 +from .mock import MockProvider
  
  class ProviderFactory:
@@ -109,7 +109,7 @@
 @@ -14,6 +15,7 @@
          "openai": OpenAIProvider,
          "ollama": OllamaProvider,
-         "gemini": GoogleProvider,
+         "gemini": GeminiProvider,
 +        "mock": MockProvider,
      }
  

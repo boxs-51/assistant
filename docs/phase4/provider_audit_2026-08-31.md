@@ -23,13 +23,13 @@ A list request supplies no `model`, causing `KeyError: 'model'` and the observed
 
 `provider.models.model(model_name=target_model_name, ...)`
 
-But `GoogleModels.model()` reads `model_id` from kwargs. A capability check on an uncached embedding model therefore fails before the embedding request is executed.
+But `GeminiModels.model()` reads `model_id` from kwargs. A capability check on an uncached embedding model therefore fails before the embedding request is executed.
 
 **Fix:** canonicalize the detail-model argument to `model_id`.
 
 ### 3. Gemini embeddings ignore the caller model
 
-`GoogleEmbeddings.embeddings()` hardcodes `embedding-001`, while the live test uses `gemini-embedding-001` (the currently documented Gemini embedding model).
+`GeminiEmbeddings.embeddings()` hardcodes `embedding-001`, while the live test uses `gemini-embedding-001` (the currently documented Gemini embedding model).
 
 **Fix:** honor `body["model"]`, normalize an optional `models/` prefix, and default to `gemini-embedding-001`.
 
@@ -96,7 +96,7 @@ The current Gemini auth strategy appends the API key to the URL, while `BaseProv
 
 ### 13. Gemini image generation is a broken latent path
 
-`GoogleProvider.image_generation()` references `self.adapter`, which is not defined in the provider assembly shown by the current repository.
+`GeminiProvider.image_generation()` references `self.adapter`, which is not defined in the provider assembly shown by the current repository.
 
 **Fix:** keep the capability explicitly `NotImplemented` until a real Imagen adapter is wired, rather than failing with `AttributeError`.
 
