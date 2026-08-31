@@ -12,7 +12,7 @@ class ResponseChats():
 
     async def adapt_chat(self, response: httpx.Response) -> GatewayResponse:
         """Chuyển đổi response JSON từ OpenAI về GatewayResponse."""
-        response_data = await response.json()
+        response_data = response.json()
         try:
             # Pydantic model sẽ tự động validate cấu trúc
             return GatewayResponse.model_validate(response_data)

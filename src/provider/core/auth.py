@@ -1,5 +1,6 @@
 from abc import ABC, abstractmethod
 from typing import Dict, Tuple
+from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 
 class AuthStrategy(ABC):
     """Interface cho các chiến lược xác thực khác nhau."""
@@ -41,8 +42,23 @@ class ApiKeyInQuery(AuthStrategy):
         new_url = f"{url}{separator}{self.key_name}={self.api_key}"
         return new_url, headers
 
+def mask_auth_url(url: str, secret_names=("key", "api_key", "apikey", "token")) -> str:
+    """Return a log-safe URL without exposing credentials in query parameters."""
+    parts = urlsplit(url)
+    if not parts.query:
+        return url
+
+    secret_names_lower = {name.lower() for name in secret_names}
+    query = [
+        (name, "***" if name.lower() in secret_names_lower else value)
+        for name, value in parse_qsl(parts.query, keep_blank_values=True)
+    ]
+    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+
 class NoAuth(AuthStrategy):
     """Chiến lược không yêu cầu xác thực, dùng cho các provider local."""
     def prepare_request(self, url: str, headers: Dict[str, str]) -> Tuple[str, Dict[str, str]]:
         # Không làm gì cả, chỉ trả về URL và headers gốc
         return url, headers
+    
+    

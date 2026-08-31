@@ -145,7 +145,7 @@ class ModelCapabilityManager:
                     model=target_model_name
                 )
                 model_info_obj = await provider.models.model(
-                    model_name=target_model_name, 
+                    model_id=target_model_name, 
                     http_client=http_client, 
                     timeout=timeout
                 )

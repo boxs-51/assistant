@@ -10,7 +10,7 @@ from ..core import (
 )
 
 from ...infrastructure.config.schemas import ProviderConfig
-from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo
+from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo, ContextLimits
 
 from .api.chats import OpenAIChats
 
@@ -48,6 +48,8 @@ class OpenAIProvider(BaseProvider):
         )
         self.config = config
         self.chat = OpenAIChats(provider=self)
+        # Runtime model handlers use the canonical provider.models component contract.
+        self.models = self
 
     def is_configured(self) -> bool:
         """Kiểm tra xem OpenAI API key đã được cung cấp hay chưa."""
@@ -79,7 +81,17 @@ class OpenAIProvider(BaseProvider):
                 provider=self, model_name=model_id, http_client=http_client, timeout=timeout
             )
             
-            return ModelInfo(id=model_id, owned_by=model_data.get("owned_by", "openai"), capabilities=[cap.name for cap in capabilities_set])
+            return ModelInfo(
+                id=model_id,
+                display_name=model_id,
+                provider=self.name,
+                family=model_id.split("-")[0] if "-" in model_id else model_id,
+                version="v1",
+                description="",
+                limits=ContextLimits(context_window=32768, max_output_tokens=4096),
+                capabilities=capabilities_set,
+                owned_by=model_data.get("owned_by", "openai"),
+            )
 
         tasks = [get_model_info(m) for m in models_list]
         results = await asyncio.gather(*tasks)
@@ -89,11 +101,11 @@ class OpenAIProvider(BaseProvider):
     
     async def model(self, **kwargs) -> Dict[str, Any]:
         """Lấy thông tin chi tiết của một model cụ thể từ OpenAI."""
-        model_name = kwargs.get("model_name")
+        model_name = kwargs.get("model_id")
         # OpenAI API dùng endpoint /v1/models/{model_id}
         api_type_template = f"models/{model_name}"
         response = await self.send(client=kwargs.get("http_client"), method="GET", api_type=api_type_template, timeout=kwargs.get("timeout"))
-        return await response.json()
+        return response.json()
 
 
     async def embeddings(self, **kwargs) -> Dict[str, Any]:
@@ -105,4 +117,4 @@ class OpenAIProvider(BaseProvider):
             json=prepared_body,
             timeout=kwargs.get("timeout"),
         )
-        return await response.json()
+        return response.json()

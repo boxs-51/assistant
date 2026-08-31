@@ -9,7 +9,7 @@ from typing import Dict, Any, AsyncGenerator, List, Optional
 # 1. Import các thành phần đã được module hóa
 from ..core import (
     BaseProvider, ApiType,
-    ApiKeyInQuery, ApiTypeMapper, BearerToken,
+    ApiKeyHeader, ApiTypeMapper, BearerToken,
     EndpointBuilder,
     ModelCapabilityManager, ProviderCapability,
     ModelMapper
@@ -56,7 +56,7 @@ class GoogleProvider(BaseProvider):
         # 3. Lắp ráp các thành phần (Composition)
         super().__init__(
             provider_name="gemini",
-            auth_strategy=ApiKeyInQuery(api_key=str(config.api_key), key_name="key"),
+            auth_strategy=ApiKeyHeader(api_key=str(config.api_key), header_name="x-goog-api-key"),
             endpoint_builder=EndpointBuilder(base_url=str(config.base_url)),
             api_mapper=ApiTypeMapper(api_map=GOOGLE_API_MAP),
             model_mapper=ModelMapper(model_map=GOOGLE_MODEL_MAP),
@@ -78,19 +78,7 @@ class GoogleProvider(BaseProvider):
 
 
     async def image_generation(self, **kwargs) -> Dict[str, Any]:
-        """Tạo hình ảnh từ văn bản bằng API của Gemini (Imagen)."""
-        body = kwargs.get("body")
-        # Chuyển đổi request sang định dạng của Gemini
-        adapted_body = self.adapter.adapt_image_generation_request(body)
-
-        response = await self.send(
-            client=kwargs.get("http_client"),
-            api_type=ApiType.IMAGE_GENERATION,
-            json=adapted_body,
-            timeout=kwargs.get("timeout"),
-        )
-        # Chuyển đổi response về định dạng chuẩn của Gateway (giống OpenAI)
-        return await self.adapter.adapt_image_generation_response(response)
+        raise NotImplementedError("Gemini image generation adapter is not implemented yet.")
     
 
     async def moderation(self, **kwargs) -> Any: raise NotImplementedError

@@ -90,7 +90,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         Commit transaction và phát các sự kiện tương ứng.
         """
         # Tạo sự kiện từ các thay đổi trong session TRƯỚC khi commit
-        storage_events = StorageEventFactory.create_events_from_session(self.session)
+        storage_events = await StorageEventFactory.create_events_from_session(self.session)
         
         await self.session.commit()
         

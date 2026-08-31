@@ -16,7 +16,7 @@ class ResponseChats():
     async def adapt_chat(self, response: httpx.Response) -> GatewayResponse: # Make it async
         """Chuyển đổi response JSON từ Ollama về GatewayResponse."""
         try:
-            response_data = await response.json()
+            response_data = response.json()
             message_data = response_data.get("message", {})
             
             return GatewayResponse(

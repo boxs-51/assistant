@@ -61,3 +61,6 @@ async def embeddings_proxy(
         return JSONResponse(content=response_data)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Embeddings request timed out.")
+    finally:
+        event_bus.unsubscribe("provider.embeddings.responded", _on_responded)
+        event_bus.unsubscribe("provider.failed", _on_failure)

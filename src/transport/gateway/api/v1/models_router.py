@@ -44,7 +44,9 @@ async def _dispatch_model_event(event_bus: EventBus, config: ConfigSchema, paylo
         return await asyncio.wait_for(future, timeout=config.provider.timeout)
     except asyncio.TimeoutError:
         raise HTTPException(status_code=504, detail="Model query timed out.")
-
+    finally:
+        event_bus.unsubscribe("provider.model.responded", _on_success)
+        event_bus.unsubscribe("provider.failed", _on_failure)
 
 @router.get("/")
 async def list_models_proxy(

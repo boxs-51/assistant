@@ -1,0 +1,44 @@
+*** Begin Patch
+*** Update File: src/provider/openai/__init__.py
+@@
+-from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo
++from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo, ContextLimits
+@@
+         self.config = config
+         self.chat = OpenAIChats(provider=self)
++        # Runtime model handlers use the canonical provider.models component contract.
++        self.models = self
+@@
+-            return ModelInfo(id=model_id, owned_by=model_data.get("owned_by", "openai"), capabilities=[cap.name for cap in capabilities_set])
++            return ModelInfo(
++                id=model_id,
++                display_name=model_id,
++                provider=self.name,
++                family=model_id.split("-")[0] if "-" in model_id else model_id,
++                version="v1",
++                description="",
++                limits=ContextLimits(context_window=32768, max_output_tokens=4096),
++                capabilities=capabilities_set,
++                owned_by=model_data.get("owned_by", "openai"),
++            )
+*** Update File: src/provider/ollama/api/models.py
+@@
+-from ....domain.schemas import ModelInfo, ModelList
++from ....domain.schemas import ModelInfo, ModelList, ContextLimits
+@@
+-                provider=self,
++                provider=self.provider,
+@@
+-            return ModelInfo(id=model_id, owned_by="ollama", capabilities=[cap.name for cap in capabilities_set])
++            return ModelInfo(
++                id=model_id,
++                display_name=model_id,
++                provider=self.provider.name,
++                family=model_id.split(":")[0] if ":" in model_id else model_id.split("-")[0],
++                version="v1",
++                description="",
++                limits=ContextLimits(context_window=32768, max_output_tokens=4096),
++                capabilities=capabilities_set,
++                owned_by="ollama",
++            )
+*** End Patch

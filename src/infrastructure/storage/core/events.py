@@ -1,6 +1,6 @@
 import structlog
 from typing import List, Optional, Dict, Any
-from sqlalchemy.orm.session import Session
+from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import inspect
 
 from ....domain.schemas.event import BaseEvent
@@ -14,12 +14,12 @@ class StorageEventFactory:
     """
 
     @staticmethod
-    def create_events_from_session(session: Session) -> List[BaseEvent]:
+    async def create_events_from_session(session: AsyncSession) -> List[BaseEvent]:
         """
         Tạo danh sách các sự kiện từ các đối tượng mới, đã sửa đổi hoặc đã xóa trong session.
         """
         events: List[BaseEvent] = []
-        session.flush()
+        await session.flush()
 
         for obj in session.new:
             entity_name = obj.__class__.__name__.lower()

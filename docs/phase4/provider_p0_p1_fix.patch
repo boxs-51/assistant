@@ -1,0 +1,299 @@
+*** Begin Patch
+*** Update File: src/provider/core/api.py
+@@
+-    MODELS = "models"
+-    MODEL = "models"
++    MODELS = "models"
++    MODEL = "model"
+*** Update File: src/provider/core/auth.py
+@@
+-from typing import Dict, Tuple
++from typing import Dict, Tuple
++from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
+@@
+ class ApiKeyInQuery(AuthStrategy):
+@@
+     def prepare_request(self, url: str, headers: Dict[str, str]) -> Tuple[str, Dict[str, str]]:
+@@
+         new_url = f"{url}{separator}{self.key_name}={self.api_key}"
+         return new_url, headers
++
++
++def mask_auth_url(url: str, secret_names=("key", "api_key", "apikey", "token")) -> str:
++    """Return a log-safe URL without exposing credentials in query parameters."""
++    parts = urlsplit(url)
++    if not parts.query:
++        return url
++
++    secret_names_lower = {name.lower() for name in secret_names}
++    query = [
++        (name, "***" if name.lower() in secret_names_lower else value)
++        for name, value in parse_qsl(parts.query, keep_blank_values=True)
++    ]
++    return urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(query), parts.fragment))
+*** Update File: src/provider/core/provider.py
+@@
+-from .auth import AuthStrategy
++from .auth import AuthStrategy, mask_auth_url
+@@
+             logger.info(
+                 "Preparing Outgoing HTTP Request",
+                 provider=self.name,
+                 api_type=str(api_type),
+                 method=method,
+                 endpoint_kwargs=endpoint_kwargs,
+-                url=auth_url,
++                url=mask_auth_url(auth_url),
+                 headers=masked_headers
+             )
+*** Update File: src/provider/google/__init__.py
+@@
+-    ApiKeyInQuery, ApiTypeMapper, BearerToken,
++    ApiKeyHeader, ApiTypeMapper, BearerToken,
+@@
+-            auth_strategy=ApiKeyInQuery(api_key=str(config.api_key), key_name="key"),
++            auth_strategy=ApiKeyHeader(api_key=str(config.api_key), header_name="x-goog-api-key"),
+@@
+     async def image_generation(self, **kwargs) -> Dict[str, Any]:
+         """Tạo hình ảnh từ văn bản bằng API của Gemini (Imagen)."""
+-        body = kwargs.get("body")
+-        # Chuyển đổi request sang định dạng của Gemini
+-        adapted_body = self.adapter.adapt_image_generation_request(body)
+-
+-        response = await self.send(
+-            client=kwargs.get("http_client"),
+-            api_type=ApiType.IMAGE_GENERATION,
+-            json=adapted_body,
+-            timeout=kwargs.get("timeout"),
+-        )
+-        # Chuyển đổi response về định dạng chuẩn của Gateway (giống OpenAI)
+-        return await self.adapter.adapt_image_generation_response(response)
++        raise NotImplementedError("Gemini image generation adapter is not implemented yet.")
+*** Update File: src/provider/google/api/models.py
+@@
+-        if not raw_model_name:
++        if not raw_model_name:
+             logger.error("Missing required parameter 'model_id' in model details request")
+-            raise ValueError("Parameter 'modelmodel_id_name' is required.")
++            raise ValueError("Parameter 'model_id' is required.")
+*** Update File: src/provider/google/api/embeddings.py
+@@
+     async def embeddings(self, **kwargs) -> Dict[str, Any]:
+         """Tạo embeddings cho văn bản bằng API của Gemini."""
+-        body = kwargs.get("body")
+-        # Gemini sử dụng model embedding riêng, không giống model chat
+-        embedding_model = "embedding-001"
++        body = kwargs.get("body") or {}
++        # Keep the caller-selected Gemini embedding model.  Default to the
++        # currently supported Gemini embedding model used by the live suite.
++        embedding_model = str(body.get("model") or "gemini-embedding-001").replace("models/", "")
+         # Adapt request body
+-        adapted_body = self.request.adapt_embeddings_request(request_embeddings={"model": embedding_model, **body})
++        adapted_body = self.request.adapt_embeddings_request({"model": embedding_model, **body})
+@@
+         )
+-        return await self.response.adapt_embeddings_response(response=response)
++        return await self.response.adapt_embeddings_response(
++            response=response,
++            model=embedding_model,
++        )
+*** Update File: src/provider/google/converters/embeddings/request.py
+@@
+ class RequestEmbeddings():
+     def adapt_embeddings_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
+@@
+-        input_text = request.get("input")
+-        model_name = request.get("model", "embedding-001")
++        input_text = request.get("input")
++        model_name = request.get("model", "gemini-embedding-001")
+@@
+         full_model_path = model_name if model_name.startswith("models/") else f"models/{model_name}"
+ 
+         if isinstance(input_text, str):
+-            return {"model": full_model_path, "content": {"parts": [{"text": input_text}]}}
++            return {"content": {"parts": [{"text": input_text}]}}
+*** Update File: src/provider/google/converters/embeddings/response.py
+@@
+ import httpx
+-from typing import Dict, Any
++from typing import Dict, Any, List
+ 
+ class ResponseEmbeddings():
+-    async def adapt_embeddings_response(self, response: httpx.Response) -> Dict[str, Any]:
+-        """Chuyển đổi response cho embeddings. Mặc định là trả về JSON gốc."""
+-        return await response.json()
++    async def adapt_embeddings_response(
++        self,
++        response: httpx.Response,
++        model: str,
++    ) -> Dict[str, Any]:
++        """Normalize Gemini embedding responses to the Gateway/OpenAI shape."""
++        raw = response.json()
++
++        vectors: List[List[float]] = []
++        if isinstance(raw.get("embedding"), dict):
++            vectors.append(list(raw["embedding"].get("values") or []))
++
++        for item in raw.get("embeddings", []) or []:
++            if isinstance(item, dict):
++                vectors.append(list(item.get("values") or []))
++
++        return {
++            "object": "list",
++            "model": model,
++            "data": [
++                {
++                    "object": "embedding",
++                    "index": index,
++                    "embedding": vector,
++                }
++                for index, vector in enumerate(vectors)
++            ],
++            "usage": {
++                "prompt_tokens": raw.get("usageMetadata", {}).get("promptTokenCount", 0),
++                "total_tokens": raw.get("usageMetadata", {}).get("totalTokenCount", 0),
++            },
++        }
+*** Update File: src/provider/core/capability/__init__.py
+@@
+-                model_info_obj = await provider.models.model(
+-                    model_name=target_model_name, 
++                model_info_obj = await provider.models.model(
++                    model_id=target_model_name,
+                     http_client=http_client, 
+                     timeout=timeout
+                 )
+*** Update File: src/provider/openai/__init__.py
+@@
+     async def model(self, **kwargs) -> Dict[str, Any]:
+         """Lấy thông tin chi tiết của một model cụ thể từ OpenAI."""
+-        model_name = kwargs.get("model_name")
++        model_name = kwargs.get("model_id")
+@@
+-        return await response.json()
++        return response.json()
+@@
+-        return await response.json()
++        return response.json()
+*** Update File: src/provider/openai/converters/chats/response.py
+@@
+-        response_data = await response.json()
++        response_data = response.json()
+*** Update File: src/provider/ollama/api/models.py
+@@
+-        ollama_data = await response.json()
++        ollama_data = response.json()
+*** Update File: src/provider/ollama/converters/chat/response.py
+@@
+-            response_data = await response.json()
++            response_data = response.json()
+*** Update File: src/infrastructure/storage/core/events.py
+@@
+-from sqlalchemy.orm.session import Session
++from sqlalchemy.ext.asyncio import AsyncSession
+@@
+-    def create_events_from_session(session: Session) -> List[BaseEvent]:
++    async def create_events_from_session(session: AsyncSession) -> List[BaseEvent]:
+@@
+-        session.flush()
++        await session.flush()
+*** Update File: src/infrastructure/storage/core/unit_of_work.py
+@@
+-        storage_events = StorageEventFactory.create_events_from_session(self.session)
++        storage_events = await StorageEventFactory.create_events_from_session(self.session)
+*** Update File: src/transport/gateway/api/v1/models_router.py
+@@
+     try:
+-        return await asyncio.wait_for(future, timeout=config.provider.timeout)
++        return await asyncio.wait_for(future, timeout=config.provider.timeout)
+     except asyncio.TimeoutError:
+         raise HTTPException(status_code=504, detail="Model query timed out.")
++    finally:
++        event_bus.unsubscribe("provider.model.responded", _on_success)
++        event_bus.unsubscribe("provider.failed", _on_failure)
+*** Update File: src/transport/gateway/api/v1/embeddings_router.py
+@@
+     try:
+         response_data = await asyncio.wait_for(future, timeout=config.provider.timeout)
+         return JSONResponse(content=response_data)
+     except asyncio.TimeoutError:
+         raise HTTPException(status_code=504, detail="Embeddings request timed out.")
++    finally:
++        event_bus.unsubscribe("provider.embeddings.responded", _on_responded)
++        event_bus.unsubscribe("provider.failed", _on_failure)
+*** Add File: tests/providers/test_gemini_provider_contracts.py
++import httpx
++import pytest
++
++from src.infrastructure.config.schemas import ProviderConfig
++from src.provider.core.api import ApiType
++from src.provider.google import GoogleProvider
++from src.provider.google.api.embeddings import GoogleEmbeddings
++from src.provider.google.api.models import GoogleModels
++from src.provider.google.converters.embeddings.request import RequestEmbeddings
++from src.provider.google.converters.embeddings.response import ResponseEmbeddings
++
++
++def _provider() -> GoogleProvider:
++    return GoogleProvider(
++        config=ProviderConfig(
++            enabled=True,
++            api_key="test-key",
++            base_url="https://generativelanguage.googleapis.com/",
++        )
++    )
++
++
++def test_model_and_models_are_distinct_api_types():
++    assert ApiType.MODEL is not ApiType.MODELS
++
++
++def test_gemini_list_models_endpoint_does_not_require_model_argument():
++    provider = _provider()
++    assert provider.build_endpoint(ApiType.MODELS) == (
++        "https://generativelanguage.googleapis.com/v1beta/models"
++    )
++
++
++def test_gemini_model_endpoint_requires_model_argument():
++    provider = _provider()
++    assert provider.build_endpoint(ApiType.MODEL, model="gemini-2.5-flash") == (
++        "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash"
++    )
++
++
++def test_embedding_request_uses_requested_model_and_valid_batch_shape():
++    body = RequestEmbeddings().adapt_embeddings_request({
++        "model": "gemini-embedding-001",
++        "input": ["hello"],
++    })
++    assert body == {
++        "requests": [{
++            "model": "models/gemini-embedding-001",
++            "content": {"parts": [{"text": "hello"}]},
++        }]
++    }
++
++
++def test_single_embedding_request_keeps_model_in_path_not_body():
++    body = RequestEmbeddings().adapt_embeddings_request({
++        "model": "gemini-embedding-001",
++        "input": "hello",
++    })
++    assert body == {"content": {"parts": [{"text": "hello"}]}}
++
++
++@pytest.mark.asyncio
++async def test_embedding_response_is_normalized_to_gateway_shape():
++    response = httpx.Response(
++        200,
++        json={"embeddings": [{"values": [0.1, 0.2]}]},
++        request=httpx.Request("POST", "https://example.test"),
++    )
++    result = await ResponseEmbeddings().adapt_embeddings_response(
++        response,
++        "gemini-embedding-001",
++    )
++    assert result["data"][0]["embedding"] == [0.1, 0.2]
+
+*** End Patch

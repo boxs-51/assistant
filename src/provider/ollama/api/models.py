@@ -3,7 +3,7 @@ import asyncio
 
 from ...core import BaseProvider, ApiType
 from ...core.interfaces.model import ModelProvider
-from ....domain.schemas import ModelInfo, ModelList
+from ....domain.schemas import ModelInfo, ModelList, ContextLimits
 
 class OllamaModels(ModelProvider):
     def __init__(self, provider: BaseProvider):
@@ -30,13 +30,23 @@ class OllamaModels(ModelProvider):
                 return None
             
             capabilities_set = await self.provider.capability_manager.get_capabilities_for_model(
-                provider=self,
+                provider=self.provider,
                 model_name=model_id,
                 http_client=http_client,
                 timeout=timeout
             )
             
-            return ModelInfo(id=model_id, owned_by="ollama", capabilities=[cap.name for cap in capabilities_set])
+            return ModelInfo(
+                id=model_id,
+                display_name=model_id,
+                provider=self.provider.name,
+                family=model_id.split(":")[0] if ":" in model_id else model_id.split("-")[0],
+                version="v1",
+                description="",
+                limits=ContextLimits(context_window=32768, max_output_tokens=4096),
+                capabilities=capabilities_set,
+                owned_by="ollama",
+            )
 
         tasks = [get_model_info(m) for m in models_list]
         results = await asyncio.gather(*tasks)

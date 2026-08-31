@@ -16,10 +16,12 @@ class GoogleEmbeddings(EmbeddingProvider):
     async def embeddings(self, **kwargs) -> Dict[str, Any]:
         """Tạo embeddings cho văn bản bằng API của Gemini."""
         body = kwargs.get("body")
-        # Gemini sử dụng model embedding riêng, không giống model chat
-        embedding_model = "embedding-001"
+        body = kwargs.get("body") or {}
+        # Keep the caller-selected Gemini embedding model.  Default to the
+        # currently supported Gemini embedding model used by the live suite.
+        embedding_model = str(body.get("model") or "gemini-embedding-001").replace("models/", "")
         # Adapt request body
-        adapted_body = self.request.adapt_embeddings_request(request_embeddings={"model": embedding_model, **body})
+        adapted_body = self.request.adapt_embeddings_request({"model": embedding_model, **body})
 
         action = "embedContent"
         # Nếu là batch request, action sẽ khác
@@ -34,4 +36,7 @@ class GoogleEmbeddings(EmbeddingProvider):
             model=embedding_model,
             action=action
         )
-        return await self.response.adapt_embeddings_response(response=response)
+        return await self.response.adapt_embeddings_response(
+            response=response,
+            model=embedding_model,
+        )

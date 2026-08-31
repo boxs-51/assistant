@@ -116,7 +116,7 @@ class GoogleModels(ModelProvider):
 
         if not raw_model_name:
             logger.error("Missing required parameter 'model_id' in model details request")
-            raise ValueError("Parameter 'modelmodel_id_name' is required.")
+            raise ValueError("Parameter 'model_id' is required.")
 
         # Chuẩn hóa tên model: loại bỏ "models/" nếu có để dựng endpoint
         clean_model_name = raw_model_name.replace("models/", "")
