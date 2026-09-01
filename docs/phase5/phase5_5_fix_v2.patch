@@ -1,0 +1,747 @@
+# Phase 5.5 Fix v2
+# Base: 0babb70e0ffe93217f74118bd91fb3b55be02709
+# Scope: AgentRuntime correctness + regression tests only.
+#
+--- a/src/runtimes/agent/runtime.py
++++ b/src/runtimes/agent/runtime.py
+@@ -47,7 +47,7 @@
+         """Execute one agent until a final answer or terminal failure."""
+         iterations: list[AgentIteration] = []
+         transcript: list[InferenceMessage] = []
+-        pending_tool_results: Sequence[ToolExecutionResult] = ()
++        latest_tool_results: tuple[ToolExecutionResult, ...] = ()
+         total_usage = context.usage
+ 
+         if self._execution_policy.check_start(context) is not PolicyDecision.ALLOW:
+@@ -70,58 +70,53 @@
+         for iteration_number in range(1, context.limits.max_iterations + 1):
+             try:
+                 context.ensure_active()
+-            except asyncio.CancelledError:
+-                return self._terminal_result(
+-                    context,
+-                    iterations,
+-                    total_usage,
+-                    AgentLoopState.CANCELLED,
+-                    "AGENT_CANCELLED",
+-                    "Agent execution cancelled.",
+-                )
+-            except TimeoutError:
+-                return self._terminal_result(
+-                    context,
+-                    iterations,
+-                    total_usage,
+-                    AgentLoopState.TIMEOUT,
+-                    "AGENT_TIMEOUT",
+-                    "Agent execution timed out.",
+-                )
+-
+-            context.next_iteration()
+-            if (
+-                self._execution_policy.check_iteration(context, iteration_number)
+-                is not PolicyDecision.ALLOW
+-            ):
+-                return self._terminal_result(
+-                    context,
+-                    iterations,
+-                    total_usage,
+-                    AgentLoopState.FAILED,
+-                    "MAX_ITERATIONS_EXCEEDED",
+-                    "Agent iteration limit exceeded.",
+-                )
+-
+-            record = AgentIteration(
+-                execution_id=context.execution_id,
+-                iteration=iteration_number,
+-                state=AgentLoopState.PREPARING,
+-            )
+-            iterations.append(record)
+-
+-            try:
++                context.next_iteration()
++
++                if (
++                    self._execution_policy.check_iteration(context, iteration_number)
++                    is not PolicyDecision.ALLOW
++                ):
++                    return self._terminal_result(
++                        context,
++                        iterations,
++                        total_usage,
++                        AgentLoopState.FAILED,
++                        "MAX_ITERATIONS_EXCEEDED",
++                        "Agent iteration limit exceeded.",
++                        last_tool_results=latest_tool_results,
++                    )
++
++                record = AgentIteration(
++                    execution_id=context.execution_id,
++                    iteration=iteration_number,
++                    state=AgentLoopState.PREPARING,
++                )
++                iterations.append(record)
+                 record.state = transition(record.state, AgentLoopState.THINKING)
+ 
+-                snapshot = await self._context_builder.build(
+-                    context,
+-                    AgentContextRequest(
+-                        execution_id=context.execution_id,
+-                        iteration=iteration_number,
+-                        prior_messages=[message.model_dump(mode="json") for message in transcript],
+-                        tool_results=list(pending_tool_results),
++                snapshot = await self._await_contextual(
++                    self._context_builder.build(
++                        context,
++                        AgentContextRequest(
++                            execution_id=context.execution_id,
++                            iteration=iteration_number,
++                            prior_messages=[
++                                message.model_dump(mode="json")
++                                for message in transcript
++                            ],
++                            # Tool results already live in transcript. Keeping
++                            # this empty avoids duplication by ContextBuilderAdapter.
++                            tool_results=[],
++                        ),
+                     ),
+-                )
++                    context=context,
++                    timeout_seconds=context.remaining_seconds,
++                )
++
++                # The first snapshot contains the authoritative session/system
++                # history. Seed the canonical transcript exactly once.
++                if not transcript:
++                    transcript.extend(snapshot.messages)
+ 
+                 request_id = f"inf_{uuid.uuid4().hex}"
+                 record.inference_request_id = request_id
+@@ -129,7 +124,9 @@
+                     getattr(context.limits, "inference_timeout_seconds", None)
+                 )
+                 if inference_timeout <= 0:
+-                    raise TimeoutError("Agent execution deadline exceeded before inference.")
++                    raise TimeoutError(
++                        "Agent execution deadline exceeded before inference."
++                    )
+ 
+                 response = await self._inference.complete(
+                     InferenceRequest(
+@@ -159,7 +156,8 @@
+                         output=_extract_text(response.message.content),
+                         final_message=response.message,
+                         iterations=tuple(iterations),
+-                        usage=total_usage,
++                        last_tool_results=latest_tool_results,
++                        usage=context.usage,
+                     )
+ 
+                 record.state = transition(record.state, AgentLoopState.TOOL_CALLING)
+@@ -177,63 +175,133 @@
+                 record.tool_call_ids = [item.tool_call_id for item in tool_requests]
+ 
+                 record.state = transition(record.state, AgentLoopState.WAITING_TOOL)
+-                pending_tool_results = await self._tool_execution.execute_many(
+-                    context,
+-                    tool_requests,
+-                    max_parallel=context.limits.max_parallel_tools,
+-                )
++                raw_tool_results = await self._await_contextual(
++                    self._tool_execution.execute_many(
++                        context,
++                        tool_requests,
++                        max_parallel=context.limits.max_parallel_tools,
++                    ),
++                    context=context,
++                    timeout_seconds=context.remaining_seconds,
++                )
++                latest_tool_results = tuple(
++                    _order_tool_results(tool_requests, raw_tool_results)
++                )
++
++                # ToolExecutionAdapter may update context.usage with per-tool
++                # accounting. Context is authoritative after the tool batch.
++                total_usage = context.usage
+                 record.close(AgentLoopState.THINKING)
+-                # Tool results are now part of the canonical transcript. Do not
+-                # also pass them through AgentContextRequest.tool_results on the
+-                # next iteration, otherwise ContextBuilderAdapter would append
+-                # the same result twice.
+-                transcript.extend(_tool_results_to_messages(pending_tool_results))
+-                pending_tool_results = ()
++
++                transcript.extend(_tool_results_to_messages(latest_tool_results))
+ 
+             except asyncio.CancelledError:
+-                record.close(AgentLoopState.CANCELLED, error_code="AGENT_CANCELLED")
++                record = iterations[-1] if iterations else None
++                if record is not None and record.state not in {
++                    AgentLoopState.COMPLETED,
++                    AgentLoopState.CANCELLED,
++                    AgentLoopState.TIMEOUT,
++                }:
++                    record.close(
++                        AgentLoopState.CANCELLED,
++                        error_code="AGENT_CANCELLED",
++                    )
+                 return self._terminal_result(
+                     context,
+                     iterations,
+-                    total_usage,
++                    context.usage,
+                     AgentLoopState.CANCELLED,
+                     "AGENT_CANCELLED",
+                     "Agent execution cancelled.",
++                    last_tool_results=latest_tool_results,
+                 )
+             except (asyncio.TimeoutError, TimeoutError):
+-                record.close(AgentLoopState.TIMEOUT, error_code="AGENT_TIMEOUT")
++                record = iterations[-1] if iterations else None
++                if record is not None and record.state not in {
++                    AgentLoopState.COMPLETED,
++                    AgentLoopState.CANCELLED,
++                    AgentLoopState.TIMEOUT,
++                }:
++                    record.close(
++                        AgentLoopState.TIMEOUT,
++                        error_code="AGENT_TIMEOUT",
++                    )
+                 return self._terminal_result(
+                     context,
+                     iterations,
+-                    total_usage,
++                    context.usage,
+                     AgentLoopState.TIMEOUT,
+                     "AGENT_TIMEOUT",
+                     "Agent execution timed out.",
++                    last_tool_results=latest_tool_results,
+                 )
+             except Exception as exc:
+-                record.close(
+-                    AgentLoopState.FAILED,
+-                    error_code=getattr(exc, "code", type(exc).__name__),
+-                )
++                record = iterations[-1] if iterations else None
++                if record is not None and record.state not in {
++                    AgentLoopState.COMPLETED,
++                    AgentLoopState.CANCELLED,
++                    AgentLoopState.TIMEOUT,
++                }:
++                    record.close(
++                        AgentLoopState.FAILED,
++                        error_code=getattr(exc, "code", type(exc).__name__),
++                    )
+                 return self._terminal_result(
+                     context,
+                     iterations,
+-                    total_usage,
++                    context.usage,
+                     AgentLoopState.FAILED,
+                     getattr(exc, "code", type(exc).__name__),
+                     str(exc),
+-                    last_tool_results=pending_tool_results,
++                    last_tool_results=latest_tool_results,
+                 )
+ 
+         return self._terminal_result(
+             context,
+             iterations,
+-            total_usage,
++            context.usage,
+             AgentLoopState.FAILED,
+             "MAX_ITERATIONS_EXCEEDED",
+             "Agent iteration limit exceeded.",
+-            last_tool_results=pending_tool_results,
++            last_tool_results=latest_tool_results,
+         )
++
++    @staticmethod
++    async def _await_contextual(
++        awaitable,
++        *,
++        context: AgentExecutionContext,
++        timeout_seconds: float | None,
++    ):
++        """Bound any port call by the execution deadline and cancellation event."""
++        task = asyncio.create_task(awaitable)
++        cancel_task = asyncio.create_task(context.cancellation_event.wait())
++        try:
++            if context.cancelled:
++                task.cancel()
++                await asyncio.gather(task, return_exceptions=True)
++                raise asyncio.CancelledError()
++
++            done, _ = await asyncio.wait(
++                {task, cancel_task},
++                timeout=timeout_seconds,
++                return_when=asyncio.FIRST_COMPLETED,
++            )
++            if task in done:
++                return await task
++            if cancel_task in done:
++                task.cancel()
++                await asyncio.gather(task, return_exceptions=True)
++                raise asyncio.CancelledError()
++
++            task.cancel()
++            await asyncio.gather(task, return_exceptions=True)
++            raise asyncio.TimeoutError(
++                "Agent execution deadline exceeded."
++            )
++        finally:
++            cancel_task.cancel()
++            await asyncio.gather(cancel_task, return_exceptions=True)
+ 
+     @staticmethod
+     def _terminal_result(
+@@ -282,6 +350,31 @@
+         for result in results
+     ]
+ 
++def _order_tool_results(
++    requests: Sequence[ToolExecutionRequest],
++    results: Sequence[ToolExecutionResult],
++) -> list[ToolExecutionResult]:
++    """Normalize tool result order to the model's original tool-call order."""
++    by_id: dict[str, ToolExecutionResult] = {}
++    for result in results:
++        if result.tool_call_id in by_id:
++            raise ValueError(
++                f"Duplicate tool result for tool_call_id={result.tool_call_id!r}."
++            )
++        by_id[result.tool_call_id] = result
++
++    ordered: list[ToolExecutionResult] = []
++    for request in requests:
++        result = by_id.get(request.tool_call_id)
++        if result is None:
++            raise ValueError(
++                f"Missing tool result for tool_call_id={request.tool_call_id!r}."
++            )
++        ordered.append(result)
++    if len(ordered) != len(results):
++        raise ValueError("Tool execution returned an unexpected result count.")
++    return ordered
++
+ 
+ def _extract_text(content: Any) -> str:
+     if isinstance(content, str):
+--- a/tests/architecture/test_phase5_runtime.py
++++ b/tests/architecture/test_phase5_runtime.py
+@@ -304,3 +304,416 @@
+     assert inference.requests[0].iteration == 1
+     assert inference.requests[1].iteration == 2
+     assert result.error_code == "MAX_ITERATIONS_EXCEEDED"
++
++
++class DelayedContextRuntime:
++    def __init__(self, started: asyncio.Event, delay: float):
++        self.started = started
++        self.delay = delay
++
++    class Engine:
++        def __init__(self, owner):
++            self.owner = owner
++
++        async def load_context(self, session_id, identity):
++            self.owner.started.set()
++            await asyncio.sleep(self.owner.delay)
++            class Session:
++                messages = []
++            class Loaded:
++                session = Session()
++            return Loaded()
++
++    @property
++    def context_engine(self):
++        return self.Engine(self)
++
++
++class ScriptedToolPort:
++    def __init__(self, results):
++        self.results = results
++        self.calls = 0
++
++    async def execute_many(self, context, requests, *, max_parallel):
++        self.calls += 1
++        await asyncio.sleep(0.05)
++        return list(reversed(self.results))
++
++
++@pytest.mark.asyncio
++async def test_agent_runtime_preserves_initial_context_across_tool_iterations():
++    session_messages = [
++        # Minimal fake gateway messages are converted by ContextBuilderAdapter.
++    ]
++
++    class HistoryRuntime:
++        class Engine:
++            async def load_context(self, session_id, identity):
++                class Session:
++                    messages = []
++                class Loaded:
++                    session = Session()
++                return Loaded()
++        context_engine = Engine()
++
++    context = make_context()
++    tool_registry = CapabilityRegistry()
++    cap_runtime = CapabilityRuntime(
++        registry=tool_registry,
++        authorization=AuthorizationService(),
++    )
++    agents = AgentRegistry()
++    agents.register(context.agent)
++    policy = RegistryAgentToolPolicy(
++        agents, tool_registry, AuthorizationService()
++    )
++    builder = ContextBuilderAdapter(HistoryRuntime(), cap_runtime, policy)
++
++    tool_result = InferenceMessage(
++        role="assistant",
++        tool_calls=[
++            InferenceToolCall(
++                id="call-1",
++                name="calculator.add",
++                arguments={"a": 2, "b": 3},
++            )
++        ],
++    )
++    final = InferenceMessage(role="assistant", content="done")
++
++    class CapturingInference:
++        def __init__(self):
++            self.requests = []
++            self.responses = [tool_result, final]
++
++        async def complete(self, request):
++            self.requests.append(request)
++            return InferenceResponse(
++                request_id=f"i{len(self.requests)}",
++                execution_id=context.execution_id,
++                iteration=request.iteration,
++                message=self.responses.pop(0),
++                provider="fake",
++                model="fake",
++            )
++
++    inference = CapturingInference()
++    tool_port = ScriptedToolPort([
++        __import__("src.runtimes.agent.contracts", fromlist=["ToolExecutionResult"]).ToolExecutionResult(
++            execution_id=context.execution_id,
++            iteration=1,
++            invocation_id="inv-1",
++            tool_call_id="call-1",
++            capability_id="calculator.add",
++            success=True,
++            output=5,
++        )
++    ])
++    runtime = AgentRuntime(
++        context_builder=builder,
++        inference=inference,
++        tool_execution=tool_port,
++        execution_policy=DefaultAgentExecutionPolicy(),
++    )
++    result = await runtime.execute(context)
++
++    assert result.state is AgentLoopState.COMPLETED
++    assert len(inference.requests) == 2
++    assert inference.requests[1].messages[0].role == "system"
++    assert any(
++        message.role == "tool" and message.tool_call_id == "call-1"
++        for message in inference.requests[1].messages
++    )
++
++
++@pytest.mark.asyncio
++async def test_agent_runtime_times_out_while_context_builder_is_running():
++    started = asyncio.Event()
++
++    class RuntimeWithTimeout:
++        class Engine:
++            async def load_context(self, session_id, identity):
++                started.set()
++                await asyncio.sleep(10)
++        context_engine = Engine()
++
++    context = make_context()
++    context.limits.timeout_seconds = 0.05
++    builder = ContextBuilderAdapter(
++        RuntimeWithTimeout(),
++        CapabilityRuntime(
++            registry=CapabilityRegistry(),
++            authorization=AuthorizationService(),
++        ),
++        RegistryAgentToolPolicy(
++            AgentRegistry(),
++            CapabilityRegistry(),
++            AuthorizationService(),
++        ),
++    )
++    inference = ScriptedInference([])
++
++    runtime = AgentRuntime(
++        context_builder=builder,
++        inference=inference,
++        tool_execution=ScriptedToolPort([]),
++        execution_policy=DefaultAgentExecutionPolicy(),
++    )
++
++    result = await runtime.execute(context)
++
++    assert started.is_set()
++    assert result.state is AgentLoopState.TIMEOUT
++    assert result.error_code == "AGENT_TIMEOUT"
++
++
++@pytest.mark.asyncio
++async def test_agent_runtime_cancels_context_builder():
++    started = asyncio.Event()
++
++    class RuntimeWithCancellation:
++        class Engine:
++            async def load_context(self, session_id, identity):
++                started.set()
++                await asyncio.sleep(10)
++        context_engine = Engine()
++
++    context = make_context()
++    builder = ContextBuilderAdapter(
++        RuntimeWithCancellation(),
++        CapabilityRuntime(
++            registry=CapabilityRegistry(),
++            authorization=AuthorizationService(),
++        ),
++        RegistryAgentToolPolicy(
++            AgentRegistry(),
++            CapabilityRegistry(),
++            AuthorizationService(),
++        ),
++    )
++    runtime = AgentRuntime(
++        context_builder=builder,
++        inference=ScriptedInference([]),
++        tool_execution=ScriptedToolPort([]),
++        execution_policy=DefaultAgentExecutionPolicy(),
++    )
++
++    task = asyncio.create_task(runtime.execute(context))
++    await started.wait()
++    context.cancel()
++
++    result = await task
++    assert result.state is AgentLoopState.CANCELLED
++    assert result.error_code == "AGENT_CANCELLED"
++
++
++@pytest.mark.asyncio
++async def test_agent_runtime_cancellation_interrupts_execute_many():
++    context = make_context()
++    tool_started = asyncio.Event()
++
++    class BlockingToolPort:
++        async def execute_many(self, context, requests, *, max_parallel):
++            tool_started.set()
++            await asyncio.sleep(10)
++            return []
++
++    context_builder = ContextBuilderAdapter(
++        EmptyContextRuntime(),
++        CapabilityRuntime(
++            registry=CapabilityRegistry(),
++            authorization=AuthorizationService(),
++        ),
++        RegistryAgentToolPolicy(
++            AgentRegistry(),
++            CapabilityRegistry(),
++            AuthorizationService(),
++        ),
++    )
++
++    inference = ScriptedInference([
++        InferenceResponse(
++            request_id="i1",
++            execution_id=context.execution_id,
++            iteration=1,
++            message=InferenceMessage(
++                role="assistant",
++                tool_calls=[
++                    InferenceToolCall(
++                        id="call-1",
++                        name="calculator.add",
++                        arguments={"a": 1, "b": 2},
++                    )
++                ],
++            ),
++            provider="fake",
++            model="fake",
++        )
++    ])
++
++    runtime = AgentRuntime(
++        context_builder=context_builder,
++        inference=inference,
++        tool_execution=BlockingToolPort(),
++        execution_policy=DefaultAgentExecutionPolicy(),
++    )
++
++    task = asyncio.create_task(runtime.execute(context))
++    await tool_started.wait()
++    context.cancel()
++
++    result = await task
++    assert result.state is AgentLoopState.CANCELLED
++    assert result.error_code == "AGENT_CANCELLED"
++
++
++@pytest.mark.asyncio
++async def test_agent_runtime_orders_tool_results_by_tool_call_id():
++    context = make_context()
++    tool_registry = CapabilityRegistry()
++    capability_runtime = CapabilityRuntime(
++        registry=tool_registry,
++        authorization=AuthorizationService(),
++    )
++    agents = AgentRegistry()
++    agents.register(context.agent)
++    policy = RegistryAgentToolPolicy(
++        agents, tool_registry, AuthorizationService()
++    )
++    builder = ContextBuilderAdapter(EmptyContextRuntime(), capability_runtime, policy)
++
++    calls = [
++        InferenceToolCall(id="call-a", name="calculator.add", arguments={"a": 1, "b": 2}),
++        InferenceToolCall(id="call-b", name="calculator.add", arguments={"a": 3, "b": 4}),
++    ]
++
++    responses = [
++        InferenceResponse(
++            request_id="i1",
++            execution_id=context.execution_id,
++            iteration=1,
++            message=InferenceMessage(role="assistant", tool_calls=calls),
++            provider="fake",
++            model="fake",
++        ),
++        InferenceResponse(
++            request_id="i2",
++            execution_id=context.execution_id,
++            iteration=2,
++            message=InferenceMessage(role="assistant", content="done"),
++            provider="fake",
++            model="fake",
++        ),
++    ]
++    inference = ScriptedInference(responses)
++
++    class ReorderingToolPort:
++        async def execute_many(self, context, requests, *, max_parallel):
++            return [
++                __import__("src.runtimes.agent.contracts", fromlist=["ToolExecutionResult"]).ToolExecutionResult(
++                    execution_id=context.execution_id,
++                    iteration=1,
++                    invocation_id="inv-b",
++                    tool_call_id="call-b",
++                    capability_id="calculator.add",
++                    success=True,
++                    output=7,
++                ),
++                __import__("src.runtimes.agent.contracts", fromlist=["ToolExecutionResult"]).ToolExecutionResult(
++                    execution_id=context.execution_id,
++                    iteration=1,
++                    invocation_id="inv-a",
++                    tool_call_id="call-a",
++                    capability_id="calculator.add",
++                    success=True,
++                    output=3,
++                ),
++            ]
++
++    runtime = AgentRuntime(
++        context_builder=builder,
++        inference=inference,
++        tool_execution=ReorderingToolPort(),
++        execution_policy=DefaultAgentExecutionPolicy(),
++    )
++    result = await runtime.execute(context)
++
++    assert result.state is AgentLoopState.COMPLETED
++    tool_messages = [
++        message for message in inference.requests[1].messages
++        if message.role == "tool"
++    ]
++    assert [message.tool_call_id for message in tool_messages] == ["call-a", "call-b"]
++
++
++@pytest.mark.asyncio
++async def test_agent_runtime_usage_includes_tool_invocations_and_last_results():
++    context = make_context()
++    registry = CapabilityRegistry()
++    capability = CapabilityDefinition(
++        id="calculator.add",
++        name="calculator.add",
++        description="add",
++        input_schema={"type": "object"},
++    )
++
++    async def add(**kwargs):
++        return 5
++
++    registry.register_capability(PythonCapabilityDriver(capability, add))
++    capability_runtime = CapabilityRuntime(
++        registry=registry,
++        authorization=AuthorizationService(),
++    )
++    agents = AgentRegistry()
++    agents.register(context.agent)
++    policy = RegistryAgentToolPolicy(agents, registry, AuthorizationService())
++    builder = ContextBuilderAdapter(EmptyContextRuntime(), capability_runtime, policy)
++    inference = ScriptedInference([
++        InferenceResponse(
++            request_id="i1",
++            execution_id=context.execution_id,
++            iteration=1,
++            message=InferenceMessage(
++                role="assistant",
++                tool_calls=[
++                    InferenceToolCall(
++                        id="call-1",
++                        name="calculator.add",
++                        arguments={"a": 1, "b": 2},
++                    )
++                ],
++            ),
++            provider="fake",
++            model="fake",
++            usage=InferenceUsage(total_tokens=3),
++        ),
++        InferenceResponse(
++            request_id="i2",
++            execution_id=context.execution_id,
++            iteration=2,
++            message=InferenceMessage(role="assistant", content="5"),
++            provider="fake",
++            model="fake",
++            usage=InferenceUsage(total_tokens=4),
++        ),
++    ])
++    tool_port = CapabilityToolExecutionAdapter(
++        capability_runtime,
++        policy,
++        DefaultAgentExecutionPolicy(),
++    )
++    runtime = AgentRuntime(
++        context_builder=builder,
++        inference=inference,
++        tool_execution=tool_port,
++        execution_policy=DefaultAgentExecutionPolicy(),
++    )
++
++    result = await runtime.execute(context)
++
++    assert result.state is AgentLoopState.COMPLETED
++    assert result.usage.total_tokens == 7
++    assert result.usage.tool_invocations == 1
++    assert len(result.last_tool_results) == 1
++    assert result.last_tool_results[0].tool_call_id == "call-1"

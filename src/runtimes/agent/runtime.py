@@ -47,7 +47,7 @@ class AgentRuntime:
         """Execute one agent until a final answer or terminal failure."""
         iterations: list[AgentIteration] = []
         transcript: list[InferenceMessage] = []
-        pending_tool_results: Sequence[ToolExecutionResult] = ()
+        latest_tool_results: tuple[ToolExecutionResult, ...] = ()
         total_usage = context.usage
 
         if self._execution_policy.check_start(context) is not PolicyDecision.ALLOW:
@@ -70,58 +70,53 @@ class AgentRuntime:
         for iteration_number in range(1, context.limits.max_iterations + 1):
             try:
                 context.ensure_active()
-            except asyncio.CancelledError:
-                return self._terminal_result(
-                    context,
-                    iterations,
-                    total_usage,
-                    AgentLoopState.CANCELLED,
-                    "AGENT_CANCELLED",
-                    "Agent execution cancelled.",
-                )
-            except TimeoutError:
-                return self._terminal_result(
-                    context,
-                    iterations,
-                    total_usage,
-                    AgentLoopState.TIMEOUT,
-                    "AGENT_TIMEOUT",
-                    "Agent execution timed out.",
-                )
+                context.next_iteration()
 
-            context.next_iteration()
-            if (
-                self._execution_policy.check_iteration(context, iteration_number)
-                is not PolicyDecision.ALLOW
-            ):
-                return self._terminal_result(
-                    context,
-                    iterations,
-                    total_usage,
-                    AgentLoopState.FAILED,
-                    "MAX_ITERATIONS_EXCEEDED",
-                    "Agent iteration limit exceeded.",
+                if (
+                    self._execution_policy.check_iteration(context, iteration_number)
+                    is not PolicyDecision.ALLOW
+                ):
+                    return self._terminal_result(
+                        context,
+                        iterations,
+                        total_usage,
+                        AgentLoopState.FAILED,
+                        "MAX_ITERATIONS_EXCEEDED",
+                        "Agent iteration limit exceeded.",
+                        last_tool_results=latest_tool_results,
+                    )
+
+                record = AgentIteration(
+                    execution_id=context.execution_id,
+                    iteration=iteration_number,
+                    state=AgentLoopState.PREPARING,
                 )
-
-            record = AgentIteration(
-                execution_id=context.execution_id,
-                iteration=iteration_number,
-                state=AgentLoopState.PREPARING,
-            )
-            iterations.append(record)
-
-            try:
+                iterations.append(record)
                 record.state = transition(record.state, AgentLoopState.THINKING)
 
-                snapshot = await self._context_builder.build(
-                    context,
-                    AgentContextRequest(
-                        execution_id=context.execution_id,
-                        iteration=iteration_number,
-                        prior_messages=[message.model_dump(mode="json") for message in transcript],
-                        tool_results=list(pending_tool_results),
+                snapshot = await self._await_contextual(
+                    self._context_builder.build(
+                        context,
+                        AgentContextRequest(
+                            execution_id=context.execution_id,
+                            iteration=iteration_number,
+                            prior_messages=[
+                                message.model_dump(mode="json")
+                                for message in transcript
+                            ],
+                            # Tool results already live in transcript. Keeping
+                            # this empty avoids duplication by ContextBuilderAdapter.
+                            tool_results=[],
+                        ),
                     ),
+                    context=context,
+                    timeout_seconds=context.remaining_seconds,
                 )
+
+                # The first snapshot contains the authoritative session/system
+                # history. Seed the canonical transcript exactly once.
+                if not transcript:
+                    transcript.extend(snapshot.messages)
 
                 request_id = f"inf_{uuid.uuid4().hex}"
                 record.inference_request_id = request_id
@@ -129,7 +124,9 @@ class AgentRuntime:
                     getattr(context.limits, "inference_timeout_seconds", None)
                 )
                 if inference_timeout <= 0:
-                    raise TimeoutError("Agent execution deadline exceeded before inference.")
+                    raise TimeoutError(
+                        "Agent execution deadline exceeded before inference."
+                    )
 
                 response = await self._inference.complete(
                     InferenceRequest(
@@ -159,7 +156,8 @@ class AgentRuntime:
                         output=_extract_text(response.message.content),
                         final_message=response.message,
                         iterations=tuple(iterations),
-                        usage=total_usage,
+                        last_tool_results=latest_tool_results,
+                        usage=context.usage,
                     )
 
                 record.state = transition(record.state, AgentLoopState.TOOL_CALLING)
@@ -177,63 +175,133 @@ class AgentRuntime:
                 record.tool_call_ids = [item.tool_call_id for item in tool_requests]
 
                 record.state = transition(record.state, AgentLoopState.WAITING_TOOL)
-                pending_tool_results = await self._tool_execution.execute_many(
-                    context,
-                    tool_requests,
-                    max_parallel=context.limits.max_parallel_tools,
+                raw_tool_results = await self._await_contextual(
+                    self._tool_execution.execute_many(
+                        context,
+                        tool_requests,
+                        max_parallel=context.limits.max_parallel_tools,
+                    ),
+                    context=context,
+                    timeout_seconds=context.remaining_seconds,
                 )
+                latest_tool_results = tuple(
+                    _order_tool_results(tool_requests, raw_tool_results)
+                )
+
+                # ToolExecutionAdapter may update context.usage with per-tool
+                # accounting. Context is authoritative after the tool batch.
+                total_usage = context.usage
                 record.close(AgentLoopState.THINKING)
-                # Tool results are now part of the canonical transcript. Do not
-                # also pass them through AgentContextRequest.tool_results on the
-                # next iteration, otherwise ContextBuilderAdapter would append
-                # the same result twice.
-                transcript.extend(_tool_results_to_messages(pending_tool_results))
-                pending_tool_results = ()
+
+                transcript.extend(_tool_results_to_messages(latest_tool_results))
 
             except asyncio.CancelledError:
-                record.close(AgentLoopState.CANCELLED, error_code="AGENT_CANCELLED")
+                record = iterations[-1] if iterations else None
+                if record is not None and record.state not in {
+                    AgentLoopState.COMPLETED,
+                    AgentLoopState.CANCELLED,
+                    AgentLoopState.TIMEOUT,
+                }:
+                    record.close(
+                        AgentLoopState.CANCELLED,
+                        error_code="AGENT_CANCELLED",
+                    )
                 return self._terminal_result(
                     context,
                     iterations,
-                    total_usage,
+                    context.usage,
                     AgentLoopState.CANCELLED,
                     "AGENT_CANCELLED",
                     "Agent execution cancelled.",
+                    last_tool_results=latest_tool_results,
                 )
             except (asyncio.TimeoutError, TimeoutError):
-                record.close(AgentLoopState.TIMEOUT, error_code="AGENT_TIMEOUT")
+                record = iterations[-1] if iterations else None
+                if record is not None and record.state not in {
+                    AgentLoopState.COMPLETED,
+                    AgentLoopState.CANCELLED,
+                    AgentLoopState.TIMEOUT,
+                }:
+                    record.close(
+                        AgentLoopState.TIMEOUT,
+                        error_code="AGENT_TIMEOUT",
+                    )
                 return self._terminal_result(
                     context,
                     iterations,
-                    total_usage,
+                    context.usage,
                     AgentLoopState.TIMEOUT,
                     "AGENT_TIMEOUT",
                     "Agent execution timed out.",
+                    last_tool_results=latest_tool_results,
                 )
             except Exception as exc:
-                record.close(
-                    AgentLoopState.FAILED,
-                    error_code=getattr(exc, "code", type(exc).__name__),
-                )
+                record = iterations[-1] if iterations else None
+                if record is not None and record.state not in {
+                    AgentLoopState.COMPLETED,
+                    AgentLoopState.CANCELLED,
+                    AgentLoopState.TIMEOUT,
+                }:
+                    record.close(
+                        AgentLoopState.FAILED,
+                        error_code=getattr(exc, "code", type(exc).__name__),
+                    )
                 return self._terminal_result(
                     context,
                     iterations,
-                    total_usage,
+                    context.usage,
                     AgentLoopState.FAILED,
                     getattr(exc, "code", type(exc).__name__),
                     str(exc),
-                    last_tool_results=pending_tool_results,
+                    last_tool_results=latest_tool_results,
                 )
 
         return self._terminal_result(
             context,
             iterations,
-            total_usage,
+            context.usage,
             AgentLoopState.FAILED,
             "MAX_ITERATIONS_EXCEEDED",
             "Agent iteration limit exceeded.",
-            last_tool_results=pending_tool_results,
+            last_tool_results=latest_tool_results,
         )
+
+    @staticmethod
+    async def _await_contextual(
+        awaitable,
+        *,
+        context: AgentExecutionContext,
+        timeout_seconds: float | None,
+    ):
+        """Bound any port call by the execution deadline and cancellation event."""
+        task = asyncio.create_task(awaitable)
+        cancel_task = asyncio.create_task(context.cancellation_event.wait())
+        try:
+            if context.cancelled:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise asyncio.CancelledError()
+
+            done, _ = await asyncio.wait(
+                {task, cancel_task},
+                timeout=timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if task in done:
+                return await task
+            if cancel_task in done:
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+                raise asyncio.CancelledError()
+
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            raise asyncio.TimeoutError(
+                "Agent execution deadline exceeded."
+            )
+        finally:
+            cancel_task.cancel()
+            await asyncio.gather(cancel_task, return_exceptions=True)
 
     @staticmethod
     def _terminal_result(
@@ -281,6 +349,31 @@ def _tool_results_to_messages(
         )
         for result in results
     ]
+
+def _order_tool_results(
+    requests: Sequence[ToolExecutionRequest],
+    results: Sequence[ToolExecutionResult],
+) -> list[ToolExecutionResult]:
+    """Normalize tool result order to the model's original tool-call order."""
+    by_id: dict[str, ToolExecutionResult] = {}
+    for result in results:
+        if result.tool_call_id in by_id:
+            raise ValueError(
+                f"Duplicate tool result for tool_call_id={result.tool_call_id!r}."
+            )
+        by_id[result.tool_call_id] = result
+
+    ordered: list[ToolExecutionResult] = []
+    for request in requests:
+        result = by_id.get(request.tool_call_id)
+        if result is None:
+            raise ValueError(
+                f"Missing tool result for tool_call_id={request.tool_call_id!r}."
+            )
+        ordered.append(result)
+    if len(ordered) != len(results):
+        raise ValueError("Tool execution returned an unexpected result count.")
+    return ordered
 
 
 def _extract_text(content: Any) -> str:
