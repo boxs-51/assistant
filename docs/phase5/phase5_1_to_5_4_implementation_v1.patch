@@ -1,0 +1,659 @@
+diff --git a/src/runtimes/agent/contracts/context.py b/src/runtimes/agent/contracts/context.py
+--- a/src/runtimes/agent/contracts/context.py
++++ b/src/runtimes/agent/contracts/context.py
+@@ -1,8 +1,9 @@
+ from __future__ import annotations
+
+ import asyncio
+ import time
++import uuid
+ from dataclasses import dataclass, field
+ from typing import Any, Dict, Optional
+
+ from ....domain.schemas.agent import AgentDefinition
+@@ -17,6 +18,15 @@ class AgentExecutionContext:
+     limits: AgentExecutionLimits
+
+     request_id: str | None = None
++    task_id: str | None = None
+     parent_execution_id: str | None = None
+     workflow_id: str | None = None
+     agent: AgentDefinition | None = None
++    input: Dict[str, Any] = field(default_factory=dict)
+     metadata: Dict[str, Any] = field(default_factory=dict)
+
+     started_monotonic: float = field(default_factory=time.monotonic)
+     deadline: float | None = None
+     iteration: int = 0
+     tool_calls_used: int = 0
++    usage: Dict[str, int | float] = field(default_factory=dict)
++    causation_id: str | None = None
++    trace_id: str | None = None
+     cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
+@@ -31,6 +41,7 @@ class AgentExecutionContext:
+         limits: AgentExecutionLimits,
+         request_id: str | None = None,
++        task_id: str | None = None,
+         parent_execution_id: str | None = None,
+         workflow_id: str | None = None,
+         agent: AgentDefinition | None = None,
++        input: Optional[Dict[str, Any]] = None,
+         metadata: Optional[Dict[str, Any]] = None,
++        causation_id: str | None = None,
++        trace_id: str | None = None,
+         now_monotonic: float | None = None,
+     ) -> "AgentExecutionContext":
+         started = time.monotonic() if now_monotonic is None else now_monotonic
+@@ -44,10 +55,18 @@ class AgentExecutionContext:
+             limits=limits,
+             request_id=request_id,
++            task_id=task_id,
+             parent_execution_id=parent_execution_id,
+             workflow_id=workflow_id,
+             agent=agent,
++            input=dict(input or {}),
+             metadata=dict(metadata or {}),
+             started_monotonic=started,
+             deadline=started + limits.timeout_seconds,
++            causation_id=causation_id,
++            trace_id=trace_id or f"trace_{uuid.uuid4().hex}",
+         )
+@@ -64,3 +83,11 @@ class AgentExecutionContext:
+         if count < 0:
+             raise ValueError("tool call count increment must be non-negative")
+         self.tool_calls_used += count
+         return self.tool_calls_used
++
++    def ensure_active(self) -> None:
++        if self.cancelled:
++            raise asyncio.CancelledError
++        if self.timed_out:
++            raise TimeoutError("Agent execution deadline exceeded.")
++
++    def record_usage(self, **values: int | float) -> None:
++        for key, value in values.items():
++            self.usage[key] = self.usage.get(key, 0) + value
+diff --git a/src/runtimes/agent/adapters/__init__.py b/src/runtimes/agent/adapters/__init__.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/adapters/__init__.py
+@@ -0,0 +1,6 @@
++from .context import ContextBuilderAdapter
++from .inference import ProviderInferenceAdapter
++from .tool import CapabilityToolExecutionAdapter
++
++__all__ = [
++    "ContextBuilderAdapter",
++    "ProviderInferenceAdapter",
++    "CapabilityToolExecutionAdapter",
++]
+diff --git a/src/runtimes/agent/adapters/context.py b/src/runtimes/agent/adapters/context.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/adapters/context.py
+@@ -0,0 +1,94 @@
++from __future__ import annotations
++
++from typing import Any
++
++from ..contracts.context import AgentExecutionContext
++from ..contracts.context_builder import (
++    AgentContextRequest,
++    AgentContextSnapshot,
++    ContextBuilderPort,
++)
++from ..contracts.inference import InferenceMessage, InferenceToolDefinition
++
++
++class ContextBuilderAdapter(ContextBuilderPort):
++    """Bridges the Agent context contract to the existing ContextRuntime.
++
++    This adapter is deliberately read-only with respect to storage. It creates
++    a per-iteration immutable snapshot and does not expose ContextEngine to
++    AgentRuntime callers.
++    """
++
++    def __init__(self, context_runtime: Any, capability_runtime: Any | None = None):
++        self._context_runtime = context_runtime
++        self._capability_runtime = capability_runtime
++
++    async def build(
++        self,
++        context: AgentExecutionContext,
++        request: AgentContextRequest,
++    ) -> AgentContextSnapshot:
++        if context.execution_id != request.execution_id:
++            raise ValueError("Context request execution_id does not match execution context.")
++        if request.iteration < 1:
++            raise ValueError("Context iteration must be >= 1.")
++
++        context.ensure_active()
++
++        engine = getattr(self._context_runtime, "context_engine", None)
++        if engine is None:
++            raise RuntimeError("ContextRuntime is not initialized.")
++
++        loaded = await engine.load_context(context.session_id, context.identity)
++        messages: list[InferenceMessage] = []
++
++        if loaded.session is not None:
++            messages.extend(
++                InferenceMessage(
++                    role=message.role,
++                    content=message.content,
++                    metadata=getattr(message, "metadata", {}) or {},
++                )
++                for message in loaded.session.messages
++            )
++
++        if request.prior_messages:
++            messages = [
++                InferenceMessage.model_validate(message)
++                for message in request.prior_messages
++            ]
++
++        input_payload = dict(request.input or context.input)
++        if input_payload:
++            prompt = input_payload.get("prompt")
++            if prompt is None:
++                prompt = input_payload.get("content")
++            if prompt is not None and (not messages or messages[-1].role != "user"):
++                messages.append(InferenceMessage(role="user", content=prompt))
++
++        if request.tool_results:
++            for result in request.tool_results:
++                messages.append(
++                    InferenceMessage(
++                        role="tool",
++                        content=result.output if result.success else result.error_message,
++                        metadata={
++                            "tool_call_id": result.tool_call_id,
++                            "capability_id": result.capability_id,
++                            "is_error": not result.success,
++                        },
++                    )
++                )
++
++        tools: list[InferenceToolDefinition] = []
++        registry = getattr(getattr(self._capability_runtime, "registry", None), "get", None)
++        agent_tools = list(getattr(context.agent, "tools", []) or [])
++        capability_registry = getattr(self._capability_runtime, "registry", None)
++        if capability_registry is not None:
++            for capability_id in agent_tools:
++                record = capability_registry.get(capability_id)
++                if record is None or not record.executable:
++                    continue
++                definition = record.definition
++                tools.append(
++                    InferenceToolDefinition(
++                        name=definition.name,
++                        description=definition.description,
++                        parameters=definition.parameters,
++                    )
++                )
++
++        return AgentContextSnapshot(
++            execution_id=context.execution_id,
++            iteration=request.iteration,
++            messages=messages,
++            tools=tools,
++            token_estimate=sum(len(str(message.content or "")) // 4 for message in messages),
++            metadata={
++                **context.metadata,
++                **dict(request.metadata),
++                "agent_id": context.agent_id,
++                "session_id": context.session_id,
++            },
++        )
+diff --git a/src/runtimes/agent/adapters/inference.py b/src/runtimes/agent/adapters/inference.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/adapters/inference.py
+@@ -0,0 +1,105 @@
++from __future__ import annotations
++
++import json
++from typing import Any
++
++from ..contracts.inference import (
++    InferenceMessage,
++    InferencePort,
++    InferenceRequest,
++    InferenceResponse,
++    InferenceToolCall,
++    InferenceUsage,
++)
++
++
++class ProviderInferenceAdapter(InferencePort):
++    """Provider-neutral adapter over the existing ProviderRuntime chat path."""
++
++    def __init__(self, provider_runtime: Any, http_client: Any):
++        self._provider_runtime = provider_runtime
++        self._http_client = http_client
++
++    async def complete(self, request: InferenceRequest) -> InferenceResponse:
++        handler = getattr(self._provider_runtime, "chat_handler", None)
++        if handler is None:
++            raise RuntimeError("ProviderRuntime chat handler is not initialized.")
++
++        body = {
++            "model": request.model or "",
++            "messages": [dict(message) for message in request.messages],
++            "tools": [
++                {
++                    "type": "function",
++                    "function": {
++                        "name": tool.name,
++                        "description": tool.description,
++                        "parameters": tool.parameters,
++                    },
++                }
++                for tool in request.tools
++            ],
++            "metadata": dict(request.metadata),
++        }
++        if request.temperature is not None:
++            body["config"] = {
++                "temperature": request.temperature,
++                "max_tokens": request.max_output_tokens,
++            }
++        elif request.max_output_tokens is not None:
++            body["config"] = {"max_tokens": request.max_output_tokens}
++
++        response = await handler.execute_with_fallback(self._http_client, body)
++        if not response.choices:
++            raise ValueError("Provider returned an empty choice list.")
++
++        choice = response.choices[0]
++        gateway_message = choice.message
++        tool_calls = []
++        for call in gateway_message.tool_calls or []:
++            raw_arguments = call.function.arguments or "{}"
++            try:
++                arguments = json.loads(raw_arguments)
++            except (TypeError, json.JSONDecodeError) as exc:
++                raise ValueError(
++                    f"Provider returned malformed tool arguments for '{call.function.name}'."
++                ) from exc
++            if not isinstance(arguments, dict):
++                raise ValueError(
++                    f"Tool arguments for '{call.function.name}' must decode to an object."
++                )
++            tool_calls.append(
++                InferenceToolCall(
++                    id=call.id,
++                    name=call.function.name,
++                    arguments=arguments,
++                )
++            )
++
++        usage = getattr(response, "usage", None)
++        inference_usage = InferenceUsage(
++            prompt_tokens=getattr(usage, "prompt_tokens", 0),
++            completion_tokens=getattr(usage, "completion_tokens", 0),
++            total_tokens=getattr(usage, "total_tokens", 0),
++        )
++
++        finish_reason = choice.finish_reason
++        finish_reason_value = getattr(finish_reason, "value", finish_reason)
++
++        return InferenceResponse(
++            request_id=request.request_id,
++            execution_id=request.execution_id,
++            iteration=request.iteration,
++            message=InferenceMessage(
++                role=gateway_message.role,
++                content=gateway_message.content,
++                tool_calls=tool_calls,
++                metadata=getattr(gateway_message, "metadata", {}) or {},
++            ),
++            finish_reason=finish_reason_value,
++            usage=inference_usage,
++            provider=response.provider,
++            model=response.model,
++            metadata=dict(getattr(response, "metadata", {}) or {}),
++        )
+diff --git a/src/runtimes/agent/adapters/tool.py b/src/runtimes/agent/adapters/tool.py
+new file mode 100644
+--- /dev/null
++++ b/src/runtimes/agent/adapters/tool.py
+@@ -0,0 +1,116 @@
++from __future__ import annotations
++
++import asyncio
++import uuid
++from typing import Any, Sequence
++
++from ..contracts.context import AgentExecutionContext
++from ..contracts.tool import (
++    ToolExecutionPort,
++    ToolExecutionRequest,
++    ToolExecutionResult,
++)
++
++
++class CapabilityToolExecutionAdapter(ToolExecutionPort):
++    """Provider-independent adapter over CapabilityRuntime.
++
++    Concurrency is explicitly bounded and result ordering follows the input
++    request ordering, never completion ordering.
++    """
++
++    def __init__(self, capability_runtime: Any):
++        self._capability_runtime = capability_runtime
++
++    async def execute(
++        self,
++        context: AgentExecutionContext,
++        request: ToolExecutionRequest,
++    ) -> ToolExecutionResult:
++        if request.execution_id != context.execution_id:
++            raise ValueError("Tool request execution_id does not match execution context.")
++
++        context.ensure_active()
++        try:
++            capability_result = await self._capability_runtime.execute_capability(
++                capability_id=request.capability_id,
++                arguments=request.arguments,
++                identity=context.identity,
++                execution_id=context.execution_id,
++                request_id=context.request_id,
++                session_id=context.session_id,
++                workflow_id=context.workflow_id,
++                timeout_seconds=context.remaining_seconds,
++                metadata={
++                    **context.metadata,
++                    **request.metadata,
++                    "tool_call_id": request.tool_call_id,
++                    "invocation_id": request.invocation_id,
++                },
++            )
++            return ToolExecutionResult(
++                execution_id=context.execution_id,
++                iteration=request.iteration,
++                invocation_id=capability_result.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=True,
++                output=capability_result.output,
++                metadata=dict(capability_result.metadata),
++            )
++        except asyncio.CancelledError:
++            raise
++        except Exception as exc:
++            return ToolExecutionResult(
++                execution_id=context.execution_id,
++                iteration=request.iteration,
++                invocation_id=request.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=False,
++                error_code=getattr(exc, "code", type(exc).__name__),
++                error_message=str(exc),
++                retryable=bool(getattr(exc, "retryable", False)),
++                metadata={
++                    "exception_type": type(exc).__name__,
++                },
++            )
++
++    async def execute_many(
++        self,
++        context: AgentExecutionContext,
++        requests: Sequence[ToolExecutionRequest],
++        *,
++        max_parallel: int,
++    ) -> Sequence[ToolExecutionResult]:
++        if max_parallel < 1:
++            raise ValueError("max_parallel must be >= 1.")
++
++        semaphore = asyncio.Semaphore(max_parallel)
++
++        async def run_one(request: ToolExecutionRequest) -> ToolExecutionResult:
++            async with semaphore:
++                return await self.execute(context, request)
++
++        # asyncio.gather preserves request ordering by contract.
++        return list(await asyncio.gather(*(run_one(request) for request in requests)))
++
++    @staticmethod
++    def new_request(
++        *,
++        context: AgentExecutionContext,
++        iteration: int,
++        tool_call_id: str,
++        capability_id: str,
++        arguments: dict[str, Any],
++        metadata: dict[str, Any] | None = None,
++    ) -> ToolExecutionRequest:
++        return ToolExecutionRequest(
++            execution_id=context.execution_id,
++            iteration=iteration,
++            invocation_id=f"inv_{uuid.uuid4().hex}",
++            tool_call_id=tool_call_id,
++            capability_id=capability_id,
++            arguments=dict(arguments),
++            metadata=dict(metadata or {}),
++        )
+diff --git a/src/runtimes/agent/contracts/context_builder.py b/src/runtimes/agent/contracts/context_builder.py
+--- a/src/runtimes/agent/contracts/context_builder.py
++++ b/src/runtimes/agent/contracts/context_builder.py
+@@ -12,7 +12,7 @@ class AgentContextRequest(BaseModel):
+     execution_id: str
+     iteration: int
+     input: Mapping[str, Any] = Field(default_factory=dict)
+-    prior_messages: Sequence[Mapping[str, Any]] = Field(default_factory=list)
++    prior_messages: Sequence[Mapping[str, Any]] = Field(default_factory=list)
+     tool_results: Sequence[ToolExecutionResult] = Field(default_factory=list)
+     metadata: Dict[str, Any] = Field(default_factory=dict)
+diff --git a/src/application/container.py b/src/application/container.py
+--- a/src/application/container.py
++++ b/src/application/container.py
+@@ -26,6 +26,10 @@ class ApplicationContainer:
+     agent_registry: Optional[Any] = None
+     tool_registry: Optional[Any] = None
+     multi_agent_coordinator: Optional[Any] = None
++    inference_port: Optional[Any] = None
++    tool_execution_port: Optional[Any] = None
++    context_builder_port: Optional[Any] = None
+
+     metrics: Optional[Any] = None
+     tracer: Optional[Any] = None
+diff --git a/src/main.py b/src/main.py
+--- a/src/main.py
++++ b/src/main.py
+@@ -43,8 +43,12 @@ from .agent.registry import AgentRegistry
+ from .tool.registry import ToolRegistry
+ from .runtimes.capability.registry import CapabilityRegistry
+ from .runtimes.agent.coordinator import MultiAgentCoordinator
+ from .runtimes.agent.persistence import DurableAgentStore
++from .runtimes.agent.adapters.context import ContextBuilderAdapter
++from .runtimes.agent.adapters.inference import ProviderInferenceAdapter
++from .runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+
+ logger = structlog.get_logger(__name__)
+@@ -121,6 +125,7 @@ async def bootstrap_runtime_kernel(
+
+     # 4. Bootstrap Kernel (RuntimeContext tự động được khởi tạo bên trong)
+     await kernel.bootstrap()
+
+-    # Cấu hình Multi-Agent Executor
+-    async def execute_registered_agent_task(task):
+-        agent = container.agent_registry.get(task.assigned_agent_id)
+-        if agent is None:
+-            raise LookupError(f"Agent '{task.assigned_agent_id}' is not registered.")
+-        request_body = dict(task.input)
+-        request_body.setdefault("model", request_body.get("model", ""))
+-        request_body["messages"] = [
+-            {"role": "system", "content": agent.instruction},
+-            *request_body.get("messages", [{"role": "user", "content": request_body.get("prompt", "")}]),
+-        ]
+-        response = await container.provider_runtime.chat_handler.execute_with_fallback(
+-            container.http_client, request_body
+-        )
+-        return response.model_dump()
+-
+-    container.multi_agent_coordinator.executor = execute_registered_agent_task
++    # Phase 5.1–5.4 ports are wired here, after the RuntimeKernel has
++    # initialized ContextRuntime/ProviderRuntime/CapabilityRuntime.
++    container.context_builder_port = ContextBuilderAdapter(
++        container.context_runtime,
++        container.capability_runtime,
++    )
++    container.inference_port = ProviderInferenceAdapter(
++        container.provider_runtime,
++        container.http_client,
++    )
++    container.tool_execution_port = CapabilityToolExecutionAdapter(
++        container.capability_runtime,
++    )
++
++    # AgentRuntime is intentionally NOT implemented in this phase.
++    # Consequently the legacy coordinator executor is left unset until the
++    # Phase 5.5 execution-plane cutover.
++    container.multi_agent_coordinator.executor = None
+
+     logger.info("AI Runtime Kernel & Runtimes booted successfully.")
+     return container
+diff --git a/tests/architecture/test_phase5_adapters.py b/tests/architecture/test_phase5_adapters.py
+new file mode 100644
+--- /dev/null
++++ b/tests/architecture/test_phase5_adapters.py
+@@ -0,0 +1,181 @@
++from __future__ import annotations
++
++import asyncio
++
++import pytest
++
++from src.domain.schemas.agent import AgentDefinition
++from src.domain.schemas.agent_execution import AgentExecutionLimits
++from src.domain.schemas.identity import Identity
++from src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
++from src.runtimes.agent.contracts.context import AgentExecutionContext
++from src.runtimes.agent.contracts.inference import (
++    InferenceMessage,
++    InferenceRequest,
++    InferenceResponse,
++)
++from src.runtimes.agent.contracts.tool import ToolExecutionRequest
++
++
++def make_context() -> AgentExecutionContext:
++    return AgentExecutionContext.create(
++        execution_id="exec-adapter",
++        agent_id="agent-1",
++        session_id="session-1",
++        correlation_id="corr-1",
++        identity=Identity(
++            user_id="user-1",
++            auth_type="api_key",
++            scopes=set(),
++        ),
++        limits=AgentExecutionLimits(
++            max_iterations=4,
++            max_tool_calls=8,
++            timeout_seconds=30,
++        ),
++        input={"prompt": "hello"},
++        agent=AgentDefinition(
++            name="agent-1",
++            goal="test",
++            instruction="test",
++            tools=["fast", "slow"],
++        ),
++        now_monotonic=100,
++    )
++
++
++def test_context_enrichment_does_not_change_existing_execution_contract():
++    context = make_context()
++    assert context.task_id is None
++    assert context.input == {"prompt": "hello"}
++    assert context.trace_id
++
++
++@pytest.mark.asyncio
++async def test_tool_adapter_preserves_input_order_with_bounded_concurrency():
++    started = 0
++    peak = 0
++    lock = asyncio.Lock()
++
++    class FakeCapabilityRuntime:
++        async def execute_capability(self, **kwargs):
++            nonlocal started, peak
++            async with lock:
++                started += 1
++                peak = max(peak, started)
++            await asyncio.sleep(0.01 if kwargs["capability_id"] == "a" else 0)
++            async with lock:
++                started -= 1
++            class Result:
++                invocation_id = kwargs["metadata"]["invocation_id"]
++                output = kwargs["capability_id"]
++                metadata = {}
++            return Result()
++
++    adapter = CapabilityToolExecutionAdapter(FakeCapabilityRuntime())
++    context = make_context()
++    requests = [
++        ToolExecutionRequest(
++            execution_id=context.execution_id,
++            iteration=1,
++            invocation_id=f"inv-{name}",
++            tool_call_id=f"call-{name}",
++            capability_id=name,
++            arguments={},
++            metadata={"invocation_id": f"inv-{name}"},
++        )
++        for name in ("a", "b", "c")
++    ]
++
++    results = await adapter.execute_many(context, requests, max_parallel=2)
++
++    assert peak <= 2
++    assert [result.capability_id for result in results] == ["a", "b", "c"]
++
++
++@pytest.mark.asyncio
++async def test_provider_adapter_contract_is_provider_neutral():
++    from src.runtimes.agent.adapters.inference import ProviderInferenceAdapter
++
++    class Handler:
++        async def execute_with_fallback(self, http_client, body):
++            from src.domain.schemas.response import GatewayChoice, GatewayResponse
++            from src.domain.schemas.message import GatewayMessage
++
++            return GatewayResponse(
++                id="gateway-1",
++                model="mock-model",
++                provider="mock",
++                choices=[
++                    GatewayChoice(
++                        index=0,
++                        finish_reason="stop",
++                        message=GatewayMessage(
++                            role="assistant",
++                            content="hello",
++                        ),
++                    )
++                ],
++            )
++
++    class Runtime:
++        chat_handler = Handler()
++
++    adapter = ProviderInferenceAdapter(Runtime(), object())
++    response = await adapter.complete(
++        InferenceRequest(
++            request_id="req-1",
++            execution_id="exec-1",
++            iteration=1,
++            messages=[{"role": "user", "content": "hello"}],
++        )
++    )
++
++    assert isinstance(response, InferenceResponse)
++    assert isinstance(response.message, InferenceMessage)
++    assert response.provider == "mock"
++    assert response.message.content == "hello"
