@@ -37,6 +37,11 @@ class AgentExecutionContext:
     causation_id: str | None = None
     trace_id: str | None = None
     cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _tool_budget_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+    )
 
     @classmethod
     def create(
@@ -98,14 +103,22 @@ class AgentExecutionContext:
         self.cancellation_event.set()
 
     def next_iteration(self) -> int:
-        self.iteration = 1
+        self.iteration += 1
         return self.iteration
 
     def record_tool_calls(self, count: int = 1) -> int:
         if count < 0:
             raise ValueError("tool call count increment must be non-negative")
-        self.tool_calls_used = count
+        self.tool_calls_used += count
         return self.tool_calls_used
+
+    async def reserve_tool_call(self) -> bool:
+        """Atomically reserve one tool-call budget slot before execution."""
+        async with self._tool_budget_lock:
+            if self.tool_calls_used >= self.limits.max_tool_calls:
+                return False
+            self.tool_calls_used += 1
+            return True
 
     def ensure_active(self) -> None:
         if self.cancelled:

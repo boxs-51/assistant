@@ -1,8 +1,10 @@
 from __future__ import annotations
 
-from typing import Any, Dict, Mapping, Protocol, Sequence
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Dict, Protocol, Sequence
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
 from .context import AgentExecutionContext
 from .inference import InferenceMessage, InferenceToolDefinition
@@ -23,7 +25,11 @@ class AgentContextRequest(BaseModel):
 class AgentContextSnapshot(BaseModel):
     """Snapshot consumed by exactly one inference turn."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+        arbitrary_types_allowed=True,
+    )
 
     execution_id: str
     iteration: int
@@ -31,6 +37,17 @@ class AgentContextSnapshot(BaseModel):
     tools: tuple[InferenceToolDefinition, ...] = ()
     token_estimate: int = 0
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def freeze_metadata(cls, value: Dict[str, Any]) -> MappingProxyType:
+        from .inference import _freeze
+        return _freeze(value)
+
+    @field_serializer("metadata")
+    def serialize_metadata(self, value: Mapping[str, Any]) -> dict[str, Any]:
+        from .inference import _thaw
+        return _thaw(value)
 
 
 class ContextBuilderPort(Protocol):

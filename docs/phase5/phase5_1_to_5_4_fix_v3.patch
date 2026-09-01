@@ -1,0 +1,332 @@
+# Phase 5.1–5.4 Fix Patch v3
+# Base: 7479c1c9593defcea6e9c8bff4625204438a23ed
+# Scope: contracts/adapters/contract-tests only; NO AgentRuntime implementation.
+#
+# Key fixes:
+# - Restore incremental iteration/tool counters.
+# - Atomically reserve tool budget before execution.
+# - Make inference request messages model-native and add timeout/cancellation controls.
+# - Normalize ProviderInferenceAdapter tool definitions to Gateway format consumed by ProviderRuntime converters.
+# - Propagate inference timeout/cancellation by cancelling the underlying provider task.
+# - Deep-freeze inference message/tool-definition payloads and snapshot metadata.
+# - Replace false-positive bounded-concurrency test with real active-task accounting.
+# - Add regression tests for atomic tool budget and inference cancellation/timeout.
+#
+--- a/src/runtimes/agent/contracts/context.py
++++ b/src/runtimes/agent/contracts/context.py
+@@ -37,6 +37,11 @@
+     causation_id: str | None = None
+     trace_id: str | None = None
+     cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
++    _tool_budget_lock: asyncio.Lock = field(
++        default_factory=asyncio.Lock,
++        init=False,
++        repr=False,
++    )
+ 
+     @classmethod
+     def create(
+@@ -98,14 +103,22 @@
+         self.cancellation_event.set()
+ 
+     def next_iteration(self) -> int:
+-        self.iteration = 1
++        self.iteration += 1
+         return self.iteration
+ 
+     def record_tool_calls(self, count: int = 1) -> int:
+         if count < 0:
+             raise ValueError("tool call count increment must be non-negative")
+-        self.tool_calls_used = count
++        self.tool_calls_used += count
+         return self.tool_calls_used
++
++    async def reserve_tool_call(self) -> bool:
++        """Atomically reserve one tool-call budget slot before execution."""
++        async with self._tool_budget_lock:
++            if self.tool_calls_used >= self.limits.max_tool_calls:
++                return False
++            self.tool_calls_used += 1
++            return True
+ 
+     def ensure_active(self) -> None:
+         if self.cancelled:
+
+--- a/src/runtimes/agent/contracts/inference.py
++++ b/src/runtimes/agent/contracts/inference.py
+@@ -1,35 +1,101 @@
+ from __future__ import annotations
+ 
+-from typing import Any, Dict, Mapping, Protocol, Sequence
++from collections.abc import Mapping
++from types import MappingProxyType
++from typing import Any, Dict, Protocol, Sequence
+ 
+-from pydantic import BaseModel, ConfigDict, Field
++from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
++
++
++def _freeze(value: Any) -> Any:
++    if isinstance(value, Mapping):
++        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
++    if isinstance(value, (list, tuple)):
++        return tuple(_freeze(item) for item in value)
++    if isinstance(value, (set, frozenset)):
++        return frozenset(_freeze(item) for item in value)
++    return value
++
++
++def _thaw(value: Any) -> Any:
++    if isinstance(value, Mapping):
++        return {key: _thaw(item) for key, item in value.items()}
++    if isinstance(value, tuple):
++        return [_thaw(item) for item in value]
++    if isinstance(value, (set, frozenset)):
++        return [_thaw(item) for item in value]
++    return value
+ 
+ 
+ class InferenceMessage(BaseModel):
+-    model_config = ConfigDict(extra="forbid")
++    model_config = ConfigDict(
++        extra="forbid",
++        frozen=True,
++        arbitrary_types_allowed=True,
++    )
+ 
+     role: str
+     content: Any = None
+-    tool_calls: list["InferenceToolCall"] = Field(default_factory=list)
++    tool_calls: tuple["InferenceToolCall", ...] = ()
+     name: str | None = None
+     tool_call_id: str | None = None
+     metadata: Dict[str, Any] = Field(default_factory=dict)
+ 
++    @field_validator("content", mode="after")
++    @classmethod
++    def freeze_content(cls, value: Any) -> Any:
++        return _freeze(value)
++
++    @field_validator("metadata", mode="after")
++    @classmethod
++    def freeze_metadata(cls, value: Dict[str, Any]) -> MappingProxyType:
++        return _freeze(value)
++
++    @field_serializer("content", "metadata")
++    def serialize_mutable_fields(self, value: Any) -> Any:
++        return _thaw(value)
++
+ 
+ class InferenceToolCall(BaseModel):
+-    model_config = ConfigDict(extra="forbid")
++    model_config = ConfigDict(
++        extra="forbid",
++        frozen=True,
++        arbitrary_types_allowed=True,
++    )
+ 
+     id: str
+     name: str
+     arguments: Dict[str, Any] = Field(default_factory=dict)
+ 
++    @field_validator("arguments", mode="after")
++    @classmethod
++    def freeze_arguments(cls, value: Dict[str, Any]) -> MappingProxyType:
++        return _freeze(value)
++
++    @field_serializer("arguments")
++    def serialize_arguments(self, value: Mapping[str, Any]) -> dict[str, Any]:
++        return _thaw(value)
++
+ 
+ class InferenceToolDefinition(BaseModel):
+-    model_config = ConfigDict(extra="forbid")
++    model_config = ConfigDict(
++        extra="forbid",
++        frozen=True,
++        arbitrary_types_allowed=True,
++    )
+ 
+     name: str
+     description: str
+     parameters: Dict[str, Any] = Field(default_factory=dict)
++
++    @field_validator("parameters", mode="after")
++    @classmethod
++    def freeze_parameters(cls, value: Dict[str, Any]) -> MappingProxyType:
++        return _freeze(value)
++
++    @field_serializer("parameters")
++    def serialize_parameters(self, value: Mapping[str, Any]) -> dict[str, Any]:
++        return _thaw(value)
+ 
+ 
+ class InferenceUsage(BaseModel):
+@@ -44,16 +110,21 @@
+ class InferenceRequest(BaseModel):
+     """Provider-neutral input to one model inference turn."""
+ 
+-    model_config = ConfigDict(extra="forbid")
++    model_config = ConfigDict(
++        extra="forbid",
++        arbitrary_types_allowed=True,
++    )
+ 
+     request_id: str
+     execution_id: str
+     iteration: int
+-    messages: Sequence[Mapping[str, Any]]
++    messages: Sequence[InferenceMessage]
+     tools: Sequence[InferenceToolDefinition] = Field(default_factory=list)
+     model: str | None = None
+     temperature: float | None = None
+     max_output_tokens: int | None = None
++    timeout_seconds: float | None = None
++    cancellation_event: Any = None
+     metadata: Dict[str, Any] = Field(default_factory=dict)
+ 
+ 
+
+--- a/src/runtimes/agent/contracts/context_builder.py
++++ b/src/runtimes/agent/contracts/context_builder.py
+@@ -1,8 +1,10 @@
+ from __future__ import annotations
+ 
+-from typing import Any, Dict, Mapping, Protocol, Sequence
++from collections.abc import Mapping
++from types import MappingProxyType
++from typing import Any, Dict, Protocol, Sequence
+ 
+-from pydantic import BaseModel, ConfigDict, Field
++from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
+ 
+ from .context import AgentExecutionContext
+ from .inference import InferenceMessage, InferenceToolDefinition
+@@ -23,7 +25,11 @@
+ class AgentContextSnapshot(BaseModel):
+     """Snapshot consumed by exactly one inference turn."""
+ 
+-    model_config = ConfigDict(extra="forbid", frozen=True)
++    model_config = ConfigDict(
++        extra="forbid",
++        frozen=True,
++        arbitrary_types_allowed=True,
++    )
+ 
+     execution_id: str
+     iteration: int
+@@ -31,6 +37,17 @@
+     tools: tuple[InferenceToolDefinition, ...] = ()
+     token_estimate: int = 0
+     metadata: Dict[str, Any] = Field(default_factory=dict)
++
++    @field_validator("metadata", mode="after")
++    @classmethod
++    def freeze_metadata(cls, value: Dict[str, Any]) -> MappingProxyType:
++        from .inference import _freeze
++        return _freeze(value)
++
++    @field_serializer("metadata")
++    def serialize_metadata(self, value: Mapping[str, Any]) -> dict[str, Any]:
++        from .inference import _thaw
++        return _thaw(value)
+ 
+ 
+ class ContextBuilderPort(Protocol):
+
+--- a/src/runtimes/agent/adapters/inference.py
++++ b/src/runtimes/agent/adapters/inference.py
+@@ -32,12 +32,9 @@
+             ],
+             "tools": [
+                 {
+-                    "type": "function",
+-                    "function": {
+-                        "name": tool.name,
+-                        "description": tool.description,
+-                        "parameters": jsonable(tool.parameters),
+-                    },
++                    "name": tool.name,
++                    "description": tool.description,
++                    "parameters": jsonable(tool.parameters),
+                 }
+                 for tool in request.tools
+             ],
+@@ -58,7 +55,52 @@
+             raise RuntimeError("ProviderRuntime chat handler is not initialized.")
+ 
+         body = self.serialize_request(request)
+-        response = await handler.execute_with_fallback(self._http_client, body)
++        provider_task = asyncio.create_task(
++            handler.execute_with_fallback(self._http_client, body),
++            name=f"inference:{request.execution_id}:{request.request_id}",
++        )
++        cancellation_task = None
++        try:
++            if request.cancellation_event is not None:
++                if request.cancellation_event.is_set():
++                    provider_task.cancel()
++                    await asyncio.gather(provider_task, return_exceptions=True)
++                    raise asyncio.CancelledError()
++                cancellation_task = asyncio.create_task(
++                    request.cancellation_event.wait(),
++                    name=f"inference-cancel:{request.request_id}",
++                )
++
++            wait_set = {provider_task}
++            if cancellation_task is not None:
++                wait_set.add(cancellation_task)
++
++            done, _ = await asyncio.wait(
++                wait_set,
++                timeout=request.timeout_seconds,
++                return_when=asyncio.FIRST_COMPLETED,
++            )
++
++            if provider_task in done:
++                response = await provider_task
++            elif cancellation_task is not None and cancellation_task in done:
++                provider_task.cancel()
++                await asyncio.gather(provider_task, return_exceptions=True)
++                raise asyncio.CancelledError()
++            else:
++                provider_task.cancel()
++                await asyncio.gather(provider_task, return_exceptions=True)
++                raise asyncio.TimeoutError(
++                    "Inference execution exceeded its timeout."
++                )
++        finally:
++            if cancellation_task is not None:
++                cancellation_task.cancel()
++                await asyncio.gather(
++                    cancellation_task,
++                    return_exceptions=True,
++                )
++
+         if not response.choices:
+             raise ValueError("Provider returned an empty choice list.")
+ 
+
+--- a/src/runtimes/agent/adapters/tool.py
++++ b/src/runtimes/agent/adapters/tool.py
+@@ -102,6 +102,9 @@
+                 message="Agent execution deadline exceeded before tool start.",
+                 retryable=True,
+             )
++
++        if not await context.reserve_tool_call():
++            return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
+ 
+         try:
+             result = await self._capability_runtime.execute_capability(
+@@ -121,7 +124,6 @@
+                     "invocation_id": request.invocation_id,
+                 },
+             )
+-            context.record_tool_calls(1)
+             context.record_usage(tool_invocations=1)
+             return ToolExecutionResult(
+                 execution_id=context.execution_id,
+
+
+

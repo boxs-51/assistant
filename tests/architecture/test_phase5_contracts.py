@@ -1,3 +1,5 @@
+import asyncio
+
 import pytest
 
 from src.domain.schemas.agent import AgentDefinition
@@ -313,6 +315,7 @@ def test_policy_protocols_are_implementable_without_runtime_coupling():
         invocation_id="inv-1",
         tool_call_id="call-1",
         capability_id="calculator.add",
+        arguments={"a": 1, "b": 2},
     )
 
     assert tool_policy.is_visible(
@@ -328,3 +331,17 @@ def test_policy_protocols_are_implementable_without_runtime_coupling():
     assert execution_policy.check_iteration(context, 1) is PolicyDecision.ALLOW
     assert execution_policy.check_tool_call(context, request) is PolicyDecision.ALLOW
     assert execution_policy.limits(context).max_tool_calls == 4
+
+
+def test_context_iteration_and_tool_counters_are_incremental():
+    context = make_context()
+
+    assert context.next_iteration() == 1
+    assert context.next_iteration() == 2
+    assert context.next_iteration() == 3
+
+    assert context.record_tool_calls(2) == 2
+    assert context.record_tool_calls(3) == 5
+
+    with pytest.raises(ValueError, match="non-negative"):
+        context.record_tool_calls(-1)

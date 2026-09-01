@@ -10,6 +10,7 @@ from ..contracts.inference import (
     InferenceRequest,
     InferenceResponse,
     InferenceToolCall,
+    InferenceToolDefinition,
     InferenceUsage,
 )
 from .messages import inference_message_to_provider, jsonable
@@ -23,6 +24,19 @@ class ProviderInferenceAdapter(InferencePort):
         self._http_client = http_client
 
     @staticmethod
+    def _serialize_tool(tool: InferenceToolDefinition | dict[str, Any]) -> dict[str, Any]:
+        normalized = (
+            tool
+            if isinstance(tool, InferenceToolDefinition)
+            else InferenceToolDefinition.model_validate(tool)
+        )
+
+        return {
+            "name": normalized.name,
+            "description": normalized.description,
+            "parameters": jsonable(normalized.parameters),
+        }
+    @staticmethod
     def serialize_request(request: InferenceRequest) -> dict[str, Any]:
         body: dict[str, Any] = {
             "model": request.model or "",
@@ -31,14 +45,7 @@ class ProviderInferenceAdapter(InferencePort):
                 for message in request.messages
             ],
             "tools": [
-                {
-                    "type": "function",
-                    "function": {
-                        "name": tool.name,
-                        "description": tool.description,
-                        "parameters": jsonable(tool.parameters),
-                    },
-                }
+                ProviderInferenceAdapter._serialize_tool(tool)
                 for tool in request.tools
             ],
             "metadata": jsonable(request.metadata),
@@ -58,7 +65,52 @@ class ProviderInferenceAdapter(InferencePort):
             raise RuntimeError("ProviderRuntime chat handler is not initialized.")
 
         body = self.serialize_request(request)
-        response = await handler.execute_with_fallback(self._http_client, body)
+        provider_task = asyncio.create_task(
+            handler.execute_with_fallback(self._http_client, body),
+            name=f"inference:{request.execution_id}:{request.request_id}",
+        )
+        cancellation_task = None
+        try:
+            if request.cancellation_event is not None:
+                if request.cancellation_event.is_set():
+                    provider_task.cancel()
+                    await asyncio.gather(provider_task, return_exceptions=True)
+                    raise asyncio.CancelledError()
+                cancellation_task = asyncio.create_task(
+                    request.cancellation_event.wait(),
+                    name=f"inference-cancel:{request.request_id}",
+                )
+
+            wait_set = {provider_task}
+            if cancellation_task is not None:
+                wait_set.add(cancellation_task)
+
+            done, _ = await asyncio.wait(
+                wait_set,
+                timeout=request.timeout_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            if provider_task in done:
+                response = await provider_task
+            elif cancellation_task is not None and cancellation_task in done:
+                provider_task.cancel()
+                await asyncio.gather(provider_task, return_exceptions=True)
+                raise asyncio.CancelledError()
+            else:
+                provider_task.cancel()
+                await asyncio.gather(provider_task, return_exceptions=True)
+                raise asyncio.TimeoutError(
+                    "Inference execution exceeded its timeout."
+                )
+        finally:
+            if cancellation_task is not None:
+                cancellation_task.cancel()
+                await asyncio.gather(
+                    cancellation_task,
+                    return_exceptions=True,
+                )
+
         if not response.choices:
             raise ValueError("Provider returned an empty choice list.")
 

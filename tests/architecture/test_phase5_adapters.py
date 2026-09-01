@@ -24,6 +24,9 @@ from src.runtimes.agent.contracts.inference import (
     InferenceMessage,
     InferenceRequest,
 )
+from src.runtimes.agent.contracts import (
+    AgentContextSnapshot
+)
 from src.runtimes.agent.contracts.tool import ToolExecutionRequest
 from src.runtimes.capability.contracts.definition import CapabilityDefinition
 from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
@@ -35,7 +38,6 @@ from src.provider.gemini.converters.chats.request import RequestChats
 
 
 def identity() -> Identity:
-    # SỬA LỖI 3 & 4: Cấp scope wildcard "*" để bypass kiểm tra quyền của AuthorizationService
     return Identity(user_id="u1", auth_type="api_key", scopes={"*"})
 
 
@@ -43,28 +45,29 @@ def make_context(
     *,
     tools: list[str] | None = None,
     cancellation_event: asyncio.Event | None = None,
+    max_tool_calls: int = 8,
+    max_parallel_tools: int = 2,
 ) -> AgentExecutionContext:
     return AgentExecutionContext.create(
-        execution_id="exec-v2",
-        agent_id="agent-v2",
-        session_id="session-v2",
-        correlation_id="corr-v2",
+        execution_id="exec-v3",
+        agent_id="agent-v3",
+        session_id="session-v3",
+        correlation_id="corr-v3",
         identity=identity(),
         limits=AgentExecutionLimits(
             max_iterations=4,
-            max_tool_calls=8,
-            max_parallel_tools=2,
+            max_tool_calls=max_tool_calls,
+            max_parallel_tools=max_parallel_tools,
             timeout_seconds=5,
             tool_timeout_seconds=1,
         ),
         input={"prompt": "hello"},
         agent=AgentDefinition(
-            name="agent-v2",
+            name="agent-v3",
             goal="test",
             instruction="You are a test agent.",
             tools=tools or [],
         ),
-        # SỬA LỖI 1: Dùng time.monotonic() thời điểm hiện tại thay vì hardcode 100
         now_monotonic=time.monotonic(),
     )
 
@@ -124,7 +127,7 @@ def test_context_snapshot_preserves_multimodal_and_tool_call_shape():
     registry.register_capability(PythonCapabilityDriver(capability, inspect))
     agent_registry.register(
         AgentDefinition(
-            name="agent-v2",
+            name="agent-v3",
             goal="test",
             instruction="You are a test agent.",
             tools=["vision.inspect"],
@@ -140,21 +143,20 @@ def test_context_snapshot_preserves_multimodal_and_tool_call_shape():
     snapshot = asyncio.run(
         adapter.build(
             make_context(tools=["vision.inspect"]),
-            AgentContextRequest(execution_id="exec-v2", iteration=1),
+            AgentContextRequest(execution_id="exec-v3", iteration=1),
         )
     )
     assert snapshot.messages[0].role == "system"
     assert snapshot.messages[1].role == "user"
-    assert isinstance(snapshot.messages[1].content, list)
+    assert isinstance(snapshot.messages[1].content, tuple)
     assert snapshot.messages[2].tool_calls[0].name == "vision.inspect"
     assert snapshot.tools[0].name == "vision.inspect"
 
 
-def test_provider_adapter_serialization_is_gemini_compatible():
-    # SỬA LỖI 2: Chuyển các object InferenceMessage thành dict bằng .model_dump() (hoặc dict literal)
+def test_provider_adapter_serialization_is_gemini_compatible_with_tools():
     request = InferenceRequest(
-        request_id="req-v2",
-        execution_id="exec-v2",
+        request_id="req-v3",
+        execution_id="exec-v3",
         iteration=2,
         messages=[
             InferenceMessage(
@@ -167,22 +169,82 @@ def test_provider_adapter_serialization_is_gemini_compatible():
                         "arguments": {"x": 1},
                     }
                 ],
-            ).model_dump(),
+            ),
             InferenceMessage(
                 role="tool",
                 name="vision.inspect",
                 tool_call_id="call-1",
                 content={"ok": True},
-            ).model_dump(),
+            ),
         ],
         tools=[],
     )
-    body = ProviderInferenceAdapter.serialize_request(request)
+    body = ProviderInferenceAdapter.serialize_request(
+        request.model_copy(
+            update={
+                "tools": [
+                    {
+                        "name": "vision.inspect",
+                        "description": "Inspect image",
+                        "parameters": {
+                            "type": "OBJECT",
+                            "properties": {"x": {"type": "INTEGER"}},
+                        },
+                    }
+                ]
+            }
+        )
+    )
+
+    assert body["tools"][0]["name"] == "vision.inspect"
+    assert "function" not in body["tools"][0]
+
     gemini_body = RequestChats().adapt_chat(body)
     contents = gemini_body["contents"]
     assert contents[0]["role"] == "model"
     assert contents[0]["parts"][0]["functionCall"]["name"] == "vision.inspect"
     assert contents[1]["parts"][0]["functionResponse"]["name"] == "vision.inspect"
+    assert gemini_body["tools"][0]["function_declarations"][0]["name"] == "vision.inspect"
+
+
+@pytest.mark.asyncio
+async def test_provider_adapter_propagates_timeout_and_cancellation():
+    class SlowHandler:
+        async def execute_with_fallback(self, http_client, body):
+            await asyncio.sleep(10)
+            raise AssertionError("provider should have been cancelled before completion")
+
+    class Runtime:
+        chat_handler = SlowHandler()
+
+    timeout_request = InferenceRequest(
+        request_id="req-timeout",
+        execution_id="exec-v3",
+        iteration=1,
+        messages=[{"role": "user", "content": "hello"}],
+        timeout_seconds=0.01,
+    )
+    adapter = ProviderInferenceAdapter(Runtime(), object())
+
+    with pytest.raises(asyncio.TimeoutError):
+        await adapter.complete(timeout_request)
+
+    cancelled = asyncio.Event()
+    cancellation_request = InferenceRequest(
+        request_id="req-cancel",
+        execution_id="exec-v3",
+        iteration=1,
+        messages=[{"role": "user", "content": "hello"}],
+        cancellation_event=cancelled,
+        timeout_seconds=2,
+    )
+
+    task = asyncio.create_task(adapter.complete(cancellation_request))
+    await asyncio.sleep(0)
+    cancelled.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
 
 
 @pytest.mark.asyncio
@@ -213,7 +275,7 @@ async def test_tool_adapter_validates_and_denies_before_capability_execution():
     agents = AgentRegistry()
     agents.register(
         AgentDefinition(
-            name="agent-v2",
+            name="agent-v3",
             goal="test",
             instruction="test",
             tools=["calculator.add"],
@@ -230,7 +292,7 @@ async def test_tool_adapter_validates_and_denies_before_capability_execution():
     result = await adapter.execute(
         make_context(tools=["calculator.add"]),
         ToolExecutionRequest(
-            execution_id="exec-v2",
+            execution_id="exec-v3",
             iteration=1,
             invocation_id="inv-1",
             tool_call_id="call-1",
@@ -265,8 +327,10 @@ async def test_capability_runtime_shares_agent_cancellation_event():
         registry=registry,
         authorization=AuthorizationService(),
     )
-    context = make_context(tools=["slow.tool"], cancellation_event=event)
-    context.cancellation_event = event
+    context = make_context(
+        tools=["slow.tool"],
+        cancellation_event=event,
+    )
     task = asyncio.create_task(
         runtime.execute_capability(
             "slow.tool",
@@ -285,23 +349,27 @@ async def test_capability_runtime_shares_agent_cancellation_event():
 
 
 @pytest.mark.asyncio
-async def test_tool_parallelism_is_bounded_by_both_request_and_execution_limit():
+async def test_tool_parallelism_is_bounded_by_request_and_execution_limits():
     active = 0
     peak = 0
+    started = 0
     lock = asyncio.Lock()
 
     async def tool(**kwargs):
-        nonlocal active, peak
+        nonlocal active, peak, started
         async with lock:
-            active = 1
+            active += 1
+            started += 1
             peak = max(peak, active)
-        await asyncio.sleep(0.01)
-        async with lock:
-            active -= 1
-        return kwargs["value"]
+        try:
+            await asyncio.sleep(0.02)
+            return kwargs["value"]
+        finally:
+            async with lock:
+                active -= 1
 
     registry = CapabilityRegistry()
-    for name in ("a", "b", "c"):
+    for name in ("a", "b", "c", "d"):
         registry.register_capability(
             PythonCapabilityDriver(
                 CapabilityDefinition(
@@ -313,15 +381,17 @@ async def test_tool_parallelism_is_bounded_by_both_request_and_execution_limit()
                 tool,
             )
         )
+
     agents = AgentRegistry()
     agents.register(
         AgentDefinition(
-            name="agent-v2",
+            name="agent-v3",
             goal="test",
             instruction="test",
-            tools=["a", "b", "c"],
+            tools=["a", "b", "c", "d"],
         )
     )
+
     runtime = CapabilityRuntime(
         registry=registry, authorization=AuthorizationService()
     )
@@ -329,7 +399,12 @@ async def test_tool_parallelism_is_bounded_by_both_request_and_execution_limit()
     adapter = CapabilityToolExecutionAdapter(
         runtime, policy, DefaultAgentExecutionPolicy()
     )
-    context = make_context(tools=["a", "b", "c"])
+    context = make_context(
+        tools=["a", "b", "c", "d"],
+        max_tool_calls=4,
+        max_parallel_tools=2,
+    )
+
     requests = [
         ToolExecutionRequest(
             execution_id=context.execution_id,
@@ -339,8 +414,123 @@ async def test_tool_parallelism_is_bounded_by_both_request_and_execution_limit()
             capability_id=name,
             arguments={"value": name},
         )
-        for i, name in enumerate(("a", "b", "c"))
+        for i, name in enumerate(("a", "b", "c", "d"))
     ]
+
     results = await adapter.execute_many(context, requests, max_parallel=8)
-    assert peak <= 2
-    assert [result.output for result in results] == ["a", "b", "c"]
+
+    assert peak == 2
+    assert started == 4
+    assert [result.output for result in results] == ["a", "b", "c", "d"]
+
+
+@pytest.mark.asyncio
+async def test_tool_budget_is_reserved_atomically_under_parallel_execution():
+    active = 0
+    executed = 0
+    lock = asyncio.Lock()
+
+    async def tool(**kwargs):
+        nonlocal active, executed
+        async with lock:
+            active += 1
+            executed += 1
+        try:
+            await asyncio.sleep(0.02)
+            return kwargs["value"]
+        finally:
+            async with lock:
+                active -= 1
+
+    registry = CapabilityRegistry()
+    for name in ("a", "b", "c", "d"):
+        registry.register_capability(
+            PythonCapabilityDriver(
+                CapabilityDefinition(
+                    id=name,
+                    name=name,
+                    description=name,
+                    input_schema={"type": "object"},
+                ),
+                tool,
+            )
+        )
+
+    agents = AgentRegistry()
+    agents.register(
+        AgentDefinition(
+            name="agent-v3",
+            goal="test",
+            instruction="test",
+            tools=["a", "b", "c", "d"],
+        )
+    )
+
+    runtime = CapabilityRuntime(
+        registry=registry, authorization=AuthorizationService()
+    )
+    policy = RegistryAgentToolPolicy(agents, registry, AuthorizationService())
+    adapter = CapabilityToolExecutionAdapter(
+        runtime, policy, DefaultAgentExecutionPolicy()
+    )
+    context = make_context(
+        tools=["a", "b", "c", "d"],
+        max_tool_calls=2,
+        max_parallel_tools=4,
+    )
+
+    requests = [
+        ToolExecutionRequest(
+            execution_id=context.execution_id,
+            iteration=1,
+            invocation_id=f"inv-{i}",
+            tool_call_id=f"call-{i}",
+            capability_id=name,
+            arguments={"value": name},
+        )
+        for i, name in enumerate(("a", "b", "c", "d"))
+    ]
+
+    results = await adapter.execute_many(context, requests, max_parallel=4)
+
+    assert executed == 2
+    assert context.tool_calls_used == 2
+    assert sum(result.success for result in results) == 2
+    assert sum(
+        result.error_code == "AGENT_TOOL_BUDGET_EXCEEDED"
+        for result in results
+    ) == 2
+
+
+def test_context_snapshot_nested_models_and_metadata_are_immutable():
+    snapshot = AgentContextSnapshot(
+        execution_id="exec-v3",
+        iteration=1,
+        messages=[
+            InferenceMessage(
+                role="user",
+                content=[{"type": "text", "text": "hello"}],
+                metadata={"nested": {"value": 1}},
+            )
+        ],
+        tools=[
+            {
+                "name": "calculator.add",
+                "description": "add",
+                "parameters": {"type": "object"},
+            }
+        ],
+        metadata={"trace": {"span": "one"}},
+    )
+
+    with pytest.raises((TypeError, ValueError)):
+        snapshot.iteration = 2
+
+    with pytest.raises((TypeError, ValueError)):
+        snapshot.messages[0].role = "assistant"
+
+    with pytest.raises(TypeError):
+        snapshot.messages[0].metadata["nested"]["value"] = 2
+
+    with pytest.raises(TypeError):
+        snapshot.metadata["trace"]["span"] = "two"

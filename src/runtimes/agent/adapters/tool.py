@@ -46,6 +46,8 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             self._execution_policy.check_tool_call(context, request)
             is not PolicyDecision.ALLOW
         ):
+            if context.tool_calls_used >= context.limits.max_tool_calls:
+                return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
             return self._denied(request, "AGENT_TOOL_POLICY_DENIED")
 
         if (
@@ -103,6 +105,9 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 retryable=True,
             )
 
+        if not await context.reserve_tool_call():
+            return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
+
         try:
             result = await self._capability_runtime.execute_capability(
                 capability_id=request.capability_id,
@@ -121,7 +126,6 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                     "invocation_id": request.invocation_id,
                 },
             )
-            context.record_tool_calls(1)
             context.record_usage(tool_invocations=1)
             return ToolExecutionResult(
                 execution_id=context.execution_id,
