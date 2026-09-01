@@ -1,0 +1,509 @@
+# Phase 5.6 — Tool Execution Coordinator v1
+# Base: f0c3037e434c706f36b37d234fe24babdf2ddf40
+# Scope: introduce canonical ToolExecutionCoordinator around the existing
+# production ToolExecutionPort implementation. No Phase 5.7+ retry engine,
+# persistence, events, MCP-specific logic, or AgentRuntime redesign.
+#
+# Guarantees:
+# - validate execution/iteration/tool-call identity before dispatch
+# - reject duplicate tool_call_id values in one model response
+# - bounded parallel execution at coordinator boundary
+# - deterministic result ordering by original tool-call order
+# - reject missing/duplicate/unexpected results from downstream ports
+# - preserve ToolExecutionPort contract so AgentRuntime remains unchanged
+# - optional retry hook is injectable but defaults to one attempt (no retry)
+#
+--- /dev/null
++++ b/src/runtimes/agent/tool_execution/__init__.py
+@@ -0,0 +1,7 @@
++from .coordinator import AgentToolExecutionCoordinator
++
++__all__ = ["AgentToolExecutionCoordinator"]
++
+--- /dev/null
++++ b/src/runtimes/agent/tool_execution/coordinator.py
+@@ -0,0 +1,184 @@
++from __future__ import annotations
++
++import asyncio
++from typing import Awaitable, Callable, Sequence
++
++from ..contracts.context import AgentExecutionContext
++from ..contracts.tool import (
++    ToolExecutionPort,
++    ToolExecutionRequest,
++    ToolExecutionResult,
++)
++
++
++RetryDecider = Callable[[ToolExecutionResult, int], bool]
++
++
++class AgentToolExecutionCoordinator(ToolExecutionPort):
++    """Canonical orchestration boundary for agent tool execution.
++
++    The coordinator owns batch-level invariants: request validation, duplicate
++    detection, bounded scheduling, deterministic result ordering, and optional
++    retry policy. The concrete capability adapter remains responsible for
++    policy/auth/schema validation and CapabilityRuntime invocation.
++    """
++
++    def __init__(
++        self,
++        executor: ToolExecutionPort,
++        *,
++        retry_decider: RetryDecider | None = None,
++        max_attempts: int = 1,
++    ) -> None:
++        if max_attempts < 1:
++            raise ValueError("max_attempts must be >= 1.")
++        self._executor = executor
++        self._retry_decider = retry_decider or self._never_retry
++        self._max_attempts = max_attempts
++
++    async def execute(
++        self,
++        context: AgentExecutionContext,
++        request: ToolExecutionRequest,
++    ) -> ToolExecutionResult:
++        self._validate_request(context, request)
++
++        attempt = 0
++        while True:
++            attempt += 1
++            result = await self._executor.execute(context, request)
++            if (
++                attempt >= self._max_attempts
++                or not result.retryable
++                or not self._retry_decider(result, attempt)
++            ):
++                return self._with_attempt(result, attempt)
++
++            context.ensure_active()
++
++    async def execute_many(
++        self,
++        context: AgentExecutionContext,
++        requests: Sequence[ToolExecutionRequest],
++        *,
++        max_parallel: int,
++    ) -> Sequence[ToolExecutionResult]:
++        if max_parallel < 1:
++            raise ValueError("max_parallel must be >= 1.")
++
++        request_list = list(requests)
++        self._validate_batch(context, request_list)
++
++        if not request_list:
++            return []
++
++        semaphore = asyncio.Semaphore(
++            min(max_parallel, context.limits.max_parallel_tools)
++        )
++
++        async def run_one(request: ToolExecutionRequest) -> ToolExecutionResult:
++            async with semaphore:
++                return await self.execute(context, request)
++
++        raw_results = await asyncio.gather(
++            *(run_one(request) for request in request_list)
++        )
++        return self._order_results(request_list, raw_results)
++
++    @staticmethod
++    def _validate_request(
++        context: AgentExecutionContext,
++        request: ToolExecutionRequest,
++    ) -> None:
++        if request.execution_id != context.execution_id:
++            raise ValueError(
++                "Tool request execution_id does not match execution context."
++            )
++        if request.iteration < 1:
++            raise ValueError("Tool request iteration must be >= 1.")
++        if not request.tool_call_id:
++            raise ValueError("Tool request tool_call_id must be non-empty.")
++        if not request.invocation_id:
++            raise ValueError("Tool request invocation_id must be non-empty.")
++        if not request.capability_id:
++            raise ValueError("Tool request capability_id must be non-empty.")
++
++    @classmethod
++    def _validate_batch(
++        cls,
++        context: AgentExecutionContext,
++        requests: Sequence[ToolExecutionRequest],
++    ) -> None:
++        seen: set[str] = set()
++        for request in requests:
++            cls._validate_request(context, request)
++            if request.tool_call_id in seen:
++                raise ValueError(
++                    "Duplicate tool_call_id in one execution batch: "
++                    f"{request.tool_call_id!r}."
++                )
++            seen.add(request.tool_call_id)
++
++    @staticmethod
++    def _order_results(
++        requests: Sequence[ToolExecutionRequest],
++        results: Sequence[ToolExecutionResult],
++    ) -> list[ToolExecutionResult]:
++        by_id: dict[str, ToolExecutionResult] = {}
++        for result in results:
++            if result.tool_call_id in by_id:
++                raise ValueError(
++                    "Duplicate tool result for tool_call_id="
++                    f"{result.tool_call_id!r}."
++                )
++            by_id[result.tool_call_id] = result
++
++        ordered: list[ToolExecutionResult] = []
++        for request in requests:
++            result = by_id.get(request.tool_call_id)
++            if result is None:
++                raise ValueError(
++                    "Missing tool result for tool_call_id="
++                    f"{request.tool_call_id!r}."
++                )
++            if result.execution_id != request.execution_id:
++                raise ValueError(
++                    "Tool result execution_id does not match request."
++                )
++            if result.iteration != request.iteration:
++                raise ValueError(
++                    "Tool result iteration does not match request."
++                )
++            if result.capability_id != request.capability_id:
++                raise ValueError(
++                    "Tool result capability_id does not match request."
++                )
++            ordered.append(result)
++
++        if len(ordered) != len(results):
++            raise ValueError("Tool execution returned an unexpected result count.")
++        return ordered
++
++    @staticmethod
++    def _with_attempt(
++        result: ToolExecutionResult,
++        attempt: int,
++    ) -> ToolExecutionResult:
++        if result.metadata.get("attempt") == attempt:
++            return result
++        return result.model_copy(
++            update={
++                "metadata": {
++                    **result.metadata,
++                    "attempt": attempt,
++                }
++            }
++        )
++
++    @staticmethod
++    def _never_retry(result: ToolExecutionResult, attempt: int) -> bool:
++        return False
++
+--- a/src/main.py
++++ b/src/main.py
+@@ -42,9 +42,10 @@
+ from .runtimes.agent.adapters import (
+     ContextBuilderAdapter,
+     ProviderInferenceAdapter,
+     CapabilityToolExecutionAdapter,
+     DefaultAgentExecutionPolicy,
+     RegistryAgentToolPolicy,
+ )
++from .runtimes.agent.tool_execution import AgentToolExecutionCoordinator
+ logger = structlog.get_logger(__name__)
+@@ -245,7 +246,10 @@
+     container.tool_execution_port = CapabilityToolExecutionAdapter(
+         container.capability_runtime,
+         agent_tool_policy,
+         agent_execution_policy,
+     )
++    container.tool_execution_port = AgentToolExecutionCoordinator(
++        container.tool_execution_port,
++    )
+ 
+     # Cấu hình Multi-Agent Executor
+--- /dev/null
++++ b/tests/architecture/test_phase5_tool_execution_coordinator.py
+@@ -0,0 +1,286 @@
++from __future__ import annotations
++
++import asyncio
++
++import pytest
++
++from src.domain.schemas.agent import AgentDefinition
++from src.domain.schemas.agent_execution import AgentExecutionLimits
++from src.domain.schemas.identity import Identity
++from src.runtimes.agent.contracts import (
++    AgentExecutionContext,
++    ToolExecutionRequest,
++    ToolExecutionResult,
++)
++from src.runtimes.agent.tool_execution import AgentToolExecutionCoordinator
++
++
++def make_context() -> AgentExecutionContext:
++    agent = AgentDefinition(
++        name="coordinator-test-agent",
++        goal="test",
++        instruction="test",
++        tools=["tool.a", "tool.b", "tool.c"],
++    )
++    return AgentExecutionContext.create(
++        execution_id="exec-coordinator-test",
++        agent_id=agent.name,
++        session_id="session-coordinator-test",
++        correlation_id="corr-coordinator-test",
++        identity=Identity(user_id="u1", auth_type="api_key", scopes={"*"}),
++        limits=AgentExecutionLimits(
++            max_iterations=4,
++            max_tool_calls=8,
++            max_parallel_tools=2,
++            timeout_seconds=5,
++            tool_timeout_seconds=1,
++        ),
++        agent=agent,
++    )
++
++
++def request(context: AgentExecutionContext, call_id: str, capability: str) -> ToolExecutionRequest:
++    return ToolExecutionRequest(
++        execution_id=context.execution_id,
++        iteration=1,
++        invocation_id=f"inv-{call_id}",
++        tool_call_id=call_id,
++        capability_id=capability,
++        arguments={},
++    )
++
++
++def result_for(req: ToolExecutionRequest, *, execution_id: str | None = None, iteration: int | None = None, capability_id: str | None = None) -> ToolExecutionResult:
++    return ToolExecutionResult(
++        execution_id=execution_id or req.execution_id,
++        iteration=req.iteration if iteration is None else iteration,
++        invocation_id=req.invocation_id,
++        tool_call_id=req.tool_call_id,
++        capability_id=capability_id or req.capability_id,
++        success=True,
++        output=req.tool_call_id,
++    )
++
++
++@pytest.mark.asyncio
++async def test_coordinator_rejects_duplicate_tool_call_ids_before_dispatch():
++    context = make_context()
++    calls = 0
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal calls
++            calls += 1
++            return result_for(request)
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("coordinator must own batch orchestration")
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++    first = request(context, "call-1", "tool.a")
++    duplicate = request(context, "call-1", "tool.b")
++
++    with pytest.raises(ValueError, match="Duplicate tool_call_id"):
++        await coordinator.execute_many(context, [first, duplicate], max_parallel=2)
++    assert calls == 0
++
++
++@pytest.mark.asyncio
++async def test_coordinator_restores_original_tool_call_order():
++    context = make_context()
++    requests = [
++        request(context, "call-a", "tool.a"),
++        request(context, "call-b", "tool.b"),
++        request(context, "call-c", "tool.c"),
++    ]
++
++    class Executor:
++        async def execute(self, context, request):
++            await asyncio.sleep({"call-a": 0.03, "call-b": 0.01, "call-c": 0.0}[request.tool_call_id])
++            return result_for(request)
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("coordinator must own batch orchestration")
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++    results = await coordinator.execute_many(context, requests, max_parallel=2)
++
++    assert [item.tool_call_id for item in results] == ["call-a", "call-b", "call-c"]
++
++
++@pytest.mark.asyncio
++async def test_coordinator_bounds_parallel_dispatch():
++    context = make_context()
++    active = 0
++    peak = 0
++    lock = asyncio.Lock()
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal active, peak
++            async with lock:
++                active += 1
++                peak = max(peak, active)
++            try:
++                await asyncio.sleep(0.02)
++                return result_for(request)
++            finally:
++                async with lock:
++                    active -= 1
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("coordinator must own batch orchestration")
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++    requests = [request(context, f"call-{i}", f"tool-{i}") for i in range(6)]
++    results = await coordinator.execute_many(context, requests, max_parallel=6)
++
++    assert peak == 2
++    assert len(results) == 6
++
++
++@pytest.mark.asyncio
++async def test_coordinator_rejects_mismatched_downstream_result():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            return result_for(request, execution_id="wrong-execution")
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("coordinator must own batch orchestration")
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    with pytest.raises(ValueError, match="execution_id"):
++        await coordinator.execute_many(context, [req], max_parallel=1)
++
++
++@pytest.mark.asyncio
++async def test_coordinator_rejects_mismatched_result_iteration():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            return result_for(request, iteration=2)
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("coordinator must own batch orchestration")
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    with pytest.raises(ValueError, match="iteration"):
++        await coordinator.execute_many(context, [req], max_parallel=1)
++
++
++@pytest.mark.asyncio
++async def test_coordinator_rejects_mismatched_capability():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            return result_for(request, capability_id="tool.b")
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("coordinator must own batch orchestration")
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    with pytest.raises(ValueError, match="capability_id"):
++        await coordinator.execute_many(context, [req], max_parallel=1)
++
++
++@pytest.mark.asyncio
++async def test_coordinator_rejects_duplicate_downstream_results():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            return result_for(request)
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            base = result_for(requests[0])
++            return [base, base.model_copy(update={"invocation_id": "inv-duplicate"})]
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++    with pytest.raises(ValueError, match="Duplicate tool result"):
++        await coordinator.execute_many(context, [req], max_parallel=1)
++
++
++@pytest.mark.asyncio
++async def test_coordinator_rejects_missing_downstream_result():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            return result_for(request)
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            return []
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++    with pytest.raises(ValueError, match="Missing tool result"):
++        await coordinator.execute_many(context, [req], max_parallel=1)
++
++
++@pytest.mark.asyncio
++async def test_coordinator_retry_hook_is_bounded_and_opt_in():
++    context = make_context()
++    attempts = 0
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal attempts
++            attempts += 1
++            return ToolExecutionResult(
++                execution_id=request.execution_id,
++                iteration=request.iteration,
++                invocation_id=request.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=False,
++                error_code="CAPABILITY_TIMEOUT",
++                retryable=True,
++            )
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("not used")
++
++    coordinator = AgentToolExecutionCoordinator(
++        Executor(),
++        retry_decider=lambda result, attempt: True,
++        max_attempts=3,
++    )
++
++    result = await coordinator.execute(context, req)
++    assert attempts == 3
++    assert result.retryable is True
++    assert result.metadata["attempt"] == 3
++
++
++def test_coordinator_requires_positive_limits():
++    class Executor:
++        async def execute(self, context, request):
++            return result_for(request)
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            return []
++
++    with pytest.raises(ValueError, match="max_attempts"):
++        AgentToolExecutionCoordinator(Executor(), max_attempts=0)
++

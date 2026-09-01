@@ -71,6 +71,7 @@ from .runtimes.agent.adapters import (
     DefaultAgentExecutionPolicy,
     RegistryAgentToolPolicy,
 )
+from .runtimes.agent.tool_execution import AgentToolExecutionCoordinator
 logger = structlog.get_logger(__name__)
 
 
@@ -255,6 +256,9 @@ async def bootstrap_runtime_kernel(
         container.capability_runtime,
         agent_tool_policy,
         agent_execution_policy,
+    )
+    container.tool_execution_port = AgentToolExecutionCoordinator(
+        container.tool_execution_port,
     )
 
     # Cấu hình Multi-Agent Executor
