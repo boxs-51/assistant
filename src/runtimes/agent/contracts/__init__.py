@@ -22,6 +22,7 @@ from .events import (
     AgentEventPublisher,
     CorrelationContext,
 )
+from .result import AgentExecutionResult
 
 __all__ = [
     "AgentExecutionContext",
@@ -49,4 +50,5 @@ __all__ = [
     "AgentEventName",
     "AgentEventPublisher",
     "CorrelationContext",
+    "AgentExecutionResult",
 ]
