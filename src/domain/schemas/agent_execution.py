@@ -39,6 +39,7 @@ class AgentExecutionLimits(GatewayBaseModel):
     iteration_timeout_seconds: float = 20.0
     inference_timeout_seconds: float = 15.0
     tool_timeout_seconds: float = 10.0
+    max_retry_attempts: int = 1
     max_cost: Optional[float] = None
 
 

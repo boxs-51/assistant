@@ -1,0 +1,516 @@
+diff --git a/src/domain/schemas/agent_execution.py b/src/domain/schemas/agent_execution.py
+index 3c726f6..xxxxxxxx 100644
+--- a/src/domain/schemas/agent_execution.py
++++ b/src/domain/schemas/agent_execution.py
+@@ -28,6 +28,7 @@ class AgentExecutionLimits(GatewayBaseModel):
+     timeout_seconds: float = 60.0
+     iteration_timeout_seconds: float = 20.0
+     inference_timeout_seconds: float = 15.0
+     tool_timeout_seconds: float = 10.0
++    max_retry_attempts: int = 1
+     max_cost: Optional[float] = None
+diff --git a/src/runtimes/agent/contracts/context.py b/src/runtimes/agent/contracts/context.py
+index e22762a..xxxxxxxx 100644
+--- a/src/runtimes/agent/contracts/context.py
++++ b/src/runtimes/agent/contracts/context.py
+@@ -34,11 +34,16 @@ class AgentExecutionContext:
+     deadline: float | None = None
+     iteration: int = 0
+     tool_calls_used: int = 0
++    retry_attempts_used: int = 0
+     usage: InferenceUsage = field(default_factory=InferenceUsage)
+     causation_id: str | None = None
+     trace_id: str | None = None
+     cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
+     _tool_budget_lock: asyncio.Lock = field(
+         default_factory=asyncio.Lock,
+         init=False,
+         repr=False,
+     )
++    _retry_budget_lock: asyncio.Lock = field(
++        default_factory=asyncio.Lock,
++        init=False,
++        repr=False,
++    )
+@@
+     async def reserve_tool_call(self) -> bool:
+         """Atomically reserve one tool-call budget slot before execution."""
+         async with self._tool_budget_lock:
+             if self.tool_calls_used >= self.limits.max_tool_calls:
+                 return False
+             self.tool_calls_used += 1
+             return True
++
++    async def reserve_retry_attempt(self) -> bool:
++        """Atomically reserve one execution-scoped retry attempt.
++
++        The initial tool execution is not counted here. Only additional
++        attempts caused by retry policy consume this budget.
++        """
++        async with self._retry_budget_lock:
++            if self.retry_attempts_used >= self.limits.max_retry_attempts:
++                return False
++            self.retry_attempts_used += 1
++            return True
+diff --git a/src/runtimes/agent/tool_execution/coordinator.py b/src/runtimes/agent/tool_execution/coordinator.py
+index 1d78be6..xxxxxxxx 100644
+--- a/src/runtimes/agent/tool_execution/coordinator.py
++++ b/src/runtimes/agent/tool_execution/coordinator.py
+@@ -1,8 +1,9 @@
+ from __future__ import annotations
+ 
+ import asyncio
+-from typing import Awaitable, Callable, Sequence
++from dataclasses import dataclass
++from typing import Callable, Sequence
+ 
+ from ..contracts.context import AgentExecutionContext
+ from ..contracts.tool import (
+     ToolExecutionPort,
+     ToolExecutionRequest,
+@@ -11,25 +12,54 @@ from ..contracts.tool import (
+ 
+ RetryDecider = Callable[[ToolExecutionResult, int], bool]
+ 
+ 
++@dataclass
++class _ExecutionEntry:
++    task: asyncio.Task[ToolExecutionResult]
++
++
+ class AgentToolExecutionCoordinator(ToolExecutionPort):
+     """Canonical orchestration boundary for agent tool execution.
+ 
+     The coordinator owns batch-level invariants: request validation, duplicate
+     detection, bounded scheduling, deterministic result ordering, and optional
+-    retry policy. The concrete capability adapter remains responsible for
+-    policy/auth/schema validation and CapabilityRuntime invocation.
++    retry policy.
++
++    Duplicate execution protection is scoped to the lifetime of this
++    coordinator and keyed by execution_id + invocation_id. This prevents
++    concurrent duplicate dispatches without introducing persistence into
++    Phase 5.6.
+     """
+ 
+     def __init__(
+         self,
+         executor: ToolExecutionPort,
+         *,
+         retry_decider: RetryDecider | None = None,
+-        max_attempts: int = 1,
++        max_attempts: int | None = None,
+     ) -> None:
+-        if max_attempts < 1:
+-            raise ValueError("max_attempts must be >= 1.")
++        if max_attempts is not None and max_attempts < 1:
++            raise ValueError("max_attempts must be >= 1 when provided.")
+         self._executor = executor
+         self._retry_decider = retry_decider or self._never_retry
+         self._max_attempts = max_attempts
++        self._inflight: dict[tuple[str, str], _ExecutionEntry] = {}
++        self._completed: dict[
++            tuple[str, str],
++            ToolExecutionResult,
++        ] = {}
++        self._ledger_lock = asyncio.Lock()
+ 
+     async def execute(
+         self,
+         context: AgentExecutionContext,
+         request: ToolExecutionRequest,
+     ) -> ToolExecutionResult:
+         self._validate_request(context, request)
+ 
+-        attempt = 0
+-        while True:
+-            attempt += 1
+-            result = await self._executor.execute(context, request)
+-            if (
+-                attempt >= self._max_attempts
+-                or not result.retryable
+-                or not self._retry_decider(result, attempt)
+-            ):
+-                return self._with_attempt(result, attempt)
+-
+-            context.ensure_active()
++        key = (request.execution_id, request.invocation_id)
++
++        async with self._ledger_lock:
++            completed = self._completed.get(key)
++            if completed is not None:
++                return completed
++
++            existing = self._inflight.get(key)
++            if existing is not None:
++                task = existing.task
++            else:
++                task = asyncio.create_task(
++                    self._execute_once_or_retry(context, request),
++                    name=(
++                        f"tool:{request.execution_id}:"
++                        f"{request.invocation_id}"
++                    ),
++                )
++                self._inflight[key] = _ExecutionEntry(task=task)
++
++        try:
++            result = await self._await_with_cancellation(
++                context,
++                task,
++            )
++        except (asyncio.CancelledError, TimeoutError):
++            raise
++        except Exception:
++            async with self._ledger_lock:
++                current = self._inflight.get(key)
++                if current is not None and current.task is task:
++                    self._inflight.pop(key, None)
++            raise
++
++        async with self._ledger_lock:
++            current = self._inflight.get(key)
++            if current is not None and current.task is task:
++                self._inflight.pop(key, None)
++                self._completed[key] = result
++
++        return result
++
++    async def _execute_once_or_retry(
++        self,
++        context: AgentExecutionContext,
++        request: ToolExecutionRequest,
++    ) -> ToolExecutionResult:
++        attempt = 1
++
++        while True:
++            context.ensure_active()
++
++            result = await self._executor.execute(
++                context,
++                request,
++            )
++
++            if not result.retryable:
++                return self._with_attempt(result, attempt)
++
++            if self._max_attempts is not None:
++                if attempt >= self._max_attempts:
++                    return self._with_attempt(result, attempt)
++            else:
++                if (
++                    context.limits.max_retry_attempts < 1
++                    or attempt >= context.limits.max_retry_attempts + 1
++                ):
++                    return self._with_attempt(result, attempt)
++
++            if not self._retry_decider(result, attempt):
++                return self._with_attempt(result, attempt)
++
++            context.ensure_active()
++
++            if not await context.reserve_retry_attempt():
++                return self._with_attempt(result, attempt)
++
++            attempt += 1
++
++            context.ensure_active()
+ 
+     async def execute_many(
+         self,
+         context: AgentExecutionContext,
+         requests: Sequence[ToolExecutionRequest],
+@@ -48,13 +78,51 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
+         async def run_one(request: ToolExecutionRequest) -> ToolExecutionResult:
+             async with semaphore:
+                 return await self.execute(context, request)
+ 
+-        raw_results = await asyncio.gather(
+-            *(run_one(request) for request in request_list)
+-        )
++        tasks = [
++            asyncio.create_task(
++                run_one(request),
++                name=(
++                    f"tool-batch:{context.execution_id}:"
++                    f"{request.invocation_id}"
++                ),
++            )
++            for request in request_list
++        ]
++
++        try:
++            raw_results = await self._gather_with_cancellation(
++                context,
++                tasks,
++            )
++        except BaseException:
++            for task in tasks:
++                if not task.done():
++                    task.cancel()
++            await asyncio.gather(*tasks, return_exceptions=True)
++            raise
++
+         return self._order_results(request_list, raw_results)
++
++    async def _await_with_cancellation(
++        self,
++        context: AgentExecutionContext,
++        task: asyncio.Task[ToolExecutionResult],
++    ) -> ToolExecutionResult:
++        if task.done():
++            return await task
++
++        context.ensure_active()
++
++        cancellation_task = asyncio.create_task(
++            context.cancellation_event.wait(),
++            name=f"tool-cancel:{context.execution_id}",
++        )
++
++        try:
++            done, _ = await asyncio.wait(
++                {task, cancellation_task},
++                timeout=context.remaining_seconds,
++                return_when=asyncio.FIRST_COMPLETED,
++            )
++
++            if task in done:
++                return await task
++
++            task.cancel()
++            await asyncio.gather(task, return_exceptions=True)
++
++            if cancellation_task in done:
++                raise asyncio.CancelledError
++
++            raise TimeoutError(
++                "Agent execution deadline exceeded during tool execution."
++            )
++        finally:
++            if not cancellation_task.done():
++                cancellation_task.cancel()
++            await asyncio.gather(
++                cancellation_task,
++                return_exceptions=True,
++            )
++
++    async def _gather_with_cancellation(
++        self,
++        context: AgentExecutionContext,
++        tasks: Sequence[asyncio.Task[ToolExecutionResult]],
++    ) -> list[ToolExecutionResult]:
++        cancellation_task = asyncio.create_task(
++            context.cancellation_event.wait(),
++            name=f"tool-batch-cancel:{context.execution_id}",
++        )
++
++        gather_task = asyncio.create_task(
++            self._gather_tasks(tasks),
++            name=f"tool-batch-gather:{context.execution_id}",
++        )
++
++        try:
++            done, _ = await asyncio.wait(
++                {gather_task, cancellation_task},
++                timeout=context.remaining_seconds,
++                return_when=asyncio.FIRST_COMPLETED,
++            )
++
++            if gather_task in done:
++                return list(await gather_task)
++
++            gather_task.cancel()
++            await asyncio.gather(
++                gather_task,
++                return_exceptions=True,
++            )
++
++            if cancellation_task in done:
++                raise asyncio.CancelledError
++
++            raise TimeoutError(
++                "Agent execution deadline exceeded during tool batch."
++            )
++        finally:
++            if not cancellation_task.done():
++                cancellation_task.cancel()
++            await asyncio.gather(
++                cancellation_task,
++                return_exceptions=True,
++            )
++    async def _gather_tasks(
++        self,
++        tasks: Sequence[asyncio.Task[ToolExecutionResult]],
++    ) -> list[ToolExecutionResult]:
++        return list(await asyncio.gather(*tasks))
+*** Update File: tests/architecture/test_phase5_tool_execution_coordinator.py
+@@
+ async def test_coordinator_rejects_duplicate_downstream_results():
+     context = make_context()
+     req = request(context, "call-1", "tool.a")
+-
+-    class Executor:
+-        async def execute(self, context, request):
+-            return result_for(request)
+-
+-        async def execute_many(self, context, requests, *, max_parallel):
+-            base = result_for(requests[0])
+-            return [base, base.model_copy(update={"invocation_id": "inv-duplicate"})]
+-
+-    coordinator = AgentToolExecutionCoordinator(Executor())
++    base = result_for(req)
++    duplicate = base.model_copy(
++        update={"invocation_id": "inv-duplicate"}
++    )
+     with pytest.raises(ValueError, match="Duplicate tool result"):
+-        await coordinator.execute_many(context, [req], max_parallel=1)
++        AgentToolExecutionCoordinator._order_results(
++            [req],
++            [base, duplicate],
++        )
+@@
+ async def test_coordinator_rejects_missing_downstream_result():
+     context = make_context()
+     req = request(context, "call-1", "tool.a")
+-
+-    class Executor:
+-        async def execute(self, context, request):
+-            return result_for(request)
+-
+-        async def execute_many(self, context, requests, *, max_parallel):
+-            return []
+-
+-    coordinator = AgentToolExecutionCoordinator(Executor())
+     with pytest.raises(ValueError, match="Missing tool result"):
+-        await coordinator.execute_many(context, [req], max_parallel=1)
++        AgentToolExecutionCoordinator._order_results(
++            [req],
++            [],
++        )
+@@
+ def test_coordinator_requires_positive_limits():
+     class Executor:
+         async def execute(self, context, request):
+             return result_for(request)
+
+         async def execute_many(self, context, requests, *, max_parallel):
+             return []
+
+     with pytest.raises(ValueError, match="max_attempts"):
+         AgentToolExecutionCoordinator(Executor(), max_attempts=0)
++
++
++@pytest.mark.asyncio
++async def test_coordinator_retry_budget_is_execution_scoped():
++    context = make_context()
++    context.limits.max_retry_attempts = 2
++
++    attempts = 0
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal attempts
++            attempts += 1
++            return ToolExecutionResult(
++                execution_id=request.execution_id,
++                iteration=request.iteration,
++                invocation_id=request.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=False,
++                error_code="CAPABILITY_TIMEOUT",
++                retryable=True,
++            )
++
++    coordinator = AgentToolExecutionCoordinator(
++        Executor(),
++        retry_decider=lambda result, attempt: True,
++    )
++
++    result = await coordinator.execute(context, req)
++
++    assert attempts == 3
++    assert context.retry_attempts_used == 2
++    assert result.metadata["attempt"] == 3
++
++
++@pytest.mark.asyncio
++async def test_coordinator_deduplicates_concurrent_invocation():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    calls = 0
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal calls
++            calls += 1
++            await asyncio.sleep(0.05)
++            return result_for(request)
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    first, second = await asyncio.gather(
++        coordinator.execute(context, req),
++        coordinator.execute(context, req),
++    )
++
++    assert calls == 1
++    assert first == second
++
++
++@pytest.mark.asyncio
++async def test_coordinator_cancellation_cancels_downstream():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    started = asyncio.Event()
++    cancelled = asyncio.Event()
++
++    class Executor:
++        async def execute(self, context, request):
++            started.set()
++            try:
++                await asyncio.sleep(10)
++            except asyncio.CancelledError:
++                cancelled.set()
++                raise
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    task = asyncio.create_task(
++        coordinator.execute(context, req)
++    )
++
++    await started.wait()
++
++    context.cancel()
++
++    with pytest.raises(asyncio.CancelledError):
++        await task
++
++    assert cancelled.is_set()
++
++
++@pytest.mark.asyncio
++async def test_coordinator_reuses_completed_invocation():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    calls = 0
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal calls
++            calls += 1
++            return result_for(request)
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    first = await coordinator.execute(context, req)
++    second = await coordinator.execute(context, req)
++
++    assert calls == 1
++    assert first == second

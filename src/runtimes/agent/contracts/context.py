@@ -33,11 +33,17 @@ class AgentExecutionContext:
     deadline: float | None = None
     iteration: int = 0
     tool_calls_used: int = 0
+    retry_attempts_used: int = 0
     usage: InferenceUsage = field(default_factory=InferenceUsage)
     causation_id: str | None = None
     trace_id: str | None = None
     cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
     _tool_budget_lock: asyncio.Lock = field(
+        default_factory=asyncio.Lock,
+        init=False,
+        repr=False,
+    )
+    _retry_budget_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,
         init=False,
         repr=False,
@@ -118,6 +124,18 @@ class AgentExecutionContext:
             if self.tool_calls_used >= self.limits.max_tool_calls:
                 return False
             self.tool_calls_used += 1
+            return True
+
+    async def reserve_retry_attempt(self) -> bool:
+        """Atomically reserve one execution-scoped retry attempt.
+
+        The initial tool execution is not counted here. Only additional
+        attempts caused by retry policy consume this budget.
+        """
+        async with self._retry_budget_lock:
+            if self.retry_attempts_used >= self.limits.max_retry_attempts:
+                return False
+            self.retry_attempts_used += 1
             return True
 
     def ensure_active(self) -> None:

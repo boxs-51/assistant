@@ -197,35 +197,26 @@ async def test_coordinator_rejects_mismatched_capability():
 async def test_coordinator_rejects_duplicate_downstream_results():
     context = make_context()
     req = request(context, "call-1", "tool.a")
-
-    class Executor:
-        async def execute(self, context, request):
-            return result_for(request)
-
-        async def execute_many(self, context, requests, *, max_parallel):
-            base = result_for(requests[0])
-            return [base, base.model_copy(update={"invocation_id": "inv-duplicate"})]
-
-    coordinator = AgentToolExecutionCoordinator(Executor())
+    base = result_for(req)
+    duplicate = base.model_copy(
+        update={"invocation_id": "inv-duplicate"}
+    )
     with pytest.raises(ValueError, match="Duplicate tool result"):
-        await coordinator.execute_many(context, [req], max_parallel=1)
+        AgentToolExecutionCoordinator._order_results(
+            [req],
+            [base, duplicate],
+        )
 
 
 @pytest.mark.asyncio
 async def test_coordinator_rejects_missing_downstream_result():
     context = make_context()
     req = request(context, "call-1", "tool.a")
-
-    class Executor:
-        async def execute(self, context, request):
-            return result_for(request)
-
-        async def execute_many(self, context, requests, *, max_parallel):
-            return []
-
-    coordinator = AgentToolExecutionCoordinator(Executor())
     with pytest.raises(ValueError, match="Missing tool result"):
-        await coordinator.execute_many(context, [req], max_parallel=1)
+        AgentToolExecutionCoordinator._order_results(
+            [req],
+            [],
+        )
 
 
 @pytest.mark.asyncio
@@ -274,3 +265,118 @@ def test_coordinator_requires_positive_limits():
 
     with pytest.raises(ValueError, match="max_attempts"):
         AgentToolExecutionCoordinator(Executor(), max_attempts=0)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_retry_budget_is_execution_scoped():
+    context = make_context()
+    context.limits.max_retry_attempts = 2
+
+    attempts = 0
+    req = request(context, "call-1", "tool.a")
+
+    class Executor:
+        async def execute(self, context, request):
+            nonlocal attempts
+            attempts += 1
+            return ToolExecutionResult(
+                execution_id=request.execution_id,
+                iteration=request.iteration,
+                invocation_id=request.invocation_id,
+                tool_call_id=request.tool_call_id,
+                capability_id=request.capability_id,
+                success=False,
+                error_code="CAPABILITY_TIMEOUT",
+                retryable=True,
+            )
+
+    coordinator = AgentToolExecutionCoordinator(
+        Executor(),
+        retry_decider=lambda result, attempt: True,
+    )
+
+    result = await coordinator.execute(context, req)
+
+    assert attempts == 3
+    assert context.retry_attempts_used == 2
+    assert result.metadata["attempt"] == 3
+
+
+@pytest.mark.asyncio
+async def test_coordinator_deduplicates_concurrent_invocation():
+    context = make_context()
+    req = request(context, "call-1", "tool.a")
+
+    calls = 0
+
+    class Executor:
+        async def execute(self, context, request):
+            nonlocal calls
+            calls += 1
+            await asyncio.sleep(0.05)
+            return result_for(request)
+
+    coordinator = AgentToolExecutionCoordinator(Executor())
+
+    first, second = await asyncio.gather(
+        coordinator.execute(context, req),
+        coordinator.execute(context, req),
+    )
+
+    assert calls == 1
+    assert first == second
+
+
+@pytest.mark.asyncio
+async def test_coordinator_cancellation_cancels_downstream():
+    context = make_context()
+    req = request(context, "call-1", "tool.a")
+
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class Executor:
+        async def execute(self, context, request):
+            started.set()
+            try:
+                await asyncio.sleep(10)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+    coordinator = AgentToolExecutionCoordinator(Executor())
+
+    task = asyncio.create_task(
+        coordinator.execute(context, req)
+    )
+
+    await started.wait()
+
+    context.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert cancelled.is_set()
+
+
+@pytest.mark.asyncio
+async def test_coordinator_reuses_completed_invocation():
+    context = make_context()
+    req = request(context, "call-1", "tool.a")
+
+    calls = 0
+
+    class Executor:
+        async def execute(self, context, request):
+            nonlocal calls
+            calls += 1
+            return result_for(request)
+
+    coordinator = AgentToolExecutionCoordinator(Executor())
+
+    first = await coordinator.execute(context, req)
+    second = await coordinator.execute(context, req)
+
+    assert calls == 1
+    assert first == second
