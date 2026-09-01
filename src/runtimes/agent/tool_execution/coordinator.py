@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Callable, Sequence
 
@@ -18,6 +20,13 @@ RetryDecider = Callable[[ToolExecutionResult, int], bool]
 @dataclass
 class _ExecutionEntry:
     task: asyncio.Task[ToolExecutionResult]
+    fingerprint: str
+
+
+@dataclass(frozen=True)
+class _CompletedEntry:
+    result: ToolExecutionResult
+    fingerprint: str
 
 
 class AgentToolExecutionCoordinator(ToolExecutionPort):
@@ -48,7 +57,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         self._inflight: dict[tuple[str, str], _ExecutionEntry] = {}
         self._completed: dict[
             tuple[str, str],
-            ToolExecutionResult,
+            _CompletedEntry,
         ] = {}
         self._ledger_lock = asyncio.Lock()
 
@@ -60,14 +69,23 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         self._validate_request(context, request)
 
         key = (request.execution_id, request.invocation_id)
+        fingerprint = self._request_fingerprint(request)
 
         async with self._ledger_lock:
             completed = self._completed.get(key)
             if completed is not None:
-                return completed
+                if completed.fingerprint != fingerprint:
+                    raise ValueError(
+                        "Conflicting request for existing invocation_id."
+                    )
+                return completed.result
 
             existing = self._inflight.get(key)
             if existing is not None:
+                if existing.fingerprint != fingerprint:
+                    raise ValueError(
+                        "Conflicting request for in-flight invocation_id."
+                    )
                 task = existing.task
             else:
                 task = asyncio.create_task(
@@ -77,16 +95,17 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                         f"{request.invocation_id}"
                     ),
                 )
-                self._inflight[key] = _ExecutionEntry(task=task)
+                self._inflight[key] = _ExecutionEntry(
+                    task=task,
+                    fingerprint=fingerprint,
+                )
 
         try:
             result = await self._await_with_cancellation(
                 context,
                 task,
             )
-        except (asyncio.CancelledError, TimeoutError):
-            raise
-        except Exception:
+        except BaseException:
             async with self._ledger_lock:
                 current = self._inflight.get(key)
                 if current is not None and current.task is task:
@@ -97,9 +116,33 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             current = self._inflight.get(key)
             if current is not None and current.task is task:
                 self._inflight.pop(key, None)
-                self._completed[key] = result
+                self._completed[key] = _CompletedEntry(
+                    result=result,
+                    fingerprint=fingerprint,
+                )
 
         return result
+
+    @staticmethod
+    def _request_fingerprint(
+        request: ToolExecutionRequest,
+    ) -> str:
+        """Return a stable semantic fingerprint for idempotency validation."""
+        payload = {
+            "execution_id": request.execution_id,
+            "iteration": request.iteration,
+            "invocation_id": request.invocation_id,
+            "tool_call_id": request.tool_call_id,
+            "capability_id": request.capability_id,
+            "arguments": request.arguments,
+        }
+        encoded = json.dumps(
+            payload,
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
 
     async def _execute_once_or_retry(
         self,

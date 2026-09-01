@@ -222,6 +222,7 @@ async def test_coordinator_rejects_missing_downstream_result():
 @pytest.mark.asyncio
 async def test_coordinator_retry_hook_is_bounded_and_opt_in():
     context = make_context()
+    context.limits.max_retry_attempts = 2
     attempts = 0
     req = request(context, "call-1", "tool.a")
 
@@ -380,3 +381,60 @@ async def test_coordinator_reuses_completed_invocation():
 
     assert calls == 1
     assert first == second
+
+
+@pytest.mark.asyncio
+async def test_coordinator_rejects_conflicting_reuse_of_invocation_id():
+    context = make_context()
+    req = request(context, "call-1", "tool.a")
+
+    conflicting = ToolExecutionRequest(
+        execution_id=req.execution_id,
+        iteration=req.iteration,
+        invocation_id=req.invocation_id,
+        tool_call_id=req.tool_call_id,
+        capability_id="tool.b",
+        arguments={"different": True},
+    )
+
+    class Executor:
+        async def execute(self, context, request):
+            return result_for(request)
+
+    coordinator = AgentToolExecutionCoordinator(Executor())
+
+    first = await coordinator.execute(context, req)
+    assert first.capability_id == "tool.a"
+
+    with pytest.raises(
+        ValueError,
+        match="Conflicting request",
+    ):
+        await coordinator.execute(context, conflicting)
+
+
+@pytest.mark.asyncio
+async def test_coordinator_removes_cancelled_invocation_from_inflight():
+    context = make_context()
+    req = request(context, "call-1", "tool.a")
+
+    started = asyncio.Event()
+
+    class Executor:
+        async def execute(self, context, request):
+            started.set()
+            await asyncio.sleep(10)
+
+    coordinator = AgentToolExecutionCoordinator(Executor())
+
+    task = asyncio.create_task(
+        coordinator.execute(context, req)
+    )
+
+    await started.wait()
+    context.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert not coordinator._inflight

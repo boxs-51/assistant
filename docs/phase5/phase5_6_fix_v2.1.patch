@@ -1,0 +1,223 @@
+diff --git a/src/runtimes/agent/tool_execution/coordinator.py b/src/runtimes/agent/tool_execution/coordinator.py
+index 1d78be6..xxxxxxxx 100644
+--- a/src/runtimes/agent/tool_execution/coordinator.py
++++ b/src/runtimes/agent/tool_execution/coordinator.py
+@@ -1,8 +1,10 @@
+ from __future__ import annotations
+
+ import asyncio
++import hashlib
++import json
+ from dataclasses import dataclass
+ from typing import Callable, Sequence
+
+ from ..contracts.context import AgentExecutionContext
+ from ..contracts.tool import (
+@@ -13,12 +15,21 @@ RetryDecider = Callable[[ToolExecutionResult, int], bool]
+
+
+ @dataclass
+ class _ExecutionEntry:
+     task: asyncio.Task[ToolExecutionResult]
++    fingerprint: str
++
++
++@dataclass(frozen=True)
++class _CompletedEntry:
++    result: ToolExecutionResult
++    fingerprint: str
+
+
+ class AgentToolExecutionCoordinator(ToolExecutionPort):
+@@ -27,6 +38,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
+     detection, bounded scheduling, deterministic result ordering, and optional
+     retry policy.
+
+     Duplicate execution protection is scoped to the lifetime of this
+     coordinator and keyed by execution_id + invocation_id. This prevents
+@@ -45,11 +57,11 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
+         self._retry_decider = retry_decider or self._never_retry
+         self._max_attempts = max_attempts
+         self._inflight: dict[tuple[str, str], _ExecutionEntry] = {}
+         self._completed: dict[
+             tuple[str, str],
+-            ToolExecutionResult,
++            _CompletedEntry,
+         ] = {}
+         self._ledger_lock = asyncio.Lock()
+
+@@ -61,19 +73,29 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
+     ) -> ToolExecutionResult:
+         self._validate_request(context, request)
+
+         key = (request.execution_id, request.invocation_id)
++        fingerprint = self._request_fingerprint(request)
+
+         async with self._ledger_lock:
+             completed = self._completed.get(key)
+             if completed is not None:
+-                return completed
++                if completed.fingerprint != fingerprint:
++                    raise ValueError(
++                        "Conflicting request for existing invocation_id."
++                    )
++                return completed.result
+
+             existing = self._inflight.get(key)
+             if existing is not None:
++                if existing.fingerprint != fingerprint:
++                    raise ValueError(
++                        "Conflicting request for in-flight invocation_id."
++                    )
+                 task = existing.task
+             else:
+                 task = asyncio.create_task(
+                     self._execute_once_or_retry(context, request),
+                     name=(
+@@ -81,10 +102,11 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
+                         f"{request.invocation_id}"
+                     ),
+                 )
+-                self._inflight[key] = _ExecutionEntry(task=task)
++                self._inflight[key] = _ExecutionEntry(
++                    task=task,
++                    fingerprint=fingerprint,
++                )
+
+         try:
+             result = await self._await_with_cancellation(
+                 context,
+                 task,
+             )
+-        except (asyncio.CancelledError, TimeoutError):
+-            raise
+-        except Exception:
++        except BaseException:
+             async with self._ledger_lock:
+                 current = self._inflight.get(key)
+                 if current is not None and current.task is task:
+                     self._inflight.pop(key, None)
+             raise
+
+         async with self._ledger_lock:
+             current = self._inflight.get(key)
+             if current is not None and current.task is task:
+                 self._inflight.pop(key, None)
+-                self._completed[key] = result
++                self._completed[key] = _CompletedEntry(
++                    result=result,
++                    fingerprint=fingerprint,
++                )
+
+         return result
++
++    @staticmethod
++    def _request_fingerprint(
++        request: ToolExecutionRequest,
++    ) -> str:
++        """Return a stable semantic fingerprint for idempotency validation."""
++        payload = {
++            "execution_id": request.execution_id,
++            "iteration": request.iteration,
++            "invocation_id": request.invocation_id,
++            "tool_call_id": request.tool_call_id,
++            "capability_id": request.capability_id,
++            "arguments": request.arguments,
++        }
++        encoded = json.dumps(
++            payload,
++            sort_keys=True,
++            separators=(",", ":"),
++            default=str,
++        ).encode("utf-8")
++        return hashlib.sha256(encoded).hexdigest()
+
+*** Update File: tests/architecture/test_phase5_tool_execution_coordinator.py
+@@
+ async def test_coordinator_retry_hook_is_bounded_and_opt_in():
+     context = make_context()
++    context.limits.max_retry_attempts = 2
+     attempts = 0
+     req = request(context, "call-1", "tool.a")
+@@
+     result = await coordinator.execute(context, req)
+
+     assert attempts == 3
+@@
+ @pytest.mark.asyncio
+ async def test_coordinator_reuses_completed_invocation():
+     context = make_context()
+     req = request(context, "call-1", "tool.a")
+
+     calls = 0
+
+     class Executor:
+         async def execute(self, context, request):
+             nonlocal calls
+             calls += 1
+             return result_for(request)
+
+     coordinator = AgentToolExecutionCoordinator(Executor())
+
+     first = await coordinator.execute(context, req)
+     second = await coordinator.execute(context, req)
+
+     assert calls == 1
+     assert first == second
++
++
++@pytest.mark.asyncio
++async def test_coordinator_rejects_conflicting_reuse_of_invocation_id():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    conflicting = ToolExecutionRequest(
++        execution_id=req.execution_id,
++        iteration=req.iteration,
++        invocation_id=req.invocation_id,
++        tool_call_id=req.tool_call_id,
++        capability_id="tool.b",
++        arguments={"different": True},
++    )
++
++    class Executor:
++        async def execute(self, context, request):
++            return result_for(request)
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    first = await coordinator.execute(context, req)
++    assert first.capability_id == "tool.a"
++
++    with pytest.raises(
++        ValueError,
++        match="Conflicting request",
++    ):
++        await coordinator.execute(context, conflicting)
++
++
++@pytest.mark.asyncio
++async def test_coordinator_removes_cancelled_invocation_from_inflight():
++    context = make_context()
++    req = request(context, "call-1", "tool.a")
++
++    started = asyncio.Event()
++
++    class Executor:
++        async def execute(self, context, request):
++            started.set()
++            await asyncio.sleep(10)
++
++    coordinator = AgentToolExecutionCoordinator(Executor())
++
++    task = asyncio.create_task(
++        coordinator.execute(context, req)
++    )
++
++    await started.wait()
++    context.cancel()
++
++    with pytest.raises(asyncio.CancelledError):
++        await task
++
++    assert not coordinator._inflight
