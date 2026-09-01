@@ -21,6 +21,8 @@ RetryDecider = Callable[[ToolExecutionResult, int], bool]
 class _ExecutionEntry:
     task: asyncio.Task[ToolExecutionResult]
     fingerprint: str
+    waiters: int = 0
+    cancel_requested: bool = False
 
 
 @dataclass(frozen=True)
@@ -71,34 +73,56 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         key = (request.execution_id, request.invocation_id)
         fingerprint = self._request_fingerprint(request)
 
-        async with self._ledger_lock:
-            completed = self._completed.get(key)
-            if completed is not None:
-                if completed.fingerprint != fingerprint:
-                    raise ValueError(
-                        "Conflicting request for existing invocation_id."
-                    )
-                return completed.result
+        while True:
+            cleanup_task: asyncio.Task[ToolExecutionResult] | None = None
 
-            existing = self._inflight.get(key)
-            if existing is not None:
-                if existing.fingerprint != fingerprint:
-                    raise ValueError(
-                        "Conflicting request for in-flight invocation_id."
+            async with self._ledger_lock:
+                completed = self._completed.get(key)
+                if completed is not None:
+                    if completed.fingerprint != fingerprint:
+                        raise ValueError(
+                            "Conflicting request for existing invocation_id."
+                        )
+                    return completed.result
+
+                existing = self._inflight.get(key)
+                if existing is not None:
+                    if existing.fingerprint != fingerprint:
+                        raise ValueError(
+                            "Conflicting request for in-flight invocation_id."
+                        )
+
+                    if existing.cancel_requested:
+                        cleanup_task = existing.task
+                    else:
+                        existing.waiters += 1
+                        task = existing.task
+                else:
+                    task = asyncio.create_task(
+                        self._execute_once_or_retry(context, request),
+                        name=(
+                            f"tool:{request.execution_id}:"
+                            f"{request.invocation_id}"
+                        ),
                     )
-                task = existing.task
-            else:
-                task = asyncio.create_task(
-                    self._execute_once_or_retry(context, request),
-                    name=(
-                        f"tool:{request.execution_id}:"
-                        f"{request.invocation_id}"
-                    ),
-                )
-                self._inflight[key] = _ExecutionEntry(
-                    task=task,
-                    fingerprint=fingerprint,
-                )
+                    self._inflight[key] = _ExecutionEntry(
+                        task=task,
+                        fingerprint=fingerprint,
+                        waiters=1,
+                    )
+
+            if cleanup_task is None:
+                break
+
+            await asyncio.gather(
+                cleanup_task,
+                return_exceptions=True,
+            )
+
+            async with self._ledger_lock:
+                current = self._inflight.get(key)
+                if current is not None and current.task is cleanup_task:
+                    self._inflight.pop(key, None)
 
         try:
             result = await self._await_with_cancellation(
@@ -106,20 +130,36 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                 task,
             )
         except BaseException:
+            cancel_task = False
             async with self._ledger_lock:
                 current = self._inflight.get(key)
                 if current is not None and current.task is task:
-                    self._inflight.pop(key, None)
+                    current.waiters -= 1
+                    if current.waiters <= 0:
+                        current.cancel_requested = True
+                        if not task.done():
+                            task.cancel()
+                            cancel_task = True
+                        else:
+                            self._inflight.pop(key, None)
+
+            if cancel_task:
+                await asyncio.gather(
+                    task,
+                    return_exceptions=True,
+                )
             raise
 
         async with self._ledger_lock:
             current = self._inflight.get(key)
             if current is not None and current.task is task:
-                self._inflight.pop(key, None)
-                self._completed[key] = _CompletedEntry(
-                    result=result,
-                    fingerprint=fingerprint,
-                )
+                current.waiters -= 1
+                if task.done():
+                    self._inflight.pop(key, None)
+                    self._completed[key] = _CompletedEntry(
+                        result=result,
+                        fingerprint=fingerprint,
+                    )
 
         return result
 
@@ -150,6 +190,16 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         request: ToolExecutionRequest,
     ) -> ToolExecutionResult:
         attempt = 1
+        max_retry_attempts = context.limits.max_retry_attempts
+        if max_retry_attempts < 0:
+            raise ValueError("max_retry_attempts must be >= 0.")
+
+        execution_max_attempts = 1 + max_retry_attempts
+        if self._max_attempts is not None:
+            execution_max_attempts = min(
+                execution_max_attempts,
+                self._max_attempts,
+            )
 
         while True:
             context.ensure_active()
@@ -162,15 +212,8 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             if not result.retryable:
                 return self._with_attempt(result, attempt)
 
-            if self._max_attempts is not None:
-                if attempt >= self._max_attempts:
-                    return self._with_attempt(result, attempt)
-            else:
-                if (
-                    context.limits.max_retry_attempts < 1
-                    or attempt >= context.limits.max_retry_attempts + 1
-                ):
-                    return self._with_attempt(result, attempt)
+            if attempt >= execution_max_attempts:
+                return self._with_attempt(result, attempt)
 
             if not self._retry_decider(result, attempt):
                 return self._with_attempt(result, attempt)

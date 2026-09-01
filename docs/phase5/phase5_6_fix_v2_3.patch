@@ -1,0 +1,118 @@
+*** Update File: tests/architecture/test_phase5_tool_execution_coordinator.py
+@@
+-@pytest.mark.asyncio
+-async def test_coordinator_retry_hook_is_bounded_and_opt_in():
+-    context = make_context()
+-    context.limits.max_retry_attempts = 2
+-    attempts = 0
+-    req = request(context, "call-1", "tool.a")
+-
+-    class Executor:
+-        async def execute(self, context, request):
+-            nonlocal attempts
+-            attempts += 1
+-            return ToolExecutionResult(
+-                execution_id=request.execution_id,
+-                iteration=request.iteration,
+-                invocation_id=request.invocation_id,
+-                tool_call_id=request.tool_call_id,
+-                capability_id=request.capability_id,
+-                success=False,
+-                error_code="CAPABILITY_TIMEOUT",
+-                retryable=True,
+-            )
+-
+-        async def execute_many(self, context, requests, *, max_parallel):
+-            raise AssertionError("not used")
+-
+-    coordinator = AgentToolExecutionCoordinator(
+-        Executor(),
+-        retry_decider=lambda result, attempt: True,
+-        max_attempts=3,
+-    )
+-
+-    result = await coordinator.execute(context, req)
+-    assert attempts == 2
+-    assert result.retryable is True
+-    assert result.metadata["attempt"] == 2
+-    assert context.retry_attempts_used == 1
++@pytest.mark.asyncio
++async def test_coordinator_capped_by_max_attempts():
++    """Kiểm tra giới hạn bị siết bởi max_attempts của Coordinator."""
++    context = make_context()
++    context.limits.max_retry_attempts = 5  # Context cho phép tổng 1 + 5 = 6 lần chạy
++    attempts = 0
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal attempts
++            attempts += 1
++            return ToolExecutionResult(
++                execution_id=request.execution_id,
++                iteration=request.iteration,
++                invocation_id=request.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=False,
++                error_code="CAPABILITY_TIMEOUT",
++                retryable=True,
++            )
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("not used")
++
++    # Coordinator siết trần chỉ cho chạy tối đa 2 lần tổng cộng
++    coordinator = AgentToolExecutionCoordinator(
++        Executor(),
++        retry_decider=lambda result, attempt: True,
++        max_attempts=2,
++    )
++
++    result = await coordinator.execute(context, req)
++    
++    assert attempts == 2
++    assert result.retryable is True
++    assert result.metadata["attempt"] == 2
++    assert context.retry_attempts_used == 1
++
++
++@pytest.mark.asyncio
++async def test_coordinator_capped_by_context_max_retry_attempts():
++    """Kiểm tra giới hạn bị siết bởi max_retry_attempts của Context."""
++    context = make_context()
++    context.limits.max_retry_attempts = 1  # Context chỉ cho phép 1 + 1 = 2 lần chạy
++    attempts = 0
++    req = request(context, "call-1", "tool.a")
++
++    class Executor:
++        async def execute(self, context, request):
++            nonlocal attempts
++            attempts += 1
++            return ToolExecutionResult(
++                execution_id=request.execution_id,
++                iteration=request.iteration,
++                invocation_id=request.invocation_id,
++                tool_call_id=request.tool_call_id,
++                capability_id=request.capability_id,
++                success=False,
++                error_code="CAPABILITY_TIMEOUT",
++                retryable=True,
++            )
++
++        async def execute_many(self, context, requests, *, max_parallel):
++            raise AssertionError("not used")
++
++    # Coordinator cho phép tới 5 lần, nhưng bị giới hạn bởi Context
++    coordinator = AgentToolExecutionCoordinator(
++        Executor(),
++        retry_decider=lambda result, attempt: True,
++        max_attempts=5,
++    )
++
++    result = await coordinator.execute(context, req)
++
++    assert attempts == 2
++    assert result.retryable is True
++    assert result.metadata["attempt"] == 2
++    assert context.retry_attempts_used == 1
