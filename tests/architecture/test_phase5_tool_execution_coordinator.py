@@ -413,12 +413,13 @@ async def test_coordinator_caller_cancellation_does_not_cancel_shared_execution(
 
     started = asyncio.Event()
     finished = asyncio.Event()
+    allow_finish = asyncio.Event()
 
     class Executor:
         async def execute(self, context, request):
             started.set()
             try:
-                await asyncio.sleep(10)
+                await allow_finish.wait()
             except asyncio.CancelledError:
                 finished.set()
                 raise
@@ -436,6 +437,8 @@ async def test_coordinator_caller_cancellation_does_not_cancel_shared_execution(
         await first
 
     assert not finished.is_set()
+
+    allow_finish.set()
 
     result = await asyncio.wait_for(second, timeout=1)
     assert result.tool_call_id == req.tool_call_id

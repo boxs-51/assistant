@@ -23,6 +23,7 @@ class _ExecutionEntry:
     fingerprint: str
     waiters: int = 0
     cancel_requested: bool = False
+    cleanup_task: asyncio.Task[None] | None = None
 
 
 @dataclass(frozen=True)
@@ -130,22 +131,31 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                 task,
             )
         except BaseException:
-            cancel_task = False
             async with self._ledger_lock:
                 current = self._inflight.get(key)
+                cleanup_task: asyncio.Task[None] | None = None
                 if current is not None and current.task is task:
                     current.waiters -= 1
                     if current.waiters <= 0:
-                        current.cancel_requested = True
-                        if not task.done():
-                            task.cancel()
-                            cancel_task = True
-                        else:
-                            self._inflight.pop(key, None)
+                        if (
+                            current.cleanup_task is None
+                            or current.cleanup_task.done()
+                        ):
+                            current.cleanup_task = asyncio.create_task(
+                                self._cleanup_cancelled_entry(
+                                    key,
+                                    task,
+                                ),
+                                name=(
+                                    f"tool-cleanup:{request.execution_id}:"
+                                    f"{request.invocation_id}"
+                                ),
+                            )
+                        cleanup_task = current.cleanup_task
 
-            if cancel_task:
+            if cleanup_task is not None:
                 await asyncio.gather(
-                    task,
+                    cleanup_task,
                     return_exceptions=True,
                 )
             raise
@@ -162,6 +172,75 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                     )
 
         return result
+
+    async def _cleanup_cancelled_entry(
+        self,
+        key: tuple[str, str],
+        task: asyncio.Task[ToolExecutionResult],
+    ) -> None:
+        """Cancel a shared task only after already-scheduled callers can join.
+
+        ``asyncio.create_task()`` only schedules a caller; it does not execute
+        it immediately. The zero-yield hand-off prevents a caller cancellation
+        from cancelling the shared task before another already-created waiter
+        has registered itself.
+        """
+        await asyncio.sleep(0)
+
+        async with self._ledger_lock:
+            current = self._inflight.get(key)
+            if current is None or current.task is not task:
+                return
+
+            if current.waiters > 0:
+                current.cancel_requested = False
+                current.cleanup_task = None
+                return
+
+            current.cancel_requested = True
+            if not task.done():
+                task.cancel()
+
+        await asyncio.gather(
+            task,
+            return_exceptions=True,
+        )
+
+        async with self._ledger_lock:
+            current = self._inflight.get(key)
+            if current is not None and current.task is task:
+                self._inflight.pop(key, None)
+
+    async def _wait_for_task_cleanup(
+        self,
+        context: AgentExecutionContext,
+        request: ToolExecutionRequest,
+    ) -> None:
+        """Wait until cancellation cleanup for one invocation has settled."""
+        key = (request.execution_id, request.invocation_id)
+
+        async with self._ledger_lock:
+            current = self._inflight.get(key)
+            cleanup_task = (
+                current.cleanup_task
+                if current is not None
+                else None
+            )
+
+        if cleanup_task is not None:
+            await asyncio.gather(
+                cleanup_task,
+                return_exceptions=True,
+            )
+
+        async with self._ledger_lock:
+            current = self._inflight.get(key)
+            if (
+                current is not None
+                and current.task.done()
+                and current.waiters <= 0
+            ):
+                self._inflight.pop(key, None)
 
     @staticmethod
     def _request_fingerprint(
