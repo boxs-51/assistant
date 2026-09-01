@@ -51,18 +51,54 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         *,
         retry_decider: RetryDecider | None = None,
         max_attempts: int | None = None,
+        max_completed_entries: int | None = None,
     ) -> None:
         if max_attempts is not None and max_attempts < 1:
             raise ValueError("max_attempts must be >= 1 when provided.")
+        if max_completed_entries is not None and max_completed_entries < 1:
+            raise ValueError("max_completed_entries must be >= 1 when provided.")
         self._executor = executor
         self._retry_decider = retry_decider or self._never_retry
         self._max_attempts = max_attempts
+        self._max_completed_entries = max_completed_entries
         self._inflight: dict[tuple[str, str], _ExecutionEntry] = {}
         self._completed: dict[
             tuple[str, str],
             _CompletedEntry,
         ] = {}
         self._ledger_lock = asyncio.Lock()
+
+    def _record_completed(
+        self,
+        key: tuple[str, str],
+        entry: _CompletedEntry,
+    ) -> None:
+        """Record completed result with LRU bounded retention."""
+        if key in self._completed:
+            del self._completed[key]
+        self._completed[key] = entry
+        if (
+            self._max_completed_entries is not None
+            and len(self._completed) > self._max_completed_entries
+        ):
+            first_key = next(iter(self._completed))
+            del self._completed[first_key]
+
+    async def _run_execution(
+        self,
+        key: tuple[str, str],
+        fingerprint: str,
+        context: AgentExecutionContext,
+        request: ToolExecutionRequest,
+    ) -> ToolExecutionResult:
+        """Run execution task and guarantee result commit to completed ledger."""
+        result = await self._execute_once_or_retry(context, request)
+        async with self._ledger_lock:
+            self._record_completed(key, _CompletedEntry(result, fingerprint))
+            current = self._inflight.get(key)
+            if current is not None and current.task is asyncio.current_task():
+                self._inflight.pop(key, None)
+        return result
 
     async def execute(
         self,
@@ -75,7 +111,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         fingerprint = self._request_fingerprint(request)
 
         while True:
-            cleanup_task: asyncio.Task[ToolExecutionResult] | None = None
+            cleanup_task: asyncio.Task[None] | None = None
 
             async with self._ledger_lock:
                 completed = self._completed.get(key)
@@ -84,6 +120,8 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                         raise ValueError(
                             "Conflicting request for existing invocation_id."
                         )
+                    # Touch to update LRU order
+                    self._completed[key] = self._completed.pop(key)
                     return completed.result
 
                 existing = self._inflight.get(key)
@@ -100,7 +138,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                         task = existing.task
                 else:
                     task = asyncio.create_task(
-                        self._execute_once_or_retry(context, request),
+                        self._run_execution(key, fingerprint, context, request),
                         name=(
                             f"tool:{request.execution_id}:"
                             f"{request.invocation_id}"
@@ -133,7 +171,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         except BaseException:
             async with self._ledger_lock:
                 current = self._inflight.get(key)
-                cleanup_task: asyncio.Task[None] | None = None
+                cleanup_task_to_await: asyncio.Task[None] | None = None
                 if current is not None and current.task is task:
                     current.waiters -= 1
                     if current.waiters <= 0:
@@ -151,11 +189,11 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                                     f"{request.invocation_id}"
                                 ),
                             )
-                        cleanup_task = current.cleanup_task
+                        cleanup_task_to_await = current.cleanup_task
 
-            if cleanup_task is not None:
+            if cleanup_task_to_await is not None:
                 await asyncio.gather(
-                    cleanup_task,
+                    cleanup_task_to_await,
                     return_exceptions=True,
                 )
             raise
@@ -166,9 +204,12 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                 current.waiters -= 1
                 if task.done():
                     self._inflight.pop(key, None)
-                    self._completed[key] = _CompletedEntry(
-                        result=result,
-                        fingerprint=fingerprint,
+                    self._record_completed(
+                       key,
+                       _CompletedEntry(
+                           result=result,
+                           fingerprint=fingerprint,
+                        ),
                     )
 
         return result
@@ -441,6 +482,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                 cancellation_task,
                 return_exceptions=True,
             )
+
     async def _gather_tasks(
         self,
         tasks: Sequence[asyncio.Task[ToolExecutionResult]],

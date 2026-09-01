@@ -366,7 +366,7 @@ def offline_app():
 
     container = SimpleNamespace(
         config=config,
-        storage=SimpleNamespace(drivers={}, repositories={}),
+        storage=SimpleNamespace(drivers={}, repositories={},get_cache_driver=lambda: None),
         http_client=runtime._http_client,
         eventing_manager=SimpleNamespace(bus=bus, ws_manager=ws),
         event_bus=bus,

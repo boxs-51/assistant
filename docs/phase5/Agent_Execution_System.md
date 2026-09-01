@@ -1,5 +1,12 @@
 # Báo cáo Đánh giá Trạng thái & Lộ trình Triển khai Phase 5: Agent Execution System
 
+> **Canonical current status:** Phase 5.6 closure is governed by
+> [`PHASE5_6_EXIT_GATE.md`](./PHASE5_6_EXIT_GATE.md) and
+> `tests/architecture/test_phase5_6_exit_gate.py`.
+>
+> The matrix and narrative below are historical architecture-roadmap notes.
+> They must not be interpreted as the current Phase 5.6 release status.
+
 ## 1. Kết luận Tổng thể
 
 Trạng thái hiện tại của Phase 5 được đánh giá như sau:
