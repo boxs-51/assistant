@@ -64,7 +64,13 @@ from .tool.registry import ToolRegistry
 from .runtimes.capability.registry import CapabilityRegistry
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
-
+from .runtimes.agent.adapters import (
+    ContextBuilderAdapter,
+    ProviderInferenceAdapter,
+    CapabilityToolExecutionAdapter,
+    DefaultAgentExecutionPolicy,
+    RegistryAgentToolPolicy,
+)
 logger = structlog.get_logger(__name__)
 
 
@@ -225,6 +231,32 @@ async def bootstrap_runtime_kernel(
     # 4. Bootstrap Kernel (RuntimeContext tự động được khởi tạo bên trong)
     await kernel.bootstrap()
 
+    # Phase 5.1-5.4: establish canonical ports without changing the
+    # existing Phase 4 coordinator execution path. AgentRuntime is not
+    # implemented yet and remains the future consumer of these ports.
+    agent_tool_policy = RegistryAgentToolPolicy(
+        agent_registry=container.agent_registry,
+        capability_registry=container.capability_registry,
+        authorization=container.authorization_service,
+    )
+    agent_execution_policy = DefaultAgentExecutionPolicy()
+    container.agent_tool_policy = agent_tool_policy
+    container.agent_execution_policy = agent_execution_policy
+    container.context_builder_port = ContextBuilderAdapter(
+        container.context_runtime,
+        container.capability_runtime,
+        agent_tool_policy,
+    )
+    container.inference_port = ProviderInferenceAdapter(
+        container.provider_runtime,
+        container.http_client,
+    )
+    container.tool_execution_port = CapabilityToolExecutionAdapter(
+        container.capability_runtime,
+        agent_tool_policy,
+        agent_execution_policy,
+    )
+
     # Cấu hình Multi-Agent Executor
     async def execute_registered_agent_task(task):
         agent = container.agent_registry.get(task.assigned_agent_id)
@@ -241,6 +273,7 @@ async def bootstrap_runtime_kernel(
         )
         return response.model_dump()
 
+    # Compatibility execution path remains intact until Phase 5.5.
     container.multi_agent_coordinator.executor = execute_registered_agent_task
 
     logger.info("AI Runtime Kernel & Runtimes booted successfully.")

@@ -37,6 +37,7 @@ class CapabilityExecutionContext:
         timeout_seconds: float | None = None,
         attempt: int = 1,
         metadata: Optional[Dict[str, Any]] = None,
+        cancellation_event: asyncio.Event | None = None,
     ) -> "CapabilityExecutionContext":
         now = time.monotonic()
         deadline = now + timeout_seconds if timeout_seconds is not None else None
@@ -50,6 +51,7 @@ class CapabilityExecutionContext:
             deadline=deadline,
             attempt=attempt,
             metadata=dict(metadata or {}),
+            cancellation_event=cancellation_event or asyncio.Event(),
         )
 
     @property

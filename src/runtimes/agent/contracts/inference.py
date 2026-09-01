@@ -11,6 +11,8 @@ class InferenceMessage(BaseModel):
     role: str
     content: Any = None
     tool_calls: list["InferenceToolCall"] = Field(default_factory=list)
+    name: str | None = None
+    tool_call_id: str | None = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -36,7 +38,8 @@ class InferenceUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
-
+    tool_invocations: int = 0
+    estimated_cost_usd: float = 0.0
 
 class InferenceRequest(BaseModel):
     """Provider-neutral input to one model inference turn."""

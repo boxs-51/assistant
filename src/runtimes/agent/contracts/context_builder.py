@@ -27,8 +27,8 @@ class AgentContextSnapshot(BaseModel):
 
     execution_id: str
     iteration: int
-    messages: Sequence[InferenceMessage] = Field(default_factory=list)
-    tools: Sequence[InferenceToolDefinition] = Field(default_factory=list)
+    messages: tuple[InferenceMessage, ...] = ()
+    tools: tuple[InferenceToolDefinition, ...] = ()
     token_estimate: int = 0
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

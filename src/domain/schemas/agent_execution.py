@@ -34,7 +34,11 @@ class AgentExecutionLimits(GatewayBaseModel):
     max_iterations: int = 8
     max_tool_calls: int = 16
     max_parallel_agents: int = 4
+    max_parallel_tools: int = 4
     timeout_seconds: float = 60.0
+    iteration_timeout_seconds: float = 20.0
+    inference_timeout_seconds: float = 15.0
+    tool_timeout_seconds: float = 10.0
     max_cost: Optional[float] = None
 
 

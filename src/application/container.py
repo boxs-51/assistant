@@ -40,6 +40,11 @@ class ApplicationContainer:
     agent_registry: Optional[Any] = None
     tool_registry: Optional[Any] = None
     multi_agent_coordinator: Optional[Any] = None
+    agent_tool_policy: Optional[Any] = None
+    agent_execution_policy: Optional[Any] = None
+    inference_port: Optional[Any] = None
+    tool_execution_port: Optional[Any] = None
+    context_builder_port: Optional[Any] = None
 
     metrics: Optional[Any] = None
     tracer: Optional[Any] = None

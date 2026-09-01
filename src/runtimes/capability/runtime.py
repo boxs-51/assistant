@@ -228,6 +228,7 @@ class CapabilityRuntime(BaseRuntime):
         session_id: str | None = None,
         workflow_id: str | None = None,
         timeout_seconds: float | None = None,
+        cancellation_event: asyncio.Event | None = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> CapabilityResult:
         started = time.perf_counter()
@@ -244,6 +245,7 @@ class CapabilityRuntime(BaseRuntime):
             session_id=session_id,
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
+            cancellation_event=cancellation_event,
             metadata=metadata,
         )
 
@@ -253,17 +255,32 @@ class CapabilityRuntime(BaseRuntime):
             invocation_id=context.invocation_id,
         )
         started_at = datetime.now(timezone.utc)
+        driver_task = asyncio.create_task(
+            driver.execute(context, dict(arguments)),
+            name=f"capability:{capability_id}:{context.invocation_id}",
+        )
+        cancellation_task = asyncio.create_task(
+            context.cancellation_event.wait(),
+            name=f"capability-cancel:{context.invocation_id}",
+        )
         try:
             if context.cancelled:
                 raise asyncio.CancelledError()
-            driver_task = driver.execute(context, dict(arguments))
-            if context.remaining_seconds is not None:
-                raw_output = await asyncio.wait_for(
-                    driver_task,
-                    timeout=context.remaining_seconds,
-                )
-            else:
+            done, pending = await asyncio.wait(
+                {driver_task, cancellation_task},
+                timeout=context.remaining_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if driver_task in done:
                 raw_output = await driver_task
+            elif cancellation_task in done:
+                driver_task.cancel()
+                await asyncio.gather(driver_task, return_exceptions=True)
+                raise asyncio.CancelledError()
+            else:
+                driver_task.cancel()
+                await asyncio.gather(driver_task, return_exceptions=True)
+                raise asyncio.TimeoutError()
         except asyncio.TimeoutError as exc:
             raise CapabilityError(
                 code="CAPABILITY_TIMEOUT",
@@ -294,6 +311,9 @@ class CapabilityRuntime(BaseRuntime):
                 capability_id=capability_id,
                 invocation_id=context.invocation_id,
             ) from exc
+        finally:
+            cancellation_task.cancel()
+            await asyncio.gather(cancellation_task, return_exceptions=True)
 
         completed_at = time.perf_counter()
         completed_at_utc = datetime.now(timezone.utc)
