@@ -1,0 +1,75 @@
+*** Update File: src/runtimes/capability/contracts/definition.py
+ from typing import Any, Dict, List
+ 
+-from jsonschema import check_schema
++from jsonschema.exceptions import SchemaError
++from jsonschema.validators import validator_for
+from pydantic import BaseModel, ConfigDict, Field
+
+-
++class InvalidCapabilitySchemaError(ValueError):
++    """Ngoại lệ riêng cho JSON Schema không hợp lệ."""
++    pass
++
++
+def validate_input_schema(schema: Dict[str, Any]) -> None:
+     """Fail closed for invalid capability input JSON Schemas."""
+-    check_schema(dict(schema))
++    schema_dict = dict(schema)
++    
++    try:
++        validator_cls = validator_for(schema_dict)
++        validator_cls.check_schema(schema_dict)
++    except SchemaError as e:
++        # Lấy vị trí thuộc tính bị lỗi trong schema (nếu có)
++        path = " -> ".join(str(p) for p in e.path) if e.path else "root"
++        
++        # Tạo error message tùy chỉnh
++        custom_message = (
++            f"[Capability Error] JSON Schema không hợp lệ tại '{path}': {e.message}"
++        )
++        raise InvalidCapabilitySchemaError(custom_message) from e
+*** Update File: src/runtimes/agent/adapters/tool.py
+@@
+             if context.tool_calls_used >= context.limits.max_tool_calls:
+                 return self._denied(request, AGENT_TOOL_BUDGET_EXCEEDED)
+             return self._denied(request, AGENT_TOOL_POLICY_DENIED)
+
+-        # Do not reveal global registry membership for a capability that was
+-        # never requested/exposed to this agent. Only agent-requested tools may
+-        # produce the more precise CAPABILITY_NOT_FOUND result.
+-        requested_tools = set(context.agent.tools or []) if context.agent else set()
+-        if request.capability_id not in requested_tools:
+-            return self._denied(request, AGENT_TOOL_NOT_VISIBLE)
+-
++        # 1. Kiểm tra sự tồn tại trong global registry trước (CAPABILITY_NOT_FOUND)
+         record = self._capability_runtime.registry.get(request.capability_id)
+         if record is None or not record.executable:
+             return self._denied(request, CAPABILITY_NOT_FOUND)
+
++        # 2. Kiểm tra quyền hiển thị đối với Agent cụ thể (AGENT_TOOL_NOT_VISIBLE)
+         if (
+             self._tool_policy.is_visible(
+                 agent_id=context.agent_id,
+@@
+     @staticmethod
+     def _failure(
+         request: ToolExecutionRequest,
+         *,
+         code: str,
+         message: str,
+         retryable: bool,
++        metadata: dict[str, Any] | None = None,
+     ) -> ToolExecutionResult:
+         return ToolExecutionResult(
+             execution_id=request.execution_id,
+             iteration=request.iteration,
+             invocation_id=request.invocation_id,
+             tool_call_id=request.tool_call_id,
+             capability_id=request.capability_id,
+             success=False,
+             error_code=code,
+             error_message=message,
+             retryable=retryable,
++            metadata=dict(metadata or {}),
+         )

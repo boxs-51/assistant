@@ -4,8 +4,6 @@ import asyncio
 import uuid
 from typing import Any, Sequence
 
-from jsonschema import SchemaError, ValidationError, validate
-
 from ..contracts.context import AgentExecutionContext
 from ..contracts.policy import (
     AgentExecutionPolicy,
@@ -17,6 +15,19 @@ from ..contracts.tool import (
     ToolExecutionRequest,
     ToolExecutionResult,
 )
+from ..tool_execution.errors import (
+   AGENT_TOOL_BUDGET_EXCEEDED,
+   AGENT_TOOL_NOT_VISIBLE,
+   AGENT_TOOL_POLICY_DENIED,
+   CAPABILITY_INVALID_ARGUMENT,
+   CAPABILITY_NOT_FOUND,
+   CAPABILITY_UNAUTHORIZED,
+    normalize_tool_exception,
+)
+from ..tool_execution.validator import (
+   JsonSchemaToolArgumentValidator,
+   ToolArgumentValidator,
+)
 
 
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
@@ -27,10 +38,12 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         capability_runtime: Any,
         tool_policy: AgentToolPolicy,
         execution_policy: AgentExecutionPolicy,
+        argument_validator: ToolArgumentValidator | None = None,
     ) -> None:
         self._capability_runtime = capability_runtime
         self._tool_policy = tool_policy
         self._execution_policy = execution_policy
+        self._argument_validator = argument_validator or JsonSchemaToolArgumentValidator()
 
     async def execute(
         self,
@@ -47,9 +60,15 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             is not PolicyDecision.ALLOW
         ):
             if context.tool_calls_used >= context.limits.max_tool_calls:
-                return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
-            return self._denied(request, "AGENT_TOOL_POLICY_DENIED")
+                return self._denied(request, AGENT_TOOL_BUDGET_EXCEEDED)
+            return self._denied(request, AGENT_TOOL_POLICY_DENIED)
 
+        # 1. Kiểm tra sự tồn tại trong global registry trước (CAPABILITY_NOT_FOUND)
+        record = self._capability_runtime.registry.get(request.capability_id)
+        if record is None or not record.executable:
+            return self._denied(request, CAPABILITY_NOT_FOUND)
+
+        # 2. Kiểm tra quyền hiển thị đối với Agent cụ thể (AGENT_TOOL_NOT_VISIBLE)
         if (
             self._tool_policy.is_visible(
                 agent_id=context.agent_id,
@@ -57,7 +76,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             )
             is not True
         ):
-            return self._denied(request, "AGENT_TOOL_NOT_VISIBLE")
+            return self._denied(request, AGENT_TOOL_NOT_VISIBLE)
 
         if (
             self._tool_policy.authorize(
@@ -67,30 +86,19 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             )
             is not PolicyDecision.ALLOW
         ):
-            return self._denied(request, "CAPABILITY_UNAUTHORIZED")
+            return self._denied(request, CAPABILITY_UNAUTHORIZED)
 
         context.ensure_active()
-        record = self._capability_runtime.registry.get(request.capability_id)
-        if record is None or not record.executable:
-            return self._denied(request, "CAPABILITY_NOT_FOUND")
-
-        try:
-            validate(
-                instance=request.arguments,
-                schema=record.definition.input_schema or {"type": "object"},
-            )
-        except ValidationError as exc:
+        validation = self._argument_validator.validate(
+            record.definition,
+            request.arguments,
+        )
+        if not validation.valid:
+            code = validation.error_code or CAPABILITY_INVALID_ARGUMENT
             return self._failure(
                 request,
-                code="CAPABILITY_INVALID_ARGUMENT",
-                message=str(exc.message),
-                retryable=False,
-            )
-        except SchemaError as exc:
-            return self._failure(
-                request,
-                code="CAPABILITY_SCHEMA_INVALID",
-                message=str(exc),
+                code=code,
+                message=validation.error_message or code,
                 retryable=False,
             )
 
@@ -140,11 +148,17 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         except asyncio.CancelledError:
             raise
         except Exception as exc:
+            normalized = normalize_tool_exception(
+                exc,
+                capability_id=request.capability_id,
+                invocation_id=request.invocation_id,
+            )
             return self._failure(
                 request,
-                code=getattr(exc, "code", type(exc).__name__),
-                message=str(exc),
-                retryable=bool(getattr(exc, "retryable", False)),
+                code=normalized.code,
+                message=normalized.message,
+                retryable=normalized.retryable,
+                metadata=dict(normalized.details),
             )
 
     async def execute_many(
@@ -154,21 +168,10 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         *,
         max_parallel: int,
     ) -> Sequence[ToolExecutionResult]:
+        """Compatibility batch API; canonical concurrency belongs to coordinator."""
         if max_parallel < 1:
             raise ValueError("max_parallel must be >= 1.")
-        semaphore = asyncio.Semaphore(
-            min(max_parallel, context.limits.max_parallel_tools)
-        )
-
-        async def run_one(request: ToolExecutionRequest) -> ToolExecutionResult:
-            async with semaphore:
-                return await self.execute(context, request)
-
-        return list(
-            await asyncio.gather(
-                *(run_one(request) for request in requests)
-            )
-        )
+        return [await self.execute(context, request) for request in requests]
 
     @staticmethod
     def new_request(
@@ -206,6 +209,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         code: str,
         message: str,
         retryable: bool,
+        metadata: dict[str, Any] | None = None,
     ) -> ToolExecutionResult:
         return ToolExecutionResult(
             execution_id=request.execution_id,
@@ -217,4 +221,5 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             error_code=code,
             error_message=message,
             retryable=retryable,
+            metadata=dict(metadata or {}),
         )

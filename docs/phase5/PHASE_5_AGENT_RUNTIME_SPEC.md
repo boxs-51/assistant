@@ -332,31 +332,64 @@ src/runtimes/agent/tool_execution/
 
 ---
 
-## 8. Phase 5.7 — Argument Validation
+## 8. Phase 5.7 — Tool Argument Validation & Error Contract Hardening
 
-Tool definition đã có `CapabilityDefinition.input_schema`, nhưng `CapabilityRuntime.execute_capability()` hiện chủ yếu đưa arguments xuống driver.
+Phase 5.7 hardens the existing canonical Agent tool boundary. It does not
+change the `AgentRuntime` contract and does not introduce Phase 5.8 retry or
+bounded-concurrency behavior.
 
-**Flow xử lý tại Agent Runtime:**
-
+**Canonical flow:**
+ 
 ```text
-LLM arguments
-   ↓
-JSON parse
-   ↓
-Schema validation
-   ↓
-Authorization
-   ↓
-Capability execution
+provider argument parsing
+        ↓
+ToolExecutionRequest
+        ↓
+agent-requested tool check
+        ↓
+capability existence/executability
+        ↓
+Agent visibility
+        ↓
+authorization
+        ↓
+JSON Schema validation
+        ↓
+budget/deadline admission
+        ↓
+CapabilityRuntime
 ```
 
-**Error contract:**
+**Ordering invariants:**
+
+- A capability outside the agent-requested tool set is `AGENT_TOOL_NOT_VISIBLE`;
+  global registry membership must not be observable from this path.
+- A requested but missing/unavailable capability is `CAPABILITY_NOT_FOUND`.
+- Invalid arguments are `CAPABILITY_INVALID_ARGUMENT` and are never dispatched
+  to a capability driver.
+- Invalid capability schemas fail closed during registry registration and are
+  still defensively rejected by the Agent validator.
+- `CapabilityError` instances from CapabilityRuntime preserve their canonical
+  error code and retryability. Unknown driver exceptions normalize to
+  `CAPABILITY_EXECUTION_FAILED`; their optional original code is diagnostic
+  metadata only.
+- Validation failures are non-retryable.
+
+**Public Agent tool error contract:**
 - `CAPABILITY_NOT_FOUND`
 - `CAPABILITY_UNAUTHORIZED`
 - `CAPABILITY_INVALID_ARGUMENT`
 - `CAPABILITY_TIMEOUT`
 - `CAPABILITY_CANCELLED`
 - `CAPABILITY_EXECUTION_FAILED`
+
+`CAPABILITY_SCHEMA_INVALID` is an internal configuration/schema failure and
+is not a retryable tool-execution result.
+
+`AgentToolExecutionCoordinator` remains the owner of batch concurrency,
+deduplication, retry orchestration and result ordering. The adapter's
+`execute_many()` is compatibility-only and does not introduce a second
+concurrency authority.
 
 Repo hiện đã có `CapabilityError`, nên tiếp tục dùng contract đó thay vì tạo exception hierarchy mới.
 

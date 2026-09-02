@@ -1,0 +1,614 @@
+*** Begin Patch
+*** Add File: src/runtimes/agent/tool_execution/errors.py
++from __future__ import annotations
++
++CAPABILITY_NOT_FOUND = "CAPABILITY_NOT_FOUND"
++CAPABILITY_UNAUTHORIZED = "CAPABILITY_UNAUTHORIZED"
++CAPABILITY_INVALID_ARGUMENT = "CAPABILITY_INVALID_ARGUMENT"
++CAPABILITY_SCHEMA_INVALID = "CAPABILITY_SCHEMA_INVALID"
++CAPABILITY_TIMEOUT = "CAPABILITY_TIMEOUT"
++CAPABILITY_CANCELLED = "CAPABILITY_CANCELLED"
++CAPABILITY_EXECUTION_FAILED = "CAPABILITY_EXECUTION_FAILED"
++
++AGENT_TOOL_POLICY_DENIED = "AGENT_TOOL_POLICY_DENIED"
++AGENT_TOOL_NOT_VISIBLE = "AGENT_TOOL_NOT_VISIBLE"
++AGENT_TOOL_BUDGET_EXCEEDED = "AGENT_TOOL_BUDGET_EXCEEDED"
++
++CANONICAL_TOOL_ERROR_CODES = frozenset(
++    {
++        CAPABILITY_NOT_FOUND,
++        CAPABILITY_UNAUTHORIZED,
++        CAPABILITY_INVALID_ARGUMENT,
++        CAPABILITY_TIMEOUT,
++        CAPABILITY_CANCELLED,
++        CAPABILITY_EXECUTION_FAILED,
++        AGENT_TOOL_POLICY_DENIED,
++        AGENT_TOOL_NOT_VISIBLE,
++        AGENT_TOOL_BUDGET_EXCEEDED,
++    }
++)
++
++INTERNAL_TOOL_ERROR_CODES = frozenset({CAPABILITY_SCHEMA_INVALID})
++
+*** Add File: src/runtimes/agent/tool_execution/validator.py
++from __future__ import annotations
++
++from dataclasses import dataclass
++from typing import Any, Mapping, Protocol
++
++from jsonschema import SchemaError, ValidationError, validate
++
++from ....runtimes.capability.contracts.definition import (
++    CapabilityDefinition,
++    validate_input_schema,
++)
++from .errors import CAPABILITY_INVALID_ARGUMENT, CAPABILITY_SCHEMA_INVALID
++
++
++def normalized_input_schema(definition: CapabilityDefinition) -> dict[str, Any]:
++    """Return the schema used by the Agent tool execution boundary."""
++    return dict(definition.input_schema or {"type": "object"})
++
++
++@dataclass(frozen=True, slots=True)
++class ToolArgumentValidationResult:
++    valid: bool
++    error_code: str | None = None
++    error_message: str | None = None
++
++    @classmethod
++    def ok(cls) -> "ToolArgumentValidationResult":
++        return cls(valid=True)
++
++    @classmethod
++    def invalid(cls, message: str) -> "ToolArgumentValidationResult":
++        return cls(
++            valid=False,
++            error_code=CAPABILITY_INVALID_ARGUMENT,
++            error_message=message,
++        )
++
++    @classmethod
++    def invalid_schema(cls, message: str) -> "ToolArgumentValidationResult":
++        return cls(
++            valid=False,
++            error_code=CAPABILITY_SCHEMA_INVALID,
++            error_message=message,
++        )
++
++
++class ToolArgumentValidator(Protocol):
++    def validate(
++        self,
++        definition: CapabilityDefinition,
++        arguments: Mapping[str, Any],
++    ) -> ToolArgumentValidationResult:
++        ...
++
++
++class JsonSchemaToolArgumentValidator:
++    """Pure validation with no capability side effects."""
++
++    def validate(
++        self,
++        definition: CapabilityDefinition,
++        arguments: Mapping[str, Any],
++    ) -> ToolArgumentValidationResult:
++        schema = normalized_input_schema(definition)
++        try:
++            validate_input_schema(schema)
++            validate(instance=dict(arguments), schema=schema)
++        except ValidationError as exc:
++            return ToolArgumentValidationResult.invalid(str(exc.message))
++        except SchemaError as exc:
++            return ToolArgumentValidationResult.invalid_schema(str(exc))
++        return ToolArgumentValidationResult.ok()
++
+*** Update File: src/runtimes/agent/tool_execution/__init__.py
+@@
+ from .coordinator import AgentToolExecutionCoordinator
++from .validator import (
++    JsonSchemaToolArgumentValidator,
++    ToolArgumentValidationResult,
++    ToolArgumentValidator,
++)
+ 
+-__all__ = ["AgentToolExecutionCoordinator"]
++__all__ = [
++    "AgentToolExecutionCoordinator",
++    "JsonSchemaToolArgumentValidator",
++    "ToolArgumentValidationResult",
++    "ToolArgumentValidator",
++]
+*** Update File: src/runtimes/capability/contracts/definition.py
+@@
+ from typing import Any, Dict, List
+ 
++from jsonschema import check_schema
+ from pydantic import BaseModel, ConfigDict, Field
++
++
++def validate_input_schema(schema: Dict[str, Any]) -> None:
++    """Fail closed for invalid capability input JSON Schemas."""
++    check_schema(dict(schema))
+*** Update File: src/runtimes/capability/registry.py
+@@
+-from .contracts.definition import CapabilityDefinition
++from .contracts.definition import CapabilityDefinition, validate_input_schema
+@@
+     def register_capability(self, driver: BaseCapabilityDriver):
+         definition = driver.definition
+         capability_id = definition.capability_id
++        validate_input_schema(definition.input_schema or {"type": "object"})
+         with self._lock:
+@@
+     def register_definition(self, definition: CapabilityDefinition):
+         """Compatibility/discovery registration without claiming executability."""
+         capability_id = definition.capability_id
++        validate_input_schema(definition.input_schema or {"type": "object"})
+         with self._lock:
+*** Update File: src/runtimes/agent/adapters/tool.py
+@@
+ from __future__ import annotations
+ 
+ import asyncio
+ import uuid
+ from typing import Any, Sequence
+ 
+-from jsonschema import SchemaError, ValidationError, validate
+-
++from ....runtimes.capability.contracts.error import CapabilityError
+ from ..contracts.context import AgentExecutionContext
+@@
+ from ..contracts.tool import (
+     ToolExecutionPort,
+     ToolExecutionRequest,
+     ToolExecutionResult,
+ )
++from ..tool_execution.errors import (
++    AGENT_TOOL_BUDGET_EXCEEDED,
++    AGENT_TOOL_NOT_VISIBLE,
++    AGENT_TOOL_POLICY_DENIED,
++    CAPABILITY_INVALID_ARGUMENT,
++    CAPABILITY_NOT_FOUND,
++    CAPABILITY_SCHEMA_INVALID,
++    CAPABILITY_UNAUTHORIZED,
++)
++from ..tool_execution.validator import (
++    JsonSchemaToolArgumentValidator,
++    ToolArgumentValidator,
++)
+@@
+     def __init__(
+         self,
+         capability_runtime: Any,
+         tool_policy: AgentToolPolicy,
+         execution_policy: AgentExecutionPolicy,
++        argument_validator: ToolArgumentValidator | None = None,
+     ) -> None:
+         self._capability_runtime = capability_runtime
+         self._tool_policy = tool_policy
+         self._execution_policy = execution_policy
++        self._argument_validator = argument_validator or JsonSchemaToolArgumentValidator()
+@@
+         if (
+             self._execution_policy.check_tool_call(context, request)
+             is not PolicyDecision.ALLOW
+         ):
+             if context.tool_calls_used >= context.limits.max_tool_calls:
+-                return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
+-            return self._denied(request, "AGENT_TOOL_POLICY_DENIED")
++                return self._denied(request, AGENT_TOOL_BUDGET_EXCEEDED)
++            return self._denied(request, AGENT_TOOL_POLICY_DENIED)
++
++        record = self._capability_runtime.registry.get(request.capability_id)
++        if record is None or not record.executable:
++            return self._denied(request, CAPABILITY_NOT_FOUND)
+ 
+         if (
+             self._tool_policy.is_visible(
+@@
+             )
+             is not True
+         ):
+-            return self._denied(request, "AGENT_TOOL_NOT_VISIBLE")
++            return self._denied(request, AGENT_TOOL_NOT_VISIBLE)
+@@
+             )
+             is not PolicyDecision.ALLOW
+         ):
+-            return self._denied(request, "CAPABILITY_UNAUTHORIZED")
++            return self._denied(request, CAPABILITY_UNAUTHORIZED)
+ 
+         context.ensure_active()
+-        record = self._capability_runtime.registry.get(request.capability_id)
+-        if record is None or not record.executable:
+-            return self._denied(request, "CAPABILITY_NOT_FOUND")
+-
+-        try:
+-            validate(
+-                instance=request.arguments,
+-                schema=record.definition.input_schema or {"type": "object"},
+-            )
+-        except ValidationError as exc:
+-            return self._failure(
+-                request,
+-                code="CAPABILITY_INVALID_ARGUMENT",
+-                message=str(exc.message),
+-                retryable=False,
+-            )
+-        except SchemaError as exc:
++        validation = self._argument_validator.validate(
++            record.definition,
++            request.arguments,
++        )
++        if not validation.valid:
++            code = validation.error_code or CAPABILITY_INVALID_ARGUMENT
+             return self._failure(
+                 request,
+-                code="CAPABILITY_SCHEMA_INVALID",
+-                message=str(exc),
++                code=code,
++                message=validation.error_message or code,
+                 retryable=False,
+             )
+@@
+         except asyncio.CancelledError:
+             raise
+         except Exception as exc:
++            normalized = (
++                exc
++                if isinstance(exc, CapabilityError)
++                else CapabilityError.from_exception(
++                    exc,
++                    capability_id=request.capability_id,
++                    invocation_id=request.invocation_id,
++                )
++            )
+             return self._failure(
+                 request,
+-                code=getattr(exc, "code", type(exc).__name__),
+-                message=str(exc),
+-                retryable=bool(getattr(exc, "retryable", False)),
++                code=normalized.code,
++                message=normalized.message,
++                retryable=normalized.retryable,
+             )
+@@
+     async def execute_many(
+@@
+     ) -> Sequence[ToolExecutionResult]:
++        """Compatibility batch API; canonical concurrency belongs to coordinator."""
+         if max_parallel < 1:
+             raise ValueError("max_parallel must be >= 1.")
+-        semaphore = asyncio.Semaphore(
+-            min(max_parallel, context.limits.max_parallel_tools)
+-        )
+-
+-        async def run_one(request: ToolExecutionRequest) -> ToolExecutionResult:
+-            async with semaphore:
+-                return await self.execute(context, request)
+-
+-        return list(
+-            await asyncio.gather(
+-                *(run_one(request) for request in requests)
+-            )
+-        )
++        return [
++            await self.execute(context, request)
++            for request in requests
++        ]
+*** Update File: src/runtimes/agent/adapters/inference.py
+@@
+ from .messages import inference_message_to_provider, jsonable
+ 
+ 
++class ToolArgumentParseError(ValueError):
++    """Provider argument parse failure with a stable Agent error code."""
++
++    code = "CAPABILITY_INVALID_ARGUMENT"
++
++
+ class ProviderInferenceAdapter(InferencePort):
+@@
+     def _parse_arguments(value: Any) -> dict[str, Any]:
+         import json
+         if value in (None, ""):
+             return {}
+         if isinstance(value, dict):
+             return value
+-        parsed = json.loads(value)
++        try:
++            parsed = json.loads(value)
++        except (TypeError, ValueError) as exc:
++            raise ToolArgumentParseError(
++                "Tool call arguments must contain valid JSON."
++            ) from exc
+         if not isinstance(parsed, dict):
+-            raise ValueError("Tool call arguments must decode to an object.")
++            raise ToolArgumentParseError(
++                "Tool call arguments must decode to a JSON object."
++            )
+         return parsed
+*** Update File: tests/architecture/test_phase5_adapters.py
+@@
+ async def test_tool_adapter_validates_and_denies_before_capability_execution():
+@@
+     assert result.error_code == "CAPABILITY_INVALID_ARGUMENT"
+     assert calls == 0
++
++
++@pytest.mark.asyncio
++async def test_tool_adapter_distinguishes_not_found_from_not_visible():
++    registry = CapabilityRegistry()
++    runtime = CapabilityRuntime(
++        registry=registry,
++        authorization=AuthorizationService(),
++    )
++    agents = AgentRegistry()
++    agents.register(
++        AgentDefinition(
++            name="agent-v3",
++            goal="test",
++            instruction="test",
++            tools=[],
++        )
++    )
++    policy = RegistryAgentToolPolicy(
++        agents, registry, AuthorizationService()
++    )
++    adapter = CapabilityToolExecutionAdapter(
++        runtime, policy, DefaultAgentExecutionPolicy()
++    )
++    context = make_context(tools=[])
++
++    missing = await adapter.execute(
++        context,
++        ToolExecutionRequest(
++            execution_id=context.execution_id,
++            iteration=1,
++            invocation_id="inv-missing",
++            tool_call_id="call-missing",
++            capability_id="missing.tool",
++            arguments={},
++        ),
++    )
++    assert missing.error_code == "CAPABILITY_NOT_FOUND"
++
++    async def hidden(**kwargs):
++        return "never"
++
++    registry.register_capability(
++        PythonCapabilityDriver(
++            CapabilityDefinition(
++                id="hidden.tool",
++                name="hidden.tool",
++                description="hidden",
++                input_schema={"type": "object"},
++            ),
++            hidden,
++        )
++    )
++
++    hidden_result = await adapter.execute(
++        context,
++        ToolExecutionRequest(
++            execution_id=context.execution_id,
++            iteration=1,
++            invocation_id="inv-hidden",
++            tool_call_id="call-hidden",
++            capability_id="hidden.tool",
++            arguments={},
++        ),
++    )
++    assert hidden_result.error_code == "AGENT_TOOL_NOT_VISIBLE"
++
++
++@pytest.mark.asyncio
++async def test_tool_adapter_normalizes_generic_driver_failure():
++    registry = CapabilityRegistry()
++
++    async def fail(**kwargs):
++        raise RuntimeError("internal failure")
++
++    registry.register_capability(
++        PythonCapabilityDriver(
++            CapabilityDefinition(
++                id="generic.failure",
++                name="generic.failure",
++                description="failure",
++                input_schema={"type": "object"},
++            ),
++            fail,
++        )
++    )
++    capability_runtime = CapabilityRuntime(
++        registry=registry,
++        authorization=AuthorizationService(),
++    )
++    agents = AgentRegistry()
++    agents.register(
++        AgentDefinition(
++            name="agent-v3",
++            goal="test",
++            instruction="test",
++            tools=["generic.failure"],
++        )
++    )
++    policy = RegistryAgentToolPolicy(
++        agents, registry, AuthorizationService()
++    )
++    adapter = CapabilityToolExecutionAdapter(
++        capability_runtime,
++        policy,
++        DefaultAgentExecutionPolicy(),
++    )
++
++    result = await adapter.execute(
++        make_context(tools=["generic.failure"]),
++        ToolExecutionRequest(
++            execution_id="exec-v3",
++            iteration=1,
++            invocation_id="inv-generic",
++            tool_call_id="call-generic",
++            capability_id="generic.failure",
++            arguments={},
++        ),
++    )
++
++    assert result.success is False
++    assert result.error_code == "CAPABILITY_EXECUTION_FAILED"
++
++
++def test_capability_registry_rejects_invalid_schema():
++    registry = CapabilityRegistry()
++
++    async def noop(**kwargs):
++        return None
++
++    definition = CapabilityDefinition(
++        id="invalid.schema",
++        name="invalid.schema",
++        description="invalid",
++        input_schema={"type": 123},
++    )
++
++    with pytest.raises(Exception):
++        registry.register_capability(
++            PythonCapabilityDriver(definition, noop)
++        )
++
++
++def test_provider_adapter_rejects_malformed_tool_arguments_with_canonical_code():
++    with pytest.raises(Exception) as exc:
++        ProviderInferenceAdapter._parse_arguments("{broken-json")
++    assert getattr(exc.value, "code", None) == "CAPABILITY_INVALID_ARGUMENT"
++
++    with pytest.raises(Exception) as exc:
++        ProviderInferenceAdapter._parse_arguments("[1, 2, 3]")
++    assert getattr(exc.value, "code", None) == "CAPABILITY_INVALID_ARGUMENT"
+@@
+-    assert peak == 2
++    assert peak == 1
+*** Update File: tests/architecture/test_phase5_runtime.py
+@@
+ async def test_agent_runtime_single_final_answer():
+@@
+     assert result.iterations[0].state is AgentLoopState.COMPLETED
++
++
++@pytest.mark.asyncio
++async def test_agent_runtime_surfaces_malformed_tool_arguments_as_canonical_error():
++    context = make_context()
++
++    class ParseFailingInference:
++        async def complete(self, request):
++            from src.runtimes.agent.adapters.inference import ToolArgumentParseError
++
++            raise ToolArgumentParseError(
++                "Tool call arguments must contain valid JSON."
++            )
++
++    runtime = AgentRuntime(
++        context_builder=ContextBuilderAdapter(
++            EmptyContextRuntime(),
++            CapabilityRuntime(
++                registry=CapabilityRegistry(),
++                authorization=AuthorizationService(),
++            ),
++            RegistryAgentToolPolicy(
++                AgentRegistry(),
++                CapabilityRegistry(),
++                AuthorizationService(),
++            ),
++        ),
++        inference=ParseFailingInference(),
++        tool_execution=ScriptedToolPort([]),
++        execution_policy=DefaultAgentExecutionPolicy(),
++    )
++
++    result = await runtime.execute(context)
++
++    assert result.state is AgentLoopState.FAILED
++    assert result.error_code == "CAPABILITY_INVALID_ARGUMENT"
+*** Update File: docs/phase5/PHASE_5_AGENT_RUNTIME_SPEC.md
+@@
+-## 8. Phase 5.7 — Argument Validation
+-
+-Tool definition đã có `CapabilityDefinition.input_schema`, nhưng `CapabilityRuntime.execute_capability()` hiện chủ yếu đưa arguments xuống driver.
+-
+-**Flow xử lý tại Agent Runtime:**
++## 8. Phase 5.7 — Tool Argument Validation & Error Contract Hardening
++
++Phase 5.7 hardens the existing canonical Agent tool boundary. It does not
++change `AgentRuntime` and does not introduce retry/concurrency semantics from
++later phases.
++
++**Canonical flow:**
+ 
+ ```text
+-LLM arguments
+-   ↓
+-JSON parse
+-   ↓
+-Schema validation
+-   ↓
+-Authorization
+-   ↓
+-Capability execution
++provider argument parsing
++        ↓
++ToolExecutionRequest
++        ↓
++capability existence
++        ↓
++Agent visibility
++        ↓
++authorization
++        ↓
++JSON Schema validation
++        ↓
++budget/deadline admission
++        ↓
++CapabilityRuntime
+ ```
+ 
+-**Error contract:**
++**Ordering invariants:**
++
++- Unknown capability → `CAPABILITY_NOT_FOUND`.
++- Existing capability not exposed to the agent → `AGENT_TOOL_NOT_VISIBLE`.
++- Invalid arguments → `CAPABILITY_INVALID_ARGUMENT` and driver dispatch count
++  must remain zero.
++- Invalid capability schemas fail closed during registry registration and are
++  still defensively rejected by the Agent validator.
++- Generic execution exceptions normalize to `CAPABILITY_EXECUTION_FAILED`;
++  arbitrary Python exception type names are not Agent tool error codes.
++- Validation failures are non-retryable.
++
++**Error contract:**
+ - `CAPABILITY_NOT_FOUND`
+ - `CAPABILITY_UNAUTHORIZED`
+ - `CAPABILITY_INVALID_ARGUMENT`
+ - `CAPABILITY_TIMEOUT`
+ - `CAPABILITY_CANCELLED`
+ - `CAPABILITY_EXECUTION_FAILED`
++
++`CAPABILITY_SCHEMA_INVALID` is an internal/configuration failure, not a
++retryable tool-execution result.
++
++`AgentToolExecutionCoordinator` remains the owner of batch concurrency,
++deduplication, retry orchestration and result ordering. The adapter's
++`execute_many()` is compatibility-only and does not create a second
++concurrency authority in Phase 5.7.
+*** Update File: docs/phase5/Agent_Execution_System.md
+@@
+ > The matrix and narrative below are historical architecture-roadmap notes.
+ > They must not be interpreted as the current Phase 5.6 release status.
++
++> **Current Phase 5.7 note:** the repository now contains the explicit
++> `ToolArgumentValidator` boundary, fail-closed capability-schema validation,
++> canonical tool error normalization, and provider argument parse errors. The
++> historical Phase 5.7 retry/timeout wording in this document is superseded;
++> those concerns remain outside this Phase 5.7 patch.
+*** End Patch

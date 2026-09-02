@@ -7,6 +7,19 @@
 > The matrix and narrative below are historical architecture-roadmap notes.
 > They must not be interpreted as the current Phase 5.6 release status.
 
+> **Current Phase 5.7 note:** the canonical tool boundary now has an explicit
+> `ToolArgumentValidator`, fail-closed capability-schema validation,
+> agent-scoped existence/visibility checks, canonical downstream error
+> normalization, and provider-side malformed-argument errors. The historical
+> Phase 5.7 retry/timeout/cancellation sections in this document are superseded
+> for the current implementation; those concerns remain outside this patch.
+
+> **Current Phase 5.7 note:** the repository now contains the explicit
+> `ToolArgumentValidator` boundary, fail-closed capability-schema validation,
+> canonical tool error normalization, and provider argument parse errors. The
+> historical Phase 5.7 retry/timeout wording in this document is superseded;
+> those concerns remain outside this Phase 5.7 patch.
+
 ## 1. Kết luận Tổng thể
 
 Trạng thái hiện tại của Phase 5 được đánh giá như sau:

@@ -306,10 +306,20 @@ class CapabilityRuntime(BaseRuntime):
         except CapabilityError:
             raise
         except Exception as exc:
-            raise CapabilityError.from_exception(
-                exc,
+            original_code = getattr(exc, "code", None)
+            details: Dict[str, Any] = {}
+            if original_code:
+                details["original_error_code"] = str(original_code)
+            raise CapabilityError(
+                code="CAPABILITY_EXECUTION_FAILED",
+                message=str(exc),
+                category="EXECUTION",
+                retryable=bool(getattr(exc, "retryable", False)),
+                safe_for_client=False,
+                cause_type=type(exc).__name__,
                 capability_id=capability_id,
                 invocation_id=context.invocation_id,
+                details=details,
             ) from exc
         finally:
             cancellation_task.cancel()

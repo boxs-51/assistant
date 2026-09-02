@@ -1,6 +1,30 @@
 from typing import Any, Dict, List
 
+from jsonschema.exceptions import SchemaError
+from jsonschema.validators import validator_for
 from pydantic import BaseModel, ConfigDict, Field
+
+class InvalidCapabilitySchemaError(ValueError):
+    """Ngoại lệ riêng cho JSON Schema không hợp lệ."""
+    pass
+
+
+def validate_input_schema(schema: Dict[str, Any]) -> None:
+    """Fail closed for invalid capability input JSON Schemas."""
+    schema_dict = dict(schema)
+    
+    try:
+        validator_cls = validator_for(schema_dict)
+        validator_cls.check_schema(schema_dict)
+    except SchemaError as e:
+        # Lấy vị trí thuộc tính bị lỗi trong schema (nếu có)
+        path = " -> ".join(str(p) for p in e.path) if e.path else "root"
+        
+        # Tạo error message tùy chỉnh
+        custom_message = (
+            f"[Capability Error] JSON Schema không hợp lệ tại '{path}': {e.message}"
+        )
+        raise InvalidCapabilitySchemaError(custom_message) from e
 
 
 class CapabilityDefinition(BaseModel):

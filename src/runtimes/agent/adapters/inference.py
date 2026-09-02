@@ -13,6 +13,7 @@ from ..contracts.inference import (
     InferenceToolDefinition,
     InferenceUsage,
 )
+from ..tool_execution.errors import ToolArgumentParseError
 from .messages import inference_message_to_provider, jsonable
 
 
@@ -162,7 +163,14 @@ class ProviderInferenceAdapter(InferencePort):
             return {}
         if isinstance(value, dict):
             return value
-        parsed = json.loads(value)
+        try:
+            parsed = json.loads(value)
+        except (TypeError, ValueError) as exc:
+            raise ToolArgumentParseError(
+                "Tool call arguments must contain valid JSON."
+            ) from exc
         if not isinstance(parsed, dict):
-            raise ValueError("Tool call arguments must decode to an object.")
+            raise ToolArgumentParseError(
+                "Tool call arguments must decode to a JSON object."
+            )
         return parsed

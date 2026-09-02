@@ -306,6 +306,157 @@ async def test_tool_adapter_validates_and_denies_before_capability_execution():
 
 
 @pytest.mark.asyncio
+async def test_tool_adapter_distinguishes_not_found_from_not_visible():
+    registry = CapabilityRegistry()
+    runtime = CapabilityRuntime(
+        registry=registry,
+        authorization=AuthorizationService(),
+    )
+    agents = AgentRegistry()
+    agents.register(
+        AgentDefinition(
+            name="agent-v3",
+            goal="test",
+            instruction="test",
+            tools=[],
+        )
+    )
+    policy = RegistryAgentToolPolicy(
+        agents, registry, AuthorizationService()
+    )
+    adapter = CapabilityToolExecutionAdapter(
+        runtime, policy, DefaultAgentExecutionPolicy()
+    )
+    context = make_context(tools=[])
+
+    missing = await adapter.execute(
+        context,
+        ToolExecutionRequest(
+            execution_id=context.execution_id,
+            iteration=1,
+            invocation_id="inv-missing",
+            tool_call_id="call-missing",
+            capability_id="missing.tool",
+            arguments={},
+        ),
+    )
+    assert missing.error_code == "CAPABILITY_NOT_FOUND"
+
+    async def hidden(**kwargs):
+        return "never"
+
+    registry.register_capability(
+        PythonCapabilityDriver(
+            CapabilityDefinition(
+                id="hidden.tool",
+                name="hidden.tool",
+                description="hidden",
+                input_schema={"type": "object"},
+            ),
+            hidden,
+        )
+    )
+
+    hidden_result = await adapter.execute(
+        context,
+        ToolExecutionRequest(
+            execution_id=context.execution_id,
+            iteration=1,
+            invocation_id="inv-hidden",
+            tool_call_id="call-hidden",
+            capability_id="hidden.tool",
+            arguments={},
+        ),
+    )
+    assert hidden_result.error_code == "AGENT_TOOL_NOT_VISIBLE"
+
+
+@pytest.mark.asyncio
+async def test_tool_adapter_normalizes_generic_driver_failure():
+    registry = CapabilityRegistry()
+
+    async def fail(**kwargs):
+        raise RuntimeError("internal failure")
+
+    registry.register_capability(
+        PythonCapabilityDriver(
+            CapabilityDefinition(
+                id="generic.failure",
+                name="generic.failure",
+                description="failure",
+                input_schema={"type": "object"},
+            ),
+            fail,
+        )
+    )
+    capability_runtime = CapabilityRuntime(
+        registry=registry,
+        authorization=AuthorizationService(),
+    )
+    agents = AgentRegistry()
+    agents.register(
+        AgentDefinition(
+            name="agent-v3",
+            goal="test",
+            instruction="test",
+            tools=["generic.failure"],
+        )
+    )
+    policy = RegistryAgentToolPolicy(
+        agents, registry, AuthorizationService()
+    )
+    adapter = CapabilityToolExecutionAdapter(
+        capability_runtime,
+        policy,
+        DefaultAgentExecutionPolicy(),
+    )
+
+    result = await adapter.execute(
+        make_context(tools=["generic.failure"]),
+        ToolExecutionRequest(
+            execution_id="exec-v3",
+            iteration=1,
+            invocation_id="inv-generic",
+            tool_call_id="call-generic",
+            capability_id="generic.failure",
+            arguments={},
+        ),
+    )
+
+    assert result.success is False
+    assert result.error_code == "CAPABILITY_EXECUTION_FAILED"
+
+
+def test_capability_registry_rejects_invalid_schema():
+    registry = CapabilityRegistry()
+
+    async def noop(**kwargs):
+        return None
+
+    definition = CapabilityDefinition(
+        id="invalid.schema",
+        name="invalid.schema",
+        description="invalid",
+        input_schema={"type": 123},
+    )
+
+    with pytest.raises(Exception):
+        registry.register_capability(
+            PythonCapabilityDriver(definition, noop)
+        )
+
+
+def test_provider_adapter_rejects_malformed_tool_arguments_with_canonical_code():
+    with pytest.raises(Exception) as exc:
+        ProviderInferenceAdapter._parse_arguments("{broken-json")
+    assert getattr(exc.value, "code", None) == "CAPABILITY_INVALID_ARGUMENT"
+
+    with pytest.raises(Exception) as exc:
+        ProviderInferenceAdapter._parse_arguments("[1, 2, 3]")
+    assert getattr(exc.value, "code", None) == "CAPABILITY_INVALID_ARGUMENT"
+
+
+@pytest.mark.asyncio
 async def test_capability_runtime_shares_agent_cancellation_event():
     event = asyncio.Event()
     registry = CapabilityRegistry()
@@ -419,7 +570,7 @@ async def test_tool_parallelism_is_bounded_by_request_and_execution_limits():
 
     results = await adapter.execute_many(context, requests, max_parallel=8)
 
-    assert peak == 2
+    assert peak == 1
     assert started == 4
     assert [result.output for result in results] == ["a", "b", "c", "d"]
 

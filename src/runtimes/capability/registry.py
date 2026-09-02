@@ -5,7 +5,7 @@ from enum import Enum
 from threading import RLock
 from typing import Dict, List, Optional
 
-from .contracts.definition import CapabilityDefinition
+from .contracts.definition import CapabilityDefinition, validate_input_schema
 from .drivers.base import BaseCapabilityDriver
 
 logger = structlog.get_logger(__name__)
@@ -89,6 +89,7 @@ class CapabilityRegistry:
     def register_capability(self, driver: BaseCapabilityDriver):
         definition = driver.definition
         capability_id = definition.capability_id
+        validate_input_schema(definition.input_schema or {"type": "object"})
         with self._lock:
             existing = self._records.get(capability_id)
             if existing and existing.driver is not None:
@@ -140,6 +141,7 @@ class CapabilityRegistry:
     def register_definition(self, definition: CapabilityDefinition):
         """Compatibility/discovery registration without claiming executability."""
         capability_id = definition.capability_id
+        validate_input_schema(definition.input_schema or {"type": "object"})
         with self._lock:
             existing = self._records.get(capability_id)
             if existing and existing.driver is not None:

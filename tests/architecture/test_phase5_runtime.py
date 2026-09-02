@@ -134,6 +134,78 @@ async def test_agent_runtime_single_final_answer():
 
 
 @pytest.mark.asyncio
+async def test_agent_runtime_preserves_canonical_error_from_malformed_tool_arguments():
+    context = make_context()
+
+    class ParseFailingInference:
+        async def complete(self, request):
+            from src.runtimes.agent.tool_execution.errors import ToolArgumentParseError
+
+            raise ToolArgumentParseError(
+                "Tool call arguments must contain valid JSON."
+            )
+
+    runtime = AgentRuntime(
+        context_builder=ContextBuilderAdapter(
+            EmptyContextRuntime(),
+            CapabilityRuntime(
+                registry=CapabilityRegistry(),
+                authorization=AuthorizationService(),
+            ),
+            RegistryAgentToolPolicy(
+                AgentRegistry(),
+                CapabilityRegistry(),
+                AuthorizationService(),
+            ),
+        ),
+        inference=ParseFailingInference(),
+        tool_execution=ScriptedToolPort([]),
+        execution_policy=DefaultAgentExecutionPolicy(),
+    )
+
+    result = await runtime.execute(context)
+
+    assert result.state is AgentLoopState.FAILED
+    assert result.error_code == "CAPABILITY_INVALID_ARGUMENT"
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_surfaces_malformed_tool_arguments_as_canonical_error():
+    context = make_context()
+
+    class ParseFailingInference:
+        async def complete(self, request):
+            from src.runtimes.agent.adapters.inference import ToolArgumentParseError
+
+            raise ToolArgumentParseError(
+                "Tool call arguments must contain valid JSON."
+            )
+
+    runtime = AgentRuntime(
+        context_builder=ContextBuilderAdapter(
+            EmptyContextRuntime(),
+            CapabilityRuntime(
+                registry=CapabilityRegistry(),
+                authorization=AuthorizationService(),
+            ),
+            RegistryAgentToolPolicy(
+                AgentRegistry(),
+                CapabilityRegistry(),
+                AuthorizationService(),
+            ),
+        ),
+        inference=ParseFailingInference(),
+        tool_execution=ScriptedToolPort([]),
+        execution_policy=DefaultAgentExecutionPolicy(),
+    )
+
+    result = await runtime.execute(context)
+
+    assert result.state is AgentLoopState.FAILED
+    assert result.error_code == "CAPABILITY_INVALID_ARGUMENT"
+
+
+@pytest.mark.asyncio
 async def test_agent_runtime_executes_tool_then_rebuilds_context_and_completes():
     registry = CapabilityRegistry()
     capability = CapabilityDefinition(
