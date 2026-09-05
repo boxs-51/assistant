@@ -10,3 +10,7 @@ data/
 
 *.zip
 artifacts/
+
+logs/
+log/
+*.log
