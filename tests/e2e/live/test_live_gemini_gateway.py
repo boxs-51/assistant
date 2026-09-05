@@ -10,29 +10,21 @@ import httpx
 import pytest
 import pytest_asyncio
 
+from tests.e2e.conftest import (run_file_test, run_heavy_test, run_embedding_test, run_test_live)
 pytestmark = pytest.mark.live
 
-BASE_URL = os.getenv("GATEWAY_BASE_URL", "http://127.0.0.1:8000").rstrip("/")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 GEMINI_EMBEDDING_MODEL = os.getenv(
     "GEMINI_EMBEDDING_MODEL", "gemini-embedding-001"
 )
-GATEWAY_TOKEN = os.getenv("GATEWAY_TOKEN")
-LIVE_TIMEOUT = float(os.getenv("LIVE_TIMEOUT", "90"))
-LIVE_HEAVY_TIMEOUT = float(os.getenv("LIVE_HEAVY_TIMEOUT", "180"))
-LIVE_CONCURRENCY = max(1, int(os.getenv("LIVE_CONCURRENCY", "3")))
-LIVE_LONG_TEXT_CHARS = max(1000, int(os.getenv("LIVE_LONG_TEXT_CHARS", "30000")))
-
-RUN_FILE_TEST = os.getenv("GEMINI_FILE_TEST", "false").lower() in {
-    "1", "true", "yes", "on"
-}
-RUN_HEAVY_TEST = os.getenv("GEMINI_HEAVY_TEST", "false").lower() in {
-    "1", "true", "yes", "on"
-}
 
 pytestmark = [
     pytest.mark.live,
+    pytest.mark.skipif(
+        not run_test_live(),
+        reason="Set RUN_LIVE_TESTS to run live tests.",
+    ),
     pytest.mark.skipif(
         not GEMINI_API_KEY,
         reason="Set GEMINI_API_KEY to run live Gemini tests.",
@@ -41,19 +33,19 @@ pytestmark = [
 
 
 @pytest_asyncio.fixture
-async def client():
+async def client(live_base_url, live_headers, live_heavy_timeout):
     headers = {"Accept": "application/json"}
-    if GATEWAY_TOKEN:
-        headers["Authorization"] = f"Bearer {GATEWAY_TOKEN}"
+    if live_headers:
+        headers["Authorization"] = live_headers["Authorization"]
 
     timeout = httpx.Timeout(
         connect=10.0,
-        read=LIVE_HEAVY_TIMEOUT,
-        write=LIVE_HEAVY_TIMEOUT,
+        read=live_heavy_timeout,
+        write=live_heavy_timeout,
         pool=10.0,
     )
     async with httpx.AsyncClient(
-        base_url=BASE_URL,
+        base_url=live_base_url,
         headers=headers,
         timeout=timeout,
         follow_redirects=True,
@@ -190,7 +182,7 @@ async def test_live_gemini_models_list_and_detail(client):
 
 
 @pytest.mark.asyncio
-async def test_live_gemini_chat_non_streaming(client):
+async def test_live_gemini_chat_non_streaming(client, live_timeout):
     await _ready(client)
 
     request = {
@@ -206,7 +198,7 @@ async def test_live_gemini_chat_non_streaming(client):
     response = await client.post(
         "/v1/chat/completions",
         json=request,
-        timeout=LIVE_TIMEOUT,
+        timeout=live_timeout,
     )
     payload = _json(response)
     text = _text(payload)
@@ -223,7 +215,7 @@ async def test_live_gemini_chat_non_streaming(client):
 
 
 @pytest.mark.asyncio
-async def test_live_gemini_chat_streaming(client):
+async def test_live_gemini_chat_streaming(client, live_timeout):
     await _ready(client)
 
     request = {
@@ -243,7 +235,7 @@ async def test_live_gemini_chat_streaming(client):
         "POST",
         "/v1/chat/completions",
         json=request,
-        timeout=LIVE_TIMEOUT,
+        timeout=live_timeout,
     ) as response:
         assert response.status_code == 200, (
             f"{response.status_code}: "
@@ -280,7 +272,11 @@ async def test_live_gemini_chat_streaming(client):
 
 
 @pytest.mark.asyncio
-async def test_live_gemini_embeddings(client):
+@pytest.mark.skipif(
+    not run_embedding_test,
+    reason="Set LIVE_EMBEDDING_TEST=true to test Gemini Embedding API.",
+)
+async def test_live_gemini_embeddings(client, live_timeout):
     await _ready(client)
 
     request = {
@@ -293,7 +289,7 @@ async def test_live_gemini_embeddings(client):
     response = await client.post(
         "/v1/embeddings",
         json=request,
-        timeout=LIVE_TIMEOUT,
+        timeout=live_timeout,
     )
     payload = _json(response)
 
@@ -312,10 +308,10 @@ async def test_live_gemini_embeddings(client):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    not RUN_FILE_TEST,
-    reason="Set GEMINI_FILE_TEST=true to test Gemini File API.",
+    not run_file_test,
+    reason="Set LIVE_FILE_TEST=true to test Gemini File API.",
 )
-async def test_live_gemini_file_upload_metadata_delete(client):
+async def test_live_gemini_file_upload_metadata_delete(client, live_heavy_timeout):
     await _ready(client)
 
     content = (
@@ -328,7 +324,7 @@ async def test_live_gemini_file_upload_metadata_delete(client):
         "/v1/files/",
         params={"provider_name": "gemini", "display_name": name},
         files={"file": (name, content, "text/plain")},
-        timeout=LIVE_HEAVY_TIMEOUT,
+        timeout=live_heavy_timeout,
     )
     payload = _json(upload)
     file_id = payload.get("name") or payload.get("id")
@@ -354,18 +350,18 @@ async def test_live_gemini_file_upload_metadata_delete(client):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    not RUN_HEAVY_TEST,
-    reason="Set GEMINI_HEAVY_TEST=true to run heavy live tests.",
+    not run_heavy_test,
+    reason="Set LIVE_HEAVY_TEST=true to run heavy live tests.",
 )
-async def test_live_gemini_long_context(client):
+async def test_live_gemini_long_context(client, live_heavy_timeout, live_long_text_chars):
     await _ready(client)
 
     seed = (
         "This is a deterministic long-context integration test. "
         "The required marker is END_OF_LIVE_CONTEXT. "
     )
-    repeats = max(1, LIVE_LONG_TEXT_CHARS // len(seed))
-    long_text = (seed * repeats)[:LIVE_LONG_TEXT_CHARS]
+    repeats = max(1, live_long_text_chars // len(seed))
+    long_text = (seed * repeats)[:live_long_text_chars]
 
     request = {
         "model": GEMINI_MODEL,
@@ -393,7 +389,7 @@ async def test_live_gemini_long_context(client):
     response = await client.post(
         "/v1/chat/completions",
         json=request,
-        timeout=LIVE_HEAVY_TIMEOUT,
+        timeout=live_heavy_timeout,
     )
     payload = _json(response)
     output = _text(payload)
@@ -408,10 +404,10 @@ async def test_live_gemini_long_context(client):
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(
-    not RUN_HEAVY_TEST,
-    reason="Set GEMINI_HEAVY_TEST=true to run heavy live tests.",
+    not run_heavy_test,
+    reason="Set LIVE_HEAVY_TEST=true to run heavy live tests.",
 )
-async def test_live_gemini_concurrent_chat(client):
+async def test_live_gemini_concurrent_chat(client, live_heavy_timeout, live_concurrency):
     await _ready(client)
 
     async def call(index: int) -> tuple[int, str, float]:
@@ -431,14 +427,14 @@ async def test_live_gemini_concurrent_chat(client):
         response = await client.post(
             "/v1/chat/completions",
             json=request,
-            timeout=LIVE_HEAVY_TIMEOUT,
+            timeout=live_heavy_timeout,
         )
         payload = _json(response)
         return index, _text(payload), time.perf_counter() - started
 
     started = time.perf_counter()
     results = await asyncio.gather(
-        *(call(i) for i in range(LIVE_CONCURRENCY))
+        *(call(i) for i in range(live_concurrency))
     )
 
     for index, output, elapsed in results:
@@ -449,6 +445,6 @@ async def test_live_gemini_concurrent_chat(client):
         )
 
     print(
-        f"\n[concurrency] count={LIVE_CONCURRENCY} "
+        f"\n[concurrency] count={live_concurrency} "
         f"wall={time.perf_counter() - started:.3f}s"
     )

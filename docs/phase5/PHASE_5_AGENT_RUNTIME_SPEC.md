@@ -334,9 +334,13 @@ src/runtimes/agent/tool_execution/
 
 ## 8. Phase 5.7 — Tool Argument Validation & Error Contract Hardening
 
-Phase 5.7 hardens the existing canonical Agent tool boundary. It does not
-change the `AgentRuntime` contract and does not introduce Phase 5.8 retry or
-bounded-concurrency behavior.
+> Canonical current status for this phase is the Phase 5.7 exit gate at
+> [`PHASE5_7_EXIT_GATE.md`](./PHASE5_7_EXIT_GATE.md) and
+> `tests/architecture/test_phase5_7_exit_gate.py`.
+>
+> Phase 5.7 hardens the existing canonical Agent tool boundary. It does not
+> change the `AgentRuntime` contract and does not introduce Phase 5.8 retry or
+> bounded-concurrency behavior.
 
 **Canonical flow:**
  
@@ -397,7 +401,11 @@ Repo hiện đã có `CapabilityError`, nên tiếp tục dùng contract đó th
 
 ## 9. Phase 5.8 — Retry Policy cho Tool
 
-Không phải tool failure nào cũng retry.
+> Canonical current status for this phase is the Phase 5.8 exit gate at
+> [`PHASE5_8_EXIT_GATE.md`](./PHASE5_8_EXIT_GATE.md) and
+> `tests/architecture/test_phase5_8_exit_gate.py`.
+>
+> Không phải tool failure nào cũng retry.
 
 Phân loại:
 

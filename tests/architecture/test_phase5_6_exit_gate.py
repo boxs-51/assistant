@@ -17,7 +17,7 @@ from src.runtimes.agent.tool_execution import AgentToolExecutionCoordinator
 
 
 ROOT = Path(__file__).resolve().parents[2]
-EXIT_GATE_DOC = ROOT / "docs" / "phase5" / "PHASE5_6_EXIT_GATE.md"
+EXIT_GATE_DOC = ROOT / "docs" / "phase5" / "phase5_6" / "PHASE5_6_EXIT_GATE.md"
 LEGACY_STATUS_DOC = ROOT / "docs" / "phase5" / "Agent_Execution_System.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-6-exit-gate.yml"
 

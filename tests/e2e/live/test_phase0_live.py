@@ -1,6 +1,15 @@
 import httpx
 import pytest
+from tests.e2e.conftest import run_test_live
+pytestmark = pytest.mark.live
 
+pytestmark = [
+    pytest.mark.live,
+    pytest.mark.skipif(
+        not run_test_live(),
+        reason="Set RUN_LIVE_TESTS to run live tests.",
+    ),
+]
 
 @pytest.mark.asyncio
 async def test_live_health_and_readiness(live_base_url, live_headers):

@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import patch
-from terminal_tool import launch_app, run_terminal_command
+from tools.v1.terminal_tool import launch_app, run_terminal_command
 
 
 class TestTerminalTool(unittest.TestCase):
@@ -26,7 +26,7 @@ class TestTerminalTool(unittest.TestCase):
         res = launch_app("")
         self.assertIn("Lỗi: Lệnh không được để trống.", res)
 
-    @patch("terminal_tool.subprocess.Popen")
+    @patch("tools.v1.terminal_tool.subprocess.Popen")
     def test_launch_app_success(self, mock_popen):
         res = launch_app("notepad")
         mock_popen.assert_called_once()

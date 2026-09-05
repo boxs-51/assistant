@@ -32,7 +32,7 @@ long_paragraph = (
     "Sau khi nhập xong, bộ nhớ tạm cũ của người dùng cũng được tự động khôi phục hoàn toàn.\n"
 )
 
-print(type_text(text=long_paragraph, force_direct=True, interval=0.5))
+print(type_text(text=long_paragraph))
 print(press_key("enter", presses=2))
 
 # Gõ câu kết ngắn
