@@ -37,6 +37,8 @@ class AgentExecutionContext:
     usage: InferenceUsage = field(default_factory=InferenceUsage)
     causation_id: str | None = None
     trace_id: str | None = None
+    resume_transcript: list[Dict[str, Any]] = field(default_factory=list)
+    resume_pending_tool_calls: list[Dict[str, Any]] = field(default_factory=list)
     cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
     _tool_budget_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,

@@ -1,0 +1,32 @@
+name: Phase 5.9 Exit Gate
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  phase-5-9-exit-gate:
+    name: Phase 5.9 exit gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run full test suite
+        run: python -m pytest -q
+
+      - name: Run Phase 5.9 exit gate
+        run: python -m pytest -q tests/architecture/test_phase5_9_exit_gate.py

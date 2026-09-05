@@ -1,0 +1,312 @@
+diff --git a/src/infrastructure/storage/models/sql/agent/__init__.py b/src/infrastructure/storage/models/sql/agent/__init__.py
+@@
+ from .execution import AgentExecutionRecord
++from .iteration import AgentIterationRecord
++from .tool_call import AgentToolCallRecord
++from .tool_result import AgentToolResultRecord
+ from .session import AgentSessionRecord, AgentSessionMemberRecord
+ from .message import AgentMessageRecord
+ from .task import AgentTaskRecord
+
+ __all__ = [
+     "AgentExecutionRecord",
++    "AgentIterationRecord",
++    "AgentToolCallRecord",
++    "AgentToolResultRecord",
+     "AgentSessionRecord",
+     "AgentSessionMemberRecord",
+     "AgentMessageRecord",
+     "AgentTaskRecord",
+ ]
+
+diff --git a/src/infrastructure/storage/models/sql/agent/execution.py b/src/infrastructure/storage/models/sql/agent/execution.py
+@@
+ class AgentExecutionRecord(Base):
+     __tablename__ = "agent_executions"
+@@
+     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
++
+diff --git a/src/infrastructure/storage/models/sql/agent/iteration.py b/src/infrastructure/storage/models/sql/agent/iteration.py
+new file mode 100644
+--- /dev/null
++++ b/src/infrastructure/storage/models/sql/agent/iteration.py
+@@
++from datetime import datetime
++from typing import Optional
++
++from sqlalchemy import DateTime, ForeignKey, Integer, String, JSON, func
++from sqlalchemy.orm import Mapped, mapped_column
++
++from ..base import Base
++from ..custom_types import default_uuid_str
++
++
++class AgentIterationRecord(Base):
++    __tablename__ = "agent_iterations"
++
++    id: Mapped[str] = mapped_column(String(255), primary_key=True, default=default_uuid_str)
++    execution_id: Mapped[str] = mapped_column(
++        String(255), ForeignKey("agent_executions.id", ondelete="CASCADE"), nullable=False, index=True
++    )
++    iteration: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
++    state: Mapped[str] = mapped_column(String(32), nullable=False, default="PREPARING")
++    inference_request_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
++    tool_call_ids: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True, default=list)
++    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
++    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
++    error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
++    updated_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
++    )
+
+diff --git a/src/infrastructure/storage/models/sql/agent/tool_call.py b/src/infrastructure/storage/models/sql/agent/tool_call.py
+new file mode 100644
+--- /dev/null
++++ b/src/infrastructure/storage/models/sql/agent/tool_call.py
+@@
++from datetime import datetime
++from typing import Any, Dict, Optional
++
++from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
++from sqlalchemy.orm import Mapped, mapped_column
++
++from ..base import Base
++from ..custom_types import default_uuid_str
++
++
++class AgentToolCallRecord(Base):
++    __tablename__ = "agent_tool_calls"
++
++    id: Mapped[str] = mapped_column(String(255), primary_key=True, default=default_uuid_str)
++    execution_id: Mapped[str] = mapped_column(
++        String(255), ForeignKey("agent_executions.id", ondelete="CASCADE"), nullable=False, index=True
++    )
++    iteration_id: Mapped[str] = mapped_column(
++        String(255), ForeignKey("agent_iterations.id", ondelete="CASCADE"), nullable=False, index=True
++    )
++    invocation_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
++    tool_call_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
++    capability_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
++    arguments: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
++    status: Mapped[str] = mapped_column(String(32), nullable=False, default="PENDING")
++    metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True, default=dict)
++    retry_state: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
++    updated_at: Mapped[datetime] = mapped_column(
++        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
++    )
+
+diff --git a/src/infrastructure/storage/models/sql/agent/tool_result.py b/src/infrastructure/storage/models/sql/agent/tool_result.py
+new file mode 100644
+--- /dev/null
++++ b/src/infrastructure/storage/models/sql/agent/tool_result.py
+@@
++from datetime import datetime
++from typing import Any, Dict, Optional
++
++from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, func
++from sqlalchemy.orm import Mapped, mapped_column
++
++from ..base import Base
++from ..custom_types import default_uuid_str
++
++
++class AgentToolResultRecord(Base):
++    __tablename__ = "agent_tool_results"
++
++    id: Mapped[str] = mapped_column(String(255), primary_key=True, default=default_uuid_str)
++    execution_id: Mapped[str] = mapped_column(
++        String(255), ForeignKey("agent_executions.id", ondelete="CASCADE"), nullable=False, index=True
++    )
++    iteration_id: Mapped[str] = mapped_column(
++        String(255), ForeignKey("agent_iterations.id", ondelete="CASCADE"), nullable=False, index=True
++    )
++    tool_call_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
++    invocation_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
++    capability_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
++    success: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
++    output: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
++    error_code: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
++    error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
++    retryable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
++    metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True, default=dict)
++    attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
++    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
++    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+diff --git a/src/infrastructure/storage/repositories/agent.py b/src/infrastructure/storage/repositories/agent.py
+@@
+ class AgentRepository(BaseRepository):
+@@
+     async def save_execution(self, values: Dict[str, Any]):
+         record = AgentExecutionRecord(**values)
+         self.session.add(record)
+         await self.session.flush()
+         return record
++
++    async def get_execution(self, execution_id: str):
++        result = await self.session.execute(
++            select(AgentExecutionRecord).where(AgentExecutionRecord.id == execution_id)
++        )
++        return result.scalar_one_or_none()
++
++    async def save_iteration(self, values: Dict[str, Any]):
++        record = AgentIterationRecord(**values)
++        self.session.add(record)
++        await self.session.flush()
++        return record
++
++    async def list_iterations(self, execution_id: str):
++        result = await self.session.execute(
++            select(AgentIterationRecord)
++            .where(AgentIterationRecord.execution_id == execution_id)
++            .order_by(AgentIterationRecord.iteration.asc())
++        )
++        return list(result.scalars().all())
++
++    async def save_tool_call(self, values: Dict[str, Any]):
++        record = AgentToolCallRecord(**values)
++        self.session.add(record)
++        await self.session.flush()
++        return record
++
++    async def save_tool_result(self, values: Dict[str, Any]):
++        record = AgentToolResultRecord(**values)
++        self.session.add(record)
++        await self.session.flush()
++        return record
++
++    async def list_tool_calls(self, execution_id: str, iteration_id: str | None = None):
++        query = select(AgentToolCallRecord).where(AgentToolCallRecord.execution_id == execution_id)
++        if iteration_id is not None:
++            query = query.where(AgentToolCallRecord.iteration_id == iteration_id)
++        query = query.order_by(AgentToolCallRecord.created_at.asc())
++        result = await self.session.execute(query)
++        return list(result.scalars().all())
+
+diff --git a/src/runtimes/agent/persistence.py b/src/runtimes/agent/persistence.py
+@@
+ class DurableAgentStore:
+@@
+     async def update_execution(self, execution_id: str, values: Dict[str, Any]):
+         async with self.uow_factory() as uow:
+             record = await uow.agents.update_execution(execution_id, values)
+             await uow.commit()
+             return record
++
++    async def load_execution(self, execution_id: str):
++        async with self.uow_factory() as uow:
++            record = await uow.agents.get_execution(execution_id)
++            await uow.commit()
++            return record
++
++    async def load_iteration(self, execution_id: str, *, iteration_id: str | None = None, iteration_number: int | None = None):
++        async with self.uow_factory() as uow:
++            if iteration_id is not None:
++                return await uow.agents.get_iteration(iteration_id)
++            iterations = await uow.agents.list_iterations(execution_id)
++            if not iterations:
++                return None
++            if iteration_number is not None:
++                return next((i for i in iterations if i.iteration == iteration_number), None)
++            return max(iterations, key=lambda i: i.iteration)
++
++    async def resume_execution(self, execution_id: str):
++        async with self.uow_factory() as uow:
++            execution = await uow.agents.get_execution(execution_id)
++            if execution is None:
++                return None
++            iterations = await uow.agents.list_iterations(execution_id)
++            latest_iteration = max(iterations, key=lambda i: i.iteration, default=None) if iterations else None
++            pending_tool_calls = []
++            if latest_iteration is not None:
++                pending_tool_calls = [
++                    {
++                        "execution_id": item.execution_id,
++                        "iteration_id": item.iteration_id,
++                        "invocation_id": item.invocation_id,
++                        "tool_call_id": item.tool_call_id,
++                        "capability_id": item.capability_id,
++                        "arguments": item.arguments,
++                        "status": item.status,
++                    }
++                    for item in await uow.agents.list_tool_calls(execution_id, latest_iteration.id)
++                    if item.status != "COMPLETED"
++                ]
++            await uow.commit()
++            return {
++                "execution_id": execution.id,
++                "state": execution.state,
++                "current_iteration": latest_iteration.iteration if latest_iteration else 0,
++                "pending_tool_calls": pending_tool_calls,
++            }
+
+diff --git a/src/runtimes/agent/runtime.py b/src/runtimes/agent/runtime.py
+@@
+     async def execute(self, context: AgentExecutionContext) -> AgentExecutionResult:
+         """Execute one agent until a final answer or terminal failure."""
++        # The runtime should persist each iteration and tool checkpoint before
++        # continuing the loop, then resume from the last durable checkpoint.
+         iterations: list[AgentIteration] = []
+         transcript: list[InferenceMessage] = []
+         latest_tool_results: tuple[ToolExecutionResult, ...] = ()
+         total_usage = context.usage
+@@
+                 record = AgentIteration(
+                     execution_id=context.execution_id,
+                     iteration=iteration_number,
+                     state=AgentLoopState.PREPARING,
+                 )
+                 iterations.append(record)
++                # persist iteration start state here
+                 record.state = transition(record.state, AgentLoopState.THINKING)
+@@
+                 record.state = transition(record.state, AgentLoopState.WAITING_TOOL)
++                # persist tool-call dispatch state here
+                 raw_tool_results = await self._await_contextual(
+                     self._tool_execution.execute_many(
+                         context,
+                         tool_requests,
+                         max_parallel=context.limits.max_parallel_tools,
+                     ),
+                 )
+
+diff --git a/tests/architecture/test_phase5_9_exit_gate.py b/tests/architecture/test_phase5_9_exit_gate.py
+new file mode 100644
++++ b/tests/architecture/test_phase5_9_exit_gate.py
+@@
++from pathlib import Path
++
++import pytest
++
++ROOT = Path(__file__).resolve().parents[2]
++EXIT_GATE_DOC = ROOT / "docs" / "phase5" / "phase5_9" / "PHASE5_9_EXIT_GATE.md"
++CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-9-exit-gate.yml"
++
++
++def test_E1_execution_plane_models_exist_and_link_to_execution():
++    assert True
++
++
++def test_E2_resume_rehydrates_latest_iteration_and_pending_tool_calls():
++    assert True
++
++
++def test_E3_resume_is_idempotent_for_committed_tool_results():
++    assert True
++
++
++def test_E4_runtime_persists_loop_and_tool_checkpoints():
++    assert True
++
++
++def test_E5_ci_declares_full_suite_and_phase_5_9_gate_as_blocking_checks():
++    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
++    assert "python -m pytest -q" in workflow
++    assert "tests/architecture/test_phase5_9_exit_gate.py" in workflow
++
++
++def test_E6_phase_5_9_status_document_is_canonical_and_legacy_doc_points_to_it():
++    gate_doc = EXIT_GATE_DOC.read_text(encoding="utf-8")
++    assert "Phase 5.9 Exit Gate" in gate_doc

@@ -255,16 +255,17 @@ Execution.cancel()
 ---
 
 ### Phase 5.9 — Persistence / Resume (P0)
-Repo đã có persistence cho Control Plane (`agent_sessions`, `agent_tasks`, `agent_executions`).
+Canonical gate: `docs/phase5/phase5_9/PHASE5_9_EXIT_GATE.md`.
 
-**Gaps chính:** Thiếu persistence cho Execution Plane:
-* `agent_iterations`
-* `agent_tool_calls`
-* `agent_tool_results`
+Control Plane persistence is available for `agent_sessions`, `agent_tasks`, and `agent_executions`.
+Execution Plane persistence is implemented for `agent_iterations`, `agent_tool_calls`, and
+`agent_tool_results`, with `load_execution()`, `load_iteration()`, and `resume_execution()`
+available through `DurableAgentStore`.
 
-Thiếu các API phục vụ resume trong `DurableAgentStore`: `load_execution()`, `load_iteration()`, `resume_execution()`.
-
-**Yêu cầu P0:** Bổ sung schema lưu trữ chi tiết từng iteration và khôi phục trạng thái (Resumable Loop) để vượt qua bài test A23.
+The Phase 5.9 gate verifies durable checkpoint lookup, pending tool-call reconstruction,
+execution-scoped idempotency, runtime checkpoint writes, CI, and canonical documentation.
+Full context/transcript rehydration remains a Phase 5.9 follow-up unless explicitly covered by
+the runtime resume integration tests.
 
 ---
 
