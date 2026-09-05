@@ -1,6 +1,6 @@
 import unittest
 from unittest.mock import MagicMock, patch
-from tools.v1.web_search import web_search
+from tools.v1.wed_tools import web_search
 
 
 class TestWebSearch(unittest.TestCase):
@@ -9,7 +9,7 @@ class TestWebSearch(unittest.TestCase):
         res = web_search("")
         self.assertTrue(isinstance(res, str) and res.startswith("Lỗi:"))
 
-    @patch("tools.v1.web_search.DDGS")
+    @patch("tools.v1.wed_tools.DDGS")
     def test_successful_search(self, mock_ddgs_class):
         mock_instance = MagicMock()
         mock_ddgs_class.return_value.__enter__.return_value = mock_instance
@@ -28,7 +28,7 @@ class TestWebSearch(unittest.TestCase):
         self.assertEqual(results[0]["title"], "Python Documentation")
         self.assertEqual(results[0]["href"], "https://python.org")
 
-    @patch("tools.v1.web_search.DDGS")
+    @patch("tools.v1.wed_tools.DDGS")
     def test_search_exception(self, mock_ddgs_class):
         mock_instance = MagicMock()
         mock_ddgs_class.return_value.__enter__.return_value = mock_instance

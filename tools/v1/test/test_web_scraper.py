@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
 import requests
-from tools.v1.web_scraper import scrape_webpage
+from tools.v1.wed_tools import scrape_webpage
 
 
 class TestWebScraper(unittest.TestCase):
@@ -10,7 +10,7 @@ class TestWebScraper(unittest.TestCase):
         result = scrape_webpage("ftp://example.com")
         self.assertTrue(result.startswith("Lỗi: URL không hợp lệ"))
 
-    @patch("tools.v1.web_scraper.requests.get")
+    @patch("tools.v1.wed_tools.requests.get")
     def test_scrape_success_and_filter_tags(self, mock_get):
         mock_response = MagicMock()
         mock_response.status_code = 200
@@ -40,7 +40,7 @@ class TestWebScraper(unittest.TestCase):
         self.assertNotIn("Thanh Điều Hướng", result)
         self.assertNotIn("Chân trang", result)
 
-    @patch("tools.v1.web_scraper.requests.get")
+    @patch("tools.v1.wed_tools.requests.get")
     def test_scrape_timeout(self, mock_get):
         mock_get.side_effect = requests.exceptions.Timeout()
         result = scrape_webpage("https://example.com")

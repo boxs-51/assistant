@@ -1,53 +1,28 @@
 import re
 from itertools import islice
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Tuple, Union
 
 
-def file_tool(
-    action: str,
-    file_paths: Union[str, List[str]],
-    content: Optional[str] = None,
-    mode: str = "w",
-    queries: Optional[Union[str, List[str]]] = None,
-    replacements: Optional[Union[str, List[str]]] = None,
-    encoding: str = "utf-8",
-    start_line: Optional[int] = None,
-    num_lines: Optional[int] = None,
-    use_regex: bool = False,
-    case_sensitive: bool = False,
-    max_results_per_file: Optional[int] = None,
-) -> str:
-    """Tool hợp nhất thao tác với tệp tin (Đọc, Ghi, Tìm kiếm, Thay thế).
+class FileTool:
+    """Class quản lý các thao tác với tệp tin (Đọc, Ghi, Tìm kiếm, Thay thế)."""
 
-    Args:
-        action (str): Hành động thực hiện: 'read', 'write', 'search', hoặc 'replace'.
-        file_paths (str | List[str]): 1 hoặc nhiều đường dẫn tệp tin.
-        content (str, optional): Nội dung văn bản dùng cho 'write'.
-        mode (str): Mode ghi file 'w' (ghi đè) hoặc 'a' (ghi tiếp) cho 'write'.
-        queries (str | List[str], optional): Chuỗi/regex tìm kiếm cho 'search'/'replace'.
-        replacements (str | List[str], optional): Chuỗi thay thế cho 'replace'.
-        encoding (str): Bảng mã (mặc định: 'utf-8').
-        start_line (int, optional): Dòng bắt đầu đọc cho 'read' (1-indexed).
-        num_lines (int, optional): Số dòng cần đọc cho 'read'.
-        use_regex (bool): Sử dụng regex cho 'search'/'replace'.
-        case_sensitive (bool): Phân biệt chữ hoa/thường cho 'search'/'replace'.
-        max_results_per_file (int, optional): Giới hạn dòng kết quả cho 'search'/'replace'.
+    def __init__(self, default_encoding: str = "utf-8"):
+        self.default_encoding = default_encoding
 
-    Returns:
-        str: Kết quả xử lý hoặc thông báo lỗi.
-    """
-    valid_actions = ("read", "write", "search", "replace")
-    if action not in valid_actions:
-        return f"Lỗi: Action '{action}' không hợp lệ. Chọn một trong: {valid_actions}"
-
-    paths_list = [file_paths] if isinstance(file_paths, str) else file_paths
-
-    # ==================== 1. HÀNH ĐỘNG: READ ====================
-    if action == "read":
-        if len(paths_list) > 1:
-            return "Lỗi: Action 'read' chỉ hỗ trợ đọc 1 file mỗi lần."
-        path = Path(paths_list[0])
+    # ------------------------------------------------------------------
+    # 1. ĐỌC FILE (READ)
+    # ------------------------------------------------------------------
+    def read(
+        self,
+        file_path: str,
+        start_line: Optional[int] = None,
+        num_lines: Optional[int] = None,
+        encoding: Optional[str] = None,
+    ) -> str:
+        """Đọc nội dung của một file."""
+        enc = encoding or self.default_encoding
+        path = Path(file_path)
 
         if not path.exists():
             return f"Lỗi: File '{path}' không tồn tại."
@@ -59,7 +34,7 @@ def file_tool(
             return "Lỗi: 'num_lines' không được là số âm."
 
         try:
-            with path.open("r", encoding=encoding) as f:
+            with path.open("r", encoding=enc) as f:
                 if start_line is None and num_lines is None:
                     return f.read()
 
@@ -70,41 +45,133 @@ def file_tool(
         except Exception as e:
             return f"Lỗi khi đọc file '{path}': {str(e)}"
 
-    # ==================== 2. HÀNH ĐỘNG: WRITE ====================
-    elif action == "write":
-        if len(paths_list) > 1:
-            return "Lỗi: Action 'write' chỉ hỗ trợ ghi 1 file mỗi lần."
+    # ------------------------------------------------------------------
+    # 2. GHI FILE (WRITE)
+    # ------------------------------------------------------------------
+    def write(
+        self,
+        file_path: str,
+        content: str,
+        mode: str = "w",
+        encoding: Optional[str] = None,
+    ) -> str:
+        """Ghi hoặc nối thêm nội dung vào file."""
         if content is None:
-            return "Lỗi: Cần cung cấp 'content' cho action 'write'."
+            return "Lỗi: Cần cung cấp 'content' cho thao tác ghi file."
         if mode not in ("w", "a"):
             return "Lỗi: mode phải là 'w' (overwrite) hoặc 'a' (append)."
 
-        file_str = paths_list[0]
-        path = Path(file_str)
+        enc = encoding or self.default_encoding
+        path = Path(file_path)
 
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
-            with open(path, mode=mode, encoding=encoding) as f:
+            with path.open(mode=mode, encoding=enc) as f:
                 f.write(content)
 
             act_str = "Ghi đè" if mode == "w" else "Ghi nối tiếp"
-            return f"Thành công: Đã {act_str} vào file '{file_str}' ({len(content)} ký tự)."
+            return f"Thành công: Đã {act_str} vào file '{file_path}' ({len(content)} ký tự)."
         except Exception as e:
-            return f"Lỗi khi ghi file '{file_str}': {str(e)}"
+            return f"Lỗi khi ghi file '{file_path}': {str(e)}"
 
-    # ==================== 3 & 4. HÀNH ĐỘNG: SEARCH HOẶC REPLACE ====================
-    else:  # action in ('search', 'replace')
+    # ------------------------------------------------------------------
+    # HELPER: BIÊN DỊCH REGEX
+    # ------------------------------------------------------------------
+    def _compile_patterns(
+        self,
+        queries: List[str],
+        replacements: Optional[List[str]] = None,
+        use_regex: bool = False,
+        case_sensitive: bool = False,
+    ) -> Union[List[Tuple[re.Pattern, Optional[str], str]], str]:
+        """Biên dịch danh sách truy vấn thành Pattern Regex."""
+        flags = 0 if case_sensitive else re.IGNORECASE
+        compiled = []
+
+        for idx, q in enumerate(queries):
+            rep = replacements[idx] if replacements else None
+            try:
+                pattern = re.compile(q if use_regex else re.escape(q), flags)
+                compiled.append((pattern, rep, q))
+            except re.error as e:
+                return f"Lỗi biểu thức chính quy (regex) tại query '{q}': {str(e)}"
+
+        return compiled
+
+    # ------------------------------------------------------------------
+    # 3. TÌM KIẾM (SEARCH)
+    # ------------------------------------------------------------------
+    def search(
+        self,
+        file_paths: Union[str, List[str]],
+        queries: Union[str, List[str]],
+        use_regex: bool = False,
+        case_sensitive: bool = False,
+        max_results_per_file: Optional[int] = None,
+        encoding: Optional[str] = None,
+    ) -> str:
+        """Tìm kiếm chuỗi hoặc regex trong một hoặc nhiều file."""
+        return self._search_or_replace(
+            file_paths=file_paths,
+            queries=queries,
+            is_replace=False,
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+            max_results_per_file=max_results_per_file,
+            encoding=encoding,
+        )
+
+    # ------------------------------------------------------------------
+    # 4. THAY THẾ (REPLACE)
+    # ------------------------------------------------------------------
+    def replace(
+        self,
+        file_paths: Union[str, List[str]],
+        queries: Union[str, List[str]],
+        replacements: Union[str, List[str]],
+        use_regex: bool = False,
+        case_sensitive: bool = False,
+        max_results_per_file: Optional[int] = None,
+        encoding: Optional[str] = None,
+    ) -> str:
+        """Tìm kiếm và thay thế chuỗi hoặc regex trong một hoặc nhiều file."""
+        return self._search_or_replace(
+            file_paths=file_paths,
+            queries=queries,
+            replacements=replacements,
+            is_replace=True,
+            use_regex=use_regex,
+            case_sensitive=case_sensitive,
+            max_results_per_file=max_results_per_file,
+            encoding=encoding,
+        )
+
+    # ------------------------------------------------------------------
+    # LOGIC CHUNG CHO SEARCH & REPLACE
+    # ------------------------------------------------------------------
+    def _search_or_replace(
+        self,
+        file_paths: Union[str, List[str]],
+        queries: Union[str, List[str]],
+        replacements: Optional[Union[str, List[str]]] = None,
+        is_replace: bool = False,
+        use_regex: bool = False,
+        case_sensitive: bool = False,
+        max_results_per_file: Optional[int] = None,
+        encoding: Optional[str] = None,
+    ) -> str:
         if not queries:
-            return f"Lỗi: Cần cung cấp 'queries' cho action '{action}'."
+            action_name = "replace" if is_replace else "search"
+            return f"Lỗi: Cần cung cấp 'queries' cho action '{action_name}'."
 
+        paths_list = [file_paths] if isinstance(file_paths, str) else file_paths
         queries_list = [queries] if isinstance(queries, str) else queries
+
         if any(q == "" for q in queries_list):
             return "Lỗi: 'queries' không được chứa chuỗi rỗng."
 
-        is_replace_mode = action == "replace"
         replacements_list: Optional[List[str]] = None
-
-        if is_replace_mode:
+        if is_replace:
             if replacements is None:
                 return "Lỗi: Action 'replace' yêu cầu phải truyền 'replacements'."
             if isinstance(replacements, str):
@@ -117,18 +184,13 @@ def file_tool(
                     )
                 replacements_list = replacements
 
-        # Biên dịch Regex/Chuỗi
-        flags = 0 if case_sensitive else re.IGNORECASE
-        compiled_pairs = []
+        compiled_pairs = self._compile_patterns(
+            queries_list, replacements_list, use_regex, case_sensitive
+        )
+        if isinstance(compiled_pairs, str):  # Lỗi khi biên dịch regex
+            return compiled_pairs
 
-        for idx, q in enumerate(queries_list):
-            rep = replacements_list[idx] if replacements_list else None
-            try:
-                pattern = re.compile(q if use_regex else re.escape(q), flags)
-                compiled_pairs.append((pattern, rep, q))
-            except re.error as e:
-                return f"Lỗi biểu thức chính quy (regex) tại query '{q}': {str(e)}"
-
+        enc = encoding or self.default_encoding
         report_output = []
 
         for file_str in paths_list:
@@ -141,11 +203,11 @@ def file_tool(
                 continue
 
             try:
-                with path.open("r", encoding=encoding) as f:
+                with path.open("r", encoding=enc) as f:
                     lines = f.readlines()
 
                 file_matches = []
-                modified_lines = lines.copy() if is_replace_mode else []
+                modified_lines = lines.copy() if is_replace else []
                 match_count = 0
 
                 for line_idx, line in enumerate(lines):
@@ -155,7 +217,7 @@ def file_tool(
 
                     for pattern, rep, original_q in compiled_pairs:
                         if pattern.search(current_line):
-                            if is_replace_mode:
+                            if is_replace:
                                 old_text = current_line.rstrip("\r\n")
                                 new_line = (
                                     pattern.sub(rep, current_line)
@@ -175,20 +237,20 @@ def file_tool(
 
                     if line_modified:
                         match_count += 1
-                        if is_replace_mode:
+                        if is_replace:
                             modified_lines[line_idx] = current_line
 
                         if max_results_per_file and match_count >= max_results_per_file:
                             break
 
-                # Ghi file nếu là action='replace'
-                if is_replace_mode and match_count > 0:
-                    with path.open("w", encoding=encoding) as f:
+                # Ghi lại file nếu là chế độ replace và có thay đổi
+                if is_replace and match_count > 0:
+                    with path.open("w", encoding=enc) as f:
                         f.writelines(modified_lines)
 
                 # Tổng hợp báo cáo
                 if file_matches:
-                    status_suffix = " [ĐÃ CẬP NHẬT]" if is_replace_mode else ""
+                    status_suffix = " [ĐÃ CẬP NHẬT]" if is_replace else ""
                     header = f"📄 File: {file_str}{status_suffix}"
                     report_output.append(header)
                     report_output.extend(file_matches)
@@ -199,3 +261,80 @@ def file_tool(
                 report_output.append(f"❌ Lỗi khi xử lý file '{file_str}': {str(e)}")
 
         return "\n".join(report_output)
+
+    # ------------------------------------------------------------------
+    # DISPATCHER / ENTRY POINT (ĐIỀU HƯỚNG BẰNG TEN ACTION)
+    # ------------------------------------------------------------------
+    def execute(
+        self,
+        action: str,
+        file_paths: Union[str, List[str]],
+        content: Optional[str] = None,
+        mode: str = "w",
+        queries: Optional[Union[str, List[str]]] = None,
+        replacements: Optional[Union[str, List[str]]] = None,
+        encoding: Optional[str] = None,
+        start_line: Optional[int] = None,
+        num_lines: Optional[int] = None,
+        use_regex: bool = False,
+        case_sensitive: bool = False,
+        max_results_per_file: Optional[int] = None,
+    ) -> str:
+        """Hàm điều hướng chung hỗ trợ gọi theo chuỗi action."""
+        paths_list = [file_paths] if isinstance(file_paths, str) else file_paths
+
+        if action == "read":
+            if len(paths_list) > 1:
+                return "Lỗi: Action 'read' chỉ hỗ trợ đọc 1 file mỗi lần."
+            return self.read(
+                file_path=paths_list[0],
+                start_line=start_line,
+                num_lines=num_lines,
+                encoding=encoding,
+            )
+
+        elif action == "write":
+            if len(paths_list) > 1:
+                return "Lỗi: Action 'write' chỉ hỗ trợ ghi 1 file mỗi lần."
+            return self.write(
+                file_path=paths_list[0],
+                content=content,
+                mode=mode,
+                encoding=encoding,
+            )
+
+        elif action == "search":
+            return self.search(
+                file_paths=file_paths,
+                queries=queries,
+                use_regex=use_regex,
+                case_sensitive=case_sensitive,
+                max_results_per_file=max_results_per_file,
+                encoding=encoding,
+            )
+
+        elif action == "replace":
+            return self.replace(
+                file_paths=file_paths,
+                queries=queries,
+                replacements=replacements,
+                use_regex=use_regex,
+                case_sensitive=case_sensitive,
+                max_results_per_file=max_results_per_file,
+                encoding=encoding,
+            )
+
+        else:
+            valid_actions = ("read", "write", "search", "replace")
+            return f"Lỗi: Action '{action}' không hợp lệ. Chọn một trong: {valid_actions}"
+
+
+# ======================================================================
+# BẢO TỒN TÍNH TƯƠNG THÍCH (Hàm wrapper gọi qua Class)
+# ======================================================================
+_default_file_tool = FileTool()
+
+
+def file_tool(*args, **kwargs) -> str:
+    """Hàm wrapper cho phép tương thích ngược với code cũ."""
+    return _default_file_tool.execute(*args, **kwargs)

@@ -1,5 +1,5 @@
-from tools.v1.web_scraper import scrape_webpage
-from tools.v1.web_search import web_search
+from tools.v1.wed_tools import scrape_webpage
+from tools.v1.wed_tools import web_search
 
 # 1. Tìm kiếm web
 search_results = web_search("Python programming language", max_results=1)

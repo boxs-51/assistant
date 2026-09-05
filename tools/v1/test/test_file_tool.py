@@ -1,6 +1,6 @@
 from pathlib import Path
 import pytest
-
+import unittest
 from tools.v1.file_tools import file_tool
 
 
@@ -261,3 +261,6 @@ def test_replace_mismatched_length_error(tmp_path):
         replacements=["r1"],
     )
     assert "không khớp với 'queries'" in result
+
+if __name__ == "__main__":
+    unittest.main()
