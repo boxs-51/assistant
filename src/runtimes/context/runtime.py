@@ -51,6 +51,12 @@ class ContextRuntime(BaseRuntime):
             self.event_bus.unsubscribe("context.command.build", self._handle_build_context)
             self._subscribed = False
 
+    async def load_context(self, session_id: str, identity: Identity):
+        """Expose the ContextEngine through the runtime boundary."""
+        if self.context_engine is None:
+            raise RuntimeError("ContextRuntime is not initialized.")
+        return await self.context_engine.load_context(session_id, identity)
+
     async def _handle_build_context(self, event: BaseEvent):
         """Xử lý Command yêu cầu dựng Prompt/Context từ Session/History và Request mới."""
         session_id = event.session_id or event.payload.get("session_id")

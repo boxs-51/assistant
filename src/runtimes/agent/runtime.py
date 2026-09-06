@@ -21,6 +21,12 @@ from .contracts import (
     transition,
 )
 from .contracts.policy import AgentExecutionPolicy, PolicyDecision
+from .contracts.events import (
+    AgentEventEnvelope,
+    AgentEventName,
+    AgentEventPublisher,
+    CorrelationContext,
+)
 
 
 class AgentRuntime:
@@ -38,12 +44,54 @@ class AgentRuntime:
         tool_execution: ToolExecutionPort,
         execution_policy: AgentExecutionPolicy,
         durable_store=None,
+        event_publisher: AgentEventPublisher | None = None,
     ) -> None:
         self._context_builder = context_builder
         self._inference = inference
         self._tool_execution = tool_execution
         self._execution_policy = execution_policy
         self._durable_store = durable_store
+        self._event_publisher = event_publisher
+
+    async def _publish(
+        self,
+        event_name: str,
+        context: AgentExecutionContext,
+        *,
+        iteration: int | None = None,
+        request_id: str | None = None,
+        tool_call_id: str | None = None,
+        invocation_id: str | None = None,
+        payload: dict[str, Any] | None = None,
+    ) -> None:
+        if self._event_publisher is None:
+            return
+        event = AgentEventEnvelope(
+            event_id=f"{context.execution_id}:{event_name}:{uuid.uuid4().hex}",
+            event_name=event_name,
+            correlation=CorrelationContext(
+                correlation_id=context.correlation_id,
+                session_id=context.session_id,
+                execution_id=context.execution_id,
+                request_id=request_id or context.request_id,
+                parent_execution_id=context.parent_execution_id,
+                iteration_id=(
+                    f"{context.execution_id}:iteration:{iteration}"
+                    if iteration is not None
+                    else None
+                ),
+                tool_call_id=tool_call_id,
+                invocation_id=invocation_id,
+                causation_id=context.causation_id,
+                trace_id=context.trace_id,
+            ),
+            payload=payload or {},
+        )
+        try:
+            await self._event_publisher.publish(event)
+        except Exception:
+            # Observability must not change the execution result.
+            return
 
     async def _persist_iteration(self, record: AgentIteration) -> None:
         if self._durable_store is None:
@@ -231,6 +279,8 @@ class AgentRuntime:
         latest_tool_results: tuple[ToolExecutionResult, ...] = ()
         total_usage = context.usage
 
+        await self._publish(AgentEventName.EXECUTION_STARTED, context)
+
         if context.resume_pending_tool_calls:
             latest_tool_results = await self._execute_resumed_tool_calls(context)
             transcript.extend(_tool_results_to_messages(latest_tool_results))
@@ -238,6 +288,22 @@ class AgentRuntime:
             await self._persist_execution_checkpoint(context, transcript)
 
         if self._execution_policy.check_start(context) is not PolicyDecision.ALLOW:
+            rejected_state = (
+                AgentLoopState.CANCELLED
+                if context.cancelled
+                else AgentLoopState.TIMEOUT
+                if context.timed_out
+                else AgentLoopState.FAILED
+            )
+            await self._publish(
+                {
+                    AgentLoopState.CANCELLED: AgentEventName.EXECUTION_CANCELLED,
+                    AgentLoopState.TIMEOUT: AgentEventName.EXECUTION_TIMEOUT,
+                    AgentLoopState.FAILED: AgentEventName.EXECUTION_FAILED,
+                }[rejected_state],
+                context,
+                payload={"error_code": "AGENT_EXECUTION_NOT_ALLOWED"},
+            )
             return AgentExecutionResult(
                 execution_id=context.execution_id,
                 agent_id=context.agent_id,
@@ -266,6 +332,11 @@ class AgentRuntime:
                     self._execution_policy.check_iteration(context, iteration_number)
                     is not PolicyDecision.ALLOW
                 ):
+                    await self._publish(
+                        AgentEventName.EXECUTION_FAILED,
+                        context,
+                        payload={"error_code": "MAX_ITERATIONS_EXCEEDED"},
+                    )
                     return self._terminal_result(
                         context,
                         iterations,
@@ -282,6 +353,11 @@ class AgentRuntime:
                     state=AgentLoopState.PREPARING,
                 )
                 iterations.append(record)
+                await self._publish(
+                    AgentEventName.ITERATION_STARTED,
+                    context,
+                    iteration=iteration_number,
+                )
                 await self._persist_iteration(record)
                 record.state = transition(record.state, AgentLoopState.THINKING)
 
@@ -320,6 +396,14 @@ class AgentRuntime:
                         "Agent execution deadline exceeded before inference."
                     )
 
+                await self._publish(
+                    AgentEventName.INFERENCE_REQUESTED,
+                    context,
+                    iteration=iteration_number,
+                    request_id=request_id,
+                    payload={"model": getattr(context.agent, "model", None)},
+                )
+
                 response = await self._inference.complete(
                     InferenceRequest(
                         request_id=request_id,
@@ -332,6 +416,18 @@ class AgentRuntime:
                         cancellation_event=context.cancellation_event,
                         metadata=dict(snapshot.metadata),
                     )
+                )
+
+                await self._publish(
+                    AgentEventName.INFERENCE_COMPLETED,
+                    context,
+                    iteration=iteration_number,
+                    request_id=request_id,
+                    payload={
+                        "finish_reason": response.finish_reason,
+                        "provider": response.provider,
+                        "model": response.model,
+                    },
                 )
 
                 transcript.append(response.message)
@@ -359,6 +455,17 @@ class AgentRuntime:
                     record.close(AgentLoopState.FINALIZING)
                     record.close(AgentLoopState.COMPLETED)
                     await self._persist_iteration(record)
+                    await self._publish(
+                        AgentEventName.ITERATION_COMPLETED,
+                        context,
+                        iteration=iteration_number,
+                        payload={"state": record.state.value},
+                    )
+                    await self._publish(
+                        AgentEventName.EXECUTION_COMPLETED,
+                        context,
+                        payload={"state": AgentLoopState.COMPLETED.value},
+                    )
                     return AgentExecutionResult(
                         execution_id=context.execution_id,
                         agent_id=context.agent_id,
@@ -388,27 +495,99 @@ class AgentRuntime:
                 await self._persist_iteration(record)
                 iteration_id = f"{record.execution_id}:iteration:{record.iteration}"
                 for request in tool_requests:
-                    await self._persist_tool_call(request, iteration_id)
-                raw_tool_results = await self._await_contextual(
-                    self._tool_execution.execute_many(
+                    await self._publish(
+                        AgentEventName.TOOL_REQUESTED,
                         context,
-                        tool_requests,
-                        max_parallel=context.limits.max_parallel_tools,
-                    ),
-                    context=context,
-                    timeout_seconds=context.remaining_seconds,
-                )
+                        iteration=iteration_number,
+                        tool_call_id=request.tool_call_id,
+                        invocation_id=request.invocation_id,
+                        payload={"capability_id": request.capability_id},
+                    )
+                    await self._publish(
+                        AgentEventName.TOOL_STARTED,
+                        context,
+                        iteration=iteration_number,
+                        tool_call_id=request.tool_call_id,
+                        invocation_id=request.invocation_id,
+                        payload={"capability_id": request.capability_id},
+                    )
+                    await self._persist_tool_call(request, iteration_id)
+                try:
+                    raw_tool_results = await self._await_contextual(
+                        self._tool_execution.execute_many(
+                            context,
+                            tool_requests,
+                            max_parallel=context.limits.max_parallel_tools,
+                        ),
+                        context=context,
+                        timeout_seconds=context.remaining_seconds,
+                    )
+                except (asyncio.CancelledError, TimeoutError) as exc:
+                    error_code = (
+                        "CAPABILITY_CANCELLED"
+                        if isinstance(exc, asyncio.CancelledError)
+                        else "CAPABILITY_TIMEOUT"
+                    )
+                    for request in tool_requests:
+                        await self._publish(
+                            AgentEventName.TOOL_FAILED,
+                            context,
+                            iteration=iteration_number,
+                            tool_call_id=request.tool_call_id,
+                            invocation_id=request.invocation_id,
+                            payload={
+                                "capability_id": request.capability_id,
+                                "error_code": error_code,
+                                "error_message": str(exc),
+                            },
+                        )
+                    raise
+                except Exception as exc:
+                    for request in tool_requests:
+                        await self._publish(
+                            AgentEventName.TOOL_FAILED,
+                            context,
+                            iteration=iteration_number,
+                            tool_call_id=request.tool_call_id,
+                            invocation_id=request.invocation_id,
+                            payload={
+                                "capability_id": request.capability_id,
+                                "error_code": getattr(exc, "code", type(exc).__name__),
+                                "error_message": str(exc),
+                            },
+                        )
+                    raise
                 latest_tool_results = tuple(
                     _order_tool_results(tool_requests, raw_tool_results)
                 )
                 for result in latest_tool_results:
                     await self._persist_tool_result(result, iteration_id)
+                    await self._publish(
+                        AgentEventName.TOOL_COMPLETED
+                        if result.success
+                        else AgentEventName.TOOL_FAILED,
+                        context,
+                        iteration=iteration_number,
+                        tool_call_id=result.tool_call_id,
+                        invocation_id=result.invocation_id,
+                        payload={
+                            "capability_id": result.capability_id,
+                            "error_code": result.error_code,
+                            "error_message": result.error_message,
+                        },
+                    )
 
                 # ToolExecutionAdapter may update context.usage with per-tool
                 # accounting. Context is authoritative after the tool batch.
                 total_usage = context.usage
                 record.close(AgentLoopState.THINKING)
                 await self._persist_iteration(record)
+                await self._publish(
+                    AgentEventName.ITERATION_COMPLETED,
+                    context,
+                    iteration=iteration_number,
+                    payload={"state": record.state.value},
+                )
 
                 transcript.extend(_tool_results_to_messages(latest_tool_results))
                 await self._persist_execution_checkpoint(context, transcript)
@@ -425,6 +604,17 @@ class AgentRuntime:
                         error_code="AGENT_CANCELLED",
                     )
                     await self._persist_iteration(record)
+                    await self._publish(
+                        AgentEventName.ITERATION_COMPLETED,
+                        context,
+                        iteration=record.iteration,
+                        payload={"state": record.state.value},
+                    )
+                    await self._publish(
+                        AgentEventName.EXECUTION_CANCELLED,
+                        context,
+                        payload={"error_code": "AGENT_CANCELLED"},
+                    )
                 return self._terminal_result(
                     context,
                     iterations,
@@ -446,6 +636,17 @@ class AgentRuntime:
                         error_code="AGENT_TIMEOUT",
                     )
                     await self._persist_iteration(record)
+                    await self._publish(
+                        AgentEventName.ITERATION_COMPLETED,
+                        context,
+                        iteration=record.iteration,
+                        payload={"state": record.state.value},
+                    )
+                    await self._publish(
+                        AgentEventName.EXECUTION_TIMEOUT,
+                        context,
+                        payload={"error_code": "AGENT_TIMEOUT"},
+                    )
                 return self._terminal_result(
                     context,
                     iterations,
@@ -467,6 +668,17 @@ class AgentRuntime:
                         error_code=getattr(exc, "code", type(exc).__name__),
                     )
                     await self._persist_iteration(record)
+                    await self._publish(
+                        AgentEventName.ITERATION_COMPLETED,
+                        context,
+                        iteration=record.iteration,
+                        payload={"state": record.state.value},
+                    )
+                    await self._publish(
+                        AgentEventName.EXECUTION_FAILED,
+                        context,
+                        payload={"error_code": getattr(exc, "code", type(exc).__name__)},
+                    )
                 return self._terminal_result(
                     context,
                     iterations,
@@ -477,6 +689,11 @@ class AgentRuntime:
                     last_tool_results=latest_tool_results,
                 )
 
+        await self._publish(
+            AgentEventName.EXECUTION_FAILED,
+            context,
+            payload={"error_code": "MAX_ITERATIONS_EXCEEDED"},
+        )
         return self._terminal_result(
             context,
             iterations,

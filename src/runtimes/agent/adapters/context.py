@@ -40,11 +40,14 @@ class ContextBuilderAdapter(ContextBuilderPort):
             raise ValueError("Context iteration must be >= 1.")
         context.ensure_active()
 
-        engine = getattr(self._context_runtime, "context_engine", None)
-        if engine is None:
-            raise RuntimeError("ContextRuntime is not initialized.")
-
-        loaded = await engine.load_context(context.session_id, context.identity)
+        runtime_loader = getattr(self._context_runtime, "load_context", None)
+        if callable(runtime_loader):
+            loaded = await runtime_loader(context.session_id, context.identity)
+        else:
+            engine = getattr(self._context_runtime, "context_engine", None)
+            if engine is None:
+                raise RuntimeError("ContextRuntime is not initialized.")
+            loaded = await engine.load_context(context.session_id, context.identity)
         history: list[InferenceMessage]
 
         if request.prior_messages:

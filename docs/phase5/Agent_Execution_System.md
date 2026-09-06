@@ -20,6 +20,11 @@
 > historical Phase 5.7 retry/timeout wording in this document is superseded;
 > those concerns remain outside this Phase 5.7 patch.
 
+> **Current Phase 5.11 status:** Context Integration is closed by
+> [`PHASE5_11_EXIT_GATE.md`](./phase5_11/PHASE5_11_EXIT_GATE.md) and
+> `tests/architecture/test_phase5_11_exit_gate.py`. The historical matrix and
+> P0 violation list below are superseded for the current Phase 5.11 status.
+
 ## 1. Kết luận Tổng thể
 
 Trạng thái hiện tại của Phase 5 được đánh giá như sau:
@@ -78,7 +83,7 @@ Tức là luồng execution hiện tại vẫn **bypass hoàn toàn AgentRuntime
 | **5.8** | Bounded Parallel Tools | Harness dùng `asyncio.gather` | Chưa bounded theo contract; chưa canonicalize ordering | **P0** | Bounded concurrency + stable result ordering |
 | **5.9** | Persistence / Resume | Có execution/task/session persistence | Thiếu iteration/tool-call/result schema, chưa resume được | **P0** | Durable execution + resumable loop |
 | **5.10**| Agent Events / Trace | Contract envelope + correlation có | Thiếu `AgentRuntime` publisher/wiring | **P0** | Publish lifecycle events kèm correlation/causation |
-| **5.11**| Context Integration | `ContextRuntime` + `ContextEngine` có | Chưa implement `ContextBuilderPort`; còn legacy flow | **P0** | Immutable per-iteration context snapshot |
+| **5.11**| Context Integration | `ContextRuntime` + `ContextEngine` + `ContextBuilderPort` adapter có | Gate verification completed | **CLOSED** | Immutable per-iteration context snapshot |
 | **5.12**| MCP Integration | `CapabilityRuntime` + `McpCapabilityDriver` có | Agent chưa đi qua `ToolExecutionPort` → `CapabilityRuntime` | **P0** | Agent tool-call thực thi được MCP thực |
 | **5.13**| Provider Integration | `ProviderRuntime` hỗ trợ Gemini/Routing | Chưa expose provider-neutral `InferencePort` | **P0** | Fake + real provider E2E |
 | **5.14**| Acceptance / E2E | Harness + contract tests có | Chưa test `AgentRuntime` production flow | **P0** | A01–A25 chạy qua runtime thật |
@@ -270,9 +275,14 @@ the runtime resume integration tests.
 ---
 
 ### Phase 5.10 — Event / Correlation (P0)
+Canonical gate: `docs/phase5/phase5_10/PHASE5_10_EXIT_GATE.md`.
+
 Contract schema đã có đầy đủ `AgentEventEnvelope`, `CorrelationContext`, `AgentEventName`.
 
-**Gaps chính:** `AgentRuntime` chưa thực sự publish các lifecycle events ra hệ thống.
+Event publication is implemented as a controlled `AgentRuntime` side effect through
+`AgentEventPublisher`, with an adapter for the gateway EventBus. The canonical gate
+verifies lifecycle ordering, correlation metadata, failure isolation, application wiring,
+and CI coverage.
 
 **Yêu cầu P0:** Biến Event publication thành side-effect có kiểm soát thuộc trách nhiệm trực tiếp của `AgentRuntime`:
 * `agent.execution.started` / `completed` / `failed` / `cancelled` / `timeout`
@@ -283,9 +293,11 @@ Contract schema đã có đầy đủ `AgentEventEnvelope`, `CorrelationContext`
 ---
 
 ### Phase 5.11 — Context Integration (P0)
+Canonical gate: `docs/phase5/phase5_11/PHASE5_11_EXIT_GATE.md`.
+
 `ContextRuntime` hiện xây dựng context thông qua `ContextEngine` → `ContextObject` → event `context.command.build`.
 
-**Gaps chính:** Chưa có adapter kết nối `ContextRuntime` với `ContextBuilderPort` để trả về `AgentContextSnapshot` bất biến (immutable) theo từng iteration.
+`ContextBuilderAdapter` now connects `ContextRuntime`/`ContextEngine` to `ContextBuilderPort` and returns an immutable `AgentContextSnapshot` for each iteration. The canonical gate verifies composition, policy filtering, fail-closed identity/cancellation checks, metadata, wiring, and CI.
 
 **Yêu cầu P0:** Xây dựng Adapter chuẩn hóa boundary:
 
@@ -324,7 +336,7 @@ FakeInferencePort ──> AgentRuntime ──> ContextBuilderPort / ToolExecutio
 
 ---
 
-## 4. Tổng hợp 8 P0 Architecture Violations (Blockers)
+## 4. Historical P0 Architecture Violations (superseded)
 
 1. **P0-01:** Phân quyền Agent Execution Authority bị thiếu (Chưa có `AgentRuntime`).
 2. **P0-02:** `MultiAgentCoordinator` bypass `AgentRuntime` gọi trực tiếp `ProviderRuntime`.
@@ -337,7 +349,7 @@ FakeInferencePort ──> AgentRuntime ──> ContextBuilderPort / ToolExecutio
 
 ---
 
-## 5. Danh sách P1 Follow-ups
+## 5. Historical P1 Follow-ups (superseded)
 
 | ID | Hạng mục | Ưu tiên |
 | :--- | :--- | :---: |

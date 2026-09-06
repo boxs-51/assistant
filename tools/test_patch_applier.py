@@ -1,6 +1,6 @@
 import os
 import pytest
-from patch_applier import apply_custom_patch, apply_hunks_to_content, PatchApplyError
+from tools.patch_applier import apply_custom_patch, apply_hunks_to_content, PatchApplyError
 
 
 # ---------------------------------------------------------------------------

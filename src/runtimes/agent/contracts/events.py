@@ -27,6 +27,7 @@ class CorrelationContext(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     correlation_id: str
+    session_id: str | None = None
     execution_id: str
     request_id: str | None = None
     parent_execution_id: str | None = None

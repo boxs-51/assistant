@@ -64,6 +64,8 @@ from .tool.registry import ToolRegistry
 from .runtimes.capability.registry import CapabilityRegistry
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
+from .runtimes.agent.runtime import AgentRuntime
+from .runtimes.agent.events import EventBusAgentEventPublisher
 from .runtimes.agent.adapters import (
     ContextBuilderAdapter,
     ProviderInferenceAdapter,
@@ -232,9 +234,7 @@ async def bootstrap_runtime_kernel(
     # 4. Bootstrap Kernel (RuntimeContext tự động được khởi tạo bên trong)
     await kernel.bootstrap()
 
-    # Phase 5.1-5.4: establish canonical ports without changing the
-    # existing Phase 4 coordinator execution path. AgentRuntime is not
-    # implemented yet and remains the future consumer of these ports.
+    # Establish canonical agent ports while preserving the legacy coordinator path.
     agent_tool_policy = RegistryAgentToolPolicy(
         agent_registry=container.agent_registry,
         capability_registry=container.capability_registry,
@@ -259,6 +259,14 @@ async def bootstrap_runtime_kernel(
     )
     container.tool_execution_port = AgentToolExecutionCoordinator(
         container.tool_execution_port,
+    )
+    container.agent_runtime = AgentRuntime(
+        context_builder=container.context_builder_port,
+        inference=container.inference_port,
+        tool_execution=container.tool_execution_port,
+        execution_policy=container.agent_execution_policy,
+        durable_store=DurableAgentStore(eventing_manager.uow_factory),
+        event_publisher=EventBusAgentEventPublisher(container.event_bus),
     )
 
     # Cấu hình Multi-Agent Executor
