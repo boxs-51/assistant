@@ -100,7 +100,7 @@ provider:
         base_url: "https://generativelanguage.googleapis.com"
 
       ollama:
-        enabled: false
+        enabled: true
         api_key: ""
         base_url: "http://127.0.0.1:11434"
       mock:

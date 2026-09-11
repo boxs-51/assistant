@@ -18,17 +18,16 @@ class ChatExecutionHandler(BaseExecutionHandler):
         self, http_client: httpx.AsyncClient, body: Dict[str, Any]
     ) -> GatewayResponse:
         model = body.get("model")
-        initial_chain = self.routing_policy.get_fallback_chain(model)
-        if not initial_chain:
-            raise NoAvailableProviderError(f"No provider configured for model '{model}'.")
-
-        execution_chain = initial_chain
-        specific_provider_name = body.get("provider")
-
-        if specific_provider_name and specific_provider_name in self.providers:
-            preferred_provider = self.providers[specific_provider_name]
-            others = [p for p in initial_chain if p.name != specific_provider_name]
-            execution_chain = [preferred_provider] + others
+        
+        # Lấy chuỗi thực thi hoàn chỉnh đã được RoutingPolicy sắp xếp & áp dụng mode
+        execution_chain = self.routing_policy.get_fallback_chain(
+            model=model,
+            metadata=body.get("metadata"),
+            override_provider=body.get("provider")
+        )
+        
+        if not execution_chain:
+            raise NoAvailableProviderError(f"No available or valid provider configured for model '{model}'.")
 
         healthy_execution_chain = await self._get_healthy_fallback_chain(execution_chain)
         if not healthy_execution_chain:
@@ -56,17 +55,15 @@ class ChatExecutionHandler(BaseExecutionHandler):
         self, http_client: httpx.AsyncClient, body: Dict[str, Any]
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
         model = body.get("model")
-        initial_chain = self.routing_policy.get_fallback_chain(model)
-        if not initial_chain:
-            raise NoAvailableProviderError(f"No provider configured for model '{model}'.")
-
-        execution_chain = initial_chain
-        specific_provider_name = body.get("provider")
-
-        if specific_provider_name and specific_provider_name in self.providers:
-            preferred_provider = self.providers[specific_provider_name]
-            others = [p for p in initial_chain if p.name != specific_provider_name]
-            execution_chain = [preferred_provider] + others
+        
+        execution_chain = self.routing_policy.get_fallback_chain(
+            model=model,
+            metadata=body.get("metadata"),
+            override_provider=body.get("provider")
+        )
+        
+        if not execution_chain:
+            raise NoAvailableProviderError(f"No available or valid provider configured for model '{model}'.")
 
         stream_check_coroutines = [
             p.has_capability(model, ModelCapability.CHAT_STREAM, http_client, self.timeout)

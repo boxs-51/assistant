@@ -13,6 +13,7 @@ class ToolType(str, Enum):
 class MessageContentType(str, Enum):
     """Các loại nội dung có thể có trong một phần của message."""
     TEXT = "text"
+    THINKING = "thinking"
     IMAGE = "image"
     AUDIO = "audio"
     VIDEO = "video"

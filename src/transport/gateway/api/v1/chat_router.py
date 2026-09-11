@@ -41,8 +41,9 @@ async def chat_completions_proxy(
     request: Request, 
     identity: Identity = Depends(get_current_identity),
     event_bus: EventBus = Depends(get_event_bus),
-    config : ConfigSchema = Depends(get_config)
+    config: ConfigSchema = Depends(get_config)
 ):
+    start_time = time.perf_counter()
     chat_request = await parse_and_validate_request(request)
     session_id = (
         chat_request.session_id
@@ -50,6 +51,8 @@ async def chat_completions_proxy(
         else str(uuid.uuid4())
     )
     is_stream = bool(chat_request.config and chat_request.config.stream)
+    request_payload = chat_request.model_dump(exclude_none=True)
+    identity_data = identity.model_dump() if hasattr(identity, "model_dump") else str(identity)
 
     # ------------------------------------------------------------------
     # 1. STREAMING RESPONSE VIA SSE BRIDGE
@@ -73,27 +76,29 @@ async def chat_completions_proxy(
             yield ": ping\n\n"
 
             try:
-                # 1. Đăng ký handlers bên trong try block
                 event_bus.subscribe("provider.stream.chunk_emitted", _on_chunk)
                 event_bus.subscribe("provider.stream.completed", _on_complete)
                 event_bus.subscribe("provider.failed", _on_fail)
 
-                # 2. Publish request event
-                await event_bus.publish(
+                event_bus.publish(
                     BaseEvent(
-                        event_name="provider.chat.execute",
+                        event_name="transport.event.request_received",
                         session_id=session_id,
                         payload={
-                            "request_body": chat_request.model_dump(exclude_none=True),
-                            "identity": identity.model_dump() if hasattr(identity, "model_dump") else str(identity)
+                            "request_body": request_payload,
+                            "identity": identity_data,
                         },
                     )
                 )
 
-                # 3. Stream Consumption Loop
                 while True:
                     if await request.is_disconnected():
-                        logger.warning("Client disconnected from SSE stream", session_id=session_id)
+                        duration = round(time.perf_counter() - start_time, 4)
+                        logger.warning(
+                            "Client disconnected from SSE stream",
+                            session_id=session_id,
+                            duration_seconds=duration,
+                        )
                         break
 
                     try:
@@ -102,9 +107,22 @@ async def chat_completions_proxy(
                         continue
 
                     if item == "[DONE]":
+                        duration = round(time.perf_counter() - start_time, 4)
+                        logger.info(
+                            "Chat completion stream finished successfully",
+                            session_id=session_id,
+                            duration_seconds=duration,
+                        )
                         yield "data: [DONE]\n\n"
                         break
                     elif isinstance(item, dict) and "error" in item:
+                        duration = round(time.perf_counter() - start_time, 4)
+                        logger.error(
+                            "Chat completion stream failed",
+                            session_id=session_id,
+                            error=item.get("error"),
+                            duration_seconds=duration,
+                        )
                         yield f"data: {json.dumps(item)}\n\n"
                         yield "data: [DONE]\n\n"
                         break
@@ -112,7 +130,6 @@ async def chat_completions_proxy(
                         yield str(item) if str(item).startswith("data:") else f"data: {json.dumps(item)}\n\n"
 
             finally:
-                # 4. Luôn đảm bảo dọn dẹp listeners
                 event_bus.unsubscribe("provider.stream.chunk_emitted", _on_chunk)
                 event_bus.unsubscribe("provider.stream.completed", _on_complete)
                 event_bus.unsubscribe("provider.failed", _on_fail)
@@ -156,22 +173,35 @@ async def chat_completions_proxy(
                     event_name="provider.chat.execute",
                     session_id=session_id,
                     payload={
-                        "request_body": chat_request.model_dump(exclude_none=True),
-                        "identity": identity.model_dump() if hasattr(identity, "model_dump") else str(identity)
+                        "request_body": request_payload,
+                        "identity": identity_data,
                     },
                 )
             )
 
-            payload = await asyncio.wait_for(
-                future, timeout=getattr(config.provider, "timeout", 60.0)
-            )
-            return payload.get("response", payload)
+            duration = round(time.perf_counter() - start_time, 4)
 
         except asyncio.TimeoutError:
+            duration = round(time.perf_counter() - start_time, 4)
+            logger.error(
+                "Provider execution timed out",
+                session_id=session_id,
+                duration_seconds=duration,
+            )
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
                 detail="Provider execution timed out.",
             )
+        except HTTPException as exc:
+            duration = round(time.perf_counter() - start_time, 4)
+            logger.error(
+                "Chat completion execution failed with HTTP exception",
+                session_id=session_id,
+                status_code=exc.status_code,
+                detail=exc.detail,
+                duration_seconds=duration,
+            )
+            raise
         finally:
             event_bus.unsubscribe("provider.chat.responded", _on_response)
             event_bus.unsubscribe("provider.failed", _on_failure)

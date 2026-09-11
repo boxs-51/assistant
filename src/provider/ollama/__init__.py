@@ -10,15 +10,7 @@ from ..core import (
 from ...infrastructure.config.schemas import ProviderConfig
 from .api.chats import OllamaChats
 from .api.models import OllamaModels
-
-# Ollama không cần mapping phức tạp, nhưng vẫn giữ cấu trúc để nhất quán
-OLLAMA_MODEL_MAP = {}
-
-# Ánh xạ ApiType sang endpoint template của Ollama
-OLLAMA_API_MAP = {
-    ApiType.CHAT_COMPLETIONS: "api/chat",
-    ApiType.MODELS: "api/tags", # Endpoint để lấy danh sách model
-}
+from .mapper import OLLAMA_API_MAP, OLLAMA_MODEL_MAP
 
 class OllamaProvider(BaseProvider):
     """Nhà cung cấp cho các mô hình local qua Ollama."""

@@ -8,47 +8,16 @@ from typing import Dict, Any, AsyncGenerator, List, Optional
 
 # 1. Import các thành phần đã được module hóa
 from ..core import (
-    BaseProvider, ApiType,
-    ApiKeyHeader, ApiTypeMapper, BearerToken,
+    BaseProvider,
+    ApiKeyHeader, ApiTypeMapper,
     EndpointBuilder,
     ModelCapabilityManager, ProviderCapability,
     ModelMapper
 )
 from ...infrastructure.config.schemas import ProviderConfig
 from .api import GeminiChat, GeminiFiles, GeminiModels, GeminiEmbeddings
-
+from .mapper import GEMINI_MODEL_MAP, GEMINI_API_MAP
 logger = structlog.get_logger(__name__)
-
-# 2. Định nghĩa các model mapping (có thể chuyển ra file config YAML)
-GOOGLE_MODEL_MAP = {
-    # Gemini 2.5
-    "gemini-2.5-pro": "gemini-2.5-pro",
-    "gemini-2.5-flash": "gemini-2.5-flash",
-
-    # Alias
-    "gpt-4o": "gemini-2.5-pro",
-    "gpt-4o-mini": "gemini-2.5-flash",
-
-    # Legacy
-    "gemini-pro": "gemini-2.5-pro",
-    "gemini-1.5-pro": "gemini-2.5-pro",
-    "gemini-1.5-pro-latest": "gemini-2.5-pro",
-    "gemini-1.5-flash": "gemini-2.5-flash",
-    "gemini-1.5-flash-latest": "gemini-2.5-flash",
-
-    "default" : "gemini-2.5-flash"
-}
-
-# Ánh xạ ApiType sang endpoint template của Gemini
-GOOGLE_API_MAP = {
-    ApiType.CHAT_COMPLETIONS: "v1beta/models/{model}:{action}",
-    ApiType.MODELS: "v1beta/models",
-    ApiType.MODEL: "v1beta/models/{model}",
-    ApiType.EMBEDDINGS: "v1beta/models/{model}:{action}",
-    ApiType.IMAGE_GENERATION: "v1/images:generate", # Giả định endpoint cho Imagen 2
-    ApiType.TEXT_TO_SPEECH: "v1/text:synthesize", # Giả định endpoint cho Text-to-Speech
-    ApiType.FILES : "v1beta/files", # Endpoint cho File API
-}
 
 class GeminiProvider(BaseProvider):
     """Nhà cung cấp cho Gemini API, được lắp ráp từ các thành phần chuyên biệt."""
@@ -58,8 +27,8 @@ class GeminiProvider(BaseProvider):
             provider_name="gemini",
             auth_strategy=ApiKeyHeader(api_key=str(config.api_key), header_name="x-goog-api-key"),
             endpoint_builder=EndpointBuilder(base_url=str(config.base_url)),
-            api_mapper=ApiTypeMapper(api_map=GOOGLE_API_MAP),
-            model_mapper=ModelMapper(model_map=GOOGLE_MODEL_MAP),
+            api_mapper=ApiTypeMapper(api_map=GEMINI_API_MAP),
+            model_mapper=ModelMapper(model_map=GEMINI_MODEL_MAP),
             capability_manager=ModelCapabilityManager(provider_name="gemini"), # Có thể tạo GeminiCapabilityManager riêng sau này
             provider_capabilities={
                 ProviderCapability.BATCH_API, # Gemini hỗ trợ batch embeddings

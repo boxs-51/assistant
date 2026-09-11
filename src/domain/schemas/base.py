@@ -11,6 +11,6 @@ class GatewayBaseModel(BaseModel):
     model_config = ConfigDict(
         populate_by_name=True,       # Cho phép map cả alias lẫn name gốc
         arbitrary_types_allowed=True,# Hỗ trợ các kiểu dữ liệu phức tạp khác
-        str_strip_whitespace=True,   # Tự động strip khoảng trắng của string
+        str_strip_whitespace=False,   # Không tự động strip khoảng trắng của string
         validate_assignment=True,    # Re-validate khi gán lại giá trị trường
     )

@@ -31,6 +31,7 @@ class GatewayResponse(GatewayBaseModel):
 class GatewayStreamDelta(GatewayBaseModel):
     """Nội dung thay đổi trong một chunk stream."""
     content: Optional[str] = None
+    reasoning_content: Optional[str] = None
     role: Optional[str] = None
     tool_calls: Optional[List[GatewayToolCall]] = None # Hỗ trợ streaming tool call
     

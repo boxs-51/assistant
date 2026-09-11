@@ -14,21 +14,20 @@ class OllamaChats(ChatProvider):
         self.response = ResponseChats()
         self.provider = provider
 
-    def prepare_request(self, body: Dict[str, Any]) -> Dict[str, Any]:
+    def prepare_request(self, body: Dict[str, Any], stream: bool = False) -> Dict[str, Any]:
         """
-        Chuẩn bị body cho request: dịch tên model và adapt body.
+        Chuẩn bị body cho request: dịch tên model và adapt body sang Ollama API specification.
         """
         prepared = body.copy()
-        # Dịch tên model, sử dụng default_model nếu có, hoặc lấy từ body, hoặc 'default'
         model = body.get("model")
 
         translated_model = self.provider.mapper.translate(model)
         prepared["model"] = translated_model
 
-        return self.request.adapt_chat_request(request_chat=prepared)
-    
+        return self.request.adapt_chat_request(request=prepared, stream=stream)
+
     async def chat(self, **kwargs) -> GatewayResponse:
-        prepared_body = self.prepare_request(kwargs.get("body"))
+        prepared_body = self.prepare_request(kwargs.get("body"), stream=False)
         response = await self.provider.send(
             client=kwargs.get("http_client"),
             api_type=ApiType.CHAT_COMPLETIONS,
@@ -38,13 +37,13 @@ class OllamaChats(ChatProvider):
         return await self.response.adapt_chat(response=response)
 
     async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
-        prepared_body = self.prepare_request(kwargs.get("body"))
-        response = await self.provider.send(
+        prepared_body = self.prepare_request(kwargs.get("body"), stream=True)
+        
+        async with self.provider.send_stream(
             client=kwargs.get("http_client"),
             api_type=ApiType.CHAT_COMPLETIONS,
             json=prepared_body,
             timeout=kwargs.get("timeout")
-        )
-        
-        async for chunk in self.response.adapt_chat_stream(response=response):
-            yield chunk
+        ) as response:
+            async for chunk in self.response.adapt_chat_stream(response=response):
+                yield chunk
