@@ -84,7 +84,7 @@ Every invocation is correlated by `invocation_id` and must preserve `execution_i
 ```text
 6.0 Foundation contracts       <- this patch
 6.1 Catalog + ownership + policy
-6.2 Connection lifecycle       <- lifecycle registry + heartbeat/stale
+6.2 Connection lifecycle       <- lifecycle + liveness
 6.3 Realtime multiplex
 6.4 Remote client driver
 6.5 Client self-registration
@@ -94,3 +94,34 @@ Every invocation is correlated by `invocation_id` and must preserve `execution_i
 ```
 
 No existing Phase 5 AgentRuntime execution flow is changed by 6.0.
+
+## Phase 6.1 / 6.2 exit boundary
+
+Before Phase 6.3:
+
+```text
+CapabilityCatalog
+
+   |
+   v
+
+CapabilityRoutingPolicy
+
+   |
+   +---- ownership/auth
+   |
+   +---- implementation lifecycle
+   |
+   +---- connection availability
+                 |
+                 v
+       ConnectionLifecycleRegistry
+
+```
+
+Client implementations are routable only while their bound connection is
+ACTIVE.
+
+STALE, DISCONNECTED, and REMOVED connections must reject new routing.
+
+Phase 6.3 is responsible for realtime transport and invocation correlation.

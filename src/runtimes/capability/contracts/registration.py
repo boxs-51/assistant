@@ -4,20 +4,13 @@ from typing import Any, Dict, List, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 from .definition import CapabilityDefinition
-from .implementation import CapabilityExecutionLocation
+from .implementation import CapabilityExecutionLocation, CapabilityOwnerType
 
 
 class CapabilityKind(str, Enum):
     TOOL = "TOOL"
     SKILL = "SKILL"
     AGENT = "AGENT"
-
-
-class CapabilityOwnerType(str, Enum):
-    SYSTEM = "SYSTEM"
-    USER = "USER"
-    CLIENT = "CLIENT"
-    WORKSPACE = "WORKSPACE"
 
 
 class CapabilityRegistration(BaseModel):

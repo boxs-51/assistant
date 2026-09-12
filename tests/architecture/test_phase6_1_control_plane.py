@@ -13,6 +13,7 @@ from src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
+    CapabilityOwnerType,
 )
 from src.runtimes.capability.policy import (
     CapabilityRequestContext,
@@ -62,6 +63,7 @@ def make_client_implementation(
         driver_kind="REMOTE_CLIENT",
         owner_id=owner_id,
         connection_id=connection_id,
+        owner_type=CapabilityOwnerType.CLIENT,
     )
 
 
@@ -70,12 +72,11 @@ def test_same_capability_can_have_multiple_implementations() -> None:
     definition = make_definition()
 
     catalog.register_definition(definition)
-    catalog.register_implementation(
-        make_server_implementation(implementation_id="server-1")
-    )
-    catalog.register_implementation(
-        make_client_implementation(implementation_id="client-1")
-    )
+    server = make_server_implementation(implementation_id="server-1")
+    client = make_client_implementation(implementation_id="client-1")
+
+    catalog.register_implementation(server)
+    catalog.register_implementation(client)
 
     implementations = catalog.list_implementations("demo.echo")
 
@@ -102,6 +103,19 @@ def test_duplicate_implementation_id_is_rejected() -> None:
         )
 
 
+def test_implementation_version_must_match_definition() -> None:
+    catalog = CapabilityCatalog()
+    definition = make_definition()
+    catalog.register_definition(definition)
+
+    implementation = make_server_implementation(
+        implementation_id="server-v1",
+    ).model_copy(update={"version": "9.9"})
+
+    with pytest.raises(ValueError):
+        catalog.register_implementation(implementation)
+
+
 def test_unknown_capability_cannot_receive_implementation() -> None:
     catalog = CapabilityCatalog()
 
@@ -120,6 +134,9 @@ def test_client_implementation_requires_owner_and_connection() -> None:
         implementation_id="client-1",
         location=CapabilityExecutionLocation.CLIENT,
         driver_kind="REMOTE_CLIENT",
+        owner_id=None,
+         connection_id=None,
+        owner_type=CapabilityOwnerType.CLIENT,
     )
 
     with pytest.raises(InvalidCapabilityBindingError):
@@ -200,12 +217,30 @@ def test_removed_implementation_is_not_routable() -> None:
 def test_client_owner_and_connection_are_enforced() -> None:
     catalog = CapabilityCatalog()
     catalog.register_definition(make_definition())
-    catalog.register_implementation(make_client_implementation())
+    client = make_client_implementation(
+        implementation_id="client-1",
+        owner_id="owner-1",
+        connection_id="conn-1",
+    )
+    catalog.register_implementation(client)
+    catalog.transition_implementation("client-1", CapabilityImplementationState.ENABLED)
     catalog.register_implementation(
         make_server_implementation(implementation_id="server-1")
     )
 
-    policy = CapabilityRoutingPolicy()
+    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+
+    connections = ConnectionLifecycleRegistry()
+    connections.register(
+        connection_id="conn-1",
+        session_id="sess-1",
+        user_id="owner-1",
+    )
+    connections.activate("conn-1")
+
+    policy = CapabilityRoutingPolicy(
+        connection_availability=connections,
+    )
 
     selected = policy.select(
         catalog,
@@ -224,7 +259,20 @@ def test_wrong_client_connection_is_not_authorized() -> None:
     catalog.register_definition(make_definition())
     catalog.register_implementation(make_client_implementation())
 
+    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+
+    connections = ConnectionLifecycleRegistry()
+    connections.register(
+        connection_id="conn-1",
+        session_id="sess-1",
+        user_id="owner-1",
+    )
+    connections.activate("conn-1")
+
     policy = CapabilityRoutingPolicy()
+    policy = CapabilityRoutingPolicy(
+        connection_availability=connections,
+    )
 
     with pytest.raises(PermissionError):
         policy.select(
@@ -319,8 +367,15 @@ def test_agent_runtime_does_not_need_to_know_physical_location() -> None:
         "client-1",
         CapabilityImplementationState.ENABLED,
     )
+    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
 
-    selected = CapabilityRoutingPolicy().select(
+    connections = ConnectionLifecycleRegistry()
+    connections.register(connection_id="conn-1", session_id="sess-1", user_id="owner-1")
+    connections.activate("conn-1")
+
+    policy = CapabilityRoutingPolicy(connection_availability=connections)
+
+    selected = policy.select(
         catalog,
         "demo.echo",
         context=CapabilityRequestContext(
@@ -331,3 +386,47 @@ def test_agent_runtime_does_not_need_to_know_physical_location() -> None:
 
     assert selected.location == CapabilityExecutionLocation.CLIENT
     assert selected.implementation_id == "client-1"
+
+
+def test_client_capability_requires_active_connection() -> None:
+    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+
+    catalog = CapabilityCatalog()
+    catalog.register_definition(make_definition())
+    catalog.register_implementation(
+        make_client_implementation(),
+    )
+
+    connections = ConnectionLifecycleRegistry()
+    connections.register(
+        connection_id="conn-1",
+        session_id="sess-1",
+        user_id="owner-1",
+    )
+
+    policy = CapabilityRoutingPolicy(
+        connection_availability=connections,
+    )
+
+    with pytest.raises(PermissionError):
+        policy.select(
+            catalog,
+            "demo.echo",
+            context=CapabilityRequestContext(
+                owner_id="owner-1",
+                connection_id="conn-1",
+            ),
+        )
+
+    connections.activate("conn-1")
+
+    # Implementation is still REGISTERED, therefore not routable.
+    with pytest.raises(PermissionError):
+        policy.select(
+            catalog,
+            "demo.echo",
+            context=CapabilityRequestContext(
+                owner_id="owner-1",
+                connection_id="conn-1",
+            ),
+        )

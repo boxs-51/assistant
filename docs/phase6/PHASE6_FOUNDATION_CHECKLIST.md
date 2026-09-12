@@ -1,4 +1,4 @@
-# Phase 6.1 Control Plane Checklist
+# Phase 6.1 / 6.2 Exit Checklist
 
 ## Contract
 
@@ -27,7 +27,7 @@
 - [x] Add tests for same capability with multiple implementations.
 - [x] Add tests proving AgentRuntime is location-agnostic.
 
-## Phase 6.1 scope
+## Phase 6.1
 
 - [x] Logical capability catalog.
 - [x] Multiple concrete implementations per capability.
@@ -41,6 +41,30 @@ Phase 6.1 remains control-plane only. It does not introduce WebSocket
 transport, remote invocation, connection heartbeat, client execution,
 or changes to the existing Phase 5 execution path.
 
+## Phase 6.2
+
+- [x] Connection identity separate from session identity.
+- [x] Explicit lifecycle state machine.
+- [x] Persistent state transitions.
+- [x] Heartbeat liveness tracking.
+- [x] Stale eviction.
+- [x] Disconnect persistence.
+- [x] Immutable connection snapshots.
+- [x] Connection ID reuse prevention.
+- [x] ConnectionRegistry uses lifecycle registry as source of truth.
+
+## 6.1 / 6.2 integration gate
+
+- [x] Client implementation requires owner type CLIENT.
+- [x] Client implementation requires owner ID.
+- [x] Client implementation requires connection ID.
+- [x] Implementation version matches capability definition version.
+- [x] Client routing requires ACTIVE connection.
+- [x] STALE connection is not routable.
+- [x] DISCONNECTED connection is not routable.
+- [x] Disconnect does not delete logical capability definition.
+- [x] AgentRuntime remains unchanged.
+
 ## Required before remote execution
 
 - [ ] Authenticated connection handshake.
@@ -52,6 +76,8 @@ or changes to the existing Phase 5 execution path.
 
 ## Exit rule
 
-Phase 6.0 is complete when the foundation contracts exist and are covered by
-architecture tests, while the current Phase 5 execution path remains behaviorally
-unchanged.
+Phase 6.1/6.2 may advance to Phase 6.3 only when the control-plane catalog,
+connection lifecycle, and their integration tests pass.
+
+Phase 6.3 remains responsible for realtime multiplexing and invocation
+correlation. No WebSocket invocation protocol is introduced by this gate.

@@ -38,7 +38,10 @@ class ConnectionSnapshot(BaseModel):
     connection identity used to bind capability implementations.
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(
+        extra="forbid",
+        frozen=True,
+    )
 
     connection_id: str
     session_id: str

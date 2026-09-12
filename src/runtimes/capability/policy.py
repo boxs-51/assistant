@@ -3,13 +3,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import FrozenSet, Optional
+from typing import FrozenSet, Optional, Protocol
 
 from .catalog import CapabilityCatalog
 from .contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
 )
+
+
+class ConnectionAvailabilityProvider(Protocol):
+    """Minimal lifecycle dependency required by client-capability routing."""
+
+    def is_active(self, connection_id: str) -> bool:
+        """Return whether a connection is currently ACTIVE."""
 
 
 @dataclass(frozen=True)
@@ -30,6 +37,7 @@ class CapabilityAuthorizationPolicy:
         *,
         required_scopes: list[str],
         context: CapabilityRequestContext,
+        connection_availability: Optional[ConnectionAvailabilityProvider] = None,
     ) -> bool:
         if implementation.location == CapabilityExecutionLocation.CLIENT:
             if not implementation.owner_id:
@@ -41,6 +49,14 @@ class CapabilityAuthorizationPolicy:
                 return False
 
             if context.connection_id != implementation.connection_id:
+                return False
+
+            if connection_availability is None:
+                return False
+
+            if not connection_availability.is_active(
+                implementation.connection_id
+            ):
                 return False
 
         required = frozenset(required_scopes)
@@ -60,10 +76,14 @@ class CapabilityRoutingPolicy:
     def __init__(
         self,
         authorization: Optional[CapabilityAuthorizationPolicy] = None,
+        connection_availability: Optional[
+            ConnectionAvailabilityProvider
+        ] = None,
     ) -> None:
         self._authorization = (
             authorization or CapabilityAuthorizationPolicy()
         )
+        self._connection_availability = connection_availability
 
     def select(
         self,
@@ -96,6 +116,7 @@ class CapabilityRoutingPolicy:
                 implementation,
                 required_scopes=definition.required_scopes,
                 context=context,
+                connection_availability=self._connection_availability,
             ):
                 return implementation
 
@@ -109,4 +130,5 @@ __all__ = [
     "CapabilityRequestContext",
     "CapabilityAuthorizationPolicy",
     "CapabilityRoutingPolicy",
+    "ConnectionAvailabilityProvider",
 ]

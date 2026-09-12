@@ -15,6 +15,7 @@ from .contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
+    CapabilityOwnerType,
 )
 
 
@@ -160,6 +161,16 @@ class CapabilityCatalog:
                     f"Unknown capability: {implementation.capability_id}"
                 )
 
+            definition = self._definitions[implementation.capability_id]
+
+            if implementation.version != definition.version:
+                raise CapabilityCatalogError(
+                    f"Implementation '{implementation.implementation_id}' "
+                    f"version {implementation.version!r} does not match "
+                    f"capability '{implementation.capability_id}' "
+                    f"version {definition.version!r}"
+                )
+
             self._validate_binding(implementation)
 
             if implementation.implementation_id in self._implementations:
@@ -267,6 +278,10 @@ class CapabilityCatalog:
         implementation: CapabilityImplementation,
     ) -> None:
         if implementation.location == CapabilityExecutionLocation.CLIENT:
+            if implementation.owner_type != CapabilityOwnerType.CLIENT:
+                raise InvalidCapabilityBindingError(
+                    "CLIENT implementation requires owner_type=CLIENT"
+                )
             if not implementation.owner_id:
                 raise InvalidCapabilityBindingError(
                     "CLIENT implementation requires owner_id"

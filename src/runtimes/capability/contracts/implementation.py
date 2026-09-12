@@ -26,6 +26,13 @@ class CapabilityImplementationState(str, Enum):
     REMOVED = "REMOVED"
 
 
+class CapabilityOwnerType(str, Enum):
+    SYSTEM = "SYSTEM"
+    USER = "USER"
+    CLIENT = "CLIENT"
+    WORKSPACE = "WORKSPACE"
+
+
 class CapabilityImplementation(BaseModel):
     """Concrete execution binding for a logical CapabilityDefinition.
 
@@ -45,6 +52,8 @@ class CapabilityImplementation(BaseModel):
     owner_id: Optional[str] = None
     connection_id: Optional[str] = None
 
+    owner_type: CapabilityOwnerType = CapabilityOwnerType.SYSTEM
+
     state: CapabilityImplementationState = (
         CapabilityImplementationState.REGISTERED
     )
@@ -60,6 +69,7 @@ class CapabilityImplementation(BaseModel):
         driver_kind: str,
         owner_id: Optional[str] = None,
         connection_id: Optional[str] = None,
+        owner_type: CapabilityOwnerType = CapabilityOwnerType.SYSTEM,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> "CapabilityImplementation":
         return cls(
@@ -70,5 +80,6 @@ class CapabilityImplementation(BaseModel):
             driver_kind=driver_kind,
             owner_id=owner_id,
             connection_id=connection_id,
+            owner_type=owner_type,
             metadata=metadata or {},
         )

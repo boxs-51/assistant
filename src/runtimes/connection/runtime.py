@@ -4,7 +4,7 @@ import structlog
 from typing import Dict, Any, Optional
 
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
-from .session import ConnectionRegistry
+from .registry import ConnectionRegistry
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 
@@ -68,7 +68,23 @@ class ConnectionRuntime(BaseRuntime):
             return True
         return False
 
+    def evict_stale_connections(self):
+        """Synchronously evict stale transport connections.
+
+        Remote invocation is intentionally not implemented here.
+        """
+        return self.registry.evict_stale()
+
     async def _monitor_heartbeats(self):
         while self._is_running:
             await asyncio.sleep(30)
-            # Logic kiểm tra heartbeat...
+            stale = self.evict_stale_connections()
+            if stale:
+                logger.info(
+                    "Stale connections evicted",
+                    count=len(stale),
+                    connection_ids=[
+                        connection.connection_id
+                        for connection in stale
+                    ],
+                )

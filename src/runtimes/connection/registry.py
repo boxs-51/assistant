@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from typing import Any, Dict, Optional
 
 from .contracts import ConnectionSnapshot
@@ -25,16 +26,21 @@ class ConnectionRegistry:
             stale_after_seconds=stale_after_seconds,
         )
         self._sockets: Dict[str, Any] = {}
+        self._session_to_connection: Dict[str, str] = {}
+        self._connection_to_session: Dict[str, str] = {}
 
     def register(
         self,
-        *,
-        connection_id: str,
         session_id: str,
         user_id: str,
         socket: Optional[Any] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        *,
+        connection_id: Optional[str] = None,
     ) -> ConnectionSnapshot:
+        if connection_id is None:
+            connection_id = f"conn-{uuid.uuid4()}"
+
         snapshot = self.lifecycle.register(
             connection_id=connection_id,
             session_id=session_id,
@@ -44,6 +50,9 @@ class ConnectionRegistry:
 
         if socket is not None:
             self._sockets[connection_id] = socket
+
+        self._session_to_connection[session_id] = connection_id
+        self._connection_to_session[connection_id] = session_id
 
         return snapshot
 
@@ -73,6 +82,12 @@ class ConnectionRegistry:
     ) -> ConnectionSnapshot:
         snapshot = self.lifecycle.remove(connection_id)
         self._sockets.pop(connection_id, None)
+        session_id = self._connection_to_session.pop(
+            connection_id,
+            None,
+        )
+        if session_id is not None:
+            self._session_to_connection.pop(session_id, None)
         return snapshot
 
     def get(
@@ -83,8 +98,16 @@ class ConnectionRegistry:
 
     def get_socket(
         self,
-        connection_id: str,
+        identifier: str,
     ) -> Optional[Any]:
+        connection_id = identifier
+
+        if identifier not in self._sockets:
+            connection_id = self._session_to_connection.get(
+                identifier,
+                identifier,
+            )
+
         return self._sockets.get(connection_id)
 
     def evict_stale(self):
@@ -94,6 +117,18 @@ class ConnectionRegistry:
             self._sockets.pop(connection.connection_id, None)
 
         return stale
+
+    def is_active(self, connection_id: str) -> bool:
+        return self.lifecycle.is_active(connection_id)
+
+    def resolve_connection_id(self, session_id: str) -> Optional[str]:
+        return self._session_to_connection.get(session_id)
+
+    def session_for_connection(
+        self,
+        connection_id: str,
+    ) -> Optional[str]:
+        return self._connection_to_session.get(connection_id)
 
 
 __all__ = ["ConnectionRegistry"]

@@ -50,9 +50,9 @@ class ConnectionLifecycleRegistry:
         with self._lock:
             existing = self._connections.get(connection_id)
 
-            if existing is not None and existing.state != ConnectionState.REMOVED:
+            if existing is not None:
                 raise ValueError(
-                    f"Connection already exists: {connection_id}"
+                    f"Connection ID cannot be reused: {connection_id}"
                 )
 
             snapshot = ConnectionSnapshot(
@@ -91,13 +91,13 @@ class ConnectionLifecycleRegistry:
         with self._lock:
             current = self._get(connection_id)
 
-            if current.state in {
-                ConnectionState.DISCONNECTED,
-                ConnectionState.REMOVED,
+            if current.state not in {
+                ConnectionState.ACTIVE,
+                ConnectionState.STALE,
             }:
                 raise ConnectionStateTransitionError(
-                    f"Heartbeat is not accepted for {current.state.value} "
-                    f"connection: {connection_id}"
+                    f"Heartbeat requires ACTIVE or STALE connection; "
+                    f"got {current.state.value} for {connection_id}"
                 )
 
             updated = current.model_copy(
@@ -115,7 +115,9 @@ class ConnectionLifecycleRegistry:
     ) -> ConnectionSnapshot:
         with self._lock:
             current = self._get(connection_id)
-            return self._transition(current, ConnectionState.STALE)
+            updated = self._transition(current, ConnectionState.STALE)
+            self._connections[connection_id] = updated
+            return updated
 
     def disconnect(
         self,
@@ -123,10 +125,12 @@ class ConnectionLifecycleRegistry:
     ) -> ConnectionSnapshot:
         with self._lock:
             current = self._get(connection_id)
-            return self._transition(
+            updated = self._transition(
                 current,
                 ConnectionState.DISCONNECTED,
             )
+            self._connections[connection_id] = updated
+            return updated
 
     def remove(
         self,
@@ -134,10 +138,12 @@ class ConnectionLifecycleRegistry:
     ) -> ConnectionSnapshot:
         with self._lock:
             current = self._get(connection_id)
-            return self._transition(
+            updated = self._transition(
                 current,
                 ConnectionState.REMOVED,
             )
+            self._connections[connection_id] = updated
+            return updated
 
     def transition(
         self,
@@ -213,6 +219,11 @@ class ConnectionLifecycleRegistry:
                     stale.append(updated)
 
         return stale
+
+    def is_active(self, connection_id: str) -> bool:
+        with self._lock:
+            current = self._get(connection_id)
+            return current.state == ConnectionState.ACTIVE
 
     def _get(self, connection_id: str) -> ConnectionSnapshot:
         try:

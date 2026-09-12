@@ -11,7 +11,7 @@ class PatchApplyError(Exception):
 
 class PatchAction:
     def __init__(self, action_type: str, filepath: str):
-        self.action_type = action_type  # "ADD" hoặc "UPDATE"
+        self.action_type = action_type  # "ADD", "UPDATE", hoặc "DELETE"
         self.filepath = filepath
         self.add_lines: list[str] = []
         self.hunks: list[list[str]] = []
@@ -49,14 +49,27 @@ def find_sequence_fuzzy(target: list[str], pattern: list[str]) -> int:
     return -1
 
 
+def format_rejected_hunks(filepath: str, failed_hunks: list[list[str]]) -> str:
+    """Tạo nội dung định dạng diff/rej cho các hunk bị lỗi để người dùng tự sửa."""
+    lines = [f"--- a/{filepath}", f"+++ b/{filepath}"]
+    for idx, hunk in enumerate(failed_hunks, 1):
+        lines.append(f"@@ - Hunk {idx} thất bại @@")
+        lines.extend(hunk)
+    return "\n".join(lines) + "\n"
+
+
 def apply_hunks_to_content(
-    filepath: str, original_text: str, hunks: list[list[str]]
-) -> str:
-    """Áp dụng các khối thay đổi (hunks) vào nội dung file có sẵn."""
+    filepath: str,
+    original_text: str,
+    hunks: list[list[str]],
+    allow_rejects: bool = False,
+) -> tuple[str, list[list[str]]]:
+    """Áp dụng các hunk vào nội dung file. Trả về (nội_dung_mới, danh_sách_hunk_thất_bại)."""
     file_lines = (
         original_text.replace("\r\n", "\n").splitlines() if original_text else []
     )
     search_idx = 0
+    failed_hunks: list[list[str]] = []
 
     for hunk_idx, hunk in enumerate(hunks, 1):
         if not hunk:
@@ -82,33 +95,31 @@ def apply_hunks_to_content(
             search_idx += len(new_lines)
             continue
 
-        # Tìm vị trí khớp chính xác
         match_idx = find_sequence(file_lines, old_lines, start_idx=search_idx)
         if match_idx == -1:
-            # Thử lại từ đầu file
             match_idx = find_sequence(file_lines, old_lines, start_idx=0)
 
-        # Nếu không khớp chính xác, thử tìm kiếm linh hoạt (Fuzzy Match)
         if match_idx == -1:
             match_idx = find_sequence_fuzzy(file_lines, old_lines)
 
-        # Kiểm tra lỗi: Nếu vẫn không tìm thấy đoạn context
         if match_idx == -1:
-            ctx_snippet = "\n".join(f"  {line}" for line in old_lines)
-            raise PatchApplyError(
-                f"Lỗi Hunk #{hunk_idx} tại file '{filepath}': Không tìm thấy đoạn context trong mã nguồn gốc:\n{ctx_snippet}"
-            )
+            if not allow_rejects:
+                ctx_snippet = "\n".join(f"  {line}" for line in old_lines)
+                raise PatchApplyError(
+                    f"Lỗi Hunk #{hunk_idx} tại file '{filepath}': Không tìm thấy đoạn context trong mã nguồn gốc:\n{ctx_snippet}"
+                )
+            else:
+                failed_hunks.append(hunk)
+        else:
+            file_lines[match_idx : match_idx + len(old_lines)] = new_lines
+            search_idx = match_idx + len(new_lines)
 
-        file_lines[match_idx : match_idx + len(old_lines)] = new_lines
-        search_idx = match_idx + len(new_lines)
-
-    return "\n".join(file_lines)
+    return "\n".join(file_lines), failed_hunks
 
 
 def parse_patch(content: str) -> list[PatchAction]:
-    """Phân tích file patch để bóc tách hành động Add/Update và các đường dẫn file."""
+    """Phân tích file patch để bóc tách hành động Add/Update/Delete và các đường dẫn file."""
     actions: list[PatchAction] = []
-    # 1. Chuẩn hóa ký tự NO-BREAK SPACE (\xa0) thành dấu cách thường
     content = content.replace("\xa0", " ")
     lines = content.splitlines()
     i = 0
@@ -117,7 +128,6 @@ def parse_patch(content: str) -> list[PatchAction]:
     while i < len(lines):
         line = lines[i]
 
-        # Xử lý cú pháp custom "*** Add File:"
         if line.startswith("*** Add File:"):
             if current_action:
                 current_action.finish_hunk()
@@ -125,12 +135,13 @@ def parse_patch(content: str) -> list[PatchAction]:
 
             filepath = line.replace("*** Add File:", "").strip()
             if not filepath:
-                raise PatchApplyError("Lỗi cú pháp patch: Đường dẫn file rỗng sau '*** Add File:'")
+                raise PatchApplyError(
+                    "Lỗi cú pháp patch: Đường dẫn file rỗng sau '*** Add File:'"
+                )
             current_action = PatchAction("ADD", filepath)
             i += 1
             continue
 
-        # Xử lý cú pháp custom "*** Update File:"
         if line.startswith("*** Update File:"):
             if current_action:
                 current_action.finish_hunk()
@@ -138,7 +149,9 @@ def parse_patch(content: str) -> list[PatchAction]:
 
             filepath = line.replace("*** Update File:", "").strip()
             if not filepath:
-                raise PatchApplyError("Lỗi cú pháp patch: Đường dẫn file rỗng sau '*** Update File:'")
+                raise PatchApplyError(
+                    "Lỗi cú pháp patch: Đường dẫn file rỗng sau '*** Update File:'"
+                )
             current_action = PatchAction("UPDATE", filepath)
             i += 1
             continue
@@ -151,12 +164,15 @@ def parse_patch(content: str) -> list[PatchAction]:
             i += 1
             continue
 
-        # Xử lý "diff --git" hoặc lỗi copy mất chữ "iff --git"
         if line.startswith("diff --git") or line.startswith("iff --git"):
             if current_action:
                 current_action.finish_hunk()
-                # Chỉ lưu action cũ nếu nó thực sự có nội dung/hunk
-                if current_action.add_lines or current_action.hunks or current_action.current_hunk:
+                if (
+                    current_action.add_lines
+                    or current_action.hunks
+                    or current_action.current_hunk
+                    or current_action.action_type == "DELETE"
+                ):
                     actions.append(current_action)
                 current_action = None
 
@@ -176,51 +192,72 @@ def parse_patch(content: str) -> list[PatchAction]:
             i += 1
             continue
 
-        # Đổi trạng thái sang ADD nếu gặp "new file mode"
         if line.startswith("new file mode"):
             if current_action:
                 current_action.action_type = "ADD"
             i += 1
             continue
 
-        # Xử lý cặp dòng standard unified diff "--- " và "+++ "
+        if line.startswith("deleted file mode"):
+            if current_action:
+                current_action.action_type = "DELETE"
+            i += 1
+            continue
+
         if line.startswith("--- "):
             if i + 1 < len(lines) and lines[i + 1].startswith("+++ "):
                 src_line = line
                 tgt_line = lines[i + 1]
 
+                raw_src = src_line[4:].split("\t")[0].strip()
+                if raw_src.startswith("a/") or raw_src.startswith("b/"):
+                    raw_src = raw_src[2:]
+
                 raw_tgt = tgt_line[4:].split("\t")[0].strip()
                 if raw_tgt.startswith("b/") or raw_tgt.startswith("a/"):
                     raw_tgt = raw_tgt[2:]
 
-                if not raw_tgt:
-                    raise PatchApplyError("Lỗi cú pháp patch: Không xác định được đường dẫn file trong Unified Diff")
-
                 is_add = src_line.startswith("--- /dev/null")
+                is_delete = tgt_line.startswith("+++ /dev/null")
 
-                # Nếu current_action đã được tạo bởi diff --git trước đó và trùng file -> Tái sử dụng
-                if current_action and current_action.filepath == raw_tgt:
-                    if is_add:
-                        current_action.action_type = "ADD"
+                if is_delete:
+                    action_type = "DELETE"
+                    target_path = raw_src
+                elif is_add:
+                    action_type = "ADD"
+                    target_path = raw_tgt
+                else:
+                    action_type = "UPDATE"
+                    target_path = raw_tgt
+
+                if not target_path or target_path == "/dev/null":
+                    raise PatchApplyError(
+                        "Lỗi cú pháp patch: Không xác định được đường dẫn file hợp lệ trong Unified Diff"
+                    )
+
+                if current_action and current_action.filepath == target_path:
+                    current_action.action_type = action_type
                 else:
                     if current_action:
                         current_action.finish_hunk()
-                        if current_action.add_lines or current_action.hunks or current_action.current_hunk:
+                        if (
+                            current_action.add_lines
+                            or current_action.hunks
+                            or current_action.current_hunk
+                            or current_action.action_type == "DELETE"
+                        ):
                             actions.append(current_action)
 
-                    action_type = "ADD" if is_add else "UPDATE"
-                    current_action = PatchAction(action_type, raw_tgt)
+                    current_action = PatchAction(action_type, target_path)
 
                 i += 2
                 continue
 
-        # Bóc tách nội dung dòng dựa trên action_type
         if current_action:
             if current_action.action_type == "ADD":
                 if line.startswith("@@"):
                     i += 1
                     continue
-                # Bỏ qua các dòng header/metadata thừa nếu có
                 if line.startswith("index ") or line.startswith("new file mode"):
                     i += 1
                     continue
@@ -248,15 +285,21 @@ def parse_patch(content: str) -> list[PatchAction]:
 
     if current_action:
         current_action.finish_hunk()
-        if current_action.add_lines or current_action.hunks or current_action.current_hunk:
+        if (
+            current_action.add_lines
+            or current_action.hunks
+            or current_action.current_hunk
+            or current_action.action_type == "DELETE"
+        ):
             actions.append(current_action)
 
     return actions
 
 
-def apply_custom_patch(patch_path: str) -> bool:
-    """Đọc file patch và thực thi tạo mới/chỉnh sửa file tương ứng (trả về True nếu thành công hoàn toàn)."""
-    # 1. Kiểm tra tồn tại file patch
+def apply_custom_patch(
+    patch_path: str, check_only: bool = False, force: bool = False
+) -> bool:
+    """Xử lý file patch theo các chế độ: Check Mode, Atomic Default Mode, và Force Mode."""
     if not os.path.exists(patch_path):
         print(f"❌ Lỗi: Không tìm thấy file patch tại: {patch_path}")
         return False
@@ -278,25 +321,31 @@ def apply_custom_patch(patch_path: str) -> bool:
         print("⚠️ Cảnh báo: Không tìm thấy khối patch hợp lệ nào trong file.")
         return False
 
-    success_count = 0
-    failed_files: list[str] = []
+    # BƯỚC 1: Mô phỏng xử lý trên bộ nhớ (Pre-check)
+    prepared_changes = []
+    has_errors = False
 
-    # 2. Duyệt qua các hành động patch
     for action in actions:
-        try:
-            dir_name = os.path.dirname(action.filepath)
-            if dir_name:
-                os.makedirs(dir_name, exist_ok=True)
+        item = {
+            "action": action,
+            "filepath": action.filepath,
+            "action_type": action.action_type,
+            "content_to_write": None,
+            "failed_hunks": [],
+            "error": None,
+        }
 
+        try:
             if action.action_type == "ADD":
-                file_content = "\n".join(action.add_lines)
-                with open(action.filepath, "w", encoding="utf-8") as f:
-                    f.write(file_content)
-                print(f"✅ Đã tạo mới: {action.filepath}")
-                success_count += 1
+                item["content_to_write"] = "\n".join(action.add_lines)
+
+            elif action.action_type == "DELETE":
+                if not os.path.exists(action.filepath) and not force:
+                    # File cần xóa không tồn tại
+                    item["error"] = f"Không thể DELETE vì file không tồn tại: '{action.filepath}'"
+                    has_errors = True
 
             elif action.action_type == "UPDATE":
-                # Kiểm tra sự tồn tại của file trước khi UPDATE
                 if not os.path.exists(action.filepath):
                     raise PatchApplyError(
                         f"Không thể UPDATE vì file chưa tồn tại: '{action.filepath}'"
@@ -305,30 +354,120 @@ def apply_custom_patch(patch_path: str) -> bool:
                 with open(action.filepath, "r", encoding="utf-8") as f:
                     original_text = f.read()
 
-                updated_content = apply_hunks_to_content(
-                    action.filepath, original_text, action.hunks
+                updated_text, failed_hunks = apply_hunks_to_content(
+                    action.filepath, original_text, action.hunks, allow_rejects=force
                 )
 
-                with open(action.filepath, "w", encoding="utf-8") as f:
-                    f.write(updated_content)
+                item["content_to_write"] = updated_text
+                item["failed_hunks"] = failed_hunks
 
-                print(f"✅ Đã cập nhật: {action.filepath}")
-                success_count += 1
+                if failed_hunks and not force:
+                    has_errors = True
 
         except (PatchApplyError, OSError) as e:
-            print(f"❌ Thất bại [{action.filepath}]: {e}")
-            failed_files.append(action.filepath)
+            item["error"] = str(e)
+            has_errors = True
 
-    # 3. Tổng kết kết quả
-    print("\n" + "=" * 50)
-    print(f"📊 Kết quả áp dụng patch:")
-    print(f"   - Thành công: {success_count}/{len(actions)} file")
-    if failed_files:
-        print(f"   - Thất bại ({len(failed_files)} file): {', '.join(failed_files)}")
+        prepared_changes.append(item)
+
+    # BƯỚC 2: Chế độ --check
+    if check_only:
+        print("🔍 --- KẾT QUẢ KIỂM TRA (CHECK MODE) ---")
+        for item in prepared_changes:
+            fp = item["filepath"]
+            if item["error"]:
+                print(f"❌ [LỖI] {fp}: {item['error']}")
+            elif item["failed_hunks"]:
+                print(f"⚠️ [LỖI HUNK] {fp}: {len(item['failed_hunks'])} hunk bị thất bại.")
+            else:
+                print(f"✅ [OK] {fp} ({item['action_type']})")
+
+        if has_errors:
+            print("\n❌ Kiểm tra thất bại: Patch chứa lỗi và không thể áp dụng sạch hoàn toàn.")
+            return False
+        print("\n🎉 Kiểm tra thành công: Tất cả các thay đổi đều hợp lệ!")
+        return True
+
+    # Chế độ Mặc định (Không có --force)
+    if has_errors and not force:
+        print("❌ BÁO LỖI: Phát hiện lỗi trong quá trình phân tích/khớp patch!")
+        print("🛑 Mặc định script sẽ HỦY BỎ toàn bộ thao tác (không có file nào bị chỉnh sửa).")
+        print("\nChi tiết các file bị lỗi:")
+        for item in prepared_changes:
+            if item["error"]:
+                print(f"   - [{item['filepath']}]: {item['error']}")
+            elif item["failed_hunks"]:
+                print(f"   - [{item['filepath']}]: {len(item['failed_hunks'])} hunk không tìm thấy context.")
+
+        print("\n💡 Gợi ý:")
+        print("   - Chạy `--check` để kiểm tra trước các file.")
+        print("   - Chạy `--force` (hoặc `-f`) để bỏ qua lỗi, áp dụng các phần khớp được và tạo file .rej chứa vị trí bị lỗi để tự sửa.")
         return False
 
-    print("🎉 Tất cả thay đổi đã được áp dụng thành công!")
-    return True
+    # BƯỚC 3: Ghi thay đổi ra đĩa
+    success_count = 0
+    rej_count = 0
+    failed_count = 0
+
+    for item in prepared_changes:
+        filepath = item["filepath"]
+        dir_name = os.path.dirname(filepath)
+
+        try:
+            if item["action_type"] == "DELETE":
+                if os.path.exists(filepath):
+                    os.remove(filepath)
+                    print(f"✅ Đã xóa: {filepath}")
+                    success_count += 1
+                else:
+                    print(f"⚠️ Không thể xóa (file không tồn tại): {filepath}")
+                    failed_count += 1
+                continue
+
+            if dir_name:
+                os.makedirs(dir_name, exist_ok=True)
+
+            if item["content_to_write"] is not None and not (item["error"] and item["action_type"] == "UPDATE"):
+                with open(filepath, "w", encoding="utf-8") as f:
+                    f.write(item["content_to_write"])
+
+            if item["failed_hunks"]:
+                rej_filepath = f"{filepath}.rej"
+                rej_content = format_rejected_hunks(filepath, item["failed_hunks"])
+                with open(rej_filepath, "w", encoding="utf-8") as f:
+                    f.write(rej_content)
+                print(f"⚠️ Đã áp dụng một phần: {filepath} (Đã tạo file lỗi: {rej_filepath})")
+                rej_count += 1
+
+            elif item["error"]:
+                rej_filepath = f"{filepath}.rej"
+                rej_content = format_rejected_hunks(
+                    filepath,
+                    item["action"].hunks if item["action"].hunks else [[l] for l in item["action"].add_lines],
+                )
+                with open(rej_filepath, "w", encoding="utf-8") as f:
+                    f.write(f"# Lỗi: {item['error']}\n" + rej_content)
+                print(f"❌ Bị lỗi [{filepath}]: {item['error']} (Đã tạo file lỗi: {rej_filepath})")
+                failed_count += 1
+
+            else:
+                act_str = "tạo mới" if item["action_type"] == "ADD" else "cập nhật"
+                print(f"✅ Đã {act_str}: {filepath}")
+                success_count += 1
+
+        except OSError as e:
+            print(f"❌ Lỗi khi xử lý file [{filepath}]: {e}")
+            failed_count += 1
+
+    print("\n" + "=" * 50)
+    print("📊 Kết quả áp dụng patch:")
+    print(f"   - Thành công: {success_count}/{len(actions)} file")
+    if rej_count > 0:
+        print(f"   - Áp dụng một phần (xuất file .rej): {rej_count} file")
+    if failed_count > 0:
+        print(f"   - Thất bại hoàn toàn: {failed_count} file")
+
+    return failed_count == 0 and rej_count == 0
 
 
 if __name__ == "__main__":
@@ -340,8 +479,21 @@ if __name__ == "__main__":
         type=str,
         help="Đường dẫn tới file .patch cần áp dụng",
     )
+    parser.add_argument(
+        "--check",
+        action="store_true",
+        help="Chế độ kiểm tra (Dry-run): Chỉ kiểm tra xem patch có khớp sạch không, không chỉnh sửa file.",
+    )
+    parser.add_argument(
+        "-f",
+        "--force",
+        action="store_true",
+        help="Bỏ qua lỗi: Vẫn áp dụng các đoạn khớp thành công và tạo file <filepath>.rej chứa các đoạn bị lỗi để tự sửa.",
+    )
 
     args = parser.parse_args()
-    success = apply_custom_patch(args.patch_path)
+    success = apply_custom_patch(
+        args.patch_path, check_only=args.check, force=args.force
+    )
     if not success:
         sys.exit(1)
