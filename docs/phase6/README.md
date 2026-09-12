@@ -84,7 +84,7 @@ Every invocation is correlated by `invocation_id` and must preserve `execution_i
 ```text
 6.0 Foundation contracts       <- this patch
 6.1 Catalog + ownership + policy
-6.2 Connection lifecycle
+6.2 Connection lifecycle       <- lifecycle registry + heartbeat/stale
 6.3 Realtime multiplex
 6.4 Remote client driver
 6.5 Client self-registration

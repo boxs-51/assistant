@@ -1,0 +1,803 @@
+diff --git a/src/runtimes/capability/catalog.py b/src/runtimes/capability/catalog.py
+new file mode 100644
+index 0000000..1111111
+--- /dev/null
++++ b/src/runtimes/capability/catalog.py
+@@ -0,0 +1,252 @@
++"""Phase 6.1 capability control-plane catalog.
++
++The catalog is intentionally separate from the legacy CapabilityRegistry.
++CapabilityRegistry owns executable server-side drivers; this catalog owns
++logical definitions and concrete implementation metadata.
++"""
++
++from __future__ import annotations
++
++from threading import RLock
++from typing import Dict, List
++
++from .contracts.definition import CapabilityDefinition, validate_input_schema
++from .contracts.implementation import (
++    CapabilityExecutionLocation,
++    CapabilityImplementation,
++    CapabilityImplementationState,
++)
++
++
++class CapabilityCatalogError(ValueError):
++    """Base error for capability catalog violations."""
++
++
++class CapabilityDefinitionConflictError(CapabilityCatalogError):
++    """Raised when an existing capability ID is registered with another contract."""
++
++
++class CapabilityImplementationConflictError(CapabilityCatalogError):
++    """Raised when an implementation ID is already registered."""
++
++
++class CapabilityNotFoundError(CapabilityCatalogError):
++    """Raised when a referenced capability does not exist."""
++
++
++class CapabilityImplementationNotFoundError(CapabilityCatalogError):
++    """Raised when a referenced implementation does not exist."""
++
++
++class InvalidCapabilityBindingError(CapabilityCatalogError):
++    """Raised when implementation ownership/location binding is invalid."""
++
++
++class InvalidCapabilityStateTransitionError(CapabilityCatalogError):
++    """Raised when an implementation lifecycle transition is invalid."""
++
++
++class CapabilityCatalog:
++    """Thread-safe catalog of definitions and multiple implementations.
++
++    A logical capability may have multiple concrete implementations:
++
++        capability_id
++          ├── server implementation
++          ├── client implementation A
++          └── MCP implementation
++
++    The catalog does not execute anything.
++    """
++
++    _ROUTABLE_STATES = frozenset(
++        {
++            CapabilityImplementationState.ENABLED,
++            CapabilityImplementationState.DEGRADED,
++        }
++    )
++
++    _ALLOWED_STATE_TRANSITIONS = {
++        CapabilityImplementationState.REGISTERED: frozenset(
++            {
++                CapabilityImplementationState.ENABLED,
++                CapabilityImplementationState.DISABLED,
++                CapabilityImplementationState.REMOVED,
++            }
++        ),
++        CapabilityImplementationState.ENABLED: frozenset(
++            {
++                CapabilityImplementationState.DEGRADED,
++                CapabilityImplementationState.DISABLED,
++                CapabilityImplementationState.UNAVAILABLE,
++                CapabilityImplementationState.REMOVED,
++            }
++        ),
++        CapabilityImplementationState.DEGRADED: frozenset(
++            {
++                CapabilityImplementationState.ENABLED,
++                CapabilityImplementationState.DISABLED,
++                CapabilityImplementationState.UNAVAILABLE,
++                CapabilityImplementationState.REMOVED,
++            }
++        ),
++        CapabilityImplementationState.UNAVAILABLE: frozenset(
++            {
++                CapabilityImplementationState.ENABLED,
++                CapabilityImplementationState.DEGRADED,
++                CapabilityImplementationState.DISABLED,
++                CapabilityImplementationState.REMOVED,
++            }
++        ),
++        CapabilityImplementationState.DISABLED: frozenset(
++            {
++                CapabilityImplementationState.ENABLED,
++                CapabilityImplementationState.DEGRADED,
++                CapabilityImplementationState.REMOVED,
++            }
++        ),
++        CapabilityImplementationState.REMOVED: frozenset(),
++    }
++
++    def __init__(self) -> None:
++        self._lock = RLock()
++        self._definitions: Dict[str, CapabilityDefinition] = {}
++        self._implementations: Dict[str, CapabilityImplementation] = {}
++        self._by_capability: Dict[str, set[str]] = {}
++
++    def register_definition(
++        self,
++        definition: CapabilityDefinition,
++    ) -> CapabilityDefinition:
++        """Register one logical capability definition.
++
++        Re-registering the exact same contract is idempotent.
++        Re-registering the same ID with a different contract is rejected.
++        """
++        validate_input_schema(definition.input_schema)
++        capability_id = definition.capability_id
++
++        with self._lock:
++            existing = self._definitions.get(capability_id)
++            if existing is not None:
++                if existing != definition:
++                    raise CapabilityDefinitionConflictError(
++                        f"Capability definition already exists with different "
++                        f"contract: {capability_id}"
++                    )
++                return existing
++
++            self._definitions[capability_id] = definition
++            self._by_capability.setdefault(capability_id, set())
++            return definition
++
++    def get_definition(self, capability_id: str) -> CapabilityDefinition:
++        with self._lock:
++            try:
++                return self._definitions[capability_id]
++            except KeyError as exc:
++                raise CapabilityNotFoundError(
++                    f"Unknown capability: {capability_id}"
++                ) from exc
++
++    def register_implementation(
++        self,
++        implementation: CapabilityImplementation,
++    ) -> CapabilityImplementation:
++        """Register a concrete implementation without replacing siblings."""
++        with self._lock:
++            if implementation.capability_id not in self._definitions:
++                raise CapabilityNotFoundError(
++                    f"Unknown capability: {implementation.capability_id}"
++                )
++
++            self._validate_binding(implementation)
++
++            if implementation.implementation_id in self._implementations:
++                raise CapabilityImplementationConflictError(
++                    f"Implementation already exists: "
++                    f"{implementation.implementation_id}"
++                )
++
++            self._implementations[
++                implementation.implementation_id
++            ] = implementation
++            self._by_capability.setdefault(
++                implementation.capability_id, set()
++            ).add(implementation.implementation_id)
++
++            return implementation
++
++    def get_implementation(
++        self,
++        implementation_id: str,
++    ) -> CapabilityImplementation:
++        with self._lock:
++            try:
++                return self._implementations[implementation_id]
++            except KeyError as exc:
++                raise CapabilityImplementationNotFoundError(
++                    f"Unknown implementation: {implementation_id}"
++                ) from exc
++
++    def list_implementations(
++        self,
++        capability_id: str,
++        *,
++        routable_only: bool = False,
++    ) -> List[CapabilityImplementation]:
++        """Return implementations in deterministic implementation-ID order."""
++        with self._lock:
++            if capability_id not in self._definitions:
++                raise CapabilityNotFoundError(
++                    f"Unknown capability: {capability_id}"
++                )
++
++            implementation_ids = self._by_capability.get(
++                capability_id,
++                set(),
++            )
++
++            implementations = [
++                self._implementations[implementation_id]
++                for implementation_id in sorted(implementation_ids)
++            ]
++
++            if routable_only:
++                implementations = [
++                    item
++                    for item in implementations
++                    if item.state in self._ROUTABLE_STATES
++                ]
++
++            return implementations
++
++    def transition_implementation(
++        self,
++        implementation_id: str,
++        new_state: CapabilityImplementationState,
++    ) -> CapabilityImplementation:
++        """Apply one deterministic lifecycle transition."""
++        with self._lock:
++            current = self.get_implementation(implementation_id)
++
++            if current.state == new_state:
++                return current
++
++            allowed = self._ALLOWED_STATE_TRANSITIONS[current.state]
++            if new_state not in allowed:
++                raise InvalidCapabilityStateTransitionError(
++                    f"Invalid implementation state transition: "
++                    f"{current.state.value} -> {new_state.value}"
++                )
++
++            updated = current.model_copy(update={"state": new_state})
++            self._implementations[implementation_id] = updated
++            return updated
++
++    def remove_implementation(
++        self,
++        implementation_id: str,
++    ) -> CapabilityImplementation:
++        """Transition an implementation to the terminal REMOVED state."""
++        return self.transition_implementation(
++            implementation_id,
++            CapabilityImplementationState.REMOVED,
++        )
++
++    def contains_definition(self, capability_id: str) -> bool:
++        with self._lock:
++            return capability_id in self._definitions
++
++    def contains_implementation(self, implementation_id: str) -> bool:
++        with self._lock:
++            return implementation_id in self._implementations
++
++    @staticmethod
++    def _validate_binding(
++        implementation: CapabilityImplementation,
++    ) -> None:
++        if implementation.location == CapabilityExecutionLocation.CLIENT:
++            if not implementation.owner_id:
++                raise InvalidCapabilityBindingError(
++                    "CLIENT implementation requires owner_id"
++                )
++            if not implementation.connection_id:
++                raise InvalidCapabilityBindingError(
++                    "CLIENT implementation requires connection_id"
++                )
++
++        if (
++            implementation.location == CapabilityExecutionLocation.SERVER
++            and implementation.connection_id is not None
++        ):
++            raise InvalidCapabilityBindingError(
++                "SERVER implementation must not bind to connection_id"
++            )
++
++
++__all__ = [
++    "CapabilityCatalog",
++    "CapabilityCatalogError",
++    "CapabilityDefinitionConflictError",
++    "CapabilityImplementationConflictError",
++    "CapabilityNotFoundError",
++    "CapabilityImplementationNotFoundError",
++    "InvalidCapabilityBindingError",
++    "InvalidCapabilityStateTransitionError",
++]
+diff --git a/src/runtimes/capability/policy.py b/src/runtimes/capability/policy.py
+new file mode 100644
+index 0000000..2222222
+--- /dev/null
++++ b/src/runtimes/capability/policy.py
+@@ -0,0 +1,146 @@
++"""Phase 6.1 authorization and routing policies."""
++
++from __future__ import annotations
++
++from dataclasses import dataclass, field
++from typing import FrozenSet, Optional
++
++from .catalog import CapabilityCatalog
++from .contracts.implementation import (
++    CapabilityExecutionLocation,
++    CapabilityImplementation,
++)
++
++
++@dataclass(frozen=True)
++class CapabilityRequestContext:
++    """Security context used by control-plane routing decisions."""
++
++    owner_id: Optional[str] = None
++    connection_id: Optional[str] = None
++    scopes: FrozenSet[str] = field(default_factory=frozenset)
++
++
++class CapabilityAuthorizationPolicy:
++    """Fail-closed authorization policy for capability implementations."""
++
++    def authorize(
++        self,
++        implementation: CapabilityImplementation,
++        *,
++        required_scopes: list[str],
++        context: CapabilityRequestContext,
++    ) -> bool:
++        if implementation.location == CapabilityExecutionLocation.CLIENT:
++            if not implementation.owner_id:
++                return False
++            if not implementation.connection_id:
++                return False
++
++            if context.owner_id != implementation.owner_id:
++                return False
++
++            if context.connection_id != implementation.connection_id:
++                return False
++
++        required = frozenset(required_scopes)
++        if not required.issubset(context.scopes):
++            return False
++
++        return True
++
++
++class CapabilityRoutingPolicy:
++    """Deterministic implementation selection.
++
++    The policy does not care how the implementation physically executes.
++    SERVER/CLIENT/MCP/DECLARATIVE are all implementation locations.
++    """
++
++    def __init__(
++        self,
++        authorization: Optional[CapabilityAuthorizationPolicy] = None,
++    ) -> None:
++        self._authorization = (
++            authorization or CapabilityAuthorizationPolicy()
++        )
++
++    def select(
++        self,
++        catalog: CapabilityCatalog,
++        capability_id: str,
++        *,
++        context: CapabilityRequestContext,
++        preferred_implementation_id: Optional[str] = None,
++    ) -> CapabilityImplementation:
++        definition = catalog.get_definition(capability_id)
++        candidates = catalog.list_implementations(
++            capability_id,
++            routable_only=True,
++        )
++
++        if preferred_implementation_id is not None:
++            preferred = [
++                item
++                for item in candidates
++                if item.implementation_id == preferred_implementation_id
++            ]
++            candidates = preferred + [
++                item
++                for item in candidates
++                if item.implementation_id != preferred_implementation_id
++            ]
++
++        for implementation in candidates:
++            if self._authorization.authorize(
++                implementation,
++                required_scopes=definition.required_scopes,
++                context=context,
++            ):
++                return implementation
++
++        raise PermissionError(
++            f"No authorized routable implementation for capability: "
++            f"{capability_id}"
++        )
++
++
++__all__ = [
++    "CapabilityRequestContext",
++    "CapabilityAuthorizationPolicy",
++    "CapabilityRoutingPolicy",
++]
+diff --git a/tests/architecture/test_phase6_1_control_plane.py b/tests/architecture/test_phase6_1_control_plane.py
+new file mode 100644
+index 0000000..3333333
+--- /dev/null
++++ b/tests/architecture/test_phase6_1_control_plane.py
+@@ -0,0 +1,244 @@
++from __future__ import annotations
++
++import pytest
++
++from src.runtimes.capability.catalog import (
++    CapabilityCatalog,
++    CapabilityImplementationConflictError,
++    InvalidCapabilityBindingError,
++    InvalidCapabilityStateTransitionError,
++)
++from src.runtimes.capability.contracts.definition import CapabilityDefinition
++from src.runtimes.capability.contracts.implementation import (
++    CapabilityExecutionLocation,
++    CapabilityImplementation,
++    CapabilityImplementationState,
++)
++from src.runtimes.capability.policy import (
++    CapabilityRequestContext,
++    CapabilityRoutingPolicy,
++)
++
++
++def make_definition(
++    capability_id: str = "demo.echo",
++    *,
++    required_scopes: list[str] | None = None,
++) -> CapabilityDefinition:
++    return CapabilityDefinition(
++        id=capability_id,
++        name="demo.echo",
++        description="Test capability",
++        input_schema={
++            "type": "object",
++            "properties": {},
++        },
++        required_scopes=required_scopes or [],
++    )
++
++
++def make_server_implementation(
++    capability_id: str = "demo.echo",
++    implementation_id: str = "server-1",
++) -> CapabilityImplementation:
++    return CapabilityImplementation.from_definition(
++        make_definition(capability_id),
++        implementation_id=implementation_id,
++        location=CapabilityExecutionLocation.SERVER,
++        driver_kind="PYTHON",
++    )
++
++
++def make_client_implementation(
++    capability_id: str = "demo.echo",
++    implementation_id: str = "client-1",
++    owner_id: str = "owner-1",
++    connection_id: str = "conn-1",
++) -> CapabilityImplementation:
++    return CapabilityImplementation.from_definition(
++        make_definition(capability_id),
++        implementation_id=implementation_id,
++        location=CapabilityExecutionLocation.CLIENT,
++        driver_kind="REMOTE_CLIENT",
++        owner_id=owner_id,
++        connection_id=connection_id,
++    )
++
++
++def test_same_capability_can_have_multiple_implementations() -> None:
++    catalog = CapabilityCatalog()
++    definition = make_definition()
++
++    catalog.register_definition(definition)
++    catalog.register_implementation(
++        make_server_implementation(implementation_id="server-1")
++    )
++    catalog.register_implementation(
++        make_client_implementation(implementation_id="client-1")
++    )
++
++    implementations = catalog.list_implementations("demo.echo")
++
++    assert [item.implementation_id for item in implementations] == [
++        "client-1",
++        "server-1",
++    ]
++    assert all(
++        item.capability_id == definition.capability_id
++        for item in implementations
++    )
++
++
++def test_duplicate_implementation_id_is_rejected() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++    catalog.register_implementation(
++        make_server_implementation(implementation_id="same")
++    )
++
++    with pytest.raises(CapabilityImplementationConflictError):
++        catalog.register_implementation(
++            make_server_implementation(implementation_id="same")
++        )
++
++
++def test_unknown_capability_cannot_receive_implementation() -> None:
++    catalog = CapabilityCatalog()
++
++    with pytest.raises(ValueError):
++        catalog.register_implementation(
++            make_server_implementation("missing", "server-1")
++        )
++
++
++def test_client_implementation_requires_owner_and_connection() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++
++    implementation = CapabilityImplementation.from_definition(
++        make_definition(),
++        implementation_id="client-1",
++        location=CapabilityExecutionLocation.CLIENT,
++        driver_kind="REMOTE_CLIENT",
++    )
++
++    with pytest.raises(InvalidCapabilityBindingError):
++        catalog.register_implementation(implementation)
++
++
++def test_server_implementation_cannot_bind_connection() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++
++    implementation = CapabilityImplementation.from_definition(
++        make_definition(),
++        implementation_id="server-1",
++        location=CapabilityExecutionLocation.SERVER,
++        driver_kind="PYTHON",
++        connection_id="conn-1",
++    )
++
++    with pytest.raises(InvalidCapabilityBindingError):
++        catalog.register_implementation(implementation)
++
++
++def test_implementation_lifecycle_is_enforced() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++    catalog.register_implementation(
++        make_server_implementation(implementation_id="server-1")
++    )
++
++    implementation = catalog.transition_implementation(
++        "server-1",
++        CapabilityImplementationState.ENABLED,
++    )
++
++    assert implementation.state == CapabilityImplementationState.ENABLED
++
++    implementation = catalog.transition_implementation(
++        "server-1",
++        CapabilityImplementationState.DEGRADED,
++    )
++
++    assert implementation.state == CapabilityImplementationState.DEGRADED
++
++
++def test_invalid_lifecycle_transition_is_rejected() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++    catalog.register_implementation(
++        make_server_implementation(implementation_id="server-1")
++    )
++
++    with pytest.raises(InvalidCapabilityStateTransitionError):
++        catalog.transition_implementation(
++            "server-1",
++            CapabilityImplementationState.UNAVAILABLE,
++        )
++
++
++def test_removed_implementation_is_not_routable() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++    catalog.register_implementation(
++        make_server_implementation(implementation_id="server-1")
++    )
++
++    catalog.transition_implementation(
++        "server-1",
++        CapabilityImplementationState.ENABLED,
++    )
++    catalog.remove_implementation("server-1")
++
++    assert catalog.list_implementations(
++        "demo.echo",
++        routable_only=True,
++    ) == []
++
++
++def test_client_owner_and_connection_are_enforced() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++    catalog.register_implementation(make_client_implementation())
++    catalog.register_implementation(
++        make_server_implementation(implementation_id="server-1")
++    )
++
++    policy = CapabilityRoutingPolicy()
++
++    selected = policy.select(
++        catalog,
++        "demo.echo",
++        context=CapabilityRequestContext(
++            owner_id="owner-1",
++            connection_id="conn-1",
++        ),
++    )
++
++    assert selected.implementation_id == "client-1"
++
++
++def test_wrong_client_connection_is_not_authorized() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++    catalog.register_implementation(make_client_implementation())
++
++    policy = CapabilityRoutingPolicy()
++
++    with pytest.raises(PermissionError):
++        policy.select(
++            catalog,
++            "demo.echo",
++            context=CapabilityRequestContext(
++                owner_id="owner-1",
++                connection_id="wrong-connection",
++            ),
++        )
++
++
++def test_required_scopes_are_fail_closed() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(
++        make_definition(required_scopes=["capability:execute"])
++    )
++    catalog.register_implementation(
++        make_server_implementation(implementation_id="server-1")
++    )
++    catalog.transition_implementation(
++        "server-1",
++        CapabilityImplementationState.ENABLED,
++    )
++
++    policy = CapabilityRoutingPolicy()
++
++    with pytest.raises(PermissionError):
++        policy.select(
++            catalog,
++            "demo.echo",
++            context=CapabilityRequestContext(
++                scopes=frozenset(),
++            ),
++        )
++
++    selected = policy.select(
++        catalog,
++        "demo.echo",
++        context=CapabilityRequestContext(
++            scopes=frozenset({"capability:execute"}),
++        ),
++    )
++
++    assert selected.implementation_id == "server-1"
++
++
++def test_routing_is_deterministic_and_supports_preference() -> None:
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++
++    for implementation_id in ("server-b", "server-a"):
++        implementation = make_server_implementation(
++            implementation_id=implementation_id,
++        )
++        catalog.register_implementation(implementation)
++        catalog.transition_implementation(
++            implementation_id,
++            CapabilityImplementationState.ENABLED,
++        )
++
++    policy = CapabilityRoutingPolicy()
++
++    selected = policy.select(
++        catalog,
++        "demo.echo",
++        context=CapabilityRequestContext(),
++    )
++    assert selected.implementation_id == "server-a"
++
++    selected = policy.select(
++        catalog,
++        "demo.echo",
++        context=CapabilityRequestContext(),
++        preferred_implementation_id="server-b",
++    )
++    assert selected.implementation_id == "server-b"
++
++
++def test_agent_runtime_does_not_need_to_know_physical_location() -> None:
++    """Architecture guard: routing operates on implementations, not drivers."""
++    catalog = CapabilityCatalog()
++    catalog.register_definition(make_definition())
++
++    client = make_client_implementation(
++        implementation_id="client-1",
++        owner_id="owner-1",
++        connection_id="conn-1",
++    )
++    catalog.register_implementation(client)
++    catalog.transition_implementation(
++        "client-1",
++        CapabilityImplementationState.ENABLED,
++    )
++
++    selected = CapabilityRoutingPolicy().select(
++        catalog,
++        "demo.echo",
++        context=CapabilityRequestContext(
++            owner_id="owner-1",
++            connection_id="conn-1",
++        ),
++    )
++
++    assert selected.location == CapabilityExecutionLocation.CLIENT
++    assert selected.implementation_id == "client-1"
+diff --git a/docs/phase6/PHASE6_FOUNDATION_CHECKLIST.md b/docs/phase6/PHASE6_FOUNDATION_CHECKLIST.md
+index f65f17c..4444444 100644
+--- a/docs/phase6/PHASE6_FOUNDATION_CHECKLIST.md
++++ b/docs/phase6/PHASE6_FOUNDATION_CHECKLIST.md
+@@ -1,4 +1,4 @@
+-# Phase 6.0 Foundation Checklist
++# Phase 6.1 Control Plane Checklist
+ 
+ ## Contract
+ 
+@@ -17,10 +17,24 @@
+ 
+ ## Required before Phase 6.1
+ 
+-- [ ] Add catalog capable of storing multiple implementations per capability.
+-- [ ] Add implementation lifecycle/state transitions.
+-- [ ] Add ownership and authorization checks for client registrations.
+-- [ ] Add capability routing policy.
+-- [ ] Add tests for same capability with multiple implementations.
+-- [ ] Add tests proving AgentRuntime is location-agnostic.
++- [x] Add catalog capable of storing multiple implementations per capability.
++- [x] Add implementation lifecycle/state transitions.
++- [x] Add ownership and authorization checks for client registrations.
++- [x] Add capability routing policy.
++- [x] Add tests for same capability with multiple implementations.
++- [x] Add tests proving AgentRuntime is location-agnostic.
++
++## Phase 6.1 scope
++
++- [x] Logical capability catalog.
++- [x] Multiple concrete implementations per capability.
++- [x] Implementation lifecycle.
++- [x] Client owner/connection authorization.
++- [x] Required-scope authorization.
++- [x] Deterministic implementation routing.
++- [x] Location-agnostic routing boundary.
++
++Phase 6.1 remains control-plane only. It does not introduce WebSocket
++transport, remote invocation, connection heartbeat, client execution,
++or changes to the existing Phase 5 execution path.
+ 
+ ## Required before remote execution
+ 

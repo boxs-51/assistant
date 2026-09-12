@@ -1,4 +1,4 @@
-# Phase 6.0 Foundation Checklist
+# Phase 6.1 Control Plane Checklist
 
 ## Contract
 
@@ -20,12 +20,26 @@
 
 ## Required before Phase 6.1
 
-- [ ] Add catalog capable of storing multiple implementations per capability.
-- [ ] Add implementation lifecycle/state transitions.
-- [ ] Add ownership and authorization checks for client registrations.
-- [ ] Add capability routing policy.
-- [ ] Add tests for same capability with multiple implementations.
-- [ ] Add tests proving AgentRuntime is location-agnostic.
+- [x] Add catalog capable of storing multiple implementations per capability.
+- [x] Add implementation lifecycle/state transitions.
+- [x] Add ownership and authorization checks for client registrations.
+- [x] Add capability routing policy.
+- [x] Add tests for same capability with multiple implementations.
+- [x] Add tests proving AgentRuntime is location-agnostic.
+
+## Phase 6.1 scope
+
+- [x] Logical capability catalog.
+- [x] Multiple concrete implementations per capability.
+- [x] Implementation lifecycle.
+- [x] Client owner/connection authorization.
+- [x] Required-scope authorization.
+- [x] Deterministic implementation routing.
+- [x] Location-agnostic routing boundary.
+
+Phase 6.1 remains control-plane only. It does not introduce WebSocket
+transport, remote invocation, connection heartbeat, client execution,
+or changes to the existing Phase 5 execution path.
 
 ## Required before remote execution
 
