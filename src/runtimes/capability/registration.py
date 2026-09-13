@@ -43,6 +43,10 @@ class ClientCapabilityRegistrationService:
         self,
         request: ClientCapabilityRegistration,
     ) -> List[CapabilityImplementation]:
+        if not request.client_id.strip() or not request.owner_id.strip():
+            raise ClientRegistrationError(
+                "Client registration requires non-empty client_id and owner_id"
+            )
         try:
             snapshot = self.connections.get(request.connection_id)
         except ConnectionNotFoundError as exc:
@@ -63,7 +67,7 @@ class ClientCapabilityRegistrationService:
             self._build_implementation(request, item)
             for item in request.capabilities
         ]
-        self._validate_batch(implementations)
+        self._validate_batch(request, implementations)
 
         definitions = {
             item.definition.capability_id: item.definition
@@ -127,9 +131,13 @@ class ClientCapabilityRegistrationService:
             raise PermissionError(
                 f"Capability '{registration.implementation_id}' connection mismatch"
             )
+        if not registration.implementation_id.strip():
+            raise ClientRegistrationError(
+                "Client registration requires non-empty implementation_id"
+            )
 
         metadata = dict(registration.metadata)
-        metadata.setdefault("client_id", request.client_id)
+        metadata["client_id"] = request.client_id
         return CapabilityImplementation.from_definition(
             registration.definition,
             implementation_id=registration.implementation_id,
@@ -143,6 +151,7 @@ class ClientCapabilityRegistrationService:
 
     @staticmethod
     def _validate_batch(
+        request: ClientCapabilityRegistration,
         implementations: List[CapabilityImplementation],
     ) -> None:
         implementation_ids = [item.implementation_id for item in implementations]
@@ -150,6 +159,16 @@ class ClientCapabilityRegistrationService:
             raise ClientRegistrationError(
                 "Client registration contains duplicate implementation_id values"
             )
+        definitions = {}
+        for registration in request.capabilities:
+            capability_id = registration.definition.capability_id
+            existing = definitions.get(capability_id)
+            if existing is not None and existing != registration.definition:
+                raise ClientRegistrationError(
+                    f"Client registration contains conflicting definitions: "
+                    f"{capability_id}"
+                )
+            definitions[capability_id] = registration.definition
 
     def _validate_existing_definitions(self, definitions) -> None:
         for capability_id, definition in definitions.items():
@@ -173,6 +192,11 @@ class ClientCapabilityRegistrationService:
             existing = self.catalog.get_implementation(
                 implementation.implementation_id
             )
+            if existing.state == CapabilityImplementationState.REMOVED:
+                raise CapabilityImplementationConflictError(
+                    f"Removed implementation cannot be re-registered: "
+                    f"{implementation.implementation_id}"
+                )
             comparable = existing.model_copy(
                 update={"state": implementation.state}
             )

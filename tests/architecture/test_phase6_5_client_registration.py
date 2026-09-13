@@ -119,6 +119,45 @@ def test_registration_rejects_non_client_driver_contract() -> None:
         service.register(make_request(driver_kind="PYTHON"))
 
 
+def test_registration_rejects_empty_identity_and_spoofed_client_metadata() -> None:
+    service, _, _ = make_service()
+
+    with pytest.raises(ClientRegistrationError, match="non-empty"):
+        service.register(make_request(owner_id=""))
+
+    request = make_request()
+    request.capabilities[0].metadata["client_id"] = "other-client"
+    registered = service.register(request)
+    assert registered[0].metadata["client_id"] == "desktop-01"
+
+
+def test_registration_rejects_conflicting_duplicate_definitions() -> None:
+    service, _, _ = make_service()
+    request = make_request()
+    duplicate = request.capabilities[0].model_copy(
+        update={
+            "definition": make_definition().model_copy(
+                update={"description": "different"}
+            ),
+            "implementation_id": "desktop-01:desktop.echo-2",
+        }
+    )
+    request.capabilities.append(duplicate)
+
+    with pytest.raises(ClientRegistrationError, match="conflicting definitions"):
+        service.register(request)
+
+
+def test_removed_implementation_cannot_be_reported_as_registered() -> None:
+    service, _, _ = make_service()
+    request = make_request()
+    service.register(request)
+    service.unregister_connection("conn-1")
+
+    with pytest.raises(ValueError, match="Removed implementation"):
+        service.register(request)
+
+
 def test_disconnect_unregisters_implementations_but_keeps_definitions() -> None:
     service, catalog, _ = make_service()
     service.register(make_request())
