@@ -1,0 +1,10 @@
+{
+  "agent": {
+    "max_steps": 15,
+    "temperature": 0.2
+  },
+  "tools_config": {
+    "allowed_local_tools": ["*"],
+    "blocked_local_tools": ["delete_path"]
+  }
+}

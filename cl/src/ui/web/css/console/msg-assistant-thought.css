@@ -1,0 +1,190 @@
+/* TIN NHẮN ASSISTANT / AI */
+.msg-block.assistant {
+  align-self: flex-start;
+  width: 100%;
+  max-width: 95%;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+  box-shadow: none !important;
+}
+
+.msg-block.assistant .msg-bubble {
+  background: transparent;
+  border: none;
+  padding: 0;
+}
+
+.msg-block.assistant.is-streaming {
+  background: transparent;
+}
+
+/* KHUNG SUY NGHĨ CỦA AI (THOUGHT PROCESS) */
+.thought-container {
+  margin-bottom: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.6);
+  border-radius: 8px;
+  overflow: hidden;
+  backdrop-filter: blur(8px);
+  transition: border-color 0.2s ease, background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.thought-container:hover {
+  border-color: rgba(255, 255, 255, 0.15);
+  background: rgba(15, 23, 42, 0.8);
+}
+
+.thought-summary {
+  padding: 8px 12px;
+  font-size: 12px;
+  font-weight: 500;
+  color: #94a3b8;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  user-select: none;
+  list-style: none;
+  gap: 10px;
+}
+
+.thought-summary::-webkit-details-marker {
+  display: none;
+}
+
+.thought-summary-left {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+/* Badge khi hoàn thành */
+.thought-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  color: #94a3b8;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  font-weight: 500;
+  flex-shrink: 0;
+  transition: all 0.3s ease;
+}
+
+.thought-pulse-dot {
+  width: 6px;
+  height: 6px;
+  background-color: #64748b;
+  border-radius: 50%;
+  transition: all 0.3s ease;
+}
+
+/* Badge khi đang suy nghĩ */
+.thought-badge.is-thinking {
+  color: #60a5fa;
+  border-color: rgba(96, 165, 250, 0.4);
+  background: linear-gradient(
+    90deg,
+    rgba(59, 130, 246, 0.1) 0%,
+    rgba(147, 51, 234, 0.25) 50%,
+    rgba(59, 130, 246, 0.1) 100%
+  );
+  background-size: 200% 100%;
+  animation: badgeShimmer 1.8s infinite linear;
+  box-shadow: 0 0 10px rgba(59, 130, 246, 0.2);
+}
+
+.thought-badge.is-thinking .thought-pulse-dot {
+  background-color: #3b82f6;
+  box-shadow: 0 0 8px #3b82f6;
+  animation: dotPulse 1.2s infinite ease-in-out;
+}
+
+@keyframes badgeShimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}
+
+@keyframes dotPulse {
+  0%, 100% {
+    transform: scale(0.8);
+    opacity: 0.5;
+    box-shadow: 0 0 2px #3b82f6;
+  }
+  50% {
+    transform: scale(1.25);
+    opacity: 1;
+    box-shadow: 0 0 8px #3b82f6, 0 0 12px rgba(59, 130, 246, 0.6);
+  }
+}
+
+.current-step-title {
+  color: #cbd5e1;
+  font-size: 12px;
+  font-weight: 400;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  display: inline-block;
+}
+
+.step-swap-anim {
+  animation: stepSwap 0.35s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes stepSwap {
+  0% { opacity: 0; transform: translateY(4px); }
+  100% { opacity: 1; transform: translateY(0); }
+}
+
+.thought-chevron {
+  color: #64748b;
+  flex-shrink: 0;
+  transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), color 0.2s ease;
+}
+
+.thought-summary:hover .thought-chevron {
+  color: #f8fafc;
+}
+
+.thought-container[open] .thought-chevron {
+  transform: rotate(180deg);
+}
+
+.thought-content-wrapper {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.thought-container[open] .thought-content-wrapper {
+  grid-template-rows: 1fr;
+}
+
+.thought-content {
+  overflow: hidden;
+  padding: 0 12px;
+  font-size: 13px;
+  color: #94a3b8;
+  line-height: 1.6;
+  border-top: 1px dashed transparent;
+  transition: padding 0.3s ease, border-color 0.3s ease;
+}
+
+.thought-container[open] .thought-content {
+  padding: 10px 12px 12px 12px;
+  border-top-color: rgba(255, 255, 255, 0.08);
+}
+
+@keyframes pulse-glow {
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.2); }
+}

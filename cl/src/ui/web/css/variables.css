@@ -1,0 +1,31 @@
+:root {
+  /* Colors - Backgrounds */
+  --bg-app: #0f0f17;
+  --bg-surface: #1e1e2e;
+  --bg-card: #181825;
+  --bg-card-hover: rgba(255, 255, 255, 0.08);
+  --bg-code: #11111b;
+
+  /* Colors - Text */
+  --text-main: #cdd6f4;
+  --text-muted: #a6adc8;
+  --text-dark: #11111b;
+
+  /* Colors - Branding & Status */
+  --primary: #3b82f6;
+  --primary-hover: #2563eb;
+  --accent-error: #f38ba8;
+  --accent-success: #a6e3a1;
+  --accent-warning: #f9e2af;
+
+  /* Borders & Radius */
+  --border-color: rgba(255, 255, 255, 0.08);
+  --border-focus: #3b82f6;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* Fonts */
+  --font-sans: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'Fira Code', Consolas, Monaco, 'Courier New', monospace;
+}

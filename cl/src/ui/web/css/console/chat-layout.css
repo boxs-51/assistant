@@ -1,0 +1,82 @@
+/* Khung chứa cuộc trò chuyện */
+.console-container, #console {
+  flex: 1;
+  background: var(--bg-surface, #0f172a);
+  border-radius: var(--radius-lg, 8px);
+  padding: 16px 20px;
+  overflow-y: auto;
+  border: 1px solid var(--border-color, #1e293b);
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+  height: 100%;
+}
+
+/* Base Message Block */
+.msg-block {
+  position: relative;
+  color: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  margin-bottom: 8px;
+  overflow: visible !important;
+}
+
+.msg-block:hover,
+.msg-block:has(.more-menu:not(.hidden)) {
+  z-index: 50;
+}
+
+/* Tin nhắn System / Time Divider */
+.msg-block.system, .msg-time-divider {
+  align-self: center !important;
+  max-width: 90%;
+  background: transparent;
+  border: 1px dashed #334155;
+  font-size: 12px;
+  color: #94a3b8;
+  padding: 4px 12px;
+  border-radius: 12px;
+  text-align: center;
+  margin: 4px 0;
+}
+
+/* Error Block */
+.msg-block.error {
+  align-self: center;
+  max-width: 90%;
+  padding: 10px 14px;
+  border-radius: 8px;
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid #ef4444;
+  color: #fca5a5;
+}
+
+/* Pending & Typing Indicator */
+.msg-block.is-pending {
+  padding: 4px 0 !important;
+}
+
+.typing-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 18px;
+}
+
+.typing-indicator span {
+  width: 6px;
+  height: 6px;
+  background: #64748b;
+  border-radius: 50%;
+  display: inline-block;
+  animation: typing-bounce 1.4s infinite ease-in-out both;
+}
+
+.typing-indicator span:nth-child(1) { animation-delay: -0.32s; }
+.typing-indicator span:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes typing-bounce {
+  0%, 80%, 100% { transform: scale(0.4); opacity: 0.3; }
+  40% { transform: scale(1); opacity: 1; }
+}

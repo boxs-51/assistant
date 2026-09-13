@@ -1,0 +1,65 @@
+/* Tin nhắn USER */
+.msg-block.user {
+  align-self: flex-end;
+  max-width: 75%;
+  min-width: 60px;
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+.msg-block.user .msg-bubble {
+  padding: 10px 16px;
+  border-radius: 12px;
+  border-bottom-right-radius: 2px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  color: #f8fafc;
+  position: relative;
+  transition: all 0.3s ease;
+}
+
+.msg-block.user .msg-body {
+  color: #f8fafc;
+  transition: max-height 0.35s cubic-bezier(0.4, 0, 0.2, 1), mask-image 0.3s ease;
+}
+
+/* Trạng thái thu gọn */
+.msg-block.user .msg-body.collapsed-user-msg {
+  max-height: calc(20 * 1.6em);
+  overflow: hidden;
+  mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+  -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent 100%);
+}
+
+/* Nút Thu gọn / Xem thêm */
+.btn-toggle-user-msg {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 6px;
+  color: #60a5fa;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.2s ease, border-color 0.2s ease, color 0.2s ease;
+}
+
+.btn-toggle-user-msg:hover {
+  background: rgba(59, 130, 246, 0.2);
+  border-color: rgba(96, 165, 250, 0.4);
+  color: #93c5fd;
+}
+
+.btn-toggle-user-msg .toggle-icon {
+  transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.btn-toggle-user-msg.expanded .toggle-icon {
+  transform: rotate(180deg);
+}

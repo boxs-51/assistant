@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+  <meta charset="UTF-8">
+  <title>Agent Studio</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono&display=swap">
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/vs2015.min.css">
+  
+  <link rel="stylesheet" href="css/main.css">
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/marked/12.0.0/marked.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+</head>
+<body>
+  <div class="app-layout" id="app-layout">
+    <!-- 1. Sidebar File Explorer (Trái) -->
+    <aside id="sidebar" class="sidebar">
+      <!-- Header: Tabs chuyển trang & Nút đóng/mở -->
+      <div class="sidebar-header">
+        <div class="sidebar-tabs">
+          <button class="sidebar-tab-btn active" data-page="explorer" title="Files">📁 Files</button>
+          <button class="sidebar-tab-btn" data-page="sessions" title="Sessions">💬 Sessions</button>
+        </div>
+        <div class="sidebar-actions">
+          <button class="sidebar-btn btn-toggle-sidebar" title="Thu gọn Sidebar">◀</button>
+        </div>
+      </div>
+
+      <!-- Nội dung các Page độc lập -->
+      <div class="sidebar-content">
+        <!-- Page 1: Cây thư mục -->
+        <div id="page-explorer" class="sidebar-page" style="display: block;">
+          <div id="explorer-tree" class="explorer-tree"></div>
+        </div>
+
+        <!-- Page 2: Danh sách Session -->
+        <div id="page-sessions" class="sidebar-page" style="display: none;">
+          <div id="sessions-list" class="sessions-list"></div>
+        </div>
+      </div>
+    </aside>
+
+    <!-- Thanh kéo giãn Explorer - Chat -->
+    <div class="resizer" id="resizer-left"></div>
+
+    <!-- 2. Chat Area (Giữa) -->
+    <main class="main-chat-container">
+      <div class="top-nav">
+        <button class="btn-toggle-sidebar btn-icon" title="Ẩn/Hiện Explorer">☰</button>
+        <span class="workspace-title">Workspace Agent</span>
+        <button id="btn-toggle-editor" class="btn-icon" title="Ẩn/Hiện Trình Chỉnh Sửa">📝 Editor</button>
+      </div>
+
+      <div id="console" class="console-container"></div>
+
+      <div id="approval-bar" class="approval-bar hidden">
+        <!-- 1. VÙNG ĐẦU: Header (Title + Badge + Buttons) -->
+        <div class="approval-header">
+          <div class="approval-title-wrap">
+            <span id="approval-badge" class="approval-badge">HIGH</span>
+            <span id="approval-title" class="approval-title">Yêu cầu phê duyệt</span>
+          </div>
+          <div id="approval-actions" class="approval-actions">
+            <button id="btn-approve" class="btn btn-approve">✅ Phê duyệt</button>
+            <button id="btn-reject" class="btn btn-reject">❌ Từ chối</button>
+          </div>
+        </div>
+
+        <!-- 2. VÙNG GIỮA: Body (Nội dung thay đổi linh hoạt theo Mode) -->
+        <div class="approval-body">
+          <div id="approval-target" class="approval-target"></div>
+          <div id="approval-custom-content" class="approval-custom-content"></div>
+        </div>
+
+        <!-- 3. VÙNG DƯỚI: Footer (Thông điệp / Cảnh báo) -->
+        <div class="approval-footer">
+          <span id="approval-message" class="approval-message"></span>
+        </div>
+      </div>
+
+      <div class="input-container" id="input-container">
+        <!-- Nút mở rộng (Mặc định ẩn) -->
+        <button id="btn-expand-input" class="btn-icon expand-btn hidden" title="Mở rộng khung nhập liệu">⤢</button>
+
+        <!-- Vùng hiển thị file đính kèm (Trên cùng) -->
+        <div id="chips-wrapper" class="chips-wrapper"></div>
+
+        <!-- Vùng chứa input và nút bấm -->
+        <div class="input-main-area" id="input-main-area">
+          
+          <!-- Text Input (Giữa) -->
+          <textarea id="user-input" placeholder="Nhập câu lệnh hoặc kéo thả tệp vào đây..." rows="1"></textarea>
+
+          <!-- Vùng chứa các nút bấm (Dưới cùng khi nhiều dòng, hoặc ngang hàng khi ít dòng) -->
+          <div class="action-bar" id="action-bar">
+            <!-- Vùng nút bên trái -->
+            <div class="action-left">
+              <button id="btn-attach" class="btn-icon" title="Đính kèm tệp">📎</button>
+            </div>
+            
+            <!-- Vùng nút ở giữa (Có thể thêm các công cụ khác sau này) -->
+            <div class="action-center">
+               <!-- Ví dụ: <button class="btn-icon">🎤</button> -->
+            </div>
+
+            <!-- Vùng nút bên phải -->
+            <div class="action-right">
+              <button id="btn-send" class="btn-primary">Gửi</button>
+            </div>
+          </div>
+
+        </div>
+      </div>
+    </main>
+
+    <!-- Thanh kéo giãn Chat - Editor -->
+    <div class="resizer" id="resizer-right"></div>
+
+    <!-- 3. Editor Panel & Tabs File đang mở (Phải) -->
+    <aside id="editor-panel" class="editor-panel">
+      <div id="editor-tabs-bar" class="editor-tabs-bar"></div>
+
+      <div class="editor-header">
+        <div class="editor-title-wrap">
+          <span id="file-format-badge" class="format-badge">TXT</span>
+          <span id="editor-filename" class="editor-filename">Chưa chọn file</span>
+        </div>
+        <div class="editor-actions">
+          <button id="btn-save-file" class="btn-primary-sm" disabled>💾 Lưu</button>
+          <button id="btn-close-editor" class="btn-icon" title="Thu gọn Editor">✕</button>
+        </div>
+      </div>
+
+      <div class="editor-body">
+        <textarea id="editor-content" placeholder="Chọn tệp ở Explorer để xem và chỉnh sửa..." spellcheck="false"></textarea>
+      </div>
+    </aside>
+
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>

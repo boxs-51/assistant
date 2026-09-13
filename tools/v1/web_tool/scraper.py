@@ -1,0 +1,198 @@
+import random
+import asyncio
+from typing import Dict, Optional, Tuple
+from bs4 import BeautifulSoup
+
+try:
+    from curl_cffi.requests import AsyncSession
+except ImportError:
+    AsyncSession = None
+
+try:
+    from playwright.async_api import async_playwright, Browser, Playwright
+except ImportError:
+    async_playwright = None
+
+from .extractors import extract_tables_and_charts
+from .utils import clean_whitespace
+from .stealth import WebToolStealth
+
+class WebScraper:
+    """Quản lý các cơ chế cào trang web tĩnh (Static) và động (Dynamic Playwright Stealth)."""
+
+    def __init__(self, max_response_bytes: int = 10 * 1024 * 1024, max_concurrency: int = 5):
+        self.max_response_bytes = max_response_bytes
+        self._playwright: Optional[Playwright] = None
+        self._browser: Optional[Browser] = None
+        self._semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.close()
+
+    async def close(self):
+        """Giải phóng hoàn toàn tài nguyên Playwright."""
+        if self._browser:
+            try:
+                await self._browser.close()
+            except Exception:
+                pass
+            self._browser = None
+        if self._playwright:
+            try:
+                await self._playwright.stop()
+            except Exception:
+                pass
+            self._playwright = None
+
+    async def _get_browser(self) -> Browser:
+        """Tái sử dụng 1 trình duyệt Chromium duy nhất cho toàn bộ ứng dụng."""
+        if not self._browser or not self._browser.is_connected():
+            if not self._playwright:
+                self._playwright = await async_playwright().start()
+            launch_args = [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+                "--disable-dev-shm-usage",
+                "--disable-web-security",
+                "--disable-features=IsolateOrigins,site-per-process",
+            ]
+            self._browser = await self._playwright.chromium.launch(headless=True, args=launch_args)
+        return self._browser
+
+    async def close(self):
+        """Giải phóng tài nguyên browser pool."""
+        if self._browser:
+            await self._browser.close()
+            self._browser = None
+        if self._playwright:
+            await self._playwright.stop()
+            self._playwright = None
+
+    async def fetch_static(
+        self, url: str, timeout: int, profile: str, proxies: Optional[Dict[str, str]]
+    ) -> Tuple[Optional[str], Optional[int], str]:
+        if not AsyncSession:
+            return None, None, "Thư viện 'curl_cffi' chưa được cài đặt."
+        try:
+            headers = {
+                "Accept": "text/html,application/xhtmlxml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+                "Accept-Language": "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                "Sec-Ch-Ua-Mobile": "?0",
+                "Sec-Ch-Ua-Platform": '"Windows"',
+                "Sec-Fetch-Dest": "document",
+                "Sec-Fetch-Mode": "navigate",
+                "Sec-Fetch-Site": "none",
+                "Upgrade-Insecure-Requests": "1"
+            }
+            async with AsyncSession(impersonate=profile, proxies=proxies) as session:
+                response = await session.get(url, headers=headers, timeout=timeout, stream=True)
+                if response.status_code == 403:
+                    return None, 403, "HTTP 403 Forbidden"
+
+                response.raise_for_status()
+
+                content_type = response.headers.get("Content-Type", "").lower()
+                if not any(t in content_type for t in ["text/", "html", "json", "xml"]):
+                    return None, response.status_code, f"Tệp không phải văn bản (Content-Type: {content_type})"
+
+                content_bytes = bytearray()
+                async for chunk in response.aiter_content(chunk_size=8192):
+                    content_bytes.extend(chunk)
+                    if len(content_bytes) > self.max_response_bytes:
+                        return None, response.status_code, "Vượt giới hạn dung lượng cho phép."
+
+                encoding = (
+                    response.encoding if isinstance(response.encoding, str) and response.encoding
+                    else response.apparent_encoding if isinstance(response.apparent_encoding, str) and response.apparent_encoding
+                    else "utf-8"
+                )
+                return content_bytes.decode(encoding, errors="replace"), response.status_code, "OK"
+
+        except Exception as e:
+            return None, None, str(e)
+
+    async def fetch_dynamic_js_stealth(
+        self,
+        url: str,
+        timeout: int,
+        wait_selector: Optional[str] = None,
+        proxy: Optional[str] = None,
+        captcha_api_key: Optional[str] = None,
+    ) -> Tuple[Optional[str], Optional[Dict[str, str]], Optional[dict], str]:
+        if not async_playwright:
+            return None, None, None, "Thư viện 'playwright' chưa được cài đặt."
+        
+        async with self._semaphore:
+            context = None
+            try:
+                browser = await self._get_browser()
+                context_options = {
+                    "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    "viewport": {"width": 1920, "height": 1080},
+                    "locale": "vi-VN",
+                    "timezone_id": "Asia/Ho_Chi_Minh",
+                }
+
+                if proxy:
+                    context_options["proxy"] = {"server": proxy}
+
+                context = await browser.new_context(**context_options)
+                page = await context.new_page()
+
+                await WebToolStealth.apply_stealth_scripts(page)
+
+                await page.route(
+                    "**/*.{png,jpg,jpeg,svg,woff,woff2,ttf}",
+                    lambda route: route.abort(),
+                )
+
+                await page.goto(url, timeout=timeout * 1000, wait_until="domcontentloaded")
+                await WebToolStealth.simulate_human_behavior(page)
+
+                if wait_selector:
+                    try:
+                        await page.wait_for_selector(wait_selector, timeout=timeout * 1000, state="visible")
+                    except Exception:
+                        pass
+                else:
+                    for _ in range(4):
+                        html_check = await page.content()
+                        title_check = (await page.title()).lower()
+                        is_cf = WebToolStealth.is_captcha_or_cf_present(html_check) or "chờ một chút" in title_check or "just a moment" in title_check
+                        
+                        if not is_cf:
+                            break
+                        
+                        if captcha_api_key:
+                            if await WebToolStealth.extract_and_solve_captcha(page, url, captcha_api_key):
+                                await page.wait_for_load_state("networkidle", timeout=10000)
+                                break
+                        
+                        await asyncio.sleep(2.5)
+                        await WebToolStealth.simulate_human_behavior(page)
+
+                cookies_list = await context.cookies()
+                cookies_dict = {cookie["name"]: cookie["value"] for cookie in cookies_list}
+                html_content = await page.content()
+                
+                structured_data = await extract_tables_and_charts(html_content, page_obj=page)
+
+                await context.close()
+
+                if WebToolStealth.is_captcha_or_cf_present(html_content):
+                    return html_content, cookies_dict, structured_data, "Cảnh báo: Trang web yêu cầu xác minh CAPTCHA thủ công."
+
+                return html_content, cookies_dict, structured_data, "OK"
+
+            except Exception as e:
+                return None, None, None, f"Lỗi Playwright Stealth: {str(e)}"
+            finally:
+                if context:
+                    try:
+                        await context.close()
+                    except Exception:
+                        pass

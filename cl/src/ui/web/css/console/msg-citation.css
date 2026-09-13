@@ -1,0 +1,171 @@
+/* Animation xuất hiện mượt cho chip ở chunk cuối */
+@keyframes citFadeIn {
+  from {
+    opacity: 0;
+    transform: scale(0.9) translateY(2px);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1) translateY(0);
+  }
+}
+
+/* Inline Citation Chip hiển thị gọn gàng trên cùng dòng */
+.citation-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 1px 6px;
+  margin: 0 2px;
+  font-size: 0.75rem;
+  font-weight: 500;
+  line-height: 1.2;
+  border-radius: 10px;
+  vertical-align: middle;
+  text-decoration: none !important;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+  max-width: 160px; /* Thu gọn độ rộng */
+  white-space: nowrap;
+  position: relative;
+  user-select: none;
+  animation: citFadeIn 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+.citation-chip .cit-icon {
+  font-size: 0.7rem;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.citation-chip .cit-badge {
+  font-weight: 700;
+  flex-shrink: 0;
+}
+
+.citation-chip .cit-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 90px; /* Tên nguồn ngắn gọn hơn */
+}
+
+/* Mũi tên chỉ báo khi có nhiều nguồn */
+.citation-chip .cit-arrow {
+  font-size: 0.6rem;
+  opacity: 0.7;
+  transition: transform 0.2s ease;
+  flex-shrink: 0;
+}
+
+.citation-chip.is-expanded .cit-arrow {
+  transform: rotate(180deg);
+}
+
+/* Nguồn tệp đính kèm / RAG */
+.citation-chip.citation-file {
+  background-color: #fff5f5;
+  color: #c53030;
+  border: 1px solid #feb2b2;
+}
+
+.citation-chip.citation-file:hover {
+  background-color: #fed7d7;
+  color: #9b2c2c;
+}
+
+/* Nguồn Web URL */
+.citation-chip.citation-web {
+  background-color: #ebf8ff;
+  color: #2b6cb0;
+  border: 1px solid #bee3f8;
+}
+
+.citation-chip.citation-web:hover {
+  background-color: #bee3f8;
+  color: #2c5282;
+}
+
+/* --- POPUP LIST KHI CLICK MỞ RỘNG (GỘP NHIỀU NGUỒN) --- */
+.cit-dropdown {
+  display: none;
+  position: absolute;
+  top: calc(100% + 4px);
+  left: 0;
+  z-index: 99;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.12);
+  padding: 6px;
+  min-width: 220px;
+  max-width: 280px;
+  max-height: 160px; /* Giới hạn độ cao để cuộn */
+  overflow-y: auto;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.citation-chip.is-expanded .cit-dropdown {
+  display: flex;
+  flex-direction: column;
+  animation: citFadeIn 0.2s ease forwards;
+}
+
+/* Thẻ nguồn con trong Popup */
+.cit-sub-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  text-decoration: none !important;
+  color: #2d3748;
+  font-size: 0.75rem;
+  background: #f7fafc;
+  border: 1px solid #edf2f7;
+  transition: all 0.15s ease;
+}
+
+.cit-sub-item:hover {
+  background: #edf2f7;
+  border-color: #cbd5e0;
+}
+
+.cit-sub-item .cit-sub-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  flex: 1;
+}
+
+/* Dark Mode */
+@media (prefers-color-scheme: dark) {
+  .citation-chip.citation-file {
+    background-color: rgba(229, 62, 62, 0.18);
+    color: #feb2b2;
+    border-color: rgba(229, 62, 62, 0.35);
+  }
+
+  .citation-chip.citation-web {
+    background-color: rgba(49, 130, 206, 0.18);
+    color: #90cdf4;
+    border-color: rgba(49, 130, 206, 0.35);
+  }
+
+  .cit-dropdown {
+    background: #1a202c;
+    border-color: #4a5568;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  }
+
+  .cit-sub-item {
+    background: #2d3748;
+    border-color: #4a5568;
+    color: #e2e8f0;
+  }
+
+  .cit-sub-item:hover {
+    background: #3a4a60;
+  }
+}

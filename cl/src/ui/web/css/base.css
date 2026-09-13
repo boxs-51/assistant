@@ -1,0 +1,131 @@
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  font-family: var(--font-sans);
+}
+
+body {
+  background-color: var(--bg-app);
+  color: var(--text-main);
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* Chống chọn văn bản và giữ con trỏ kéo nhất quán toàn màn hình khi đang drag */
+body.is-resizing {
+  user-select: none !important;
+  -webkit-user-select: none !important;
+  cursor: col-resize !important;
+}
+
+body.is-resizing textarea,
+body.is-resizing input {
+  pointer-events: none !important;
+}
+.context-menu {
+  position: fixed;
+  z-index: 9999;
+  background: var(--bg-surface, #1e1e2e);
+  border: 1px solid var(--border-color, #313244);
+  border-radius: var(--radius-sm, 6px);
+  box-shadow: 0 10px 25px rgba(0, 0, 0, 0.35);
+  padding: 4px;
+  min-width: 190px;
+  user-select: none;
+  /* Tránh giật giật khi tính toán tọa độ overflow */
+  max-height: 90vh;
+  overflow-y: auto;
+}
+
+.app-layout {
+  display: flex;
+  height: 100vh;
+  width: 100vw;
+  padding: 8px;
+  gap: 0;
+  user-select: none;
+}
+
+/* Bật lại bôi đen văn bản cho nội dung chính */
+.msg-block, .msg-body, code, pre, textarea, #editor-content {
+  user-select: text !important;
+  -webkit-user-select: text !important;
+}
+
+/* Main Container */
+.main-chat-container {
+  flex: 1;
+  min-width: 400px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  height: 100%;
+}
+
+/* Thanh kéo giãn (Resizer) */
+.resizer {
+  width: 6px;
+  cursor: col-resize;
+  background: transparent;
+  transition: background 0.2s;
+  z-index: 10;
+  margin: 0 2px;
+}
+
+.btn {
+  border: none;
+  padding: 8px 16px;
+  border-radius: var(--radius-sm);
+  color: white;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  transition: transform 0.1s, opacity 0.2s;
+}
+
+.btn:active { transform: scale(0.97); }
+.btn-approve { background: #16a34a; }
+.btn-approve:hover { background: #15803d; }
+.btn-reject { background: #dc2626; }
+.btn-reject:hover { background: #b91c1c; }
+
+.btn-icon {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 18px;
+  padding: 6px;
+  border-radius: var(--radius-sm);
+  transition: background 0.2s, color 0.2s;
+}
+
+.btn-icon:hover {
+  background: var(--bg-card-hover);
+  color: var(--text-main);
+}
+
+.resizer:hover, .resizer.dragging {
+  background: var(--primary);
+  border-radius: 4px;
+}
+
+/* Custom Scrollbar (Toàn ứng dụng) */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.3);
+}

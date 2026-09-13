@@ -1,0 +1,191 @@
+/* 1. KHỐI TỆP ĐÌNH KÈM (FILE PART) */
+.msg-block.msg-file-part {
+  background: transparent !important;
+  border: none !important;
+  padding: 0 !important;
+}
+
+.msg-block.user.msg-file-part,
+.msg-block.file-user {
+  align-self: flex-end;
+}
+
+.msg-block.assistant.msg-file-part,
+.msg-block.file-assistant {
+  align-self: flex-start;
+}
+
+.msg-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  padding: 6px 12px;
+  border-radius: 8px;
+  font-size: 13px;
+  color: #f8fafc;
+  user-select: none;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+.msg-block.file-user .msg-file-chip {
+  background: #1e293b;
+  border-color: #3b82f6;
+}
+
+.msg-block.file-assistant .msg-file-chip {
+  background: #0f172a;
+  border-color: #334155;
+}
+
+.msg-file-chip:hover {
+  border-color: #3b82f6;
+  background: #334155;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.25);
+}
+
+.msg-file-chip .file-action-btn {
+  padding: 2px 6px;
+  border-radius: 4px;
+  opacity: 0.7;
+  transition: opacity 0.15s ease, background 0.15s ease, transform 0.15s ease;
+}
+
+.msg-file-chip .file-action-btn:hover {
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.2);
+  transform: scale(1.1);
+}
+
+.msg-file-chip .file-action-btn:active {
+  transform: scale(0.95);
+}
+
+.msg-file-chip .file-actions {
+  display: flex;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+/* 2. KHỐI THẺ LIÊN KẾT (URL PREVIEW CARD PART) */
+.msg-block.msg-url-part {
+  max-width: 420px;
+}
+
+.msg-block.user.msg-url-part { align-self: flex-end; }
+.msg-block.assistant.msg-url-part { align-self: flex-start; }
+
+.url-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  background: #1e293b;
+  border: 1px solid #334155;
+  padding: 10px 14px;
+  border-radius: 10px;
+  transition: all 0.2s ease;
+}
+
+.url-card:hover {
+  border-color: #3b82f6;
+}
+
+.url-card-icon {
+  font-size: 20px;
+}
+
+.url-card-info {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.url-card-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: #60a5fa;
+  text-decoration: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.url-card-title:hover {
+  text-decoration: underline;
+}
+
+.url-card-domain {
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.url-card-actions {
+  display: flex;
+  gap: 4px;
+}
+
+/* 3. KHỐI HÌNH ẢNH (IMAGE PART) */
+.msg-block.msg-image-part {
+  max-width: 360px;
+}
+
+.msg-block.user.msg-image-part { align-self: flex-end; }
+.msg-block.assistant.msg-image-part { align-self: flex-start; }
+
+.msg-image-container {
+  position: relative;
+  border-radius: 8px;
+  overflow: hidden;
+  border: 1px solid #334155;
+  background: #020617;
+}
+
+.msg-image-preview {
+  width: 100%;
+  max-height: 260px;
+  object-fit: cover;
+  display: block;
+}
+
+.image-overlay-actions {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity 0.2s ease;
+  background: rgba(15, 23, 42, 0.7);
+  padding: 4px;
+  border-radius: 6px;
+  backdrop-filter: blur(4px);
+}
+
+.msg-image-container:hover .image-overlay-actions {
+  opacity: 1;
+}
+
+/* 4. KHỐI MEDIA (AUDIO / VIDEO) */
+.msg-block.msg-media-part {
+  max-width: 400px;
+  width: 100%;
+}
+
+.msg-block.user.msg-media-part { align-self: flex-end; }
+.msg-block.assistant.msg-media-part { align-self: flex-start; }
+
+.media-wrapper {
+  background: #1e293b;
+  border: 1px solid #334155;
+  border-radius: 8px;
+  padding: 6px;
+}
+
+.custom-audio-player,
+.custom-video-player {
+  width: 100%;
+  border-radius: 6px;
+}
