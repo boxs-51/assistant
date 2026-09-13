@@ -85,7 +85,7 @@ async def chat_completions_proxy(
                 event_bus.subscribe("provider.stream.completed", _on_complete)
                 event_bus.subscribe("provider.failed", _on_fail)
 
-                asyncio.create_task(event_bus.publish(
+                event_bus.publish(
                     BaseEvent(
                         event_name="transport.event.request_received",
                         session_id=session_id,
@@ -94,7 +94,7 @@ async def chat_completions_proxy(
                             "identity": identity_data,
                         },
                     )
-                ))
+                )
 
                 while True:
                     if await request.is_disconnected():

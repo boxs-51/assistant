@@ -353,7 +353,11 @@ class ModelCapabilityManager:
                 caps.add(ModelCapability.RERANK)
                 return caps
 
-            if any(x in model_id for x in ["chat", "instruct", "llama", "mistral", "qwen", "phi"]):
+            if any(x in model_id for x in [
+                "chat", "instruct", "command", "codestral", "deepseek",
+                "gemma", "granite", "internvl", "llama", "mistral",
+                "mixtral", "nemotron", "phi", "qwen", "starcoder", "yi",
+            ]):
                 caps.update({ModelCapability.CHAT, ModelCapability.CHAT_STREAM, ModelCapability.TOOL_CALLING})
                 
             if any(x in model_id for x in ["vision", "llava", "vlm"]):

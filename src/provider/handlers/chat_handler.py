@@ -23,7 +23,6 @@ class ChatExecutionHandler(BaseExecutionHandler):
         execution_chain = self.routing_policy.get_fallback_chain(
             model=model,
             metadata=body.get("metadata"),
-            override_provider=body.get("provider")
         )
         
         if not execution_chain:
@@ -59,7 +58,6 @@ class ChatExecutionHandler(BaseExecutionHandler):
         execution_chain = self.routing_policy.get_fallback_chain(
             model=model,
             metadata=body.get("metadata"),
-            override_provider=body.get("provider")
         )
         
         if not execution_chain:

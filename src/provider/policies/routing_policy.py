@@ -95,7 +95,6 @@ class RoutingPolicy:
         self,
         model: str,
         metadata: Dict[str, Any] | None = None,
-        override_provider: str | None = None,
     ) -> List[BaseProvider]:
         """
         Lấy chuỗi fallback provider phù hợp cho model dựa trên quy tắc cấu hình và metadata.
@@ -115,8 +114,8 @@ class RoutingPolicy:
         metadata = metadata or {}
         routing_info = metadata.get("routing", {})
         
-        # Ưu tiên lấy từ override_provider (top-level body "provider"), nếu không có mới lấy prefer_provider trong metadata
-        preferred_name = override_provider or routing_info.get("prefer_provider")
+        # Lấy prefer_provider trong metadata
+        preferred_name = routing_info.get("prefer_provider")
         routing_type = str(routing_info.get("type", "fallback")).lower()
 
         # Nếu không chỉ định provider ưu tiên, trả về chuỗi mặc định
