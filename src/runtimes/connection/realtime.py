@@ -59,6 +59,12 @@ class RealtimeMultiplexer:
         if not envelope.invocation_id:
             raise ValueError("capability.invoke requires invocation_id")
 
+        effective_timeout = (
+            self.default_timeout if timeout is None else float(timeout)
+        )
+        if effective_timeout <= 0:
+            raise TimeoutError("Realtime invocation timeout must be > 0")
+
         socket = self.registry.require_active_socket(envelope.connection_id)
         future = await self.multiplexer.register(
             envelope.invocation_id,
@@ -72,13 +78,6 @@ class RealtimeMultiplexer:
         except BaseException as exc:
             await self.multiplexer.reject(envelope.invocation_id, exc)
             raise
-
-        effective_timeout = (
-            self.default_timeout if timeout is None else float(timeout)
-        )
-        if effective_timeout <= 0:
-            await self.cancel(envelope.connection_id, envelope.invocation_id)
-            raise TimeoutError("Realtime invocation timeout must be > 0")
 
         try:
             return await asyncio.wait_for(
@@ -121,7 +120,13 @@ class RealtimeMultiplexer:
         connection_id: str,
         envelope: RealtimeEnvelope,
     ) -> bool:
-        if envelope.connection_id and envelope.connection_id != connection_id:
+        correlated_types = {
+            "capability.result",
+            "capability.error",
+            "capability.cancelled",
+            "capability.progress",
+        }
+        if envelope.type in correlated_types and envelope.connection_id != connection_id:
             raise ValueError(
                 "Realtime envelope connection_id does not match transport connection"
             )
@@ -130,6 +135,7 @@ class RealtimeMultiplexer:
             return await self.multiplexer.resolve(
                 envelope.invocation_id or "",
                 envelope.payload,
+                connection_id,
             )
 
         if envelope.type == "capability.error":
@@ -137,15 +143,21 @@ class RealtimeMultiplexer:
             return await self.multiplexer.reject(
                 envelope.invocation_id or "",
                 RemoteCapabilityError(message),
+                connection_id,
             )
 
         if envelope.type == "capability.cancelled":
             return await self.multiplexer.cancel(
                 envelope.invocation_id or "",
+                connection_id,
             )
 
         if envelope.type == "capability.progress":
             if self.progress_handler is None:
+                return False
+            if await self.multiplexer.connection_for_invocation(
+                envelope.invocation_id or ""
+            ) != connection_id:
                 return False
             result = self.progress_handler(envelope)
             if asyncio.iscoroutine(result):

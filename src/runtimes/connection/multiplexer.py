@@ -38,24 +38,56 @@ class ConnectionMultiplexer:
             )
             return future
 
-    async def resolve(self, invocation_id: str, result: Any) -> bool:
+    async def resolve(
+        self,
+        invocation_id: str,
+        result: Any,
+        connection_id: Optional[str] = None,
+    ) -> bool:
         async with self._lock:
+            pending = self._pending.get(invocation_id)
+            if pending is not None and (
+                connection_id is not None
+                and pending.connection_id != connection_id
+            ):
+                return False
             pending = self._pending.pop(invocation_id, None)
         if pending is None or pending.future.done():
             return False
         pending.future.set_result(result)
         return True
 
-    async def reject(self, invocation_id: str, error: BaseException) -> bool:
+    async def reject(
+        self,
+        invocation_id: str,
+        error: BaseException,
+        connection_id: Optional[str] = None,
+    ) -> bool:
         async with self._lock:
+            pending = self._pending.get(invocation_id)
+            if pending is not None and (
+                connection_id is not None
+                and pending.connection_id != connection_id
+            ):
+                return False
             pending = self._pending.pop(invocation_id, None)
         if pending is None or pending.future.done():
             return False
         pending.future.set_exception(error)
         return True
 
-    async def cancel(self, invocation_id: str) -> bool:
+    async def cancel(
+        self,
+        invocation_id: str,
+        connection_id: Optional[str] = None,
+    ) -> bool:
         async with self._lock:
+            pending = self._pending.get(invocation_id)
+            if pending is not None and (
+                connection_id is not None
+                and pending.connection_id != connection_id
+            ):
+                return False
             pending = self._pending.pop(invocation_id, None)
         if pending is None or pending.future.done():
             return False

@@ -247,3 +247,69 @@ def test_inbound_connection_identity_is_enforced() -> None:
             )
 
     asyncio.run(scenario())
+
+
+def test_cross_connection_result_injection_is_rejected() -> None:
+    async def scenario() -> None:
+        registry = ConnectionRegistry()
+        socket_a = FakeSocket()
+        socket_b = FakeSocket()
+        registry.register("sess-a", "user-1", socket_a, connection_id="conn-a")
+        registry.register("sess-b", "user-1", socket_b, connection_id="conn-b")
+        registry.activate("conn-a")
+        registry.activate("conn-b")
+        realtime = RealtimeMultiplexer(registry, default_timeout=0.1)
+
+        task = asyncio.create_task(realtime.invoke(
+            RealtimeEnvelope(
+                type="capability.invoke",
+                message_id="msg-a",
+                connection_id="conn-a",
+                invocation_id="inv-a",
+                payload={},
+            )
+        ))
+        await asyncio.sleep(0)
+
+        accepted = await realtime.handle_inbound(
+            "conn-b",
+            RealtimeEnvelope(
+                type="capability.result",
+                message_id="msg-injected",
+                connection_id="conn-b",
+                invocation_id="inv-a",
+                payload={"injected": True},
+            ),
+        )
+        assert accepted is False
+        assert not task.done()
+
+        assert await realtime.handle_inbound(
+            "conn-a",
+            RealtimeEnvelope(
+                type="capability.result",
+                message_id="msg-a-result",
+                connection_id="conn-a",
+                invocation_id="inv-a",
+                payload={"ok": True},
+            ),
+        )
+        assert await task == {"ok": True}
+
+    asyncio.run(scenario())
+
+
+def test_correlated_message_requires_invocation_id() -> None:
+    with pytest.raises(ValueError, match="invocation_id"):
+        RealtimeEnvelope(
+            type="capability.result",
+            message_id="msg-1",
+            connection_id="conn-1",
+        )
+
+    with pytest.raises(ValueError, match="connection_id"):
+        RealtimeEnvelope(
+            type="capability.invoke",
+            message_id="msg-2",
+            invocation_id="inv-2",
+        )

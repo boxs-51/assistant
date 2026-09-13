@@ -41,3 +41,24 @@ class RealtimeEnvelope(BaseModel):
     trace_id: Optional[str] = None
 
     payload: Dict[str, Any] = Field(default_factory=dict)
+
+    @model_validator(mode="after")
+    def validate_correlation_contract(self) -> "RealtimeEnvelope":
+        invocation_required = {
+            "capability.invoke",
+            "capability.progress",
+            "capability.result",
+            "capability.error",
+            "capability.cancel",
+            "capability.cancelled",
+        }
+
+        if self.type in invocation_required and not self.invocation_id:
+            raise ValueError(
+                f"Realtime message '{self.type}' requires invocation_id"
+            )
+
+        if self.type == "capability.invoke" and not self.connection_id:
+            raise ValueError("capability.invoke requires connection_id")
+
+        return self

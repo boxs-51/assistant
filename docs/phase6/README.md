@@ -146,3 +146,28 @@ RealtimeMultiplexer
 
 Phase 6.4 begins when a reusable `RemoteClientDriver` invokes this realtime
 boundary from the execution plane.
+
+## Phase 6.4 status
+
+Phase 6.4 adds the reusable `RemoteClientDriver` adapter. It constructs the
+`capability.invoke` envelope from `CapabilityExecutionContext`, preserves
+execution/session/connection/invocation/trace correlation, applies the
+context deadline, and sends `capability.cancel` when execution is cancelled.
+
+The driver does not change `AgentRuntime`, capability routing, client
+registration, or the legacy capability registry. Those migrations remain in
+later Phase 6 slices.
+
+## Phase 6.5 status
+
+Phase 6.5 adds `ClientCapabilityRegistrationService` for authenticated
+client self-registration. Registration requires an ACTIVE connection owned by
+the request owner, and every advertised implementation must be a
+`CLIENT`/`REMOTE_CLIENT` binding. Re-registering the same contract is
+idempotent; conflicting definitions or implementation IDs are rejected before
+catalog mutation.
+
+Disconnect cleanup transitions all implementations bound to the connection to
+`REMOVED` while retaining logical capability definitions. The connection
+transport or lifecycle owner must call `unregister_connection()` during
+disconnect handling.

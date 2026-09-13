@@ -232,6 +232,21 @@ class CapabilityCatalog:
 
             return implementations
 
+    def list_implementations_for_connection(
+        self,
+        connection_id: str,
+    ) -> List[CapabilityImplementation]:
+        """Return all implementations bound to one client connection."""
+        with self._lock:
+            return sorted(
+                (
+                    item
+                    for item in self._implementations.values()
+                    if item.connection_id == connection_id
+                ),
+                key=lambda item: item.implementation_id,
+            )
+
     def transition_implementation(
         self,
         implementation_id: str,
