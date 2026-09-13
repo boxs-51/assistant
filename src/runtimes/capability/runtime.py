@@ -13,6 +13,12 @@ from .contracts.error import CapabilityError
 from .contracts.result import CapabilityResult
 from .contracts.definition import CapabilityDefinition
 from .drivers.mcp_driver import McpCapabilityDriver
+from .drivers.remote_client_driver import RemoteClientDriver
+from .catalog import CapabilityCatalog
+from .contracts.implementation import CapabilityExecutionLocation
+from .policy import CapabilityRequestContext, CapabilityRoutingPolicy
+from ...runtimes.connection.registry import ConnectionRegistry
+from ...runtimes.connection.realtime import RealtimeMultiplexer
 from ...domain.schemas.identity import Identity
 from ...domain.schemas.event import BaseEvent
 from ...application.policy.authorization import AuthorizationService
@@ -27,6 +33,10 @@ class CapabilityRuntime(BaseRuntime):
         self,
         registry: CapabilityRegistry | None = None,
         authorization: AuthorizationService | None = None,
+        catalog: CapabilityCatalog | None = None,
+        routing_policy: CapabilityRoutingPolicy | None = None,
+        connection_registry: ConnectionRegistry | None = None,
+        realtime: RealtimeMultiplexer | None = None,
     ):
         manifest = RuntimeManifest(
             id="capability_runtime",
@@ -37,6 +47,10 @@ class CapabilityRuntime(BaseRuntime):
         self.event_bus = None
         self.registry = registry if registry is not None else CapabilityRegistry()
         self.authorization = authorization if authorization is not None else AuthorizationService()
+        self.catalog = catalog
+        self.routing_policy = routing_policy
+        self.connection_registry = connection_registry
+        self.realtime = realtime
         
         self._subscribed = False
         self.mcp_manager = None
@@ -232,7 +246,12 @@ class CapabilityRuntime(BaseRuntime):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> CapabilityResult:
         started = time.perf_counter()
-        driver = self.registry.get_driver(capability_id)
+        request_metadata = dict(metadata or {})
+        driver = self._resolve_execution_driver(
+            capability_id,
+            identity,
+            request_metadata,
+        )
         if not driver:
             raise ValueError(f"Capability '{capability_id}' not found or unavailable.")
         if not self.authorization.is_allowed(identity, driver):
@@ -246,7 +265,7 @@ class CapabilityRuntime(BaseRuntime):
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
             cancellation_event=cancellation_event,
-            metadata=metadata,
+            metadata=request_metadata,
         )
 
         logger.info(
@@ -336,6 +355,57 @@ class CapabilityRuntime(BaseRuntime):
             completed_at=completed_at_utc,
             duration_ms=(completed_at - started) * 1000,
             metadata={"attempt": context.attempt},
+        )
+
+    def _resolve_execution_driver(
+        self,
+        capability_id: str,
+        identity: Identity,
+        metadata: Dict[str, Any],
+    ) -> BaseCapabilityDriver | None:
+        legacy_driver = self.registry.get_driver(capability_id)
+        if self.catalog is None or not self.catalog.contains_definition(capability_id):
+            return legacy_driver
+        if self.routing_policy is None:
+            raise RuntimeError(
+                "Capability catalog is configured without routing policy."
+            )
+
+        connection_id = metadata.get("connection_id")
+        if connection_id is None and self.connection_registry is not None:
+            connection_id = self.connection_registry.resolve_connection_id(
+                identity.session_id or ""
+            )
+
+        selected = self.routing_policy.select(
+            self.catalog,
+            capability_id,
+            context=CapabilityRequestContext(
+                owner_id=identity.user_id,
+                connection_id=connection_id,
+                scopes=frozenset(identity.scopes),
+            ),
+            preferred_implementation_id=metadata.get(
+                "implementation_id"
+            ),
+        )
+
+        if selected.location == CapabilityExecutionLocation.CLIENT:
+            if self.realtime is None or not selected.connection_id:
+                raise RuntimeError(
+                    "Client capability execution requires realtime and connection."
+                )
+            return RemoteClientDriver(
+                self.catalog.get_definition(capability_id),
+                self.realtime,
+                selected.connection_id,
+            )
+
+        if selected.location == CapabilityExecutionLocation.SERVER:
+            return legacy_driver
+
+        raise RuntimeError(
+            f"No compatibility driver for location {selected.location.value}"
         )
 
     async def execute_tool(

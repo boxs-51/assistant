@@ -171,3 +171,12 @@ Disconnect cleanup transitions all implementations bound to the connection to
 `REMOVED` while retaining logical capability definitions. The connection
 transport or lifecycle owner must call `unregister_connection()` during
 disconnect handling.
+
+## Phase 6.6 status
+
+Phase 6.6 adds an opt-in compatibility bridge in `CapabilityRuntime`. When a
+capability exists in the control-plane catalog, the runtime selects an
+authorized implementation through `CapabilityRoutingPolicy`; client
+implementations execute through `RemoteClientDriver`, while legacy server
+drivers remain supported. `AgentRuntime` continues to use `ToolExecutionPort`
+and does not branch on execution location.
