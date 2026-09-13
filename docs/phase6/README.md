@@ -180,3 +180,18 @@ authorized implementation through `CapabilityRoutingPolicy`; client
 implementations execute through `RemoteClientDriver`, while legacy server
 drivers remain supported. `AgentRuntime` continues to use `ToolExecutionPort`
 and does not branch on execution location.
+
+## Phase 6.7 status
+
+Phase 6.7 adds `DeclarativeWorkflowDriver`. Workflow steps resolve
+`initial_input` and previous step outputs, then execute through
+`CapabilityRuntime`, preserving the same server/client routing boundary for
+each composed capability.
+
+## Phase 6.8 status
+
+Phase 6.8 adds offline resilience coverage for timeout cancellation, duplicate
+terminal messages, connection-scoped pending failure, stale/disconnected
+routing, and client implementation cleanup during connection shutdown. The
+legacy HTTP routers remain compatibility surfaces until equivalent migrated
+contracts and acceptance coverage exist.

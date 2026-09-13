@@ -18,7 +18,8 @@ from .....domain.schemas import (
     GatewayStreamChoice,
     GatewayStreamDelta,
     GatewayToolCall,
-    FunctionCall
+    FunctionCall,
+    ResponseMetaData
 )
 
 
@@ -91,9 +92,10 @@ class ResponseChats:
                     completion_tokens=completion_tokens,
                     total_tokens=prompt_tokens + completion_tokens
                 ),
-                provider="ollama",
-                created=int(time.time()),
-                raw_response=response_data
+                metadata= ResponseMetaData(
+                    provider = "ollama",
+                    raw_response = response_data,
+                )
             )
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             logger.error("Hỏng cấu trúc response từ Ollama:", error=str(e), response=response.text)
@@ -184,7 +186,9 @@ class ResponseChats:
                         finish_reason=finish_reason
                     )],
                     provider="ollama",
-                    created=int(time.time()),
+                    metadata=ResponseMetaData(
+                        provider="ollama",
+                    ),
                     usage=gateway_usage
                 )
             except json.JSONDecodeError:

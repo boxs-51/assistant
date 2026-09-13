@@ -7,6 +7,7 @@ from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from .registry import ConnectionRegistry
 from .protocol import RealtimeEnvelope
 from .realtime import RealtimeMultiplexer
+from ..capability.registration import ClientCapabilityRegistrationService
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 
@@ -16,7 +17,10 @@ logger = structlog.get_logger(__name__)
 class ConnectionRuntime(BaseRuntime):
     """Runtime quản lý toàn bộ kết nối active (WebSocket, SSE, Transport Sessions)."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        registration_service: ClientCapabilityRegistrationService | None = None,
+    ):
         manifest = RuntimeManifest(
             id="connection_runtime",
             name="ConnectionRuntime",
@@ -26,6 +30,7 @@ class ConnectionRuntime(BaseRuntime):
         self.event_bus = None
         self.registry = ConnectionRegistry()
         self.realtime = RealtimeMultiplexer(self.registry)
+        self.registration_service = registration_service
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._subscribed = False
 
@@ -94,7 +99,8 @@ class ConnectionRuntime(BaseRuntime):
         snapshot = self.registry.disconnect(connection_id)
         del snapshot
         failed = await self.realtime.disconnect(connection_id)
-        self.registry.get_socket(connection_id)
+        if self.registration_service is not None:
+            self.registration_service.unregister_connection(connection_id)
         return failed
 
     def evict_stale_connections(self):
@@ -102,7 +108,13 @@ class ConnectionRuntime(BaseRuntime):
 
         Remote invocation is intentionally not implemented here.
         """
-        return self.registry.evict_stale()
+        stale = self.registry.evict_stale()
+        if self.registration_service is not None:
+            for connection in stale:
+                self.registration_service.unregister_connection(
+                    connection.connection_id
+                )
+        return stale
 
     async def _monitor_heartbeats(self):
         while self._is_running:

@@ -10,7 +10,7 @@ from ..core import (
 )
 
 from ...infrastructure.config.schemas import ProviderConfig
-from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelList, ModelInfo, ContextLimits
+from ...domain.schemas import ModelList, ModelInfo, ContextLimits
 
 from .api.chats import OpenAIChats
 

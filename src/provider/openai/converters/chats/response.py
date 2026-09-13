@@ -6,7 +6,9 @@ from typing import AsyncGenerator
 from ....exceptions import ResponseValidationError
 from .....domain.schemas import (
     GatewayResponse,
-    GatewayStreamChunk
+    GatewayStreamChunk,
+    ResponseMetaData,
+    
 )
 class ResponseChats():
 

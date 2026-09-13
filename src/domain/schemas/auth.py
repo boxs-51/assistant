@@ -1,4 +1,4 @@
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, ConfigDict
 from typing import List, Optional, Dict, Any
 from pydantic.networks import HttpUrl
 
@@ -48,8 +48,7 @@ class OAuthUserInfoSchema(BaseModel):
     # --- "Cú chốt" bảo hiểm ---
     raw_data: Dict[str, Any] = Field(None, description="Lưu toàn bộ JSON thô trả về từ OAuth để phòng hờ")
 
-    class Config:
-        frozen = True 
+    config = ConfigDict(frozen = True)
 
 # --- USER & OTP SCHEMAS ---
 
@@ -81,5 +80,4 @@ class APIKeyResponseSchema(BaseModel):
     prefix: str
     created_at: str # Chuyển từ str sang datetime
 
-    class Config:
-        frozen = True 
+    config = ConfigDict(frozen = True)

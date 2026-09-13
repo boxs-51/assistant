@@ -118,7 +118,6 @@ class MockChat:
         return GatewayResponse(
             id=self.provider.state.stable_id("chat", self.provider.request_key(body)),
             model=model,
-            provider=self.provider.name,
             choices=[
                 GatewayChoice(
                     index=0,
@@ -131,7 +130,9 @@ class MockChat:
                 completion_tokens=completion_tokens,
                 total_tokens=prompt_tokens + completion_tokens
             ),
-            metadata={"mock": True, "scenario": self.provider.scenario.name},
+            metadata={"mock": True, 
+                      "scenario": self.provider.scenario.name,
+                      "provider": self.provider.name},
         )
 
     async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
@@ -171,7 +172,6 @@ class MockChat:
             yield GatewayStreamChunk(
                 id=self.provider.state.stable_id("stream", request_key),
                 model=model,
-                provider=self.provider.name,
                 choices=[
                     GatewayStreamChoice(
                         index=0,
@@ -182,7 +182,10 @@ class MockChat:
                         finish_reason="stop" if is_last_chunk else None
                     )
                 ],
-                metadata={"mock": True, "scenario": self.provider.scenario.name},
+                metadata={"mock": True, 
+                          "scenario": self.provider.scenario.name,
+                          "provider": self.provider.name
+                          },
             )
             chunk_number += 1
 

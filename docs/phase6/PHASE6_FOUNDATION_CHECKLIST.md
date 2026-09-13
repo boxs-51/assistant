@@ -67,12 +67,30 @@ or changes to the existing Phase 5 execution path.
 
 ## Required before remote execution
 
-- [ ] Authenticated connection handshake.
-- [ ] Heartbeat/stale eviction.
-- [ ] Invocation multiplexer.
-- [ ] Timeout/cancel/disconnect semantics.
-- [ ] Duplicate-result idempotency.
-- [ ] End-to-end client registration/invoke/result tests.
+- [ ] Authenticated connection handshake at the transport endpoint.
+- [x] Heartbeat/stale eviction.
+- [x] Invocation multiplexer.
+- [x] Timeout/cancel/disconnect semantics.
+- [x] Duplicate-result idempotency.
+- [x] Offline client registration/invoke/result coverage.
+- [ ] Live transport client registration/invoke/result acceptance.
+
+## Current Phase 6 status
+
+- [x] Phase 6.0 foundation contracts.
+- [x] Phase 6.1 catalog, ownership and routing policy.
+- [x] Phase 6.2 connection lifecycle and liveness.
+- [x] Phase 6.3 realtime multiplex and correlation hardening.
+- [x] Phase 6.4 reusable remote client driver.
+- [x] Phase 6.5 offline client self-registration and disconnect cleanup.
+- [x] Phase 6.6 opt-in CapabilityRuntime compatibility bridge.
+- [x] Phase 6.7 declarative workflow composition slice.
+- [x] Phase 6.8 offline resilience and architecture coverage.
+
+The checked items represent implemented and tested repository slices. The
+remaining unchecked items require a real authenticated transport handshake and
+live client acceptance; they are not satisfied by in-memory or direct service
+tests.
 
 ## Exit rule
 

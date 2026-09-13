@@ -116,7 +116,7 @@ class FakeLLM:
         return GatewayResponse(
             id=f"fake-{self.calls}",
             model=self.model,
-            provider="fake-llm",
+            metadata= {"provider": "fake-llm"},
             choices=[GatewayChoice(index=0, message=message, finish_reason=None)],
         )
 

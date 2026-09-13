@@ -17,6 +17,7 @@ from .....domain.schemas import (
     DocumentContent,
     UrlContent,
     GatewayResponse,
+    ResponseMetaData,
     GatewayChoice,
     GatewayMessage,
     GatewayUsage,
@@ -365,15 +366,17 @@ class ResponseChats:
                 completion_tokens=usage_data.get("candidatesTokenCount", 0),
                 total_tokens=usage_data.get("totalTokenCount", 0)
             )
+            metadata= ResponseMetaData(
+                provider="gemini",
+                raw_response=response_data
+            )
 
             return GatewayResponse(
                 id=f"chatcmpl-{uuid.uuid4()}",
                 model=response_data.get("modelVersion", "gemini-model"),
                 choices=choices,
                 usage=usage,
-                provider="gemini",
-                created=int(time.time()),
-                raw_response=response_data
+                metadata=metadata,
             )
         except (KeyError, IndexError, json.JSONDecodeError) as e:
             logger.error("Hỏng cấu trúc response từ Gemini:", error=str(e), response=response.text)
@@ -402,7 +405,6 @@ class ResponseChats:
         json_decoder = json.JSONDecoder()
 
         async def process_object(obj: Dict[str, Any]):
-            chunk_metadata = {}
             finish_reason = None
             parsed_parts = []
             tool_calls = []
@@ -444,17 +446,8 @@ class ResponseChats:
                         citations=citations_data,
                     )
 
-                    if parsed_parts:
-                        chunk_metadata["content_parts"] = [
-                            p.model_dump(exclude_none=True)
-                            for p in parsed_parts
-                        ]
-
                     if tool_calls and finish_reason == "stop":
                         finish_reason = "tool_calls"
-
-            if citations_data:
-                chunk_metadata["citations"] = citations_data
 
             text_delta = ""
 
@@ -495,40 +488,36 @@ class ResponseChats:
             ):
                 return None
 
+            model_obj = obj.get(
+                "modelVersion",
+                "gemini-model",
+            )
+            delta_obj = GatewayStreamDelta(
+                content=(text_delta if text_delta else None),
+                reasoning_content=(reasoning_delta if reasoning_delta else None),
+                role="assistant",
+                tool_calls=(tool_calls if tool_calls else None),
+            )
+            choices_obj = GatewayStreamChoice(
+                index=0,
+                delta=delta_obj,
+                finish_reason=finish_reason,
+            )
+            metadata = ResponseMetaData(
+                provider="gemini",
+                citations=citations_data if citations_data else None,
+                content_parts=[
+                    p.model_dump(exclude_none=True)
+                    for p in parsed_parts
+                ] if parsed_parts else None,
+            )
             return GatewayStreamChunk(
                 id=stream_id,
-                model=obj.get(
-                    "modelVersion",
-                    "gemini-model",
-                ),
-                choices=[
-                    GatewayStreamChoice(
-                        index=0,
-                        delta=GatewayStreamDelta(
-                            content=(
-                                text_delta
-                                if text_delta
-                                else None
-                            ),
-                            reasoning_content=(
-                                reasoning_delta
-                                if reasoning_delta
-                                else None
-                            ),
-                            role="assistant",
-                            tool_calls=(
-                                tool_calls
-                                if tool_calls
-                                else None
-                            ),
-                        ),
-                        finish_reason=finish_reason,
-                    )
-                ],
+                model=model_obj,
+                choices=[choices_obj],
                 provider="gemini",
-                created=int(time.time()),
                 usage=gateway_usage,
-                metadata=chunk_metadata,
+                metadata=metadata,
             )
 
         async for byte_chunk in response.aiter_bytes():

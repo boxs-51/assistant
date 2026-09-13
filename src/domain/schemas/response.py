@@ -15,18 +15,19 @@ class GatewayChoice(GatewayBaseModel):
     message: GatewayMessage
     finish_reason: Optional[FinishReason] = None
 
+class ResponseMetaData(GatewayBaseModel) :
+    created: int = Field(default_factory=lambda: int(time.time()))
+    provider: str = Field(..., description="Provider thực tế đã xử lý request")
+
 class GatewayResponse(GatewayBaseModel):
     """Phản hồi Non-Streaming hoàn chỉnh."""
     id: str = Field(default_factory=str)
     model: str
     choices: List[GatewayChoice] = Field(default_factory=list)
     usage: GatewayUsage = Field(default_factory=GatewayUsage)
-    provider: str = Field(..., description="Provider thực tế đã xử lý request")
-    created: int = Field(default_factory=lambda: int(time.time()))
     object: str = "gateway_response"
     system_fingerprint: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-    raw_response: Optional[Any] = Field(default=None, exclude=True)
+    metadata: ResponseMetaData = Field(default_factory=ResponseMetaData)
 
 class GatewayStreamDelta(GatewayBaseModel):
     """Nội dung thay đổi trong một chunk stream."""
@@ -46,10 +47,8 @@ class GatewayStreamChunk(GatewayBaseModel):
     model: str
     choices: List[GatewayStreamChoice]
     object: str = "gateway_stream_chunk"
-    created: int = Field(default_factory=lambda: int(time.time()))
-    provider: str
     usage: Optional[GatewayUsage] = None  # Thường trả về ở chunk cuối cùng
-    metadata: Dict[str, Any] = Field(default_factory=dict)
+    metadata:ResponseMetaData = Field(default_factory=ResponseMetaData)
     
     def to_sse(self) -> str:
         """Chuyển đổi sang chuẩn Server-Sent Event (SSE)."""

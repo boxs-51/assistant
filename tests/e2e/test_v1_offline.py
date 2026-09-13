@@ -413,13 +413,15 @@ async def test_v1_provider_apis_are_offline(offline_app: FastAPI):
             "/v1/chat/completions",
             json={
                 "model": "mock-chat",
-                "provider": "mock",
                 "messages": [{"role": "user", "content": "hello"}],
                 "config": {"stream": False},
+                "metadata": {
+                    "routing": {"prefer_provider" : "mock"},
+                }
             },
         )
         assert chat.status_code == 200, chat.text
-        assert chat.json()["provider"] == "mock"
+        assert chat.json()["metadata"]["routing"]["prefer_provider"] == "mock"
 
         embeddings = await client.post(
             "/v1/embeddings",
