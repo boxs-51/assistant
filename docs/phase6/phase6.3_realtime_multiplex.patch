@@ -1,0 +1,790 @@
+*** Begin Patch
+*** Update File: src/runtimes/connection/protocol.py
+@@
+-from typing import Any, Dict, Literal, Optional
++from typing import Any, Dict, Literal, Optional
+@@
+ class RealtimeEnvelope(BaseModel):
+@@
+     payload: Dict[str, Any] = Field(default_factory=dict)
++
++    @model_validator(mode="after")
++    def validate_correlation_contract(self) -> "RealtimeEnvelope":
++        invocation_required = {
++            "capability.invoke",
++            "capability.progress",
++            "capability.result",
++            "capability.error",
++            "capability.cancel",
++            "capability.cancelled",
++        }
++
++        if self.type in invocation_required and not self.invocation_id:
++            raise ValueError(
++                f"Realtime message '{self.type}' requires invocation_id"
++            )
++
++        if self.type == "capability.invoke" and not self.connection_id:
++            raise ValueError(
++                "capability.invoke requires connection_id"
++            )
++
++        return self
+*** Update File: src/runtimes/connection/protocol.py
+@@
+-from pydantic import BaseModel, ConfigDict, Field
++from pydantic import BaseModel, ConfigDict, Field, model_validator
+*** Update File: src/runtimes/connection/multiplexer.py
+@@
+ import asyncio
+-from typing import Any, Dict
++from dataclasses import dataclass
++from typing import Any, Dict, Optional
++
++
++@dataclass
++class _PendingInvocation:
++    connection_id: Optional[str]
++    future: asyncio.Future[Any]
+@@
+-        self._pending: Dict[str, asyncio.Future[Any]] = {}
++        self._pending: Dict[str, _PendingInvocation] = {}
+         self._lock = asyncio.Lock()
+ 
+-    async def register(self, invocation_id: str) -> asyncio.Future[Any]:
++    async def register(
++        self,
++        invocation_id: str,
++        connection_id: Optional[str] = None,
++    ) -> asyncio.Future[Any]:
+         async with self._lock:
+             if invocation_id in self._pending:
+                 raise ValueError(
+                     f"Invocation '{invocation_id}' is already registered."
+                 )
+             future = asyncio.get_running_loop().create_future()
+-            self._pending[invocation_id] = future
++            self._pending[invocation_id] = _PendingInvocation(
++                connection_id=connection_id,
++                future=future,
++            )
+             return future
+ 
+     async def resolve(self, invocation_id: str, result: Any) -> bool:
+         async with self._lock:
+-            future = self._pending.pop(invocation_id, None)
+-        if future is None or future.done():
++            pending = self._pending.pop(invocation_id, None)
++        if pending is None or pending.future.done():
+             return False
+-        future.set_result(result)
++        pending.future.set_result(result)
+         return True
+ 
+     async def reject(self, invocation_id: str, error: BaseException) -> bool:
+         async with self._lock:
+-            future = self._pending.pop(invocation_id, None)
+-        if future is None or future.done():
++            pending = self._pending.pop(invocation_id, None)
++        if pending is None or pending.future.done():
+             return False
+-        future.set_exception(error)
++        pending.future.set_exception(error)
+         return True
+ 
+     async def cancel(self, invocation_id: str) -> bool:
+         async with self._lock:
+-            future = self._pending.pop(invocation_id, None)
+-        if future is None or future.done():
++            pending = self._pending.pop(invocation_id, None)
++        if pending is None or pending.future.done():
+             return False
+-        future.cancel()
++        pending.future.cancel()
+         return True
+ 
++    async def fail_connection(
++        self,
++        connection_id: str,
++        error: BaseException,
++    ) -> int:
++        async with self._lock:
++            matching_ids = [
++                invocation_id
++                for invocation_id, pending in self._pending.items()
++                if pending.connection_id == connection_id
++            ]
++            pending = [
++                self._pending.pop(invocation_id)
++                for invocation_id in matching_ids
++            ]
++
++        count = 0
++        for item in pending:
++            if not item.future.done():
++                item.future.set_exception(error)
++                count += 1
++        return count
++
+     async def fail_all(self, error: BaseException) -> int:
+         async with self._lock:
+-            pending = list(self._pending.values())
++            pending = list(self._pending.values())
+             self._pending.clear()
+ 
+         count = 0
+-        for future in pending:
+-            if not future.done():
+-                future.set_exception(error)
++        for item in pending:
++            if not item.future.done():
++                item.future.set_exception(error)
+                 count += 1
+         return count
+ 
+-    async def pending_count(self) -> int:
++    async def pending_count(
++        self,
++        connection_id: Optional[str] = None,
++    ) -> int:
+         async with self._lock:
+-            return len(self._pending)
++            if connection_id is None:
++                return len(self._pending)
++            return sum(
++                1
++                for pending in self._pending.values()
++                if pending.connection_id == connection_id
++            )
++
++    async def connection_for_invocation(
++        self,
++        invocation_id: str,
++    ) -> Optional[str]:
++        async with self._lock:
++            pending = self._pending.get(invocation_id)
++            return None if pending is None else pending.connection_id
+*** Update File: src/runtimes/connection/registry.py
+@@
+     def get_socket(
+         self,
+         identifier: str,
+@@
+         return self._sockets.get(connection_id)
++
++    def require_active_socket(self, connection_id: str) -> Any:
++        if not self.lifecycle.is_active(connection_id):
++            raise ConnectionStateError(
++                f"Connection '{connection_id}' is not ACTIVE"
++            )
++
++        socket = self._sockets.get(connection_id)
++        if socket is None:
++            raise ConnectionSocketUnavailableError(connection_id)
++        return socket
+@@
+-__all__ = ["ConnectionRegistry"]
++class ConnectionStateError(RuntimeError):
++    """Connection cannot be used for realtime invocation."""
++
++
++class ConnectionSocketUnavailableError(ConnectionStateError):
++    """An ACTIVE connection has no transport socket bound to it."""
++
++
++__all__ = [
++    "ConnectionRegistry",
++    "ConnectionStateError",
++    "ConnectionSocketUnavailableError",
++]
+*** Update File: src/runtimes/connection/runtime.py
+@@
+ from .registry import ConnectionRegistry
++from .protocol import RealtimeEnvelope
++from .realtime import RealtimeMultiplexer
+@@
+         self.event_bus = None
+         self.registry = ConnectionRegistry()
++        self.realtime = RealtimeMultiplexer(self.registry)
+@@
+     async def send_to_client(self, session_id: str, data: Dict[str, Any]) -> bool:
+@@
+         return False
++
++    async def send_realtime(
++        self,
++        envelope: RealtimeEnvelope,
++        *,
++        timeout: Optional[float] = None,
++    ) -> Any:
++        """Send one correlated realtime invocation and await its terminal result."""
++        return await self.realtime.invoke(envelope, timeout=timeout)
++
++    async def handle_realtime_message(
++        self,
++        connection_id: str,
++        data: Dict[str, Any],
++    ) -> bool:
++        """Validate and dispatch one inbound realtime envelope."""
++        envelope = RealtimeEnvelope.model_validate(data)
++        return await self.realtime.handle_inbound(connection_id, envelope)
++
++    async def disconnect_connection(self, connection_id: str) -> int:
++        """Close lifecycle state and fail pending invocations deterministically."""
++        snapshot = self.registry.disconnect(connection_id)
++        del snapshot
++        failed = await self.realtime.disconnect(connection_id)
++        self.registry.get_socket(connection_id)
++        return failed
+*** End Patch
+*** Add File: src/runtimes/connection/realtime.py
++"""Phase 6.3 realtime invocation multiplexing.
++
++This module is the transport-facing boundary between ConnectionRegistry and
++remote capability invocation. AgentRuntime is intentionally absent here.
++"""
++
++from __future__ import annotations
++
++import asyncio
++from typing import Any, Awaitable, Callable, Dict, Optional
++
++from .multiplexer import ConnectionMultiplexer
++from .protocol import RealtimeEnvelope
++from .registry import ConnectionRegistry
++
++
++class RemoteCapabilityError(RuntimeError):
++    """Remote client reported a capability execution error."""
++
++
++ProgressHandler = Callable[[RealtimeEnvelope], Awaitable[None] | None]
++
++
++class RealtimeMultiplexer:
++    """Multiplex invocations over active connection sockets."""
++
++    TERMINAL_TYPES = {
++        "capability.result",
++        "capability.error",
++        "capability.cancelled",
++    }
++
++    def __init__(
++        self,
++        registry: ConnectionRegistry,
++        *,
++        multiplexer: Optional[ConnectionMultiplexer] = None,
++        default_timeout: float = 60.0,
++        progress_handler: Optional[ProgressHandler] = None,
++    ) -> None:
++        if default_timeout <= 0:
++            raise ValueError("default_timeout must be > 0")
++
++        self.registry = registry
++        self.multiplexer = multiplexer or ConnectionMultiplexer()
++        self.default_timeout = float(default_timeout)
++        self.progress_handler = progress_handler
++
++    async def invoke(
++        self,
++        envelope: RealtimeEnvelope,
++        *,
++        timeout: Optional[float] = None,
++    ) -> Any:
++        if envelope.type != "capability.invoke":
++            raise ValueError("RealtimeMultiplexer.invoke requires capability.invoke")
++        if not envelope.connection_id:
++            raise ValueError("capability.invoke requires connection_id")
++        if not envelope.invocation_id:
++            raise ValueError("capability.invoke requires invocation_id")
++
++        socket = self.registry.require_active_socket(envelope.connection_id)
++        future = await self.multiplexer.register(
++            envelope.invocation_id,
++            envelope.connection_id,
++        )
++
++        try:
++            await socket.send_json(
++                envelope.model_dump(mode="json")
++            )
++        except BaseException as exc:
++            await self.multiplexer.reject(envelope.invocation_id, exc)
++            raise
++
++        effective_timeout = (
++            self.default_timeout if timeout is None else float(timeout)
++        )
++        if effective_timeout <= 0:
++            await self.cancel(envelope.connection_id, envelope.invocation_id)
++            raise TimeoutError("Realtime invocation timeout must be > 0")
++
++        try:
++            return await asyncio.wait_for(
++                asyncio.shield(future),
++                timeout=effective_timeout,
++            )
++        except asyncio.TimeoutError:
++            await self.cancel(
++                envelope.connection_id,
++                envelope.invocation_id,
++            )
++            raise
++
++    async def cancel(
++        self,
++        connection_id: str,
++        invocation_id: str,
++    ) -> bool:
++        cancelled = await self.multiplexer.cancel(invocation_id)
++        if not cancelled:
++            return False
++
++        socket = self.registry.get_socket(connection_id)
++        if socket is None or not self.registry.is_active(connection_id):
++            return True
++
++        envelope = RealtimeEnvelope(
++            type="capability.cancel",
++            message_id=f"cancel-{invocation_id}",
++            session_id=self.registry.session_for_connection(connection_id),
++            connection_id=connection_id,
++            invocation_id=invocation_id,
++            payload={},
++        )
++        await socket.send_json(envelope.model_dump(mode="json"))
++        return True
++
++    async def handle_inbound(
++        self,
++        connection_id: str,
++        envelope: RealtimeEnvelope,
++    ) -> bool:
++        if envelope.connection_id and envelope.connection_id != connection_id:
++            raise ValueError(
++                "Realtime envelope connection_id does not match transport connection"
++            )
++
++        if envelope.type == "capability.result":
++            return await self.multiplexer.resolve(
++                envelope.invocation_id or "",
++                envelope.payload,
++            )
++
++        if envelope.type == "capability.error":
++            message = str(envelope.payload.get("message", "Remote capability failed"))
++            return await self.multiplexer.reject(
++                envelope.invocation_id or "",
++                RemoteCapabilityError(message),
++            )
++
++        if envelope.type == "capability.cancelled":
++            return await self.multiplexer.cancel(
++                envelope.invocation_id or "",
++            )
++
++        if envelope.type == "capability.progress":
++            if self.progress_handler is None:
++                return False
++            result = self.progress_handler(envelope)
++            if asyncio.iscoroutine(result):
++                await result
++            return True
++
++        if envelope.type == "connection.heartbeat":
++            self.registry.heartbeat(connection_id)
++            return True
++
++        return False
++
++    async def disconnect(
++        self,
++        connection_id: str,
++        error: Optional[BaseException] = None,
++    ) -> int:
++        failure = error or ConnectionError(
++            f"Connection '{connection_id}' disconnected"
++        )
++        return await self.multiplexer.fail_connection(
++            connection_id,
++            failure,
++        )
++
+*** Add File: tests/architecture/test_phase6_3_realtime_multiplex.py
++from __future__ import annotations
++
++import asyncio
++
++import pytest
++
++from src.runtimes.connection.protocol import RealtimeEnvelope
++from src.runtimes.connection.registry import ConnectionRegistry
++from src.runtimes.connection.realtime import (
++    RealtimeMultiplexer,
++    RemoteCapabilityError,
++)
++
++
++class FakeSocket:
++    def __init__(self) -> None:
++        self.messages = []
++
++    async def send_json(self, payload):
++        self.messages.append(payload)
++
++
++def make_active_connection() -> tuple[ConnectionRegistry, FakeSocket]:
++    registry = ConnectionRegistry()
++    socket = FakeSocket()
++    registry.register(
++        "sess-1",
++        "user-1",
++        socket,
++        connection_id="conn-1",
++    )
++    registry.activate("conn-1")
++    return registry, socket
++
++
++def test_invoke_correlates_result_and_is_idempotent() -> None:
++    async def scenario() -> None:
++        registry, socket = make_active_connection()
++        realtime = RealtimeMultiplexer(registry)
++        invocation = RealtimeEnvelope(
++            type="capability.invoke",
++            message_id="msg-1",
++            connection_id="conn-1",
++            invocation_id="inv-1",
++            payload={"x": 1},
++        )
++
++        task = asyncio.create_task(realtime.invoke(invocation))
++        await asyncio.sleep(0)
++
++        assert socket.messages[0]["type"] == "capability.invoke"
++
++        result = await realtime.handle_inbound(
++            "conn-1",
++            RealtimeEnvelope(
++                type="capability.result",
++                message_id="msg-2",
++                connection_id="conn-1",
++                invocation_id="inv-1",
++                payload={"ok": True},
++            ),
++        )
++        duplicate = await realtime.handle_inbound(
++            "conn-1",
++            RealtimeEnvelope(
++                type="capability.result",
++                message_id="msg-3",
++                connection_id="conn-1",
++                invocation_id="inv-1",
++                payload={"ok": False},
++            ),
++        )
++
++        assert result is True
++        assert duplicate is False
++        assert await task == {"ok": True}
++
++    asyncio.run(scenario())
++
++
++def test_timeout_sends_cancel() -> None:
++    async def scenario() -> None:
++        registry, socket = make_active_connection()
++        realtime = RealtimeMultiplexer(registry, default_timeout=0.01)
++        invocation = RealtimeEnvelope(
++            type="capability.invoke",
++            message_id="msg-1",
++            connection_id="conn-1",
++            invocation_id="inv-1",
++            payload={},
++        )
++
++        with pytest.raises(asyncio.TimeoutError):
++            await realtime.invoke(invocation)
++
++        assert socket.messages[-1]["type"] == "capability.cancel"
++
++    asyncio.run(scenario())
++
++
++def test_disconnect_fails_only_pending_invocations_for_connection() -> None:
++    async def scenario() -> None:
++        registry = ConnectionRegistry()
++        socket_a = FakeSocket()
++        socket_b = FakeSocket()
++        registry.register("sess-a", "user-1", socket_a, connection_id="conn-a")
++        registry.register("sess-b", "user-1", socket_b, connection_id="conn-b")
++        registry.activate("conn-a")
++        registry.activate("conn-b")
++        realtime = RealtimeMultiplexer(registry)
++
++        task_a = asyncio.create_task(realtime.invoke(
++            RealtimeEnvelope(
++                type="capability.invoke",
++                message_id="msg-a",
++                connection_id="conn-a",
++                invocation_id="inv-a",
++                payload={},
++            )
++        ))
++        task_b = asyncio.create_task(realtime.invoke(
++            RealtimeEnvelope(
++                type="capability.invoke",
++                message_id="msg-b",
++                connection_id="conn-b",
++                invocation_id="inv-b",
++                payload={},
++            )
++        ))
++        await asyncio.sleep(0)
++
++        assert await realtime.disconnect("conn-a") == 1
++        assert await realtime.handle_inbound(
++            "conn-b",
++            RealtimeEnvelope(
++                type="capability.result",
++                message_id="msg-b-result",
++                connection_id="conn-b",
++                invocation_id="inv-b",
++                payload={"ok": True},
++            ),
++        )
++
++        with pytest.raises(ConnectionError):
++            await task_a
++        assert await task_b == {"ok": True}
++
++    asyncio.run(scenario())
++
++
++def test_progress_is_forwarded_without_completing_invocation() -> None:
+    async def scenario() -> None:
+        registry, _ = make_active_connection()
+        progress_messages = []
+
+        async def on_progress(envelope):
+            progress_messages.append(envelope.payload)
+
+        realtime = RealtimeMultiplexer(
+            registry,
+            progress_handler=on_progress,
+        )
+        invocation = RealtimeEnvelope(
+            type="capability.invoke",
+            message_id="msg-1",
+            connection_id="conn-1",
+            invocation_id="inv-1",
+            payload={},
+        )
+        task = asyncio.create_task(realtime.invoke(invocation))
+        await asyncio.sleep(0)
+
+        assert await realtime.handle_inbound(
+            "conn-1",
+            RealtimeEnvelope(
+                type="capability.progress",
+                message_id="msg-progress",
+                connection_id="conn-1",
+                invocation_id="inv-1",
+                payload={"percent": 50},
+            ),
+        )
+        assert progress_messages == [{"percent": 50}]
+        assert await realtime.multiplexer.pending_count("conn-1") == 1
+
+        await realtime.handle_inbound(
+            "conn-1",
+            RealtimeEnvelope(
+                type="capability.result",
+                message_id="msg-result",
+                connection_id="conn-1",
+                invocation_id="inv-1",
+                payload={"ok": True},
+            ),
+        )
+        assert await task == {"ok": True}
+
+    asyncio.run(scenario())
+
+
+def test_remote_error_is_correlated_to_invocation() -> None:
++    async def scenario() -> None:
++        registry, _ = make_active_connection()
++        realtime = RealtimeMultiplexer(registry)
++        invocation = RealtimeEnvelope(
++            type="capability.invoke",
++            message_id="msg-1",
++            connection_id="conn-1",
++            invocation_id="inv-1",
++            payload={},
++        )
++        task = asyncio.create_task(realtime.invoke(invocation))
++        await asyncio.sleep(0)
++
++        await realtime.handle_inbound(
++            "conn-1",
++            RealtimeEnvelope(
++                type="capability.error",
++                message_id="msg-2",
++                connection_id="conn-1",
++                invocation_id="inv-1",
++                payload={"message": "permission denied"},
++            ),
++        )
++
++        with pytest.raises(RemoteCapabilityError, match="permission denied"):
++            await task
++
++    asyncio.run(scenario())
++
++
++def test_inbound_connection_identity_is_enforced() -> None:
++    async def scenario() -> None:
++        registry, _ = make_active_connection()
++        realtime = RealtimeMultiplexer(registry)
++
++        with pytest.raises(ValueError, match="connection_id"):
++            await realtime.handle_inbound(
++                "conn-1",
++                RealtimeEnvelope(
++                    type="capability.result",
++                    message_id="msg-1",
++                    connection_id="conn-2",
++                    invocation_id="inv-1",
++                    payload={},
++                ),
++            )
++
++    asyncio.run(scenario())
+*** Add File: docs/phase6/PHASE6_REALTIME_MULTIPLEX.md
++# Phase 6.3 — Realtime Multiplex
++
++## Status
++
++Phase 6.3 is the transport/correlation layer between the Phase 6.2 connection
++lifecycle and future Phase 6.4 remote-client execution.
++
++This slice does **not** introduce client capability discovery or a remote driver.
++
++## Responsibilities
++
++1. Correlate `capability.invoke` with exactly one terminal response.
++2. Route progress without consuming the pending invocation.
++3. Send cancellation on timeout or explicit cancel.
++4. Fail pending invocations bound to a disconnected connection.
++5. Reject cross-connection response injection.
++6. Keep duplicate terminal responses idempotent.
++
++## Flow
++
++```text
++CapabilityRuntime / future RemoteClientDriver
++              |
++              v
++       RealtimeMultiplexer
++              |
++       ConnectionRegistry
++              |
++          active socket
++              |
++       capability.invoke
++              |
++            Client
++         /      |      \
++     progress  result  error
++         |       |       |
++         +-------+-------+
++                 |
++         invocation_id correlation
++```
++
++Timeout path:
++
++```text
++wait_for timeout
++      |
++      v
++capability.cancel
++      |
++      v
++client
++      |
++capability.cancelled
++```
++
++Disconnect path:
++
++```text
++ConnectionRegistry.disconnect
++          |
++          v
++RealtimeMultiplexer.disconnect
++          |
++          v
++fail_connection(connection_id)
++```
++
++Only pending invocations for the affected connection are failed.
++
++## Safety invariants
++
++- `capability.invoke` requires `connection_id` and `invocation_id`.
++- Result/error/cancelled/progress messages require `invocation_id`.
++- An inbound envelope cannot claim a different `connection_id` than the socket
++  on which it was received.
++- Terminal messages remove their pending invocation before completing the future,
++  making duplicate terminal messages harmless.
++- AgentRuntime remains unaware of transport location.
++
++## Exit gate
++
++The Phase 6.3 gate is the realtime architecture test module:
++
++```text
++tests/architecture/test_phase6_3_realtime_multiplex.py
++```
++
++Required coverage:
++
++- invoke/result correlation
++- duplicate terminal result idempotency
++- remote error correlation
++- timeout -> cancel
++- connection-scoped disconnect failure
++- inbound connection identity enforcement
+*** Update File: docs/phase6/README.md
+@@
+-6.3 Realtime multiplex
++6.3 Realtime multiplex       <- correlation + timeout/cancel + transport boundary
+@@
+ Client implementations are routable only while their bound connection is
+ ACTIVE.
+@@
+ Phase 6.3 is responsible for realtime transport and invocation correlation.
++
++## Phase 6.3 exit boundary
++
++Phase 6.3 owns the realtime correlation boundary, but not client capability
++registration or remote execution policy:
++
++```text
++capability.invoke
++      |
++      v
++RealtimeMultiplexer
++      |
++      +--> ConnectionRegistry (ACTIVE gate)
++      +--> ConnectionMultiplexer (invocation correlation)
++      +--> timeout / cancel
++      +--> inbound result/error/progress
++      +--> disconnect -> fail pending
++```
++
++Phase 6.4 begins when a reusable `RemoteClientDriver` invokes this realtime
++boundary from the execution plane.
+*** End Patch

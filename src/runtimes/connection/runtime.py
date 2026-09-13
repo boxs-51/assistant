@@ -5,6 +5,8 @@ from typing import Dict, Any, Optional
 
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from .registry import ConnectionRegistry
+from .protocol import RealtimeEnvelope
+from .realtime import RealtimeMultiplexer
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 
@@ -23,6 +25,7 @@ class ConnectionRuntime(BaseRuntime):
         super().__init__(manifest=manifest)
         self.event_bus = None
         self.registry = ConnectionRegistry()
+        self.realtime = RealtimeMultiplexer(self.registry)
         self._heartbeat_task: Optional[asyncio.Task] = None
         self._subscribed = False
 
@@ -67,6 +70,32 @@ class ConnectionRuntime(BaseRuntime):
             await socket.send_json(data)
             return True
         return False
+
+    async def send_realtime(
+        self,
+        envelope: RealtimeEnvelope,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Any:
+        """Send one correlated realtime invocation and await its terminal result."""
+        return await self.realtime.invoke(envelope, timeout=timeout)
+
+    async def handle_realtime_message(
+        self,
+        connection_id: str,
+        data: Dict[str, Any],
+    ) -> bool:
+        """Validate and dispatch one inbound realtime envelope."""
+        envelope = RealtimeEnvelope.model_validate(data)
+        return await self.realtime.handle_inbound(connection_id, envelope)
+
+    async def disconnect_connection(self, connection_id: str) -> int:
+        """Close lifecycle state and fail pending invocations deterministically."""
+        snapshot = self.registry.disconnect(connection_id)
+        del snapshot
+        failed = await self.realtime.disconnect(connection_id)
+        self.registry.get_socket(connection_id)
+        return failed
 
     def evict_stale_connections(self):
         """Synchronously evict stale transport connections.

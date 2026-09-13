@@ -1,5 +1,12 @@
 import asyncio
-from typing import Any, Dict
+from dataclasses import dataclass
+from typing import Any, Dict, Optional
+
+
+@dataclass
+class _PendingInvocation:
+    connection_id: Optional[str]
+    future: asyncio.Future[Any]
 
 
 class ConnectionMultiplexer:
@@ -11,42 +18,72 @@ class ConnectionMultiplexer:
     """
 
     def __init__(self) -> None:
-        self._pending: Dict[str, asyncio.Future[Any]] = {}
+        self._pending: Dict[str, _PendingInvocation] = {}
         self._lock = asyncio.Lock()
 
-    async def register(self, invocation_id: str) -> asyncio.Future[Any]:
+    async def register(
+        self,
+        invocation_id: str,
+        connection_id: Optional[str] = None,
+    ) -> asyncio.Future[Any]:
         async with self._lock:
             if invocation_id in self._pending:
                 raise ValueError(
                     f"Invocation '{invocation_id}' is already registered."
                 )
             future = asyncio.get_running_loop().create_future()
-            self._pending[invocation_id] = future
+            self._pending[invocation_id] = _PendingInvocation(
+                connection_id=connection_id,
+                future=future,
+            )
             return future
 
     async def resolve(self, invocation_id: str, result: Any) -> bool:
         async with self._lock:
-            future = self._pending.pop(invocation_id, None)
-        if future is None or future.done():
+            pending = self._pending.pop(invocation_id, None)
+        if pending is None or pending.future.done():
             return False
-        future.set_result(result)
+        pending.future.set_result(result)
         return True
 
     async def reject(self, invocation_id: str, error: BaseException) -> bool:
         async with self._lock:
-            future = self._pending.pop(invocation_id, None)
-        if future is None or future.done():
+            pending = self._pending.pop(invocation_id, None)
+        if pending is None or pending.future.done():
             return False
-        future.set_exception(error)
+        pending.future.set_exception(error)
         return True
 
     async def cancel(self, invocation_id: str) -> bool:
         async with self._lock:
-            future = self._pending.pop(invocation_id, None)
-        if future is None or future.done():
+            pending = self._pending.pop(invocation_id, None)
+        if pending is None or pending.future.done():
             return False
-        future.cancel()
+        pending.future.cancel()
         return True
+
+    async def fail_connection(
+        self,
+        connection_id: str,
+        error: BaseException,
+    ) -> int:
+        async with self._lock:
+            matching_ids = [
+                invocation_id
+                for invocation_id, pending in self._pending.items()
+                if pending.connection_id == connection_id
+            ]
+            pending = [
+                self._pending.pop(invocation_id)
+                for invocation_id in matching_ids
+            ]
+
+        count = 0
+        for item in pending:
+            if not item.future.done():
+                item.future.set_exception(error)
+                count += 1
+        return count
 
     async def fail_all(self, error: BaseException) -> int:
         async with self._lock:
@@ -54,12 +91,29 @@ class ConnectionMultiplexer:
             self._pending.clear()
 
         count = 0
-        for future in pending:
-            if not future.done():
-                future.set_exception(error)
+        for item in pending:
+            if not item.future.done():
+                item.future.set_exception(error)
                 count += 1
         return count
 
-    async def pending_count(self) -> int:
+    async def pending_count(
+        self,
+        connection_id: Optional[str] = None,
+    ) -> int:
         async with self._lock:
-            return len(self._pending)
+            if connection_id is None:
+                return len(self._pending)
+            return sum(
+                1
+                for pending in self._pending.values()
+                if pending.connection_id == connection_id
+            )
+
+    async def connection_for_invocation(
+        self,
+        invocation_id: str,
+    ) -> Optional[str]:
+        async with self._lock:
+            pending = self._pending.get(invocation_id)
+            return None if pending is None else pending.connection_id

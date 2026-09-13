@@ -110,6 +110,17 @@ class ConnectionRegistry:
 
         return self._sockets.get(connection_id)
 
+    def require_active_socket(self, connection_id: str) -> Any:
+        if not self.lifecycle.is_active(connection_id):
+            raise ConnectionStateError(
+                f"Connection '{connection_id}' is not ACTIVE"
+            )
+
+        socket = self._sockets.get(connection_id)
+        if socket is None:
+            raise ConnectionSocketUnavailableError(connection_id)
+        return socket
+
     def evict_stale(self):
         stale = self.lifecycle.evict_stale()
 
@@ -131,4 +142,16 @@ class ConnectionRegistry:
         return self._connection_to_session.get(connection_id)
 
 
-__all__ = ["ConnectionRegistry"]
+class ConnectionStateError(RuntimeError):
+    """Connection cannot be used for realtime invocation."""
+
+
+class ConnectionSocketUnavailableError(ConnectionStateError):
+    """An ACTIVE connection has no transport socket bound to it."""
+
+
+__all__ = [
+    "ConnectionRegistry",
+    "ConnectionStateError",
+    "ConnectionSocketUnavailableError",
+]

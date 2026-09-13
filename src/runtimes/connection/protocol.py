@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 RealtimeMessageType = Literal[

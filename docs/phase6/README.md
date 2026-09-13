@@ -85,7 +85,7 @@ Every invocation is correlated by `invocation_id` and must preserve `execution_i
 6.0 Foundation contracts       <- this patch
 6.1 Catalog + ownership + policy
 6.2 Connection lifecycle       <- lifecycle + liveness
-6.3 Realtime multiplex
+6.3 Realtime multiplex       <- correlation + timeout/cancel + transport boundary
 6.4 Remote client driver
 6.5 Client self-registration
 6.6 Tool/Agent compatibility migration
@@ -125,3 +125,24 @@ ACTIVE.
 STALE, DISCONNECTED, and REMOVED connections must reject new routing.
 
 Phase 6.3 is responsible for realtime transport and invocation correlation.
+
+## Phase 6.3 exit boundary
+
+Phase 6.3 owns the realtime correlation boundary, but not client capability
+registration or remote execution policy:
+
+```text
+capability.invoke
+      |
+      v
+RealtimeMultiplexer
+      |
+      +--> ConnectionRegistry (ACTIVE gate)
+      +--> ConnectionMultiplexer (invocation correlation)
+      +--> timeout / cancel
+      +--> inbound result/error/progress
+      +--> disconnect -> fail pending
+```
+
+Phase 6.4 begins when a reusable `RemoteClientDriver` invokes this realtime
+boundary from the execution plane.
