@@ -21,6 +21,7 @@ class SessionRuntime(BaseRuntime):
         self.event_bus = None
         self.uow_factory = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
+        self._stream_buffers: Dict[str, list[str]] = {}
         self._subscribed = False
 
     async def initialize(self, context: RuntimeContext) -> None:
@@ -33,6 +34,8 @@ class SessionRuntime(BaseRuntime):
         if not self._subscribed:
             self.event_bus.subscribe("transport.event.request_received", self._on_request_received)
             self.event_bus.subscribe("provider.chat.responded", self._on_provider_responded)
+            self.event_bus.subscribe("provider.stream.chunk_emitted", self._on_stream_chunk)
+            self.event_bus.subscribe("provider.stream.completed", self._on_stream_completed)
             self._subscribed = True
         self._is_initialized = True
         logger.info("SessionRuntime initialized")
@@ -45,6 +48,9 @@ class SessionRuntime(BaseRuntime):
         if self.event_bus is not None and self._subscribed:
             self.event_bus.unsubscribe("transport.event.request_received", self._on_request_received)
             self.event_bus.unsubscribe("provider.chat.responded", self._on_provider_responded)
+            self.event_bus.unsubscribe("provider.stream.chunk_emitted", self._on_stream_chunk)
+            self.event_bus.unsubscribe("provider.stream.completed", self._on_stream_completed)
+            self._stream_buffers.clear()
             self._subscribed = False
 
     async def _on_request_received(self, event: BaseEvent):
@@ -117,10 +123,41 @@ class SessionRuntime(BaseRuntime):
         if content is None:
             return
 
+        await self._persist_assistant_message(
+            event.session_id,
+            message.get("role", "assistant"),
+            content,
+        )
+
+    async def _on_stream_chunk(self, event: BaseEvent):
+        if not event.session_id:
+            return
+
+        chunk = event.payload.get("chunk", {})
+        choices = chunk.get("choices", []) if isinstance(chunk, dict) else []
+        if not choices:
+            return
+
+        delta = choices[0].get("delta", {})
+        content = delta.get("content") if isinstance(delta, dict) else None
+        if content:
+            self._stream_buffers.setdefault(event.session_id, []).append(content)
+
+    async def _on_stream_completed(self, event: BaseEvent):
+        if not event.session_id:
+            return
+
+        content = "".join(self._stream_buffers.pop(event.session_id, []))
+        if content:
+            await self._persist_assistant_message(event.session_id, "assistant", content)
+
+    async def _persist_assistant_message(self, session_id: str, role: str, content: Any):
+        logger.debug("Persisting assistant message", session_id=session_id)
+
         async with self.uow_factory() as uow:
             await uow.sessions.add_message(
-                session_id=event.session_id,
-                role=message.get("role", "assistant"),
+                session_id=session_id,
+                role=role,
                 content={"type": "text", "data": content},
             )
             await uow.commit()

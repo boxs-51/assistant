@@ -63,7 +63,12 @@ async def chat_completions_proxy(
 
             async def _on_chunk(evt: BaseEvent):
                 if evt.session_id == session_id:
-                    await queue.put(evt.payload.get("sse"))
+                    sse = evt.payload.get("sse")
+                    if not sse:
+                        chunk = evt.payload.get("chunk")
+                        sse = f"data: {json.dumps(chunk)}\n\n" if chunk else None
+                    if sse:
+                        await queue.put(sse)
 
             async def _on_complete(evt: BaseEvent):
                 if evt.session_id == session_id:
@@ -80,7 +85,7 @@ async def chat_completions_proxy(
                 event_bus.subscribe("provider.stream.completed", _on_complete)
                 event_bus.subscribe("provider.failed", _on_fail)
 
-                event_bus.publish(
+                asyncio.create_task(event_bus.publish(
                     BaseEvent(
                         event_name="transport.event.request_received",
                         session_id=session_id,
@@ -89,7 +94,7 @@ async def chat_completions_proxy(
                             "identity": identity_data,
                         },
                     )
-                )
+                ))
 
                 while True:
                     if await request.is_disconnected():
@@ -170,7 +175,7 @@ async def chat_completions_proxy(
         try:
             await event_bus.publish(
                 BaseEvent(
-                    event_name="provider.chat.execute",
+                    event_name="transport.event.request_received",
                     session_id=session_id,
                     payload={
                         "request_body": request_payload,
@@ -179,7 +184,11 @@ async def chat_completions_proxy(
                 )
             )
 
+            response_payload = await future
+
             duration = round(time.perf_counter() - start_time, 4)
+
+            return response_payload.get("response", response_payload)
 
         except asyncio.TimeoutError:
             duration = round(time.perf_counter() - start_time, 4)

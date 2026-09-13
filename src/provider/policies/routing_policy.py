@@ -42,12 +42,6 @@ class RoutingPolicy:
             for name in self._config.priority
             if name in self.providers
         ]
-        if self._config.configs.get("mock").enabled:
-            self._default_chain = [self.providers["mock"]]
-        logger.info(
-            "Default chain",
-            chain=[p.name for p in self._default_chain]
-        )
         # Tải quy tắc từ file YAML
         self._load_rules_from_file()
 

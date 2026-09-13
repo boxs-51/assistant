@@ -81,6 +81,7 @@ provider:
       - "openai"
       - "gemini"
       - "ollama"
+      - "mock"
 
   routing_rules_path: "config/gateway/routing/routing_rules.yaml"
   configs:
@@ -104,7 +105,7 @@ provider:
         api_key: ""
         base_url: "http://127.0.0.1:11434"
       mock:
-        enabled: false
+        enabled: True
         api_key: ""
         base_url: "http://mock.invalid"
         options:

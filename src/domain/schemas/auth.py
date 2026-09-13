@@ -48,7 +48,7 @@ class OAuthUserInfoSchema(BaseModel):
     # --- "Cú chốt" bảo hiểm ---
     raw_data: Dict[str, Any] = Field(None, description="Lưu toàn bộ JSON thô trả về từ OAuth để phòng hờ")
 
-    config = ConfigDict(frozen = True)
+    model_config = ConfigDict(frozen = True)
 
 # --- USER & OTP SCHEMAS ---
 
@@ -80,4 +80,4 @@ class APIKeyResponseSchema(BaseModel):
     prefix: str
     created_at: str # Chuyển từ str sang datetime
 
-    config = ConfigDict(frozen = True)
+    model_config = ConfigDict(frozen = True)

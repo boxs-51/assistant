@@ -248,6 +248,7 @@ def offline_app():
 
     # Use the same handler contracts as ProviderRuntime without requiring the
     # production storage/bootstrap stack.
+    app_transport = httpx.ASGITransport(app=app)
     runtime = SimpleNamespace(
         providers=providers,
         routing_policy=routing,
@@ -256,7 +257,7 @@ def offline_app():
         embedding_handler=EmbeddingExecutionHandler(**handler_kwargs),
         model_handler=ModelOperationHandler(**handler_kwargs),
         file_handler=FileOperationHandler(**handler_kwargs),
-        _http_client=httpx.AsyncClient(),
+        _http_client=httpx.AsyncClient(transport=app_transport, base_url="http://testserver"),
         event_bus=bus,
     )
 
@@ -325,6 +326,14 @@ def offline_app():
                 payload={"error": str(exc), "status_code": 404},
             ))
 
+    async def _handle_request_received(event):
+        await bus.publish(BaseEvent(
+            event_name="provider.chat.execute",
+            session_id=event.session_id,
+            payload=event.payload,
+        ))
+
+    bus.subscribe("transport.event.request_received", _handle_request_received)
     async def _handle_files(event):
         try:
             result = await runtime.file_handler.execute(
@@ -421,7 +430,7 @@ async def test_v1_provider_apis_are_offline(offline_app: FastAPI):
             },
         )
         assert chat.status_code == 200, chat.text
-        assert chat.json()["metadata"]["routing"]["prefer_provider"] == "mock"
+        assert chat.json()["metadata"]["provider"] == "mock"
 
         embeddings = await client.post(
             "/v1/embeddings",
@@ -473,9 +482,11 @@ async def test_v1_streaming_chat_is_offline(offline_app: FastAPI):
             "/v1/chat/completions",
             json={
                 "model": "mock-chat",
-                "provider": "mock",
                 "messages": [{"role": "user", "content": "one two"}],
                 "config": {"stream": True},
+                "metadata": {
+                    "routing": {"prefer_provider" : "mock"},
+                }
             },
         ) as response:
             body = await response.aread()

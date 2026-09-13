@@ -134,6 +134,43 @@ async def test_session_runtime_creates_session_and_persists_latest_message():
 
 
 @pytest.mark.asyncio
+async def test_session_runtime_persists_completed_stream_answer():
+    repository = FakeSessionRepository(
+        SimpleNamespace(id="session-1", user_id="user-1", messages=[])
+    )
+    uow = FakeUow(repository)
+    runtime = SessionRuntime()
+    runtime.uow_factory = lambda: uow
+
+    await runtime._on_stream_chunk(BaseEvent(
+        event_name="provider.stream.chunk_emitted",
+        session_id="session-1",
+        payload={
+            "chunk": {
+                "choices": [{"delta": {"content": "Hello "}}],
+            },
+        },
+    ))
+    await runtime._on_stream_chunk(BaseEvent(
+        event_name="provider.stream.chunk_emitted",
+        session_id="session-1",
+        payload={
+            "chunk": {
+                "choices": [{"delta": {"content": "world"}}],
+            },
+        },
+    ))
+    await runtime._on_stream_completed(BaseEvent(
+        event_name="provider.stream.completed",
+        session_id="session-1",
+        payload={},
+    ))
+
+    assert repository.added_messages[-1].role == "assistant"
+    assert repository.added_messages[-1].content["data"] == "Hello world"
+
+
+@pytest.mark.asyncio
 async def test_session_runtime_rejects_session_owned_by_another_user():
     session = SimpleNamespace(id="session-1", user_id="other-user")
     repository = FakeSessionRepository(session)
