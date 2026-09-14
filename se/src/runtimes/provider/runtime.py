@@ -126,13 +126,15 @@ class ProviderRuntime(BaseRuntime):
             if not is_stream:
                 response = await self.chat_handler.execute_with_fallback(self._http_client, body)
                 latency = time.time() - start_time
+                response_metadata = response.metadata.model_dump() if hasattr(response.metadata, "model_dump") else (response.metadata or {})
+                provider_name = response_metadata.get("provider", "unknown")
                 
                 await self.event_bus.publish(BaseEvent(
                     event_name="provider.chat.responded",
                     session_id=session_id,
                     payload={
                         "response": response.model_dump(),
-                        "provider": response.provider,
+                        "provider": provider_name,
                         "model": response.model,
                         "latency": latency
                     }

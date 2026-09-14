@@ -136,6 +136,13 @@ class ProviderInferenceAdapter(InferencePort):
         )
         finish_reason = choice.finish_reason
         finish_reason = getattr(finish_reason, "value", finish_reason)
+        response_metadata = getattr(response, "metadata", {}) or {}
+        provider = (
+            getattr(response_metadata, "provider", None)
+            or response_metadata.get("provider")
+            if isinstance(response_metadata, dict)
+            else getattr(response_metadata, "provider", None)
+        )
 
         return InferenceResponse(
             request_id=request.request_id,
@@ -151,9 +158,9 @@ class ProviderInferenceAdapter(InferencePort):
             ),
             finish_reason=finish_reason,
             usage=inference_usage,
-            provider=response.provider,
+            provider=provider or "unknown",
             model=response.model,
-            metadata=jsonable(getattr(response, "metadata", {}) or {}),
+            metadata=jsonable(response_metadata),
         )
 
     @staticmethod

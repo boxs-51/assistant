@@ -20,7 +20,7 @@ def main():
     gateway_client = GatewayLLMClient("http://localhost:8000")
 
     # 4. Khởi tạo Engine chính
-    engine = AgentEngine(registry=registry, hitl=hitl, gateway_client=gateway_client,mock_mode=True)
+    engine = AgentEngine(registry=registry, hitl=hitl, gateway_client=gateway_client,mock_mode=False)
 
     api = UIBridge(engine=engine, hitl=hitl)
     html_path = os.path.join(os.path.dirname(__file__), "ui", "web", "index.html")

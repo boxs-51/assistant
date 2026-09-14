@@ -6,12 +6,14 @@ import { initInputFrame, setInputState } from './components/inputFrame.js';
 import { initSidebar } from './components/sidebar.js';
 import { initEditor } from './components/editor.js';
 import { initResizers } from './components/resizer.js';
+import { initGatewayPanel } from './components/gatewayPanel.js';
 
 function setupApp() {
   initSidebar();
   initEditor();
   initResizers();
   initApprovalBar();
+  initGatewayPanel();
 
   initInputFrame((text, files) => {
     if (window.pywebview?.api?.submit_prompt) {

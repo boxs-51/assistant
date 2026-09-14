@@ -62,6 +62,8 @@ from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
 from .runtimes.capability.registry import CapabilityRegistry
+from .runtimes.capability.catalog import CapabilityCatalog
+from .runtimes.capability.registration import ClientCapabilityRegistrationService
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
@@ -178,6 +180,7 @@ async def bootstrap_runtime_kernel(
     eventing_manager.register_subscribers()
     agent_registry = AgentRegistry()
     capability_registry = CapabilityRegistry()
+    capability_catalog = CapabilityCatalog()
     authorization_service = AuthorizationService()
 
     # 1. Tạo ApplicationContainer trước
@@ -208,10 +211,16 @@ async def bootstrap_runtime_kernel(
     container.runtime_kernel = kernel
 
     # 3. Tạo các instance Runtimes và Bind vào Container trước khi Kernel Bootstrap
+    connection_runtime = ConnectionRuntime()
+    connection_runtime.registration_service = ClientCapabilityRegistrationService(
+        capability_catalog,
+        connection_runtime.registry,
+    )
+
     runtimes = [
         ("event_runtime", EventRuntime()),
         ("context_runtime", ContextRuntime()),
-        ("connection_runtime", ConnectionRuntime()),
+        ("connection_runtime", connection_runtime),
         ("session_runtime", SessionRuntime()),
         ("workflow_runtime", WorkflowRuntime()),
         (
@@ -219,6 +228,9 @@ async def bootstrap_runtime_kernel(
             CapabilityRuntime(
                 registry=capability_registry,
                 authorization=authorization_service,
+                catalog=capability_catalog,
+                connection_registry=connection_runtime.registry,
+                realtime=connection_runtime.realtime,
             ),
         ),
         ("provider_runtime", ProviderRuntime(cb_manager)),
