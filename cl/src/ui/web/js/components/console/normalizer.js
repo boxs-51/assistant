@@ -128,55 +128,31 @@ export function normalizeToContentParts(data) {
 
   const parts = [];
 
-  // 1. Duyệt qua mảng content/parts nếu dữ liệu đầu vào là mảng
-  const targetArray = Array.isArray(data)
-    ? data
-    : Array.isArray(data.parts)
-      ? data.parts
-      : Array.isArray(data.content)
-        ? data.content
-        : null;
-
-  if (targetArray) {
-    targetArray.forEach(item => {
-      const part = processContentPart(item, data.metadata);
-      if (part) parts.push(part);
-    });
-  }
-
-  // 2. Xử lý dữ liệu nằm trong data.data
-  const innerData = data.data;
+  // 1. Xử lý dữ liệu nằm trong data.data
+  const innerData = data.data?.response?.choices[0]?.message;
   if (innerData) {
     if (Array.isArray(innerData.content)) {
       innerData.content.forEach(item => {
-        const part = processContentPart(item, innerData.metadata || data.metadata);
+        const part = processContentPart(item, innerData.metadata);
         if (part) parts.push(part);
       });
     } else if (typeof innerData.content === 'string' || typeof innerData.text === 'string' || innerData.thought) {
-      const part = processContentPart(innerData, data.metadata);
+      const part = processContentPart(innerData, innerData.metadata);
       if (part) parts.push(part);
     }
   }
 
-  // 3. Xử lý các chuỗi văn bản đơn lẻ ở cấp root
-  const rootCitations = data.citations || data.metadata?.citations || null;
-  if (!targetArray && typeof data.content === 'string' && data.content.trim()) {
-    parts.push({ type: 'text', text: data.content, ...(rootCitations ? { citations: rootCitations } : {}) });
-  } else if (!targetArray && typeof data.text === 'string' && data.text.trim()) {
-    parts.push({ type: 'text', text: data.text, ...(rootCitations ? { citations: rootCitations } : {}) });
-  }
-
   // 4. Xử lý mảng files đính kèm
-  if (Array.isArray(innerData?.files)) {
-    files.forEach(f => {
-      parts.push({
-        type: 'file',
-        data: {
-          attachment: buildGatewayAttachment(f)
-        }
-      });
-    });
-  }
+  // if (Array.isArray(innerData?.files)) {
+  //   files.forEach(f => {
+  //     parts.push({
+  //       type: 'file',
+  //       data: {
+  //         attachment: buildGatewayAttachment(f)
+  //       }
+  //     });
+  //   });
+  // }
 
   return parts;
 }

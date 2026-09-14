@@ -1,7 +1,7 @@
 // js/components/editor.js
 
 import { getFileIcon } from '../utils/fileIcons.js';
-import { addFilesToQueue } from '../components/inputFrame.js';
+import { addFilesToQueue } from '../components/inputFrame/fileManager.js';
 
 let currentFilePath = null;
 let isCurrentReadOnly = false;

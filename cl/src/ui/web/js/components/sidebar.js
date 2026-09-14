@@ -200,8 +200,8 @@ async function executeAction(action, item) {
     case 'delete':
       if (!item || item.isRoot) return;
       if (confirm(`Bạn có chắc muốn xóa "${item.name}"?`)) {
-        if (window.pywebview?.api?.delete_item) {
-          await window.pywebview.api.delete_item(item.path);
+        if (window.pywebview?.api?.delete_file_content) {
+          await window.pywebview.api.delete_file_content(item.path);
         }
         await ExplorerPage.load();
       }
@@ -222,8 +222,8 @@ function renderRenameInput(item) {
   const handleRename = async () => {
     const newName = inputEl.value.trim();
     if (newName && newName !== currentName) {
-      if (window.pywebview?.api?.rename_item) {
-        await window.pywebview.api.rename_item(item.path, newName);
+      if (window.pywebview?.api?.rename_file_content) {
+        await window.pywebview.api.rename_file_content(item.path, newName);
       }
       await ExplorerPage.load();
     } else {

@@ -695,8 +695,7 @@ class AgentEngine:
                                     render_cb(
                                         role="assistant",
                                         btype="stream_content",
-                                        data=serialize_helper(delta),
-                                        metadata=serialize_helper(metadata),
+                                        data=serialize_helper(chunk),
                                     )
 
                         except ExecutionCancelled:
@@ -762,7 +761,7 @@ class AgentEngine:
                             render_cb(
                                 role="assistant",
                                 btype="content",
-                                data=serialize_helper(assistant_msg_raw),
+                                data=serialize_helper(response),
                             )
 
                     if execution_context.cancelled:

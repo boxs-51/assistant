@@ -70,14 +70,14 @@ export class StreamManager {
     }
 
     // 1. Xử lý Thought Chunk
-    const thoughtChunk = data.data?.reasoning_content || null;
+    const thoughtChunk = data.data?.choices[0]?.delta?.reasoning_content || null;
     if (thoughtChunk && this.currentStreamBlock) {
       this.currentStreamThoughtText += thoughtChunk;
       appendThoughtToBlock(this.currentStreamBlock, this.currentStreamThoughtText);
     }
 
     // 2. Xử lý Main Content Chunk
-    const textChunk = data.data?.content || null;
+    const textChunk = data.data?.choices[0]?.delta?.content || null;
     if (textChunk) {
       finishThoughtBlock(this.currentStreamBlock);
       this.currentStreamText += textChunk;
@@ -88,7 +88,7 @@ export class StreamManager {
     }
 
     // 3. Xử lý Citations ở Chunk cuối cùng
-    const citations = data.metadata?.citations || null;
+    const citations = data.data?.choices[0]?.metadata?.citations || null;
     if (citations && this.currentStreamBlock) {
       this.currentStreamCitations = citations;
       const updatedText = updateBlockWithCitations(this.currentStreamBlock, citations);

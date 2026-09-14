@@ -2,7 +2,7 @@
 
 import { renderBlock, showPendingIndicator, removePendingIndicator } from './components/console.js';
 import { initApprovalBar, showApprovalBar, hideApprovalBar } from './components/approvalBar.js';
-import { initInputFrame, setInputState, addFilesToQueue } from './components/inputFrame.js';
+import { initInputFrame, setInputState } from './components/inputFrame.js';
 import { initSidebar } from './components/sidebar.js';
 import { initEditor } from './components/editor.js';
 import { initResizers } from './components/resizer.js';
@@ -28,7 +28,6 @@ function setupApp() {
   window.showApprovalBar = showApprovalBar;
   window.hideApprovalBar = hideApprovalBar;
   window.setInputState = setInputState;
-  window.addFilesToQueue = addFilesToQueue;
 }
 
 if (window.pywebview) {
