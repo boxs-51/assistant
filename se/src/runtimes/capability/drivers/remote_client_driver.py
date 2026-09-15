@@ -37,6 +37,11 @@ class RemoteClientDriver(BaseCapabilityDriver):
     ) -> Any:
         if context.cancelled:
             raise asyncio.CancelledError()
+        if context.connection_id != self._connection_id:
+            raise ValueError(
+                "Capability execution connection_id does not match the selected "
+                "remote implementation connection."
+            )
 
         timeout = context.remaining_seconds
         if timeout is not None and timeout <= 0:
@@ -46,7 +51,7 @@ class RemoteClientDriver(BaseCapabilityDriver):
             type="capability.invoke",
             message_id=f"msg-{uuid.uuid4().hex}",
             session_id=context.session_id,
-            connection_id=self._connection_id,
+            connection_id=context.connection_id,
             execution_id=context.execution_id,
             invocation_id=context.invocation_id,
             trace_id=context.metadata.get("trace_id"),

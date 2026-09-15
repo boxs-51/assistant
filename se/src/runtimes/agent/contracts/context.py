@@ -25,6 +25,7 @@ class AgentExecutionContext:
     task_id: str | None = None
     parent_execution_id: str | None = None
     workflow_id: str | None = None
+    connection_id: str | None = None
     agent: AgentDefinition | None = None
     input: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
@@ -65,6 +66,7 @@ class AgentExecutionContext:
         task_id: str | None = None,
         parent_execution_id: str | None = None,
         workflow_id: str | None = None,
+        connection_id: str | None = None,
         agent: AgentDefinition | None = None,
         input: Optional[Dict[str, Any]] = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -84,6 +86,7 @@ class AgentExecutionContext:
             task_id=task_id,
             parent_execution_id=parent_execution_id,
             workflow_id=workflow_id,
+            connection_id=connection_id,
             agent=agent,
             input=dict(input or {}),
             metadata=dict(metadata or {}),

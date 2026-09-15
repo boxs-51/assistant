@@ -18,6 +18,7 @@ class CapabilityExecutionContext:
     invocation_id: str
     request_id: str | None = None
     session_id: str | None = None
+    connection_id: str | None = None
     workflow_id: str | None = None
     deadline: float | None = None
     attempt: int = 1
@@ -33,6 +34,7 @@ class CapabilityExecutionContext:
         invocation_id: str | None = None,
         request_id: str | None = None,
         session_id: str | None = None,
+        connection_id: str | None = None,
         workflow_id: str | None = None,
         timeout_seconds: float | None = None,
         attempt: int = 1,
@@ -47,6 +49,7 @@ class CapabilityExecutionContext:
             invocation_id=invocation_id or f"capinv_{uuid.uuid4().hex}",
             request_id=request_id or getattr(identity, "request_id", None),
             session_id=session_id or getattr(identity, "session_id", None),
+            connection_id=connection_id,
             workflow_id=workflow_id,
             deadline=deadline,
             attempt=attempt,

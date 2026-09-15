@@ -240,6 +240,7 @@ class CapabilityRuntime(BaseRuntime):
         execution_id: str | None = None,
         request_id: str | None = None,
         session_id: str | None = None,
+        connection_id: str | None = None,
         workflow_id: str | None = None,
         timeout_seconds: float | None = None,
         cancellation_event: asyncio.Event | None = None,
@@ -247,10 +248,20 @@ class CapabilityRuntime(BaseRuntime):
     ) -> CapabilityResult:
         started = time.perf_counter()
         request_metadata = dict(metadata or {})
+        metadata_connection_id = request_metadata.get("connection_id")
+        if (
+            connection_id is not None
+            and metadata_connection_id is not None
+            and connection_id != metadata_connection_id
+        ):
+            raise ValueError(
+                "Explicit connection_id does not match metadata['connection_id']."
+            )
         driver = self._resolve_execution_driver(
             capability_id,
             identity,
             request_metadata,
+            connection_id=connection_id,
         )
         if not driver:
             raise ValueError(f"Capability '{capability_id}' not found or unavailable.")
@@ -262,6 +273,17 @@ class CapabilityRuntime(BaseRuntime):
             execution_id=execution_id,
             request_id=request_id,
             session_id=session_id,
+            connection_id=(
+                connection_id
+                or metadata_connection_id
+                or (
+                    self.connection_registry.resolve_connection_id(
+                        getattr(identity, "session_id", "") or ""
+                    )
+                    if self.connection_registry is not None
+                    else None
+                )
+            ),
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
             cancellation_event=cancellation_event,
@@ -362,6 +384,8 @@ class CapabilityRuntime(BaseRuntime):
         capability_id: str,
         identity: Identity,
         metadata: Dict[str, Any],
+        *,
+        connection_id: str | None = None,
     ) -> BaseCapabilityDriver | None:
         legacy_driver = self.registry.get_driver(capability_id)
         if self.catalog is None or not self.catalog.contains_definition(capability_id):
@@ -371,9 +395,9 @@ class CapabilityRuntime(BaseRuntime):
                 "Capability catalog is configured without routing policy."
             )
 
-        connection_id = metadata.get("connection_id")
-        if connection_id is None and self.connection_registry is not None:
-            connection_id = self.connection_registry.resolve_connection_id(
+        effective_connection_id = connection_id or metadata.get("connection_id")
+        if effective_connection_id is None and self.connection_registry is not None:
+            effective_connection_id = self.connection_registry.resolve_connection_id(
                 identity.session_id or ""
             )
 
@@ -382,7 +406,7 @@ class CapabilityRuntime(BaseRuntime):
             capability_id,
             context=CapabilityRequestContext(
                 owner_id=identity.user_id,
-                connection_id=connection_id,
+                connection_id=effective_connection_id,
                 scopes=frozenset(identity.scopes),
             ),
             preferred_implementation_id=metadata.get(
@@ -424,6 +448,7 @@ class CapabilityRuntime(BaseRuntime):
             execution_id=context.get("execution_id"),
             request_id=context.get("request_id"),
             session_id=context.get("session_id"),
+            connection_id=context.get("connection_id"),
             workflow_id=context.get("workflow_id"),
             metadata={
                 key: value

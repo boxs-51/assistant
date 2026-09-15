@@ -67,6 +67,7 @@ from .tool.registry import ToolRegistry
 from .runtimes.capability.registry import CapabilityRegistry
 from .runtimes.capability.catalog import CapabilityCatalog
 from .runtimes.capability.registration import ClientCapabilityRegistrationService
+from .runtimes.capability.policy import CapabilityRoutingPolicy
 from .runtimes.capability.local_tool_loader import register_local_tools
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
@@ -220,6 +221,9 @@ async def bootstrap_runtime_kernel(
         capability_catalog,
         connection_runtime.registry,
     )
+    capability_routing_policy = CapabilityRoutingPolicy(
+        connection_availability=connection_runtime.registry,
+    )
 
     runtimes = [
         ("event_runtime", EventRuntime()),
@@ -233,6 +237,7 @@ async def bootstrap_runtime_kernel(
                 registry=capability_registry,
                 authorization=authorization_service,
                 catalog=capability_catalog,
+                routing_policy=capability_routing_policy,
                 connection_registry=connection_runtime.registry,
                 realtime=connection_runtime.realtime,
             ),

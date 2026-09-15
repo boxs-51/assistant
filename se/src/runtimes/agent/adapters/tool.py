@@ -54,6 +54,10 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             raise ValueError(
                 "Tool request execution_id does not match execution context."
             )
+        if request.connection_id != context.connection_id:
+            raise ValueError(
+                "Tool request connection_id does not match execution context."
+            )
 
         if (
             self._execution_policy.check_tool_call(context, request)
@@ -124,6 +128,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 execution_id=context.execution_id,
                 request_id=context.request_id,
                 session_id=context.session_id,
+                connection_id=context.connection_id,
                 workflow_id=context.workflow_id,
                 timeout_seconds=timeout,
                 cancellation_event=context.cancellation_event,

@@ -69,7 +69,7 @@ async def test_full_provider_handler_path_is_fully_offline(offline_config):
             client,
             {"model": "mock-chat", "messages": [{"role": "user", "content": "phase0"}]},
         )
-        assert chat.provider == "mock"
+        assert chat.metadata.provider == "mock"
 
         embeddings = await EmbeddingExecutionHandler(**kwargs).execute(
             client,

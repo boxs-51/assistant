@@ -200,6 +200,14 @@ class AgentRuntime:
         ]
         if not requests:
             return ()
+        normalized_requests: list[ToolExecutionRequest] = []
+        for request in requests:
+            if request.connection_id is None and context.connection_id is not None:
+                request = request.model_copy(
+                    update={"connection_id": context.connection_id}
+                )
+            normalized_requests.append(request)
+        requests = normalized_requests
         committed: list[ToolExecutionResult] = []
         pending: list[ToolExecutionRequest] = []
         for request in requests:
@@ -485,6 +493,7 @@ class AgentRuntime:
                         invocation_id=f"inv_{uuid.uuid4().hex}",
                         tool_call_id=tool_call.id,
                         capability_id=tool_call.name,
+                        connection_id=context.connection_id,
                         arguments=dict(tool_call.arguments),
                     )
                     for tool_call in response.message.tool_calls

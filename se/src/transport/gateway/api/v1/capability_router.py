@@ -10,7 +10,12 @@ from .....domain.schemas.capability import CapabilityRegistrationResponse, Skill
 from .....domain.schemas.identity import Identity
 from .....domain.schemas.tool import GatewayToolDefinition
 from .....runtimes.capability.contracts.definition import CapabilityDefinition
-from .....runtimes.capability.contracts.implementation import CapabilityImplementation
+from .....runtimes.capability.contracts.implementation import (
+    CapabilityExecutionLocation,
+    CapabilityImplementation,
+    CapabilityImplementationState,
+    CapabilityOwnerType,
+)
 from .....runtimes.capability.contracts.registration import CapabilityKind, CapabilityRegistration
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
@@ -30,6 +35,51 @@ def _response(kind: CapabilityKind, definition: CapabilityDefinition, implementa
         capability_id=definition.capability_id, kind=kind.value,
         definition=definition.model_dump(mode="json", by_alias=True),
         implementations=[item.model_dump(mode="json") for item in implementations],
+    )
+
+
+def _ensure_server_tool_implementation(container: ApplicationContainer, definition: CapabilityDefinition):
+    """Attach a catalog implementation only when a real executable server driver exists.
+
+    The legacy ToolRegistry is metadata-only.  A capability is not considered
+    executable merely because its definition is present.
+    """
+    runtime = container.capability_runtime
+    driver = runtime.registry.get_driver(definition.capability_id)
+    if driver is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=(
+                f"Tool '{definition.capability_id}' has no executable server driver. "
+                "Register/load the server tool first, or use the client WebSocket "
+                "capability.register flow."
+            ),
+        )
+
+    catalog = _catalog(container)
+    implementation_id = f"server:{definition.capability_id}"
+    if catalog.contains_implementation(implementation_id):
+        implementation = catalog.get_implementation(implementation_id)
+        if implementation.state == CapabilityImplementationState.REMOVED:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Server implementation '{implementation_id}' was removed.",
+            )
+        return implementation
+
+    implementation = CapabilityImplementation.from_definition(
+        definition,
+        implementation_id=implementation_id,
+        location=CapabilityExecutionLocation.SERVER,
+        driver_kind="SERVER_REGISTRY",
+        owner_type=CapabilityOwnerType.SYSTEM,
+        owner_id=identity.user_id if False else None,
+        metadata={"kind": "TOOL", "driver": type(driver).__name__},
+    )
+    catalog.register_implementation(implementation)
+    return catalog.transition_implementation(
+        implementation_id,
+        CapabilityImplementationState.ENABLED,
     )
 
 
@@ -66,9 +116,21 @@ async def register_tool_capability(body: GatewayToolDefinition, identity: Identi
         required_scopes=body.required_scopes, metadata={"kind": "TOOL"},
     )
     try:
+        # Never mutate the catalog before we know an executable server driver exists.
+        if container.capability_runtime.registry.get_driver(definition.capability_id) is None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    f"Tool '{definition.capability_id}' has no executable server driver. "
+                    "Use the client WebSocket registration path for remote tools."
+                ),
+            )
         definition = _catalog(container).register_definition(definition)
         container.tool_registry.register(body)
-        return _response(CapabilityKind.TOOL, definition)
+        implementation = _ensure_server_tool_implementation(container, definition)
+        return _response(CapabilityKind.TOOL, definition, [implementation])
+    except HTTPException:
+        raise
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 

@@ -33,7 +33,7 @@ async def test_fail_next_means_exactly_next_n_calls():
         await p.chat.chat(body={"model": "mock-chat", "messages": [{"role": "user", "content": "x"}]})
 
     response = await p.chat.chat(body={"model": "mock-chat", "messages": [{"role": "user", "content": "x"}]})
-    assert response.provider == "mock"
+    assert response.metadata.provider == "mock"
 
 
 @pytest.mark.asyncio

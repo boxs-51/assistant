@@ -15,6 +15,7 @@ class ToolExecutionRequest(BaseModel):
     invocation_id: str
     tool_call_id: str
     capability_id: str
+    connection_id: str | None = None
     arguments: Dict[str, Any] = Field(default_factory=dict)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
