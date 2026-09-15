@@ -7,6 +7,14 @@ class RequestChats():
         Chuyển đổi request body từ chuẩn Gateway sang chuẩn OpenAI.
         """
         adapted_request = request.copy()
+        config = adapted_request.pop("config", {}) or {}
+        adapted_request.pop("metadata", None)
+        adapted_request.pop("session_id", None)
+        for field in ("temperature", "top_p", "max_tokens", "presence_penalty", "frequency_penalty", "response_format"):
+            if config.get(field) is not None:
+                adapted_request[field] = config[field]
+        if "stream" in config:
+            adapted_request["stream"] = bool(config["stream"])
 
         # OpenAI sử dụng 'model' trực tiếp, không cần dịch tên model ở đây
         # Logic dịch tên model đã được xử lý ở BaseProvider.prepare_request

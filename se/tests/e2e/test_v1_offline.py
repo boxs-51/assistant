@@ -23,6 +23,7 @@ from src.transport.gateway.api.v1 import (
     admin,
     agent_router,
     auth_router,
+    capability_router,
     chat_router,
     embeddings_router,
     events_router,
@@ -32,6 +33,9 @@ from src.transport.gateway.api.v1 import (
     multi_agent_router,
     tool_router,
 )
+from src.runtimes.capability.catalog import CapabilityCatalog
+from src.runtimes.capability.registry import CapabilityRegistry
+from src.runtimes.capability.runtime import CapabilityRuntime
 from src.transport.gateway.authentication.dependency import get_current_identity, verify_admin_ip, get_api_key_service
 from src.transport.gateway.dependencies import get_container, get_auth
 
@@ -386,6 +390,9 @@ def offline_app():
         multi_agent_coordinator=FakeCoordinator(),
         oauth=FakeOAuth(),
     )
+    container.capability_runtime = CapabilityRuntime(
+        registry=CapabilityRegistry(), catalog=CapabilityCatalog()
+    )
     container.require = lambda key: getattr(container, key)
     app.state.container = container
     
@@ -398,6 +405,7 @@ def offline_app():
         admin.router,
         agent_router.router,
         tool_router.router,
+        capability_router.router,
         events_router.router,
         multi_agent_router.router,
         health_router.router,
@@ -540,6 +548,23 @@ async def test_v1_agent_tool_admin_health_multi_agent(offline_app: FastAPI):
         assert (await client.get("/ready")).status_code == 200
         assert (await client.get("/metrics")).status_code == 200
         assert (await client.get("/stats")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_v1_capability_control_plane_registers_tool_skill_and_agent(offline_app: FastAPI):
+    transport = httpx.ASGITransport(app=offline_app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+        tool = {"name": "cap.echo", "description": "Echo", "parameters": {"type": "object"}}
+        registered_tool = await client.post("/v1/capabilities/tools", json=tool)
+        assert registered_tool.status_code == 201, registered_tool.text
+        assert registered_tool.json()["kind"] == "TOOL"
+        skill = await client.post("/v1/capabilities/skills", json={"name": "cap.review", "description": "Review", "instruction": "Review carefully"})
+        assert skill.status_code == 201, skill.text
+        agent = await client.post("/v1/capabilities/agents", json={"name": "cap-agent", "goal": "Echo", "instruction": "Use cap.echo", "tools": ["cap.echo"]})
+        assert agent.status_code == 201, agent.text
+        fetched = await client.get("/v1/capabilities/cap.echo")
+        assert fetched.status_code == 200
+        assert fetched.json()["capability_id"] == "cap.echo"
 
 
 def test_v1_events_websocket_offline(offline_app: FastAPI):

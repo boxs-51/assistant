@@ -17,6 +17,10 @@ class GatewayChoice(GatewayBaseModel):
 
 class ResponseMetaData(GatewayBaseModel) :
     created: int = Field(default_factory=lambda: int(time.time()))
+    provider_response_id: Optional[str] = None
+    raw_response: Optional[Dict[str, Any]] = None
+    citations: Optional[List[Dict[str, Any]]] = None
+    content_parts: Optional[List[Dict[str, Any]]] = None
     provider: str = Field(..., description="Provider thực tế đã xử lý request")
 
 class GatewayResponse(GatewayBaseModel):

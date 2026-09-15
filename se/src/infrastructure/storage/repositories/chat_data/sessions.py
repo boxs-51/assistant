@@ -51,6 +51,22 @@ class SessionRepository(BaseRepository):
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
+    async def update_message_content(
+        self, session_id: str, message_id: str, content: Any
+    ) -> Optional[Message]:
+        """Edit one message while preventing cross-session mutation."""
+        stmt = select(Message).where(
+            Message.id == message_id,
+            Message.session_id == session_id,
+        )
+        result = await self.session.execute(stmt)
+        message = result.scalar_one_or_none()
+        if message is None:
+            return None
+        message.content = content if isinstance(content, dict) else {"type": "text", "data": content}
+        await self.session.flush()
+        return message
+
     async def get_by_id(self, session_id: str, options: Optional[List] = None) -> Optional[Session]:
         """Lấy một session bằng ID, có thể kèm theo các relations."""
         stmt = select(Session).where(Session.id == session_id)
@@ -58,6 +74,11 @@ class SessionRepository(BaseRepository):
             stmt = stmt.options(*options)
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
+
+    async def list_by_user_id(self, user_id: str, limit: int = 100) -> List[Session]:
+        stmt = select(Session).where(Session.user_id == user_id).order_by(Session.updated_at.desc()).limit(limit)
+        result = await self.session.execute(stmt)
+        return result.scalars().all()
 
     async def update_session_metadata(self, session_id: str, metadata_update: Dict[str, Any]):
         """Cập nhật (merge) trường metadata của một session."""

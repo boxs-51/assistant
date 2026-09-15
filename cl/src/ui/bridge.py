@@ -99,6 +99,13 @@ class UIBridge:
             "model_details": lambda: client.model_details(payload["provider_name"], payload["model_id"]),
             "register_agent": lambda: client.register_agent(payload),
             "register_tool": lambda: client.register_tool(payload),
+            "register_capability_tool": lambda: client.register_capability_tool(payload),
+            "register_skill": lambda: client.register_skill(payload),
+            "register_capability_agent": lambda: client.register_capability_agent(payload),
+            "get_sessions": lambda: client.get_sessions(),
+            "get_session": lambda: client.get_session(payload["session_id"]),
+            "edit_session_message": lambda: client.edit_session_message(payload["session_id"], payload["message_id"], payload["content"]),
+            "regenerate_session_response": lambda: client.regenerate_session_response(payload["session_id"], payload),
             "create_agent_session": lambda: client.create_agent_session(payload["agent_ids"]),
             "add_agent_to_session": lambda: client.add_agent_to_session(payload["session_id"], payload["agent_id"]),
             "list_agent_messages": lambda: client.list_agent_messages(payload["session_id"]),
@@ -122,6 +129,7 @@ class UIBridge:
             return {"success": False, "endpoint": endpoint, "error": str(error)}
 
     # --- Uỷ quyền API cho frontend JS gọi ---
+    def get_sessions(self): return self._engine.gateway_client.get_sessions()
     def encode_files_async(self, files: list): return self.encoder.encode_async(files)
     def respond_approval(self, choice: bool, aid: str = None): return self.hitl.respond(choice, aid)
     def get_workspace_files(self): return self.workspace.get_files()
@@ -141,4 +149,3 @@ class UIBridge:
         except Exception as e:
             logger.error("Lỗi mở File Picker: %s", e)
             return []
-    

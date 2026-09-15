@@ -1,4 +1,5 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Dict, Any, Tuple
 from fastapi import FastAPI
 import httpx
@@ -48,6 +49,7 @@ from .transport.gateway.api.v1 import (
     admin as admin_router,
     agent_router,
     auth_router,
+    capability_router,
     chat_router,
     embeddings_router,
     events_router,
@@ -55,6 +57,7 @@ from .transport.gateway.api.v1 import (
     health_router,
     models_router,
     multi_agent_router,
+    session_router,
     tool_router,
 )
 from .application.container import ApplicationContainer
@@ -64,6 +67,7 @@ from .tool.registry import ToolRegistry
 from .runtimes.capability.registry import CapabilityRegistry
 from .runtimes.capability.catalog import CapabilityCatalog
 from .runtimes.capability.registration import ClientCapabilityRegistrationService
+from .runtimes.capability.local_tool_loader import register_local_tools
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
@@ -242,6 +246,11 @@ async def bootstrap_runtime_kernel(
 
     if container.capability_runtime and hasattr(container.capability_runtime, "registry"):
         container.tool_registry = ToolRegistry(container.capability_runtime.registry)
+        tools_dir = Path(__file__).resolve().parents[2] / "tools" / "v1"
+        loaded_tools = register_local_tools(
+            container.capability_runtime, container.tool_registry, tools_dir
+        )
+        logger.info("Local tools discovered", tools=loaded_tools)
 
     # 4. Bootstrap Kernel (RuntimeContext tự động được khởi tạo bên trong)
     await kernel.bootstrap()
@@ -369,6 +378,8 @@ def create_app() -> FastAPI:
     app_instance.include_router(admin_router.router)
     app_instance.include_router(agent_router.router)
     app_instance.include_router(tool_router.router)
+    app_instance.include_router(capability_router.router)
+    app_instance.include_router(session_router.router)
     app_instance.include_router(events_router.router)
     app_instance.include_router(multi_agent_router.router)
     app_instance.include_router(health_router.router)

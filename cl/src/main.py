@@ -18,6 +18,13 @@ def main():
 
     # 3 .
     gateway_client = GatewayLLMClient("http://localhost:8000")
+    try:
+        sync_result = gateway_client.sync_registry(registry)
+        print(f"Gateway registry synchronized: {len(sync_result['tools'])} tools, {len(sync_result['skills'])} skills")
+    except Exception as exc:
+        # Desktop mode remains usable while the gateway is offline; the UI can
+        # retry registration through its gateway operations.
+        print(f"Gateway registry synchronization skipped: {exc}")
 
     # 4. Khởi tạo Engine chính
     engine = AgentEngine(registry=registry, hitl=hitl, gateway_client=gateway_client,mock_mode=False)

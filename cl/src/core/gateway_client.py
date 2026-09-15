@@ -1,5 +1,7 @@
 import requests
 import json
+import uuid
+import websocket
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 from ..schemas.request import GatewayChatRequest
@@ -163,6 +165,41 @@ class GatewayLLMClient:
     def register_tool(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/v1/tools/", json=payload).json()
 
+    def register_capability_tool(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/v1/capabilities/tools", json=payload).json()
+
+    def register_skill(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/v1/capabilities/skills", json=payload).json()
+
+    def register_capability_agent(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/v1/capabilities/agents", json=payload).json()
+
+    def get_sessions(self) -> Any:
+        return self._request("GET", "/v1/sessions").json()
+
+    def get_session(self, session_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/v1/sessions/{session_id}").json()
+
+    def edit_session_message(self, session_id: str, message_id: str, content: Any) -> Dict[str, Any]:
+        return self._request("PATCH", f"/v1/sessions/{session_id}/messages/{message_id}", json={"content": content}).json()
+
+    def regenerate_session_response(self, session_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", f"/v1/sessions/{session_id}/regenerate", json=payload).json()
+
+    def sync_registry(self, registry, agent: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        result = {"tools": [], "skills": [], "agent": None}
+        for name, item in registry.tools.items():
+            metadata = item.get("metadata", {})
+            result["tools"].append(self.register_capability_tool({"name": name, "description": metadata.get("description", name), "parameters": metadata.get("parameters", {"type": "object"})}))
+        for name, skill in registry.skills.items():
+            result["skills"].append(self.register_skill({"name": name, "description": skill.get("name", name), "instruction": skill.get("content", ""), "metadata": {"base_risk": skill.get("base_risk", "MEDIUM")}}))
+        if agent:
+            result["agent"] = self.register_capability_agent(agent)
+        return result
+
+    def open_realtime_connection(self, connection_id: Optional[str] = None, session_id: Optional[str] = None):
+        return GatewayRealtimeClient(self.base_url, self.headers, connection_id, session_id)
+
     def create_agent_session(self, agent_ids: Iterable[str]) -> Dict[str, Any]:
         return self._request("POST", "/v1/multi-agent/sessions", json={"agent_ids": list(agent_ids)}).json()
 
@@ -202,3 +239,36 @@ class GatewayLLMClient:
 
     def circuit_breakers_status(self) -> Any:
         return self._request("GET", "/v1/admin/circuit-breakers/status").json()
+
+
+class GatewayRealtimeClient:
+    """Synchronous client for the gateway capability WebSocket protocol."""
+    def __init__(self, base_url: str, headers: Dict[str, str], connection_id: Optional[str] = None, session_id: Optional[str] = None):
+        self.connection_id = connection_id or f"cl-{uuid.uuid4().hex}"
+        self.session_id = session_id or f"session-{uuid.uuid4().hex}"
+        self._headers = headers
+        self._ws_url = base_url.replace("https://", "wss://").replace("http://", "ws://") + "/v1/events/ws"
+        self.ws = None
+
+    def connect(self) -> Dict[str, Any]:
+        self.ws = websocket.create_connection(self._ws_url, header=[f"Authorization: {self._headers['Authorization']}"])
+        self.send("connection.register", {"client_id": "desktop-client"})
+        return self.receive()
+
+    def send(self, event_type: str, payload: Dict[str, Any], invocation_id: Optional[str] = None) -> None:
+        if self.ws is None:
+            raise RuntimeError("Realtime connection is not open.")
+        self.ws.send(json.dumps({"type": event_type, "message_id": uuid.uuid4().hex, "session_id": self.session_id, "connection_id": self.connection_id, "invocation_id": invocation_id, "payload": payload}))
+
+    def receive(self) -> Dict[str, Any]:
+        if self.ws is None:
+            raise RuntimeError("Realtime connection is not open.")
+        return json.loads(self.ws.recv())
+
+    def send_result(self, invocation_id: str, result: Any) -> None:
+        self.send("capability.result", {"result": result}, invocation_id)
+
+    def close(self) -> None:
+        if self.ws is not None:
+            self.ws.close()
+            self.ws = None
