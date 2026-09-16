@@ -1,31 +1,31 @@
 import asyncio
-
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.contracts.context import AgentExecutionContext
-from src.runtimes.agent.contracts.inference import (
+import pytest
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.contracts.context import AgentExecutionContext
+from se.src.runtimes.agent.contracts.inference import (
     InferenceMessage,
     InferenceResponse,
     InferenceUsage,
 )
-from src.runtimes.agent.contracts.policy import PolicyDecision
-from src.runtimes.agent.runtime import AgentRuntime
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.runtimes.agent.contracts.policy import PolicyDecision
+from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.policy import CapabilityRoutingPolicy
-from src.runtimes.capability.registry import CapabilityRegistry
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
-from src.runtimes.connection.registry import ConnectionRegistry
-from src.runtimes.connection.realtime import RealtimeMultiplexer
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.realtime import RealtimeMultiplexer
 
 
 class FakeSocket:
@@ -201,23 +201,33 @@ def test_agent_tool_loop_executes_on_client_and_returns_to_inference():
         assert invoke["connection_id"] == "conn-1"
         assert invoke["execution_id"] == "exec-1"
 
+        from se.src.runtimes.connection.protocol import RealtimeEnvelope
+
+        invoke = socket.messages[0]
+        assert invoke["type"] == "capability.invoke"
+        assert invoke["connection_id"] == "conn-1"
+        assert invoke["execution_id"] == "exec-1"
+
+        # 2. Lấy invocation_id linh hoạt (tùy thuộc vào cấu trúc payload hoặc root)
+        invocation_id = invoke.get("invocation_id") or invoke.get("payload", {}).get("invocation_id")
+
         await realtime.handle_inbound(
             "conn-1",
-            __import__(
-                "src.runtimes.connection.protocol",
-                fromlist=["RealtimeEnvelope"],
-            ).RealtimeEnvelope(
+            RealtimeEnvelope(
                 type="capability.result",
                 message_id="result-1",
                 session_id="sess-1",
                 connection_id="conn-1",
                 execution_id="exec-1",
-                invocation_id=invoke["invocation_id"],
+                invocation_id=invocation_id,
                 payload={"value": "hello"},
             ),
         )
 
-        result = await execution
+        try:
+            result = await asyncio.wait_for(execution, timeout=2.0)
+        except asyncio.TimeoutError:
+            pytest.fail("Test bị timeout do socket không nhận được message hoặc Future bị treo.")
         assert result.output == "done"
         assert result.state.value == "COMPLETED"
         assert context.iteration == 2

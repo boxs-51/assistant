@@ -75,12 +75,16 @@ class ChatExecutionHandler(BaseExecutionHandler):
             raise NoAvailableProviderError("All streaming providers are currently unavailable.")
 
         for provider in healthy_execution_chain:
+            stream_started = False
             try:
                 async for chunk in self.executor.execute_stream(provider=provider, http_client=http_client, body=body):
+                    stream_started = True
                     yield chunk
                 return
             except (ProviderError, httpx.RequestError, httpx.HTTPStatusError) as e:
                 logger.warning("Provider stream failed", provider=provider.name, error=str(e))
+                if stream_started:
+                    raise ProviderError(f"Stream interrupted mid-response on provider {provider.name}") from e
                 continue
 
         raise NoAvailableProviderError("All providers failed for streaming.")

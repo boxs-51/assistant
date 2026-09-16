@@ -1,4 +1,4 @@
-# src/transport/http/routes/chat.py
+# src/transport/gateway/api/v1/chat_router.py
 import time
 import json
 import uuid
@@ -184,7 +184,8 @@ async def chat_completions_proxy(
                 )
             )
 
-            response_payload = await future
+            timeout_val = config.provider.timeout or 60
+            response_payload = await asyncio.wait_for(future, timeout=timeout_val)
 
             duration = round(time.perf_counter() - start_time, 4)
 
