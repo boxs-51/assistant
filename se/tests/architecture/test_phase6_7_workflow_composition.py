@@ -2,15 +2,15 @@ from __future__ import annotations
 
 import asyncio
 
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.identity import Identity
-from src.domain.schemas.workflow import WorkflowDefinition, WorkflowStep
-from src.runtimes.capability.composition import DeclarativeWorkflowDriver
-from src.runtimes.capability.contracts.context import CapabilityExecutionContext
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
-from src.runtimes.capability.registry import CapabilityRegistry
-from src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.identity import Identity
+from se.src.domain.schemas.workflow import WorkflowDefinition, WorkflowStep
+from se.src.runtimes.capability.composition import DeclarativeWorkflowDriver
+from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 
 
 def test_declarative_workflow_composes_capability_steps() -> None:

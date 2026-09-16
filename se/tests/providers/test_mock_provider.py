@@ -1,8 +1,8 @@
 import pytest
 from io import BytesIO
-from src.domain.schemas import ModelCapability
-from src.provider.mock import MockProvider
-from src.infrastructure.config.schemas import ProviderConfig
+from se.src.domain.schemas import ModelCapability
+from se.src.provider.mock import MockProvider
+from se.src.infrastructure.config.schemas import ProviderConfig
 
 @pytest.mark.asyncio
 async def test_chat_is_deterministic():

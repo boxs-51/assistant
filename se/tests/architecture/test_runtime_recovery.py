@@ -1,7 +1,7 @@
 import pytest
 
-from src.kernel.base import LifecycleState
-from src.kernel.kernel import RuntimeKernel
+from se.src.kernel.base import LifecycleState
+from se.src.kernel.kernel import RuntimeKernel
 
 
 class FakeRuntime:

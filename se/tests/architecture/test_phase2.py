@@ -3,12 +3,12 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.context.manager import ContextEngine
-from src.domain.schemas.event import BaseEvent
-from src.domain.schemas.identity import Identity
-from src.infrastructure.event_bus.registry import EventRegistry
-from src.runtimes.session.runtime import SessionRuntime
-from src.runtimes.context.runtime import ContextRuntime
+from se.src.context.manager import ContextEngine
+from se.src.domain.schemas.event import BaseEvent
+from se.src.domain.schemas.identity import Identity
+from se.src.infrastructure.event_bus.registry import EventRegistry
+from se.src.runtimes.session.runtime import SessionRuntime
+from se.src.runtimes.context.runtime import ContextRuntime
 
 
 class FakeUow:

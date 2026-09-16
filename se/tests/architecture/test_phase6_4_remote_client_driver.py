@@ -4,12 +4,12 @@ import asyncio
 
 import pytest
 
-from src.runtimes.capability.contracts.context import CapabilityExecutionContext
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.drivers.remote_client_driver import RemoteClientDriver
-from src.runtimes.connection.protocol import RealtimeEnvelope
-from src.runtimes.connection.registry import ConnectionRegistry
-from src.runtimes.connection.realtime import RealtimeMultiplexer
+from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.drivers.remote_client_driver import RemoteClientDriver
+from se.src.runtimes.connection.protocol import RealtimeEnvelope
+from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.realtime import RealtimeMultiplexer
 
 
 class FakeSocket:

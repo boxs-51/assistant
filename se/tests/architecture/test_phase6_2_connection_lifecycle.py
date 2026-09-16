@@ -2,12 +2,12 @@ from __future__ import annotations
 
 import pytest
 
-from src.runtimes.connection.contracts import (
+from se.src.runtimes.connection.contracts import (
     ConnectionNotFoundError,
     ConnectionState,
     ConnectionStateTransitionError,
 )
-from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+from se.src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
 
 
 class FakeClock:

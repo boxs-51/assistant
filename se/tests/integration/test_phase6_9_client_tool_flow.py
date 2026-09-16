@@ -1,19 +1,19 @@
 import asyncio
 
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.identity import Identity
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.policy import CapabilityRoutingPolicy
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.runtimes.connection.registry import ConnectionRegistry
-from src.runtimes.connection.realtime import RealtimeMultiplexer
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.realtime import RealtimeMultiplexer
 
 
 class FakeSocket:
@@ -92,13 +92,10 @@ def test_client_capability_invocation_uses_bound_connection_and_correlates_resul
         assert invoke["type"] == "capability.invoke"
         assert invoke["connection_id"] == "conn-1"
         assert invoke["payload"]["capability_id"] == "desktop.echo"
-
+        from se.src.runtimes.connection.protocol import RealtimeEnvelope
         accepted = await realtime.handle_inbound(
             "conn-1",
-            __import__(
-                "src.runtimes.connection.protocol",
-                fromlist=["RealtimeEnvelope"],
-            ).RealtimeEnvelope(
+            RealtimeEnvelope(
                 type="capability.result",
                 message_id="result-1",
                 session_id="sess-1",

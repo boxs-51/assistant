@@ -5,17 +5,18 @@ from types import SimpleNamespace
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.identity import Identity
-from src.infrastructure.event_bus.ws_manager import WebSocketConnectionManager
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.registration import ClientCapabilityRegistrationService
-from src.runtimes.connection.runtime import ConnectionRuntime
-from src.transport.gateway.api.v1 import events_router
-from src.transport.gateway.authentication.dependency import (
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.identity import Identity
+from se.src.infrastructure.event_bus.ws_manager import WebSocketConnectionManager
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.registration import ClientCapabilityRegistrationService
+from se.src.runtimes.connection.runtime import ConnectionRuntime
+from se.src.transport.gateway.api.v1 import events_router
+from se.src.transport.gateway.authentication.dependency import (
     get_current_identity,
+    get_websocket_identity
 )
-from src.transport.gateway.dependencies import get_container
+from se.src.transport.gateway.dependencies import get_container
 
 
 def make_app():
@@ -28,6 +29,7 @@ def make_app():
         eventing_manager=SimpleNamespace(ws_manager=WebSocketConnectionManager()),
         connection_runtime=connection_runtime,
     )
+    container.require=lambda key: getattr(container, key)
     identity = Identity(
         user_id="user-1",
         session_id="session-1",
@@ -37,6 +39,9 @@ def make_app():
     app.include_router(events_router.router)
     app.dependency_overrides[get_container] = lambda: container
     app.dependency_overrides[get_current_identity] = lambda: identity
+    async def _mock_ws_identity(*args, **kwargs):
+        return identity
+    app.dependency_overrides[get_websocket_identity] = _mock_ws_identity
     return app, catalog, connection_runtime
 
 
@@ -71,7 +76,7 @@ def test_websocket_registers_client_capabilities_and_unregisters_on_disconnect()
     app, catalog, connection_runtime = make_app()
 
     with TestClient(app) as client:
-        with client.websocket_connect("/v1/events/ws") as websocket:
+        with client.websocket_connect("/v1/events/ws?args={}&kwargs={}") as websocket:
             websocket.send_json(
                 {
                     "type": "connection.register",

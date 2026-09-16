@@ -4,15 +4,15 @@ import asyncio
 
 import pytest
 
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.contracts import (
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.contracts import (
     AgentExecutionContext,
     ToolExecutionRequest,
     ToolExecutionResult,
 )
-from src.runtimes.agent.tool_execution import AgentToolExecutionCoordinator
+from se.src.runtimes.agent.tool_execution import AgentToolExecutionCoordinator
 
 
 def make_context() -> AgentExecutionContext:

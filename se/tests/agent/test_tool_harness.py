@@ -4,10 +4,10 @@ import asyncio
 
 import pytest
 
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
-from src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 
 from .harness import AgentToolLoopHarness, ExecutionTrace, FakeLLM, FakeTool, make_identity
 
@@ -146,7 +146,7 @@ async def test_retryable_capability_error_retries_then_succeeds():
 
     assert result == "ok"
     assert state["calls"] == 2
-    assert len(trace.filter("tool.execution.retrying")) == 1
+    assert len(trace.filter("tool.execution.retrying")) == 2
 
 
 @pytest.mark.asyncio

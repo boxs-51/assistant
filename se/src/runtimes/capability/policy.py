@@ -99,14 +99,8 @@ class CapabilityRoutingPolicy:
             routable_only=True,
         )
 
-        # A connection-bound execution is a hard routing constraint.
-        #
-        # Once the execution carries connection_id, only a CLIENT
-        # implementation bound to that exact connection is eligible.
-        # There is deliberately NO SERVER/MCP/other-client fallback here:
-        # the session must never silently jump execution to another location.
         if context.connection_id is not None:
-            candidates = [
+            same_connection_clients = [
                 item
                 for item in candidates
                 if (
@@ -114,6 +108,30 @@ class CapabilityRoutingPolicy:
                     and item.connection_id == context.connection_id
                 )
             ]
+
+            server_or_non_client = [
+                item
+                for item in candidates
+                if item.location != CapabilityExecutionLocation.CLIENT
+            ]
+
+            foreign_clients = [
+                item
+                for item in candidates
+                if (
+                    item.location == CapabilityExecutionLocation.CLIENT
+                    and item.connection_id != context.connection_id
+                )
+            ]
+
+            # Foreign client is ALWAYS excluded.
+            #
+            # Same connection gets first priority.
+            # Server remains a valid continuation candidate.
+            candidates = (
+                same_connection_clients
+                + server_or_non_client
+            )
 
         if preferred_implementation_id is not None:
             preferred = [

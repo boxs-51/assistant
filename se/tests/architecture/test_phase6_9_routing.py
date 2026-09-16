@@ -1,18 +1,18 @@
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
 import pytest
 
-from src.runtimes.capability.contracts.implementation import (
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.policy import (
+from se.src.runtimes.capability.policy import (
     CapabilityRequestContext,
     CapabilityRoutingPolicy,
 )
-from src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.registry import ConnectionRegistry
 
 
 def _impl(definition, implementation_id, connection_id):

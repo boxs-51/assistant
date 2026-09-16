@@ -3,12 +3,12 @@ import asyncio
 from pathlib import Path
 
 import pytest
-from src.application.container import ApplicationContainer
-from src.domain.schemas.event import BaseEvent
-from src.infrastructure.event_bus import subscribers
-from src.infrastructure.event_bus.bus import EventBus, EventPriority
-from src.infrastructure.event_bus.registry import EventRegistry
-from src.kernel.base import RuntimeContext
+from se.src.application.container import ApplicationContainer
+from se.src.domain.schemas.event import BaseEvent
+from se.src.infrastructure.event_bus import subscribers
+from se.src.infrastructure.event_bus.bus import EventBus, EventPriority
+from se.src.infrastructure.event_bus.registry import EventRegistry
+from se.src.kernel.base import RuntimeContext
 
 
 class EventingStub:

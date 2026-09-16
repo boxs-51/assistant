@@ -4,9 +4,9 @@ import asyncio
 
 import pytest
 
-from src.runtimes.connection.protocol import RealtimeEnvelope
-from src.runtimes.connection.registry import ConnectionRegistry
-from src.runtimes.connection.realtime import (
+from se.src.runtimes.connection.protocol import RealtimeEnvelope
+from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.realtime import (
     RealtimeMultiplexer,
     RemoteCapabilityError,
 )

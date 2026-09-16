@@ -194,6 +194,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             invocation_id=f"inv_{uuid.uuid4().hex}",
             tool_call_id=tool_call_id,
             capability_id=capability_id,
+            connection_id=context.connection_id,
             arguments=dict(arguments),
             metadata=dict(metadata or {}),
         )

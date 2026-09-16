@@ -6,24 +6,24 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.adapters.context import ContextBuilderAdapter
-from src.runtimes.agent.adapters.policy import RegistryAgentToolPolicy
-from src.runtimes.agent.contracts import (
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.adapters.context import ContextBuilderAdapter
+from se.src.runtimes.agent.adapters.policy import RegistryAgentToolPolicy
+from se.src.runtimes.agent.contracts import (
     AgentContextRequest,
     AgentExecutionContext,
     AgentLoopState,
     InferenceMessage,
     ToolExecutionResult,
 )
-from src.runtimes.capability.registry import CapabilityRegistry
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
-from src.agent.registry import AgentRegistry
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+from se.src.agent.registry import AgentRegistry
 
 ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_11" / "PHASE5_11_EXIT_GATE.md"

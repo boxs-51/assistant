@@ -7,8 +7,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, Iterable, Mapping, Sequence
 
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas import (
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas import (
     GatewayChoice,
     GatewayMessage,
     GatewayResponse,
@@ -16,11 +16,11 @@ from src.domain.schemas import (
     GatewayToolResult,
     FunctionCall,
 )
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
 
 
 @dataclass(frozen=True, slots=True)

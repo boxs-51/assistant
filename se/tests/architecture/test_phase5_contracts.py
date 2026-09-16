@@ -2,10 +2,10 @@ import asyncio
 
 import pytest
 
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.contracts import (
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.contracts import (
     AgentContextSnapshot,
     AgentEventEnvelope,
     AgentEventName,
@@ -24,7 +24,7 @@ from src.runtimes.agent.contracts import (
     ToolExecutionResult,
     transition,
 )
-from src.runtimes.agent.contracts.policy import (
+from se.src.runtimes.agent.contracts.policy import (
     AgentExecutionPolicy,
     AgentToolPolicy,
     PolicyDecision,

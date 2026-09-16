@@ -2,21 +2,21 @@ from __future__ import annotations
 
 import asyncio
 
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.identity import Identity
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.policy import CapabilityRoutingPolicy
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.runtimes.connection.protocol import RealtimeEnvelope
-from src.runtimes.connection.registry import ConnectionRegistry
-from src.runtimes.connection.realtime import RealtimeMultiplexer
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.connection.protocol import RealtimeEnvelope
+from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.realtime import RealtimeMultiplexer
 
 
 class FakeSocket:

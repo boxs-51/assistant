@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from src.runtimes.capability.catalog import (
+from se.src.runtimes.capability.catalog import (
     CapabilityCatalog,
     CapabilityImplementationConflictError,
     InvalidCapabilityBindingError,
     InvalidCapabilityStateTransitionError,
 )
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.policy import (
+from se.src.runtimes.capability.policy import (
     CapabilityRequestContext,
     CapabilityRoutingPolicy,
 )
@@ -228,7 +228,7 @@ def test_client_owner_and_connection_are_enforced() -> None:
         make_server_implementation(implementation_id="server-1")
     )
 
-    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+    from se.src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
 
     connections = ConnectionLifecycleRegistry()
     connections.register(
@@ -259,7 +259,7 @@ def test_wrong_client_connection_is_not_authorized() -> None:
     catalog.register_definition(make_definition())
     catalog.register_implementation(make_client_implementation())
 
-    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+    from se.src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
 
     connections = ConnectionLifecycleRegistry()
     connections.register(
@@ -367,7 +367,7 @@ def test_agent_runtime_does_not_need_to_know_physical_location() -> None:
         "client-1",
         CapabilityImplementationState.ENABLED,
     )
-    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+    from se.src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
 
     connections = ConnectionLifecycleRegistry()
     connections.register(connection_id="conn-1", session_id="sess-1", user_id="owner-1")
@@ -389,7 +389,7 @@ def test_agent_runtime_does_not_need_to_know_physical_location() -> None:
 
 
 def test_client_capability_requires_active_connection() -> None:
-    from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+    from se.src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
 
     catalog = CapabilityCatalog()
     catalog.register_definition(make_definition())

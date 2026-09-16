@@ -1,7 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from src.transport.gateway.limiter.storage.redis_storage import RedisStorage
+from se.src.transport.gateway.limiter.storage.redis_storage import RedisStorage
 
 
 class FakeCacheDriver:

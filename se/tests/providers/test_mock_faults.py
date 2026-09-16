@@ -1,8 +1,8 @@
 import pytest
 
-from src.provider.mock import MockProvider, MockScenario
-from src.provider.exceptions import ProviderRateLimitError, ProviderUnavailableError
-from src.infrastructure.config.schemas import ProviderConfig
+from se.src.provider.mock import MockProvider, MockScenario
+from se.src.provider.exceptions import ProviderRateLimitError, ProviderUnavailableError
+from se.src.infrastructure.config.schemas import ProviderConfig
 
 @pytest.mark.asyncio
 async def test_persistent_rate_limit_fault():

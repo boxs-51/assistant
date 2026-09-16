@@ -1,7 +1,7 @@
 import pytest
-from src.domain.schemas import ModelCapability
-from src.provider.mock import MODEL_CAPABILITIES, MockProvider
-from src.infrastructure.config.schemas import ProviderConfig
+from se.src.domain.schemas import ModelCapability
+from se.src.provider.mock import MODEL_CAPABILITIES, MockProvider
+from se.src.infrastructure.config.schemas import ProviderConfig
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("model,capability", [

@@ -5,36 +5,36 @@ import time
 
 import pytest
 
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.domain.schemas.message import GatewayMessage, MessageContentPart
-from src.domain.schemas.response import GatewayChoice, GatewayResponse
-from src.domain.schemas.tool import FunctionCall, GatewayToolCall
-from src.runtimes.agent.adapters.context import ContextBuilderAdapter
-from src.runtimes.agent.adapters.inference import ProviderInferenceAdapter
-from src.runtimes.agent.adapters.policy import (
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.domain.schemas.message import GatewayMessage, MessageContentPart
+from se.src.domain.schemas.response import GatewayChoice, GatewayResponse
+from se.src.domain.schemas.tool import FunctionCall, GatewayToolCall
+from se.src.runtimes.agent.adapters.context import ContextBuilderAdapter
+from se.src.runtimes.agent.adapters.inference import ProviderInferenceAdapter
+from se.src.runtimes.agent.adapters.policy import (
     DefaultAgentExecutionPolicy,
     RegistryAgentToolPolicy,
 )
-from src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
-from src.runtimes.agent.contracts.context import AgentExecutionContext
-from src.runtimes.agent.contracts.context_builder import AgentContextRequest
-from src.runtimes.agent.contracts.inference import (
+from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+from se.src.runtimes.agent.contracts.context import AgentExecutionContext
+from se.src.runtimes.agent.contracts.context_builder import AgentContextRequest
+from se.src.runtimes.agent.contracts.inference import (
     InferenceMessage,
     InferenceRequest,
 )
-from src.runtimes.agent.contracts import (
+from se.src.runtimes.agent.contracts import (
     AgentContextSnapshot
 )
-from src.runtimes.agent.contracts.tool import ToolExecutionRequest
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.runtimes.capability.registry import CapabilityRegistry
-from src.application.policy.authorization import AuthorizationService
-from src.agent.registry import AgentRegistry
-from src.provider.gemini.converters.chats.request import RequestChats
+from se.src.runtimes.agent.contracts.tool import ToolExecutionRequest
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.agent.registry import AgentRegistry
+from se.src.provider.gemini.converters.chats.request import RequestChats
 
 
 def identity() -> Identity:

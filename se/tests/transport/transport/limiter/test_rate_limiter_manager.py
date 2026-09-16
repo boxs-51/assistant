@@ -1,9 +1,9 @@
 import pytest
 from unittest.mock import AsyncMock
 
-from src.transport.gateway.limiter import RateLimiterManager
-from src.circuit_breaker import CircuitBreakerManager
-from src.infrastructure.config.schemas import CircuitBreakerSettings, RateLimitSettings
+from se.src.transport.gateway.limiter import RateLimiterManager
+from se.src.circuit_breaker import CircuitBreakerManager
+from se.src.infrastructure.config.schemas import CircuitBreakerSettings, RateLimitSettings
 
 
 class FakeCacheDriver:

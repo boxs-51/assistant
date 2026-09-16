@@ -1,6 +1,6 @@
 import pytest
 
-from src.runtimes.provider.runtime import ProviderRuntime
+from se.src.runtimes.provider.runtime import ProviderRuntime
 
 
 class FakeHttpClient:

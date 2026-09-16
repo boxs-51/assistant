@@ -4,23 +4,23 @@ import asyncio
 
 import pytest
 
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.contracts.registration import (
+from se.src.runtimes.capability.contracts.registration import (
     CapabilityRegistration,
     ClientCapabilityRegistration,
 )
-from src.runtimes.capability.registration import ClientCapabilityRegistrationService
-from src.runtimes.connection.protocol import RealtimeEnvelope
-from src.runtimes.connection.registry import ConnectionRegistry
-from src.runtimes.connection.realtime import RealtimeMultiplexer
-from src.runtimes.connection.runtime import ConnectionRuntime
+from se.src.runtimes.capability.registration import ClientCapabilityRegistrationService
+from se.src.runtimes.connection.protocol import RealtimeEnvelope
+from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.realtime import RealtimeMultiplexer
+from se.src.runtimes.connection.runtime import ConnectionRuntime
 
 
 class FakeSocket:

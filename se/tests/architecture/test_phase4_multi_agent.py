@@ -1,10 +1,10 @@
 import pytest
 
-from src.agent.registry import AgentRegistry
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.identity import Identity
-from src.domain.schemas.multi_agent import AgentMessageType, AgentTaskStatus
-from src.runtimes.agent.coordinator import MultiAgentCoordinator
+from se.src.agent.registry import AgentRegistry
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.identity import Identity
+from se.src.domain.schemas.multi_agent import AgentMessageType, AgentTaskStatus
+from se.src.runtimes.agent.coordinator import MultiAgentCoordinator
 
 
 def identity(user_id="user-1"):

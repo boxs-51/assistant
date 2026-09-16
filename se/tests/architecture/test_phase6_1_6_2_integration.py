@@ -2,20 +2,20 @@ from __future__ import annotations
 
 import pytest
 
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.policy import (
+from se.src.runtimes.capability.policy import (
     CapabilityRequestContext,
     CapabilityRoutingPolicy,
 )
-from src.runtimes.connection.contracts import ConnectionState
-from src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
+from se.src.runtimes.connection.contracts import ConnectionState
+from se.src.runtimes.connection.lifecycle import ConnectionLifecycleRegistry
 
 
 def make_definition() -> CapabilityDefinition:

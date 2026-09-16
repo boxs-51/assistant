@@ -3,15 +3,15 @@ from types import SimpleNamespace
 
 from fastapi import HTTPException
 
-from src.domain.schemas.identity import Identity
-from src.domain.schemas.tool import GatewayToolDefinition
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.drivers.base import BaseCapabilityDriver
-from src.runtimes.capability.registry import CapabilityRegistry
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.transport.gateway.api.v1.capability_router import register_tool_capability
-
-
+from se.src.domain.schemas.identity import Identity
+from se.src.domain.schemas.tool import GatewayToolDefinition
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.drivers.base import BaseCapabilityDriver
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.transport.gateway.api.v1.capability_router import register_tool_capability
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition 
+from se.src.tool.registry import ToolRegistry
 class ServerEchoDriver(BaseCapabilityDriver):
     async def execute(self, context, arguments):
         return arguments["value"]
@@ -22,10 +22,7 @@ class Container:
 
 
 def _container():
-    definition = __import__(
-        "src.runtimes.capability.contracts.definition",
-        fromlist=["CapabilityDefinition"],
-    ).CapabilityDefinition(
+    definition = CapabilityDefinition(
         id="echo",
         name="echo",
         description="Echo",
@@ -35,10 +32,7 @@ def _container():
     registry.register_capability(ServerEchoDriver(definition))
     catalog = CapabilityCatalog()
     runtime = CapabilityRuntime(registry=registry, catalog=catalog)
-    tool_registry = __import__(
-        "src.tool.registry",
-        fromlist=["ToolRegistry"],
-    ).ToolRegistry()
+    tool_registry = ToolRegistry()
     container = Container()
     container.capability_runtime = runtime
     container.tool_registry = tool_registry
@@ -66,10 +60,7 @@ def test_tool_endpoint_registers_server_implementation():
 
 def test_tool_endpoint_does_not_claim_non_executable_definition():
     async def scenario():
-        definition = __import__(
-            "src.runtimes.capability.contracts.definition",
-            fromlist=["CapabilityDefinition"],
-        ).CapabilityDefinition(
+        definition = CapabilityDefinition(
             id="remote-only",
             name="remote-only",
             description="Remote",
@@ -80,10 +71,7 @@ def test_tool_endpoint_does_not_claim_non_executable_definition():
         runtime = CapabilityRuntime(registry=registry, catalog=catalog)
         container = SimpleNamespace(
             capability_runtime=runtime,
-            tool_registry=__import__(
-                "src.tool.registry",
-                fromlist=["ToolRegistry"],
-            ).ToolRegistry(),
+            tool_registry=ToolRegistry(),
         )
         body = GatewayToolDefinition(
             name="remote-only",

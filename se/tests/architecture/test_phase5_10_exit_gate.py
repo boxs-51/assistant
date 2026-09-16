@@ -4,10 +4,10 @@ from pathlib import Path
 
 import pytest
 
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.contracts import (
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.contracts import (
     AgentContextSnapshot,
     AgentEventName,
     AgentExecutionContext,
@@ -18,9 +18,9 @@ from src.runtimes.agent.contracts import (
     InferenceUsage,
     ToolExecutionResult,
 )
-from src.runtimes.agent.events import EventBusAgentEventPublisher
-from src.runtimes.agent.runtime import AgentRuntime
-from src.runtimes.agent.adapters.policy import DefaultAgentExecutionPolicy
+from se.src.runtimes.agent.events import EventBusAgentEventPublisher
+from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.agent.adapters.policy import DefaultAgentExecutionPolicy
 
 ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_10" / "PHASE5_10_EXIT_GATE.md"

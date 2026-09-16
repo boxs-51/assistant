@@ -1,17 +1,17 @@
 import httpx
 import pytest
 
-from src.circuit_breaker import CircuitBreakerManager
-from src.infrastructure.config.schemas import (ConfigSchema, ProviderSettings,ProviderConfig,
+from se.src.circuit_breaker import CircuitBreakerManager
+from se.src.infrastructure.config.schemas import (ConfigSchema, ProviderSettings,ProviderConfig,
                                                CircuitBreakerSettings, CircuitBreakerProviderSettings)
-from src.provider.discovery import ProviderDiscovery
-from src.provider.policies.routing_policy import RoutingPolicy
-from src.provider.registry import ProviderRegistry
-from src.provider.executor import ProviderExecutor
-from src.provider.handlers.chat_handler import ChatExecutionHandler
-from src.provider.handlers.embedding_handler import EmbeddingExecutionHandler
-from src.provider.handlers.model_handler import ModelOperationHandler
-from src.provider.handlers.file_handler import FileOperationHandler
+from se.src.provider.discovery import ProviderDiscovery
+from se.src.provider.policies.routing_policy import RoutingPolicy
+from se.src.provider.registry import ProviderRegistry
+from se.src.provider.executor import ProviderExecutor
+from se.src.provider.handlers.chat_handler import ChatExecutionHandler
+from se.src.provider.handlers.embedding_handler import EmbeddingExecutionHandler
+from se.src.provider.handlers.model_handler import ModelOperationHandler
+from se.src.provider.handlers.file_handler import FileOperationHandler
 
 
 @pytest.fixture

@@ -4,9 +4,9 @@ from dataclasses import dataclass
 
 import pytest
 
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.drivers.mcp_driver import McpCapabilityDriver
-from src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.drivers.mcp_driver import McpCapabilityDriver
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 
 from .harness import AgentToolLoopHarness, ExecutionTrace, FakeLLM, make_identity
 

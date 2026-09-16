@@ -4,18 +4,18 @@ import asyncio
 
 import pytest
 
-from src.agent.registry import AgentRegistry
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.adapters.context import ContextBuilderAdapter
-from src.runtimes.agent.adapters.policy import (
+from se.src.agent.registry import AgentRegistry
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.adapters.context import ContextBuilderAdapter
+from se.src.runtimes.agent.adapters.policy import (
     DefaultAgentExecutionPolicy,
     RegistryAgentToolPolicy,
 )
-from src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
-from src.runtimes.agent.contracts import (
+from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+from se.src.runtimes.agent.contracts import (
     AgentContextRequest,
     AgentExecutionContext,
     AgentLoopState,
@@ -24,11 +24,11 @@ from src.runtimes.agent.contracts import (
     InferenceToolCall,
     InferenceUsage,
 )
-from src.runtimes.agent.runtime import AgentRuntime
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
-from src.runtimes.capability.registry import CapabilityRegistry
-from src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 
 
 def make_context(max_iterations: int = 4) -> AgentExecutionContext:
@@ -139,7 +139,7 @@ async def test_agent_runtime_preserves_canonical_error_from_malformed_tool_argum
 
     class ParseFailingInference:
         async def complete(self, request):
-            from src.runtimes.agent.tool_execution.errors import ToolArgumentParseError
+            from se.src.runtimes.agent.tool_execution.errors import ToolArgumentParseError
 
             raise ToolArgumentParseError(
                 "Tool call arguments must contain valid JSON."
@@ -175,7 +175,7 @@ async def test_agent_runtime_surfaces_malformed_tool_arguments_as_canonical_erro
 
     class ParseFailingInference:
         async def complete(self, request):
-            from src.runtimes.agent.adapters.inference import ToolArgumentParseError
+            from se.src.runtimes.agent.adapters.inference import ToolArgumentParseError
 
             raise ToolArgumentParseError(
                 "Tool call arguments must contain valid JSON."
@@ -469,9 +469,10 @@ async def test_agent_runtime_preserves_initial_context_across_tool_iterations():
                 model="fake",
             )
 
+    from se.src.runtimes.agent.contracts import ToolExecutionResult
     inference = CapturingInference()
     tool_port = ScriptedToolPort([
-        __import__("src.runtimes.agent.contracts", fromlist=["ToolExecutionResult"]).ToolExecutionResult(
+        ToolExecutionResult(
             execution_id=context.execution_id,
             iteration=1,
             invocation_id="inv-1",
@@ -681,8 +682,9 @@ async def test_agent_runtime_orders_tool_results_by_tool_call_id():
 
     class ReorderingToolPort:
         async def execute_many(self, context, requests, *, max_parallel):
+            from se.src.runtimes.agent.contracts import ToolExecutionResult
             return [
-                __import__("src.runtimes.agent.contracts", fromlist=["ToolExecutionResult"]).ToolExecutionResult(
+                ToolExecutionResult(
                     execution_id=context.execution_id,
                     iteration=1,
                     invocation_id="inv-b",
@@ -691,7 +693,7 @@ async def test_agent_runtime_orders_tool_results_by_tool_call_id():
                     success=True,
                     output=7,
                 ),
-                __import__("src.runtimes.agent.contracts", fromlist=["ToolExecutionResult"]).ToolExecutionResult(
+                ToolExecutionResult(
                     execution_id=context.execution_id,
                     iteration=1,
                     invocation_id="inv-a",

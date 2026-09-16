@@ -4,21 +4,21 @@ from pathlib import Path
 
 import pytest
 
-from src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
-from src.runtimes.agent.contracts.context import AgentExecutionContext
-from src.runtimes.agent.contracts.policy import PolicyDecision
-from src.runtimes.agent.contracts.tool import ToolExecutionRequest
-from src.runtimes.agent.tool_execution.validator import (
+from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+from se.src.runtimes.agent.contracts.context import AgentExecutionContext
+from se.src.runtimes.agent.contracts.policy import PolicyDecision
+from se.src.runtimes.agent.contracts.tool import ToolExecutionRequest
+from se.src.runtimes.agent.tool_execution.validator import (
     JsonSchemaToolArgumentValidator,
 )
-from src.runtimes.capability.contracts.definition import (
+from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
     InvalidCapabilitySchemaError,
     validate_input_schema,
 )
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
 
 ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_7" / "PHASE5_7_EXIT_GATE.md"
@@ -136,7 +136,7 @@ def test_E3_visible_and_authorized_capability_path_remains_separate_from_legacy_
 
 def test_E4_capability_error_codes_and_retryability_are_preserved_verbatim():
     """E4: canonical downstream capability errors keep their code and retry flag."""
-    from src.runtimes.capability.contracts.error import CapabilityError
+    from se.src.runtimes.capability.contracts.error import CapabilityError
 
     error = CapabilityError(
         code="CAPABILITY_TIMEOUT",
@@ -177,7 +177,7 @@ def test_E6_phase_5_7_status_document_is_canonical_and_legacy_doc_points_to_it()
 
 def test_E7_tool_error_contract_is_canonical_and_non_retryable_invalid_arguments_stay_non_retryable():
     """E7: canonical tool error contract is explicit and invalid arguments are never retryable."""
-    from src.runtimes.agent.tool_execution.errors import (
+    from se.src.runtimes.agent.tool_execution.errors import (
         CANONICAL_TOOL_ERROR_CODES,
         CAPABILITY_INVALID_ARGUMENT,
     )

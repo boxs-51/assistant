@@ -1,17 +1,17 @@
 import pytest
 
-from src.application.policy.authorization import AuthorizationService
-from src.domain.schemas.identity import Identity
-from src.runtimes.capability.registry import CapabilityRegistry, CapabilityState
-from src.runtimes.capability.contracts.context import CapabilityExecutionContext
-from src.runtimes.capability.contracts.error import CapabilityError
-from src.runtimes.capability.contracts.result import CapabilityResult
-from src.runtimes.capability.drivers.base import BaseCapabilityDriver, CapabilityDefinition
-from src.runtimes.capability.drivers.mcp_driver import McpCapabilityDriver
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.tool.registry import ToolRegistry
-from src.domain.schemas.tool import GatewayToolDefinition
-from src.kernel.base import HealthStatus
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.capability.registry import CapabilityRegistry, CapabilityState
+from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
+from se.src.runtimes.capability.contracts.error import CapabilityError
+from se.src.runtimes.capability.contracts.result import CapabilityResult
+from se.src.runtimes.capability.drivers.base import BaseCapabilityDriver, CapabilityDefinition
+from se.src.runtimes.capability.drivers.mcp_driver import McpCapabilityDriver
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.tool.registry import ToolRegistry
+from se.src.domain.schemas.tool import GatewayToolDefinition
+from se.src.kernel.base import HealthStatus
 
 class EchoDriver(BaseCapabilityDriver):
     async def execute(self, context, arguments):
@@ -92,7 +92,7 @@ def test_capability_definition_is_transport_neutral():
 
 
 def test_capability_registry_does_not_treat_definition_only_as_executable():
-    from src.runtimes.capability.registry import CapabilityRegistry
+    from se.src.runtimes.capability.registry import CapabilityRegistry
 
     registry = CapabilityRegistry()
     registry.register_definition(

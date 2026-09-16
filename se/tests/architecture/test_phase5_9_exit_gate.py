@@ -5,24 +5,24 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from src.infrastructure.storage.models.sql.agent import (
+from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionRecord,
     AgentIterationRecord,
     AgentToolCallRecord,
     AgentToolResultRecord,
 )
-from src.infrastructure.storage.models.sql.base import Base
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.contracts import (
+from se.src.infrastructure.storage.models.sql.base import Base
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.contracts import (
     AgentIteration,
     AgentLoopState,
     AgentExecutionContext,
     ToolExecutionRequest,
     ToolExecutionResult,
 )
-from src.runtimes.agent.persistence import DurableAgentStore
-from src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.agent.persistence import DurableAgentStore
+from se.src.runtimes.agent.runtime import AgentRuntime
 
 ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_9" / "PHASE5_9_EXIT_GATE.md"

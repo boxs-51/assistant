@@ -2,12 +2,12 @@ import asyncio
 
 import pytest
 
-from src.agent.registry import AgentRegistry
-from src.domain.schemas.agent import AgentDefinition
-from src.domain.schemas.agent_execution import AgentExecutionState
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.coordinator import MultiAgentCoordinator
-from src.runtimes.agent.state_machine import AgentExecutionStateMachine
+from se.src.agent.registry import AgentRegistry
+from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.agent_execution import AgentExecutionState
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.coordinator import MultiAgentCoordinator
+from se.src.runtimes.agent.state_machine import AgentExecutionStateMachine
 
 
 def make_identity():
@@ -44,7 +44,7 @@ async def test_task_execution_times_out():
         await asyncio.sleep(0.05)
         return {"done": True}
 
-    from src.domain.schemas.agent_execution import AgentExecutionLimits
+    from se.src.domain.schemas.agent_execution import AgentExecutionLimits
     execution = await coordinator.execute_task(
         task.task_id,
         make_identity(),

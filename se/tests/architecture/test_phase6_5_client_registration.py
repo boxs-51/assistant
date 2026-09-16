@@ -2,22 +2,22 @@ from __future__ import annotations
 
 import pytest
 
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.contracts.registration import (
+from se.src.runtimes.capability.contracts.registration import (
     CapabilityKind,
     CapabilityRegistration,
     ClientCapabilityRegistration,
 )
-from src.runtimes.capability.registration import (
+from se.src.runtimes.capability.registration import (
     ClientCapabilityRegistrationService,
     ClientRegistrationError,
 )
-from src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.registry import ConnectionRegistry
 
 
 def make_definition(capability_id: str = "desktop.echo") -> CapabilityDefinition:

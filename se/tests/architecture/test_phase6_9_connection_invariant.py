@@ -2,30 +2,30 @@ import asyncio
 
 import pytest
 
-from src.domain.schemas.identity import Identity
-from src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
-from src.runtimes.agent.contracts.context import AgentExecutionContext
-from src.runtimes.agent.contracts.tool import ToolExecutionRequest
-from src.runtimes.agent.contracts.policy import (
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+from se.src.runtimes.agent.contracts.context import AgentExecutionContext
+from se.src.runtimes.agent.contracts.tool import ToolExecutionRequest
+from se.src.runtimes.agent.contracts.policy import (
     AgentExecutionPolicy,
     AgentToolPolicy,
     PolicyDecision,
 )
-from src.domain.schemas.agent_execution import AgentExecutionLimits
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from src.runtimes.capability.policy import CapabilityRoutingPolicy
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.runtimes.connection.registry import ConnectionRegistry
-from src.runtimes.connection.realtime import RealtimeMultiplexer
-from src.runtimes.capability.drivers.base import BaseCapabilityDriver
-
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.runtimes.connection.realtime import RealtimeMultiplexer
+from se.src.runtimes.capability.drivers.base import BaseCapabilityDriver
+from se.src.runtimes.capability.registry import CapabilityRegistry
 
 class FakeServerDriver(BaseCapabilityDriver):
     async def execute(self, context, arguments):
@@ -92,10 +92,7 @@ def test_runtime_rejects_conflicting_explicit_and_metadata_connection():
     )
     catalog.register_definition(definition)
     driver = FakeServerDriver(definition)
-    runtime_registry = __import__(
-        "src.runtimes.capability.registry",
-        fromlist=["CapabilityRegistry"],
-    ).CapabilityRegistry()
+    runtime_registry = CapabilityRegistry()
     runtime_registry.register_capability(driver)
     runtime = CapabilityRuntime(
         registry=runtime_registry,

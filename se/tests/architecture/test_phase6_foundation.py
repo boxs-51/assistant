@@ -1,19 +1,19 @@
 from pathlib import Path
 
-from src.runtimes.capability.contracts.definition import CapabilityDefinition
-from src.runtimes.capability.contracts.implementation import (
+from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
 )
-from src.runtimes.capability.contracts.registration import (
+from se.src.runtimes.capability.contracts.registration import (
     CapabilityKind,
     CapabilityOwnerType,
     ClientCapabilityRegistration,
 )
-from src.runtimes.connection.protocol import RealtimeEnvelope
+from se.src.runtimes.connection.protocol import RealtimeEnvelope
 
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def test_capability_definition_is_independent_from_implementation_identity():
@@ -85,8 +85,8 @@ def test_realtime_envelope_preserves_invocation_correlation():
 
 
 def test_phase6_foundation_does_not_wire_agent_or_runtime_yet():
-    control_plane = REPO_ROOT / "src" / "runtimes" / "capability" / "control_plane.py"
-    multiplexer = REPO_ROOT / "src" / "runtimes" / "connection" / "multiplexer.py"
+    control_plane = REPO_ROOT / "se" / "src" / "runtimes" / "capability" / "control_plane.py"
+    multiplexer = REPO_ROOT / "se" /"src" / "runtimes" / "connection" / "multiplexer.py"
 
     assert control_plane.exists()
     assert multiplexer.exists()

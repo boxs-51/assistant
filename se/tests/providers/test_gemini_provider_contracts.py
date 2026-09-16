@@ -1,13 +1,13 @@
 import httpx
 import pytest
 
-from src.infrastructure.config.schemas import ProviderConfig
-from src.provider.core.api import ApiType
-from src.provider.gemini import GeminiProvider
-from src.provider.gemini.api.embeddings import GeminiEmbeddings
-from src.provider.gemini.api.models import GeminiModels
-from src.provider.gemini.converters.embeddings.request import RequestEmbeddings
-from src.provider.gemini.converters.embeddings.response import ResponseEmbeddings
+from se.src.infrastructure.config.schemas import ProviderConfig
+from se.src.provider.core.api import ApiType
+from se.src.provider.gemini import GeminiProvider
+from se.src.provider.gemini.api.embeddings import GeminiEmbeddings
+from se.src.provider.gemini.api.models import GeminiModels
+from se.src.provider.gemini.converters.embeddings.request import RequestEmbeddings
+from se.src.provider.gemini.converters.embeddings.response import ResponseEmbeddings
 
 
 def _provider() -> GeminiProvider:

@@ -1,6 +1,6 @@
 import pytest
 
-from src.infrastructure.storage.core.registry import DriverRegistry
+from se.src.infrastructure.storage.core.registry import DriverRegistry
 
 
 class FakeDriver:

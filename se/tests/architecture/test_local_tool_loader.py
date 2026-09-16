@@ -1,11 +1,11 @@
 from pathlib import Path
 
-from src.application.policy.authorization import AuthorizationService
-from src.runtimes.capability.catalog import CapabilityCatalog
-from src.runtimes.capability.local_tool_loader import register_local_tools
-from src.runtimes.capability.registry import CapabilityRegistry
-from src.runtimes.capability.runtime import CapabilityRuntime
-from src.tool.registry import ToolRegistry
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.local_tool_loader import register_local_tools
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.tool.registry import ToolRegistry
 
 
 def test_tools_v1_are_discovered_and_executable_metadata_is_registered():

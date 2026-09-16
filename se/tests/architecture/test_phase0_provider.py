@@ -1,11 +1,11 @@
 import pytest
 
-from src.domain.schemas import ModelCapability
-from src.provider.mock.provider import MockProvider, MOCK_MODEL
-from src.provider.registry import ProviderRegistry
-from src.provider.policies.routing_policy import RoutingPolicy
-from src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
-from src.infrastructure.config.schemas import ProviderConfig
+from se.src.domain.schemas import ModelCapability
+from se.src.provider.mock.provider import MockProvider, MOCK_MODEL
+from se.src.provider.registry import ProviderRegistry
+from se.src.provider.policies.routing_policy import RoutingPolicy
+from se.src.infrastructure.config.schemas import ConfigSchema, ProviderSettings
+from se.src.infrastructure.config.schemas import ProviderConfig
 
 
 def test_mock_provider_registers_like_a_normal_provider(monkeypatch):
@@ -31,7 +31,7 @@ async def test_mock_provider_capability_does_not_touch_http_client():
 
 @pytest.mark.asyncio
 async def test_mock_is_not_discovered_when_disabled(monkeypatch):
-    from src.infrastructure.config import ConfigurationRegistry
+    from se.src.infrastructure.config import ConfigurationRegistry
 
     config = ConfigSchema(
         provider=ProviderSettings(
@@ -47,13 +47,13 @@ async def test_mock_is_not_discovered_when_disabled(monkeypatch):
 
     ConfigurationRegistry.set_config(config)
     registry = ProviderRegistry()
-    from src.provider.discovery import ProviderDiscovery
+    from se.src.provider.discovery import ProviderDiscovery
     ProviderDiscovery(registry=registry, config=config.provider).run()
     assert "mock" not in registry.list_all_providers()
 
 
 def test_mock_does_not_enter_default_fallback_chain_implicitly(monkeypatch):
-    from src.infrastructure.config import ConfigurationRegistry
+    from se.src.infrastructure.config import ConfigurationRegistry
     config = ConfigSchema(
         provider=ProviderSettings(
             priority=["mock", "openai"],
@@ -70,7 +70,7 @@ def test_mock_does_not_enter_default_fallback_chain_implicitly(monkeypatch):
         )
     )
     ConfigurationRegistry.set_config(config)
-    from src.provider.mock.provider import MockProvider
+    from se.src.provider.mock.provider import MockProvider
     providers = {"openai": MockProvider(config=ProviderConfig(
                     enabled=True,
                     base_url="http://testserver"

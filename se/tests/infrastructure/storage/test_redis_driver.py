@@ -1,8 +1,8 @@
 import pytest
 from unittest.mock import AsyncMock, patch
 
-from src.infrastructure.storage.drivers.redis.driver import RedisDriver
-from src.infrastructure.config.schemas import DriverConfig
+from se.src.infrastructure.storage.drivers.redis.driver import RedisDriver
+from se.src.infrastructure.config.schemas import DriverConfig
 
 @pytest.fixture
 def config():
@@ -17,7 +17,7 @@ async def test_connect_success(config):
     client.ping.return_value = True
 
     with patch(
-        "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
+        "se.src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
         driver = RedisDriver(config)
@@ -34,7 +34,7 @@ async def test_connect_failure_closes_client_and_raises(config):
     client.ping.side_effect = RuntimeError("redis unavailable")
 
     with patch(
-        "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
+        "se.src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
         driver = RedisDriver(config)
@@ -53,7 +53,7 @@ async def test_disconnect_is_idempotent(config):
     client.ping.return_value = True
 
     with patch(
-        "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
+        "se.src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
         driver = RedisDriver(config)
@@ -74,7 +74,7 @@ async def test_get_uses_cache_driver(config):
     client.get.return_value = "value"
 
     with patch(
-        "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
+        "se.src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
         driver = RedisDriver(config)
@@ -89,17 +89,15 @@ async def test_get_uses_cache_driver(config):
 async def test_execute_script_falls_back_to_eval_on_noscript(config):
     client = AsyncMock()
     client.ping.return_value = True
-
-    noscript = __import__(
-        "redis.exceptions",
-        fromlist=["NoScriptError"],
-    ).NoScriptError("NOSCRIPT")
+    
+    from redis.exceptions import NoScriptError
+    noscript = NoScriptError("NOSCRIPT")
 
     client.evalsha.side_effect = noscript
     client.eval.return_value = [1, 99, 0]
 
     with patch(
-        "src.infrastructure.storage.drivers.redis.driver.redis.from_url",
+        "se.src.infrastructure.storage.drivers.redis.driver.redis.from_url",
         return_value=client,
     ):
         driver = RedisDriver(config)

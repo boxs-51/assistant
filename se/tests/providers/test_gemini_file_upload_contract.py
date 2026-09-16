@@ -1,8 +1,8 @@
 import httpx
 import pytest
 
-from src.infrastructure.config.schemas import ProviderConfig
-from src.provider.gemini import GeminiProvider
+from se.src.infrastructure.config.schemas import ProviderConfig
+from se.src.provider.gemini import GeminiProvider
 
 
 class _FakeProviderClient:
