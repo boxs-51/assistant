@@ -42,6 +42,7 @@ def make_context(**kwargs) -> CapabilityExecutionContext:
         execution_id="exec-1",
         invocation_id="inv-1",
         session_id="sess-1",
+        connection_id="conn-1",
         metadata={"trace_id": "trace-1"},
         **kwargs,
     )

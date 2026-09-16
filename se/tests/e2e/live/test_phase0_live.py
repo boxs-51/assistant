@@ -1,6 +1,6 @@
 import httpx
 import pytest
-from se.tests.e2e.conftest import run_test_live
+from tests.e2e.conftest import run_test_live
 pytestmark = pytest.mark.live
 
 pytestmark = [

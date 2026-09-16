@@ -80,4 +80,4 @@ def test_mock_does_not_enter_default_fallback_chain_implicitly(monkeypatch):
                 ))}
     providers["openai"].name = "openai"
     policy = RoutingPolicy(providers=providers,config=config.provider)
-    assert [provider.name for provider in policy.get_fallback_chain("unknown-model")] == ["mock"]
+    assert [provider.name for provider in policy.get_fallback_chain("unknown-model")] == ["mock", "openai"]

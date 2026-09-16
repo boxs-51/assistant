@@ -99,13 +99,14 @@ class CapabilityRoutingPolicy:
             routable_only=True,
         )
 
-        # Connection affinity is part of routing policy, not a driver detail.
-        # When an execution is bound to a live client connection:
-        #   1. prefer the implementation owned by that connection;
-        #   2. never route to a different CLIENT connection;
-        #   3. retain SERVER/MCP fallback candidates where policy allows them.
+        # A connection-bound execution is a hard routing constraint.
+        #
+        # Once the execution carries connection_id, only a CLIENT
+        # implementation bound to that exact connection is eligible.
+        # There is deliberately NO SERVER/MCP/other-client fallback here:
+        # the session must never silently jump execution to another location.
         if context.connection_id is not None:
-            preferred_clients = [
+            candidates = [
                 item
                 for item in candidates
                 if (
@@ -113,12 +114,6 @@ class CapabilityRoutingPolicy:
                     and item.connection_id == context.connection_id
                 )
             ]
-            non_client = [
-                item
-                for item in candidates
-                if item.location != CapabilityExecutionLocation.CLIENT
-            ]
-            candidates = preferred_clients + non_client
 
         if preferred_implementation_id is not None:
             preferred = [
@@ -130,16 +125,6 @@ class CapabilityRoutingPolicy:
                 item
                 for item in candidates
                 if item.implementation_id != preferred_implementation_id
-            ]
-        elif context.connection_id is not None:
-            # preferred_implementation_id may be supplied by an older caller,
-            # but must not be used to escape the connection affinity above.
-            candidates = [
-                item for item in candidates
-                if (
-                    item.location != CapabilityExecutionLocation.CLIENT
-                    or item.connection_id == context.connection_id
-                )
             ]
 
         for implementation in candidates:
