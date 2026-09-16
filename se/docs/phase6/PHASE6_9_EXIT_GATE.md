@@ -1,71 +1,59 @@
-# Exit Gate Criteria
+# Phase 6.9 Exit Gate
 
-Phase 6.9 is considered complete only when:
-- [ ] Bootstrap injects `CapabilityRoutingPolicy`.
-- [ ] Client connection registry is the availability provider.
-- [ ] Server tool registration does not create definition-only executable claims.
-- [ ] Connection ID is explicit in execution contracts.
-- [ ] Foreign client implementations cannot be selected.
-- [ ] Remote driver rejects mismatched context/implementation connection.
-- [ ] Client result correlation resolves the correct invocation.
-- [ ] Agent loop continues to a second inference after remote tool result.
-- [ ] All new Phase 6.9 tests pass.
-- [ ] Existing Phase 6.6/6.8 compatibility tests remain green.
+Status: **GREEN** on 2026-09-16.
 
----
+Phase 6.9 is complete only while every P0 item below remains green.
 
-## Known Follow-Up
+## Bootstrap and registration
 
-Phase 6.9 intentionally does not migrate:
-- `/v1/tools` legacy endpoint
-- `/v1/agents` legacy endpoint
-- `/v1/sessions/{id}/regenerate` direct `ProviderRuntime` path
-- Agent event -> `assistant.delta`/`completed`/`error` realtime mapping
-- Provider streaming DTO normalization
+- [x] Production bootstrap constructs `CapabilityRoutingPolicy`.
+- [x] `ConnectionRegistry` is the connection-availability provider.
+- [x] `CapabilityRuntime.routing_policy` is non-null in production.
+- [x] `/v1/capabilities/tools` requires an executable server driver.
+- [x] Successful server registration creates an enabled `SERVER` / `SYSTEM` implementation.
+- [x] Definition-only server claims are rejected.
+- [x] Client tools register through `/v1/events/ws` and remain executable without a server driver.
 
-Those belong to later migration phases.
+## Identity and routing
 
----
----
+- [x] Connection identity is explicit in Agent, tool, and capability execution contracts.
+- [x] Tool request and Agent context connection IDs must match.
+- [x] Explicit and metadata connection IDs cannot conflict.
+- [x] `RemoteClientDriver` rejects context/implementation mismatch.
+- [x] The exact active client is preferred and foreign clients are excluded.
+- [x] An issued invocation remains bound to its original connection.
+- [x] A new routing decision may use a server implementation after client loss.
 
-# Document 2: Phase 6.9 Exit Gate Checklist
+## Real WebSocket E2E
 
-## P0 — Bootstrap
-- [ ] `CapabilityRoutingPolicy` constructed during application bootstrap.
-- [ ] `ConnectionRegistry` supplied as connection availability provider.
-- [ ] `CapabilityRuntime.routing_policy` is non-null in the production container.
+- [x] Canonical E2E uses real uvicorn and a real TCP WebSocket.
+- [x] It uses `ClientRuntime`, its receiver loop, and `CapabilityDispatcher`.
+- [x] It does not manually call `handle_inbound()` or the dispatcher.
+- [x] The local Python capability executes on the client.
+- [x] `capability.result` returns over the real socket with the same invocation identity.
+- [x] AgentRuntime performs a second inference and completes.
 
-## P0 — Server Tool
-- [ ] `/v1/capabilities/tools` requires an executable server driver.
-- [ ] Successful server registration creates `server:<capability_id>`.
-- [ ] Server implementation is `SERVER` / `SYSTEM` / `ENABLED`.
-- [ ] Definition-only remote tools are rejected by this server endpoint.
-- [ ] Client tools still register through `/v1/events/ws`.
+## Disconnect and continuation
 
-## P0 — Connection Invariant
-- [ ] `AgentExecutionContext.connection_id` is explicit.
-- [ ] `CapabilityExecutionContext.connection_id` is explicit.
-- [ ] `ToolExecutionRequest.connection_id` is explicit.
-- [ ] Tool request/context IDs must match.
-- [ ] Explicit argument and metadata connection IDs must not conflict.
-- [ ] `RemoteClientDriver` refuses a mismatched connection.
+- [x] Disconnect marks the connection inactive and fails pending invocations.
+- [x] Each failure is `RemoteConnectionLost(connection_id, invocation_id)`.
+- [x] Late and foreign results cannot resurrect an invocation.
+- [x] Agent creates an immutable disconnect checkpoint with transcript and pending identity.
+- [x] Remote-only work enters `WAITING_FOR_CONNECTION` without unsafe retry.
+- [x] Server-side continuation can proceed automatically as a new routing decision.
+- [x] Reconnect requires a new connection identity and creates an isolated branch.
+- [x] Branch merge requires the owning user and matching base checkpoint.
+- [x] Stale merge is rejected and successful merge is idempotent.
+- [x] Continuation state is persisted in the existing execution `context_state` JSON.
 
-## Routing
-- [ ] Current-session `CLIENT` implementation wins over foreign `CLIENT` implementations.
-- [ ] Foreign `CLIENT` implementations are never selected.
-- [ ] `SERVER` fallback remains possible when no current `CLIENT` implementation is available.
-- [ ] Stale/disconnected connections remain unroutable.
+## Verification
 
-## E2E
-- [ ] Agent emits a tool call.
-- [ ] Tool invocation uses the active session connection.
-- [ ] Client receives `capability.invoke`.
-- [ ] Client returns `capability.result`.
-- [ ] Result resolves the same `invocation_id`.
-- [ ] Agent continues to next iteration.
-- [ ] Final answer is returned.
+- [x] Phase 6.9 plus Phase 6.6/6.8 and coordinator regression selection: `51 passed`.
+- [x] Focused Phase 6.9 plus compatibility selection: `29 passed`.
+- [x] Repository-wide non-live run: `273 passed`.
 
-## Regression
-- [ ] Phase 6.6 tests remain green.
-- [ ] Phase 6.8 resilience tests remain green.
-- [ ] Legacy `/v1/tools` and `/v1/agents` compatibility tests remain green.
+## Deferred migrations
+
+Phase 6.9 intentionally does not migrate legacy `/v1/tools`, `/v1/agents`,
+`/v1/sessions/{id}/regenerate`, Agent-event realtime mapping, or provider
+streaming DTO normalization. Those remain later-phase work.

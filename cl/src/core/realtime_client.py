@@ -126,7 +126,6 @@ class GatewayRealtimeClient:
             self._registered.clear()
             self._capabilities_registered.clear()
             self._disconnect_error = None
-            print(self.headers['Authorization'])
             self.ws = websocket.create_connection(
                 self._ws_url,
                 header=[

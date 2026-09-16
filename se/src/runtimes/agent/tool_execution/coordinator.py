@@ -396,6 +396,10 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
 
         return self._order_results(request_list, raw_results)
 
+    def can_continue_server_side(self, capability_id: str) -> bool:
+        checker = getattr(self._executor, "can_continue_server_side", None)
+        return bool(checker and checker(capability_id))
+
     async def _await_with_cancellation(
         self,
         context: AgentExecutionContext,

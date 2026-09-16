@@ -23,6 +23,20 @@ from .events import (
     CorrelationContext,
 )
 from .result import AgentExecutionResult
+from .continuation import (
+    CheckpointReason,
+    ContinuationBranch,
+    ContinuationState,
+    ExecutionCheckpoint,
+)
+from .context_assembly import (
+    AgentCapabilityResolver,
+    AgentCapabilityView,
+    AgentContextAssembler,
+    AgentContextAssembly,
+    AgentSystemPrompt,
+    AgentSystemPromptProvider,
+)
 
 __all__ = [
     "AgentExecutionContext",
@@ -51,4 +65,14 @@ __all__ = [
     "AgentEventPublisher",
     "CorrelationContext",
     "AgentExecutionResult",
+    "CheckpointReason",
+    "ContinuationBranch",
+    "ContinuationState",
+    "ExecutionCheckpoint",
+    "AgentCapabilityResolver",
+    "AgentCapabilityView",
+    "AgentContextAssembler",
+    "AgentContextAssembly",
+    "AgentSystemPrompt",
+    "AgentSystemPromptProvider",
 ]

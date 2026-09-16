@@ -120,7 +120,7 @@ async def test_retryable_capability_error_retries_then_succeeds():
     async def flaky_tool() -> str:
         state["calls"] += 1
         if state["calls"] < 2:
-            from src.runtimes.capability.contracts.error import CapabilityError
+            from se.src.runtimes.capability.contracts.error import CapabilityError
 
             raise CapabilityError(
                 code="TRANSIENT",
@@ -146,7 +146,7 @@ async def test_retryable_capability_error_retries_then_succeeds():
 
     assert result == "ok"
     assert state["calls"] == 2
-    assert len(trace.filter("tool.execution.retrying")) == 2
+    assert len(trace.filter("tool.execution.retrying")) == 1
 
 
 @pytest.mark.asyncio

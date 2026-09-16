@@ -67,7 +67,7 @@ def test_active_session_connection_is_preferred_and_other_clients_are_never_sele
     assert selected.implementation_id == "client-a:desktop.echo"
 
 
-def test_connection_affinity_rejects_server_fallback():
+def test_new_routing_decision_allows_server_fallback():
     catalog = CapabilityCatalog()
     definition = CapabilityDefinition(
         id="echo",
@@ -98,17 +98,18 @@ def test_connection_affinity_rejects_server_fallback():
     connections.register("sess-f", "user-1", connection_id="conn-foreign")
     connections.activate("conn-foreign")
 
-    with pytest.raises(PermissionError, match="No authorized routable implementation"):
-        CapabilityRoutingPolicy(
-            connection_availability=connections
-        ).select(
-            catalog,
-            "echo",
-            context=CapabilityRequestContext(
-                owner_id="user-1",
-                connection_id="conn-local",
-            ),
-        )
+    selected = CapabilityRoutingPolicy(
+        connection_availability=connections
+    ).select(
+        catalog,
+        "echo",
+        context=CapabilityRequestContext(
+            owner_id="user-1",
+            connection_id="conn-local",
+        ),
+    )
+
+    assert selected.implementation_id == "server:echo"
 
 
 def test_connection_affinity_rejects_foreign_client_when_local_connection_has_no_implementation():

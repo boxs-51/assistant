@@ -28,6 +28,8 @@ from ..tool_execution.validator import (
    JsonSchemaToolArgumentValidator,
    ToolArgumentValidator,
 )
+from ...capability.contracts.implementation import CapabilityExecutionLocation
+from ...capability.catalog import CapabilityNotFoundError
 
 
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
@@ -69,7 +71,19 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
 
         # 1. Kiểm tra sự tồn tại trong global registry trước (CAPABILITY_NOT_FOUND)
         record = self._capability_runtime.registry.get(request.capability_id)
-        if record is None or not record.executable:
+        definition = record.definition if record is not None and record.executable else None
+        catalog = getattr(self._capability_runtime, "catalog", None)
+        if definition is None and catalog is not None:
+            try:
+                candidate = catalog.get_definition(request.capability_id)
+                if catalog.list_implementations(
+                    request.capability_id,
+                    routable_only=True,
+                ):
+                    definition = candidate
+            except (KeyError, CapabilityNotFoundError):
+                definition = None
+        if definition is None:
             return self._denied(request, CAPABILITY_NOT_FOUND)
 
         # 2. Kiểm tra quyền hiển thị đối với Agent cụ thể (AGENT_TOOL_NOT_VISIBLE)
@@ -94,7 +108,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
 
         context.ensure_active()
         validation = self._argument_validator.validate(
-            record.definition,
+            definition,
             request.arguments,
         )
         if not validation.valid:
@@ -177,6 +191,23 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         if max_parallel < 1:
             raise ValueError("max_parallel must be >= 1.")
         return [await self.execute(context, request) for request in requests]
+
+    def can_continue_server_side(self, capability_id: str) -> bool:
+        """Return whether a new routing decision can avoid the lost client."""
+        catalog = getattr(self._capability_runtime, "catalog", None)
+        if catalog is None:
+            return False
+        try:
+            implementations = catalog.list_implementations(
+                capability_id,
+                routable_only=True,
+            )
+        except (KeyError, CapabilityNotFoundError):
+            return False
+        return any(
+            item.location is not CapabilityExecutionLocation.CLIENT
+            for item in implementations
+        )
 
     @staticmethod
     def new_request(

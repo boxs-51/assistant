@@ -27,6 +27,7 @@ from .contracts.events import (
     AgentEventPublisher,
     CorrelationContext,
 )
+from .contracts.continuation import ContinuationState
 
 
 class AgentRuntime:
@@ -45,6 +46,7 @@ class AgentRuntime:
         execution_policy: AgentExecutionPolicy,
         durable_store=None,
         event_publisher: AgentEventPublisher | None = None,
+        continuation_service=None,
     ) -> None:
         self._context_builder = context_builder
         self._inference = inference
@@ -52,6 +54,7 @@ class AgentRuntime:
         self._execution_policy = execution_policy
         self._durable_store = durable_store
         self._event_publisher = event_publisher
+        self._continuation_service = continuation_service
 
     async def _publish(
         self,
@@ -585,6 +588,70 @@ class AgentRuntime:
                             "error_message": result.error_message,
                         },
                     )
+
+                disconnected = [
+                    item
+                    for item in latest_tool_results
+                    if item.metadata.get("original_error_code")
+                    == "REMOTE_CONNECTION_LOST"
+                ]
+                if disconnected and self._continuation_service is not None:
+                    lost = disconnected[0]
+                    server_continuation_available = bool(
+                        getattr(
+                            self._tool_execution,
+                            "can_continue_server_side",
+                            lambda capability_id: False,
+                        )(lost.capability_id)
+                    )
+                    old_connection_id = (
+                        lost.metadata.get("connection_id")
+                        or context.connection_id
+                        or ""
+                    )
+                    checkpoint_transcript = [
+                        item.model_dump(mode="json")
+                        for item in [
+                            *transcript,
+                            *_tool_results_to_messages(latest_tool_results),
+                        ]
+                    ]
+                    checkpoint = await self._continuation_service.checkpoint_disconnect(
+                        execution_id=context.execution_id,
+                        session_id=context.session_id,
+                        owner_user_id=context.identity.user_id,
+                        connection_id=old_connection_id,
+                        invocation_id=(
+                            lost.metadata.get("invocation_id")
+                            or lost.invocation_id
+                        ),
+                        tool_call_id=lost.tool_call_id,
+                        capability_id=lost.capability_id,
+                        iteration=iteration_number,
+                        transcript=checkpoint_transcript,
+                        server_continuation_available=server_continuation_available,
+                    )
+                    context.connection_id = None
+                    if checkpoint.state is ContinuationState.WAITING_FOR_CONNECTION:
+                        record.close(
+                            AgentLoopState.FAILED,
+                            error_code="WAITING_FOR_CONNECTION",
+                        )
+                        await self._persist_iteration(record)
+                        return AgentExecutionResult(
+                            execution_id=context.execution_id,
+                            agent_id=context.agent_id,
+                            state=AgentLoopState.FAILED,
+                            iterations=tuple(iterations),
+                            last_tool_results=latest_tool_results,
+                            usage=context.usage,
+                            error_code="WAITING_FOR_CONNECTION",
+                            error_message=(
+                                "Remote capability requires a new connection."
+                            ),
+                            continuation_state=checkpoint.state,
+                            checkpoint_id=checkpoint.checkpoint_id,
+                        )
 
                 # ToolExecutionAdapter may update context.usage with per-tool
                 # accounting. Context is authoritative after the tool batch.

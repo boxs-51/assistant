@@ -175,10 +175,7 @@ class RealtimeMultiplexer:
         connection_id: str,
         error: Optional[BaseException] = None,
     ) -> int:
-        failure = error or ConnectionError(
-            f"Connection '{connection_id}' disconnected"
-        )
         return await self.multiplexer.fail_connection(
             connection_id,
-            failure,
+            error,
         )

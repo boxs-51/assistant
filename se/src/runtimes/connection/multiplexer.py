@@ -3,6 +3,21 @@ from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 
+class RemoteConnectionLost(ConnectionError):
+    """A pending remote invocation lost its immutable transport binding."""
+
+    code = "REMOTE_CONNECTION_LOST"
+    retryable = False
+
+    def __init__(self, connection_id: str, invocation_id: str) -> None:
+        self.connection_id = connection_id
+        self.invocation_id = invocation_id
+        super().__init__(
+            f"Remote connection '{connection_id}' lost while invocation "
+            f"'{invocation_id}' was pending."
+        )
+
+
 @dataclass
 class _PendingInvocation:
     connection_id: Optional[str]
@@ -97,7 +112,7 @@ class ConnectionMultiplexer:
     async def fail_connection(
         self,
         connection_id: str,
-        error: BaseException,
+        error: BaseException | None = None,
     ) -> int:
         async with self._lock:
             matching_ids = [
@@ -111,9 +126,13 @@ class ConnectionMultiplexer:
             ]
 
         count = 0
-        for item in pending:
+        for invocation_id, item in zip(matching_ids, pending):
             if not item.future.done():
-                item.future.set_exception(error)
+                failure = error or RemoteConnectionLost(
+                    connection_id,
+                    invocation_id,
+                )
+                item.future.set_exception(failure)
                 count += 1
         return count
 

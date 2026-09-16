@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from .contracts.context_assembly import AgentCapabilityView
-from .contracts.inference import InferenceToolDefinition
 from .contracts.policy import AgentToolPolicy, PolicyDecision
+from ..capability.catalog import CapabilityNotFoundError
 
 
 class RegistryAgentCapabilityResolver:
@@ -14,10 +14,12 @@ class RegistryAgentCapabilityResolver:
         agent_registry,
         capability_registry,
         tool_policy: AgentToolPolicy,
+        capability_catalog=None,
     ) -> None:
         self._agents = agent_registry
         self._capabilities = capability_registry
         self._policy = tool_policy
+        self._catalog = capability_catalog
 
     async def resolve(
         self,
@@ -46,10 +48,13 @@ class RegistryAgentCapabilityResolver:
                 continue
 
             record = self._capabilities.get(capability_id)
-            if record is None or not record.executable:
+            definition = (
+                record.definition
+                if record is not None and record.executable
+                else self._catalog_definition(capability_id)
+            )
+            if definition is None:
                 continue
-
-            definition = record.definition
 
             result.append(
                 AgentCapabilityView(
@@ -61,3 +66,16 @@ class RegistryAgentCapabilityResolver:
             )
 
         return tuple(result)
+
+    def _catalog_definition(self, capability_id):
+        if self._catalog is None:
+            return None
+        try:
+            definition = self._catalog.get_definition(capability_id)
+            implementations = self._catalog.list_implementations(
+                capability_id,
+                routable_only=True,
+            )
+        except (KeyError, CapabilityNotFoundError):
+            return None
+        return definition if implementations else None

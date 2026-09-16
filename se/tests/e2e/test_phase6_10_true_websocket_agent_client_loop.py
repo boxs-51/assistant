@@ -10,6 +10,7 @@ import uvicorn
 from fastapi import FastAPI
 
 from se.src.application.policy.authorization import AuthorizationService
+from se.src.agent.registry import AgentRegistry
 from se.src.domain.schemas.agent import AgentDefinition
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.identity import Identity
@@ -17,6 +18,11 @@ from se.src.infrastructure.event_bus.ws_manager import WebSocketConnectionManage
 from se.src.runtimes.agent.adapters.tool import (
     CapabilityToolExecutionAdapter,
 )
+from se.src.runtimes.agent.adapters.context import ContextBuilderAdapter
+from se.src.runtimes.agent.adapters.policy import RegistryAgentToolPolicy
+from se.src.runtimes.agent.assembly import DefaultAgentContextAssembler
+from se.src.runtimes.agent.capabilities import RegistryAgentCapabilityResolver
+from se.src.runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
 from se.src.runtimes.agent.contracts.context import AgentExecutionContext
 from se.src.runtimes.agent.contracts.inference import (
     InferenceMessage,
@@ -26,9 +32,6 @@ from se.src.runtimes.agent.contracts.inference import (
 from se.src.runtimes.agent.contracts.policy import PolicyDecision
 from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.capability.catalog import CapabilityCatalog
-from se.src.runtimes.capability.contracts.definition import (
-    CapabilityDefinition,
-)
 from se.src.runtimes.capability.registry import CapabilityRegistry
 from se.src.runtimes.capability.registration import (
     ClientCapabilityRegistrationService,
@@ -38,7 +41,6 @@ from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.connection.runtime import ConnectionRuntime
 from se.src.transport.gateway.api.v1 import events_router
 from se.src.transport.gateway.authentication.dependency import (
-    get_current_identity,
     get_websocket_identity
 )
 from se.src.transport.gateway.dependencies import get_container
@@ -55,14 +57,6 @@ SESSION_ID = "e2e-session-01"
 CLIENT_ID = "e2e-desktop-01"
 OWNER_ID = "e2e-user-01"
 CAPABILITY_ID = "desktop.echo"
-
-
-class AllowToolPolicy:
-    def is_visible(self, *, agent_id, capability_id):
-        return True
-
-    def authorize(self, *, identity, agent_id, capability_id):
-        return PolicyDecision.ALLOW
 
 
 class AllowExecutionPolicy:
@@ -136,30 +130,14 @@ class DeterministicInference:
         )
 
 
-class DeterministicContextBuilder:
-    async def build(self, context, request):
-        class Snapshot:
-            messages = list(request.prior_messages)
-            tools = [
-                {
-                    "name": CAPABILITY_ID,
-                    "description": "Real client-side E2E echo tool",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "value": {
-                                "type": "string",
-                            },
-                        },
-                        "required": ["value"],
-                    },
-                }
-            ]
-            metadata = {
-                "connection_id": context.connection_id,
-            }
-
-        return Snapshot()
+class E2EContextRuntime:
+    async def load_context(self, session_id, identity):
+        session = type(
+            "Session",
+            (),
+            {"messages": [InferenceMessage(role="user", content="Run echo")]},
+        )()
+        return type("Loaded", (), {"session": session})()
 
 
 def _free_tcp_port() -> int:
@@ -220,12 +198,7 @@ def _build_gateway_app():
     app.dependency_overrides[get_container] = (
         lambda: container
     )
-    app.dependency_overrides[get_current_identity] = (
-        lambda: identity
-    )
-    async def _mock_ws_identity(*args, **kwargs):
-        return identity
-    app.dependency_overrides[get_websocket_identity] = _mock_ws_identity
+    app.dependency_overrides[get_websocket_identity] = lambda: identity
     
     return (
         app,
@@ -365,6 +338,7 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
 
         client_realtime = None
         client_dispatcher = None
+        client_capabilities = None
 
         try:
             client_dispatcher = CapabilityDispatcher(
@@ -381,6 +355,9 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
                 session_id=SESSION_ID,
                 client_id=CLIENT_ID,
                 heartbeat_interval=60.0,
+                on_message=lambda envelope: (
+                    client_capabilities.handle_message(envelope)
+                ),
             )
 
             # The dispatcher must use the SAME real realtime transport.
@@ -462,57 +439,10 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             # Gateway-side AgentRuntime setup
             # ----------------------------------------------------------
             #
-            # CapabilityToolExecutionAdapter currently checks the
-            # executable CapabilityRegistry before CapabilityRuntime
-            # resolves the catalog implementation.
-            #
-            # Keep that check explicit in the harness. The actual
-            # execution driver is STILL selected from the catalog as
-            # REMOTE_CLIENT and therefore the local gateway driver below
-            # is never invoked.
+            # Deliberately keep the server registry empty. The registered
+            # remote catalog implementation is independently executable.
             gateway_capability_registry = (
                 CapabilityRegistry()
-            )
-
-            definition = CapabilityDefinition(
-                id=CAPABILITY_ID,
-                name=CAPABILITY_ID,
-                description=(
-                    "Real client-side E2E echo tool"
-                ),
-                input_schema={
-                    "type": "object",
-                    "properties": {
-                        "value": {
-                            "type": "string",
-                        },
-                    },
-                    "required": ["value"],
-                },
-            )
-
-            gateway_capability_registry.register_definition(
-                definition
-            )
-
-            # The canonical adapter requires an executable record.
-            # Register a guard driver whose execute method MUST NOT run.
-            class RegistryGateDriver:
-                def __init__(self, definition):
-                    self.definition = definition
-
-                async def execute(
-                    self,
-                    context,
-                    arguments,
-                ):
-                    raise AssertionError(
-                        "RegistryGateDriver executed: "
-                        "remote catalog routing was bypassed."
-                    )
-
-            gateway_capability_registry.register_capability(
-                RegistryGateDriver(definition)
             )
 
             gateway_realtime = (
@@ -534,12 +464,6 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
                 realtime=gateway_realtime,
             )
 
-            tool_port = CapabilityToolExecutionAdapter(
-                gateway_capability_runtime,
-                AllowToolPolicy(),
-                AllowExecutionPolicy(),
-            )
-
             inference = DeterministicInference()
 
             agent = AgentDefinition(
@@ -549,6 +473,34 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
                     "Use desktop.echo when required."
                 ),
                 tools=[CAPABILITY_ID],
+            )
+            agent_registry = AgentRegistry()
+            agent_registry.register(agent)
+            tool_policy = RegistryAgentToolPolicy(
+                agent_registry,
+                gateway_capability_registry,
+                AuthorizationService(),
+                capability_catalog=catalog,
+            )
+            context_assembler = DefaultAgentContextAssembler(
+                DefaultAgentSystemPromptProvider(),
+                RegistryAgentCapabilityResolver(
+                    agent_registry=agent_registry,
+                    capability_registry=gateway_capability_registry,
+                    capability_catalog=catalog,
+                    tool_policy=tool_policy,
+                ),
+            )
+            context_builder = ContextBuilderAdapter(
+                E2EContextRuntime(),
+                gateway_capability_runtime,
+                tool_policy,
+                context_assembler=context_assembler,
+            )
+            tool_port = CapabilityToolExecutionAdapter(
+                gateway_capability_runtime,
+                tool_policy,
+                AllowExecutionPolicy(),
             )
 
             context = AgentExecutionContext.create(
@@ -562,12 +514,11 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
                 ),
                 connection_id=CONNECTION_ID,
                 agent=agent,
+                metadata={"constitution": "Report remote results honestly."},
             )
 
             runtime = AgentRuntime(
-                context_builder=(
-                    DeterministicContextBuilder()
-                ),
+                context_builder=context_builder,
                 inference=inference,
                 tool_execution=tool_port,
                 execution_policy=(
@@ -615,11 +566,28 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             assert execution.state.value == "COMPLETED"
             assert context.iteration == 2
 
+            first_request = inference.requests[0]
+            assert first_request.messages[0].role == "system"
+            assert sum(
+                item.role == "system" for item in first_request.messages
+            ) == 1
+            system_content = str(first_request.messages[0].content)
+            assert "AGENT CONSTITUTION" in system_content
+            assert "phase6-10-e2e-agent" in system_content
+            assert "Execute a client-side tool" in system_content
+            assert "Use desktop.echo when required" in system_content
+            assert [item.name for item in first_request.tools] == [CAPABILITY_ID]
+
             # The second inference must contain the tool result in the
             # reconstructed conversation.
             second_request = inference.requests[1]
+            assert sum(
+                item.role == "system" for item in second_request.messages
+            ) == 1
+            assert second_request.messages[0].content == first_request.messages[0].content
+            assert second_request.messages[-1].role == "tool"
             serialized = repr(
-                second_request.prior_messages
+                second_request.messages
             )
 
             assert "hello-from-agent" in serialized

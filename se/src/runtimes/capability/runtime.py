@@ -19,6 +19,7 @@ from .contracts.implementation import CapabilityExecutionLocation
 from .policy import CapabilityRequestContext, CapabilityRoutingPolicy
 from ...runtimes.connection.registry import ConnectionRegistry
 from ...runtimes.connection.realtime import RealtimeMultiplexer
+from ...runtimes.connection.multiplexer import RemoteConnectionLost
 from ...domain.schemas.identity import Identity
 from ...domain.schemas.event import BaseEvent
 from ...application.policy.authorization import AuthorizationService
@@ -351,6 +352,11 @@ class CapabilityRuntime(BaseRuntime):
             details: Dict[str, Any] = {}
             if original_code:
                 details["original_error_code"] = str(original_code)
+            if isinstance(exc, RemoteConnectionLost):
+                details.update(
+                    connection_id=exc.connection_id,
+                    invocation_id=exc.invocation_id,
+                )
             raise CapabilityError(
                 code="CAPABILITY_EXECUTION_FAILED",
                 message=str(exc),

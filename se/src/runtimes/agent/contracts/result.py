@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .inference import InferenceMessage, InferenceUsage
 from .loop import AgentIteration, AgentLoopState
 from .tool import ToolExecutionResult
+from .continuation import ContinuationState
 
 
 class AgentExecutionResult(BaseModel):
@@ -24,3 +25,5 @@ class AgentExecutionResult(BaseModel):
     usage: InferenceUsage = Field(default_factory=InferenceUsage)
     error_code: str | None = None
     error_message: str | None = None
+    continuation_state: ContinuationState | None = None
+    checkpoint_id: str | None = None

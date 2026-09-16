@@ -22,10 +22,12 @@ class ContextBuilderAdapter(ContextBuilderPort):
         context_runtime: Any,
         capability_runtime: Any,
         tool_policy: AgentToolPolicy,
+        context_assembler=None,
     ) -> None:
         self._context_runtime = context_runtime
         self._capability_runtime = capability_runtime
         self._tool_policy = tool_policy
+        self._context_assembler = context_assembler
 
     async def build(
         self,
@@ -61,19 +63,20 @@ class ContextBuilderAdapter(ContextBuilderPort):
                 for message in (loaded.session.messages if loaded.session else [])
             ]
 
-        instruction = (context.agent.instruction if context.agent else "").strip()
-        if instruction and not any(
-            message.role == "system" for message in history
-        ):
-            history.insert(0, InferenceMessage(role="system", content=instruction))
+        if self._context_assembler is None:
+            instruction = (context.agent.instruction if context.agent else "").strip()
+            if instruction and not any(
+                message.role == "system" for message in history
+            ):
+                history.insert(0, InferenceMessage(role="system", content=instruction))
 
         input_payload = dict(request.input or context.input or {})
         prompt = input_payload.get("prompt", input_payload.get("content"))
         if prompt is not None:
             prompt_value = jsonable(prompt)
-            if not history or not (
-                history[-1].role == "user"
-                and history[-1].content == prompt_value
+            if not any(
+                message.role == "user" and message.content == prompt_value
+                for message in history
             ):
                 history.append(
                     InferenceMessage(role="user", content=prompt_value)
@@ -98,8 +101,17 @@ class ContextBuilderAdapter(ContextBuilderPort):
             )
 
         tools: list[InferenceToolDefinition] = []
-        registry = getattr(self._capability_runtime, "registry", None)
-        if registry is not None and context.agent is not None:
+        assembly = None
+        if self._context_assembler is not None:
+            assembly = await self._context_assembler.assemble(
+                context=context,
+                prior_messages=[item.model_dump(mode="json") for item in history],
+            )
+            history = list(assembly.messages)
+            tools = list(assembly.tools)
+        else:
+            registry = getattr(self._capability_runtime, "registry", None)
+        if self._context_assembler is None and registry is not None and context.agent is not None:
             for capability_id in context.agent.tools or []:
                 if self._tool_policy.is_visible(
                     agent_id=context.agent_id,
@@ -131,6 +143,15 @@ class ContextBuilderAdapter(ContextBuilderPort):
             "session_id": context.session_id,
             "trace_id": context.trace_id,
         }
+        if assembly is not None:
+            metadata.update(
+                capability_ids=[
+                    item.capability_id for item in assembly.capabilities
+                ],
+                system_prompt_source=assembly.system_prompt.source,
+                system_prompt_version=assembly.system_prompt.version,
+                constraints=dict(assembly.constraints),
+            )
         return AgentContextSnapshot(
             execution_id=context.execution_id,
             iteration=request.iteration,

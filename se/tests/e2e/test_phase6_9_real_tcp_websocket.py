@@ -29,6 +29,7 @@ from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.connection.runtime import ConnectionRuntime
 from se.src.transport.gateway.api.v1 import events_router
+from se.src.infrastructure.event_bus.ws_manager import WebSocketConnectionManager
 from se.src.transport.gateway.authentication.dependency import (
     get_websocket_identity,
 )
@@ -39,7 +40,6 @@ from se.src.domain.schemas import AgentExecutionLimits
 from cl.src.core.client_runtime import ClientRuntime
 
 
-CONNECTION_ID = "e2e-connection-01"
 SESSION_ID = "e2e-session-01"
 CLIENT_ID = "e2e-client-01"
 OWNER_ID = "e2e-owner-01"
@@ -176,26 +176,34 @@ def _build_registry(executed):
             "connection_id": kwargs.get("connection_id"),
         }
 
-    return SimpleNamespace(
-        tools={
-            CAPABILITY_ID: {
-                "func": desktop_echo,
-                "metadata": {
-                    "name": CAPABILITY_ID,
-                    "description": "E2E client echo",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "value": {
-                                "type": "string",
-                            }
+    class TestRegistry:
+        def __init__(self):
+            self.tools = {
+                CAPABILITY_ID: {
+                    "func": desktop_echo,
+                    "metadata": {
+                        "name": CAPABILITY_ID,
+                        "description": "E2E client echo",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "value": {
+                                    "type": "string",
+                                }
+                            },
+                            "required": ["value"],
                         },
-                        "required": ["value"],
                     },
-                },
+                }
             }
-        }
-    )
+
+        def load_all(self):
+            return None
+
+        def get_tool(self, capability_id):
+            return self.tools.get(capability_id)
+
+    return TestRegistry()
 
 
 def _build_gateway():
@@ -221,7 +229,7 @@ def _build_gateway():
     container = SimpleNamespace(
         connection_runtime=connection_runtime,
         eventing_manager=SimpleNamespace(
-            ws_manager=SimpleNamespace(),
+            ws_manager=WebSocketConnectionManager(),
         ),
     )
 
@@ -306,12 +314,12 @@ def test_phase6_9_real_tcp_websocket_agent_client_loop():
 
         _wait_until(
             lambda: catalog.contains_implementation(
-                f"{CONNECTION_ID}:{CAPABILITY_ID}"
+                f"{client.connection_id}:{CAPABILITY_ID}"
             )
         )
 
         implementation = catalog.get_implementation(
-            f"{CONNECTION_ID}:{CAPABILITY_ID}"
+            f"{client.connection_id}:{CAPABILITY_ID}"
         )
 
         assert implementation.connection_id == client.connection_id
@@ -334,13 +342,16 @@ def test_phase6_9_real_tcp_websocket_agent_client_loop():
         gateway_registry.register_definition(definition)
 
         class RegistryGateDriver:
+            def __init__(self, capability_definition):
+                self.definition = capability_definition
+
             async def execute(self, context, arguments):
                 raise AssertionError(
                     "SERVER driver executed instead of client driver."
                 )
 
         gateway_registry.register_capability(
-            RegistryGateDriver()
+            RegistryGateDriver(definition)
         )
 
         capability_runtime = CapabilityRuntime(

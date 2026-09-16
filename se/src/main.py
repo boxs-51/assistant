@@ -72,6 +72,10 @@ from .runtimes.capability.local_tool_loader import register_local_tools
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
+from .runtimes.agent.continuation import AgentContinuationService
+from .runtimes.agent.assembly import DefaultAgentContextAssembler
+from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
+from .runtimes.agent.capabilities import RegistryAgentCapabilityResolver
 from .runtimes.agent.events import EventBusAgentEventPublisher
 from .runtimes.agent.adapters import (
     ContextBuilderAdapter,
@@ -265,14 +269,25 @@ async def bootstrap_runtime_kernel(
         agent_registry=container.agent_registry,
         capability_registry=container.capability_registry,
         authorization=container.authorization_service,
+        capability_catalog=capability_catalog,
     )
     agent_execution_policy = DefaultAgentExecutionPolicy()
     container.agent_tool_policy = agent_tool_policy
     container.agent_execution_policy = agent_execution_policy
+    container.context_assembler = DefaultAgentContextAssembler(
+        DefaultAgentSystemPromptProvider(),
+        RegistryAgentCapabilityResolver(
+            agent_registry=container.agent_registry,
+            capability_registry=container.capability_registry,
+            capability_catalog=capability_catalog,
+            tool_policy=agent_tool_policy,
+        ),
+    )
     container.context_builder_port = ContextBuilderAdapter(
         container.context_runtime,
         container.capability_runtime,
         agent_tool_policy,
+        context_assembler=container.context_assembler,
     )
     container.inference_port = ProviderInferenceAdapter(
         container.provider_runtime,
@@ -286,6 +301,9 @@ async def bootstrap_runtime_kernel(
     container.tool_execution_port = AgentToolExecutionCoordinator(
         container.tool_execution_port,
     )
+    container.continuation_service = AgentContinuationService(
+        DurableAgentStore(eventing_manager.uow_factory)
+    )
     container.agent_runtime = AgentRuntime(
         context_builder=container.context_builder_port,
         inference=container.inference_port,
@@ -293,6 +311,7 @@ async def bootstrap_runtime_kernel(
         execution_policy=container.agent_execution_policy,
         durable_store=DurableAgentStore(eventing_manager.uow_factory),
         event_publisher=EventBusAgentEventPublisher(container.event_bus),
+        continuation_service=container.continuation_service,
     )
 
     # Cấu hình Multi-Agent Executor

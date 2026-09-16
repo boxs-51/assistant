@@ -39,6 +39,25 @@ class DurableAgentStore:
     async def update_checkpoint(self, execution_id: str, values: Dict[str, Any]):
         return await self.update_execution(execution_id, values)
 
+    async def save_continuation_state(
+        self,
+        execution_id: str,
+        state: Dict[str, Any],
+    ):
+        """Persist Phase 6.9 continuation data in the existing JSON column."""
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                raise KeyError(f"Unknown agent execution: {execution_id}")
+            context_state = dict(getattr(execution, "context_state", None) or {})
+            context_state["continuation"] = dict(state)
+            record = await uow.agents.update_execution(
+                execution_id,
+                {"context_state": context_state},
+            )
+            await uow.commit()
+            return record
+
     async def save_iteration(self, values: Dict[str, Any]):
         async with self.uow_factory() as uow:
             record = await uow.agents.save_iteration(values)
