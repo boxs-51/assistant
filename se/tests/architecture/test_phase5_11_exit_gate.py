@@ -25,12 +25,12 @@ from src.runtimes.capability.contracts.definition import CapabilityDefinition
 from src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
 from src.agent.registry import AgentRegistry
 
-ROOT = Path(__file__).resolve().parents[2]
-EXIT_GATE_DOC = ROOT / "docs" / "phase5" / "phase5_11" / "PHASE5_11_EXIT_GATE.md"
-CHECKLIST = ROOT / "docs" / "phase5" / "phase5_11" / "PHASE5_11_TASK_CHECKLIST.md"
-LEGACY_STATUS_DOC = ROOT / "docs" / "phase5" / "Agent_Execution_System.md"
+ROOT = Path(__file__).resolve().parents[3]
+EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_11" / "PHASE5_11_EXIT_GATE.md"
+CHECKLIST = ROOT / "se" / "docs" / "phase5" / "phase5_11" / "PHASE5_11_TASK_CHECKLIST.md"
+LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "phase5" / "Agent_Execution_System.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-11-exit-gate.yml"
-MAIN_MODULE = ROOT / "src" / "main.py"
+MAIN_MODULE = ROOT / "se" / "src" / "main.py"
 
 
 class ContextEngine:

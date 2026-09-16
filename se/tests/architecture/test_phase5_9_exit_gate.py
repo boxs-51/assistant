@@ -24,9 +24,9 @@ from src.runtimes.agent.contracts import (
 from src.runtimes.agent.persistence import DurableAgentStore
 from src.runtimes.agent.runtime import AgentRuntime
 
-ROOT = Path(__file__).resolve().parents[2]
-EXIT_GATE_DOC = ROOT / "docs" / "phase5" / "phase5_9" / "PHASE5_9_EXIT_GATE.md"
-LEGACY_STATUS_DOC = ROOT / "docs" / "phase5" / "Agent_Execution_System.md"
+ROOT = Path(__file__).resolve().parents[3]
+EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_9" / "PHASE5_9_EXIT_GATE.md"
+LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "phase5" / "Agent_Execution_System.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-9-exit-gate.yml"
 
 def test_E1_execution_plane_models_persist_expected_links():

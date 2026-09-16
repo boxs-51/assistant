@@ -22,11 +22,11 @@ from src.runtimes.agent.events import EventBusAgentEventPublisher
 from src.runtimes.agent.runtime import AgentRuntime
 from src.runtimes.agent.adapters.policy import DefaultAgentExecutionPolicy
 
-ROOT = Path(__file__).resolve().parents[2]
-EXIT_GATE_DOC = ROOT / "docs" / "phase5" / "phase5_10" / "PHASE5_10_EXIT_GATE.md"
-LEGACY_STATUS_DOC = ROOT / "docs" / "phase5" / "Agent_Execution_System.md"
+ROOT = Path(__file__).resolve().parents[3]
+EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_10" / "PHASE5_10_EXIT_GATE.md"
+LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "phase5" / "Agent_Execution_System.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-10-exit-gate.yml"
-MAIN_MODULE = ROOT / "src" / "main.py"
+MAIN_MODULE = ROOT / "se" / "src" / "main.py"
 
 
 class Publisher:
