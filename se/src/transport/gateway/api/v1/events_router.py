@@ -7,7 +7,7 @@ from pydantic import ValidationError
 from .....infrastructure.event_bus.ws_manager import WebSocketConnectionManager
 from .....runtimes.capability.contracts.registration import ClientCapabilityRegistration
 from .....runtimes.connection.protocol import RealtimeEnvelope
-from ...authentication.dependency import get_current_identity
+from ...authentication.dependency import get_current_identity, get_websocket_identity
 from .....domain.schemas.identity import Identity
 from ...dependencies import get_container
 from .....application.container import ApplicationContainer
@@ -61,7 +61,7 @@ async def _ensure_connection(websocket, identity, connection_runtime, envelope):
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
-    identity: Identity = Depends(get_current_identity),
+    identity: Identity = Depends(get_websocket_identity),
     container: ApplicationContainer = Depends(get_container),
 ):
     """Endpoint cho phép client kết nối để nhận các sự kiện hệ thống theo thời gian thực."""
@@ -74,6 +74,8 @@ async def websocket_endpoint(
         # Vòng lặp để nhận tin nhắn từ client (ví dụ: yêu cầu subscribe)
         while True:
             data = await websocket.receive_text()
+            if data:
+                logger.info("data tu ws", data=data)
             try:
                 message = json.loads(data)
                 action = message.get("action")
@@ -126,8 +128,10 @@ async def websocket_endpoint(
                             envelope,
                         )
             except (ValidationError, ValueError, RuntimeError) as error:
+                logger.exception("Validation/Runtime error during WebSocket message processing", error=str(error))
                 await websocket.send_text(json.dumps({"status": "error", "message": str(error)}))
             except json.JSONDecodeError:
+                logger.error("Invalid JSON received from WebSocket client")
                 await websocket.send_text(json.dumps({"status": "error", "message": "Invalid JSON format"}))
 
     except WebSocketDisconnect:

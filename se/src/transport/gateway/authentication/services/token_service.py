@@ -47,7 +47,7 @@ class TokenService:
 
         # Lưu hash của refresh token vào Redis để có thể thu hồi sau này
         refresh_token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-        await self.session_repo.save_token(user_id, refresh_token_hash, self.config.auth.refresh_token_expire_days * 86400)
+        await self.session_repo.save_token(user_id, refresh_token_hash, self.config.refresh_token_expire_days * 86400)
 
         return TokenSchema(access_token=access_token, refresh_token=refresh_token)
 

@@ -1,10 +1,10 @@
 from fastapi import Request, Depends
-
+from starlette.requests import HTTPConnection
 from ...application.container import ApplicationContainer
 
 
-def get_container(request: Request) -> ApplicationContainer:
-    container = getattr(request.app.state, "container", None)
+def get_container(connection: HTTPConnection) -> ApplicationContainer:
+    container = getattr(connection.app.state, "container", None)
     if container is None:
         raise RuntimeError("Application container has not been initialized.")
     return container

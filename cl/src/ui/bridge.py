@@ -11,8 +11,9 @@ from .encoder import FileEncoder
 logger = logging.getLogger(__name__)
 
 class UIBridge:
-    def __init__(self, engine, hitl):
+    def __init__(self, engine, hitl, client_runtime):
         self._engine = engine
+        self._client_runtime = client_runtime
         self._window = None
         self._execution_local = threading.local()
         
@@ -27,6 +28,19 @@ class UIBridge:
         
         hitl.set_approval_callback(self.hitl.show_dialog)
 
+    def login(self, payload: dict):
+        try:
+            return {
+                "success": True,
+                "data": self._client_runtime.login(payload),
+            }
+        except Exception as error:
+            logger.exception("Login failed")
+            return {
+                "success": False,
+                "error": str(error),
+            }
+    
     def set_window(self, window: webview.Window):
         self._window = window
 
@@ -41,6 +55,14 @@ class UIBridge:
         self._eval_js(f"window.renderBlock && window.renderBlock({json.dumps(payload, ensure_ascii=False)})")
 
     def submit_prompt(self, text: str, files: list = None, conversation_id: str = None):
+
+        if not self._client_runtime.ready:
+            self.render_block(
+                role="system",
+                text="Vui lòng đăng nhập trước khi sử dụng Gateway.",
+            )
+            return
+        
         cid, session, lock = self.sessions.get_or_create(conversation_id)
         execution_id = uuid.uuid4().hex
         self._eval_js("window.setInputState(false)")

@@ -67,6 +67,27 @@ export function initGatewayPanel() {
   if (!panel) return;
 
   panel.innerHTML = `
+    <section class="gateway-auth">
+      <div class="gateway-heading">
+        <div>
+          <span class="gateway-eyebrow">ACCESS</span>
+          <h2>Sign in</h2>
+        </div>
+        <span id="auth-status" class="gateway-status idle">Signed out</span>
+      </div>
+
+      <input id="auth-email" type="email" placeholder="Email">
+      <input id="auth-password" type="password" placeholder="Password">
+
+      <button id="auth-login" class="gateway-button primary">
+        Sign in
+      </button>
+
+      <pre id="auth-result" class="gateway-result"></pre>
+    </section>
+
+    <!-- Gateway console hiện tại đặt bên dưới -->
+    
     <div class="gateway-heading">
       <div>
         <span class="gateway-eyebrow">CONTROL PLANE</span>
@@ -86,6 +107,43 @@ export function initGatewayPanel() {
     </div>
     <pre id="gateway-result" class="gateway-result">Chưa có response.</pre>
   `;
+
+  const loginButton = panel.querySelector('#auth-login');
+  const emailInput = panel.querySelector('#auth-email');
+  const passwordInput = panel.querySelector('#auth-password');
+  const authStatus = panel.querySelector('#auth-status');
+  const authResult = panel.querySelector('#auth-result');
+
+  loginButton.addEventListener('click', async () => {
+    loginButton.disabled = true;
+    authStatus.textContent = 'Signing in';
+    authStatus.className = 'gateway-status running';
+
+    try {
+      const response = await window.pywebview.api.login({
+        email: emailInput.value.trim(),
+        password: passwordInput.value,
+      });
+
+      if (!response.success) {
+        throw new Error(response.error);
+      }
+
+      authStatus.textContent = 'Signed in';
+      authStatus.className = 'gateway-status success';
+      authResult.textContent = JSON.stringify(
+        response.data.user,
+        null,
+        2,
+      );
+    } catch (error) {
+      authStatus.textContent = 'Failed';
+      authStatus.className = 'gateway-status error';
+      authResult.textContent = error.message;
+    } finally {
+      loginButton.disabled = false;
+    }
+  });
 
   const endpoint = panel.querySelector('#gateway-endpoint');
   const payload = panel.querySelector('#gateway-payload');

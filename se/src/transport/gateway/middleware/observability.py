@@ -1,13 +1,13 @@
 import time
 import uuid
 import structlog
-from fastapi import Request
+from starlette.requests import HTTPConnection
 from opentelemetry import trace
 
 
 logger = structlog.get_logger(__name__)
 
-async def observability_middleware(request: Request, call_next):
+async def observability_middleware(connection: HTTPConnection, call_next):
     """
     Middleware trung tâm cho observability:
     1. Gắn request_id vào context của log.
@@ -20,9 +20,9 @@ async def observability_middleware(request: Request, call_next):
     structlog.contextvars.bind_contextvars(request_id=request_id)
 
     start_time = time.time()
-    logger.info("Request received", method=request.method, path=request.url.path)
+    logger.info("Request received", method=connection.method, path=connection.url.path)
 
-    response = await call_next(request)
+    response = await call_next(connection)
 
     process_time = time.time() - start_time
     

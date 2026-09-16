@@ -128,7 +128,35 @@ export function normalizeToContentParts(data) {
 
   const parts = [];
 
-  // 1. Xử lý dữ liệu nằm trong data.data
+  const payload = data.data || {};
+
+  if (typeof data.text === 'string' && data.text.trim()) {
+    parts.push({
+      type: 'text',
+      text: data.text,
+    });
+  }
+
+  if (typeof payload.text === 'string' && payload.text.trim()) {
+    parts.push({
+      type: 'text',
+      text: payload.text,
+    });
+  }
+
+  if (Array.isArray(payload.files)) {
+    payload.files.forEach((file) => {
+      const attachment = buildGatewayAttachment(file);
+
+      if (attachment) {
+        parts.push({
+          type: 'file',
+          data: { attachment },
+        });
+      }
+    });
+  }
+  
   const innerData = data.data?.response?.choices[0]?.message;
   if (innerData) {
     if (Array.isArray(innerData.content)) {
@@ -142,17 +170,6 @@ export function normalizeToContentParts(data) {
     }
   }
 
-  // 4. Xử lý mảng files đính kèm
-  // if (Array.isArray(innerData?.files)) {
-  //   files.forEach(f => {
-  //     parts.push({
-  //       type: 'file',
-  //       data: {
-  //         attachment: buildGatewayAttachment(f)
-  //       }
-  //     });
-  //   });
-  // }
 
   return parts;
 }

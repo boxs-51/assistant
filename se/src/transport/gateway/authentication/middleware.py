@@ -1,4 +1,4 @@
-from fastapi import Request
+from starlette.requests import HTTPConnection
 from fastapi.responses import JSONResponse
 import structlog
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -21,26 +21,26 @@ class AuthenticationMiddleware(BaseHTTPMiddleware):
                 return True
         return False
 
-    async def dispatch(self, request: Request, call_next):
+    async def dispatch(self, connection: HTTPConnection, call_next):
         # Tự động bỏ qua tất cả các request OPTIONS (dành cho CORS preflight)
         # CORSMiddleware sẽ xử lý chúng sau.
-        if request.method == "OPTIONS":
-            return await call_next(request)
+        if connection.method == "OPTIONS":
+            return await call_next(connection)
 
-        if self._is_public(request.url.path):
-            return await call_next(request)
+        if self._is_public(connection.url.path):
+            return await call_next(connection)
 
         try:
             # ``app.state.container`` is the only application-state dependency boundary.
-            container = request.app.state.container
+            container = connection.app.state.container
             auth_manager: AuthenticationManager = container.require("auth_manager")
-            identity = await auth_manager.authenticate(request)
-            request.state.identity = identity
+            identity = await auth_manager.authenticate(connection)
+            connection.state.identity = identity
             # Gắn thông tin identity vào log context để dễ dàng truy vết
             structlog.contextvars.bind_contextvars(identity=identity.model_dump(exclude_none=True))
         except (AuthenticationError, InvalidCredentialsError) as e:
-            logger.warning("Authentication failed", error=e.detail, path=request.url.path)
+            logger.warning("Authentication failed", error=e.detail, path=connection.url.path)
             return JSONResponse(status_code=401, content={"detail": e.detail})
 
-        response = await call_next(request)
+        response = await call_next(connection)
         return response

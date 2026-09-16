@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 from ..schemas.request import GatewayChatRequest
 from ..schemas.response import GatewayResponse, GatewayStreamChunk
+from .realtime_client import GatewayRealtimeClient as PersistentGatewayRealtimeClient
 
 # Token cố định cho Guest (phải trùng khớp với GUEST_PASS_TOKEN bên backend JWTAuthenticator)
 DEFAULT_GUEST_TOKEN = "YOUR_GUEST_PASS_JWT_HERE"
@@ -14,11 +15,18 @@ class GatewayLLMClient:
     def __init__(self, gateway_url: str, api_key: str = ""):
         self.base_url = gateway_url.rstrip('/')
         self.gateway_url = self.base_url + "/v1/chat/completions"
-        token = api_key or DEFAULT_GUEST_TOKEN
+
+        self.access_token = api_key or DEFAULT_GUEST_TOKEN
+        self.refresh_token_value = None
+
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {token}"
+            "Authorization": f"Bearer {self.access_token}",
         }
+
+    def set_access_token(self, access_token: str) -> None:
+        self.access_token = access_token
+        self.headers["Authorization"] = f"Bearer {access_token}"
 
     def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
         headers = self.headers.copy()
@@ -31,6 +39,15 @@ class GatewayLLMClient:
             **kwargs,
         )
         response.raise_for_status()
+        if response.status_code >= 400:
+            try:
+                detail = response.json().get("detail")
+            except ValueError:
+                detail = response.text
+            raise requests.HTTPError(
+                f"{response.status_code}: {detail}",
+                response=response,
+            )
         return response
 
     def send_request(self, payload: GatewayChatRequest) -> Union[GatewayResponse, Generator[GatewayStreamChunk, None, None]]:
@@ -76,10 +93,26 @@ class GatewayLLMClient:
         return self._request("POST", "/v1/auth/register/verify", json=payload).json()
 
     def login(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request("POST", "/v1/auth/login", json=payload).json()
+        response = self._request(
+            "POST",
+            "/v1/auth/login",
+            json=payload,
+        ).json()
+
+        self.set_access_token(response["access_token"])
+        self.refresh_token_value = response.get("refresh_token")
+
+        return response
 
     def refresh_token(self, refresh_token: str) -> Dict[str, Any]:
-        return self._request("POST", "/v1/auth/refresh", json={"refresh_token": refresh_token}).json()
+        response = self._request(
+            "POST",
+            "/v1/auth/refresh",
+            json={"refresh_token": refresh_token},
+        ).json()
+
+        self.set_access_token(response["access_token"])
+        return response
 
     def logout(self, refresh_token: str) -> None:
         self._request("POST", "/v1/auth/logout", json={"refresh_token": refresh_token})
@@ -198,7 +231,7 @@ class GatewayLLMClient:
         return result
 
     def open_realtime_connection(self, connection_id: Optional[str] = None, session_id: Optional[str] = None):
-        return GatewayRealtimeClient(self.base_url, self.headers, connection_id, session_id)
+        return PersistentGatewayRealtimeClient(self.base_url, self.headers, connection_id=connection_id, session_id=session_id)
 
     def create_agent_session(self, agent_ids: Iterable[str]) -> Dict[str, Any]:
         return self._request("POST", "/v1/multi-agent/sessions", json={"agent_ids": list(agent_ids)}).json()
@@ -242,7 +275,11 @@ class GatewayLLMClient:
 
 
 class GatewayRealtimeClient:
-    """Synchronous client for the gateway capability WebSocket protocol."""
+    """
+    DEPRECATED.
+
+    Use cl.src.core.realtime_client.GatewayRealtimeClient.
+    """
     def __init__(self, base_url: str, headers: Dict[str, str], connection_id: Optional[str] = None, session_id: Optional[str] = None):
         self.connection_id = connection_id or f"cl-{uuid.uuid4().hex}"
         self.session_id = session_id or f"session-{uuid.uuid4().hex}"

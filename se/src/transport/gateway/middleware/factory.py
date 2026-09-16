@@ -4,7 +4,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .observability import observability_middleware
 from ..authentication.middleware import AuthenticationMiddleware
-from ....infrastructure.config import settings
 
 
 def create_middleware_stack(app: FastAPI):

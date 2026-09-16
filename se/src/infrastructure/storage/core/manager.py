@@ -316,10 +316,6 @@ class StorageEngine:
             self.drivers.is_available("sqlite")
         )
 
-        redis_available = (
-            self.drivers.is_available("redis")
-        )
-
         # -----------------------------------------------------
         # SQLite
         # -----------------------------------------------------
@@ -335,23 +331,26 @@ class StorageEngine:
         # Session Repository
         # -----------------------------------------------------
 
-        if redis_available:
-            redis_driver = self.get_cache_driver()
+        cache_driver = None
+        if self.drivers.is_available("redis"):
+            cache_driver = self.get_driver("redis")
+        elif self.drivers.is_available("in-memory"):
+            cache_driver = self.get_cache_driver("in-memory")
 
+        if cache_driver is not None:
             self.repositories.register(
                 "sessions",
                 SessionRepository(
-                    cache_driver=redis_driver
+                    cache_driver=cache_driver
                 ),
             )
 
             logger.info(
                 "Session repository initialized"
             )
-
         else:
             logger.warning(
-                "Redis driver unavailable. "
+                "No cache driver available. "
                 "Session repository will not be registered."
             )
 

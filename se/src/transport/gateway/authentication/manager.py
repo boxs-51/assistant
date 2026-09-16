@@ -1,5 +1,5 @@
 # authentication/manager.py
-from fastapi import Request
+from starlette.requests import HTTPConnection
 import structlog
 from typing import List
 
@@ -29,8 +29,8 @@ class AuthenticationManager:
     def __init__(self, authenticators: List[AuthenticatorInterface]):
         self.authenticators = authenticators
 
-    async def authenticate(self, request: Request) -> Identity:
-        auth_header = request.headers.get("Authorization")
+    async def authenticate(self, connection: HTTPConnection) -> Identity:
+        auth_header = connection.headers.get("Authorization")
         if not auth_header or not auth_header.startswith("Bearer "):
             raise InvalidCredentialsError("Missing or malformed Authorization header")
 

@@ -6,30 +6,28 @@ from .loader.registry import DynamicRegistry
 from .hitl.hitl_manager import HITLManager
 from .core.agent_engine import AgentEngine
 from .core.gateway_client import GatewayLLMClient
+from .core.client_runtime import ClientRuntime
 
 def main():
-    # 1. Khởi tạo Registry & nạp mô-đun động
-    registry = DynamicRegistry(tools_dir="tools/v1",
-                               config_dir="cl/config")
-    registry.load_all()
+    registry = DynamicRegistry(
+        tools_dir="tools/v1",
+        config_dir="cl/config",
+    )
 
-    # 2. Khởi tạo bộ quản lý Human-In-The-Loop
-    hitl = HITLManager()
+    client_runtime = ClientRuntime(
+        "http://localhost:8000",
+        registry,
+        client_id="desktop-client",
+    )
 
-    # 3 .
-    gateway_client = GatewayLLMClient("http://localhost:8000")
-    try:
-        sync_result = gateway_client.sync_registry(registry)
-        print(f"Gateway registry synchronized: {len(sync_result['tools'])} tools, {len(sync_result['skills'])} skills")
-    except Exception as exc:
-        # Desktop mode remains usable while the gateway is offline; the UI can
-        # retry registration through its gateway operations.
-        print(f"Gateway registry synchronization skipped: {exc}")
-
-    # 4. Khởi tạo Engine chính
-    engine = AgentEngine(registry=registry, hitl=hitl, gateway_client=gateway_client,mock_mode=False)
-
-    api = UIBridge(engine=engine, hitl=hitl)
+    hitl=HITLManager()
+    engine = AgentEngine(
+        registry=registry,
+        hitl=hitl,
+        gateway_client=client_runtime.gateway,
+        mock_mode=False,
+    )
+    api = UIBridge(engine=engine, hitl=hitl, client_runtime=client_runtime)
     html_path = os.path.join(os.path.dirname(__file__), "ui", "web", "index.html")
     # 5. Mở giao diện ứng dụng
     window = webview.create_window(

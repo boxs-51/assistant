@@ -10,6 +10,8 @@ from ...interfaces.database import DatabaseDriver
 from ...models.sql.user_data.user import User
 from ...models.sql.user_data.organization import Organization
 from ...models.sql.user_data.member import Member
+from ...models.sql.user_data.member import member_role_association
+from ...models.sql.user_data.permission import Role
 from ...models.sql.user_data.oauth_account import OAuthAccount
 
 logger = structlog.get_logger(__name__)
@@ -49,7 +51,16 @@ class UserRepository(BaseRepository):
     async def get_user_roles(self, user_id: str) -> List[str]:
         """Lấy danh sách các vai trò của một người dùng từ các tổ chức họ tham gia."""
         stmt = (
-            select(Member.role)
+            select(Role.name)
+            .join(
+                member_role_association,
+                member_role_association.c.role_id == Role.id,
+            )
+            .join(
+                Member,
+                (member_role_association.c.member_organization_id == Member.organization_id)
+                & (member_role_association.c.member_user_id == Member.user_id),
+            )
             .where(Member.user_id == user_id)
             .distinct()
         )

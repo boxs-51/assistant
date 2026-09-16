@@ -118,6 +118,8 @@ class CapabilityCatalog:
     def register_definition(
         self,
         definition: CapabilityDefinition,
+        *,
+        allow_update: bool = False,
     ) -> CapabilityDefinition:
         """Register one logical capability definition.
 
@@ -131,10 +133,13 @@ class CapabilityCatalog:
             existing = self._definitions.get(capability_id)
             if existing is not None:
                 if existing != definition:
-                    raise CapabilityDefinitionConflictError(
-                        f"Capability definition already exists with different "
-                        f"contract: {capability_id}"
-                    )
+                    if not allow_update:
+                        raise CapabilityDefinitionConflictError(
+                            f"Capability definition already exists with different "
+                            f"contract: {capability_id}"
+                        )
+                    self._definitions[capability_id] = definition
+                    return definition
                 return existing
 
             self._definitions[capability_id] = definition
@@ -153,6 +158,8 @@ class CapabilityCatalog:
     def register_implementation(
         self,
         implementation: CapabilityImplementation,
+        *,
+        allow_update: bool = False,
     ) -> CapabilityImplementation:
         """Register a concrete implementation without replacing siblings."""
         with self._lock:
@@ -173,7 +180,7 @@ class CapabilityCatalog:
 
             self._validate_binding(implementation)
 
-            if implementation.implementation_id in self._implementations:
+            if implementation.implementation_id in self._implementations and not allow_update:
                 raise CapabilityImplementationConflictError(
                     f"Implementation already exists: "
                     f"{implementation.implementation_id}"

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Dict
 
 from ..connection.contracts import ConnectionNotFoundError
 from ..connection.registry import ConnectionRegistry
@@ -22,7 +22,7 @@ from .contracts.registration import (
     CapabilityRegistration,
     ClientCapabilityRegistration,
 )
-
+from .contracts.definition import CapabilityDefinition
 
 class ClientRegistrationError(ValueError):
     """Base error for invalid client capability registration requests."""
@@ -73,11 +73,11 @@ class ClientCapabilityRegistrationService:
             item.definition.capability_id: item.definition
             for item in request.capabilities
         }
-        self._validate_existing_definitions(definitions)
-        self._validate_existing_implementations(implementations)
+        self._validate_existing_definitions(definitions, allow_update=True)
+        self._validate_existing_implementations(implementations, allow_update=True)
 
         for definition in definitions.values():
-            self.catalog.register_definition(definition)
+            self.catalog.register_definition(definition, allow_update=True)
 
         registered: List[CapabilityImplementation] = []
         for implementation in implementations:
@@ -88,7 +88,7 @@ class ClientCapabilityRegistrationService:
                 registered.append(existing)
                 continue
 
-            self.catalog.register_implementation(implementation)
+            self.catalog.register_implementation(implementation, allow_update=True)
             registered.append(
                 self.catalog.transition_implementation(
                     implementation.implementation_id,
@@ -170,11 +170,16 @@ class ClientCapabilityRegistrationService:
                 )
             definitions[capability_id] = registration.definition
 
-    def _validate_existing_definitions(self, definitions) -> None:
+    def _validate_existing_definitions(
+            self, 
+            definitions: Dict[str, CapabilityDefinition],
+            *, 
+            allow_update: bool = False,
+    ) -> None:
         for capability_id, definition in definitions.items():
             if not self.catalog.contains_definition(capability_id):
                 continue
-            if self.catalog.get_definition(capability_id) != definition:
+            if self.catalog.get_definition(capability_id) != definition and not allow_update:
                 raise CapabilityDefinitionConflictError(
                     f"Capability definition already exists with different contract: "
                     f"{capability_id}"
@@ -183,6 +188,8 @@ class ClientCapabilityRegistrationService:
     def _validate_existing_implementations(
         self,
         implementations: List[CapabilityImplementation],
+        *,
+        allow_update: bool = False
     ) -> None:
         for implementation in implementations:
             if not self.catalog.contains_implementation(
@@ -200,7 +207,7 @@ class ClientCapabilityRegistrationService:
             comparable = existing.model_copy(
                 update={"state": implementation.state}
             )
-            if comparable != implementation:
+            if comparable != implementation and not allow_update:
                 raise CapabilityImplementationConflictError(
                     f"Implementation already exists with a different contract: "
                     f"{implementation.implementation_id}"
