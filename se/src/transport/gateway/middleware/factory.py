@@ -4,9 +4,10 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .observability import observability_middleware
 from ..authentication.middleware import AuthenticationMiddleware
+from ....infrastructure.config.schemas import AuthenticationSettings
 
 
-def create_middleware_stack(app: FastAPI):
+def create_middleware_stack(app: FastAPI, auth_config: AuthenticationSettings):
     """
     Hàm tập trung để khởi tạo và đăng ký tất cả các middleware cho ứng dụng.
     Thứ tự đăng ký middleware là rất quan trọng.
@@ -16,17 +17,15 @@ def create_middleware_stack(app: FastAPI):
 
     # 2. Middleware xác thực (chạy trước CORS để không block các request OPTIONS)
     # Nó sẽ bỏ qua các public paths được định nghĩa.
-    PUBLIC_PATHS = ["/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats", "/auth/*"]
     app.add_middleware(
         AuthenticationMiddleware,
-        public_paths=PUBLIC_PATHS
+        public_paths=auth_config.public_paths,
     )
 
     # 3. Middleware quản lý session cho luồng OAuth
-    SESSION_SECRET_KEY = "change-this-in-production"
     app.add_middleware(
         SessionMiddleware,
-        secret_key=SESSION_SECRET_KEY,
+        secret_key=auth_config.session_secret_key.get_secret_value(),
         session_cookie="oauth_session",
         max_age=600  # 10 phút
     )

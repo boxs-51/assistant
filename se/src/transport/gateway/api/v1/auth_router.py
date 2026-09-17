@@ -19,11 +19,12 @@ from .....domain.schemas.auth import (
     UserCreateSchema,
     UserMeSchema,
     VerifyOTPRequest,
+    GuestTokenSchema,
 )
 from .....infrastructure.event_bus import EventBus
 from .....domain.schemas.identity import Identity
 from .....infrastructure.config import ConfigSchema 
-from ...authentication.dependency import get_current_identity
+from ...authentication.dependency import get_current_identity, get_optional_identity
 from ...authentication.exceptions import (
     InvalidCredentialsError,
     OTPCooldownError,
@@ -33,7 +34,7 @@ from ...authentication.services.api_key_service import APIKeyService
 from ...authentication.authentication import Authentication
 
 from ...authentication.dependency import get_api_key_service
-from ...dependencies import get_config, get_event_bus, get_oauth, get_auth
+from ...dependencies import get_config, get_event_bus, get_oauth, get_auth, get_container
 
 router = APIRouter(prefix="/v1/auth", tags=["Authentication"])
 logger = structlog.get_logger(__name__)
@@ -65,13 +66,21 @@ async def register_or_resend_otp(
 @router.post("/register/verify", response_model=TokenSchema)
 async def verify_otp_and_complete(
     payload: VerifyOTPRequest,
+    response: Response,
+    guest_identity: Identity | None = Depends(get_optional_identity),
     auth_facade: Authentication = Depends(get_auth),
 ):
     """
     Endpoint nhận OTP từ Client để xác thực hoàn tất đăng ký.
     """
     try:
-        tokens = await auth_facade.confirm_registration(payload.email, payload.otp)
+        if guest_identity and guest_identity.auth_type == "guest":
+            tokens = await auth_facade.confirm_registration(
+                payload.email, payload.otp, guest_identity
+            )
+        else:
+            tokens = await auth_facade.confirm_registration(payload.email, payload.otp)
+        response.delete_cookie("guest_access_token")
         return tokens
     except OTPInvalidError as otp_err:
         raise HTTPException(
@@ -83,12 +92,18 @@ async def verify_otp_and_complete(
 @router.post("/login", response_model=TokenSchema)
 async def login_for_access_token(
     login_data: LoginRequestSchema,
+    response: Response,
+    guest_identity: Identity | None = Depends(get_optional_identity),
     auth_facade: Authentication = Depends(get_auth),
     event_bus: EventBus = Depends(get_event_bus),
 ):
     """Endpoint để đăng nhập và nhận token."""
     try:
-        tokens = await auth_facade.login(login_data)
+        if guest_identity and guest_identity.auth_type == "guest":
+            tokens = await auth_facade.login(login_data, guest_identity)
+        else:
+            tokens = await auth_facade.login(login_data)
+        response.delete_cookie("guest_access_token")
         return tokens
     except InvalidCredentialsError as e:
         raise HTTPException(
@@ -155,6 +170,7 @@ async def oauth_callback(
     auth_facade: Authentication = Depends(get_auth),
     oauth: OAuth = Depends(get_oauth),
     config: ConfigSchema = Depends(get_config),
+    guest_identity: Identity | None = Depends(get_optional_identity),
 ):
     """
     Xử lý callback từ OAuth provider sau khi người dùng xác thực.
@@ -189,14 +205,25 @@ async def oauth_callback(
             profile_url=user_info_resp.get("picture_url"),
         )
 
-        tokens = await auth_facade.handle_oauth_callback(provider, user_schema)
+        if guest_identity and guest_identity.auth_type == "guest":
+            tokens = await auth_facade.handle_oauth_callback(
+                provider, user_schema, guest_identity
+            )
+        else:
+            tokens = await auth_facade.handle_oauth_callback(provider, user_schema)
 
         redirect_url = config.frontend.oauth_callback_url
         if not redirect_url:
             logger.warning("FRONTEND_OAUTH_CALLBACK_URL is not set. Returning tokens as JSON.")
-            return JSONResponse(content=tokens.model_dump())
+            response = JSONResponse(content=tokens.model_dump())
+            response.delete_cookie("guest_access_token")
+            return response
 
-        return RedirectResponse(f"{redirect_url}?{urlencode(tokens.model_dump())}")
+        response = RedirectResponse(f"{redirect_url}?{urlencode(tokens.model_dump())}")
+        response.delete_cookie("guest_access_token")
+        return response
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("Error during OAuth callback", provider=provider, error=str(e), exc_info=True)
         raise HTTPException(status_code=500, detail="An internal error occurred during OAuth callback.")
@@ -206,6 +233,8 @@ async def oauth_callback(
 async def oauth_login(
     provider: str,
     user_info: OAuthUserInfoSchema,
+    response: Response,
+    guest_identity: Identity | None = Depends(get_optional_identity),
     auth_facade: Authentication = Depends(get_auth),
 ):
     """
@@ -213,15 +242,38 @@ async def oauth_login(
     Client (frontend) sẽ chịu trách nhiệm thực hiện luồng OAuth 2.0 với provider,
     lấy thông tin người dùng và gửi đến endpoint này.
     """
-    try:
-        tokens = await auth_facade.handle_oauth_callback(provider, user_info)
-        return tokens
-    except Exception as e:
-        logger.error("Error during OAuth callback handling", provider=provider, error=str(e), exc_info=True)
+    del provider, user_info, response, guest_identity, auth_facade
+    raise HTTPException(
+        status_code=status.HTTP_410_GONE,
+        detail=(
+            "Direct OAuth profile submission is disabled. "
+            "Use the verified OAuth redirect/callback flow."
+        ),
+    )
+
+
+@router.post("/guest", response_model=GuestTokenSchema)
+async def create_guest_identity(
+    request: Request,
+    response: Response,
+    config: ConfigSchema = Depends(get_config),
+    container=Depends(get_container),
+):
+    if config.auth.enable and not config.auth.allow_guest:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="An internal error occurred during OAuth processing.",
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Guest access is disabled.",
         )
+    issued = await container.require("guest_session_service").create_guest()
+    response.set_cookie(
+        "guest_access_token",
+        issued.token.access_token,
+        max_age=issued.token.expires_in,
+        httponly=True,
+        secure=request.url.scheme == "https",
+        samesite="lax",
+    )
+    return issued.token
 
 
 @router.post("/api-keys", response_model=APIKeyResponseSchema, status_code=status.HTTP_201_CREATED)

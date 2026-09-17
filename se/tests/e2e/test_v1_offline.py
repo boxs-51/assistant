@@ -532,7 +532,7 @@ async def test_v1_auth_api_is_offline(offline_app: FastAPI):
         assert (await client.post("/v1/auth/api-keys", json={"name": "x"})).status_code == 201
         assert (await client.get("/v1/auth/api-keys")).status_code == 200
         assert (await client.delete("/v1/auth/api-keys/mock-key")).status_code == 204
-        assert (await client.post("/v1/auth/oauth/mock", json={"provider": "mock", "provider_user_id": "offline-user", "email": "offline@example.com"})).status_code == 200
+        assert (await client.post("/v1/auth/oauth/mock", json={"provider": "mock", "provider_user_id": "offline-user", "email": "offline@example.com"})).status_code == 410
 
 
 @pytest.mark.asyncio

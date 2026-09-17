@@ -49,6 +49,11 @@ def get_current_identity(connection: HTTPConnection) -> Identity:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Not authenticated")
     return identity
 
+
+def get_optional_identity(connection: HTTPConnection) -> Identity | None:
+    """Return an optionally authenticated identity on public auth routes."""
+    return getattr(connection.state, "identity", None)
+
 async def get_websocket_identity(
     websocket: WebSocket,
     container: ApplicationContainer = Depends(get_container),

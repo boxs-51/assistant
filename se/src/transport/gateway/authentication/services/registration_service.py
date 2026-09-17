@@ -10,6 +10,8 @@ from .otp_service import OTPStorageService
 from .token_service import TokenService
 from .....transport.gateway.authentication import password as PwdHelper
 from typing import Callable
+from .....domain.schemas.identity import Identity
+from .guest_session_service import GuestSessionService
 
 logger = structlog.get_logger(__name__)
 
@@ -19,12 +21,14 @@ class RegistrationService:
         uow_factory: Callable[[], SqlAlchemyUnitOfWork],
         otp_storage: OTPStorageService,
         token_service: TokenService,
-        event_bus: EventBus
+        event_bus: EventBus,
+        guest_session_service: GuestSessionService,
     ):
         self.uow_factory = uow_factory
         self.otp_storage = otp_storage
         self.token_service = token_service
         self.event_bus = event_bus
+        self.guest_session_service = guest_session_service
 
     def _generate_otp(self) -> str:
         """Sinh chuỗi số ngẫu nhiên an toàn bảo mật gồm 6 chữ số."""
@@ -54,7 +58,12 @@ class RegistrationService:
 
         return {"status": "success", "message": "OTP has been sent.", "cooldown_seconds": self.otp_storage.cooldown_ttl}
 
-    async def confirm_registration(self, email: str, otp: str) -> TokenSchema:
+    async def confirm_registration(
+        self,
+        email: str,
+        otp: str,
+        guest_identity: Identity | None = None,
+    ) -> TokenSchema:
         """Giai đoạn 2: Xác thực OTP và hoàn tất đăng ký."""
         user_payload = await self.otp_storage.verify_and_get_data(email, otp)
         if not user_payload:
@@ -65,6 +74,9 @@ class RegistrationService:
             org_name = f"{new_user.name or user_payload['email']}'s Organization"
             new_org = await uow.organizations.create(name=org_name, owner_id=new_user.id)
             await uow.members.create(organization_id=new_org.id, user_id=new_user.id, role="admin")
+            user_id = new_user.id
+            user_email = new_user.email
+            organization_id = new_org.id
             await uow.commit()
 
             # Phát sự kiện user.created sau khi đã commit thành công
@@ -78,4 +90,13 @@ class RegistrationService:
             # )
             # await self.event_bus.publish(user_created_event)
 
-            return await self.token_service.create_user_tokens(new_user.id, new_user.email)
+        claimed_count = await self.guest_session_service.claim_sessions(
+            guest_identity,
+            target_user_id=user_id,
+            target_organization_id=organization_id,
+        )
+        return await self.token_service.create_user_tokens(
+            user_id,
+            user_email,
+            claimed_guest_sessions=(claimed_count if guest_identity else None),
+        )

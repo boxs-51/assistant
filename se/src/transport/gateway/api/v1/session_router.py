@@ -1,7 +1,8 @@
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from .....application.container import ApplicationContainer
 from .....domain.schemas.capability import SessionMessageEditRequest, SessionRegenerateRequest
 from .....domain.schemas.identity import Identity
+from .....domain.schemas.event import BaseEvent
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
 
@@ -34,6 +35,31 @@ async def get_session(session_id: str, identity: Identity = Depends(get_current_
 async def list_session_messages(session_id: str, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
     _, messages = await _owned_session(container, session_id, identity)
     return [_message(item) for item in messages]
+
+
+@router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_session(
+    session_id: str,
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
+):
+    async with container.uow_factory() as uow:
+        deleted = await uow.sessions.delete_owned_session(
+            session_id,
+            identity.user_id,
+        )
+        if not deleted:
+            # Do not disclose whether a foreign-owned session exists.
+            raise HTTPException(status_code=404, detail="Session not found.")
+        await uow.commit()
+    await container.event_bus.publish(
+        BaseEvent(
+            event_name="session.deleted",
+            session_id=session_id,
+            payload={"session_id": session_id, "owner_user_id": identity.user_id},
+        )
+    )
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 @router.patch("/{session_id}/messages/{message_id}")
 async def edit_session_message(session_id: str, message_id: str, body: SessionMessageEditRequest, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):

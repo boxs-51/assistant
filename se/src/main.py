@@ -34,7 +34,7 @@ from .transport.gateway.authentication.authenticators.api_key_authenticator impo
 from .transport.gateway.authentication.authenticators.jwt_authenticator import JWTAuthenticator
 
 from .transport.gateway.authentication.services import (APIKeyService, LoginService, OAuthService,
-OTPStorageService, RegistrationService, TokenService, UserService)
+OTPStorageService, RegistrationService, TokenService, UserService, GuestSessionService)
 
 from .runtimes.connection.runtime import ConnectionRuntime
 from .runtimes.session.runtime import SessionRuntime
@@ -85,6 +85,7 @@ from .runtimes.agent.adapters import (
     RegistryAgentToolPolicy,
 )
 from .runtimes.agent.tool_execution import AgentToolExecutionCoordinator
+from .version import __version__
 logger = structlog.get_logger(__name__)
 
 
@@ -92,10 +93,13 @@ logger = structlog.get_logger(__name__)
 # BOOTSTRAP FACTORIES
 # ==============================================================================
 
-def bootstrap_observability() -> ConfigSchema:
+def bootstrap_observability(config: ConfigSchema | None = None) -> ConfigSchema:
     """Tải cấu hình gateway và kích hoạt hệ thống Observability (Metrics & Tracing)."""
-    _config_manager = ConfigManager().get_instance("se/config/default.yaml")
-    _config = _config_manager.initialize()
+    _config = config
+    if _config is None:
+        _config_manager = ConfigManager().get_instance("se/config/default.yaml")
+        _config = _config_manager.initialize()
+    _config.auth.validate_runtime_secrets()
     ConfigurationRegistry.set_config(_config)
 
     obs_config = ObservabilityConfig(
@@ -141,6 +145,7 @@ def bootstrap_security(
 
     session_repo = storage_engine.repositories.get("sessions")
     token_service = TokenService(uow_factory=uow_factory, session_repo=session_repo,config=config.auth)
+    guest_session_service = GuestSessionService(uow_factory, token_service)
     api_key_service = APIKeyService(uow_factory=uow_factory)
 
     auth_manager = AuthenticationManager(
@@ -151,9 +156,20 @@ def bootstrap_security(
     )
     redis_driver = storage_engine.get_cache_driver()
     otp_service = OTPStorageService(redis_driver if redis_driver else None, uow_factory)
-    registration_service = RegistrationService(uow_factory, otp_service, token_service, eventing_manager.bus)
-    login_service = LoginService(uow_factory, token_service)
-    oauth_service = OAuthService(uow_factory, token_service, eventing_manager.bus)
+    registration_service = RegistrationService(
+        uow_factory,
+        otp_service,
+        token_service,
+        eventing_manager.bus,
+        guest_session_service,
+    )
+    login_service = LoginService(uow_factory, token_service, guest_session_service)
+    oauth_service = OAuthService(
+        uow_factory,
+        token_service,
+        eventing_manager.bus,
+        guest_session_service,
+    )
     user_service = UserService(uow_factory)
 
     auth = Authentication(
@@ -172,6 +188,7 @@ def bootstrap_security(
         "limiter": limiter,
         "auth": auth,
         "api_key_service": api_key_service,
+        "guest_session_service": guest_session_service,
     }
 
 
@@ -347,7 +364,7 @@ async def lifespan(app: FastAPI):
     logger.info("Starting AI Gateway Application...")
 
     # 1. Startup Sequence
-    config = bootstrap_observability()
+    config = bootstrap_observability(app.state.bootstrap_config)
     FastAPIInstrumentor.instrument_app(app)
 
     # Local resources
@@ -386,12 +403,19 @@ async def lifespan(app: FastAPI):
         logger.info("Shutdown sequence completed cleanly.")
 
 
-def create_app() -> FastAPI:
+def create_app(config: ConfigSchema | None = None) -> FastAPI:
     """Tạo instance FastAPI và đăng ký Middlewares, Routers."""
-    app_instance = FastAPI(title="AI Gateway", lifespan=lifespan)
+    if config is None:
+        config = ConfigManager().get_instance("se/config/default.yaml").initialize()
+    app_instance = FastAPI(
+        title=config.gateway.name,
+        version=__version__,
+        lifespan=lifespan,
+    )
+    app_instance.state.bootstrap_config = config
 
     # Middleware Stack
-    create_middleware_stack(app_instance)
+    create_middleware_stack(app_instance, config.auth)
 
     # Route Registrations: api/v1 is the sole HTTP router surface.
     app_instance.include_router(auth_router.router)

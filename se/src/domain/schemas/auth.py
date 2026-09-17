@@ -17,6 +17,13 @@ class TokenSchema(BaseModel):
     access_token: str
     refresh_token: str
     token_type: str = "bearer"
+    session_claim: Optional[Dict[str, int]] = None
+
+
+class GuestTokenSchema(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    expires_in: int
 
 class RefreshRequestSchema(BaseModel):
     refresh_token: str

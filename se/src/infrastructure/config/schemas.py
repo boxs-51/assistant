@@ -1,5 +1,6 @@
-from pydantic import BaseModel, Field, AnyHttpUrl, model_validator, ConfigDict
+from pydantic import BaseModel, Field, AnyHttpUrl, model_validator, ConfigDict, SecretStr
 from typing import Dict, Optional, Any
+from ...version import __version__
 # =================================================================
 # CONFIGURATION SCHEMAS
 # Đây là các Pydantic Model định nghĩa cấu trúc của cấu hình.
@@ -8,12 +9,20 @@ from typing import Dict, Optional, Any
 
 class GatewaySettings(BaseModel):
     name: str = "AI Gateway"
-    version: str = "1.0.0"
+    version: str = __version__
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = False
 
     allowed_origins: list[str] = ["*"]
+
+    @model_validator(mode="after")
+    def enforce_canonical_version(self) -> "GatewaySettings":
+        if self.version != __version__:
+            raise ValueError(
+                f"gateway.version is code-owned and must be {__version__}."
+            )
+        return self
 class OAuthClientConfig(BaseModel):
     client_id: str
     client_secret: str
@@ -24,17 +33,54 @@ class OAuthSettings(BaseModel):
 
 class AuthenticationSettings(BaseModel):
     enable: bool = True
+    allow_guest: bool = False
 
     admin_ips: Dict[str, str] = {}
-    public_paths: list[str] = ["/docs", "/openapi.json", "/health*", "/ready", "/metrics", "/stats", "/auth/*"]
-    session_secret_key: str = "change-this-in-production"
+    public_paths: list[str] = [
+        "/docs",
+        "/openapi.json",
+        "/health*",
+        "/ready",
+        "/metrics",
+        "/stats",
+        "/v1/auth/register/initiate",
+        "/v1/auth/register/verify",
+        "/v1/auth/login",
+        "/v1/auth/refresh",
+        "/v1/auth/logout",
+        "/v1/auth/oauth/login/*",
+        "/v1/auth/oauth/callback/*",
+        "/v1/auth/guest",
+    ]
+    session_secret_key: SecretStr = SecretStr("")
 
-    jwt_secret_key: str = "change-me"
+    jwt_secret_key: SecretStr = SecretStr("")
     jwt_algorithm: str = "HS256"
     jwt_expiration: int = 3600
 
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 30
+    guest_token_ttl_seconds: int = 86400
+
+    def validate_runtime_secrets(self) -> None:
+        """Fail closed before authentication services are exposed."""
+        jwt_secret = self.jwt_secret_key.get_secret_value()
+        session_secret = self.session_secret_key.get_secret_value()
+        insecure = {"", "change-me", "change-this-in-production"}
+
+        def is_insecure(value: str) -> bool:
+            return (
+                value in insecure
+                or value.startswith("replace-with-")
+                or len(value.encode("utf-8")) < 32
+            )
+
+        if is_insecure(jwt_secret):
+            raise ValueError("AUTH__JWT_SECRET_KEY must contain at least 32 bytes of non-default entropy.")
+        if is_insecure(session_secret):
+            raise ValueError("AUTH__SESSION_SECRET_KEY must contain at least 32 bytes of non-default entropy.")
+        if jwt_secret == session_secret:
+            raise ValueError("JWT and session secrets must be different.")
 
 class FrontendSettings(BaseModel):
     oauth_callback_url: Optional[str] = None

@@ -48,6 +48,19 @@ class UserRepository(BaseRepository):
         result = await self.session.execute(stmt)
         return result.scalar_one_or_none()
 
+    async def get_by_id_for_update(self, user_id: str) -> Optional[User]:
+        stmt = select(User).where(User.id == user_id).with_for_update()
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
+    async def set_status(self, user_id: str, status: str) -> Optional[User]:
+        user = await self.get_by_id(user_id)
+        if user is None:
+            return None
+        user.status = status
+        await self.session.flush()
+        return user
+
     async def get_user_roles(self, user_id: str) -> List[str]:
         """Lấy danh sách các vai trò của một người dùng từ các tổ chức họ tham gia."""
         stmt = (
@@ -100,9 +113,8 @@ class UserRepository(BaseRepository):
             password_hash=dummy_password_hash,
             # name=name # Thêm trường name nếu model User của bạn có hỗ trợ trường này
         )
-        
+
         self.session.add(new_user)
         await self.session.flush()
         logger.info("New user via OAuth added to session", user_id=new_user.id, email=new_user.email, provider=provider)
         return new_user
-    

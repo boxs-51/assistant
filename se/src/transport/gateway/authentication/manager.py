@@ -31,13 +31,27 @@ class AuthenticationManager:
 
     async def authenticate(self, connection: HTTPConnection) -> Identity:
         auth_header = connection.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer "):
+        token = None
+        if auth_header and auth_header.startswith("Bearer "):
+            token = auth_header.split(" ", 1)[1].strip()
+        elif hasattr(connection, "cookies"):
+            token = connection.cookies.get("guest_access_token")
+        if not token:
             raise InvalidCredentialsError("Missing or malformed Authorization header")
-
-        token = auth_header.split(" ", 1)[1].strip()
 
         for authenticator in self.authenticators:
             if authenticator.can_handle(token):
                 return await authenticator.authenticate(token)
 
         raise InvalidCredentialsError("No authenticator available for the provided token format.")
+
+    @staticmethod
+    def has_credentials(connection: HTTPConnection) -> bool:
+        auth_header = connection.headers.get("Authorization")
+        return bool(
+            (auth_header and auth_header.startswith("Bearer "))
+            or (
+                hasattr(connection, "cookies")
+                and connection.cookies.get("guest_access_token")
+            )
+        )

@@ -8,6 +8,8 @@ from .token_service import TokenService
 from .....transport.gateway.authentication import password as PwdHelper
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from typing import Callable
+from .....domain.schemas.identity import Identity
+from .guest_session_service import GuestSessionService
 
 logger = structlog.get_logger(__name__)
 
@@ -16,13 +18,20 @@ class OAuthService:
         self,
         uow_factory: Callable[[], SqlAlchemyUnitOfWork],
         token_service: TokenService,
-        event_bus: EventBus
+        event_bus: EventBus,
+        guest_session_service: GuestSessionService,
     ):
         self.uow_factory = uow_factory
         self.token_service = token_service
         self.event_bus = event_bus
+        self.guest_session_service = guest_session_service
 
-    async def handle_oauth_callback(self, provider: str, oauth_user_info: OAuthUserInfoSchema) -> TokenSchema:
+    async def handle_oauth_callback(
+        self,
+        provider: str,
+        oauth_user_info: OAuthUserInfoSchema,
+        guest_identity: Identity | None = None,
+    ) -> TokenSchema:
         async with self.uow_factory() as uow:
             oauth_account = await uow.oauth_accounts.get_by_provider_user_id(
                 provider=provider,
@@ -32,18 +41,28 @@ class OAuthService:
             if oauth_account:
                 logger.info("OAuth account found, logging in user", user_id=oauth_account.user_id, provider=provider)
                 user = await uow.users.get_by_id(oauth_account.user_id)
-                return await self.token_service.create_user_tokens(user.id, user.email)
+                user_id = user.id
+                user_email = user.email
+                organization = await uow.users.get_organization_for_user(user_id)
+                organization_id = organization.id if organization else None
+                existing_oauth_account = True
+            else:
+                existing_oauth_account = False
 
-            existing_user = await uow.users.get_by_email(oauth_user_info.email)
+            existing_user = (
+                None
+                if existing_oauth_account
+                else await uow.users.get_by_email(oauth_user_info.email)
+            )
 
-            if existing_user:
+            if not existing_oauth_account and existing_user:
                 # Nếu user đã tồn tại, cập nhật thông tin (nếu cần) và tạo liên kết
                 user = existing_user
                 if not user.name and oauth_user_info.name:
                     user.name = oauth_user_info.name
                 if not user.picture and oauth_user_info.profile_url:
                     user.picture = oauth_user_info.profile_url
-            else:
+            elif not existing_oauth_account:
                 # Nếu user chưa tồn tại, tạo mới hoàn toàn
                 logger.info("No existing user found. Creating new user and link.", email=oauth_user_info.email, provider=provider)
                 random_password = PwdHelper.get_password_hash(hashlib.sha256(oauth_user_info.email.encode()).hexdigest())
@@ -63,8 +82,22 @@ class OAuthService:
                 # )
                 # await self.event_bus.publish(user_created_event)
 
-            logger.info("User found/created, creating new OAuth link.", user_id=user.id, provider=provider)
-            await uow.oauth_accounts.create(user.id, provider, oauth_user_info.provider_user_id)
+            if not existing_oauth_account:
+                logger.info("User found/created, creating new OAuth link.", user_id=user.id, provider=provider)
+                await uow.oauth_accounts.create(user.id, provider, oauth_user_info.provider_user_id)
+                user_id = user.id
+                user_email = user.email
+                organization = await uow.users.get_organization_for_user(user_id)
+                organization_id = organization.id if organization else None
+                await uow.commit()
 
-            await uow.commit()
-            return await self.token_service.create_user_tokens(user.id, user.email)
+        claimed_count = await self.guest_session_service.claim_sessions(
+            guest_identity,
+            target_user_id=user_id,
+            target_organization_id=organization_id,
+        )
+        return await self.token_service.create_user_tokens(
+            user_id,
+            user_email,
+            claimed_guest_sessions=(claimed_count if guest_identity else None),
+        )

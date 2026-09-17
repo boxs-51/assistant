@@ -31,6 +31,7 @@ class ApplicationContainer:
     provider_runtime: Optional[Any] = None
 
     api_key_service: Optional[Any] = None
+    guest_session_service: Optional[Any] = None
     auth_manager: Optional[Any] = None
     auth: Optional[Any] = None
     oauth: Optional[Any] = None

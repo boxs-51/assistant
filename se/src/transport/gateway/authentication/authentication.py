@@ -28,14 +28,27 @@ class Authentication:
     async def initiate_registration(self, user_data: UserCreateSchema) -> dict:
         return await self.registration_service.initiate_registration(user_data)
 
-    async def confirm_registration(self, email: str, otp: str) -> TokenSchema:
-        return await self.registration_service.confirm_registration(email, otp)
+    async def confirm_registration(
+        self, email: str, otp: str, guest_identity: Identity | None = None
+    ) -> TokenSchema:
+        return await self.registration_service.confirm_registration(
+            email, otp, guest_identity
+        )
 
-    async def login(self, login_data: LoginRequestSchema) -> TokenSchema:
-        return await self.login_service.login(login_data)
+    async def login(
+        self, login_data: LoginRequestSchema, guest_identity: Identity | None = None
+    ) -> TokenSchema:
+        return await self.login_service.login(login_data, guest_identity)
 
-    async def handle_oauth_callback(self, provider: str, oauth_user_info: OAuthUserInfoSchema) -> TokenSchema:
-        return await self.oauth_service.handle_oauth_callback(provider, oauth_user_info)
+    async def handle_oauth_callback(
+        self,
+        provider: str,
+        oauth_user_info: OAuthUserInfoSchema,
+        guest_identity: Identity | None = None,
+    ) -> TokenSchema:
+        return await self.oauth_service.handle_oauth_callback(
+            provider, oauth_user_info, guest_identity
+        )
 
     async def refresh_access_token(self, refresh_token: str) -> AccessTokenSchema:
         return await self.token_service.refresh_access_token(refresh_token)

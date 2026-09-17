@@ -7,7 +7,7 @@ class JwtHelper:
     def __init__(self, config: AuthenticationSettings):
         
         self.config = config
-        self.SECRET_KEY = self.config.jwt_secret_key
+        self.SECRET_KEY = self.config.jwt_secret_key.get_secret_value()
         self.ALGORITHM = self.config.jwt_algorithm
         self.ACCESS_TOKEN_EXPIRE_MINUTES = self.config.access_token_expire_minutes
         self.REFRESH_TOKEN_EXPIRE_DAYS = self.config.refresh_token_expire_days

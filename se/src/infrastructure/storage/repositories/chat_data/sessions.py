@@ -1,11 +1,12 @@
 import structlog
 from typing import Optional, List, Dict, Any
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...interfaces.repository import BaseRepository
 from ...interfaces.database import DatabaseDriver
 from ...models.sql.chat_data.session import Session, Message
+from ...models.sql.chat_data.attachment import Attachment
 
 logger = structlog.get_logger(__name__)
 
@@ -79,6 +80,45 @@ class SessionRepository(BaseRepository):
         stmt = select(Session).where(Session.user_id == user_id).order_by(Session.updated_at.desc()).limit(limit)
         result = await self.session.execute(stmt)
         return result.scalars().all()
+
+    async def claim_by_user_id(
+        self,
+        guest_user_id: str,
+        target_user_id: str,
+        target_organization_id: Optional[str],
+    ) -> int:
+        result = await self.session.execute(
+            update(Session)
+            .where(Session.user_id == guest_user_id)
+            .values(
+                user_id=target_user_id,
+                organization_id=target_organization_id,
+            )
+        )
+        await self.session.flush()
+        return int(result.rowcount or 0)
+
+    async def delete_owned_session(self, session_id: str, owner_user_id: str) -> bool:
+        owned = await self.session.execute(
+            select(Session.id).where(
+                Session.id == session_id,
+                Session.user_id == owner_user_id,
+            )
+        )
+        if owned.scalar_one_or_none() is None:
+            return False
+
+        # Explicit child deletion is portable even when SQLite FK cascades are disabled.
+        await self.session.execute(delete(Message).where(Message.session_id == session_id))
+        await self.session.execute(delete(Attachment).where(Attachment.session_id == session_id))
+        await self.session.execute(
+            delete(Session).where(
+                Session.id == session_id,
+                Session.user_id == owner_user_id,
+            )
+        )
+        await self.session.flush()
+        return True
 
     async def update_session_metadata(self, session_id: str, metadata_update: Dict[str, Any]):
         """Cập nhật (merge) trường metadata của một session."""

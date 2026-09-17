@@ -1,7 +1,8 @@
 import structlog
 import hashlib
+from datetime import timedelta
 
-from .....domain.schemas.auth import TokenSchema, AccessTokenSchema
+from .....domain.schemas.auth import TokenSchema, AccessTokenSchema, GuestTokenSchema
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from .....infrastructure.storage.repositories.sessions import SessionRepository
 from ..jwt import JwtHelper
@@ -24,7 +25,13 @@ class TokenService:
         self.session_repo = session_repo
         self.jwt = JwtHelper(config)
 
-    async def create_user_tokens(self, user_id: str, email: str) -> TokenSchema:
+    async def create_user_tokens(
+        self,
+        user_id: str,
+        email: str,
+        *,
+        claimed_guest_sessions: int | None = None,
+    ) -> TokenSchema:
         """Tạo và lưu trữ access và refresh token cho một người dùng."""
         async with self.uow_factory() as uow:
             roles = await uow.users.get_user_roles(user_id)
@@ -49,7 +56,29 @@ class TokenService:
         refresh_token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
         await self.session_repo.save_token(user_id, refresh_token_hash, self.config.refresh_token_expire_days * 86400)
 
-        return TokenSchema(access_token=access_token, refresh_token=refresh_token)
+        return TokenSchema(
+            access_token=access_token,
+            refresh_token=refresh_token,
+            session_claim=(
+                {"claimed_count": claimed_guest_sessions}
+                if claimed_guest_sessions is not None
+                else None
+            ),
+        )
+
+    def create_guest_token(self, guest_user_id: str) -> GuestTokenSchema:
+        ttl = self.config.guest_token_ttl_seconds
+        access_token = self.jwt.create_access_token(
+            data={
+                "sub": guest_user_id,
+                "roles": ["guest"],
+                "scopes": ["guest"],
+                "plan": "guest",
+                "principal_type": "guest",
+            },
+            expires_delta=timedelta(seconds=ttl),
+        )
+        return GuestTokenSchema(access_token=access_token, expires_in=ttl)
 
     async def refresh_access_token(self, refresh_token: str) -> AccessTokenSchema:
         """Làm mới access token bằng một refresh token hợp lệ."""
@@ -101,8 +130,9 @@ class TokenService:
         # Logic lấy permission giờ đây sẽ nằm trong các Authenticator, nơi có UoW
         permissions = [] # Để trống, sẽ được điền bởi Authenticator
 
+        principal_type = payload.get("principal_type", "user")
         return Identity(
-            auth_type="jwt",
+            auth_type="guest" if principal_type == "guest" else "jwt",
             user_id=user_id,
             organization_id=payload.get("org_id"),
             session_id=payload.get("jti"), # jti (JWT ID) có thể được dùng làm session_id
