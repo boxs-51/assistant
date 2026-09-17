@@ -67,6 +67,9 @@ class UIBridge:
     def confirm_password_reset(self, payload: dict):
         return self._auth_action(self._client_runtime.confirm_password_reset, payload)
 
+    def logout(self):
+        return self._auth_action(lambda _payload: self._client_runtime.logout(), {})
+
     def _record_activity(self, action: str, status: str, detail=None):
         item = {
             "id": uuid.uuid4().hex,
@@ -93,9 +96,23 @@ class UIBridge:
             activity = list(self._activity)
             preferences = dict(self._chat_preferences)
 
+        startup_error = None
+        if not self._client_runtime.ready:
+            try:
+                self._client_runtime.start()
+            except Exception as error:
+                logger.exception("Gateway session initialization failed")
+                startup_error = str(error)
+
         capabilities = []
         agents = []
-        gateway_status = {"connected": self._client_runtime.ready}
+        gateway_status = {
+            "connected": self._client_runtime.ready,
+            "principal_type": getattr(self._client_runtime, "principal_type", None),
+            "user_id": getattr(self._client_runtime, "owner_id", None),
+        }
+        if startup_error:
+            gateway_status["error"] = startup_error
         if self._client_runtime.ready:
             try:
                 gateway_status["health"] = self._engine.gateway_client.health()
@@ -350,7 +367,11 @@ class UIBridge:
             return {"success": False, "endpoint": endpoint, "error": str(error)}
 
     # --- Uỷ quyền API cho frontend JS gọi ---
-    def get_sessions(self): return self._engine.gateway_client.get_sessions()
+    def get_sessions(self):
+        # Sidebar initialization races with the Gateway panel during pywebview
+        # startup, so session bootstrap must not depend on panel ordering.
+        self._client_runtime.start()
+        return self._engine.gateway_client.get_sessions()
     def encode_files_async(self, files: list): return self.encoder.encode_async(files)
     def respond_approval(self, choice: bool, aid: str = None): return self.hitl.respond(choice, aid)
     def get_workspace_files(self): return self.workspace.get_files()

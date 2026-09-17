@@ -8,28 +8,39 @@ from ..schemas.request import GatewayChatRequest
 from ..schemas.response import GatewayResponse, GatewayStreamChunk
 from .realtime_client import GatewayRealtimeClient as PersistentGatewayRealtimeClient
 
-# Token cố định cho Guest (phải trùng khớp với GUEST_PASS_TOKEN bên backend JWTAuthenticator)
-DEFAULT_GUEST_TOKEN = "YOUR_GUEST_PASS_JWT_HERE"
-
 class GatewayLLMClient:
     def __init__(self, gateway_url: str, api_key: str = ""):
         self.base_url = gateway_url.rstrip('/')
         self.gateway_url = self.base_url + "/v1/chat/completions"
 
-        self.access_token = api_key or DEFAULT_GUEST_TOKEN
+        self.access_token = api_key or None
         self.refresh_token_value = None
 
         self.headers = {
             "Content-Type": "application/json",
-            "Authorization": f"Bearer {self.access_token}",
         }
+        if self.access_token:
+            self.headers["Authorization"] = f"Bearer {self.access_token}"
 
     def set_access_token(self, access_token: str) -> None:
         self.access_token = access_token
         self.headers["Authorization"] = f"Bearer {access_token}"
 
-    def _request(self, method: str, path: str, **kwargs: Any) -> requests.Response:
+    def clear_access_token(self) -> None:
+        self.access_token = None
+        self.headers.pop("Authorization", None)
+
+    def _request(
+        self,
+        method: str,
+        path: str,
+        *,
+        authenticated: bool = True,
+        **kwargs: Any,
+    ) -> requests.Response:
         headers = self.headers.copy()
+        if not authenticated:
+            headers.pop("Authorization", None)
         if "files" in kwargs:
             headers.pop("Content-Type", None)
         response = requests.request(
@@ -87,7 +98,9 @@ class GatewayLLMClient:
         return self._request("GET", "/metrics").text
 
     def register(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request("POST", "/v1/auth/register/initiate", json=payload).json()
+        return self._request(
+            "POST", "/v1/auth/register/initiate", authenticated=False, json=payload
+        ).json()
 
     def verify_registration(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         response = self._request("POST", "/v1/auth/register/verify", json=payload).json()
@@ -96,10 +109,25 @@ class GatewayLLMClient:
         return response
 
     def initiate_password_reset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request("POST", "/v1/auth/password-reset/initiate", json=payload).json()
+        return self._request(
+            "POST", "/v1/auth/password-reset/initiate", authenticated=False, json=payload
+        ).json()
 
     def confirm_password_reset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request("POST", "/v1/auth/password-reset/confirm", json=payload).json()
+        return self._request(
+            "POST", "/v1/auth/password-reset/confirm", authenticated=False, json=payload
+        ).json()
+
+    def create_guest(self) -> Dict[str, Any]:
+        response = self._request(
+            "POST", "/v1/auth/guest", authenticated=False
+        ).json()
+        self.set_access_token(response["access_token"])
+        self.refresh_token_value = None
+        return response
+
+    def current_session(self) -> Dict[str, Any]:
+        return self._request("GET", "/v1/auth/session").json()
 
     def login(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         response = self._request(
@@ -117,6 +145,7 @@ class GatewayLLMClient:
         response = self._request(
             "POST",
             "/v1/auth/refresh",
+            authenticated=False,
             json={"refresh_token": refresh_token},
         ).json()
 
@@ -124,7 +153,12 @@ class GatewayLLMClient:
         return response
 
     def logout(self, refresh_token: str) -> None:
-        self._request("POST", "/v1/auth/logout", json={"refresh_token": refresh_token})
+        self._request(
+            "POST",
+            "/v1/auth/logout",
+            authenticated=False,
+            json={"refresh_token": refresh_token},
+        )
 
     def oauth_redirect_url(self, provider: str) -> str:
         return f"{self.base_url}/v1/auth/oauth/login/{provider}"

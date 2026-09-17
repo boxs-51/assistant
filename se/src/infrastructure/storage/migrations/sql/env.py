@@ -7,10 +7,10 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from alembic import context
-from src.infrastructure.storage.models.sql.chat_data import attachment
-from src.infrastructure.storage.models.sql.chat_data import project
-from src.infrastructure.storage.models.sql.user_data import api_key, application, member, oauth_account, organization, pending_registration
-from src.infrastructure.storage.models.sql.user_data import permission
+from se.src.infrastructure.storage.models.sql.chat_data import attachment
+from se.src.infrastructure.storage.models.sql.chat_data import project
+from se.src.infrastructure.storage.models.sql.user_data import api_key, application, member, oauth_account, organization, pending_registration
+from se.src.infrastructure.storage.models.sql.user_data import permission
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
@@ -28,15 +28,15 @@ if config.config_file_name is not None:
 
 # --- THAY ĐỔI QUAN TRỌNG ---
 # Import Base từ model của chúng ta để Alembic có thể "thấy" được các table
-from src.infrastructure.storage.models.sql.user_data import (
+from se.src.infrastructure.storage.models.sql.user_data import (
     user
 )
-from src.infrastructure.storage.models.sql.base import Base
-from src.infrastructure.storage.models.sql.chat_data import (
+from se.src.infrastructure.storage.models.sql.base import Base
+from se.src.infrastructure.storage.models.sql.chat_data import (
     session
 ) 
-from src.infrastructure.storage.models.sql import agent
-from src.infrastructure.storage.models.sql import capability
+from se.src.infrastructure.storage.models.sql import agent
+from se.src.infrastructure.storage.models.sql import capability
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---
@@ -45,7 +45,7 @@ target_metadata = Base.metadata
 # Trong thực tế, bạn sẽ đọc từ file config của ứng dụng
 DB_URL = os.getenv(
     "ASSISTANT_ALEMBIC_DATABASE_URL",
-    "sqlite+aiosqlite:///gateway_storage.db",
+    "sqlite+aiosqlite:///data/gateway_storage.db",
 )
 config.set_main_option("sqlalchemy.url", DB_URL)
 

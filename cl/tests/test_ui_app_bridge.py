@@ -62,6 +62,9 @@ class _Gateway:
     def list_agents(self):
         return []
 
+    def get_sessions(self):
+        return [{"id": "session-1"}]
+
     def register_skill(self, payload):
         self.registered_skills.append(payload)
         return {"capability_id": payload["name"]}
@@ -95,6 +98,11 @@ class _ClientRuntime:
     def __init__(self, gateway):
         self.gateway = gateway
         self.auth_calls = []
+        self.start_calls = 0
+
+    def start(self):
+        self.start_calls += 1
+        self.ready = True
 
     def login(self, payload):
         self.auth_calls.append(("login", payload))
@@ -194,3 +202,13 @@ def test_account_actions_are_exposed_through_bridge_without_leaking_exceptions()
         "initiate_password_reset",
         "confirm_password_reset",
     ]
+
+
+def test_sidebar_session_load_bootstraps_auth_before_request():
+    bridge, _, _ = _bridge()
+    bridge._client_runtime.ready = False
+
+    sessions = bridge.get_sessions()
+
+    assert bridge._client_runtime.start_calls == 1
+    assert sessions == [{"id": "session-1"}]

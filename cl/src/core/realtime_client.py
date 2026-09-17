@@ -126,10 +126,16 @@ class GatewayRealtimeClient:
             self._registered.clear()
             self._capabilities_registered.clear()
             self._disconnect_error = None
+            authorization = self.headers.get("Authorization")
+            if not authorization:
+                raise RuntimeError(
+                    "Realtime connection requires an authenticated user or guest session."
+                )
+
             self.ws = websocket.create_connection(
                 self._ws_url,
                 header=[
-                    f"Authorization: {self.headers['Authorization']}",
+                    f"Authorization: {authorization}",
                 ],
                 timeout=self.timeout,
             )

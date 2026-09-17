@@ -24,6 +24,14 @@ class GuestTokenSchema(BaseModel):
     access_token: str
     token_type: str = "bearer"
     expires_in: int
+    user_id: str
+
+
+class AuthSessionSchema(BaseModel):
+    user_id: str
+    principal_type: str
+    organization_id: Optional[str] = None
+    roles: List[str] = Field(default_factory=list)
 
 class RefreshRequestSchema(BaseModel):
     refresh_token: str

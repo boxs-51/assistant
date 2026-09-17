@@ -78,7 +78,11 @@ class TokenService:
             },
             expires_delta=timedelta(seconds=ttl),
         )
-        return GuestTokenSchema(access_token=access_token, expires_in=ttl)
+        return GuestTokenSchema(
+            access_token=access_token,
+            expires_in=ttl,
+            user_id=guest_user_id,
+        )
 
     async def refresh_access_token(self, refresh_token: str) -> AccessTokenSchema:
         """Làm mới access token bằng một refresh token hợp lệ."""

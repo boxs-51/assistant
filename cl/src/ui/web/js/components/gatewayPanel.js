@@ -40,12 +40,14 @@ function renderOverview(panel) {
   const gateway = state.snapshot?.gateway || {};
   const preferences = state.snapshot?.preferences || {};
   const connected = Boolean(gateway.connected);
+  const principalLabel = gateway.principal_type === 'guest' ? 'Guest' : 'User';
   view.innerHTML = `
     <div class="studio-card status-card">
-      <div><span class="studio-kicker">GATEWAY</span><h3>${connected ? 'Connected' : 'Signed out'}</h3></div>
+      <div><span class="studio-kicker">GATEWAY</span><h3>${connected ? `Connected · ${principalLabel}` : 'Disconnected'}</h3></div>
       <span class="studio-dot ${connected ? 'online' : ''}"></span>
     </div>
     ${gateway.error ? `<div class="studio-alert">${escapeHtml(gateway.error)}</div>` : ''}
+    ${connected && gateway.principal_type === 'user' ? '<button id="studio-logout" class="gateway-button secondary wide">Sign out and continue as guest</button>' : ''}
     <div class="studio-card">
       <span class="studio-kicker">CHAT RUNTIME</span>
       <label>Provider</label>
@@ -66,6 +68,16 @@ function renderOverview(panel) {
       <div><strong>${state.snapshot?.agents?.length || 0}</strong><span>Agents</span></div>
     </div>
   `;
+
+  view.querySelector('#studio-logout')?.addEventListener('click', async () => {
+    try {
+      await callBridge('logout');
+      await refresh(panel, 'overview');
+      setOutput(panel, { message: 'Signed out. A guest session is now active.' });
+    } catch (error) {
+      setOutput(panel, error.message, true);
+    }
+  });
 
   view.querySelector('#studio-load-models').addEventListener('click', async () => {
     try {

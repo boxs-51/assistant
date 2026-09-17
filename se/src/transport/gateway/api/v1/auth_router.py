@@ -20,6 +20,7 @@ from .....domain.schemas.auth import (
     UserMeSchema,
     VerifyOTPRequest,
     GuestTokenSchema,
+    AuthSessionSchema,
     PasswordResetRequestSchema,
     PasswordResetConfirmSchema,
 )
@@ -312,6 +313,24 @@ async def create_guest_identity(
         samesite="lax",
     )
     return issued.token
+
+
+@router.get("/session", response_model=AuthSessionSchema)
+async def get_auth_session(
+    identity: Identity = Depends(get_current_identity),
+):
+    """Return the authenticated principal for client session restoration."""
+    if not identity.user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Authenticated principal has no user id.",
+        )
+    return AuthSessionSchema(
+        user_id=identity.user_id,
+        principal_type="guest" if identity.auth_type == "guest" else "user",
+        organization_id=identity.organization_id,
+        roles=identity.roles,
+    )
 
 
 @router.post("/api-keys", response_model=APIKeyResponseSchema, status_code=status.HTTP_201_CREATED)
