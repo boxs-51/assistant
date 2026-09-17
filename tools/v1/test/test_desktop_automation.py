@@ -13,7 +13,7 @@ sys.modules['pynput'] = mock_pynput
 sys.modules['pynput.keyboard'] = mock_pynput
 
 # Import module cần test sau khi đã mock dependencies
-from tools.desktop_tool import (
+from tools.v1.desktop_tool import (
     DesktopAutomation,
     get_screen_info,
     mouse_click,

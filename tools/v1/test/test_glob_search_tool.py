@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 # Import class và entrypoint chuẩn
-from tools.find_by_glob import GlobSearchTool, run, TOOL_METADATA
+from tools.v1.find_by_glob import GlobSearchTool, run, TOOL_METADATA
 
 
 class TestGlobSearchTool(unittest.TestCase):

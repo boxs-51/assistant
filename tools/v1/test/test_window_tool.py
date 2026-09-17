@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import MagicMock, patch
-import tools.window_tool
-from tools.window_tool import WindowTool, run
+import tools.v1.window_tool
+from tools.v1.window_tool import WindowTool, run
 
 
 class TestWindowTool(unittest.TestCase):
@@ -12,7 +12,7 @@ class TestWindowTool(unittest.TestCase):
 
     # ==================== 1. TEST KIỂM TRA DEPENDENCY ====================
 
-    @patch("tools.window_tool.gw", None)
+    @patch("tools.v1.window_tool.gw", None)
     def test_dependency_missing(self):
         """Kiểm tra báo lỗi khi chưa cài đặt thư viện PyGetWindow."""
         err = self.tool._check_dependency()
@@ -24,13 +24,13 @@ class TestWindowTool(unittest.TestCase):
 
     # ==================== 2. TEST HELPER _GET_WINDOW_OBJECTS ====================
 
-    @patch("tools.window_tool.gw")
+    @patch("tools.v1.window_tool.gw")
     def test_get_window_objects_empty_query(self, mock_gw):
         """Kiểm tra báo lỗi khi query tìm kiếm trống."""
         res = self.tool._get_window_objects("")
         self.assertEqual(res, "Lỗi: Từ khóa tìm kiếm cửa sổ không được để trống.")
 
-    @patch("tools.window_tool.gw")
+    @patch("tools.v1.window_tool.gw")
     def test_get_window_objects_exact_match(self, mock_gw):
         """Kiểm tra tìm kiếm khi getWindowsWithTitle trả về kết quả."""
         mock_win = MagicMock()
@@ -41,7 +41,7 @@ class TestWindowTool(unittest.TestCase):
         self.assertEqual(len(wins), 1)
         self.assertEqual(wins[0].title, "Notepad - Draft.txt")
 
-    @patch("tools.window_tool.gw")
+    @patch("tools.v1.window_tool.gw")
     def test_get_window_objects_fallback_search(self, mock_gw):
         """Kiểm tra cơ chế fallback duyệt getAllWindows() khi getWindowsWithTitle không thấy."""
         mock_gw.getWindowsWithTitle.return_value = []
@@ -56,14 +56,14 @@ class TestWindowTool(unittest.TestCase):
 
     # ==================== 3. TEST LIỆT KÊ CỬA SỔ (LIST) ====================
 
-    @patch("tools.window_tool.gw")
+    @patch("tools.v1.window_tool.gw")
     def test_list_windows_success(self, mock_gw):
         """Kiểm tra lấy danh sách tiêu đề cửa sổ thành công."""
         mock_gw.getAllTitles.return_value = ["  Chrome  ", "", "Notepad", "   "]
         titles = self.tool.list_windows()
         self.assertEqual(titles, ["Chrome", "Notepad"])
 
-    @patch("tools.window_tool.gw")
+    @patch("tools.v1.window_tool.gw")
     def test_list_windows_empty(self, mock_gw):
         """Kiểm tra thông báo khi không có cửa sổ nào."""
         mock_gw.getAllTitles.return_value = ["", "   "]

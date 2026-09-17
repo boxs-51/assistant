@@ -1,7 +1,5 @@
-import random
 import asyncio
 from typing import Dict, Optional, Tuple
-from bs4 import BeautifulSoup
 
 try:
     from curl_cffi.requests import AsyncSession
@@ -14,7 +12,6 @@ except ImportError:
     async_playwright = None
 
 from .extractors import extract_tables_and_charts
-from .utils import clean_whitespace
 from .stealth import WebToolStealth
 
 class WebScraper:

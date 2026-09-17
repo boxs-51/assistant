@@ -3,7 +3,7 @@ from unittest.mock import MagicMock, AsyncMock, patch
 import time
 
 # Import WebTool từ package web_tool
-from tools.web_tool import WebTool, run, TOOL_METADATA
+from tools.v1.web_tool import WebTool, run, TOOL_METADATA
 
 
 class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
@@ -15,7 +15,7 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
 
     # ================= 1. TEST QUẢN LÝ PROXY & LATENCY =================
 
-    @patch("tools.web_tool.proxy.cffi_requests")
+    @patch("tools.v1.web_tool.proxy.cffi_requests")
     def test_proxy_testing_and_latency_sorting(self, mock_cffi):
         """Test kiểm tra Proxy song song và sắp xếp theo Latency tăng dần."""
         def fake_get(url, proxies, timeout, impersonate):
@@ -47,7 +47,7 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
 
     # ================= 2. TEST TÌM KIẾM DUCKDUCKGO =================
 
-    @patch("tools.web_tool.searcher.DDGS")
+    @patch("tools.v1.web_tool.searcher.DDGS")
     async def test_search_success(self, mock_ddgs_cls):
         """Test chức năng tìm kiếm trả về chuỗi Markdown định dạng."""
         mock_ddgs_instance = MagicMock()
@@ -68,7 +68,7 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
 
     # ================= 3. TEST CÀO DỮ LIỆU (SCRAPE) =================
 
-    @patch("tools.web_tool.core.extract_clean_content")
+    @patch("tools.v1.web_tool.core.extract_clean_content")
     async def test_scrape_static_success(self, mock_extract):
         """Test cào tĩnh thành công bằng curl_cffi và làm sạch nội dung."""
         html = "<html><head><title>Test Page</title></head><body><p>Hello World Content</p></body></html>"
@@ -87,7 +87,7 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Static (curl_cffi)", res)
             self.assertIn(content, res)
 
-    @patch("tools.web_tool.core.extract_clean_content")
+    @patch("tools.v1.web_tool.core.extract_clean_content")
     async def test_scrape_fallback_to_playwright_when_short_content(self, mock_extract):
         """Test tự động nhảy sang Playwright khi nội dung cào tĩnh quá ngắn/rỗng."""
         def fake_extract(html, *args, **kwargs):
@@ -118,7 +118,7 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
         """Test giới hạn số lượng ký tự đầu ra max_chars."""
         raw_html = "<html><body>" + "A" * 500 + "</body></html>"
         with patch.object(self.tool.scraper, "fetch_static", new_callable=AsyncMock, return_value=(raw_html, 200, "OK")):
-            with patch("tools.web_tool.core.extract_clean_content", return_value="A" * 500):
+            with patch("tools.v1.web_tool.core.extract_clean_content", return_value="A" * 500):
                 res = await self.tool.scrape("https://long-text.com", max_chars=100)
                 self.assertIn("*(Nội dung đã bị cắt bớt do vượt giới hạn độ dài)*", res)
 
@@ -150,7 +150,7 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
 
     def test_run_function_wrapper(self):
         """Test hàm entrypoint global `run()`."""
-        with patch("tools.web_tool._default_web_tool.execute") as mock_exec:
+        with patch("tools.v1.web_tool.WebTool.execute") as mock_exec:
             mock_exec.return_value = "OK"
             res = run("search", query="hello")
             mock_exec.assert_called_once_with(action="search", query="hello")

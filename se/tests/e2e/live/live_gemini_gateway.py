@@ -10,7 +10,7 @@ import httpx
 import pytest
 import pytest_asyncio
 
-from tests.e2e.conftest import (run_file_test, run_heavy_test, run_embedding_test, run_test_live)
+from se.tests.e2e.conftest import (run_file_test, run_heavy_test, run_embedding_test, run_test_live)
 pytestmark = pytest.mark.live
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")

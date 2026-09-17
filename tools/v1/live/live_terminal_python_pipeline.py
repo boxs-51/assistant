@@ -11,14 +11,14 @@ if os.path.exists(TARGET_DIR):
 
 # Import các công cụ chính từ hệ thống
 try:
-    from tools.terminal_tool import run as terminal_tool_run
-    from tools.file_tool import run as file_tool_run
-    from tools.find_by_glob import run as glob_tool_run
+    from tools.v1.terminal_tool import run as terminal_tool_run
+    from tools.v1.file_tool import run as file_tool_run
+    from tools.v1.find_by_glob import run as glob_tool_run
 except ImportError:
     try:
-        from terminal_tool import run as terminal_tool_run
-        from file_tool import run as file_tool_run
-        from find_by_glob import run as glob_tool_run
+        from tools.v1.terminal_tool import run as terminal_tool_run
+        from tools.v1.file_tool import run as file_tool_run
+        from tools.v1.find_by_glob import run as glob_tool_run
     except ImportError as e:
         print(f"⚠️ Lỗi Import Tool: {e}. Vui lòng kiểm tra lại PYTHONPATH hoặc thư mục chứa tool.")
 

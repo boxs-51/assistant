@@ -6,9 +6,9 @@ import unittest
 import warnings
 
 # Import các công cụ thực thi
-from tools.desktop_tool import DesktopAutomation
-from tools.terminal_tool import TerminalTool
-from tools.window_tool import WindowTool
+from tools.v1.desktop_tool import DesktopAutomation
+from tools.v1.terminal_tool import TerminalTool
+from tools.v1.window_tool import WindowTool
 
 
 class TestRealMachineIntegration(unittest.TestCase):

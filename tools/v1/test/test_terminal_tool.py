@@ -5,7 +5,7 @@ import tempfile
 import unittest
 from unittest.mock import MagicMock, patch
 
-from tools.terminal_tool import TerminalTool, run, TOOL_METADATA
+from tools.v1.terminal_tool import TerminalTool, run, TOOL_METADATA
 
 
 class TestTerminalTool(unittest.TestCase):
