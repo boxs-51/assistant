@@ -21,6 +21,14 @@ class CapabilityRegistrationResponse(GatewayBaseModel):
     implementations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
+class CapabilityExecutionRequest(GatewayBaseModel):
+    arguments: Dict[str, Any] = Field(default_factory=dict)
+    session_id: str | None = None
+    connection_id: str | None = None
+    timeout_seconds: float | None = Field(default=None, gt=0)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class SessionMessageEditRequest(GatewayBaseModel):
     content: Any
 

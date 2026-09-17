@@ -6,7 +6,11 @@ bound to a live connection before an agent invokes them.
 from fastapi import APIRouter, Depends, HTTPException, status
 from .....application.container import ApplicationContainer
 from .....domain.schemas.agent import AgentDefinition
-from .....domain.schemas.capability import CapabilityRegistrationResponse, SkillDefinition
+from .....domain.schemas.capability import (
+    CapabilityExecutionRequest,
+    CapabilityRegistrationResponse,
+    SkillDefinition,
+)
 from .....domain.schemas.identity import Identity
 from .....domain.schemas.tool import GatewayToolDefinition
 from .....runtimes.capability.contracts.definition import CapabilityDefinition
@@ -17,6 +21,8 @@ from .....runtimes.capability.contracts.implementation import (
     CapabilityOwnerType,
 )
 from .....runtimes.capability.contracts.registration import CapabilityKind, CapabilityRegistration
+from .....runtimes.capability.contracts.error import CapabilityError
+from .....runtimes.capability.contracts.result import CapabilityResult
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
 
@@ -108,6 +114,31 @@ async def register_capability(body: CapabilityRegistration, identity: Identity =
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+@router.get("/", response_model=list[CapabilityRegistrationResponse])
+async def list_capabilities(
+    kind: CapabilityKind | None = None,
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
+):
+    catalog = _catalog(container)
+    result = []
+    for definition in catalog.list_definitions():
+        try:
+            definition_kind = CapabilityKind(str(definition.metadata.get("kind", "TOOL")).upper())
+        except ValueError:
+            continue
+        if kind is not None and definition_kind is not kind:
+            continue
+        result.append(
+            _response(
+                definition_kind,
+                definition,
+                catalog.list_implementations(definition.capability_id),
+            )
+        )
+    return result
+
+
 @router.post("/tools", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
 async def register_tool_capability(body: GatewayToolDefinition, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
     definition = CapabilityDefinition(
@@ -137,15 +168,37 @@ async def register_tool_capability(body: GatewayToolDefinition, identity: Identi
 
 @router.post("/agents", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
 async def register_agent_capability(body: AgentDefinition, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
-    missing = [name for name in body.tools if container.tool_registry.get(name) is None]
+    catalog = _catalog(container)
+
+    def known_tool(name: str) -> bool:
+        if container.tool_registry.get(name) is not None:
+            return True
+        if not catalog.contains_definition(name):
+            return False
+        definition = catalog.get_definition(name)
+        return (
+            str(definition.metadata.get("kind", "TOOL")).upper() == "TOOL"
+            and bool(catalog.list_implementations(name, routable_only=True))
+        )
+
+    missing = [name for name in body.tools if not known_tool(name)]
     if missing:
         raise HTTPException(status_code=422, detail=f"Unknown tools: {', '.join(missing)}")
+    missing_skills = [name for name in body.skills if not catalog.contains_definition(name)]
+    if missing_skills:
+        raise HTTPException(status_code=422, detail=f"Unknown skills: {', '.join(missing_skills)}")
+    invalid_skills = [
+        name for name in body.skills
+        if str(catalog.get_definition(name).metadata.get("kind", "")).upper() != "SKILL"
+    ]
+    if invalid_skills:
+        raise HTTPException(status_code=422, detail=f"Not skill capabilities: {', '.join(invalid_skills)}")
     definition = CapabilityDefinition(
         id=body.name, name=body.name, description=body.goal, input_schema={"type": "object"},
         execution_kind="AGENT", metadata={"kind": "AGENT", "agent": body.model_dump(mode="json")},
     )
     try:
-        definition = _catalog(container).register_definition(definition)
+        definition = catalog.register_definition(definition)
         container.agent_registry.register(body)
         return _response(CapabilityKind.AGENT, definition)
     except ValueError as exc:
@@ -160,11 +213,39 @@ async def register_skill_capability(body: SkillDefinition, identity: Identity = 
         metadata={"kind": "SKILL", "instruction": body.instruction, **body.metadata},
     )
     try:
-        definition = _catalog(container).register_definition(definition)
+        definition = _catalog(container).register_definition(definition, allow_update=True)
         container.capability_runtime.registry.register_definition(definition)
         return _response(CapabilityKind.SKILL, definition)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/{capability_id}/execute", response_model=CapabilityResult)
+async def execute_capability(
+    capability_id: str,
+    body: CapabilityExecutionRequest,
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
+):
+    try:
+        return await container.capability_runtime.execute_capability(
+            capability_id=capability_id,
+            arguments=body.arguments,
+            identity=identity,
+            session_id=body.session_id,
+            connection_id=body.connection_id,
+            timeout_seconds=body.timeout_seconds,
+            metadata=body.metadata,
+        )
+    except PermissionError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except CapabilityError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=exc.model_dump(mode="json"),
+        ) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
 
 
 @router.get("/{capability_id}", response_model=CapabilityRegistrationResponse)

@@ -525,6 +525,7 @@ export function initSidebar() {
 }
 
 export function switchSidebarPage(pageName) {
+  document.getElementById('sidebar')?.classList.toggle('studio-mode', pageName === 'gateway');
   document.querySelectorAll('.sidebar-tab-btn').forEach(btn => {
     btn.classList.toggle('active', btn.dataset.page === pageName);
   });

@@ -31,6 +31,7 @@ class MultiAgentCoordinator:
         self._tasks: Dict[str, AgentTask] = {}
         self._messages: Dict[str, List[AgentMessage]] = {}
         self._executions: Dict[str, AgentExecution] = {}
+        self._running_tasks: Dict[str, asyncio.Task] = {}
 
     async def _persist(self, method: str, values: dict):
         if self.durable_store is not None:
@@ -171,8 +172,32 @@ class MultiAgentCoordinator:
 
     def cancel_task(self, task_id: str, identity: Identity) -> AgentTask:
         task = self.get_task(task_id, identity)
+        running = self._running_tasks.get(task_id)
+        if running is not None and not running.done():
+            running.cancel()
         task.status = AgentTaskStatus.CANCELLED
         task.updated_at = time.time()
+        return task
+
+    async def start_task(self, task_id: str, identity: Identity, executor) -> AgentTask:
+        task = self.get_task(task_id, identity)
+        if task_id in self._running_tasks and not self._running_tasks[task_id].done():
+            raise ValueError(f"Agent task '{task_id}' is already running.")
+        if task.status in {AgentTaskStatus.COMPLETED, AgentTaskStatus.CANCELLED}:
+            raise ValueError(f"Agent task '{task_id}' is already terminal.")
+
+        runner = asyncio.create_task(
+            self.execute_task(task_id, identity, executor),
+            name=f"agent-task:{task_id}",
+        )
+        self._running_tasks[task_id] = runner
+
+        def cleanup(_completed):
+            if self._running_tasks.get(task_id) is runner:
+                self._running_tasks.pop(task_id, None)
+
+        runner.add_done_callback(cleanup)
+        await asyncio.sleep(0)
         return task
 
     def close_session(self, session_id: str, identity: Identity) -> AgentSession:
@@ -218,7 +243,18 @@ class MultiAgentCoordinator:
             execution.state = AgentExecutionStateMachine.transition(
                 execution.state, AgentExecutionState.RUNNING
             )
-            result_value = executor(task)
+            try:
+                executor_signature = inspect.signature(executor)
+                accepts_identity = (
+                    "identity" in executor_signature.parameters
+                    or any(
+                        parameter.kind == inspect.Parameter.VAR_KEYWORD
+                        for parameter in executor_signature.parameters.values()
+                    )
+                )
+            except (TypeError, ValueError):
+                accepts_identity = False
+            result_value = executor(task, identity=identity) if accepts_identity else executor(task)
             if inspect.isawaitable(result_value):
                 result = await asyncio.wait_for(
                     result_value, timeout=execution_limits.timeout_seconds

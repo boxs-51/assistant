@@ -15,7 +15,7 @@ class MessageContentPart(GatewayBaseModel):
     """
     type: MessageContentType
     text: Optional[str] = None
-    data: Union[
+    data: Optional[Union[
         TextContent,
         ImageContent,
         AudioContent,
@@ -23,7 +23,7 @@ class MessageContentPart(GatewayBaseModel):
         DocumentContent,
         GatewayAttachment,
         UrlContent,
-    ] = None
+    ]] = None
 
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

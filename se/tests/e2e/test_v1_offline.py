@@ -38,6 +38,7 @@ from se.src.runtimes.capability.registration import ClientCapabilityRegistration
 from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.registry import CapabilityRegistry
 from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.transport.gateway.authentication.dependency import get_current_identity, verify_admin_ip, get_api_key_service
 from se.src.transport.gateway.dependencies import get_container, get_auth
 
@@ -224,6 +225,10 @@ class FakeCoordinator:
     async def execute_task(self, tid, identity, executor):
         return await executor(self.tasks[tid])
 
+    async def start_task(self, tid, identity, executor):
+        self.tasks[tid]["status"] = "RUNNING"
+        return self.tasks[tid]
+
     def get_execution(self, eid, identity):
         return {"execution_id": eid, "status": "completed"}
 
@@ -382,10 +387,12 @@ def offline_app():
     agent_registry = SimpleNamespace(
         register=lambda x: agent_store.__setitem__(x.name, x),
         get=lambda x: agent_store.get(x),
+        list_all=lambda: list(agent_store.values()),
     )
     tool_registry = SimpleNamespace(
         register=lambda x: tool_store.__setitem__(x.name, x),
         get=lambda x: tool_store.get(x),
+        get_all=lambda: list(tool_store.values()),
     )
 
     catalog=CapabilityCatalog()
@@ -404,7 +411,11 @@ def offline_app():
         tool_registry=tool_registry,
         multi_agent_coordinator=FakeCoordinator(),
         oauth=FakeOAuth(),
-        capability_runtime=CapabilityRuntime(registry=CapabilityRegistry(), catalog=catalog),
+        capability_runtime=CapabilityRuntime(
+            registry=CapabilityRegistry(),
+            catalog=catalog,
+            routing_policy=CapabilityRoutingPolicy(),
+        ),
         connection_runtime=connection_runtime
     )
     container.require = lambda key: getattr(container, key)
@@ -537,6 +548,7 @@ async def test_v1_auth_api_is_offline(offline_app: FastAPI):
 
 @pytest.mark.asyncio
 async def test_v1_agent_tool_admin_health_multi_agent(offline_app: FastAPI):
+    offline_app.state.container.multi_agent_coordinator.executor = lambda task: {"task_id": task["task_id"]}
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         tool = {"name": "offline.tool", "description": "offline", "parameters": {"type": "object", "properties": {}}}
@@ -553,6 +565,9 @@ async def test_v1_agent_tool_admin_health_multi_agent(offline_app: FastAPI):
         assert task.status_code == 201
         tid = task.json()["task_id"]
         assert (await client.get(f"/v1/multi-agent/tasks/{tid}")).status_code == 200
+        started = await client.post(f"/v1/multi-agent/tasks/{tid}/start")
+        assert started.status_code == 200
+        assert started.json()["status"] == "RUNNING"
         assert (await client.post(f"/v1/multi-agent/tasks/{tid}/cancel")).status_code == 200
         assert (await client.post(f"/v1/multi-agent/sessions/{sid}/close")).status_code == 200
         assert (await client.get("/v1/multi-agent/executions/ex1")).status_code == 200
@@ -608,6 +623,7 @@ async def test_v1_capability_control_plane_registers_tool_skill_and_agent(offlin
             "goal": "Echo Goal",
             "instruction": "Use cap.echo",
             "tools": ["cap.echo"],  # Tool cap.echo da duoc dang ky o tren
+            "skills": ["cap.review"],
         }
         registered_agent = await client.post("/v1/capabilities/agents", json=agent_payload)
         assert registered_agent.status_code == 201, registered_agent.text
@@ -617,6 +633,25 @@ async def test_v1_capability_control_plane_registers_tool_skill_and_agent(offlin
         fetched = await client.get("/v1/capabilities/cap.echo")
         assert fetched.status_code == 200
         assert fetched.json()["capability_id"] == "cap.echo"
+
+        listed = await client.get("/v1/capabilities/", params={"kind": "SKILL"})
+        assert listed.status_code == 200, listed.text
+        assert [item["capability_id"] for item in listed.json()] == ["cap.review"]
+
+        executed = await client.post(
+            "/v1/capabilities/cap.echo/execute",
+            json={"arguments": {}},
+        )
+        assert executed.status_code == 200, executed.text
+        assert executed.json()["output"] == "echo response"
+
+        agents = await client.get("/v1/agents/")
+        assert agents.status_code == 200
+        assert any(item["name"] == "cap-agent" for item in agents.json())
+
+        tools = await client.get("/v1/tools/")
+        assert tools.status_code == 200
+        assert any(item["name"] == "cap.echo" for item in tools.json())
 
 
 def test_v1_client_capabilities_websocket_registration(offline_app: FastAPI):

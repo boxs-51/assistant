@@ -26,6 +26,46 @@ class ResponseFiles():
         except Exception:
             return None
 
+    @staticmethod
+    def _response_json(response: Any) -> Dict[str, Any]:
+        """Return a JSON object from either an HTTP response or decoded data."""
+        raw_data = response if isinstance(response, dict) else response.json()
+        if not isinstance(raw_data, dict) or not raw_data:
+            raise ValueError("Gemini File API returned an empty or non-object JSON body")
+        return raw_data
+
+    def _adapt_file_data(self, file_data: Dict[str, Any]) -> GatewayAttachment:
+        if not isinstance(file_data, dict):
+            raise TypeError("Gemini file entry must be a JSON object")
+
+        raw_name = file_data.get("name", "")
+        file_id = raw_name.removeprefix("files/")
+        if not file_id:
+            raise ValueError("Gemini file response is missing 'name'")
+
+        size_bytes = file_data.get("sizeBytes")
+        try:
+            final_size = int(size_bytes) if size_bytes is not None else None
+        except (ValueError, TypeError):
+            final_size = None
+
+        metadata_dto = FileMetadata(
+            checksum_sha256=file_data.get("sha256Hash"),
+            created_at=self._parse_iso_to_timestamp(file_data.get("createTime")),
+            modified_at=self._parse_iso_to_timestamp(file_data.get("updateTime")),
+        )
+
+        return GatewayAttachment(
+            id=file_id,
+            filename=file_data.get("displayName"),
+            mime_type=file_data.get("mimeType", "application/octet-stream"),
+            size=final_size,
+            uri=file_data.get("uri"),
+            source="provider",
+            provider_file_id=raw_name,
+            metadata=metadata_dto,
+        )
+
     async def adapt_file_upload_response(self, response: Any) -> GatewayAttachment:
         """
         Chuyển đổi response thành công từ bước PUT (Resumable Upload) của Gemini File API 
@@ -45,60 +85,18 @@ class ResponseFiles():
 
             # Trích xuất dữ liệu JSON từ Response
             # LƯU Ý: Nếu dùng aiohttp, hãy đổi thành: raw_data = await response.json()
-            raw_data = response.json()
-            if not raw_data:
-                logger.error("Gemini File API returned an empty response body")
-                raise ValueError("Empty response received from Gemini File API")
+            raw_data = self._response_json(response)
 
             # Gemini bọc dữ liệu trong trường "file"
             file_data: Dict[str, Any] = raw_data.get("file", raw_data)
 
             # 2. Bóc tách và chuẩn hóa thông tin cơ bản
-            raw_name = file_data.get("name", "")  # Cấu trúc trả về thường là: "files/abc123xyz"
-            file_id = raw_name.replace("files/", "") if "files/" in raw_name else raw_name
-            
-            # Xử lý kích thước file (Gemini trả về dạng chuỗi sizeBytes)
-            size_bytes = file_data.get("sizeBytes")
-            try:
-                final_size = int(size_bytes) if size_bytes is not None else None
-            except (ValueError, TypeError):
-                final_size = None
-
-            # 3. Xử lý timestamps (Chuyển ISO 8601 string thành Unix timestamp int)
-            created_timestamp = self._parse_iso_to_timestamp(iso_str=file_data.get("createTime"))
-            modified_timestamp = self._parse_iso_to_timestamp(iso_str=file_data.get("updateTime"))
-
-            # 4. Tạo FileMetadata DTO chi tiết
-            metadata_dto = FileMetadata(
-                checksum_sha256=file_data.get("sha256Hash"),
-                created_at=created_timestamp,
-                modified_at=modified_timestamp,
-                page_count=None,
-                language=None,
-                encoding=None
-            )
-
-            # 5. Khởi tạo và trả về GatewayAttachment hoàn chỉnh
-            # Trường 'uri' cực kỳ quan trọng, chính là link 'https://generativelanguage.googleapis.com/...' 
-            # để nạp vào cấu trúc fileData sau này.
-            file_uri = file_data.get("uri")
-            if not file_uri:
-                logger.warning("Field 'uri' is missing from Gemini file upload response", file_id=file_id)
-
-            attachment = GatewayAttachment(
-                id=file_id,
-                filename=file_data.get("displayName"),
-                mime_type=file_data.get("mimeType", "application/octet-stream"),
-                size=final_size,
-                uri=file_uri,
-                base64_data=None,  # Đã chuyển lên File API thành công nên trường này luôn để None
-                metadata=metadata_dto
-            )
+            attachment = self._adapt_file_data(file_data)
 
             logger.info(
                 "Successfully adapted Gemini File API response to GatewayAttachment",
-                file_id=file_id,
-                file_uri=file_uri
+                file_id=attachment.id,
+                file_uri=attachment.uri,
             )
             return attachment
 
@@ -111,24 +109,23 @@ class ResponseFiles():
         try:
             # Parse JSON từ response
 
-            raw_data = response.json()
+            raw_data = self._response_json(response)
             # Gemini API trả về key 'files' chứa danh sách các file
             gemini_files = raw_data.get("files", [])
+            if not isinstance(gemini_files, list):
+                raise TypeError("Gemini 'files' field must be an array")
             logger.info("Found raw files in Gemini response, starting mapping", count=len(gemini_files))
 
             final_attachments: List[GatewayAttachment] = []
 
             for f in gemini_files:
                 try:
-                    # Giả lập một response bọc độc lập để tái sử dụng hàm adapt_file_upload_response đã viết
-                    # Hoặc bạn có thể bóc tách logic parse của hàm đó ra thành một hàm private riêng lẻ
-                    mock_file_response = {"file": f}
-                    attachment = await self.adapt_file_upload_response(mock_file_response)
+                    attachment = self._adapt_file_data(f)
                     final_attachments.append(attachment)
                 except Exception as map_err:
                     logger.error(
                         "Error mapping raw Gemini file data to GatewayAttachment", 
-                        file_name=f.get("name"), 
+                        file_name=f.get("name") if isinstance(f, dict) else None,
                         error=str(map_err)
                     )
                     continue

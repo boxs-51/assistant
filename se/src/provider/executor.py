@@ -4,7 +4,7 @@ import structlog
 from typing import Callable, Awaitable, AsyncGenerator, Any
 
 from ..infrastructure.config.schemas import ProviderSettings
-from .exceptions import ProviderError
+from .exceptions import ProviderError, wrap_provider_exception
 from .core.provider import BaseProvider
 from ..domain.schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
 
@@ -97,8 +97,11 @@ class ProviderExecutor:
                 "Provider execution failed after all retries.",
                 provider=provider.name, error=str(e), error_type=type(e).__name__
             )
-            # Ném lại lỗi dưới dạng ProviderError để Router có thể fallback.
-            raise ProviderError(f"Provider failed after all retries: {e}", provider_name=provider.name) from e
+            # Preserve structured provider errors and normalize raw httpx errors.
+            normalized = wrap_provider_exception(e, provider.name)
+            if normalized is e:
+                raise
+            raise normalized from e
 
     async def execute_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
         """
@@ -134,7 +137,10 @@ class ProviderExecutor:
             logger.warning(
                 "Provider stream execution failed.", provider=provider.name, error=str(e), error_type=type(e).__name__
             )
-            raise ProviderError(f"Provider stream failed: {e}", provider_name=provider.name) from e
+            normalized = wrap_provider_exception(e, provider.name)
+            if normalized is e:
+                raise
+            raise normalized from e
 
     async def execute_generic(
         self,
@@ -174,4 +180,7 @@ class ProviderExecutor:
                 "Provider generic execution failed after all retries.",
                 provider=provider.name, error=str(e), error_type=type(e).__name__
             )
-            raise ProviderError(f"Provider failed after all retries: {e}", provider_name=provider.name) from e
+            normalized = wrap_provider_exception(e, provider.name)
+            if normalized is e:
+                raise
+            raise normalized from e

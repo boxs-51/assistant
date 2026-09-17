@@ -17,7 +17,7 @@ class GatewayChoice(GatewayBaseModel):
 
 class ResponseMetaData(GatewayBaseModel) :
     created: int = Field(default_factory=lambda: int(time.time()))
-    provider: str = Field(..., description="Provider thực tế đã xử lý request")
+    provider: str = Field(default="unknown", description="Provider thực tế đã xử lý request")
 
 class GatewayResponse(GatewayBaseModel):
     """Phản hồi Non-Streaming hoàn chỉnh."""

@@ -60,9 +60,10 @@ class DynamicRegistry:
             return res
         
         elif cmd == "/skills":
-            res = "### 📚 Loaded Skill Workflows\n"
+            res = "### 📚 Discovered Skill Workflows\n"
             for k, v in self.skills.items():
-                res += f"- **`{k}`** (Risk: `{v['base_risk']}`)\n"
+                state = "loaded" if v.get("loaded") else "available"
+                res += f"- **`{k}`** (Risk: `{v['base_risk']}`, State: `{state}`)\n"
             return res
             
         elif cmd == "/context":
@@ -80,3 +81,22 @@ class DynamicRegistry:
                 return tool_data
                 
         return None
+
+    def get_skill(self, skill_name: str, *, load: bool = False) -> Optional[Dict[str, Any]]:
+        skill = self.skill_mgr.get_skill(skill_name, load=load)
+        if skill is not None:
+            self.skills[skill_name] = skill
+        return skill
+
+    def activate_skill(self, skill_name: str) -> Dict[str, Any]:
+        skill = self.skill_mgr.load_skill(skill_name)
+        self.skills[skill_name] = skill
+        return skill
+
+    def deactivate_skill(self, skill_name: str) -> bool:
+        unloaded = self.skill_mgr.unload_skill(skill_name)
+        if unloaded:
+            skill = self.skill_mgr.get_skill(skill_name)
+            if skill is not None:
+                self.skills[skill_name] = skill
+        return unloaded

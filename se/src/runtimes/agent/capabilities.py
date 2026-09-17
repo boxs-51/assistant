@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .contracts.context_assembly import AgentCapabilityView
+from .contracts.context_assembly import AgentCapabilityView, AgentSkillView
 from .contracts.policy import AgentToolPolicy, PolicyDecision
 from ..capability.catalog import CapabilityNotFoundError
 
@@ -79,3 +79,38 @@ class RegistryAgentCapabilityResolver:
         except (KeyError, CapabilityNotFoundError):
             return None
         return definition if implementations else None
+
+
+class RegistryAgentSkillResolver:
+    """Resolve only the skills assigned to an agent when its context is built."""
+
+    def __init__(self, *, agent_registry, capability_catalog) -> None:
+        self._agents = agent_registry
+        self._catalog = capability_catalog
+
+    async def resolve(self, *, agent_id: str, identity) -> tuple[AgentSkillView, ...]:
+        agent = self._agents.get(agent_id)
+        if agent is None:
+            return ()
+
+        result: list[AgentSkillView] = []
+        for skill_id in agent.skills or []:
+            try:
+                definition = self._catalog.get_definition(skill_id)
+            except (KeyError, CapabilityNotFoundError):
+                continue
+            if str(definition.metadata.get("kind", "")).upper() != "SKILL":
+                continue
+            instruction = definition.metadata.get("instruction")
+            if not isinstance(instruction, str) or not instruction.strip():
+                continue
+            result.append(
+                AgentSkillView(
+                    skill_id=skill_id,
+                    name=definition.name,
+                    description=definition.description,
+                    instruction=instruction.strip(),
+                    version=definition.version,
+                )
+            )
+        return tuple(result)

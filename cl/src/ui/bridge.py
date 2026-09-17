@@ -2,6 +2,7 @@ import json
 import uuid
 import logging
 import threading
+import time
 import webview
 from .workspace import WorkspaceManager
 from .session import SessionManager
@@ -16,6 +17,12 @@ class UIBridge:
         self._client_runtime = client_runtime
         self._window = None
         self._execution_local = threading.local()
+        self._state_lock = threading.RLock()
+        self._activity = []
+        self._chat_preferences = {
+            "provider": "gemini",
+            "model": "gemini-2.5-flash",
+        }
         
         # Gắn kết các module
         raw_ws = getattr(engine, "workspace_dir", __import__("os").getcwd())
@@ -40,6 +47,177 @@ class UIBridge:
                 "success": False,
                 "error": str(error),
             }
+
+    def _record_activity(self, action: str, status: str, detail=None):
+        item = {
+            "id": uuid.uuid4().hex,
+            "action": action,
+            "status": status,
+            "detail": detail,
+            "created_at": time.time(),
+        }
+        with self._state_lock:
+            self._activity.insert(0, item)
+            del self._activity[100:]
+        return item
+
+    @staticmethod
+    def _public_skill(skill: dict) -> dict:
+        return {
+            key: value for key, value in skill.items()
+            if key not in {"path", "content", "mtime_ns"}
+        }
+
+    def get_app_snapshot(self):
+        registry = self._engine.registry
+        with self._state_lock:
+            activity = list(self._activity)
+            preferences = dict(self._chat_preferences)
+
+        capabilities = []
+        agents = []
+        gateway_status = {"connected": self._client_runtime.ready}
+        if self._client_runtime.ready:
+            try:
+                gateway_status["health"] = self._engine.gateway_client.health()
+                capabilities = self._engine.gateway_client.list_capabilities()
+                agents = self._engine.gateway_client.list_agents()
+            except Exception as error:
+                gateway_status["error"] = str(error)
+
+        local_tools = []
+        for name, item in registry.tools.items():
+            metadata = item.get("metadata", {}) if isinstance(item, dict) else {}
+            local_tools.append({
+                "name": name,
+                "description": metadata.get("description", name),
+                "parameters": metadata.get("parameters", metadata.get("input_schema", {"type": "object"})),
+                "base_risk": metadata.get("base_risk", "MEDIUM"),
+                "source": "MCP" if item.get("is_mcp") else "LOCAL",
+            })
+
+        return {
+            "gateway": gateway_status,
+            "preferences": preferences,
+            "skills": [self._public_skill(item) for item in registry.skills.values()],
+            "tools": local_tools,
+            "capabilities": capabilities,
+            "agents": agents,
+            "activity": activity,
+        }
+
+    def set_chat_preferences(self, payload: dict):
+        provider = str(payload.get("provider") or "").strip()
+        model = str(payload.get("model") or "").strip()
+        if not provider or not model:
+            return {"success": False, "error": "Provider và model không được để trống."}
+        with self._state_lock:
+            self._chat_preferences = {"provider": provider, "model": model}
+        return {"success": True, "data": dict(self._chat_preferences)}
+
+    def list_models(self, provider: str):
+        try:
+            return {"success": True, "data": self._engine.gateway_client.list_models(provider)}
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+
+    def activate_skill(self, skill_name: str):
+        try:
+            if not self._client_runtime.ready:
+                raise RuntimeError("Vui lòng đăng nhập trước khi kích hoạt Skill.")
+            skill = self._engine.registry.activate_skill(skill_name)
+            registered = self._engine.gateway_client.register_skill({
+                "name": skill["name"],
+                "description": skill.get("description", skill["name"]),
+                "version": skill.get("version", "1.0"),
+                "instruction": skill["content"],
+                "metadata": {"base_risk": skill.get("base_risk", "MEDIUM")},
+            })
+            self._record_activity("skill.activate", "success", skill_name)
+            return {
+                "success": True,
+                "data": {"skill": self._public_skill(skill), "registration": registered},
+            }
+        except Exception as error:
+            self._record_activity("skill.activate", "error", str(error))
+            return {"success": False, "error": str(error)}
+
+    def deactivate_skill(self, skill_name: str):
+        unloaded = self._engine.registry.deactivate_skill(skill_name)
+        self._record_activity("skill.deactivate", "success" if unloaded else "error", skill_name)
+        return {"success": unloaded, "data": {"name": skill_name, "loaded": False}}
+
+    def execute_tool(self, tool_name: str, arguments: dict = None):
+        arguments = arguments or {}
+        if not isinstance(arguments, dict):
+            return {"success": False, "error": "Tool arguments phải là object."}
+        try:
+            local = self._engine.registry.get_tool(tool_name)
+            metadata = local.get("metadata", {}) if isinstance(local, dict) else {}
+            risk_level = str(metadata.get("base_risk", "HIGH")).upper()
+            approved = self._engine.hitl.request_approval(
+                tool_name,
+                arguments,
+                risk_level,
+                "Thực thi Tool trực tiếp từ giao diện.",
+            )
+            if not approved:
+                raise PermissionError("Tool execution was not approved.")
+            result = self._engine.gateway_client.execute_capability(
+                tool_name,
+                {"arguments": arguments},
+            )
+            self._record_activity("tool.execute", "success", tool_name)
+            return {"success": True, "data": result}
+        except Exception as error:
+            self._record_activity("tool.execute", "error", str(error))
+            return {"success": False, "error": str(error)}
+
+    def save_agent(self, payload: dict):
+        try:
+            result = self._engine.gateway_client.register_capability_agent(payload)
+            self._record_activity("agent.save", "success", payload.get("name"))
+            return {"success": True, "data": result}
+        except Exception as error:
+            self._record_activity("agent.save", "error", str(error))
+            return {"success": False, "error": str(error)}
+
+    def run_agent(self, payload: dict):
+        try:
+            agent_id = str(payload.get("agent_id") or "").strip()
+            prompt = str(payload.get("prompt") or "").strip()
+            if not agent_id or not prompt:
+                raise ValueError("Agent và prompt không được để trống.")
+            session = self._engine.gateway_client.create_agent_session([agent_id])
+            with self._state_lock:
+                model = self._chat_preferences["model"]
+            task = self._engine.gateway_client.create_agent_task({
+                "session_id": session["session_id"],
+                "assigned_agent_id": agent_id,
+                "input": {"prompt": prompt, "model": model},
+            })
+            started = self._engine.gateway_client.start_agent_task(task["task_id"])
+            self._record_activity("agent.run", "running", agent_id)
+            return {"success": True, "data": {"session": session, "task": started}}
+        except Exception as error:
+            self._record_activity("agent.run", "error", str(error))
+            return {"success": False, "error": str(error)}
+
+    def get_agent_task_status(self, task_id: str):
+        try:
+            task = self._engine.gateway_client.get_agent_task(task_id)
+            return {"success": True, "data": task}
+        except Exception as error:
+            return {"success": False, "error": str(error)}
+
+    def cancel_agent_task(self, task_id: str):
+        try:
+            task = self._engine.gateway_client.cancel_agent_task(task_id)
+            self._record_activity("agent.cancel", "success", task_id)
+            return {"success": True, "data": task}
+        except Exception as error:
+            self._record_activity("agent.cancel", "error", str(error))
+            return {"success": False, "error": str(error)}
     
     def set_window(self, window: webview.Window):
         self._window = window
@@ -82,10 +260,12 @@ class UIBridge:
                 self.render_block(role="user", data={"text": text, "files": files or []})
                 self._eval_js("window.showPendingIndicator()")
                 
+                with self._state_lock:
+                    preferences = dict(self._chat_preferences)
                 self._engine.run_agent_session(
                     session=session, user_input=text, attached_files=files or [],
                     render_cb=self.render_block, enable_stream=True,
-                    provider_name="gemini", model_name="gemini-2.5-flash"
+                    provider_name=preferences["provider"], model_name=preferences["model"]
                 )
             except Exception as e:
                 self.render_block(role="system", text=f"❌ Lỗi: {str(e)}")

@@ -21,7 +21,10 @@ class ResponseMetaData(GatewayBaseModel) :
     raw_response: Optional[Dict[str, Any]] = None
     citations: Optional[List[Dict[str, Any]]] = None
     content_parts: Optional[List[Dict[str, Any]]] = None
-    provider: str = Field(..., description="Provider thực tế đã xử lý request")
+    provider: str = Field(
+        default="unknown",
+        description="Provider thực tế đã xử lý request",
+    )
 
 class GatewayResponse(GatewayBaseModel):
     """Phản hồi Non-Streaming hoàn chỉnh."""

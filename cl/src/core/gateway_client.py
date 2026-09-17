@@ -38,10 +38,10 @@ class GatewayLLMClient:
             headers=headers,
             **kwargs,
         )
-        response.raise_for_status()
         if response.status_code >= 400:
             try:
-                detail = response.json().get("detail")
+                body = response.json()
+                detail = body.get("detail", body) if isinstance(body, dict) else body
             except ValueError:
                 detail = response.text
             raise requests.HTTPError(
@@ -195,8 +195,14 @@ class GatewayLLMClient:
     def register_agent(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/v1/agents/", json=payload).json()
 
+    def list_agents(self) -> Any:
+        return self._request("GET", "/v1/agents/").json()
+
     def register_tool(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/v1/tools/", json=payload).json()
+
+    def list_tools(self) -> Any:
+        return self._request("GET", "/v1/tools/").json()
 
     def register_capability_tool(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/v1/capabilities/tools", json=payload).json()
@@ -206,6 +212,17 @@ class GatewayLLMClient:
 
     def register_capability_agent(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/v1/capabilities/agents", json=payload).json()
+
+    def list_capabilities(self, kind: Optional[str] = None) -> Any:
+        params = {"kind": kind} if kind else None
+        return self._request("GET", "/v1/capabilities/", params=params).json()
+
+    def execute_capability(self, capability_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request(
+            "POST",
+            f"/v1/capabilities/{capability_id}/execute",
+            json=payload,
+        ).json()
 
     def get_sessions(self) -> Any:
         return self._request("GET", "/v1/sessions").json()
@@ -224,8 +241,15 @@ class GatewayLLMClient:
         for name, item in registry.tools.items():
             metadata = item.get("metadata", {})
             result["tools"].append(self.register_capability_tool({"name": name, "description": metadata.get("description", name), "parameters": metadata.get("parameters", {"type": "object"})}))
-        for name, skill in registry.skills.items():
-            result["skills"].append(self.register_skill({"name": name, "description": skill.get("name", name), "instruction": skill.get("content", ""), "metadata": {"base_risk": skill.get("base_risk", "MEDIUM")}}))
+        for name in registry.skills:
+            skill = registry.get_skill(name, load=True)
+            result["skills"].append(self.register_skill({
+                "name": name,
+                "description": skill.get("description", name),
+                "version": skill.get("version", "1.0"),
+                "instruction": skill["content"],
+                "metadata": {"base_risk": skill.get("base_risk", "MEDIUM")},
+            }))
         if agent:
             result["agent"] = self.register_capability_agent(agent)
         return result
@@ -260,6 +284,9 @@ class GatewayLLMClient:
 
     def execute_agent_task(self, task_id: str) -> Dict[str, Any]:
         return self._request("POST", f"/v1/multi-agent/tasks/{task_id}/execute").json()
+
+    def start_agent_task(self, task_id: str) -> Dict[str, Any]:
+        return self._request("POST", f"/v1/multi-agent/tasks/{task_id}/start").json()
 
     def close_agent_session(self, session_id: str) -> Dict[str, Any]:
         return self._request("POST", f"/v1/multi-agent/sessions/{session_id}/close").json()

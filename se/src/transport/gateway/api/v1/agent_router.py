@@ -13,6 +13,26 @@ router = APIRouter(prefix="/v1/agents", tags=["Agents"])
 logger = structlog.get_logger(__name__)
 
 
+@router.get("/", response_model=list[AgentDefinition])
+async def list_agents(
+    container: ApplicationContainer = Depends(get_container),
+    identity: Identity = Depends(get_current_identity),
+):
+    return container.agent_registry.list_all()
+
+
+@router.get("/{agent_name}", response_model=AgentDefinition)
+async def get_agent(
+    agent_name: str,
+    container: ApplicationContainer = Depends(get_container),
+    identity: Identity = Depends(get_current_identity),
+):
+    agent = container.agent_registry.get(agent_name)
+    if agent is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Unknown agent: {agent_name}")
+    return agent
+
+
 @router.post(
     "/",
     response_model=AgentRegistrationResponse,
@@ -39,6 +59,20 @@ async def register_agent(
         if not tool_registry.get(tool_name):
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                                 detail=f"Tool '{tool_name}' is not registered in the Gateway.")
+
+    catalog = getattr(container.capability_runtime, "catalog", None)
+    for skill_name in agent_definition.skills:
+        if catalog is None or not catalog.contains_definition(skill_name):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Skill '{skill_name}' is not registered in the Gateway.",
+            )
+        definition = catalog.get_definition(skill_name)
+        if str(definition.metadata.get("kind", "")).upper() != "SKILL":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Capability '{skill_name}' is not a Skill.",
+            )
 
     agent_registry.register(agent_definition)
 

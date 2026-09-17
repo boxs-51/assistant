@@ -14,8 +14,8 @@ class MessageContentPart(GatewayBaseModel):
     Thiết kế lại để sử dụng GatewayAttachment.
     """
     type: MessageContentType
-    text : str = None
-    data: Union[
+    text: Optional[str] = None
+    data: Optional[Union[
         TextContent,
         ImageContent,
         AudioContent,
@@ -23,7 +23,7 @@ class MessageContentPart(GatewayBaseModel):
         DocumentContent,
         GatewayAttachment,
         UrlContent,
-    ] = None
+    ]] = None
 
 class GatewayMessage(GatewayBaseModel):
     """

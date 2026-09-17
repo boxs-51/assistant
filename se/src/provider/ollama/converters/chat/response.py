@@ -97,7 +97,9 @@ class ResponseChats:
                     raw_response = response_data,
                 )
             )
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
+        except ResponseValidationError:
+            raise
+        except (KeyError, IndexError, AttributeError, TypeError, ValueError, json.JSONDecodeError) as e:
             logger.error("Hỏng cấu trúc response từ Ollama:", error=str(e), response=response.text)
             raise ResponseValidationError(
                 f"Invalid response structure from Ollama: {str(e)}", 
@@ -185,12 +187,16 @@ class ResponseChats:
                         delta=delta_obj,
                         finish_reason=finish_reason
                     )],
-                    provider="ollama",
                     metadata=ResponseMetaData(
                         provider="ollama",
                     ),
                     usage=gateway_usage
                 )
-            except json.JSONDecodeError:
-                logger.warning("Failed to decode JSON chunk from Ollama stream", line=line)
-                continue
+            except ResponseValidationError:
+                raise
+            except (KeyError, IndexError, AttributeError, TypeError, ValueError, json.JSONDecodeError) as e:
+                logger.warning("Failed to normalize chunk from Ollama stream", error=str(e))
+                raise ResponseValidationError(
+                    f"Invalid stream chunk from Ollama: {e}",
+                    provider_name="ollama",
+                ) from e

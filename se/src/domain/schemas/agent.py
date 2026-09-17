@@ -21,6 +21,10 @@ class AgentDefinition(GatewayBaseModel):
     goal: str = Field(..., description="Mục tiêu chính, mô tả cấp cao về nhiệm vụ của Agent.")
     instruction: str = Field(..., description="System prompt hoặc chỉ dẫn chi tiết cho Agent thực thi.")
     tools: List[str] = Field(default_factory=list, description="Danh sách tên các Tool đã đăng ký mà Agent này được phép sử dụng.")
+    skills: List[str] = Field(
+        default_factory=list,
+        description="Danh sách Skill đã kích hoạt và được nạp vào context khi Agent chạy.",
+    )
     workflow_definition: Optional[Dict[str, Any]] = Field(None, description="Cấu trúc workflow (dành cho tương lai, ví dụ: định nghĩa các bước theo YAML/JSON).")
     memory_config: AgentMemoryConfig = Field(default_factory=AgentMemoryConfig, description="Cấu hình bộ nhớ cho Agent.")
 

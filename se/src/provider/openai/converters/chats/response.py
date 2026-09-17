@@ -14,8 +14,10 @@ class ResponseChats():
 
     async def adapt_chat(self, response: httpx.Response) -> GatewayResponse:
         """Chuyển đổi response JSON từ OpenAI về GatewayResponse."""
-        response_data = response.json()
         try:
+            response_data = response.json()
+            if not isinstance(response_data, dict):
+                raise TypeError("response body must be a JSON object")
             # Pydantic model sẽ tự động validate cấu trúc
             response_data["metadata"] = {
                 "provider": "openai",
@@ -23,8 +25,9 @@ class ResponseChats():
                 "raw_response": response_data.copy(),
             }
             return GatewayResponse.model_validate(response_data)
-        except Exception as e:
-            # Bắt các lỗi validation từ Pydantic
+        except ResponseValidationError:
+            raise
+        except (json.JSONDecodeError, TypeError, ValueError) as e:
             raise ResponseValidationError(f"Invalid response structure from OpenAI-compatible API: {e}", provider_name="openai") from e
 
     async def adapt_chat_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
@@ -37,8 +40,14 @@ class ResponseChats():
                     break
                 try:
                     chunk_json = json.loads(data)
+                    if not isinstance(chunk_json, dict):
+                        raise TypeError("stream chunk must be a JSON object")
                     chunk_json["metadata"] = {"provider": "openai", "provider_response_id": chunk_json.get("id")}
                     yield GatewayStreamChunk.model_validate(chunk_json)
-                except (json.JSONDecodeError, Exception) as e:
-                    # Bỏ qua các dòng không hợp lệ hoặc lỗi parse
-                    continue
+                except ResponseValidationError:
+                    raise
+                except (json.JSONDecodeError, TypeError, ValueError) as e:
+                    raise ResponseValidationError(
+                        f"Invalid stream chunk from OpenAI-compatible API: {e}",
+                        provider_name="openai",
+                    ) from e

@@ -13,6 +13,7 @@ def main():
         tools_dir="tools/v1",
         config_dir="cl/config",
     )
+    registry.load_all()
 
     client_runtime = ClientRuntime(
         "http://localhost:8000",

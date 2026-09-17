@@ -291,6 +291,11 @@ class CapabilityCatalog:
         with self._lock:
             return capability_id in self._definitions
 
+    def list_definitions(self) -> List[CapabilityDefinition]:
+        """Return logical capability definitions in stable ID order."""
+        with self._lock:
+            return [self._definitions[key] for key in sorted(self._definitions)]
+
     def contains_implementation(self, implementation_id: str) -> bool:
         with self._lock:
             return implementation_id in self._implementations

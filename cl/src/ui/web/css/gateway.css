@@ -113,3 +113,95 @@
   white-space: pre-wrap;
   word-break: break-word;
 }
+
+.sidebar.studio-mode { width: min(430px, 42vw); }
+
+.studio-heading { margin-bottom: 10px; }
+.studio-card {
+  box-sizing: border-box;
+  margin-bottom: 10px;
+  padding: 12px;
+  border: 1px solid rgba(148, 163, 184, .14);
+  border-radius: 10px;
+  background: linear-gradient(145deg, rgba(30, 41, 59, .72), rgba(15, 23, 42, .55));
+}
+.studio-card h3, .studio-section-head h3 { margin: 2px 0; font-size: 14px; color: #f8fafc; }
+.studio-card p { margin: 7px 0 10px; color: #94a3b8; font-size: 11px; line-height: 1.45; }
+.studio-kicker { color: #67e8f9; font-size: 8px; font-weight: 700; letter-spacing: 1px; }
+.studio-tabs { display: grid; grid-template-columns: repeat(5, 1fr); gap: 3px; margin-bottom: 12px; }
+.studio-tabs button {
+  overflow: hidden;
+  padding: 7px 2px;
+  border: 0;
+  border-radius: 5px;
+  background: rgba(15, 23, 42, .7);
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 9px;
+  text-transform: capitalize;
+}
+.studio-tabs button.active { background: #0e7490; color: white; }
+.studio-view { display: none; }
+.studio-view.active { display: block; }
+.studio-inline { display: flex; gap: 6px; }
+.studio-inline > * { min-width: 0; flex: 1; }
+.studio-view label, .studio-card > label {
+  display: block;
+  margin: 9px 0 4px;
+  color: #94a3b8;
+  font-size: 9px;
+  font-weight: 600;
+  text-transform: uppercase;
+}
+.studio-view input, .studio-view select, .studio-view textarea, .gateway-auth input {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid rgba(148, 163, 184, .2);
+  border-radius: 6px;
+  outline: none;
+  background: rgba(2, 6, 23, .55);
+  color: #e2e8f0;
+  font: 11px Inter, sans-serif;
+}
+.studio-view textarea { min-height: 72px; resize: vertical; }
+.gateway-button.wide { width: 100%; margin-top: 10px; }
+.status-card, .studio-section-head, .resource-title, .activity-item > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.studio-dot { width: 9px; height: 9px; border-radius: 50%; background: #64748b; box-shadow: 0 0 0 4px rgba(100, 116, 139, .12); }
+.studio-dot.online { background: #22c55e; box-shadow: 0 0 0 4px rgba(34, 197, 94, .12); }
+.studio-alert { margin-bottom: 10px; padding: 8px; border-radius: 6px; background: rgba(127, 29, 29, .35); color: #fecaca; font-size: 10px; }
+.studio-summary { display: grid; grid-template-columns: repeat(3, 1fr); text-align: center; }
+.studio-summary div { display: flex; flex-direction: column; gap: 2px; }
+.studio-summary strong { color: #67e8f9; font-size: 18px; }
+.studio-summary span { color: #94a3b8; font-size: 9px; }
+.studio-section-head { margin: 4px 0 10px; }
+.studio-section-head > span, .resource-card small { color: #64748b; font-size: 9px; }
+.studio-list { display: grid; gap: 7px; }
+.resource-card { margin: 0; }
+.risk { padding: 3px 6px; border-radius: 999px; background: rgba(234, 179, 8, .14); color: #fde68a; font-size: 8px; }
+.risk.low { background: rgba(34, 197, 94, .14); color: #86efac; }
+.risk.high, .risk.critical { background: rgba(239, 68, 68, .14); color: #fca5a5; }
+.tool-card { width: 100%; color: inherit; cursor: pointer; text-align: left; }
+.tool-card:hover { border-color: rgba(34, 211, 238, .45); }
+.tool-card span { display: flex; justify-content: space-between; }
+.tool-card small { color: #67e8f9; }
+.tool-runner.hidden { display: none; }
+.studio-checks { display: flex; flex-wrap: wrap; gap: 5px; }
+.studio-check { display: flex !important; align-items: center; gap: 4px; margin: 0 !important; padding: 5px 7px; border-radius: 5px; background: rgba(15, 23, 42, .8); text-transform: none !important; }
+.studio-check input { width: auto; }
+.studio-card summary { cursor: pointer; color: #e2e8f0; font-size: 12px; font-weight: 600; }
+.activity-item.success { border-left: 3px solid #22c55e; }
+.activity-item.error { border-left: 3px solid #ef4444; }
+.activity-item time { color: #64748b; font-size: 9px; }
+.studio-empty { padding: 14px 8px; color: #64748b; font-size: 10px; text-align: center; }
+.studio-output-wrap { margin-top: 12px; }
+.gateway-result.error { color: #fecaca; }
+
+@media (max-width: 800px) {
+  .sidebar.studio-mode { width: min(360px, 70vw); }
+}

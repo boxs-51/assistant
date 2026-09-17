@@ -81,7 +81,9 @@ class ClientRuntime:
             if self._ready:
                 return
 
-            self.registry.load_all()
+            settings = getattr(self.registry, "settings", None)
+            if settings is not None and not settings:
+                self.registry.load_all()
 
             if not self.owner_id:
                 user = self.gateway.current_user()

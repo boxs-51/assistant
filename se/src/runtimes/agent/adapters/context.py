@@ -148,6 +148,7 @@ class ContextBuilderAdapter(ContextBuilderPort):
                 capability_ids=[
                     item.capability_id for item in assembly.capabilities
                 ],
+                skill_ids=[item.skill_id for item in assembly.skills],
                 system_prompt_source=assembly.system_prompt.source,
                 system_prompt_version=assembly.system_prompt.version,
                 constraints=dict(assembly.constraints),

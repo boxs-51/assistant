@@ -1,38 +1,130 @@
-import os
-import glob
+from __future__ import annotations
+
 import re
-from typing import Dict, Any
+from pathlib import Path
+from threading import RLock
+from typing import Any, Dict, Optional
+
+
+class SkillNotFoundError(LookupError):
+    pass
+
 
 class SkillManager:
-    """Chuyên trách quét và nạp danh sách Skills từ thư mục skills/"""
+    """Discover skill metadata eagerly and load instruction bodies on demand."""
+
+    _FIELD_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_-]*):\s*(.*?)\s*$")
+
     def __init__(self, skills_dir: str):
-        self.skills_dir = skills_dir
+        self.skills_dir = Path(skills_dir).resolve()
+        self._skills: Dict[str, Dict[str, Any]] = {}
+        self._lock = RLock()
+
+    @staticmethod
+    def _skill_name(path: Path, metadata: Dict[str, str], root: Path) -> str:
+        name = metadata.get("name", "").strip()
+        if name:
+            return name
+        return path.parent.name if path.parent != root else path.stem
+
+    def _read_frontmatter(self, path: Path) -> Dict[str, str]:
+        """Read only the YAML-like header; the instruction body remains unloaded."""
+        metadata: Dict[str, str] = {}
+        with path.open("r", encoding="utf-8") as stream:
+            first = stream.readline()
+            if first.strip() != "---":
+                candidates = [first]
+                for _ in range(31):
+                    line = stream.readline()
+                    if not line:
+                        break
+                    candidates.append(line)
+            else:
+                candidates = []
+                for _ in range(128):
+                    line = stream.readline()
+                    if not line or line.strip() == "---":
+                        break
+                    candidates.append(line)
+
+        for line in candidates:
+            match = self._FIELD_RE.match(line.strip())
+            if match:
+                metadata[match.group(1).lower()] = match.group(2).strip(" \"'")
+        return metadata
 
     def load_skills(self) -> Dict[str, Dict[str, Any]]:
-        skills = {}
-        pattern_subfolder = os.path.join(self.skills_dir, "*", "*.md")
-        pattern_rootfolder = os.path.join(self.skills_dir, "*.md")
-        skill_files = glob.glob(pattern_subfolder) + glob.glob(pattern_rootfolder)
+        """Discover available skills without loading their full instructions."""
+        discovered: Dict[str, Dict[str, Any]] = {}
+        if not self.skills_dir.exists():
+            with self._lock:
+                self._skills = {}
+            return {}
 
-        for fpath in skill_files:
+        paths = sorted(self.skills_dir.glob("*.md")) + sorted(self.skills_dir.glob("*/*.md"))
+        for path in paths:
+            resolved = path.resolve()
+            if self.skills_dir not in resolved.parents:
+                continue
             try:
-                with open(fpath, "r", encoding="utf-8") as f:
-                    content = f.read()
-
-                name_m = re.search(r"name:\s*(.+)", content)
-                risk_m = re.search(r"base_risk:\s*(.+)", content)
-
-                s_name = name_m.group(1).strip() if name_m else os.path.basename(os.path.dirname(fpath))
-                if not s_name or s_name == os.path.basename(self.skills_dir):
-                    s_name = os.path.splitext(os.path.basename(fpath))[0]
-
-                skills[s_name] = {
-                    "name": s_name,
-                    "base_risk": risk_m.group(1).strip() if risk_m else "MEDIUM",
-                    "content": content
+                metadata = self._read_frontmatter(resolved)
+                name = self._skill_name(resolved, metadata, self.skills_dir)
+                if not name:
+                    continue
+                stat = resolved.stat()
+                discovered[name] = {
+                    "name": name,
+                    "description": metadata.get("description", name),
+                    "version": metadata.get("version", "1.0"),
+                    "base_risk": metadata.get("base_risk", "MEDIUM").upper(),
+                    "path": str(resolved),
+                    "loaded": False,
+                    "content": None,
+                    "mtime_ns": stat.st_mtime_ns,
                 }
-            except Exception as e:
-                print(f"⚠️ Lỗi đọc skill tại {fpath}: {e}")
+            except (OSError, UnicodeError):
+                continue
 
-        print(f"✅ [Skills Loaded]: {len(skills)} skills từ {self.skills_dir}")
-        return skills
+        with self._lock:
+            self._skills = discovered
+            return {name: dict(item) for name, item in discovered.items()}
+
+    def load_skill(self, name: str, *, force: bool = False) -> Dict[str, Any]:
+        """Load and cache one skill body when it is explicitly activated."""
+        with self._lock:
+            skill = self._skills.get(name)
+            if skill is None:
+                raise SkillNotFoundError(f"Skill '{name}' was not discovered.")
+            path = Path(skill["path"]).resolve()
+
+            if self.skills_dir not in path.parents:
+                raise PermissionError("Skill path escapes the configured skills directory.")
+
+            current_mtime = path.stat().st_mtime_ns
+            if skill.get("loaded") and not force and skill.get("mtime_ns") == current_mtime:
+                return dict(skill)
+
+            content = path.read_text(encoding="utf-8")
+            skill = {
+                **skill,
+                "content": content,
+                "loaded": True,
+                "mtime_ns": current_mtime,
+            }
+            self._skills[name] = skill
+            return dict(skill)
+
+    def get_skill(self, name: str, *, load: bool = False) -> Optional[Dict[str, Any]]:
+        if load:
+            return self.load_skill(name)
+        with self._lock:
+            skill = self._skills.get(name)
+            return dict(skill) if skill is not None else None
+
+    def unload_skill(self, name: str) -> bool:
+        with self._lock:
+            skill = self._skills.get(name)
+            if skill is None:
+                return False
+            self._skills[name] = {**skill, "content": None, "loaded": False}
+            return True

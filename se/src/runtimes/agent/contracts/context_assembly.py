@@ -26,6 +26,16 @@ class AgentCapabilityView(BaseModel):
     parameters: Mapping[str, Any] = Field(default_factory=dict)
 
 
+class AgentSkillView(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    skill_id: str
+    name: str
+    description: str = ""
+    instruction: str
+    version: str = "1.0"
+
+
 class AgentContextAssembly(BaseModel):
     """
     Canonical semantic context assembled for one Agent iteration.
@@ -38,6 +48,7 @@ class AgentContextAssembly(BaseModel):
 
     system_prompt: AgentSystemPrompt
     capabilities: tuple[AgentCapabilityView, ...] = ()
+    skills: tuple[AgentSkillView, ...] = ()
     constraints: Mapping[str, Any] = Field(default_factory=dict)
     messages: tuple[InferenceMessage, ...] = ()
     tools: tuple[InferenceToolDefinition, ...] = ()

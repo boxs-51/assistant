@@ -93,7 +93,7 @@ def wrap_provider_exception(error: Exception, provider_name: str) -> ProviderErr
                 message=f"Quota/Rate Limit Exceeded: {message}", provider_name=provider_name,
                 status_code=status_code, error_code=error_code, raw_response=raw_response
             )
-        elif status_code in (502, 503, 504):
+        elif status_code == 408 or 500 <= status_code < 600:
             return ProviderUnavailableError(
                 message=f"Provider Service Unavailable: {message}", provider_name=provider_name,
                 status_code=status_code, error_code=error_code, raw_response=raw_response
@@ -106,16 +106,11 @@ def wrap_provider_exception(error: Exception, provider_name: str) -> ProviderErr
 
     # Trường hợp 3: Lỗi httpx.RequestError (Mất mạng, Timeout, DNS sập, Không có response)
     if isinstance(error, httpx.RequestError):
-        # Tự động map lỗi timeout kết nối vật lý vào nhóm Tạm thời không khả dụng (để sau này RetryPolicy biết đường thử lại)
-        if isinstance(error, httpx.TimeoutException):
-            return ProviderUnavailableError(
-                message=f"Network Timeout: {str(error)}",
-                provider_name=provider_name,
-                is_network_error=True
-            )
-        
-        return ProviderError(
-            message=f"Network Request Failed (No Response): {str(error)}",
+        # Transport errors have no provider response and are generally transient.
+        # Keep them in one retryable category while preserving the concrete cause.
+        prefix = "Network Timeout" if isinstance(error, httpx.TimeoutException) else "Network Request Failed"
+        return ProviderUnavailableError(
+            message=f"{prefix} (No Response): {str(error)}",
             provider_name=provider_name,
             is_network_error=True
         )

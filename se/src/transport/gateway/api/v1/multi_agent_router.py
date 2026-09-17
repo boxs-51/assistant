@@ -172,3 +172,22 @@ async def get_agent_execution(
         return coordinator.get_execution(execution_id, identity)
     except Exception as error:
         raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/start")
+async def start_agent_task(
+    task_id: str,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    """Start an Agent task in the background for UI polling/cancellation."""
+    executor = getattr(coordinator, "executor", None)
+    if executor is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Agent execution runtime is unavailable.",
+        )
+    try:
+        return await coordinator.start_task(task_id, identity, executor)
+    except Exception as error:
+        raise map_error(error) from error

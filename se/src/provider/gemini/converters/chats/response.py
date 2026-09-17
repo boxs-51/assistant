@@ -378,7 +378,9 @@ class ResponseChats:
                 usage=usage,
                 metadata=metadata,
             )
-        except (KeyError, IndexError, json.JSONDecodeError) as e:
+        except ResponseValidationError:
+            raise
+        except (KeyError, IndexError, AttributeError, TypeError, ValueError, json.JSONDecodeError) as e:
             logger.error("Hỏng cấu trúc response từ Gemini:", error=str(e), response=response.text)
             raise ResponseValidationError(
                 f"Hỏng cấu trúc response từ Gemini: {str(e)}", 
@@ -515,7 +517,6 @@ class ResponseChats:
                 id=stream_id,
                 model=model_obj,
                 choices=[choices_obj],
-                provider="gemini",
                 usage=gateway_usage,
                 metadata=metadata,
             )
@@ -599,7 +600,10 @@ class ResponseChats:
                         "gemini_stream_unparsed_tail",
                         buffer=buffer[:1000],
                     )
-                    break
+                    raise ResponseValidationError(
+                        "Invalid trailing data in Gemini stream.",
+                        provider_name="gemini",
+                    )
 
                 buffer = buffer[start_index:]
 
@@ -610,7 +614,10 @@ class ResponseChats:
                     "gemini_stream_incomplete_tail",
                     buffer=buffer[:1000],
                 )
-                break
+                raise ResponseValidationError(
+                    "Incomplete JSON object at end of Gemini stream.",
+                    provider_name="gemini",
+                )
 
             buffer = buffer[end_index:]
 

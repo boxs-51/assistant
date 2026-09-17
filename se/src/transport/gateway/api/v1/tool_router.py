@@ -13,6 +13,14 @@ router = APIRouter(prefix="/v1/tools", tags=["Tools"])
 logger = structlog.get_logger(__name__)
 
 
+@router.get("/", response_model=List[GatewayToolDefinition])
+async def list_tools(
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
+):
+    return container.tool_registry.get_all()
+
+
 class ToolRegistrationResponse(GatewayToolDefinition):
     status: str = "success"
 

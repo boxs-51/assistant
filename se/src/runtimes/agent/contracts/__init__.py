@@ -32,6 +32,7 @@ from .continuation import (
 from .context_assembly import (
     AgentCapabilityResolver,
     AgentCapabilityView,
+    AgentSkillView,
     AgentContextAssembler,
     AgentContextAssembly,
     AgentSystemPrompt,
@@ -71,6 +72,7 @@ __all__ = [
     "ExecutionCheckpoint",
     "AgentCapabilityResolver",
     "AgentCapabilityView",
+    "AgentSkillView",
     "AgentContextAssembler",
     "AgentContextAssembly",
     "AgentSystemPrompt",

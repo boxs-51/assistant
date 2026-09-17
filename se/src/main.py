@@ -1,6 +1,7 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Dict, Any, Tuple
+import uuid
 from fastapi import FastAPI
 import httpx
 import structlog
@@ -75,7 +76,7 @@ from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.continuation import AgentContinuationService
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
 from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
-from .runtimes.agent.capabilities import RegistryAgentCapabilityResolver
+from .runtimes.agent.capabilities import RegistryAgentCapabilityResolver, RegistryAgentSkillResolver
 from .runtimes.agent.events import EventBusAgentEventPublisher
 from .runtimes.agent.adapters import (
     ContextBuilderAdapter,
@@ -85,6 +86,8 @@ from .runtimes.agent.adapters import (
     RegistryAgentToolPolicy,
 )
 from .runtimes.agent.tool_execution import AgentToolExecutionCoordinator
+from .runtimes.agent.contracts.context import AgentExecutionContext
+from .domain.schemas.agent_execution import AgentExecutionLimits
 from .version import __version__
 logger = structlog.get_logger(__name__)
 
@@ -299,6 +302,10 @@ async def bootstrap_runtime_kernel(
             capability_catalog=capability_catalog,
             tool_policy=agent_tool_policy,
         ),
+        RegistryAgentSkillResolver(
+            agent_registry=container.agent_registry,
+            capability_catalog=capability_catalog,
+        ),
     )
     container.context_builder_port = ContextBuilderAdapter(
         container.context_runtime,
@@ -332,22 +339,25 @@ async def bootstrap_runtime_kernel(
     )
 
     # Cấu hình Multi-Agent Executor
-    async def execute_registered_agent_task(task):
+    async def execute_registered_agent_task(task, *, identity):
         agent = container.agent_registry.get(task.assigned_agent_id)
         if agent is None:
             raise LookupError(f"Agent '{task.assigned_agent_id}' is not registered.")
-        request_body = dict(task.input)
-        request_body.setdefault("model", request_body.get("model", ""))
-        request_body["messages"] = [
-            {"role": "system", "content": agent.instruction},
-            *request_body.get("messages", [{"role": "user", "content": request_body.get("prompt", "")}]),
-        ]
-        response = await container.provider_runtime.chat_handler.execute_with_fallback(
-            container.http_client, request_body
+        execution_context = AgentExecutionContext.create(
+            execution_id=f"agent_{uuid.uuid4().hex}",
+            agent_id=agent.name,
+            session_id=task.session_id,
+            correlation_id=f"corr_{uuid.uuid4().hex}",
+            identity=identity,
+            limits=AgentExecutionLimits(),
+            task_id=task.task_id,
+            agent=agent,
+            input=dict(task.input),
         )
-        return response.model_dump()
+        result = await container.agent_runtime.execute(execution_context)
+        return result.model_dump(mode="json")
 
-    # Compatibility execution path remains intact until Phase 5.5.
+    # Multi-agent HTTP tasks enter the canonical AgentRuntime loop.
     container.multi_agent_coordinator.executor = execute_registered_agent_task
 
     logger.info("AI Runtime Kernel & Runtimes booted successfully.")
