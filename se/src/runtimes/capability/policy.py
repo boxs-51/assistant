@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from enum import Enum
 from typing import FrozenSet, Optional, Protocol
 
 from .catalog import CapabilityCatalog
@@ -10,6 +11,37 @@ from .contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
 )
+from .contracts.definition import (
+    CapabilityDefinition,
+    CapabilityEffect,
+    CapabilityExecutionMode,
+    CapabilityKind,
+)
+
+
+class CapabilityAccessProfile(str, Enum):
+    NONE = "NONE"
+    DIRECT_READ_ONLY = "DIRECT_READ_ONLY"
+    AGENT_POLICY = "AGENT_POLICY"
+
+
+class CapabilityAccessPolicy:
+    """Fail-closed model-visibility policy independent of physical routing."""
+
+    @staticmethod
+    def allows(definition: CapabilityDefinition, profile: CapabilityAccessProfile) -> bool:
+        if profile is CapabilityAccessProfile.NONE:
+            return False
+        if profile is CapabilityAccessProfile.AGENT_POLICY:
+            return True
+        if definition.kind is CapabilityKind.AGENT:
+            return False
+        if definition.execution_mode in {
+            CapabilityExecutionMode.CONTEXT_ONLY,
+            CapabilityExecutionMode.LONG_RUNNING,
+        }:
+            return False
+        return bool(definition.effects) and definition.effects.issubset({CapabilityEffect.READ})
 
 
 class ConnectionAvailabilityProvider(Protocol):
@@ -92,12 +124,18 @@ class CapabilityRoutingPolicy:
         *,
         context: CapabilityRequestContext,
         preferred_implementation_id: Optional[str] = None,
+        excluded_implementation_ids: frozenset[str] = frozenset(),
     ) -> CapabilityImplementation:
         definition = catalog.get_definition(capability_id)
         candidates = catalog.list_implementations(
             capability_id,
             routable_only=True,
         )
+        candidates = [
+            item
+            for item in candidates
+            if item.implementation_id not in excluded_implementation_ids
+        ]
 
         if context.connection_id is not None:
             same_connection_clients = [
@@ -165,4 +203,6 @@ __all__ = [
     "CapabilityAuthorizationPolicy",
     "CapabilityRoutingPolicy",
     "ConnectionAvailabilityProvider",
+    "CapabilityAccessProfile",
+    "CapabilityAccessPolicy",
 ]

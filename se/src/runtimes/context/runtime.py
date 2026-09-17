@@ -77,11 +77,13 @@ class ContextRuntime(BaseRuntime):
             await self.event_bus.publish(BaseEvent(
                 event_name="context.event.built",
                 session_id=session_id,
+                turn_id=event.turn_id,
                 payload=payload
             ))
         except Exception as exc:
             await self.event_bus.publish(BaseEvent(
                 event_name="provider.failed",
                 session_id=session_id,
+                turn_id=event.turn_id,
                 payload={"error": str(exc), "status_code": 404 if isinstance(exc, ValueError) else 500},
             ))

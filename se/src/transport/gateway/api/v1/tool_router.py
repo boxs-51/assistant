@@ -5,7 +5,6 @@ from fastapi import APIRouter, Depends, status
 from .....application.container import ApplicationContainer
 from .....domain.schemas.identity import Identity
 from .....domain.schemas.tool import GatewayToolDefinition
-from .....tool.registry import ToolRegistry
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
 
@@ -40,6 +39,9 @@ async def register_tool(
     Endpoint cho phép Client (ví dụ: một plugin CRM, một agent game)
     đăng ký một tool với Gateway để các Agent khác có thể sử dụng.
     """
-    tool_registry: ToolRegistry = container.tool_registry
-    tool_registry.register(tool_definition)
+    # Compatibility transport only; execution metadata and driver validation
+    # are owned by the canonical capability control plane.
+    from .capability_router import register_tool_capability
+
+    await register_tool_capability(tool_definition, identity, container)
     return ToolRegistrationResponse(status="success", **tool_definition.model_dump())

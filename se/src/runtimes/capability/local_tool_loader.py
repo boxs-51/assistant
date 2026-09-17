@@ -5,7 +5,7 @@ import importlib.util
 from pathlib import Path
 from typing import Any
 
-from .contracts.definition import CapabilityDefinition
+from .contracts.definition import CapabilityDefinition, CapabilityEffect
 from .contracts.implementation import CapabilityExecutionLocation, CapabilityImplementation, CapabilityImplementationState, CapabilityOwnerType
 from .drivers.python_driver import PythonCapabilityDriver
 
@@ -36,6 +36,7 @@ def register_local_tools(runtime: Any, tool_registry: Any, tools_dir: Path) -> d
                 description=str(metadata.get("description", metadata["name"])),
                 input_schema=metadata.get("parameters") or {"type": "object"},
                 source="LOCAL", execution_kind="PYTHON",
+                effects={CapabilityEffect(item) for item in metadata.get("effects", [])},
                 metadata={"module_path": str(path), "base_risk": metadata.get("base_risk", "HIGH")},
             )
             runtime.register_capability(PythonCapabilityDriver(definition, handler))
@@ -48,6 +49,11 @@ def register_local_tools(runtime: Any, tool_registry: Any, tools_dir: Path) -> d
                     implementation = CapabilityImplementation.from_definition(definition, implementation_id=implementation_id, location=CapabilityExecutionLocation.SERVER, driver_kind="PYTHON", owner_type=CapabilityOwnerType.SYSTEM, metadata={"module_path": str(path), "kind": "TOOL"})
                     runtime.catalog.register_implementation(implementation)
                     runtime.catalog.transition_implementation(implementation_id, CapabilityImplementationState.ENABLED)
+                runtime.driver_registry.bind(
+                    implementation_id,
+                    runtime.registry.get_driver(definition.capability_id),
+                    replace=True,
+                )
             results[definition.capability_id] = "registered"
         except Exception as exc:
             results[path.stem] = f"skipped: {exc}"

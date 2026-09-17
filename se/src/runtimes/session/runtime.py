@@ -1,5 +1,7 @@
 # src/runtimes/session/runtime.py
 from typing import Dict, Any
+from datetime import datetime, timezone
+import uuid
 import structlog
 
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
@@ -21,7 +23,7 @@ class SessionRuntime(BaseRuntime):
         self.event_bus = None
         self.uow_factory = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
-        self._stream_buffers: Dict[str, list[str]] = {}
+        self._stream_buffers: Dict[tuple[str, str], Dict[str, Any]] = {}
         self._subscribed = False
 
     async def initialize(self, context: RuntimeContext) -> None:
@@ -63,6 +65,7 @@ class SessionRuntime(BaseRuntime):
             return
 
         identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
+        turn_id = event.turn_id or event.payload.get("turn_id") or f"turn_{uuid.uuid4().hex}"
 
         async with self.uow_factory() as uow:
             session = await uow.sessions.get_by_id(session_id)
@@ -86,6 +89,8 @@ class SessionRuntime(BaseRuntime):
                     session_id=session_id,
                     role=message.get("role", "user"),
                     content={"type": "text", "data": message.get("content", "")},
+                    turn_id=turn_id,
+                    completed_at=datetime.now(timezone.utc),
                 )
             await uow.commit()
 
@@ -97,7 +102,14 @@ class SessionRuntime(BaseRuntime):
                     "user_id": session.user_id,
                     "organization_id": session.organization_id,
                     "messages": [
-                        {"role": message.role, "content": message.content}
+                        {
+                            "role": message.role,
+                            "content": message.content,
+                            "turn_id": message.turn_id,
+                            "sequence": message.sequence,
+                            "created_at": message.created_at,
+                            "completed_at": message.completed_at,
+                        }
                         for message in messages
                     ],
                 }
@@ -107,6 +119,7 @@ class SessionRuntime(BaseRuntime):
         await self.event_bus.publish(BaseEvent(
             event_name="session.event.loaded",
             session_id=session_id,
+            turn_id=turn_id,
             payload={**event.payload, "session_id": session_id, **session_payload}
         ))
 
@@ -127,10 +140,12 @@ class SessionRuntime(BaseRuntime):
             event.session_id,
             message.get("role", "assistant"),
             content,
+            event.turn_id,
+            completed_at=datetime.now(timezone.utc),
         )
 
     async def _on_stream_chunk(self, event: BaseEvent):
-        if not event.session_id:
+        if not event.session_id or not event.turn_id:
             return
 
         chunk = event.payload.get("chunk", {})
@@ -141,17 +156,44 @@ class SessionRuntime(BaseRuntime):
         delta = choices[0].get("delta", {})
         content = delta.get("content") if isinstance(delta, dict) else None
         if content:
-            self._stream_buffers.setdefault(event.session_id, []).append(content)
+            key = (event.session_id, event.turn_id)
+            buffer = self._stream_buffers.setdefault(
+                key,
+                {"chunks": [], "created_at": datetime.now(timezone.utc)},
+            )
+            buffer["chunks"].append(content)
 
     async def _on_stream_completed(self, event: BaseEvent):
-        if not event.session_id:
+        if not event.session_id or not event.turn_id:
             return
 
-        content = "".join(self._stream_buffers.pop(event.session_id, []))
+        buffer = self._stream_buffers.pop((event.session_id, event.turn_id), None)
+        if not buffer:
+            return
+        content = "".join(buffer["chunks"])
         if content:
-            await self._persist_assistant_message(event.session_id, "assistant", content)
+            await self._persist_assistant_message(
+                event.session_id,
+                "assistant",
+                content,
+                event.turn_id,
+                created_at=buffer["created_at"],
+                completed_at=datetime.now(timezone.utc),
+            )
 
-    async def _persist_assistant_message(self, session_id: str, role: str, content: Any):
+    async def _persist_assistant_message(
+        self,
+        session_id: str,
+        role: str,
+        content: Any,
+        turn_id: str | None,
+        *,
+        created_at: datetime | None = None,
+        completed_at: datetime | None = None,
+    ):
+        if not turn_id:
+            logger.warning("Ignoring assistant message without turn correlation", session_id=session_id)
+            return
         logger.debug("Persisting assistant message", session_id=session_id)
 
         async with self.uow_factory() as uow:
@@ -159,5 +201,8 @@ class SessionRuntime(BaseRuntime):
                 session_id=session_id,
                 role=role,
                 content={"type": "text", "data": content},
+                turn_id=turn_id,
+                created_at=created_at,
+                completed_at=completed_at,
             )
             await uow.commit()

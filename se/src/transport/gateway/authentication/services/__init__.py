@@ -6,9 +6,10 @@ from .otp_service import OTPStorageService
 from .token_service import TokenService
 from .user_service import UserService
 from .guest_session_service import GuestSessionService, IssuedGuest
+from .password_reset_service import PasswordResetService
 
 __all__ = [
     "APIKeyService", "LoginService", "OAuthService",
     "RegistrationService", "OTPStorageService", "TokenService",
-    "UserService", "GuestSessionService", "IssuedGuest",
+    "UserService", "GuestSessionService", "IssuedGuest", "PasswordResetService",
 ]

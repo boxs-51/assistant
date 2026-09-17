@@ -69,6 +69,14 @@ class VerifyOTPRequest(BaseModel):
     otp: str = Field(..., min_length=6, max_length=6, description="Mã OTP gồm 6 chữ số")
 
 
+class PasswordResetRequestSchema(BaseModel):
+    email: EmailStr
+
+
+class PasswordResetConfirmSchema(VerifyOTPRequest):
+    new_password: str = Field(..., min_length=6, description="Mật khẩu mới tối thiểu 6 ký tự")
+
+
 # --- API KEY SCHEMAS ---
 
 class APIKeyCreateSchema(BaseModel):

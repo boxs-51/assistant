@@ -1,8 +1,14 @@
 .gateway-panel {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 16px 12px 20px;
   color: var(--text-main, #cdd6f4);
+  scrollbar-gutter: stable;
 }
+
+#page-gateway { min-height: 0; }
 
 .gateway-heading {
   display: flex;
@@ -117,6 +123,28 @@
 .sidebar.studio-mode { width: min(430px, 42vw); }
 
 .studio-heading { margin-bottom: 10px; }
+.gateway-auth-tabs {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 4px;
+  margin-bottom: 10px;
+}
+.gateway-auth-tabs button {
+  min-width: 0;
+  padding: 6px 3px;
+  border: 0;
+  border-radius: 5px;
+  background: rgba(15, 23, 42, .7);
+  color: #94a3b8;
+  cursor: pointer;
+  font-size: 9px;
+}
+.gateway-auth-tabs button.active { background: #155e75; color: #ecfeff; }
+.gateway-auth-view { display: none; gap: 7px; }
+.gateway-auth-view.active { display: grid; }
+.gateway-auth-verification { display: grid; gap: 7px; }
+.gateway-auth-verification[hidden] { display: none; }
+.gateway-auth-view .gateway-button.wide { margin-top: 1px; }
 .studio-card {
   box-sizing: border-box;
   margin-bottom: 10px;

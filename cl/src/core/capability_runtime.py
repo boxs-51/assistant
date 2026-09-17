@@ -82,6 +82,9 @@ class CapabilityRuntime:
                         "output_schema": output_schema,
                         "source": "CLIENT",
                         "execution_kind": "PYTHON",
+                        "kind": metadata.get("kind", "TOOL"),
+                        "execution_mode": metadata.get("execution_mode", "ONE_SHOT"),
+                        "effects": metadata.get("effects", []),
                         "require_auth": metadata.get(
                             "require_auth",
                             False,

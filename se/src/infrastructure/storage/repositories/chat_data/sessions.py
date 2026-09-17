@@ -1,6 +1,8 @@
 import structlog
 from typing import Optional, List, Dict, Any
 from sqlalchemy import delete, select, update
+from datetime import datetime, timezone
+import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...interfaces.repository import BaseRepository
@@ -38,9 +40,33 @@ class SessionRepository(BaseRepository):
         logger.info("New session created", session_id=new_session.id, user_id=user_id, project_id=project_id)
         return new_session
 
-    async def add_message(self, session_id: str, role: str, content: Dict[str, Any]) -> Message:
+    async def add_message(
+        self,
+        session_id: str,
+        role: str,
+        content: Dict[str, Any],
+        *,
+        turn_id: Optional[str] = None,
+        created_at: Optional[datetime] = None,
+        completed_at: Optional[datetime] = None,
+    ) -> Message:
         """Thêm một tin nhắn vào session."""
-        new_message = Message(session_id=session_id, role=role, content=content)
+        sequence_result = await self.session.execute(
+            update(Session)
+            .where(Session.id == session_id)
+            .values(next_message_sequence=Session.next_message_sequence + 1)
+            .returning(Session.next_message_sequence)
+        )
+        sequence = sequence_result.scalar_one()
+        new_message = Message(
+            session_id=session_id,
+            role=role,
+            content=content,
+            turn_id=turn_id or f"legacy_{uuid.uuid4().hex}",
+            sequence=sequence,
+            created_at=created_at or datetime.now(timezone.utc),
+            completed_at=completed_at,
+        )
         self.session.add(new_message)
         await self.session.flush()
         logger.debug("New message added to session", message_id=new_message.id, session_id=session_id)
@@ -48,7 +74,7 @@ class SessionRepository(BaseRepository):
 
     async def get_messages_by_session_id(self, session_id: str, limit: int = 100) -> List[Message]:
         """Lấy lịch sử tin nhắn của một session."""
-        stmt = select(Message).where(Message.session_id == session_id).order_by(Message.timestamp.asc()).limit(limit)
+        stmt = select(Message).where(Message.session_id == session_id).order_by(Message.sequence.asc()).limit(limit)
         result = await self.session.execute(stmt)
         return result.scalars().all()
 

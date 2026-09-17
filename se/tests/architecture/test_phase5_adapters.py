@@ -573,6 +573,9 @@ async def test_tool_parallelism_is_bounded_by_request_and_execution_limits():
     assert peak == 1
     assert started == 4
     assert [result.output for result in results] == ["a", "b", "c", "d"]
+    assert [result.invocation_id for result in results] == [
+        request.invocation_id for request in requests
+    ]
 
 
 @pytest.mark.asyncio

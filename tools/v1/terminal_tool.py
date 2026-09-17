@@ -7,6 +7,7 @@ TOOL_METADATA = {
     "name": "terminal_tool",
     "description": "Thực thi câu lệnh terminal/shell đồng bộ (chờ kết quả) hoặc mở ứng dụng/lệnh bất đồng bộ ngầm.",
     "base_risk": "HIGH",
+    "effects": ["EXECUTE", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": [
         r"rm\s+-rf",
         r"mkfs",

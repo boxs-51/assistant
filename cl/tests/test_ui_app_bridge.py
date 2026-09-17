@@ -94,6 +94,27 @@ class _ClientRuntime:
 
     def __init__(self, gateway):
         self.gateway = gateway
+        self.auth_calls = []
+
+    def login(self, payload):
+        self.auth_calls.append(("login", payload))
+        return {"user": {"id": "user-1"}}
+
+    def register(self, payload):
+        self.auth_calls.append(("register", payload))
+        return {"status": "success"}
+
+    def verify_registration(self, payload):
+        self.auth_calls.append(("verify_registration", payload))
+        return {"user": {"id": "user-1"}}
+
+    def initiate_password_reset(self, payload):
+        self.auth_calls.append(("initiate_password_reset", payload))
+        return {"status": "success"}
+
+    def confirm_password_reset(self, payload):
+        self.auth_calls.append(("confirm_password_reset", payload))
+        return {"status": "success"}
 
 
 class _Engine:
@@ -153,3 +174,23 @@ def test_skill_tool_and_agent_app_actions_hide_endpoint_orchestration():
     assert run["data"]["task"]["status"] == "RUNNING"
     assert bridge.get_agent_task_status("task-1")["data"]["status"] == "COMPLETED"
     assert bridge.cancel_agent_task("task-1")["data"]["status"] == "CANCELLED"
+
+
+def test_account_actions_are_exposed_through_bridge_without_leaking_exceptions():
+    bridge, _, _ = _bridge()
+
+    assert bridge.register({"email": "user@example.com", "password": "secret1"})["success"] is True
+    assert bridge.verify_registration({"email": "user@example.com", "otp": "123456"})["success"] is True
+    assert bridge.initiate_password_reset({"email": "user@example.com"})["success"] is True
+    assert bridge.confirm_password_reset({
+        "email": "user@example.com",
+        "otp": "123456",
+        "new_password": "secret2",
+    })["success"] is True
+
+    assert [name for name, _ in bridge._client_runtime.auth_calls] == [
+        "register",
+        "verify_registration",
+        "initiate_password_reset",
+        "confirm_password_reset",
+    ]

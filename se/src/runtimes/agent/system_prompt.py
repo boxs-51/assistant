@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .contracts.context_assembly import AgentSystemPrompt
+from ..context.temporal import TemporalContextProvider
 
 
 class DefaultAgentSystemPromptProvider:
@@ -16,10 +17,18 @@ class DefaultAgentSystemPromptProvider:
     Agent runtime.
     """
 
+    def __init__(self, temporal_context_provider=None) -> None:
+        self._temporal_context_provider = (
+            temporal_context_provider or TemporalContextProvider()
+        )
+
     async def build(self, *, agent, context) -> AgentSystemPrompt:
         sections: list[str] = []
 
         metadata = context.metadata or {}
+
+        temporal = self._temporal_context_provider.current(metadata.get("timezone"))
+        sections.append(temporal.as_system_text())
 
         constitution = metadata.get("constitution")
         if isinstance(constitution, str) and constitution.strip():

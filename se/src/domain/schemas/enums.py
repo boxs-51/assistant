@@ -35,4 +35,9 @@ class FinishReason(str, Enum):
     UNKNOWN = "unknown"
 
 
+class ChatExecutionMode(str, Enum):
+    DIRECT = "DIRECT"
+    AGENT = "AGENT"
+
+
 

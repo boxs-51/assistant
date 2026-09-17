@@ -1,4 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Response, status
+from datetime import datetime, timezone
+import uuid
 from .....application.container import ApplicationContainer
 from .....domain.schemas.capability import SessionMessageEditRequest, SessionRegenerateRequest
 from .....domain.schemas.identity import Identity
@@ -18,7 +20,15 @@ async def _owned_session(container, session_id, identity):
         return session, await uow.sessions.get_messages_by_session_id(session_id)
 
 def _message(item):
-    return {"id": item.id, "role": item.role, "content": item.content, "timestamp": item.timestamp}
+    return {
+        "id": item.id,
+        "role": item.role,
+        "content": item.content,
+        "turn_id": item.turn_id,
+        "sequence": item.sequence,
+        "created_at": item.created_at,
+        "completed_at": item.completed_at,
+    }
 
 @router.get("")
 async def list_sessions(identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
@@ -98,6 +108,8 @@ async def regenerate_session_response(session_id: str, body: SessionRegenerateRe
                 await uow.sessions.add_message(
                     session_id=session_id, role=message.get("role", "assistant"),
                     content={"type": "text", "data": content},
+                    turn_id=f"turn_{uuid.uuid4().hex}",
+                    completed_at=datetime.now(timezone.utc),
                 )
                 await uow.commit()
     return response_payload

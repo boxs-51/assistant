@@ -48,6 +48,25 @@ class UIBridge:
                 "error": str(error),
             }
 
+    def _auth_action(self, action, payload: dict):
+        try:
+            return {"success": True, "data": action(payload)}
+        except Exception as error:
+            logger.exception("Authentication action failed")
+            return {"success": False, "error": str(error)}
+
+    def register(self, payload: dict):
+        return self._auth_action(self._client_runtime.register, payload)
+
+    def verify_registration(self, payload: dict):
+        return self._auth_action(self._client_runtime.verify_registration, payload)
+
+    def initiate_password_reset(self, payload: dict):
+        return self._auth_action(self._client_runtime.initiate_password_reset, payload)
+
+    def confirm_password_reset(self, payload: dict):
+        return self._auth_action(self._client_runtime.confirm_password_reset, payload)
+
     def _record_activity(self, action: str, status: str, detail=None):
         item = {
             "id": uuid.uuid4().hex,

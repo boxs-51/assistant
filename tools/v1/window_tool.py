@@ -11,6 +11,7 @@ TOOL_METADATA = {
     "name": "window_tool",
     "description": "Công cụ quản lý cửa sổ ứng dụng: Liệt kê, tìm kiếm, kích hoạt (focus), thu nhỏ, phóng to, hoặc đóng cửa sổ đang chạy.",
     "base_risk": "MEDIUM",
+    "effects": ["READ", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": [],
     "parameters": {
         "type": "object",

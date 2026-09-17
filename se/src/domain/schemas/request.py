@@ -4,6 +4,7 @@ from .base import GatewayBaseModel
 from .attachment import GatewayAttachment
 from .message import GatewayMessage
 from .tool import GatewayToolDefinition
+from .enums import ChatExecutionMode
 
 # =================================================================
 # 7. GATEWAY REQUEST DTO
@@ -34,7 +35,13 @@ class GatewayChatRequest(GatewayBaseModel):
     messages: List[GatewayMessage] = Field(..., description="Danh sách lịch sử hội thoại")
     session_id: Optional[str] = Field(default=None, description="ID của phiên hội thoại để duy trì ngữ cảnh. Nếu bỏ trống, một session mới sẽ được tạo.")
     tools: Optional[List[GatewayToolDefinition]] = Field(default=None, description="Danh sách công cụ hỗ trợ (Function Calling)")
+    agent_enabled: bool = Field(default=False, description="Select AGENT rather than DIRECT execution mode.")
+    agent_id: Optional[str] = Field(default=None, description="Explicit agent for AGENT mode.")
     
     # Gom cụm các cấu hình và metadata
     config: RequestConfig = Field(default_factory=RequestConfig, description="Cấu hình tham số của request")
     metadata: RequestMetadata = Field(default_factory=RequestMetadata, description="Thông tin tracking và định tuyến")
+
+    @property
+    def execution_mode(self) -> ChatExecutionMode:
+        return ChatExecutionMode.AGENT if self.agent_enabled else ChatExecutionMode.DIRECT

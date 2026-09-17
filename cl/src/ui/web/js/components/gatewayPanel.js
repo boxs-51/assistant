@@ -2,6 +2,7 @@ const state = {
   snapshot: null,
   activeTab: 'overview',
   selectedTool: null,
+  authMode: 'login',
 };
 let agentPollTimer = null;
 
@@ -346,6 +347,27 @@ async function refresh(panel, keepTab = state.activeTab) {
   }
 }
 
+function showAuthMode(panel, mode) {
+  state.authMode = mode;
+  panel.querySelectorAll('[data-auth-mode]').forEach(button => {
+    button.classList.toggle('active', button.dataset.authMode === mode);
+  });
+  panel.querySelectorAll('[data-auth-view]').forEach(view => {
+    view.classList.toggle('active', view.dataset.authView === mode);
+  });
+}
+
+function setAuthPending(form, pending) {
+  form.querySelectorAll('button, input').forEach(control => {
+    control.disabled = pending;
+  });
+}
+
+function assertMatchingPasswords(password, confirmation) {
+  if (password.length < 6) throw new Error('Password must contain at least 6 characters.');
+  if (password !== confirmation) throw new Error('Passwords do not match.');
+}
+
 export function initGatewayPanel() {
   const panel = document.getElementById('gateway-panel');
   if (!panel) return;
@@ -354,9 +376,38 @@ export function initGatewayPanel() {
       <div><span class="gateway-eyebrow">AGENT STUDIO</span><h2>Control Center</h2></div>
       <span id="studio-connection" class="gateway-status idle">Loading</span>
     </div>
-    <section class="gateway-auth studio-card">
-      <div class="studio-inline"><input id="auth-email" type="email" placeholder="Email"><input id="auth-password" type="password" placeholder="Password"></div>
-      <button id="auth-login" class="gateway-button primary wide">Sign in</button>
+    <section class="gateway-auth studio-card" aria-label="Gateway account">
+      <div class="gateway-auth-tabs" role="tablist">
+        <button type="button" data-auth-mode="login" class="active">Sign in</button>
+        <button type="button" data-auth-mode="register">Register</button>
+        <button type="button" data-auth-mode="reset">Forgot password</button>
+      </div>
+      <form class="gateway-auth-view active" data-auth-view="login">
+        <input id="auth-email" type="email" autocomplete="username" placeholder="Email" required>
+        <input id="auth-password" type="password" autocomplete="current-password" placeholder="Password" required>
+        <button class="gateway-button primary wide" type="submit">Sign in</button>
+      </form>
+      <form class="gateway-auth-view" data-auth-view="register">
+        <input id="register-name" autocomplete="name" placeholder="Full name">
+        <input id="register-email" type="email" autocomplete="username" placeholder="Email" required>
+        <input id="register-password" type="password" autocomplete="new-password" minlength="6" placeholder="Password (6+ characters)" required>
+        <input id="register-password-confirm" type="password" autocomplete="new-password" minlength="6" placeholder="Confirm password" required>
+        <div class="gateway-auth-verification" data-register-verification hidden>
+          <input id="register-otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit verification code">
+          <button id="register-verify" class="gateway-button primary wide" type="button">Verify and sign in</button>
+        </div>
+        <button id="register-send" class="gateway-button primary wide" type="submit">Send verification code</button>
+      </form>
+      <form class="gateway-auth-view" data-auth-view="reset">
+        <input id="reset-email" type="email" autocomplete="username" placeholder="Account email" required>
+        <div class="gateway-auth-verification" data-reset-verification hidden>
+          <input id="reset-otp" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" autocomplete="one-time-code" placeholder="6-digit reset code">
+          <input id="reset-password" type="password" autocomplete="new-password" minlength="6" placeholder="New password">
+          <input id="reset-password-confirm" type="password" autocomplete="new-password" minlength="6" placeholder="Confirm new password">
+          <button id="reset-confirm" class="gateway-button primary wide" type="button">Set new password</button>
+        </div>
+        <button id="reset-send" class="gateway-button primary wide" type="submit">Send reset code</button>
+      </form>
     </section>
     <nav class="studio-tabs">
       ${['overview', 'skills', 'tools', 'agents', 'activity'].map(tab => `<button data-tab="${tab}">${tab}</button>`).join('')}
@@ -368,8 +419,14 @@ export function initGatewayPanel() {
   `;
 
   panel.querySelectorAll('[data-tab]').forEach(button => button.addEventListener('click', () => showTab(panel, button.dataset.tab)));
-  panel.querySelector('#auth-login').addEventListener('click', async event => {
-    event.currentTarget.disabled = true;
+  panel.querySelectorAll('[data-auth-mode]').forEach(button => {
+    button.addEventListener('click', () => showAuthMode(panel, button.dataset.authMode));
+  });
+
+  const loginForm = panel.querySelector('[data-auth-view="login"]');
+  loginForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    setAuthPending(loginForm, true);
     try {
       const response = await callBridge('login', {
         email: panel.querySelector('#auth-email').value.trim(),
@@ -380,8 +437,91 @@ export function initGatewayPanel() {
     } catch (error) {
       setOutput(panel, error.message, true);
     } finally {
-      event.currentTarget.disabled = false;
+      setAuthPending(loginForm, false);
     }
   });
+
+  const registerForm = panel.querySelector('[data-auth-view="register"]');
+  registerForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    setAuthPending(registerForm, true);
+    try {
+      assertMatchingPasswords(
+        panel.querySelector('#register-password').value,
+        panel.querySelector('#register-password-confirm').value,
+      );
+      const response = await callBridge('register', {
+        name: panel.querySelector('#register-name').value.trim() || null,
+        email: panel.querySelector('#register-email').value.trim(),
+        password: panel.querySelector('#register-password').value,
+      });
+      panel.querySelector('[data-register-verification]').hidden = false;
+      panel.querySelector('#register-send').textContent = 'Resend verification code';
+      setOutput(panel, response);
+    } catch (error) {
+      setOutput(panel, error.message, true);
+    } finally {
+      setAuthPending(registerForm, false);
+    }
+  });
+
+  panel.querySelector('#register-verify').addEventListener('click', async () => {
+    setAuthPending(registerForm, true);
+    try {
+      const response = await callBridge('verify_registration', {
+        email: panel.querySelector('#register-email').value.trim(),
+        otp: panel.querySelector('#register-otp').value.trim(),
+      });
+      setOutput(panel, response.user || response);
+      await refresh(panel);
+    } catch (error) {
+      setOutput(panel, error.message, true);
+    } finally {
+      setAuthPending(registerForm, false);
+    }
+  });
+
+  const resetForm = panel.querySelector('[data-auth-view="reset"]');
+  resetForm.addEventListener('submit', async event => {
+    event.preventDefault();
+    setAuthPending(resetForm, true);
+    try {
+      const response = await callBridge('initiate_password_reset', {
+        email: panel.querySelector('#reset-email').value.trim(),
+      });
+      panel.querySelector('[data-reset-verification]').hidden = false;
+      panel.querySelector('#reset-send').textContent = 'Resend reset code';
+      setOutput(panel, response);
+    } catch (error) {
+      setOutput(panel, error.message, true);
+    } finally {
+      setAuthPending(resetForm, false);
+    }
+  });
+
+  panel.querySelector('#reset-confirm').addEventListener('click', async () => {
+    setAuthPending(resetForm, true);
+    try {
+      assertMatchingPasswords(
+        panel.querySelector('#reset-password').value,
+        panel.querySelector('#reset-password-confirm').value,
+      );
+      const response = await callBridge('confirm_password_reset', {
+        email: panel.querySelector('#reset-email').value.trim(),
+        otp: panel.querySelector('#reset-otp').value.trim(),
+        new_password: panel.querySelector('#reset-password').value,
+      });
+      resetForm.reset();
+      panel.querySelector('[data-reset-verification]').hidden = true;
+      panel.querySelector('#reset-send').textContent = 'Send reset code';
+      showAuthMode(panel, 'login');
+      setOutput(panel, response);
+    } catch (error) {
+      setOutput(panel, error.message, true);
+    } finally {
+      setAuthPending(resetForm, false);
+    }
+  });
+  showAuthMode(panel, state.authMode);
   refresh(panel);
 }

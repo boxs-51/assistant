@@ -1,5 +1,6 @@
 from .base import GatewayBaseModel
 from typing import Literal, Optional, Dict, Union, List, Any
+from datetime import datetime
 from pydantic import Field
 from .attachment import GatewayAttachment, ImageContent, AudioContent, UrlContent, VideoContent, TextContent, DocumentContent
 from .tool import GatewayToolCall, GatewayToolResult
@@ -38,5 +39,9 @@ class GatewayMessage(GatewayBaseModel):
     # Dành cho assistant và tool
     tool_calls: Optional[List[GatewayToolCall]] = None
     tool_results: Optional[List[GatewayToolResult]] = None
+    turn_id: Optional[str] = None
+    sequence: Optional[int] = Field(default=None, ge=1)
+    created_at: Optional[datetime] = None
+    completed_at: Optional[datetime] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

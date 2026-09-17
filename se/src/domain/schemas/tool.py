@@ -35,6 +35,8 @@ class GatewayToolDefinition(GatewayBaseModel):
     )
     require_auth: bool = Field(default=False, description="Yêu cầu identity được xác thực để sử dụng tool.")
     required_scopes: list[str] = Field(default_factory=list, description="Các scope bắt buộc để sử dụng tool.")
+    effects: list[Literal["READ", "WRITE", "EXECUTE", "EXTERNAL_SIDE_EFFECT", "PRIVILEGED"]] = Field(default_factory=list)
+    execution_mode: Literal["ONE_SHOT", "STREAMING", "LONG_RUNNING"] = "ONE_SHOT"
     
 class FunctionCall(GatewayBaseModel):
     """Chi tiết hàm được gọi từ Model (Tương thích cấu trúc chuẩn OpenAI/Gemini)."""

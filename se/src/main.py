@@ -21,6 +21,7 @@ from .transport.gateway.middleware.factory import create_middleware_stack
 # Storage & UoW
 from .infrastructure.storage.core.manager import StorageEngine
 from .infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from .infrastructure.storage.repositories.capability_invocations import SqlCapabilityInvocationStore
 from .infrastructure.mcp.mcp_manager import GatewayMcpManager
 
 # Security & Gateway Infrastructure
@@ -34,7 +35,7 @@ from .transport.gateway.authentication.authentication import Authentication
 from .transport.gateway.authentication.authenticators.api_key_authenticator import APIKeyAuthenticator
 from .transport.gateway.authentication.authenticators.jwt_authenticator import JWTAuthenticator
 
-from .transport.gateway.authentication.services import (APIKeyService, LoginService, OAuthService,
+from .transport.gateway.authentication.services import (APIKeyService, LoginService, OAuthService, PasswordResetService,
 OTPStorageService, RegistrationService, TokenService, UserService, GuestSessionService)
 
 from .runtimes.connection.runtime import ConnectionRuntime
@@ -70,6 +71,7 @@ from .runtimes.capability.catalog import CapabilityCatalog
 from .runtimes.capability.registration import ClientCapabilityRegistrationService
 from .runtimes.capability.policy import CapabilityRoutingPolicy
 from .runtimes.capability.local_tool_loader import register_local_tools
+from .runtimes.capability.invocation import CapabilityInvocationLifecycle
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
@@ -87,7 +89,9 @@ from .runtimes.agent.adapters import (
 )
 from .runtimes.agent.tool_execution import AgentToolExecutionCoordinator
 from .runtimes.agent.contracts.context import AgentExecutionContext
+from .runtimes.chat import DirectChatRuntime
 from .domain.schemas.agent_execution import AgentExecutionLimits
+from .domain.schemas.event import BaseEvent
 from .version import __version__
 logger = structlog.get_logger(__name__)
 
@@ -174,6 +178,7 @@ def bootstrap_security(
         guest_session_service,
     )
     user_service = UserService(uow_factory)
+    password_reset_service = PasswordResetService(uow_factory, otp_service)
 
     auth = Authentication(
         registration_service=registration_service,
@@ -181,6 +186,7 @@ def bootstrap_security(
         oauth_service=oauth_service,
         token_service=token_service,
         user_service=user_service,
+        password_reset_service=password_reset_service,
     )
 
     oauth = create_oauth_client(config.oauth)
@@ -249,6 +255,22 @@ async def bootstrap_runtime_kernel(
         connection_availability=connection_runtime.registry,
     )
 
+    async def publish_capability_invocation(event):
+        await container.event_bus.publish(
+            BaseEvent(
+                event_id=event.event_id,
+                event_name=event.event_name,
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                payload=event.model_dump(mode="json"),
+            )
+        )
+
+    capability_invocation_lifecycle = CapabilityInvocationLifecycle(
+        SqlCapabilityInvocationStore(eventing_manager.uow_factory),
+        publish_capability_invocation,
+    )
+
     runtimes = [
         ("event_runtime", EventRuntime()),
         ("context_runtime", ContextRuntime()),
@@ -264,6 +286,7 @@ async def bootstrap_runtime_kernel(
                 routing_policy=capability_routing_policy,
                 connection_registry=connection_runtime.registry,
                 realtime=connection_runtime.realtime,
+                invocation_lifecycle=capability_invocation_lifecycle,
             ),
         ),
         ("provider_runtime", ProviderRuntime(cb_manager)),
@@ -316,6 +339,10 @@ async def bootstrap_runtime_kernel(
     container.inference_port = ProviderInferenceAdapter(
         container.provider_runtime,
         container.http_client,
+    )
+    container.direct_chat_runtime = DirectChatRuntime(
+        inference=container.inference_port,
+        capability_runtime=container.capability_runtime,
     )
     container.tool_execution_port = CapabilityToolExecutionAdapter(
         container.capability_runtime,

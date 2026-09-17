@@ -90,7 +90,16 @@ class GatewayLLMClient:
         return self._request("POST", "/v1/auth/register/initiate", json=payload).json()
 
     def verify_registration(self, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request("POST", "/v1/auth/register/verify", json=payload).json()
+        response = self._request("POST", "/v1/auth/register/verify", json=payload).json()
+        self.set_access_token(response["access_token"])
+        self.refresh_token_value = response.get("refresh_token")
+        return response
+
+    def initiate_password_reset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/v1/auth/password-reset/initiate", json=payload).json()
+
+    def confirm_password_reset(self, payload: Dict[str, Any]) -> Dict[str, Any]:
+        return self._request("POST", "/v1/auth/password-reset/confirm", json=payload).json()
 
     def login(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         response = self._request(

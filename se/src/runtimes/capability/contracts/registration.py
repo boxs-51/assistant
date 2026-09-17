@@ -1,16 +1,9 @@
-from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .definition import CapabilityDefinition
+from .definition import CapabilityDefinition, CapabilityKind
 from .implementation import CapabilityExecutionLocation, CapabilityOwnerType
-
-
-class CapabilityKind(str, Enum):
-    TOOL = "TOOL"
-    SKILL = "SKILL"
-    AGENT = "AGENT"
 
 
 class CapabilityRegistration(BaseModel):

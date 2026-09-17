@@ -584,7 +584,11 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             assert sum(
                 item.role == "system" for item in second_request.messages
             ) == 1
-            assert second_request.messages[0].content == first_request.messages[0].content
+            # Temporal context is intentionally rebuilt for every inference;
+            # the stable agent instructions remain while current time advances.
+            assert second_request.messages[0].content != first_request.messages[0].content
+            assert "AGENT CONSTITUTION" in str(second_request.messages[0].content)
+            assert "Use desktop.echo when required" in str(second_request.messages[0].content)
             assert second_request.messages[-1].role == "tool"
             serialized = repr(
                 second_request.messages
@@ -606,5 +610,150 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             assert not server_thread.is_alive(), (
                 "Gateway E2E server did not shut down."
             )
+
+    asyncio.run(scenario())
+
+
+def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
+    """A real socket loss creates attempt 2 without changing invocation ID."""
+    from se.src.runtimes.capability.contracts.implementation import (
+        CapabilityExecutionLocation,
+        CapabilityImplementation,
+        CapabilityImplementationState,
+    )
+    from se.src.runtimes.capability.drivers.base import BaseCapabilityDriver
+    from se.src.runtimes.capability.invocation import (
+        CapabilityInvocationLifecycle,
+        InMemoryCapabilityInvocationStore,
+    )
+
+    async def scenario():
+        gateway_app, catalog, connection_runtime, identity = _build_gateway_app()
+        server, server_thread, port = _start_uvicorn(gateway_app)
+        started = threading.Event()
+        release = threading.Event()
+
+        def slow_client_tool(value: str, **kwargs):
+            started.set()
+            release.wait(timeout=5.0)
+            return {"source": "client", "value": value}
+
+        client_registry = SimpleNamespace(
+            tools={
+                CAPABILITY_ID: {
+                    "func": slow_client_tool,
+                    "metadata": {
+                        "name": CAPABILITY_ID,
+                        "description": "Disconnecting client tool",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {"value": {"type": "string"}},
+                            "required": ["value"],
+                        },
+                    },
+                }
+            }
+        )
+        dispatcher = CapabilityDispatcher(client_registry, None)
+        client_realtime = None
+        try:
+            client_capabilities = None
+            client_realtime = GatewayRealtimeClient(
+                f"http://127.0.0.1:{port}",
+                {"Authorization": "Bearer phase7-fallback"},
+                connection_id=CONNECTION_ID,
+                session_id=SESSION_ID,
+                client_id=CLIENT_ID,
+                heartbeat_interval=60.0,
+                on_message=lambda envelope: client_capabilities.handle_message(envelope),
+            )
+            dispatcher.realtime = client_realtime
+            client_capabilities = ClientCapabilityRuntime(
+                client_registry,
+                client_realtime,
+                client_id=CLIENT_ID,
+                owner_id=OWNER_ID,
+                dispatcher=dispatcher,
+            )
+            client_realtime.connect(wait_timeout=5.0)
+            client_capabilities.register(timeout=5.0)
+
+            definition = catalog.get_definition(CAPABILITY_ID)
+            server_implementation = CapabilityImplementation.from_definition(
+                definition,
+                implementation_id=f"server:{CAPABILITY_ID}",
+                location=CapabilityExecutionLocation.SERVER,
+                driver_kind="PYTHON",
+            )
+            catalog.register_implementation(server_implementation)
+            catalog.transition_implementation(
+                server_implementation.implementation_id,
+                CapabilityImplementationState.ENABLED,
+            )
+
+            class ServerFallbackDriver(BaseCapabilityDriver):
+                async def execute(self, context, arguments):
+                    return {
+                        "source": "server",
+                        "value": arguments["value"],
+                        "invocation_id": context.invocation_id,
+                    }
+
+            invocation_store = InMemoryCapabilityInvocationStore()
+            runtime = CapabilityRuntime(
+                catalog=catalog,
+                routing_policy=CapabilityRoutingPolicy(
+                    connection_availability=connection_runtime.registry
+                ),
+                connection_registry=connection_runtime.registry,
+                realtime=connection_runtime.realtime,
+                invocation_lifecycle=CapabilityInvocationLifecycle(
+                    invocation_store
+                ),
+            )
+            runtime.driver_registry.bind(
+                server_implementation.implementation_id,
+                ServerFallbackDriver(definition),
+            )
+
+            task = asyncio.create_task(
+                runtime.execute_capability(
+                    CAPABILITY_ID,
+                    {"value": "fallback"},
+                    identity,
+                    invocation_id="inv-real-fallback",
+                    session_id=SESSION_ID,
+                    connection_id=CONNECTION_ID,
+                    metadata={"max_attempts": 2},
+                )
+            )
+            assert await asyncio.to_thread(started.wait, 5.0)
+            await asyncio.to_thread(client_realtime.close)
+            release.set()
+            result = await asyncio.wait_for(task, timeout=10.0)
+
+            assert result.invocation_id == "inv-real-fallback"
+            assert result.output == {
+                "source": "server",
+                "value": "fallback",
+                "invocation_id": "inv-real-fallback",
+            }
+            attempts = sorted(
+                invocation_store.attempts.values(),
+                key=lambda item: item.attempt_number,
+            )
+            assert [item.implementation_id for item in attempts] == [
+                f"{CONNECTION_ID}:{CAPABILITY_ID}",
+                f"server:{CAPABILITY_ID}",
+            ]
+            assert invocation_store.items["inv-real-fallback"].state.value == "COMPLETED"
+        finally:
+            release.set()
+            if client_realtime is not None:
+                client_realtime.close()
+            dispatcher.shutdown()
+            server.should_exit = True
+            server_thread.join(timeout=5.0)
+            assert not server_thread.is_alive()
 
     asyncio.run(scenario())

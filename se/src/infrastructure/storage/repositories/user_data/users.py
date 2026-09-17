@@ -61,6 +61,14 @@ class UserRepository(BaseRepository):
         await self.session.flush()
         return user
 
+    async def set_password(self, user_id: str, hashed_password: str) -> Optional[User]:
+        user = await self.get_by_id_for_update(user_id)
+        if user is None:
+            return None
+        user.password_hash = hashed_password
+        await self.session.flush()
+        return user
+
     async def get_user_roles(self, user_id: str) -> List[str]:
         """Lấy danh sách các vai trò của một người dùng từ các tổ chức họ tham gia."""
         stmt = (

@@ -39,6 +39,9 @@ from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.registry import CapabilityRegistry
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
+from se.src.runtimes.workflow.runtime import WorkflowRuntime
+from se.src.runtimes.chat import DirectChatRuntime
+from se.src.runtimes.agent.adapters.inference import ProviderInferenceAdapter
 from se.src.transport.gateway.authentication.dependency import get_current_identity, verify_admin_ip, get_api_key_service
 from se.src.transport.gateway.dependencies import get_container, get_auth
 
@@ -288,11 +291,13 @@ def offline_app():
                     bus.publish(BaseEvent(
                         event_name="provider.stream.chunk_emitted",
                         session_id=event.session_id,
+                        turn_id=event.turn_id,
                         payload={"chunk": chunk.model_dump(), "sse": chunk.to_sse()},
                     ))
                 bus.publish(BaseEvent(
                     event_name="provider.stream.completed",
                     session_id=event.session_id,
+                    turn_id=event.turn_id,
                     payload={},
                 ))
             else:
@@ -300,12 +305,14 @@ def offline_app():
                 bus.publish(BaseEvent(
                     event_name="provider.chat.responded",
                     session_id=event.session_id,
+                    turn_id=event.turn_id,
                     payload={"response": response.model_dump()},
                 ))
         except Exception as exc:
             bus.publish(BaseEvent(
                 event_name="provider.failed",
                 session_id=event.session_id,
+                turn_id=event.turn_id,
                 payload={"error": str(exc), "status_code": 503},
             ))
 
@@ -347,8 +354,9 @@ def offline_app():
 
     async def _handle_request_received(event):
         bus.publish(BaseEvent(
-            event_name="provider.chat.execute",
+            event_name="context.event.built",
             session_id=event.session_id,
+            turn_id=event.turn_id,
             payload=event.payload,
         ))
 
@@ -418,6 +426,19 @@ def offline_app():
         ),
         connection_runtime=connection_runtime
     )
+    container.inference_port = ProviderInferenceAdapter(
+        runtime, runtime._http_client
+    )
+    container.direct_chat_runtime = DirectChatRuntime(
+        inference=container.inference_port,
+        capability_runtime=container.capability_runtime,
+    )
+    container.agent_runtime = None
+    workflow_runtime = WorkflowRuntime()
+    workflow_runtime.container = container
+    workflow_runtime.event_bus = bus
+    bus.subscribe("context.event.built", workflow_runtime._handle_context_built)
+    container.workflow_runtime = workflow_runtime
     container.require = lambda key: getattr(container, key)
     app.state.container = container
 
@@ -507,6 +528,360 @@ async def test_v1_provider_apis_are_offline(offline_app: FastAPI):
 
 
 @pytest.mark.asyncio
+async def test_direct_chat_read_tool_uses_gateway_provider_and_capability_runtime(
+    offline_app: FastAPI,
+):
+    from se.src.domain.schemas.response import GatewayChoice, GatewayResponse
+    from se.src.domain.schemas.message import GatewayMessage
+    from se.src.domain.schemas.tool import FunctionCall, GatewayToolCall
+    from se.src.runtimes.capability.contracts.definition import (
+        CapabilityDefinition,
+        CapabilityEffect,
+    )
+    from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+
+    container = offline_app.state.container
+    calls = []
+
+    async def read_status(**arguments):
+        calls.append(arguments)
+        return {"status": "ready"}
+
+    definition = CapabilityDefinition(
+        id="status.read",
+        name="status.read",
+        description="Read status",
+        input_schema={"type": "object"},
+        effects={CapabilityEffect.READ},
+    )
+    container.capability_runtime.register_capability(
+        PythonCapabilityDriver(definition, read_status)
+    )
+
+    provider = container.provider_runtime.providers["mock"]
+    original_chat = provider.chat.chat
+
+    async def scripted_chat(**kwargs):
+        body = kwargs.get("body") or {}
+        messages = body.get("messages") or []
+        if any(item.get("role") == "tool" for item in messages):
+            message = GatewayMessage(role="assistant", content="status is ready")
+        else:
+            message = GatewayMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    GatewayToolCall(
+                        id="call-status",
+                        function=FunctionCall(name="status.read", arguments="{}"),
+                    )
+                ],
+            )
+        return GatewayResponse(
+            id="direct-tool-e2e",
+            model=body.get("model") or "mock-chat",
+            choices=[GatewayChoice(index=0, message=message, finish_reason="stop")],
+            metadata={"provider": "mock"},
+        )
+
+    provider.chat.chat = scripted_chat
+    try:
+        transport = httpx.ASGITransport(app=offline_app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "mock-chat",
+                    "agent_enabled": False,
+                    "messages": [{"role": "user", "content": "read status"}],
+                    "metadata": {"routing": {"prefer_provider": "mock"}},
+                },
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["choices"][0]["message"]["content"] == "status is ready"
+        assert calls == [{}]
+    finally:
+        provider.chat.chat = original_chat
+
+
+@pytest.mark.asyncio
+async def test_direct_chat_injects_registered_context_skill_into_provider_request(
+    offline_app: FastAPI,
+):
+    from se.src.domain.schemas.response import GatewayChoice, GatewayResponse
+    from se.src.domain.schemas.message import GatewayMessage
+
+    container = offline_app.state.container
+    transport = httpx.ASGITransport(app=offline_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        registered = await client.post(
+            "/v1/capabilities/skills",
+            json={
+                "name": "skill.citations",
+                "description": "Citation guidance",
+                "instruction": "Cite every factual claim.",
+                "execution_mode": "CONTEXT_ONLY",
+            },
+        )
+        assert registered.status_code == 201, registered.text
+
+        provider = container.provider_runtime.providers["mock"]
+        original_chat = provider.chat.chat
+        captured = []
+
+        async def capture_chat(**kwargs):
+            body = kwargs.get("body") or {}
+            captured.append(body)
+            return GatewayResponse(
+                id="context-skill-e2e",
+                model=body.get("model") or "mock-chat",
+                choices=[
+                    GatewayChoice(
+                        index=0,
+                        message=GatewayMessage(role="assistant", content="done"),
+                        finish_reason="stop",
+                    )
+                ],
+                metadata={"provider": "mock"},
+            )
+
+        provider.chat.chat = capture_chat
+        try:
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "mock-chat",
+                    "agent_enabled": False,
+                    "messages": [{"role": "user", "content": "answer"}],
+                    "metadata": {"routing": {"prefer_provider": "mock"}},
+                },
+            )
+        finally:
+            provider.chat.chat = original_chat
+
+    assert response.status_code == 200, response.text
+    assert captured
+    assert "[CONTEXT SKILLS]" in captured[0]["messages"][0]["content"]
+    assert "Cite every factual claim." in captured[0]["messages"][0]["content"]
+
+
+@pytest.mark.asyncio
+async def test_executable_skill_runs_from_capability_api_through_provider_runtime(
+    offline_app: FastAPI,
+):
+    transport = httpx.ASGITransport(app=offline_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        registered = await client.post(
+            "/v1/capabilities/skills",
+            json={
+                "name": "skill.review-executable",
+                "description": "Review content",
+                "instruction": "Review carefully and return a concise result.",
+                "execution_mode": "ONE_SHOT",
+                "effects": ["READ"],
+                "metadata": {"model": "mock-chat"},
+            },
+        )
+        assert registered.status_code == 201, registered.text
+        assert registered.json()["implementations"][0]["driver_kind"] == "SKILL_RUNTIME"
+
+        executed = await client.post(
+            "/v1/capabilities/skill.review-executable/execute",
+            json={
+                "invocation_id": "inv-skill-e2e",
+                "arguments": {"prompt": "draft text"},
+                "metadata": {
+                    "model": "mock-chat",
+                    "routing": {"prefer_provider": "mock"},
+                },
+            },
+        )
+
+    assert executed.status_code == 200, executed.text
+    payload = executed.json()
+    assert payload["invocation_id"] == "inv-skill-e2e"
+    assert payload["output"]["message"]["content"] == "mock:draft text"
+    assert payload["metadata"]["implementation_id"] == (
+        "server:skill:skill.review-executable"
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_agent_capability_runs_agent_tool_loop_via_http(
+    offline_app: FastAPI,
+):
+    from se.src.domain.schemas.message import GatewayMessage
+    from se.src.domain.schemas.response import GatewayChoice, GatewayResponse
+    from se.src.domain.schemas.tool import FunctionCall, GatewayToolCall
+    from se.src.runtimes.agent.adapters.policy import DefaultAgentExecutionPolicy
+    from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+    from se.src.runtimes.agent.contracts.context_builder import AgentContextSnapshot
+    from se.src.runtimes.agent.contracts.inference import (
+        InferenceMessage,
+        InferenceToolDefinition,
+    )
+    from se.src.runtimes.agent.contracts.policy import PolicyDecision
+    from se.src.runtimes.agent.runtime import AgentRuntime
+    from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+    from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+
+    container = offline_app.state.container
+    tool_calls = []
+
+    async def echo(**arguments):
+        tool_calls.append(arguments)
+        return {"echo": arguments["value"]}
+
+    tool_definition = CapabilityDefinition(
+        id="agent.echo",
+        name="agent.echo",
+        description="Echo for agent",
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+    )
+    container.capability_runtime.register_capability(
+        PythonCapabilityDriver(tool_definition, echo)
+    )
+
+    class ContextBuilder:
+        async def build(self, context, request):
+            if request.prior_messages:
+                messages = tuple(
+                    InferenceMessage.model_validate(item)
+                    for item in request.prior_messages
+                )
+            else:
+                messages = (
+                    InferenceMessage(
+                        role="system", content=context.agent.instruction
+                    ),
+                    InferenceMessage(
+                        role="user", content=context.input.get("prompt", "")
+                    ),
+                )
+            return AgentContextSnapshot(
+                execution_id=context.execution_id,
+                iteration=request.iteration,
+                messages=messages,
+                tools=(
+                    InferenceToolDefinition(
+                        name="agent.echo",
+                        description="Echo for agent",
+                        parameters=tool_definition.input_schema,
+                    ),
+                ),
+            )
+
+    class AllowToolPolicy:
+        def is_visible(self, *, agent_id, capability_id):
+            return capability_id == "agent.echo"
+
+        def authorize(self, *, identity, agent_id, capability_id):
+            return PolicyDecision.ALLOW
+
+    execution_policy = DefaultAgentExecutionPolicy()
+    tool_port = CapabilityToolExecutionAdapter(
+        container.capability_runtime,
+        AllowToolPolicy(),
+        execution_policy,
+    )
+    container.agent_runtime = AgentRuntime(
+        context_builder=ContextBuilder(),
+        inference=container.inference_port,
+        tool_execution=tool_port,
+        execution_policy=execution_policy,
+    )
+
+    provider = container.provider_runtime.providers["mock"]
+    original_chat = provider.chat.chat
+    inference_calls = []
+
+    async def scripted_chat(**kwargs):
+        body = kwargs.get("body") or {}
+        inference_calls.append(body)
+        if any(item.get("role") == "tool" for item in body.get("messages", [])):
+            message = GatewayMessage(role="assistant", content="agent done")
+        else:
+            message = GatewayMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    GatewayToolCall(
+                        id="agent-call-1",
+                        function=FunctionCall(
+                            name="agent.echo",
+                            arguments='{"value":"from-agent"}',
+                        ),
+                    )
+                ],
+            )
+        return GatewayResponse(
+            id=f"agent-inference-{len(inference_calls)}",
+            model=body.get("model") or "mock-chat",
+            choices=[GatewayChoice(index=0, message=message, finish_reason="stop")],
+            metadata={"provider": "mock"},
+        )
+
+    provider.chat.chat = scripted_chat
+    try:
+        transport = httpx.ASGITransport(app=offline_app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            tool = await client.post(
+                "/v1/capabilities/tools",
+                json={
+                    "name": "agent.echo",
+                    "description": "Echo for agent",
+                    "parameters": tool_definition.input_schema,
+                },
+            )
+            assert tool.status_code == 201, tool.text
+            agent = await client.post(
+                "/v1/capabilities/agents",
+                json={
+                    "name": "agent-capability-e2e",
+                    "goal": "Execute echo",
+                    "instruction": "Use agent.echo, then finish.",
+                    "tools": ["agent.echo"],
+                },
+            )
+            assert agent.status_code == 201, agent.text
+            assert agent.json()["implementations"][0]["driver_kind"] == "AGENT_RUNTIME"
+
+            executed = await client.post(
+                "/v1/capabilities/agent-capability-e2e/execute",
+                json={
+                    "invocation_id": "inv-agent-e2e",
+                    "session_id": "session-agent-e2e",
+                    "arguments": {"prompt": "echo this"},
+                    "metadata": {
+                        "model": "mock-chat",
+                        "routing": {"prefer_provider": "mock"},
+                    },
+                },
+            )
+    finally:
+        provider.chat.chat = original_chat
+
+    assert executed.status_code == 200, executed.text
+    result = executed.json()
+    assert result["invocation_id"] == "inv-agent-e2e"
+    assert result["output"]["output"] == "agent done"
+    assert tool_calls == [{"value": "from-agent"}]
+    assert len(inference_calls) == 2
+
+
+@pytest.mark.asyncio
 async def test_v1_streaming_chat_is_offline(offline_app: FastAPI):
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
@@ -525,8 +900,9 @@ async def test_v1_streaming_chat_is_offline(offline_app: FastAPI):
             body = await response.aread()
             assert response.status_code == 200, body
             text = body.decode()
-            assert "mock:one" in text
-            assert "mock:two" in text
+            # DIRECT mode performs its bounded inference/tool loop before the
+            # transport emits the final correlated SSE chunk.
+            assert "mock:one two" in text
             assert "[DONE]" in text
 
 
@@ -548,7 +924,20 @@ async def test_v1_auth_api_is_offline(offline_app: FastAPI):
 
 @pytest.mark.asyncio
 async def test_v1_agent_tool_admin_health_multi_agent(offline_app: FastAPI):
+    from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+    from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+
     offline_app.state.container.multi_agent_coordinator.executor = lambda task: {"task_id": task["task_id"]}
+    offline_app.state.container.capability_runtime.register_capability(
+        PythonCapabilityDriver(
+            CapabilityDefinition(
+                id="offline.tool",
+                name="offline.tool",
+                description="offline",
+            ),
+            lambda **kwargs: kwargs,
+        )
+    )
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
         tool = {"name": "offline.tool", "description": "offline", "parameters": {"type": "object", "properties": {}}}

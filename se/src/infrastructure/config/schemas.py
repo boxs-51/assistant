@@ -45,6 +45,8 @@ class AuthenticationSettings(BaseModel):
         "/stats",
         "/v1/auth/register/initiate",
         "/v1/auth/register/verify",
+        "/v1/auth/password-reset/initiate",
+        "/v1/auth/password-reset/confirm",
         "/v1/auth/login",
         "/v1/auth/refresh",
         "/v1/auth/logout",

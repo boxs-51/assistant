@@ -21,6 +21,7 @@ TOOL_METADATA = {
     "name": "desktop_automation",
     "description": "Điều khiển tự động hóa các thao tác chuột và bàn phím trên máy tính desktop.",
     "base_risk": "HIGH",  # Tương tác trực tiếp với thiết bị ngoại vi và giao diện OS
+    "effects": ["EXECUTE", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": [],
     "parameters": {
         "type": "object",

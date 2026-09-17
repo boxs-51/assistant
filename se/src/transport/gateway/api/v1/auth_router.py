@@ -20,6 +20,8 @@ from .....domain.schemas.auth import (
     UserMeSchema,
     VerifyOTPRequest,
     GuestTokenSchema,
+    PasswordResetRequestSchema,
+    PasswordResetConfirmSchema,
 )
 from .....infrastructure.event_bus import EventBus
 from .....domain.schemas.identity import Identity
@@ -82,6 +84,42 @@ async def verify_otp_and_complete(
             tokens = await auth_facade.confirm_registration(payload.email, payload.otp)
         response.delete_cookie("guest_access_token")
         return tokens
+    except OTPInvalidError as otp_err:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={"error": "invalid_or_expired_otp", "message": str(otp_err)},
+        )
+
+
+@router.post("/password-reset/initiate")
+async def initiate_password_reset(
+    payload: PasswordResetRequestSchema,
+    auth_facade: Authentication = Depends(get_auth),
+):
+    try:
+        return await auth_facade.initiate_password_reset(payload.email)
+    except OTPCooldownError as cooldown_err:
+        return JSONResponse(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            content={
+                "error": "otp_cooldown_active",
+                "message": str(cooldown_err),
+                "cooldown_remaining": cooldown_err.remaining_seconds,
+            },
+        )
+
+
+@router.post("/password-reset/confirm")
+async def confirm_password_reset(
+    payload: PasswordResetConfirmSchema,
+    auth_facade: Authentication = Depends(get_auth),
+):
+    try:
+        return await auth_facade.confirm_password_reset(
+            payload.email,
+            payload.otp,
+            payload.new_password,
+        )
     except OTPInvalidError as otp_err:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

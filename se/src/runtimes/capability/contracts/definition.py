@@ -1,4 +1,5 @@
-from typing import Any, Dict, List
+from enum import Enum
+from typing import Any, Dict, List, Set
 
 from jsonschema.exceptions import SchemaError
 from jsonschema.validators import validator_for
@@ -7,6 +8,27 @@ from pydantic import BaseModel, ConfigDict, Field
 class InvalidCapabilitySchemaError(ValueError):
     """Ngoại lệ riêng cho JSON Schema không hợp lệ."""
     pass
+
+
+class CapabilityKind(str, Enum):
+    TOOL = "TOOL"
+    SKILL = "SKILL"
+    AGENT = "AGENT"
+
+
+class CapabilityExecutionMode(str, Enum):
+    CONTEXT_ONLY = "CONTEXT_ONLY"
+    ONE_SHOT = "ONE_SHOT"
+    STREAMING = "STREAMING"
+    LONG_RUNNING = "LONG_RUNNING"
+
+
+class CapabilityEffect(str, Enum):
+    READ = "READ"
+    WRITE = "WRITE"
+    EXECUTE = "EXECUTE"
+    EXTERNAL_SIDE_EFFECT = "EXTERNAL_SIDE_EFFECT"
+    PRIVILEGED = "PRIVILEGED"
 
 
 def validate_input_schema(schema: Dict[str, Any]) -> None:
@@ -54,6 +76,9 @@ class CapabilityDefinition(BaseModel):
 
     source: str = "BUILTIN"
     execution_kind: str = "PYTHON"
+    kind: CapabilityKind = CapabilityKind.TOOL
+    execution_mode: CapabilityExecutionMode = CapabilityExecutionMode.ONE_SHOT
+    effects: Set[CapabilityEffect] = Field(default_factory=set)
 
     require_auth: bool = False
     required_scopes: List[str] = Field(default_factory=list)

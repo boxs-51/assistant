@@ -132,6 +132,7 @@ class ProviderRuntime(BaseRuntime):
                 await self.event_bus.publish(BaseEvent(
                     event_name="provider.chat.responded",
                     session_id=session_id,
+                    turn_id=event.turn_id,
                     payload={
                         "response": response.model_dump(),
                         "provider": provider_name,
@@ -144,12 +145,14 @@ class ProviderRuntime(BaseRuntime):
                     await self.event_bus.publish(BaseEvent(
                         event_name="provider.stream.chunk_emitted",
                         session_id=session_id,
+                        turn_id=event.turn_id,
                         payload={"chunk": chunk.model_dump(), "sse": chunk.to_sse()}
                     ))
                 
                 await self.event_bus.publish(BaseEvent(
                     event_name="provider.stream.completed",
                     session_id=session_id,
+                    turn_id=event.turn_id,
                     payload={"latency": time.time() - start_time}
                 ))
 
@@ -158,6 +161,7 @@ class ProviderRuntime(BaseRuntime):
             await self.event_bus.publish(BaseEvent(
                 event_name="provider.failed",
                 session_id=session_id,
+                turn_id=event.turn_id,
                 payload={"error": str(e), "status_code": 503}
             ))
         except Exception as e:
@@ -165,6 +169,7 @@ class ProviderRuntime(BaseRuntime):
             await self.event_bus.publish(BaseEvent(
                 event_name="provider.failed",
                 session_id=session_id,
+                turn_id=event.turn_id,
                 payload={"error": str(e), "status_code": 500}
             ))
 

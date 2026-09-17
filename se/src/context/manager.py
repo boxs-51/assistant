@@ -60,6 +60,10 @@ class ContextEngine:
                     content=message.content.get("data", "")
                     if isinstance(message.content, dict)
                     else message.content,
+                    turn_id=getattr(message, "turn_id", None),
+                    sequence=getattr(message, "sequence", None),
+                    created_at=getattr(message, "created_at", None),
+                    completed_at=getattr(message, "completed_at", None),
                 )
                 for message in session_db.messages
             ],

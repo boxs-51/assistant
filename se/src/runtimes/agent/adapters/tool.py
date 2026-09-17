@@ -140,6 +140,8 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 arguments=request.arguments,
                 identity=context.identity,
                 execution_id=context.execution_id,
+                invocation_id=request.invocation_id,
+                turn_id=context.metadata.get("turn_id"),
                 request_id=context.request_id,
                 session_id=context.session_id,
                 connection_id=context.connection_id,

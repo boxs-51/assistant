@@ -163,6 +163,25 @@ class ClientRuntime:
             "tokens": tokens,
         }
 
+    def register(self, payload: dict) -> dict:
+        return self.gateway.register(payload)
+
+    def verify_registration(self, payload: dict) -> dict:
+        tokens = self.gateway.verify_registration(payload)
+        user = self.gateway.current_user()
+        self.owner_id = user["id"]
+        self.capabilities.owner_id = self.owner_id
+        self.realtime.update_headers(self.gateway.headers)
+        if not self._ready:
+            self.start()
+        return {"user": user, "tokens": tokens}
+
+    def initiate_password_reset(self, payload: dict) -> dict:
+        return self.gateway.initiate_password_reset(payload)
+
+    def confirm_password_reset(self, payload: dict) -> dict:
+        return self.gateway.confirm_password_reset(payload)
+
     def __enter__(self):
         self.start()
         return self

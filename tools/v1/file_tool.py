@@ -10,6 +10,7 @@ TOOL_METADATA = {
     "name": "file_tool",
     "description": "Thực hiện các thao tác quản lý tệp tin local bao gồm Đọc (read), Ghi (write), Tìm kiếm (search), và Thay thế (replace).",
     "base_risk": "HIGH",
+    "effects": ["READ", "WRITE"],
     "danger_patterns": [
         r"\.env$",
         r"\.pem$",

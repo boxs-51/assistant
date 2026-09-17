@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta, timezone
 
 from se.src.agent.registry import AgentRegistry
 from se.src.application.policy.authorization import AuthorizationService
@@ -23,6 +24,7 @@ from se.src.runtimes.capability.contracts.implementation import (
 )
 from se.src.runtimes.capability.registry import CapabilityRegistry
 from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.context.temporal import TemporalContextProvider
 
 
 class _ContextRuntime:
@@ -95,8 +97,18 @@ def _setup():
         AuthorizationService(),
         capability_catalog=catalog,
     )
+    clock_calls = 0
+
+    def advancing_clock(zone):
+        nonlocal clock_calls
+        value = datetime(2026, 1, 1, tzinfo=timezone.utc) + timedelta(
+            seconds=clock_calls
+        )
+        clock_calls += 1
+        return value.astimezone(zone)
+
     assembler = DefaultAgentContextAssembler(
-        DefaultAgentSystemPromptProvider(),
+        DefaultAgentSystemPromptProvider(TemporalContextProvider(advancing_clock)),
         RegistryAgentCapabilityResolver(
             agent_registry=agents,
             capability_registry=registry,
@@ -170,7 +182,8 @@ def test_phase6_11_builds_one_canonical_system_message_and_filtered_tools():
             ),
         )
         assert sum(item.role == "system" for item in second.messages) == 1
-        assert second.messages[0].content == first.messages[0].content
+        assert "[TEMPORAL CONTEXT]" in str(second.messages[0].content)
+        assert second.messages[0].content != first.messages[0].content
         assert second.messages[-1].role == "tool"
         assert second.messages[-1].content == "hello"
 

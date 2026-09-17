@@ -13,16 +13,22 @@ from .....domain.schemas.capability import (
 )
 from .....domain.schemas.identity import Identity
 from .....domain.schemas.tool import GatewayToolDefinition
-from .....runtimes.capability.contracts.definition import CapabilityDefinition
+from .....runtimes.capability.contracts.definition import (
+    CapabilityDefinition,
+    CapabilityExecutionMode,
+    CapabilityKind,
+)
 from .....runtimes.capability.contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
-from .....runtimes.capability.contracts.registration import CapabilityKind, CapabilityRegistration
+from .....runtimes.capability.contracts.registration import CapabilityRegistration
 from .....runtimes.capability.contracts.error import CapabilityError
 from .....runtimes.capability.contracts.result import CapabilityResult
+from .....runtimes.capability.drivers.agent_driver import AgentCapabilityDriver
+from .....runtimes.capability.drivers.skill_driver import ExecutableSkillCapabilityDriver
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
 
@@ -71,6 +77,7 @@ def _ensure_server_tool_implementation(container: ApplicationContainer, definiti
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Server implementation '{implementation_id}' was removed.",
             )
+        runtime.driver_registry.bind(implementation_id, driver, replace=True)
         return implementation
 
     implementation = CapabilityImplementation.from_definition(
@@ -83,10 +90,12 @@ def _ensure_server_tool_implementation(container: ApplicationContainer, definiti
         metadata={"kind": "TOOL", "driver": type(driver).__name__},
     )
     catalog.register_implementation(implementation)
-    return catalog.transition_implementation(
+    implementation = catalog.transition_implementation(
         implementation_id,
         CapabilityImplementationState.ENABLED,
     )
+    runtime.driver_registry.bind(implementation_id, driver, replace=True)
+    return implementation
 
 
 @router.post("/", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
@@ -124,7 +133,7 @@ async def list_capabilities(
     result = []
     for definition in catalog.list_definitions():
         try:
-            definition_kind = CapabilityKind(str(definition.metadata.get("kind", "TOOL")).upper())
+            definition_kind = definition.kind
         except ValueError:
             continue
         if kind is not None and definition_kind is not kind:
@@ -145,6 +154,9 @@ async def register_tool_capability(body: GatewayToolDefinition, identity: Identi
         id=body.name, name=body.name, description=body.description,
         input_schema=body.parameters or {"type": "object"}, require_auth=body.require_auth,
         required_scopes=body.required_scopes, metadata={"kind": "TOOL"},
+        kind=CapabilityKind.TOOL,
+        execution_mode=CapabilityExecutionMode(body.execution_mode),
+        effects=set(body.effects),
     )
     try:
         # Never mutate the catalog before we know an executable server driver exists.
@@ -195,27 +207,85 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
         raise HTTPException(status_code=422, detail=f"Not skill capabilities: {', '.join(invalid_skills)}")
     definition = CapabilityDefinition(
         id=body.name, name=body.name, description=body.goal, input_schema={"type": "object"},
-        execution_kind="AGENT", metadata={"kind": "AGENT", "agent": body.model_dump(mode="json")},
+        execution_kind="AGENT", kind=CapabilityKind.AGENT,
+        execution_mode=CapabilityExecutionMode.LONG_RUNNING,
+        metadata={"kind": "AGENT", "agent": body.model_dump(mode="json")},
     )
     try:
         definition = catalog.register_definition(definition)
         container.agent_registry.register(body)
-        return _response(CapabilityKind.AGENT, definition)
+        implementations = []
+        agent_runtime = getattr(container, "agent_runtime", None)
+        if agent_runtime is not None:
+            driver = AgentCapabilityDriver(definition, body, agent_runtime)
+            container.capability_runtime.register_capability(driver)
+            implementation_id = f"server:agent:{definition.capability_id}"
+            implementation = CapabilityImplementation.from_definition(
+                definition,
+                implementation_id=implementation_id,
+                location=CapabilityExecutionLocation.SERVER,
+                driver_kind="AGENT_RUNTIME",
+                owner_type=CapabilityOwnerType.SYSTEM,
+            )
+            if not catalog.contains_implementation(implementation_id):
+                catalog.register_implementation(implementation)
+                implementation = catalog.transition_implementation(
+                    implementation_id, CapabilityImplementationState.ENABLED
+                )
+            else:
+                implementation = catalog.get_implementation(implementation_id)
+            container.capability_runtime.driver_registry.bind(
+                implementation_id, driver, replace=True
+            )
+            implementations.append(implementation)
+        return _response(CapabilityKind.AGENT, definition, implementations)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
 @router.post("/skills", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
 async def register_skill_capability(body: SkillDefinition, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
+    catalog = _catalog(container)
     definition = CapabilityDefinition(
         id=body.name, version=body.version, name=body.name, description=body.description,
         input_schema=body.input_schema, execution_kind="SKILL",
+        kind=CapabilityKind.SKILL,
+        execution_mode=CapabilityExecutionMode(body.execution_mode),
+        effects=set(body.effects),
         metadata={"kind": "SKILL", "instruction": body.instruction, **body.metadata},
     )
     try:
-        definition = _catalog(container).register_definition(definition, allow_update=True)
+        definition = catalog.register_definition(definition, allow_update=True)
         container.capability_runtime.registry.register_definition(definition)
-        return _response(CapabilityKind.SKILL, definition)
+        implementations = []
+        if definition.execution_mode is not CapabilityExecutionMode.CONTEXT_ONLY:
+            inference_port = getattr(container, "inference_port", None)
+            if inference_port is None:
+                raise ValueError("Executable skills require the inference runtime.")
+            driver = ExecutableSkillCapabilityDriver(
+                definition, body.instruction, inference_port
+            )
+            container.capability_runtime.register_capability(driver)
+            implementation_id = f"server:skill:{definition.capability_id}"
+            implementation = CapabilityImplementation.from_definition(
+                definition,
+                implementation_id=implementation_id,
+                location=CapabilityExecutionLocation.SERVER,
+                driver_kind="SKILL_RUNTIME",
+                owner_type=CapabilityOwnerType.SYSTEM,
+            )
+            if not catalog.contains_implementation(implementation_id):
+                catalog.register_implementation(implementation)
+                implementation = catalog.transition_implementation(
+                    implementation_id, CapabilityImplementationState.ENABLED
+                )
+            else:
+                implementation = catalog.get_implementation(implementation_id)
+            container.capability_runtime.driver_registry.bind(
+                implementation_id, driver, replace=True
+            )
+            implementations.append(implementation)
+        return _response(CapabilityKind.SKILL, definition, implementations)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -232,6 +302,7 @@ async def execute_capability(
             capability_id=capability_id,
             arguments=body.arguments,
             identity=identity,
+            invocation_id=body.invocation_id,
             session_id=body.session_id,
             connection_id=body.connection_id,
             timeout_seconds=body.timeout_seconds,
@@ -242,7 +313,7 @@ async def execute_capability(
     except CapabilityError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail=exc.model_dump(mode="json"),
+            detail=exc.model_dump(),
         ) from exc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
@@ -253,7 +324,7 @@ async def get_capability(capability_id: str, container: ApplicationContainer = D
     try:
         catalog = _catalog(container)
         definition = catalog.get_definition(capability_id)
-        kind = CapabilityKind(str(definition.metadata.get("kind", "TOOL")))
+        kind = definition.kind
         return _response(kind, definition, catalog.list_implementations(capability_id))
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc

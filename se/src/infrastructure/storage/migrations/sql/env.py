@@ -1,4 +1,5 @@
 import asyncio
+import os
 from logging.config import fileConfig
 
 from sqlalchemy import pool
@@ -35,13 +36,17 @@ from src.infrastructure.storage.models.sql.chat_data import (
     session
 ) 
 from src.infrastructure.storage.models.sql import agent
+from src.infrastructure.storage.models.sql import capability
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---
 # Lấy URL từ cấu hình của ứng dụng thay vì hardcode
 # Tạm thời chúng ta sẽ hardcode URL của SQLite để đơn giản hóa
 # Trong thực tế, bạn sẽ đọc từ file config của ứng dụng
-DB_URL = "sqlite+aiosqlite:///gateway_storage.db"
+DB_URL = os.getenv(
+    "ASSISTANT_ALEMBIC_DATABASE_URL",
+    "sqlite+aiosqlite:///gateway_storage.db",
+)
 config.set_main_option("sqlalchemy.url", DB_URL)
 
 # other values from the config, defined by the needs of env.py,

@@ -50,8 +50,10 @@ async def chat_completions_proxy(
         if hasattr(chat_request, "session_id") and chat_request.session_id
         else str(uuid.uuid4())
     )
+    turn_id = f"turn_{uuid.uuid4().hex}"
     is_stream = bool(chat_request.config and chat_request.config.stream)
     request_payload = chat_request.model_dump(exclude_none=True)
+    request_payload["_chat_execution_mode"] = chat_request.execution_mode.value
     identity_data = identity.model_dump() if hasattr(identity, "model_dump") else str(identity)
 
     # ------------------------------------------------------------------
@@ -62,7 +64,7 @@ async def chat_completions_proxy(
             queue: asyncio.Queue = asyncio.Queue()
 
             async def _on_chunk(evt: BaseEvent):
-                if evt.session_id == session_id:
+                if evt.session_id == session_id and evt.turn_id == turn_id:
                     sse = evt.payload.get("sse")
                     if not sse:
                         chunk = evt.payload.get("chunk")
@@ -71,11 +73,11 @@ async def chat_completions_proxy(
                         await queue.put(sse)
 
             async def _on_complete(evt: BaseEvent):
-                if evt.session_id == session_id:
+                if evt.session_id == session_id and evt.turn_id == turn_id:
                     await queue.put("[DONE]")
 
             async def _on_fail(evt: BaseEvent):
-                if evt.session_id == session_id:
+                if evt.session_id == session_id and evt.turn_id == turn_id:
                     await queue.put({"error": evt.payload.get("error", "Unknown stream error")})
 
             yield ": ping\n\n"
@@ -89,9 +91,11 @@ async def chat_completions_proxy(
                     BaseEvent(
                         event_name="transport.event.request_received",
                         session_id=session_id,
+                        turn_id=turn_id,
                         payload={
                             "request_body": request_payload,
                             "identity": identity_data,
+                            "turn_id": turn_id,
                         },
                     )
                 )
@@ -157,11 +161,11 @@ async def chat_completions_proxy(
         future = loop.create_future()
 
         async def _on_response(evt: BaseEvent):
-            if evt.session_id == session_id and not future.done():
+            if evt.session_id == session_id and evt.turn_id == turn_id and not future.done():
                 future.set_result(evt.payload)
 
         async def _on_failure(evt: BaseEvent):
-            if evt.session_id == session_id and not future.done():
+            if evt.session_id == session_id and evt.turn_id == turn_id and not future.done():
                 future.set_exception(
                     HTTPException(
                         status_code=evt.payload.get("status_code", 500),
@@ -177,9 +181,11 @@ async def chat_completions_proxy(
                 BaseEvent(
                     event_name="transport.event.request_received",
                     session_id=session_id,
+                    turn_id=turn_id,
                     payload={
                         "request_body": request_payload,
                         "identity": identity_data,
+                        "turn_id": turn_id,
                     },
                 )
             )

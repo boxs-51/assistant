@@ -9,6 +9,13 @@ from se.src.runtimes.capability.contracts.result import CapabilityResult
 from se.src.runtimes.capability.drivers.base import BaseCapabilityDriver, CapabilityDefinition
 from se.src.runtimes.capability.drivers.mcp_driver import McpCapabilityDriver
 from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.implementation import (
+    CapabilityExecutionLocation,
+    CapabilityImplementation,
+    CapabilityImplementationState,
+)
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.tool.registry import ToolRegistry
 from se.src.domain.schemas.tool import GatewayToolDefinition
 from se.src.kernel.base import HealthStatus
@@ -154,6 +161,87 @@ async def test_execute_capability_returns_normalized_result_and_legacy_api_still
         {"value": "legacy"},
         identity,
     ) == "legacy"
+
+
+@pytest.mark.asyncio
+async def test_execute_capability_preserves_caller_invocation_id_end_to_end():
+    seen = []
+
+    class CapturingDriver(BaseCapabilityDriver):
+        async def execute(self, context, arguments):
+            seen.append(context.invocation_id)
+            return arguments
+
+    runtime = CapabilityRuntime()
+    runtime.register_capability(
+        CapturingDriver(
+            CapabilityDefinition(
+                id="local.capture",
+                name="local.capture",
+                description="Capture correlation",
+            )
+        )
+    )
+
+    result = await runtime.execute_capability(
+        "local.capture",
+        {"value": "ok"},
+        make_identity(),
+        invocation_id="inv-canonical",
+    )
+
+    assert seen == ["inv-canonical"]
+    assert result.invocation_id == "inv-canonical"
+
+
+@pytest.mark.asyncio
+async def test_routing_resolves_driver_by_selected_implementation_id():
+    definition = CapabilityDefinition(
+        id="logical.echo",
+        name="logical.echo",
+        description="Two concrete implementations",
+    )
+    catalog = CapabilityCatalog()
+    catalog.register_definition(definition)
+    runtime = CapabilityRuntime(
+        catalog=catalog,
+        routing_policy=CapabilityRoutingPolicy(),
+    )
+
+    class NamedDriver(BaseCapabilityDriver):
+        def __init__(self, name):
+            super().__init__(definition)
+            self._implementation_name = name
+
+        async def execute(self, context, arguments):
+            return self._implementation_name
+
+    for implementation_id in ("server:a", "server:b"):
+        implementation = CapabilityImplementation.from_definition(
+            definition,
+            implementation_id=implementation_id,
+            location=CapabilityExecutionLocation.SERVER,
+            driver_kind="PYTHON",
+        )
+        catalog.register_implementation(implementation)
+        catalog.transition_implementation(
+            implementation_id,
+            CapabilityImplementationState.ENABLED,
+        )
+        runtime.driver_registry.bind(
+            implementation_id,
+            NamedDriver(implementation_id),
+        )
+
+    result = await runtime.execute_capability(
+        "logical.echo",
+        {},
+        make_identity(),
+        metadata={"implementation_id": "server:b"},
+    )
+
+    assert result.output == "server:b"
+    assert result.metadata["implementation_id"] == "server:b"
 
 def test_capability_runtime_uses_injected_dependencies():
     registry = CapabilityRegistry()

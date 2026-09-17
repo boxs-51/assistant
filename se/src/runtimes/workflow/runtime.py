@@ -1,10 +1,15 @@
 # src/runtimes/workflow/runtime.py
 from typing import Dict, Any
+import uuid
 import structlog
 
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+from ...domain.schemas.identity import Identity
+from ...domain.schemas.agent_execution import AgentExecutionLimits
+from ..agent.contracts.context import AgentExecutionContext
+from ..agent.adapters.messages import jsonable
 
 logger = structlog.get_logger(__name__)
 
@@ -18,8 +23,10 @@ class WorkflowRuntime(BaseRuntime):
         )
         super().__init__(manifest=manifest)
         self.event_bus = None
+        self.container = None
 
     async def initialize(self, context: RuntimeContext) -> None:
+        self.container = context.container
         self.event_bus = context.event_bus
         # Lắng nghe các Domain Event từ các Runtime khác
         self.event_bus.subscribe("session.event.loaded", self._handle_session_loaded)
@@ -42,6 +49,7 @@ class WorkflowRuntime(BaseRuntime):
         await self.event_bus.publish(BaseEvent(
             event_name="context.command.build",
             session_id=event.session_id,
+            turn_id=event.turn_id,
             payload=event.payload
         ))
 
@@ -49,11 +57,151 @@ class WorkflowRuntime(BaseRuntime):
         """Bước 2: Sau khi Context dựng xong -> Yêu cầu Provider Runtime gọi LLM."""
         logger.debug("Handling context built, triggering provider execution", session_id=event.session_id)
         
+        body = dict(event.payload.get("request_body", {}))
+        mode = body.pop("_chat_execution_mode", "DIRECT")
+        event.payload["request_body"] = body
+        if mode == "DIRECT" and getattr(self.container, "direct_chat_runtime", None):
+            await self._execute_direct(event, body)
+            return
+        if mode == "AGENT" and getattr(self.container, "agent_runtime", None):
+            await self._execute_agent(event, body)
+            return
         await self.event_bus.publish(BaseEvent(
             event_name="provider.chat.execute",
             session_id=event.session_id,
+            turn_id=event.turn_id,
             payload=event.payload
         ))
+
+    @staticmethod
+    def _response_payload(response) -> dict:
+        return {
+            "id": response.execution_id,
+            "model": response.model,
+            "object": "gateway_response",
+            "choices": [{
+                "index": 0,
+                "message": jsonable(response.message),
+                "finish_reason": response.finish_reason,
+            }],
+            "usage": response.usage.model_dump(mode="json"),
+            "metadata": {"provider": response.provider},
+        }
+
+    async def _execute_direct(self, event: BaseEvent, body: dict) -> None:
+        try:
+            identity_data = event.payload.get("identity")
+            identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
+            metadata = body.get("metadata", {})
+            user_metadata = metadata.get("user", {}) if isinstance(metadata, dict) else {}
+            response = await self.container.direct_chat_runtime.execute(
+                messages=body.get("messages", []),
+                identity=identity,
+                session_id=event.session_id,
+                model=body.get("model", ""),
+                timezone_name=user_metadata.get("timezone"),
+                metadata=metadata,
+            )
+            payload = self._response_payload(response)
+            if body.get("config", {}).get("stream"):
+                await self.event_bus.publish(BaseEvent(
+                    event_name="provider.stream.chunk_emitted",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={"chunk": {
+                        "id": payload["id"],
+                        "model": payload["model"],
+                        "choices": [{"index": 0, "delta": {"content": response.message.content}}],
+                    }},
+                ))
+                await self.event_bus.publish(BaseEvent(
+                    event_name="provider.stream.completed",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={},
+                ))
+            else:
+                await self.event_bus.publish(BaseEvent(
+                    event_name="provider.chat.responded",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={"response": payload},
+                ))
+        except Exception as exc:
+            await self.event_bus.publish(BaseEvent(
+                event_name="provider.failed",
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                payload={"error": str(exc), "status_code": 500},
+            ))
+
+    async def _execute_agent(self, event: BaseEvent, body: dict) -> None:
+        try:
+            routing = body.get("metadata", {}).get("routing", {})
+            agent_id = body.get("agent_id") or routing.get("default_agent_id")
+            if not agent_id:
+                raise ValueError("AGENT mode requires agent_id or an explicit default_agent_id.")
+            agent = self.container.agent_registry.get(agent_id)
+            if agent is None:
+                raise LookupError(f"Agent '{agent_id}' is not registered.")
+            identity_data = event.payload.get("identity")
+            identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
+            messages = body.get("messages", [])
+            prompt = next((item.get("content") for item in reversed(messages) if item.get("role") == "user"), "")
+            context = AgentExecutionContext.create(
+                execution_id=f"agent_{uuid.uuid4().hex}",
+                agent_id=agent_id,
+                session_id=event.session_id,
+                correlation_id=event.turn_id or f"corr_{uuid.uuid4().hex}",
+                identity=identity,
+                limits=AgentExecutionLimits(),
+                request_id=event.turn_id,
+                agent=agent,
+                input={"prompt": prompt},
+                metadata={**body.get("metadata", {}), "timezone": body.get("metadata", {}).get("user", {}).get("timezone")},
+            )
+            result = await self.container.agent_runtime.execute(context)
+            if result.final_message is None:
+                raise RuntimeError(result.error_message or result.error_code or "Agent produced no final message.")
+            response = {
+                "id": result.execution_id,
+                "model": getattr(agent, "model", None) or body.get("model", ""),
+                "object": "gateway_response",
+                "choices": [{"index": 0, "message": jsonable(result.final_message), "finish_reason": "stop"}],
+                "usage": result.usage.model_dump(mode="json"),
+                "metadata": {"provider": "agent", "agent_id": agent_id},
+            }
+            if body.get("config", {}).get("stream"):
+                await self.event_bus.publish(BaseEvent(
+                    event_name="provider.stream.chunk_emitted",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={"chunk": {
+                        "id": response["id"],
+                        "model": response["model"],
+                        "choices": [{"index": 0, "delta": {"content": result.final_message.content}}],
+                    }},
+                ))
+                await self.event_bus.publish(BaseEvent(
+                    event_name="provider.stream.completed",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={},
+                ))
+            else:
+                await self.event_bus.publish(BaseEvent(
+                    event_name="provider.chat.responded",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={"response": response},
+                ))
+        except Exception as exc:
+            await self.event_bus.publish(BaseEvent(
+                event_name="provider.failed",
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                payload={"error": str(exc), "status_code": 400 if isinstance(exc, (ValueError, LookupError)) else 500},
+            ))
 
     async def _handle_capability_executed(self, event: BaseEvent):
         """Bước 3: Sau khi Capability/Tool chạy xong -> Gửi kết quả về Context Runtime để build lại Prompt."""
@@ -62,5 +210,6 @@ class WorkflowRuntime(BaseRuntime):
         await self.event_bus.publish(BaseEvent(
             event_name="context.command.build",
             session_id=event.session_id,
+            turn_id=event.turn_id,
             payload={"tool_result": event.payload.get("result")}
         ))

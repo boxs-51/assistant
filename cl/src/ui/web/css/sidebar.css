@@ -46,23 +46,27 @@
 
 /* Custom Scrollbar mỏng gọn kiểu IDE */
 .explorer-tree::-webkit-scrollbar,
-.sessions-list::-webkit-scrollbar {
+.sessions-list::-webkit-scrollbar,
+.gateway-panel::-webkit-scrollbar {
   width: 5px;
 }
 
 .explorer-tree::-webkit-scrollbar-track,
-.sessions-list::-webkit-scrollbar-track {
+.sessions-list::-webkit-scrollbar-track,
+.gateway-panel::-webkit-scrollbar-track {
   background: transparent;
 }
 
 .explorer-tree::-webkit-scrollbar-thumb,
-.sessions-list::-webkit-scrollbar-thumb {
+.sessions-list::-webkit-scrollbar-thumb,
+.gateway-panel::-webkit-scrollbar-thumb {
   background: rgba(255, 255, 255, 0.12);
   border-radius: 4px;
 }
 
 .explorer-tree::-webkit-scrollbar-thumb:hover,
-.sessions-list::-webkit-scrollbar-thumb:hover {
+.sessions-list::-webkit-scrollbar-thumb:hover,
+.gateway-panel::-webkit-scrollbar-thumb:hover {
   background: rgba(255, 255, 255, 0.25);
 }
 

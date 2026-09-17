@@ -412,7 +412,10 @@ class AgentRuntime:
                     context,
                     iteration=iteration_number,
                     request_id=request_id,
-                    payload={"model": getattr(context.agent, "model", None)},
+                    payload={
+                        "model": getattr(context.agent, "model", None)
+                        or context.metadata.get("model")
+                    },
                 )
 
                 response = await self._inference.complete(
@@ -422,7 +425,10 @@ class AgentRuntime:
                         iteration=iteration_number,
                         messages=list(snapshot.messages),
                         tools=list(snapshot.tools),
-                        model=getattr(context.agent, "model", None),
+                        model=(
+                            getattr(context.agent, "model", None)
+                            or context.metadata.get("model")
+                        ),
                         timeout_seconds=inference_timeout,
                         cancellation_event=context.cancellation_event,
                         metadata=dict(snapshot.metadata),

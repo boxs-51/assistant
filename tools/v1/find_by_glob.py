@@ -5,6 +5,7 @@ TOOL_METADATA = {
     "name": "find_by_glob",
     "description": "Tìm kiếm danh sách đường dẫn tệp tin và thư mục dựa trên mẫu glob pattern.",
     "base_risk": "LOW",
+    "effects": ["READ"],
     "danger_patterns": [],
     "parameters": {
         "type": "object",

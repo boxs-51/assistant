@@ -9,6 +9,7 @@ from .services.login_service import LoginService
 from .services.oauth_service import OAuthService
 from .services.token_service import TokenService
 from .services.user_service import UserService
+from .services.password_reset_service import PasswordResetService
 
 class Authentication:
     def __init__(
@@ -18,12 +19,14 @@ class Authentication:
         oauth_service: OAuthService,
         token_service: TokenService,
         user_service: UserService,
+        password_reset_service: PasswordResetService,
     ):
         self.registration_service = registration_service
         self.login_service = login_service
         self.oauth_service = oauth_service
         self.token_service = token_service
         self.user_service = user_service
+        self.password_reset_service = password_reset_service
 
     async def initiate_registration(self, user_data: UserCreateSchema) -> dict:
         return await self.registration_service.initiate_registration(user_data)
@@ -58,6 +61,12 @@ class Authentication:
 
     async def get_current_user_info(self, identity: Identity) -> UserMeSchema:
         return await self.user_service.get_current_user_info(identity)
+
+    async def initiate_password_reset(self, email: str) -> dict:
+        return await self.password_reset_service.initiate(email)
+
+    async def confirm_password_reset(self, email: str, otp: str, new_password: str) -> dict:
+        return await self.password_reset_service.confirm(email, otp, new_password)
 
     # Phương thức register_user cũ không còn cần thiết với luồng OTP mới
     # Nếu vẫn cần, nó sẽ nằm trong RegistrationService
