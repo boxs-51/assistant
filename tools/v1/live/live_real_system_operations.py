@@ -28,6 +28,8 @@ except ImportError:
 class TestRealSystemOperations(unittest.TestCase):
     # Cờ kiểm soát trạng thái Pipeline (Nếu True -> Ngắt toàn bộ các bước sau)
     _pipeline_failed = False
+
+    TARGET_SEARCH_QUERY = "du bao thoi tiet tai khanh hoa, co con bao nao khong"
     
     # Khai báo đường dẫn lưu trữ đầu ra
     LOG_DIR = os.path.join(os.getcwd(), "logs","test_wed_tool")
@@ -97,7 +99,7 @@ class TestRealSystemOperations(unittest.TestCase):
         try:
             # 1. Mở rộng tìm kiếm với max_results lớn hơn (10 kết quả)
             self.log("      -> Đang tìm kiếm từ khóa với action='search' (max_results=10)...")
-            search_res = web_tool_run(action="search", query="tin tuc moi nhat", max_results=10)
+            search_res = web_tool_run(action="search", query=self.TARGET_SEARCH_QUERY, max_results=10)
             
             if not search_res:
                 self._mark_failed_and_stop("Step 2", "web_tool search không trả về kết quả.")
