@@ -235,5 +235,32 @@ def test_submit_prompt_uses_server_agent_runtime_by_default(monkeypatch):
 
     request = bridge._client_runtime.chat_calls[0]
     assert request.agent_enabled is True
+    assert request.agent_id == "agent-coordinator"
     assert request.session_id == "conversation-1"
     assert request.messages[0].content == "hello"
+
+
+def test_submit_prompt_can_disable_server_agent(monkeypatch):
+    bridge, _, _ = _bridge()
+
+    class ImmediateThread:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("cl.src.ui.bridge.threading.Thread", ImmediateThread)
+    updated = bridge.set_chat_preferences({
+        "provider": "mock",
+        "model": "mock-chat",
+        "agent_enabled": False,
+        "agent_id": None,
+    })
+    assert updated["success"] is True
+
+    bridge.submit_prompt("hello", conversation_id="conversation-1")
+
+    request = bridge._client_runtime.chat_calls[0]
+    assert request.agent_enabled is False
+    assert request.agent_id is None

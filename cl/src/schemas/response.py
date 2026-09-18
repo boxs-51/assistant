@@ -19,6 +19,9 @@ class ResponseMetaData(GatewayBaseModel) :
     created: int = Field(default_factory=lambda: int(time.time()))
     provider: str = Field(default="unknown", description="Provider thực tế đã xử lý request")
 
+    agent_id: Optional[str] = None
+    agent_fallback: Optional[Dict[str, Any]] = None
+
 class GatewayResponse(GatewayBaseModel):
     """Phản hồi Non-Streaming hoàn chỉnh."""
     id: str = Field(default_factory=str)

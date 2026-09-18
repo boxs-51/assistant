@@ -41,6 +41,7 @@ function renderOverview(panel) {
   const preferences = state.snapshot?.preferences || {};
   const connected = Boolean(gateway.connected);
   const principalLabel = gateway.principal_type === 'guest' ? 'Guest' : 'User';
+  const agents = state.snapshot?.agents || [];
   view.innerHTML = `
     <div class="studio-card status-card">
       <div><span class="studio-kicker">GATEWAY</span><h3>${connected ? `Connected · ${principalLabel}` : 'Disconnected'}</h3></div>
@@ -60,11 +61,20 @@ function renderOverview(panel) {
         <datalist id="studio-model-options"></datalist>
         <button id="studio-load-models" class="gateway-button secondary">Load</button>
       </div>
+      <label class="studio-toggle">
+        <input id="studio-agent-enabled" type="checkbox" ${preferences.agent_enabled ? 'checked' : ''}>
+        <span>Use server Agent</span>
+      </label>
+      <label>Chat agent</label>
+      <select id="studio-agent-id" ${preferences.agent_enabled ? '' : 'disabled'}>
+        <option value="">No agent selected (fallback to chat_direct)</option>
+        ${agents.map(agent => `<option value="${escapeHtml(agent.name)}" ${preferences.agent_id === agent.name ? 'selected' : ''}>${escapeHtml(agent.name)}</option>`).join('')}
+      </select>
       <button id="studio-save-runtime" class="gateway-button primary wide">Use for chat & agents</button>
     </div>
     <div class="studio-card studio-summary">
-      <div><strong>${state.snapshot?.skills?.length || 0}</strong><span>Skills</span></div>
-      <div><strong>${state.snapshot?.tools?.length || 0}</strong><span>Tools</span></div>
+      <div><strong>${mergedSkills().length}</strong><span>Skills</span></div>
+      <div><strong>${mergedTools().length}</strong><span>Tools</span></div>
       <div><strong>${state.snapshot?.agents?.length || 0}</strong><span>Agents</span></div>
     </div>
   `;
@@ -93,11 +103,17 @@ function renderOverview(panel) {
     }
   });
 
+  view.querySelector('#studio-agent-enabled').addEventListener('change', event => {
+    view.querySelector('#studio-agent-id').disabled = !event.target.checked;
+  });
+
   view.querySelector('#studio-save-runtime').addEventListener('click', async () => {
     try {
       const data = await callBridge('set_chat_preferences', {
         provider: view.querySelector('#studio-provider').value,
         model: view.querySelector('#studio-model').value,
+        agent_enabled: view.querySelector('#studio-agent-enabled').checked,
+        agent_id: view.querySelector('#studio-agent-id').value || null,
       });
       state.snapshot.preferences = data;
       setOutput(panel, { message: 'Chat runtime updated', ...data });
@@ -107,9 +123,27 @@ function renderOverview(panel) {
   });
 }
 
+function mergedSkills() {
+  const byName = new Map();
+  (state.snapshot?.skills || []).forEach(skill => byName.set(skill.name, skill));
+  capabilityItems('SKILL').forEach(item => {
+    const definition = item.definition || {};
+    const name = item.capability_id || definition.name;
+    byName.set(name, {
+      ...(byName.get(name) || {}),
+      name,
+      description: definition.description || byName.get(name)?.description,
+      base_risk: definition.metadata?.base_risk || byName.get(name)?.base_risk || 'LOW',
+      loaded: true,
+      serverManaged: true,
+    });
+  });
+  return [...byName.values()];
+}
+
 function renderSkills(panel) {
   const view = panel.querySelector('[data-view="skills"]');
-  const skills = state.snapshot?.skills || [];
+  const skills = mergedSkills();
   view.innerHTML = `
     <div class="studio-section-head"><div><span class="studio-kicker">WORKFLOWS</span><h3>Skills</h3></div><span>${skills.length} discovered</span></div>
     <div class="studio-list">
@@ -117,8 +151,8 @@ function renderSkills(panel) {
         <article class="studio-card resource-card">
           <div class="resource-title"><strong>${escapeHtml(skill.name)}</strong><span class="risk ${escapeHtml((skill.base_risk || 'MEDIUM').toLowerCase())}">${escapeHtml(skill.base_risk || 'MEDIUM')}</span></div>
           <p>${escapeHtml(skill.description || '')}</p>
-          <button class="gateway-button ${skill.loaded ? 'secondary' : 'primary'}" data-skill="${escapeHtml(skill.name)}" data-action="${skill.loaded ? 'deactivate' : 'activate'}">
-            ${skill.loaded ? 'Unload' : 'Activate'}
+          <button class="gateway-button ${skill.loaded ? 'secondary' : 'primary'}" ${skill.serverManaged ? 'disabled' : `data-skill="${escapeHtml(skill.name)}" data-action="${skill.loaded ? 'deactivate' : 'activate'}"`}>
+            ${skill.serverManaged ? 'Server ready' : (skill.loaded ? 'Unload' : 'Activate')}
           </button>
         </article>`).join('') : '<div class="studio-empty">Không tìm thấy Skill.</div>'}
     </div>
@@ -264,7 +298,7 @@ function monitorAgentTask(panel, taskId) {
 function renderAgents(panel) {
   const view = panel.querySelector('[data-view="agents"]');
   const agents = state.snapshot?.agents || [];
-  const skills = (state.snapshot?.skills || []).filter(item => item.loaded);
+  const skills = mergedSkills().filter(item => item.loaded);
   const tools = mergedTools();
   view.innerHTML = `
     <div class="studio-section-head"><div><span class="studio-kicker">AUTOMATION</span><h3>Agents</h3></div><span>${agents.length} registered</span></div>

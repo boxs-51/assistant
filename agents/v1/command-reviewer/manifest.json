@@ -1,0 +1,9 @@
+{
+  "name": "agent-command-reviewer",
+  "goal": "Validate commands and tool calls before they are executed.",
+  "instruction_file": "instruction.md",
+  "tools": ["terminal_tool", "file_tool", "find_by_glob"],
+  "skills": ["skill-command-safety"],
+  "required_scopes": [],
+  "required_permissions": []
+}

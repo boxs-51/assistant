@@ -173,6 +173,15 @@
 .studio-view.active { display: block; }
 .studio-inline { display: flex; gap: 6px; }
 .studio-inline > * { min-width: 0; flex: 1; }
+.studio-toggle {
+  display: flex !important;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0 4px !important;
+  color: #cbd5e1 !important;
+  text-transform: none !important;
+}
+.studio-toggle input { width: auto !important; accent-color: #0891b2; }
 .studio-view label, .studio-card > label {
   display: block;
   margin: 9px 0 4px;

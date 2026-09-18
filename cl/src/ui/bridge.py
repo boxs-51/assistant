@@ -25,6 +25,8 @@ class UIBridge:
             "provider": "gemini",
             "model": "gemini-2.5-flash",
             "execution_mode": "ONLINE_AGENT",
+            "agent_enabled": True,
+            "agent_id": "agent-coordinator",
         }
         
         # Gắn kết các module
@@ -141,6 +143,12 @@ class UIBridge:
             "skills": [self._public_skill(item) for item in registry.skills.values()],
             "tools": local_tools,
             "capabilities": capabilities,
+            "support_catalog": {
+                kind.lower() + "s": [
+                    item for item in capabilities if item.get("kind") == kind
+                ]
+                for kind in ("TOOL", "SKILL", "AGENT")
+            },
             "agents": agents,
             "activity": activity,
         }
@@ -157,11 +165,23 @@ class UIBridge:
         ).upper()
         if execution_mode not in {"ONLINE_AGENT", "LOCAL_OFFLINE"}:
             return {"success": False, "error": "execution_mode khong hop le."}
+        agent_enabled = payload.get(
+            "agent_enabled", self._chat_preferences.get("agent_enabled", True)
+        )
+        if not isinstance(agent_enabled, bool):
+            return {"success": False, "error": "agent_enabled phai la boolean."}
+        agent_id = str(
+            payload.get("agent_id")
+            if "agent_id" in payload
+            else self._chat_preferences.get("agent_id") or ""
+        ).strip() or None
         with self._state_lock:
             self._chat_preferences = {
                 "provider": provider,
                 "model": model,
                 "execution_mode": execution_mode,
+                "agent_enabled": agent_enabled,
+                "agent_id": agent_id,
             }
         return {"success": True, "data": dict(self._chat_preferences)}
 
@@ -332,7 +352,12 @@ class UIBridge:
                             model=preferences["model"],
                             messages=[GatewayMessage(role="user", content=text)],
                             session_id=cid,
-                            agent_enabled=True,
+                            agent_enabled=bool(preferences.get("agent_enabled")),
+                            agent_id=(
+                                preferences.get("agent_id")
+                                if preferences.get("agent_enabled")
+                                else None
+                            ),
                             config=RequestConfig(stream=True),
                         )
                     )

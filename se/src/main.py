@@ -71,6 +71,7 @@ from .runtimes.capability.catalog import CapabilityCatalog
 from .runtimes.capability.registration import ClientCapabilityRegistrationService
 from .runtimes.capability.policy import CapabilityRoutingPolicy
 from .runtimes.capability.local_tool_loader import register_local_tools
+from .runtimes.capability.builtins import register_builtin_support
 from .runtimes.capability.invocation import CapabilityInvocationLifecycle
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
@@ -365,12 +366,47 @@ async def bootstrap_runtime_kernel(
         event_publisher=EventBusAgentEventPublisher(container.event_bus),
         continuation_service=container.continuation_service,
     )
+    builtin_support = register_builtin_support(container)
+    container.multi_agent_coordinator.agent_authorizer = (
+        lambda identity, agent_id: (
+            capability_catalog.contains_definition(agent_id)
+            and container.authorization_service.is_allowed(
+                identity, capability_catalog.get_definition(agent_id)
+            )
+        )
+    )
+    logger.info("Built-in agent support registered", support=builtin_support)
 
     # Cấu hình Multi-Agent Executor
     async def execute_registered_agent_task(task, *, identity):
         agent = container.agent_registry.get(task.assigned_agent_id)
         if agent is None:
             raise LookupError(f"Agent '{task.assigned_agent_id}' is not registered.")
+        # Agent context assembly reads canonical conversation history. A
+        # multi-agent session has its own durable record, so ensure the paired
+        # conversation record exists before entering AgentRuntime.
+        async with container.uow_factory() as uow:
+            conversation = await uow.sessions.get_by_id(task.session_id)
+            if conversation is None:
+                await uow.sessions.create_session(
+                    user_id=identity.user_id,
+                    organization_id=identity.organization_id,
+                    session_id=task.session_id,
+                )
+                await uow.commit()
+            elif conversation.user_id != identity.user_id:
+                raise PermissionError(
+                    f"Session '{task.session_id}' is not owned by this identity."
+                )
+        task_metadata = (
+            dict(task.input.get("metadata", {}))
+            if isinstance(task.input.get("metadata"), dict)
+            else {}
+        )
+        if task.input.get("model"):
+            task_metadata["model"] = task.input["model"]
+        if task.client_id:
+            task_metadata["client_id"] = task.client_id
         execution_context = AgentExecutionContext.create(
             execution_id=f"agent_{uuid.uuid4().hex}",
             agent_id=agent.name,
@@ -382,7 +418,7 @@ async def bootstrap_runtime_kernel(
             connection_id=task.connection_id,
             agent=agent,
             input=dict(task.input),
-            metadata={"client_id": task.client_id} if task.client_id else {},
+            metadata=task_metadata,
         )
         result = await container.agent_runtime.execute(execution_context)
         return result.model_dump(mode="json")

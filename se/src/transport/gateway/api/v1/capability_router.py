@@ -42,6 +42,13 @@ def _catalog(container: ApplicationContainer):
     return runtime.catalog
 
 
+def _authorization(container: ApplicationContainer):
+    return (
+        getattr(container, "authorization_service", None)
+        or container.capability_runtime.authorization
+    )
+
+
 def _response(kind: CapabilityKind, definition: CapabilityDefinition, implementations=()):
     return CapabilityRegistrationResponse(
         capability_id=definition.capability_id, kind=kind.value,
@@ -132,6 +139,8 @@ async def list_capabilities(
     catalog = _catalog(container)
     result = []
     for definition in catalog.list_definitions():
+        if not _authorization(container).is_allowed(identity, definition):
+            continue
         try:
             definition_kind = definition.kind
         except ValueError:
@@ -189,14 +198,21 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
             return False
         definition = catalog.get_definition(name)
         return (
-            str(definition.metadata.get("kind", "TOOL")).upper() == "TOOL"
+            definition.kind in {CapabilityKind.TOOL, CapabilityKind.AGENT}
             and bool(catalog.list_implementations(name, routable_only=True))
+            and _authorization(container).is_allowed(identity, definition)
         )
 
     missing = [name for name in body.tools if not known_tool(name)]
     if missing:
-        raise HTTPException(status_code=422, detail=f"Unknown tools: {', '.join(missing)}")
-    missing_skills = [name for name in body.skills if not catalog.contains_definition(name)]
+        raise HTTPException(status_code=422, detail=f"Unknown tools/agents: {', '.join(missing)}")
+    missing_skills = [
+        name for name in body.skills
+        if not catalog.contains_definition(name)
+        or not _authorization(container).is_allowed(
+            identity, catalog.get_definition(name)
+        )
+    ]
     if missing_skills:
         raise HTTPException(status_code=422, detail=f"Unknown skills: {', '.join(missing_skills)}")
     invalid_skills = [
@@ -320,10 +336,16 @@ async def execute_capability(
 
 
 @router.get("/{capability_id}", response_model=CapabilityRegistrationResponse)
-async def get_capability(capability_id: str, container: ApplicationContainer = Depends(get_container)):
+async def get_capability(
+    capability_id: str,
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
+):
     try:
         catalog = _catalog(container)
         definition = catalog.get_definition(capability_id)
+        if not _authorization(container).is_allowed(identity, definition):
+            raise HTTPException(status_code=404, detail=f"Unknown capability: {capability_id}")
         kind = definition.kind
         return _response(kind, definition, catalog.list_implementations(capability_id))
     except ValueError as exc:

@@ -26,6 +26,9 @@ class ResponseMetaData(GatewayBaseModel) :
         description="Provider thực tế đã xử lý request",
     )
 
+    agent_id: Optional[str] = None
+    agent_fallback: Optional[Dict[str, Any]] = None
+
 class GatewayResponse(GatewayBaseModel):
     """Phản hồi Non-Streaming hoàn chỉnh."""
     id: str = Field(default_factory=str)

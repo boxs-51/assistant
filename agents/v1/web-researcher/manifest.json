@@ -1,0 +1,9 @@
+{
+  "name": "agent-web-researcher",
+  "goal": "Retrieve and summarize current information from the web with sources.",
+  "instruction_file": "instruction.md",
+  "tools": ["web_tool"],
+  "skills": ["skill-web-research"],
+  "required_scopes": [],
+  "required_permissions": []
+}

@@ -1,0 +1,9 @@
+{
+  "name": "agent-coordinator",
+  "goal": "Coordinate general requests and delegate specialist work when useful.",
+  "instruction_file": "instruction.md",
+  "tools": ["agent-command-reviewer", "agent-web-researcher"],
+  "skills": [],
+  "required_scopes": [],
+  "required_permissions": []
+}

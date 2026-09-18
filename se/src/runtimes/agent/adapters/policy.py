@@ -66,7 +66,9 @@ class RegistryAgentToolPolicy(AgentToolPolicy):
         if self._catalog is None or not implementations:
             return PolicyDecision.DENY
         definition = self._catalog.get_definition(capability_id)
-        if not set(definition.required_scopes).issubset(set(identity.scopes)):
+        if self._authorization.authorize(
+            identity, definition
+        ) is not AuthorizationDecision.ALLOW:
             return PolicyDecision.DENY
         return (
             PolicyDecision.ALLOW

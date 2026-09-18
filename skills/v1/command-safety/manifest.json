@@ -1,0 +1,8 @@
+{
+  "name": "skill-command-safety",
+  "description": "Review shell and tool commands for correctness, scope, and destructive risk.",
+  "version": "1.0",
+  "instruction_file": "instruction.md",
+  "required_scopes": [],
+  "required_permissions": []
+}

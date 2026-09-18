@@ -19,14 +19,24 @@ class AuthorizationService:
         capability: BaseCapabilityDriver | CapabilityDefinition,
     ) -> AuthorizationDecision:
         definition = capability.definition if isinstance(capability, BaseCapabilityDriver) else capability
-        if not definition.require_auth:
+        required_scopes = set(getattr(definition, "required_scopes", []))
+        required_permissions = set(
+            getattr(definition, "metadata", {}).get("required_permissions", [])
+        )
+        if not definition.require_auth and not required_scopes and not required_permissions:
             return AuthorizationDecision.ALLOW
         if identity is None:
             return AuthorizationDecision.DENY
 
         identity_scopes = identity.scopes if isinstance(identity, Identity) else set(identity.get("scopes", set()))
-        required_scopes = set(getattr(definition, "required_scopes", []))
         if required_scopes and not required_scopes.issubset(identity_scopes):
+            return AuthorizationDecision.DENY
+        identity_permissions = set(
+            identity.permissions
+            if isinstance(identity, Identity)
+            else identity.get("permissions", [])
+        )
+        if required_permissions and not required_permissions.issubset(identity_permissions):
             return AuthorizationDecision.DENY
         return AuthorizationDecision.ALLOW
 

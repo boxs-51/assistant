@@ -74,7 +74,7 @@ class WorkflowRuntime(BaseRuntime):
         ))
 
     @staticmethod
-    def _response_payload(response) -> dict:
+    def _response_payload(response, extra_metadata: dict | None = None) -> dict:
         return {
             "id": response.execution_id,
             "model": response.model,
@@ -85,10 +85,16 @@ class WorkflowRuntime(BaseRuntime):
                 "finish_reason": response.finish_reason,
             }],
             "usage": response.usage.model_dump(mode="json"),
-            "metadata": {"provider": response.provider},
+            "metadata": {"provider": response.provider, **(extra_metadata or {})},
         }
 
-    async def _execute_direct(self, event: BaseEvent, body: dict) -> None:
+    async def _execute_direct(
+        self,
+        event: BaseEvent,
+        body: dict,
+        *,
+        fallback_notice: dict | None = None,
+    ) -> None:
         try:
             identity_data = event.payload.get("identity")
             identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
@@ -103,8 +109,18 @@ class WorkflowRuntime(BaseRuntime):
                 timezone_name=user_metadata.get("timezone"),
                 metadata=metadata,
             )
-            payload = self._response_payload(response)
+            payload = self._response_payload(
+                response,
+                {"agent_fallback": fallback_notice} if fallback_notice else None,
+            )
             if body.get("config", {}).get("stream"):
+                if fallback_notice:
+                    await self.event_bus.publish(BaseEvent(
+                        event_name="provider.stream.chunk_emitted",
+                        session_id=event.session_id,
+                        turn_id=event.turn_id,
+                        payload={"chunk": fallback_notice},
+                    ))
                 await self.event_bus.publish(BaseEvent(
                     event_name="provider.stream.chunk_emitted",
                     session_id=event.session_id,
@@ -141,12 +157,43 @@ class WorkflowRuntime(BaseRuntime):
             routing = body.get("metadata", {}).get("routing", {})
             agent_id = body.get("agent_id") or routing.get("default_agent_id")
             if not agent_id:
-                raise ValueError("AGENT mode requires agent_id or an explicit default_agent_id.")
+                await self._execute_direct(
+                    event,
+                    body,
+                    fallback_notice={
+                        "status": "AGENT_FALLBACK",
+                        "reason": "AGENT_NOT_SPECIFIED",
+                        "message": "No agent_id was specified; chat_direct handled this request.",
+                        "fallback": "DIRECT",
+                    },
+                )
+                return
+            capability_runtime = getattr(self.container, "capability_runtime", None)
+            catalog = getattr(capability_runtime, "catalog", None)
+            identity = None
+            if catalog is not None and catalog.contains_definition(agent_id):
+                identity_data = event.payload.get("identity")
+                identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
+                definition = catalog.get_definition(agent_id)
+                if not self.container.authorization_service.is_allowed(identity, definition):
+                    raise PermissionError(f"Agent '{agent_id}' is not permitted for this identity.")
             agent = self.container.agent_registry.get(agent_id)
             if agent is None:
-                raise LookupError(f"Agent '{agent_id}' is not registered.")
-            identity_data = event.payload.get("identity")
-            identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
+                await self._execute_direct(
+                    event,
+                    body,
+                    fallback_notice={
+                        "status": "AGENT_FALLBACK",
+                        "reason": "AGENT_NOT_FOUND",
+                        "requested_agent_id": agent_id,
+                        "message": f"Agent '{agent_id}' is unavailable; chat_direct handled this request.",
+                        "fallback": "DIRECT",
+                    },
+                )
+                return
+            if identity is None:
+                identity_data = event.payload.get("identity")
+                identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
             messages = body.get("messages", [])
             prompt = next((item.get("content") for item in reversed(messages) if item.get("role") == "user"), "")
             context = AgentExecutionContext.create(
@@ -160,7 +207,11 @@ class WorkflowRuntime(BaseRuntime):
                 connection_id=body.get("connection_id"),
                 agent=agent,
                 input={"prompt": prompt},
-                metadata={**body.get("metadata", {}), "timezone": body.get("metadata", {}).get("user", {}).get("timezone")},
+                metadata={
+                    **body.get("metadata", {}),
+                    "model": body.get("model", ""),
+                    "timezone": body.get("metadata", {}).get("user", {}).get("timezone"),
+                },
             )
             result = await self.container.agent_runtime.execute(context)
             if result.error_code == "WAITING_FOR_CONNECTION":
@@ -236,7 +287,14 @@ class WorkflowRuntime(BaseRuntime):
                 event_name="provider.failed",
                 session_id=event.session_id,
                 turn_id=event.turn_id,
-                payload={"error": str(exc), "status_code": 400 if isinstance(exc, (ValueError, LookupError)) else 500},
+                payload={
+                    "error": str(exc),
+                    "status_code": (
+                        403 if isinstance(exc, PermissionError)
+                        else 400 if isinstance(exc, (ValueError, LookupError))
+                        else 500
+                    ),
+                },
             ))
 
     async def _handle_capability_executed(self, event: BaseEvent):

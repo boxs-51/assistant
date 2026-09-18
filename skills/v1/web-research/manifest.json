@@ -1,0 +1,8 @@
+{
+  "name": "skill-web-research",
+  "description": "Collect web evidence and distinguish sourced facts from inference.",
+  "version": "1.0",
+  "instruction_file": "instruction.md",
+  "required_scopes": [],
+  "required_permissions": []
+}

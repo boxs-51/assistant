@@ -16,6 +16,8 @@ def test_tools_v1_are_discovered_and_executable_metadata_is_registered():
     root = Path(__file__).resolve().parents[3] / "tools" / "v1"
     result = register_local_tools(runtime, tools, root)
     assert result["desktop_automation"] == "registered"
+    assert result["web_tool"] == "registered"
     assert runtime.registry.get_driver("desktop_automation") is not None
     assert tools.get("desktop_automation") is not None
+    assert tools.get("web_tool") is not None
     assert runtime.catalog.get_implementation("server:desktop_automation").state.value == "ENABLED"

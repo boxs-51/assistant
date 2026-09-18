@@ -66,6 +66,34 @@ def test_registration_verification_carries_guest_identity(monkeypatch):
     assert client.refresh_token_value == "user-refresh"
 
 
+def test_stream_preserves_agent_fallback_notification(monkeypatch):
+    notice = {
+        "status": "AGENT_FALLBACK",
+        "reason": "AGENT_NOT_SPECIFIED",
+        "fallback": "DIRECT",
+    }
+
+    class StreamResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield f"data: {json.dumps(notice)}".encode()
+            yield b"data: [DONE]"
+
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: StreamResponse())
+
+    chunks = list(GatewayLLMClient("http://gateway")._stream_response({}))
+
+    assert chunks == [notice]
+
+
 def test_start_creates_and_persists_guest_session(request):
     store = _store(request)
     runtime = ClientRuntime("http://gateway", _Registry(), session_store=store)

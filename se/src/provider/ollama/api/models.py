@@ -83,7 +83,10 @@ class OllamaModels(ModelProvider):
             timeout=timeout,
         )
 
-        ollama_data = await response.json()
+        # httpx.Response.json() is synchronous. Awaiting it only fails after a
+        # successful /api/tags response because the returned dict is not
+        # awaitable.
+        ollama_data = response.json()
         models_list = ollama_data.get("models", [])
 
         async def build_info(model_data: Dict[str, Any]) -> Optional[ModelInfo]:

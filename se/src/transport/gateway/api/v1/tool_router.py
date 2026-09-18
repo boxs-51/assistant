@@ -12,12 +12,27 @@ router = APIRouter(prefix="/v1/tools", tags=["Tools"])
 logger = structlog.get_logger(__name__)
 
 
+def _authorization(container):
+    return (
+        getattr(container, "authorization_service", None)
+        or container.capability_runtime.authorization
+    )
+
+
 @router.get("/", response_model=List[GatewayToolDefinition])
 async def list_tools(
     identity: Identity = Depends(get_current_identity),
     container: ApplicationContainer = Depends(get_container),
 ):
-    return container.tool_registry.get_all()
+    catalog = getattr(container.capability_runtime, "catalog", None)
+    result = []
+    for tool in container.tool_registry.get_all():
+        if catalog is not None and catalog.contains_definition(tool.name):
+            definition = catalog.get_definition(tool.name)
+            if not _authorization(container).is_allowed(identity, definition):
+                continue
+        result.append(tool)
+    return result
 
 
 class ToolRegistrationResponse(GatewayToolDefinition):

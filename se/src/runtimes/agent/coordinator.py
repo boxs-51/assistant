@@ -27,6 +27,7 @@ class MultiAgentCoordinator:
         self.agent_registry = agent_registry
         self.durable_store = durable_store
         self.executor = executor
+        self.agent_authorizer = None
         self._sessions: Dict[str, AgentSession] = {}
         self._tasks: Dict[str, AgentTask] = {}
         self._messages: Dict[str, List[AgentMessage]] = {}
@@ -43,7 +44,11 @@ class MultiAgentCoordinator:
             raise LookupError("Agent session not found or access denied.")
         return session
 
-    def _require_agent(self, agent_id: str) -> AgentDefinition:
+    def _require_agent(self, agent_id: str, identity: Identity) -> AgentDefinition:
+        if self.agent_authorizer is not None and not self.agent_authorizer(
+            identity, agent_id
+        ):
+            raise PermissionError(f"Agent '{agent_id}' is not permitted.")
         agent = self.agent_registry.get(agent_id)
         if not agent:
             raise LookupError(f"Agent '{agent_id}' is not registered.")
@@ -52,7 +57,7 @@ class MultiAgentCoordinator:
     def create_session(self, identity: Identity, agent_ids: Optional[List[str]] = None) -> AgentSession:
         selected_agents = agent_ids or []
         for agent_id in selected_agents:
-            self._require_agent(agent_id)
+            self._require_agent(agent_id, identity)
         now = time.time()
         session = AgentSession(
             session_id=f"as_{uuid.uuid4().hex}",
@@ -74,7 +79,7 @@ class MultiAgentCoordinator:
 
     def add_agent(self, session_id: str, agent_id: str, identity: Identity) -> AgentSession:
         session = self._require_session(session_id, identity)
-        self._require_agent(agent_id)
+        self._require_agent(agent_id, identity)
         if agent_id not in session.agent_ids:
             session.agent_ids.append(agent_id)
             session.updated_at = time.time()
@@ -134,7 +139,7 @@ class MultiAgentCoordinator:
         client_id: Optional[str] = None,
     ) -> AgentTask:
         session = self._require_session(session_id, identity)
-        self._require_agent(assigned_agent_id)
+        self._require_agent(assigned_agent_id, identity)
         if assigned_agent_id not in session.agent_ids:
             raise PermissionError("Assigned agent is not a member of this session.")
         now = time.time()
@@ -272,6 +277,20 @@ class MultiAgentCoordinator:
                 task.status = AgentTaskStatus.WAITING_FOR_CONNECTION
                 execution.state = AgentExecutionStateMachine.transition(
                     execution.state, AgentExecutionState.WAITING_FOR_CONNECTION
+                )
+            elif (
+                execution.result.get("error_code")
+                or str(execution.result.get("state", "")).upper()
+                in {"FAILED", "TIMEOUT", "CANCELLED"}
+            ):
+                execution.error = (
+                    execution.result.get("error_message")
+                    or execution.result.get("error_code")
+                    or "Agent execution failed."
+                )
+                task.status = AgentTaskStatus.FAILED
+                execution.state = AgentExecutionStateMachine.transition(
+                    execution.state, AgentExecutionState.FAILED
                 )
             else:
                 task.status = AgentTaskStatus.COMPLETED
