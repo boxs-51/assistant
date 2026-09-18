@@ -23,6 +23,19 @@ class EventPriority(IntEnum):
 logger = structlog.get_logger(__name__)
 
 
+def _observe_background_future(future: asyncio.Future) -> None:
+    """Consume fire-and-forget Future failures without masking the source error."""
+    if future.cancelled():
+        return
+    try:
+        future.result()
+    except Exception:
+        logger.error(
+            "Background event publication failed",
+            exc_info=True,
+        )
+
+
 class EventDispatcher:
     def __init__(
 
@@ -120,7 +133,10 @@ class EventDispatcher:
                             "stack_trace": traceback.format_exc(),
                         }
                     )
-                    asyncio.create_task(self._dependency_container.event_bus.publish(dlq_event))
+                    dlq_future = self._dependency_container.event_bus.publish(
+                        dlq_event
+                    )
+                    dlq_future.add_done_callback(_observe_background_future)
                     raise
 
     async def _is_event_processed(self, event_id: str) -> bool:

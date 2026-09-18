@@ -167,7 +167,8 @@ class SessionRuntime(BaseRuntime):
         if not event.session_id or not event.turn_id:
             return
 
-        buffer = self._stream_buffers.pop((event.session_id, event.turn_id), None)
+        key = (event.session_id, event.turn_id)
+        buffer = self._stream_buffers.get(key)
         if not buffer:
             return
         content = "".join(buffer["chunks"])
@@ -180,6 +181,9 @@ class SessionRuntime(BaseRuntime):
                 created_at=buffer["created_at"],
                 completed_at=datetime.now(timezone.utc),
             )
+        # Remove only after content assembly/persistence succeeded. If either
+        # fails, retain the buffer so a retry cannot silently lose the turn.
+        self._stream_buffers.pop(key, None)
 
     async def _persist_assistant_message(
         self,

@@ -69,20 +69,3 @@ class UrlContent(GatewayBaseModel):
     max_depth: int = 0
     extract_main_content: bool = True
     title: Optional[str] = None
-
-class TextContent(GatewayBaseModel):
-    """Nội dung văn bản với nhiều dạng khác nhau."""
-    data: str  # raw text
-    format: Literal[
-        "plain",        # Chuỗi ký tự thuần
-        "structured",   # Có định dạng (HTML, Markdown, XML…)
-        "code",         # Code snippets
-        "dialog",       # Hội thoại / Conversation style
-        "creative",     # Văn bản sáng tạo (thơ, truyện…)
-        "instructional" # Hướng dẫn / Procedural text
-    ] = "plain"
-    encoding: Optional[str] = None  # Mã hóa văn bản
-    token_count: Optional[int] = None  # Số lượng token
-    line_count: Optional[int] = None  # Số lượng dòng
-    language: Optional[str] = None  # Ngôn ngữ văn bản
-

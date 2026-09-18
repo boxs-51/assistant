@@ -1,5 +1,5 @@
 # src/runtime/runtimes/capability/drivers/python_driver.py
-import asyncio
+import inspect
 from typing import Any, Callable, Mapping
 
 from ..contracts.context import CapabilityExecutionContext
@@ -17,6 +17,7 @@ class PythonCapabilityDriver(BaseCapabilityDriver):
         context: CapabilityExecutionContext,
         arguments: Mapping[str, Any],
     ) -> Any:
-        if asyncio.iscoroutinefunction(self._handler):
-            return await self._handler(**arguments)
-        return self._handler(**arguments)
+        result = self._handler(**arguments)
+        if inspect.isawaitable(result):
+            return await result
+        return result

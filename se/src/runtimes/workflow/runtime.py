@@ -42,6 +42,39 @@ class WorkflowRuntime(BaseRuntime):
     async def stop(self) -> None:
         self._is_running = False
 
+    @staticmethod
+    def _stream_text(content: Any) -> str:
+        """Normalize message content to canonical SSE delta.content text."""
+        value = jsonable(content)
+        if value is None:
+            return ""
+        if isinstance(value, str):
+            return value
+        if not isinstance(value, list):
+            raise TypeError(
+                "Stream content must be a string or a list of content parts, "
+                f"got {type(value).__name__}."
+            )
+
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+                continue
+            if not isinstance(item, dict):
+                continue
+
+            text = item.get("text")
+            if isinstance(text, str):
+                parts.append(text)
+
+            data = item.get("data")
+            if isinstance(data, str):
+                parts.append(data)
+            elif isinstance(data, dict) and isinstance(data.get("data"), str):
+                parts.append(data["data"])
+        return "".join(parts)
+
     async def _handle_session_loaded(self, event: BaseEvent):
         """Bước 1: Sau khi Session tải xong -> Yêu cầu Context Runtime xây dựng Prompt."""
         logger.debug("Handling session loaded, triggering context build", session_id=event.session_id)
@@ -128,7 +161,10 @@ class WorkflowRuntime(BaseRuntime):
                     payload={"chunk": {
                         "id": payload["id"],
                         "model": payload["model"],
-                        "choices": [{"index": 0, "delta": {"content": response.message.content}}],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": self._stream_text(response.message.content)},
+                        }],
                     }},
                 ))
                 await self.event_bus.publish(BaseEvent(
@@ -266,7 +302,10 @@ class WorkflowRuntime(BaseRuntime):
                     payload={"chunk": {
                         "id": response["id"],
                         "model": response["model"],
-                        "choices": [{"index": 0, "delta": {"content": result.final_message.content}}],
+                        "choices": [{
+                            "index": 0,
+                            "delta": {"content": self._stream_text(result.final_message.content)},
+                        }],
                     }},
                 ))
                 await self.event_bus.publish(BaseEvent(

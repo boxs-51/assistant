@@ -7,7 +7,6 @@ import httpx
 from typing import List, Any, Dict, AsyncGenerator, Tuple, Optional
 
 from .....domain.schemas import (
-    TextContent,
     MessageContentPart,
     GatewayAttachment,
     FileMetadata,
@@ -148,20 +147,24 @@ class ResponseChats:
             if start > last_end:
                 plain_text = text[last_end:start].strip()
                 if plain_text:
-                    parts.append(MessageContentPart(type="text", data=TextContent(data=plain_text, format="structured")))
+                    parts.append(
+                        MessageContentPart(type="text", text=plain_text)
+                    )
 
-            language = match.group(1).lower() or "text"
-            code_text = match.group(2)
-            parts.append(MessageContentPart(type="text", data=TextContent(data=code_text, format="code", language=language)))
+            # Keep the original fenced Markdown as flat text so presentation
+            # remains a client concern after TextContent removal.
+            parts.append(
+                MessageContentPart(type="text", text=match.group(0))
+            )
             last_end = end
 
         if last_end < len(text):
             remaining_text = text[last_end:].strip()
             if remaining_text:
-                parts.append(MessageContentPart(type="text", data=TextContent(data=remaining_text, format="structured")))
+                parts.append(MessageContentPart(type="text", text=remaining_text))
 
         if not parts:
-            parts.append(MessageContentPart(type="text", data=TextContent(data=text, format="structured")))
+            parts.append(MessageContentPart(type="text", text=text))
 
         return parts
 
@@ -217,7 +220,7 @@ class ResponseChats:
                     content_parts.append(
                         MessageContentPart(
                             type="thinking",
-                            data=TextContent(data=thought_text, format="structured"),
+                            text=thought_text,
                             metadata={"citations": citations or []}
                         )
                     )
@@ -298,27 +301,20 @@ class ResponseChats:
                 exec_code = part["executableCode"]
                 code_text = exec_code.get("code", "")
                 language = exec_code.get("language", "python").lower()
-                
+
                 content_parts.append(MessageContentPart(
                     type="text",
-                    data=TextContent(
-                        data=f"\n\n```{language}\n# [AI Executed Code]\n{code_text}\n```", 
-                        format="code",
-                        language=language
-                    )
+                    text=f"\n\n```{language}\n# [AI Executed Code]\n{code_text}\n```"
                 ))
 
             # 6. Đầu ra stdout của mã nguồn vừa chạy
             elif "codeExecutionResult" in part:
                 exec_result = part["codeExecutionResult"]
                 output_log = exec_result.get("output", "")
-                
+
                 content_parts.append(MessageContentPart(
                     type="text",
-                    data=TextContent(
-                        data=f"\n\n```text\n# [Execution Output]\n{output_log}\n```", 
-                        format="code"
-                    )
+                    text=f"\n\n```text\n# [Execution Output]\n{output_log}\n```"
                 ))
 
         return content_parts, tool_calls, reasoning_delta
@@ -456,9 +452,9 @@ class ResponseChats:
             for part in parsed_parts:
                 if (
                     part.type == "text"
-                    and isinstance(part.data, TextContent)
+                    and isinstance(part.text, str)
                 ):
-                    text_delta += part.data.data
+                    text_delta += part.text
 
             gateway_usage = None
 

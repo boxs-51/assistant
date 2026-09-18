@@ -35,6 +35,30 @@ class RequestChats:
             "image_url": OpenAiVisionFallbackHandler()
         }
 
+    @staticmethod
+    def _extract_text_part(part: Dict[str, Any]) -> str | None:
+        """Return canonical text from Gateway structured text content.
+
+        Gateway/Inference text parts may store text either directly in
+        ``part["text"]`` or in ``part["data"]["data"]``.  Gemini must never
+        receive ``{"text": None}``, because that does not initialize a valid
+        ``Part.data`` oneof field.
+        """
+        direct = part.get("text")
+        if isinstance(direct, str) and direct:
+            return direct
+
+        data = part.get("data")
+        if isinstance(data, str):
+            return data
+        if isinstance(data, dict):
+            nested = data.get("data")
+            if isinstance(nested, str):
+                return nested
+
+        # Preserve an explicit empty string, but never propagate None.
+        return direct if isinstance(direct, str) else None
+
     def _process_flat_text_content(self, text_content: str) -> List[Dict[str, Any]]:
         """
         Hàm xử lý thông minh cho văn bản phẳng thuần túy.
@@ -109,7 +133,9 @@ class RequestChats:
                 elif isinstance(content, list):
                     for part in content:
                         if part.get("type") == "text" or "text" in part:
-                            system_instruction_text += part.get("text", "") + "\n"
+                            text_val = self._extract_text_part(part)
+                            if text_val is not None:
+                                system_instruction_text += text_val + "\n"
                 continue
 
             gemini_parts = []
@@ -159,7 +185,13 @@ class RequestChats:
                     elif isinstance(content, list):
                         for part in content:
                             if part.get("type") == "text" or "text" in part:
-                                gemini_parts.append({"text": part.get("text", "")})
+                                text_val = self._extract_text_part(part)
+                                if text_val is None:
+                                    continue
+                                if len(text_val) > MAX_TEXT_LENGTH:
+                                    logger.warning(f"Part text quá dài. Tiến hành cắt ngắn về {MAX_TEXT_LENGTH} ký tự.")
+                                    text_val = text_val[:MAX_TEXT_LENGTH] + "\n...[Cắt bớt]..."
+                                gemini_parts.append({"text": text_val})
 
             # KỊCH BẢN B: KẾT QUẢ TRẢ VỀ TỪ CÔNG CỤ (TOOL / FUNCTION RESPONSE / TOOL_RESULT)
             elif role in ["tool", "tool_result", "function"]:
@@ -206,7 +238,9 @@ class RequestChats:
                             continue
 
                         if part_type == "text":
-                            text_val = part.get("text", "")
+                            text_val = self._extract_text_part(part)
+                            if text_val is None:
+                                continue
                             if len(text_val) > MAX_TEXT_LENGTH:
                                 logger.warning(f"Part text quá dài. Tiến hành cắt ngắn về {MAX_TEXT_LENGTH} ký tự.")
                                 text_val = text_val[:MAX_TEXT_LENGTH] + "\n...[Cắt bớt]..."
