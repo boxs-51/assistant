@@ -18,7 +18,7 @@ class TestRealMachineIntegration(unittest.TestCase):
     # -------------------------------------------------------------------------
     # CẤU HÌNH ĐƯỜNG DẪN LÀM VIỆC & NHẬT KÝ KIỂM THỬ (LOGS)
     # -------------------------------------------------------------------------
-    BASE_DIR = r"D:\client_name"
+    BASE_DIR = r"D:\assistant"
     LOG_DIR = os.path.join(BASE_DIR, "logs", "test_integration_real_machine")
     LOG_FILE = os.path.join(LOG_DIR, "pipeline_execution.log")
 

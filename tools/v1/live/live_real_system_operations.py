@@ -4,8 +4,8 @@ import sys
 import unittest
 import datetime
 
-# Tự động chuyển thư mục làm việc về E:\client_name nếu tồn tại
-TARGET_DIR = r"E:\client_name"
+# Tự động chuyển thư mục làm việc về E:\assistant nếu tồn tại
+TARGET_DIR = r"E:\assistant"
 if os.path.exists(TARGET_DIR):
     os.chdir(TARGET_DIR)
 
