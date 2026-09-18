@@ -58,6 +58,19 @@ class DurableAgentStore:
             await uow.commit()
             return record
 
+    async def load_continuation_state(
+        self,
+        execution_id: str,
+    ) -> Dict[str, Any] | None:
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            await uow.commit()
+            if execution is None:
+                return None
+            context_state = dict(getattr(execution, "context_state", None) or {})
+            continuation = context_state.get("continuation")
+            return dict(continuation) if continuation else None
+
     async def save_iteration(self, values: Dict[str, Any]):
         async with self.uow_factory() as uow:
             record = await uow.agents.save_iteration(values)
@@ -153,12 +166,21 @@ class DurableAgentStore:
                 pending_tool_calls = [
                     {
                         "execution_id": item.execution_id,
-                        "iteration_id": item.iteration_id,
+                        "iteration": latest_iteration.iteration,
                         "invocation_id": item.invocation_id,
                         "tool_call_id": item.tool_call_id,
                         "capability_id": item.capability_id,
                         "arguments": item.arguments,
-                        "status": item.status,
+                        "connection_id": (
+                            (getattr(item, "extra_metadata", None) or {}).get(
+                                "connection_id"
+                            )
+                        ),
+                        "metadata": {
+                            **dict(getattr(item, "extra_metadata", None) or {}),
+                            "iteration_id": item.iteration_id,
+                            "persisted_status": item.status,
+                        },
                     }
                     for item in await uow.agents.list_tool_calls(
                         execution_id,
@@ -191,6 +213,7 @@ class DurableAgentStore:
                 metadata=state.get("metadata", {}),
                 causation_id=state.get("causation_id"),
                 trace_id=state.get("trace_id"),
+                connection_id=state.get("connection_id"),
             )
             context.iteration = latest_iteration.iteration if latest_iteration else 0
             context.resume_transcript = getattr(execution, "transcript", None) or (

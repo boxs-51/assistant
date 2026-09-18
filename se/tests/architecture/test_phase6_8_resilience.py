@@ -61,7 +61,7 @@ def test_timeout_and_duplicate_terminal_result_are_resilient() -> None:
                 message_id="late-1",
                 connection_id="conn-1",
                 invocation_id="inv-1",
-                payload={},
+                payload={"output": None},
             ),
         ) is False
 
@@ -97,7 +97,8 @@ def test_disconnect_fails_only_affected_pending_invocations() -> None:
             "b",
             RealtimeEnvelope(
                 type="capability.result", message_id="b-result",
-                connection_id="b", invocation_id="inv-b", payload={"ok": True}
+                connection_id="b", invocation_id="inv-b",
+                payload={"output": {"ok": True}}
             ),
         )
         assert await task_b == {"ok": True}

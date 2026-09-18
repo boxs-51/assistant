@@ -74,7 +74,7 @@ def test_remote_driver_preserves_correlation_and_arguments() -> None:
                 message_id="result-1",
                 connection_id="conn-1",
                 invocation_id="inv-1",
-                payload={"content": "ok"},
+                payload={"output": {"content": "ok"}},
             ),
         )
         assert await task == {"content": "ok"}

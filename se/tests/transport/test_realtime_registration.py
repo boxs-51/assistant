@@ -100,7 +100,7 @@ def test_websocket_registers_client_capabilities_and_unregisters_on_disconnect()
                 }
             )
             registered = websocket.receive_json()
-            assert registered["type"] == "connection.registered"
+            assert registered["type"] == "capability.registered"
             assert registered["payload"]["capabilities"][0]["state"] == "ENABLED"
             assert catalog.get_implementation("desktop-1:filesystem.read").state.value == "ENABLED"
 

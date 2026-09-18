@@ -7,7 +7,7 @@ import structlog
 from typing import AsyncGenerator, Any
 
 from fastapi import APIRouter, Request, HTTPException, Depends, status
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from .....domain.schemas import GatewayChatRequest
@@ -17,6 +17,12 @@ from .....domain.schemas.event import BaseEvent
 from ...dependencies import get_event_bus, get_config
 from .....infrastructure.config.core import ConfigSchema
 from .....infrastructure.event_bus.bus import EventBus
+from .....application.container import ApplicationContainer
+from .....application.connection_affinity import (
+    ConnectionAffinityError,
+    validate_connection_affinity,
+)
+from ...dependencies import get_container
 
 
 router = APIRouter(tags=["LLM APIs Transport Layer"])
@@ -41,10 +47,28 @@ async def chat_completions_proxy(
     request: Request, 
     identity: Identity = Depends(get_current_identity),
     event_bus: EventBus = Depends(get_event_bus),
-    config: ConfigSchema = Depends(get_config)
+    config: ConfigSchema = Depends(get_config),
+    container: ApplicationContainer = Depends(get_container),
 ):
     start_time = time.perf_counter()
     chat_request = await parse_and_validate_request(request)
+    connection_snapshot = None
+    if chat_request.connection_id:
+        try:
+            connection_snapshot = validate_connection_affinity(
+                container.connection_runtime.registry,
+                chat_request.connection_id,
+                identity.user_id or "",
+            )
+        except ConnectionAffinityError as error:
+            raise HTTPException(
+                status_code=error.status_code,
+                detail={"code": error.code, "message": error.message},
+            ) from error
+    if connection_snapshot is not None:
+        chat_request.metadata.routing["client_id"] = (
+            connection_snapshot.metadata.get("client_id")
+        )
     session_id = (
         chat_request.session_id
         if hasattr(chat_request, "session_id") and chat_request.session_id
@@ -195,7 +219,11 @@ async def chat_completions_proxy(
 
             duration = round(time.perf_counter() - start_time, 4)
 
-            return response_payload.get("response", response_payload)
+            response_body = response_payload.get("response", response_payload)
+            http_status = int(response_payload.get("_http_status", 200))
+            if http_status != 200:
+                return JSONResponse(status_code=http_status, content=response_body)
+            return response_body
 
         except asyncio.TimeoutError:
             duration = round(time.perf_counter() - start_time, 4)

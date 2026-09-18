@@ -8,6 +8,8 @@ from .workspace import WorkspaceManager
 from .session import SessionManager
 from .hitl import HitlManager
 from .encoder import FileEncoder
+from ..schemas.message import GatewayMessage
+from ..schemas.request import GatewayChatRequest, RequestConfig
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +24,7 @@ class UIBridge:
         self._chat_preferences = {
             "provider": "gemini",
             "model": "gemini-2.5-flash",
+            "execution_mode": "ONLINE_AGENT",
         }
         
         # Gắn kết các module
@@ -147,8 +150,19 @@ class UIBridge:
         model = str(payload.get("model") or "").strip()
         if not provider or not model:
             return {"success": False, "error": "Provider và model không được để trống."}
+        execution_mode = str(
+            payload.get("execution_mode")
+            or self._chat_preferences.get("execution_mode")
+            or "ONLINE_AGENT"
+        ).upper()
+        if execution_mode not in {"ONLINE_AGENT", "LOCAL_OFFLINE"}:
+            return {"success": False, "error": "execution_mode khong hop le."}
         with self._state_lock:
-            self._chat_preferences = {"provider": provider, "model": model}
+            self._chat_preferences = {
+                "provider": provider,
+                "model": model,
+                "execution_mode": execution_mode,
+            }
         return {"success": True, "data": dict(self._chat_preferences)}
 
     def list_models(self, provider: str):
@@ -227,11 +241,15 @@ class UIBridge:
             session = self._engine.gateway_client.create_agent_session([agent_id])
             with self._state_lock:
                 model = self._chat_preferences["model"]
-            task = self._engine.gateway_client.create_agent_task({
+            task_payload = {
                 "session_id": session["session_id"],
                 "assigned_agent_id": agent_id,
                 "input": {"prompt": prompt, "model": model},
-            })
+            }
+            connection_id = getattr(self._client_runtime, "connection_id", None)
+            if connection_id:
+                task_payload["connection_id"] = connection_id
+            task = self._engine.gateway_client.create_agent_task(task_payload)
             started = self._engine.gateway_client.start_agent_task(task["task_id"])
             self._record_activity("agent.run", "running", agent_id)
             return {"success": True, "data": {"session": session, "task": started}}
@@ -298,11 +316,46 @@ class UIBridge:
                 
                 with self._state_lock:
                     preferences = dict(self._chat_preferences)
-                self._engine.run_agent_session(
-                    session=session, user_input=text, attached_files=files or [],
-                    render_cb=self.render_block, enable_stream=True,
-                    provider_name=preferences["provider"], model_name=preferences["model"]
-                )
+                if preferences.get("execution_mode") == "LOCAL_OFFLINE":
+                    self._engine.run_agent_session(
+                        session=session, user_input=text, attached_files=files or [],
+                        render_cb=self.render_block, enable_stream=True,
+                        provider_name=preferences["provider"], model_name=preferences["model"]
+                    )
+                else:
+                    if files:
+                        raise ValueError(
+                            "Online Agent chua ho tro tep dinh kem; chon LOCAL_OFFLINE cho yeu cau nay."
+                        )
+                    response = self._client_runtime.chat(
+                        GatewayChatRequest(
+                            model=preferences["model"],
+                            messages=[GatewayMessage(role="user", content=text)],
+                            session_id=cid,
+                            agent_enabled=True,
+                            config=RequestConfig(stream=True),
+                        )
+                    )
+                    if isinstance(response, dict):
+                        self.render_block(
+                            role="system",
+                            btype="execution_status",
+                            data=response,
+                        )
+                    else:
+                        for chunk in response:
+                            if isinstance(chunk, dict):
+                                self.render_block(
+                                    role="system",
+                                    btype="execution_status",
+                                    data=chunk,
+                                )
+                            else:
+                                self.render_block(
+                                    role="assistant",
+                                    btype="stream_content",
+                                    data=chunk.model_dump(mode="json"),
+                                )
             except Exception as e:
                 self.render_block(role="system", text=f"❌ Lỗi: {str(e)}")
             finally:

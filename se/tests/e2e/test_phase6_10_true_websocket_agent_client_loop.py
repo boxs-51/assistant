@@ -398,7 +398,7 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             )
 
             assert registration["type"] == (
-                "connection.registered"
+                "capability.registered"
             )
             assert registration["connection_id"] == (
                 CONNECTION_ID
@@ -753,7 +753,7 @@ def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
                 client_realtime.close()
             dispatcher.shutdown()
             server.should_exit = True
-            server_thread.join(timeout=5.0)
+            server_thread.join(timeout=10.0)
             assert not server_thread.is_alive()
 
     asyncio.run(scenario())

@@ -1065,6 +1065,7 @@ def test_v1_client_capabilities_websocket_registration(offline_app: FastAPI):
             client_tool_registration = {
                 "type": "capability.register",
                 "message_id": "test-msg-001",
+                "connection_id": "conn-12345",
                 "payload": {
                     "connection_id": "conn-12345",
                     "client_id": "client-001",

@@ -3,7 +3,6 @@ from typing import List, Union, Any, Dict
 from functools import lru_cache
 import os
 from opentelemetry import trace
-from sentence_transformers import SentenceTransformer
 import structlog
 
 tracer = trace.get_tracer(__name__)
@@ -18,6 +17,12 @@ class EmbeddingService:
         self.config = config
         self._model = None
         try:
+            # The embedding stack (torch/transformers) is intentionally loaded
+            # only when this optional service is instantiated.  Importing the
+            # storage architecture must remain cheap and must not make CI or
+            # non-semantic-cache deployments depend on an ML runtime.
+            from sentence_transformers import SentenceTransformer
+
             with tracer.start_as_current_span("load_embedding_model"):
                 model_name = self.config.get("embedding_model", "all-MiniLM-L6-v2")
                 device = self.config.get("embedding_device", "cpu")

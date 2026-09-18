@@ -99,7 +99,7 @@ def test_capability_runtime_routes_client_without_agent_location_branch() -> Non
                 message_id="result-1",
                 connection_id="conn-1",
                 invocation_id=socket.messages[0]["invocation_id"],
-                payload={"value": "ok"},
+                payload={"output": {"value": "ok"}},
             ),
         )
         result = await task

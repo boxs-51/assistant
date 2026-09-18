@@ -34,6 +34,7 @@ class GatewayChatRequest(GatewayBaseModel):
     model: str = Field(..., description="Định danh model sử dụng (e.g., gpt-4o, claude-3-5-sonnet)")
     messages: List[GatewayMessage] = Field(..., description="Danh sách lịch sử hội thoại")
     session_id: Optional[str] = Field(default=None, description="ID của phiên hội thoại để duy trì ngữ cảnh. Nếu bỏ trống, một session mới sẽ được tạo.")
+    connection_id: Optional[str] = Field(default=None, description="Active realtime connection affinity for client capabilities.")
     tools: Optional[List[GatewayToolDefinition]] = Field(default=None, description="Danh sách công cụ hỗ trợ (Function Calling)")
     agent_enabled: bool = Field(default=False, description="Select AGENT rather than DIRECT execution mode.")
     agent_id: Optional[str] = Field(default=None, description="Explicit agent for AGENT mode.")

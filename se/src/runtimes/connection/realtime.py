@@ -15,7 +15,20 @@ from .registry import ConnectionRegistry
 
 
 class RemoteCapabilityError(RuntimeError):
-    """Remote client reported a capability execution error."""
+    """Structured remote client capability execution error."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        code: str = "REMOTE_CAPABILITY_ERROR",
+        details: Any = None,
+        retryable: bool = False,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.details = details
+        self.retryable = bool(retryable)
 
 
 ProgressHandler = Callable[[RealtimeEnvelope], Awaitable[None] | None]
@@ -134,7 +147,7 @@ class RealtimeMultiplexer:
         if envelope.type == "capability.result":
             return await self.multiplexer.resolve(
                 envelope.invocation_id or "",
-                envelope.payload,
+                envelope.payload.get("output"),
                 connection_id,
             )
 
@@ -142,7 +155,12 @@ class RealtimeMultiplexer:
             message = str(envelope.payload.get("message", "Remote capability failed"))
             return await self.multiplexer.reject(
                 envelope.invocation_id or "",
-                RemoteCapabilityError(message),
+                RemoteCapabilityError(
+                    message,
+                    code=str(envelope.payload.get("code", "REMOTE_CAPABILITY_ERROR")),
+                    details=envelope.payload.get("details"),
+                    retryable=bool(envelope.payload.get("retryable", False)),
+                ),
                 connection_id,
             )
 

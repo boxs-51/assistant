@@ -13,6 +13,7 @@ class AgentExecutionState(str, Enum):
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
     TIMEOUT = "TIMEOUT"
+    WAITING_FOR_CONNECTION = "WAITING_FOR_CONNECTION"
 
 
 class AgentExecution(GatewayBaseModel):

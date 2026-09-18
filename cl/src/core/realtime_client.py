@@ -242,6 +242,9 @@ class GatewayRealtimeClient:
         event_type: str,
         payload: Optional[Dict[str, Any]] = None,
         invocation_id: Optional[str] = None,
+        *,
+        execution_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> None:
         with self._send_lock:
             if self.ws is None or not self.is_connected:
@@ -250,11 +253,14 @@ class GatewayRealtimeClient:
                 )
 
             envelope = {
+                "protocol_version": 1,
                 "type": event_type,
                 "message_id": f"msg-{uuid.uuid4().hex}",
                 "session_id": self.session_id,
                 "connection_id": self.connection_id,
                 "invocation_id": invocation_id,
+                "execution_id": execution_id,
+                "trace_id": trace_id,
                 "payload": payload or {},
             }
 
@@ -275,14 +281,19 @@ class GatewayRealtimeClient:
         self,
         invocation_id: str,
         result: Any,
+        *,
+        execution_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> None:
         # SE resolves the COMPLETE payload as the result.
         self.send(
             "capability.result",
             {
-                "result": result,
+                "output": result,
             },
             invocation_id,
+            execution_id=execution_id,
+            trace_id=trace_id,
         )
 
     def send_error(
@@ -292,10 +303,14 @@ class GatewayRealtimeClient:
         code: str,
         message: str,
         details: Optional[Any] = None,
+        retryable: bool = False,
+        execution_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> None:
         payload: Dict[str, Any] = {
             "code": code,
             "message": message,
+            "retryable": retryable,
         }
 
         if details is not None:
@@ -305,17 +320,56 @@ class GatewayRealtimeClient:
             "capability.error",
             payload,
             invocation_id,
+            execution_id=execution_id,
+            trace_id=trace_id,
         )
 
     def send_cancelled(
         self,
         invocation_id: str,
+        *,
+        execution_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
     ) -> None:
         self.send(
             "capability.cancelled",
             {},
             invocation_id,
+            execution_id=execution_id,
+            trace_id=trace_id,
         )
+
+    def resume_execution(
+        self,
+        execution_id: str,
+        checkpoint_id: str,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        if not self.capabilities_registered:
+            raise RealtimeConnectionError(
+                "Capabilities must be registered before execution.resume."
+            )
+        self.send(
+            "execution.resume",
+            {
+                "execution_id": execution_id,
+                "checkpoint_id": checkpoint_id,
+                "connection_id": self.connection_id,
+            },
+            execution_id=execution_id,
+        )
+        message = self._wait_for_message(
+            lambda item: (
+                item.get("type") == "execution.resume.accepted"
+                and item.get("connection_id") == self.connection_id
+                and item.get("execution_id") == execution_id
+            ),
+            self.timeout if timeout is None else timeout,
+        )
+        if message is None:
+            raise RealtimeHandshakeError("Timed out waiting for resume acknowledgement.")
+        return message
 
     # ------------------------------------------------------------------
     # Incoming message handling
@@ -436,7 +490,7 @@ class GatewayRealtimeClient:
         message: Dict[str, Any],
     ) -> None:
         if (
-            message.get("type") == "connection.registered"
+            message.get("type") == "capability.registered"
             and message.get("connection_id") == self.connection_id
             and "capabilities" in message.get("payload", {})
         ):
@@ -454,7 +508,7 @@ class GatewayRealtimeClient:
 
         message = self._wait_for_message(
             lambda item: (
-                item.get("type") == "connection.registered"
+                item.get("type") == "capability.registered"
                 and item.get("connection_id") == self.connection_id
                 and "capabilities" in item.get(
                     "payload",

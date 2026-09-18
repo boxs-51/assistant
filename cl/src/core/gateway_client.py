@@ -1,7 +1,5 @@
 import requests
 import json
-import uuid
-import websocket
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 from ..schemas.request import GatewayChatRequest
@@ -61,7 +59,7 @@ class GatewayLLMClient:
             )
         return response
 
-    def send_request(self, payload: GatewayChatRequest) -> Union[GatewayResponse, Generator[GatewayStreamChunk, None, None]]:
+    def send_request(self, payload: GatewayChatRequest) -> Union[GatewayResponse, Dict[str, Any], Generator[GatewayStreamChunk, None, None]]:
         # Chuyển Pydantic Model thành JSON Dict
         json_data = payload.model_dump(exclude_none=True)
 
@@ -70,9 +68,11 @@ class GatewayLLMClient:
         else:
             response = requests.post(self.gateway_url, headers=self.headers, json=json_data)
             response.raise_for_status()
+            if response.status_code == 202:
+                return response.json()
             return GatewayResponse.model_validate(response.json())
 
-    def _stream_response(self, json_data: dict) -> Generator[GatewayStreamChunk, None, None]:
+    def _stream_response(self, json_data: dict) -> Generator[Union[GatewayStreamChunk, Dict[str, Any]], None, None]:
         with requests.post(self.gateway_url, headers=self.headers, json=json_data, stream=True) as response:
             response.raise_for_status()
             for line in response.iter_lines():
@@ -83,7 +83,10 @@ class GatewayLLMClient:
                         if data_str == "[DONE]":
                             break
                         chunk_dict = json.loads(data_str)
-                        yield GatewayStreamChunk.model_validate(chunk_dict)
+                        if isinstance(chunk_dict, dict) and chunk_dict.get("status") == "WAITING_FOR_CONNECTION":
+                            yield chunk_dict
+                        else:
+                            yield GatewayStreamChunk.model_validate(chunk_dict)
 
     def health(self) -> Dict[str, Any]:
         return self._request("GET", "/health").json()
@@ -344,38 +347,5 @@ class GatewayLLMClient:
         return self._request("GET", "/v1/admin/circuit-breakers/status").json()
 
 
-class GatewayRealtimeClient:
-    """
-    DEPRECATED.
-
-    Use cl.src.core.realtime_client.GatewayRealtimeClient.
-    """
-    def __init__(self, base_url: str, headers: Dict[str, str], connection_id: Optional[str] = None, session_id: Optional[str] = None):
-        self.connection_id = connection_id or f"cl-{uuid.uuid4().hex}"
-        self.session_id = session_id or f"session-{uuid.uuid4().hex}"
-        self._headers = headers
-        self._ws_url = base_url.replace("https://", "wss://").replace("http://", "ws://") + "/v1/events/ws"
-        self.ws = None
-
-    def connect(self) -> Dict[str, Any]:
-        self.ws = websocket.create_connection(self._ws_url, header=[f"Authorization: {self._headers['Authorization']}"])
-        self.send("connection.register", {"client_id": "desktop-client"})
-        return self.receive()
-
-    def send(self, event_type: str, payload: Dict[str, Any], invocation_id: Optional[str] = None) -> None:
-        if self.ws is None:
-            raise RuntimeError("Realtime connection is not open.")
-        self.ws.send(json.dumps({"type": event_type, "message_id": uuid.uuid4().hex, "session_id": self.session_id, "connection_id": self.connection_id, "invocation_id": invocation_id, "payload": payload}))
-
-    def receive(self) -> Dict[str, Any]:
-        if self.ws is None:
-            raise RuntimeError("Realtime connection is not open.")
-        return json.loads(self.ws.recv())
-
-    def send_result(self, invocation_id: str, result: Any) -> None:
-        self.send("capability.result", {"result": result}, invocation_id)
-
-    def close(self) -> None:
-        if self.ws is not None:
-            self.ws.close()
-            self.ws = None
+# Backward-compatible import name without maintaining a second protocol stack.
+GatewayRealtimeClient = PersistentGatewayRealtimeClient

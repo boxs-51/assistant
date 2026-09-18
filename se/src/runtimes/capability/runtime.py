@@ -342,13 +342,6 @@ class CapabilityRuntime(BaseRuntime):
             connection_id=(
                 connection_id
                 or metadata_connection_id
-                or (
-                    self.connection_registry.resolve_connection_id(
-                        getattr(identity, "session_id", "") or ""
-                    )
-                    if self.connection_registry is not None
-                    else None
-                )
             ),
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
@@ -584,6 +577,9 @@ class CapabilityRuntime(BaseRuntime):
                 details: Dict[str, Any] = {}
                 if original_code:
                     details["original_error_code"] = str(original_code)
+                remote_details = getattr(exc, "details", None)
+                if remote_details is not None:
+                    details["remote_details"] = remote_details
                 normalized = CapabilityError(
                     code="CAPABILITY_EXECUTION_FAILED",
                     message=str(exc),
@@ -653,10 +649,6 @@ class CapabilityRuntime(BaseRuntime):
             )
 
         effective_connection_id = connection_id or metadata.get("connection_id")
-        if effective_connection_id is None and self.connection_registry is not None:
-            effective_connection_id = self.connection_registry.resolve_connection_id(
-                identity.session_id or ""
-            )
 
         selected = self.routing_policy.select(
             self.catalog,

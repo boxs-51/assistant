@@ -42,6 +42,7 @@ class DirectChatRuntime:
         messages: Sequence[Any],
         identity,
         session_id: str,
+        connection_id: str | None = None,
         model: str,
         timezone_name: str | None = None,
         metadata: Mapping[str, Any] | None = None,
@@ -119,6 +120,7 @@ class DirectChatRuntime:
                     arguments=dict(call.arguments),
                     identity=identity,
                     session_id=session_id,
+                    connection_id=connection_id,
                     metadata={"chat_execution_mode": "DIRECT"},
                 )
                 return InferenceMessage(

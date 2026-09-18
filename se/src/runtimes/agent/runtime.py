@@ -135,6 +135,7 @@ class AgentRuntime:
             "metadata": context.metadata,
             "causation_id": context.causation_id,
             "trace_id": context.trace_id,
+            "connection_id": context.connection_id,
             "limits": context.limits.model_dump(mode="json"),
         }
         values = {
@@ -250,6 +251,10 @@ class AgentRuntime:
                 "capability_id": request.capability_id,
                 "arguments": request.arguments,
                 "status": "PENDING",
+                "extra_metadata": {
+                    **request.metadata,
+                    "connection_id": request.connection_id,
+                },
             }
         )
 
@@ -636,6 +641,9 @@ class AgentRuntime:
                         iteration=iteration_number,
                         transcript=checkpoint_transcript,
                         server_continuation_available=server_continuation_available,
+                        metadata={
+                            "origin_client_id": context.metadata.get("client_id")
+                        },
                     )
                     context.connection_id = None
                     if checkpoint.state is ContinuationState.WAITING_FOR_CONNECTION:

@@ -142,6 +142,10 @@ async def test_E2_resume_rehydrates_latest_iteration_and_pending_calls():
     assert state.metadata["resume"] is True
     assert state.resume_transcript[0]["content"] == "resume"
     assert state.resume_pending_tool_calls[0]["invocation_id"] == "inv-1"
+    restored_request = ToolExecutionRequest.model_validate(
+        state.resume_pending_tool_calls[0]
+    )
+    assert restored_request.iteration == 2
 
 
 @pytest.mark.asyncio

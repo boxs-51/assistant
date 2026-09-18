@@ -11,6 +11,7 @@ _ALLOWED: Dict[AgentExecutionState, Set[AgentExecutionState]] = {
         AgentExecutionState.FAILED,
         AgentExecutionState.CANCELLED,
         AgentExecutionState.TIMEOUT,
+        AgentExecutionState.WAITING_FOR_CONNECTION,
     },
     AgentExecutionState.WAITING_AGENT: {
         AgentExecutionState.RUNNING,
@@ -22,6 +23,11 @@ _ALLOWED: Dict[AgentExecutionState, Set[AgentExecutionState]] = {
     AgentExecutionState.FAILED: set(),
     AgentExecutionState.CANCELLED: set(),
     AgentExecutionState.TIMEOUT: set(),
+    AgentExecutionState.WAITING_FOR_CONNECTION: {
+        AgentExecutionState.RUNNING,
+        AgentExecutionState.CANCELLED,
+        AgentExecutionState.FAILED,
+    },
 }
 
 

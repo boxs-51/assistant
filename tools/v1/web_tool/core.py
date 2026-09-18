@@ -121,7 +121,7 @@ class WebTool:
                 )
 
         if not structured_data and (raw_html or raw_html_js):
-            structured_data = await asyncio.to_thread(extract_tables_and_charts, raw_html_js or raw_html)
+            structured_data = await extract_tables_and_charts(raw_html_js or raw_html)
 
         if not clean_markdown:
             return f"**Lỗi cào dữ liệu (`{url}`):** Không thể trích xuất nội dung từ trang web này."

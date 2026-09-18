@@ -352,15 +352,16 @@ async def bootstrap_runtime_kernel(
     container.tool_execution_port = AgentToolExecutionCoordinator(
         container.tool_execution_port,
     )
+    container.agent_durable_store = DurableAgentStore(eventing_manager.uow_factory)
     container.continuation_service = AgentContinuationService(
-        DurableAgentStore(eventing_manager.uow_factory)
+        container.agent_durable_store
     )
     container.agent_runtime = AgentRuntime(
         context_builder=container.context_builder_port,
         inference=container.inference_port,
         tool_execution=container.tool_execution_port,
         execution_policy=container.agent_execution_policy,
-        durable_store=DurableAgentStore(eventing_manager.uow_factory),
+        durable_store=container.agent_durable_store,
         event_publisher=EventBusAgentEventPublisher(container.event_bus),
         continuation_service=container.continuation_service,
     )
@@ -378,8 +379,10 @@ async def bootstrap_runtime_kernel(
             identity=identity,
             limits=AgentExecutionLimits(),
             task_id=task.task_id,
+            connection_id=task.connection_id,
             agent=agent,
             input=dict(task.input),
+            metadata={"client_id": task.client_id} if task.client_id else {},
         )
         result = await container.agent_runtime.execute(execution_context)
         return result.model_dump(mode="json")

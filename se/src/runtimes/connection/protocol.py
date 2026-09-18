@@ -10,6 +10,7 @@ RealtimeMessageType = Literal[
     "connection.heartbeat",
     "connection.state",
     "capability.register",
+    "capability.registered",
     "capability.unregister",
     "capability.invoke",
     "capability.progress",
@@ -20,6 +21,8 @@ RealtimeMessageType = Literal[
     "assistant.delta",
     "assistant.completed",
     "assistant.error",
+    "execution.resume",
+    "execution.resume.accepted",
 ]
 
 
@@ -28,6 +31,7 @@ class RealtimeEnvelope(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    protocol_version: Literal[1] = 1
     type: RealtimeMessageType
     message_id: str
     timestamp: datetime = Field(
@@ -58,7 +62,16 @@ class RealtimeEnvelope(BaseModel):
                 f"Realtime message '{self.type}' requires invocation_id"
             )
 
-        if self.type == "capability.invoke" and not self.connection_id:
-            raise ValueError("capability.invoke requires connection_id")
+        connection_required = invocation_required | {
+            "connection.register",
+            "capability.register",
+            "capability.registered",
+            "execution.resume",
+            "execution.resume.accepted",
+        }
+        if self.type in connection_required and not self.connection_id:
+            raise ValueError(
+                f"Realtime message '{self.type}' requires connection_id"
+            )
 
         return self

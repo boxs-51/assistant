@@ -18,6 +18,7 @@ class AgentTaskStatus(str, Enum):
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
+    WAITING_FOR_CONNECTION = "WAITING_FOR_CONNECTION"
 
 
 class AgentMessageType(str, Enum):
@@ -52,6 +53,8 @@ class AgentTask(GatewayBaseModel):
     created_by: str
     assigned_agent_id: str
     parent_task_id: Optional[str] = None
+    connection_id: Optional[str] = None
+    client_id: Optional[str] = None
     status: AgentTaskStatus = AgentTaskStatus.CREATED
     input: Dict[str, Any] = Field(default_factory=dict)
     output: Optional[Dict[str, Any]] = None
@@ -81,3 +84,4 @@ class AgentTaskCreateRequest(GatewayBaseModel):
     assigned_agent_id: str
     input: Dict[str, Any] = Field(default_factory=dict)
     parent_task_id: Optional[str] = None
+    connection_id: Optional[str] = None

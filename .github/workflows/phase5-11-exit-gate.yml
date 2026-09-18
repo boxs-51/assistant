@@ -23,10 +23,11 @@ jobs:
           python-version: "3.12.10"
 
       - name: Install dependencies
-        run: python -m pip install -r requirements.txt
+        run: python -m pip install -r requirements-test.txt
 
       - name: Run full test suite
         run: python -m pytest -q
 
       - name: Run Phase 5.11 exit gate
+        working-directory: se
         run: python -m pytest -q tests/architecture/test_phase5_11_exit_gate.py

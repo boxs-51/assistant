@@ -10,6 +10,10 @@ from .....domain.schemas.multi_agent import (
 )
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
+from .....application.connection_affinity import (
+    ConnectionAffinityError,
+    validate_connection_affinity,
+)
 
 router = APIRouter(prefix="/v1/multi-agent", tags=["Multi-Agent"])
 
@@ -94,15 +98,34 @@ async def create_agent_task(
     body: AgentTaskCreateRequest,
     coordinator=Depends(get_coordinator),
     identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
 ):
     try:
+        connection_snapshot = None
+        if body.connection_id:
+            connection_snapshot = validate_connection_affinity(
+                container.connection_runtime.registry,
+                body.connection_id,
+                identity.user_id or "",
+            )
         return await coordinator.create_task_async(
             session_id=body.session_id,
             assigned_agent_id=body.assigned_agent_id,
             task_input=body.input,
             identity=identity,
             parent_task_id=body.parent_task_id,
+            connection_id=body.connection_id,
+            client_id=(
+                connection_snapshot.metadata.get("client_id")
+                if connection_snapshot is not None
+                else None
+            ),
         )
+    except ConnectionAffinityError as error:
+        raise HTTPException(
+            status_code=error.status_code,
+            detail={"code": error.code, "message": error.message},
+        ) from error
     except Exception as error:
         raise map_error(error) from error
 

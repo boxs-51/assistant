@@ -132,6 +132,9 @@ class CapabilityRuntime:
             )
 
         payload = self.build_registration()
+        self.dispatcher.update_registration_snapshot(
+            item["definition"]["id"] for item in payload["capabilities"]
+        )
 
         self.realtime.send(
             "capability.register",
@@ -172,7 +175,7 @@ class CapabilityRuntime:
 
             return True
 
-        if message_type == "connection.registered":
+        if message_type == "capability.registered":
             self.realtime.mark_capabilities_registered(
                 envelope
             )

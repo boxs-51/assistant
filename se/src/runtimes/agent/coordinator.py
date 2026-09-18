@@ -130,6 +130,8 @@ class MultiAgentCoordinator:
         task_input: dict,
         identity: Identity,
         parent_task_id: Optional[str] = None,
+        connection_id: Optional[str] = None,
+        client_id: Optional[str] = None,
     ) -> AgentTask:
         session = self._require_session(session_id, identity)
         self._require_agent(assigned_agent_id)
@@ -142,6 +144,8 @@ class MultiAgentCoordinator:
             created_by=identity.user_id or "anonymous",
             assigned_agent_id=assigned_agent_id,
             parent_task_id=parent_task_id,
+            connection_id=connection_id,
+            client_id=client_id,
             status=AgentTaskStatus.ASSIGNED,
             input=task_input,
             created_at=now,
@@ -158,6 +162,8 @@ class MultiAgentCoordinator:
             "created_by": task.created_by,
             "assigned_agent_id": task.assigned_agent_id,
             "parent_task_id": task.parent_task_id,
+            "connection_id": task.connection_id,
+            "client_id": task.client_id,
             "status": task.status.value,
             "input": task.input,
         })
@@ -262,10 +268,16 @@ class MultiAgentCoordinator:
             else:
                 result = result_value
             execution.result = result if isinstance(result, dict) else {"value": result}
-            task.status = AgentTaskStatus.COMPLETED
-            execution.state = AgentExecutionStateMachine.transition(
-                execution.state, AgentExecutionState.COMPLETED
-            )
+            if execution.result.get("error_code") == "WAITING_FOR_CONNECTION":
+                task.status = AgentTaskStatus.WAITING_FOR_CONNECTION
+                execution.state = AgentExecutionStateMachine.transition(
+                    execution.state, AgentExecutionState.WAITING_FOR_CONNECTION
+                )
+            else:
+                task.status = AgentTaskStatus.COMPLETED
+                execution.state = AgentExecutionStateMachine.transition(
+                    execution.state, AgentExecutionState.COMPLETED
+                )
         except asyncio.TimeoutError:
             execution.error = "Agent execution timed out."
             task.status = AgentTaskStatus.FAILED

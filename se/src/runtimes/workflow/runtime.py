@@ -98,6 +98,7 @@ class WorkflowRuntime(BaseRuntime):
                 messages=body.get("messages", []),
                 identity=identity,
                 session_id=event.session_id,
+                connection_id=body.get("connection_id"),
                 model=body.get("model", ""),
                 timezone_name=user_metadata.get("timezone"),
                 metadata=metadata,
@@ -156,11 +157,46 @@ class WorkflowRuntime(BaseRuntime):
                 identity=identity,
                 limits=AgentExecutionLimits(),
                 request_id=event.turn_id,
+                connection_id=body.get("connection_id"),
                 agent=agent,
                 input={"prompt": prompt},
                 metadata={**body.get("metadata", {}), "timezone": body.get("metadata", {}).get("user", {}).get("timezone")},
             )
             result = await self.container.agent_runtime.execute(context)
+            if result.error_code == "WAITING_FOR_CONNECTION":
+                checkpoint = self.container.continuation_service.current_checkpoint(
+                    result.execution_id
+                )
+                waiting = {
+                    "status": "WAITING_FOR_CONNECTION",
+                    "execution_id": result.execution_id,
+                    "checkpoint_id": result.checkpoint_id,
+                    "pending_capability_id": (
+                        checkpoint.pending_capability_id if checkpoint else None
+                    ),
+                    "retry_policy": "USER_CONFIRM",
+                }
+                if body.get("config", {}).get("stream"):
+                    await self.event_bus.publish(BaseEvent(
+                        event_name="provider.stream.chunk_emitted",
+                        session_id=event.session_id,
+                        turn_id=event.turn_id,
+                        payload={"chunk": waiting},
+                    ))
+                    await self.event_bus.publish(BaseEvent(
+                        event_name="provider.stream.completed",
+                        session_id=event.session_id,
+                        turn_id=event.turn_id,
+                        payload={},
+                    ))
+                else:
+                    await self.event_bus.publish(BaseEvent(
+                        event_name="provider.chat.responded",
+                        session_id=event.session_id,
+                        turn_id=event.turn_id,
+                        payload={"response": waiting, "_http_status": 202},
+                    ))
+                return
             if result.final_message is None:
                 raise RuntimeError(result.error_message or result.error_code or "Agent produced no final message.")
             response = {

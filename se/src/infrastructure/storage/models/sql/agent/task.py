@@ -16,6 +16,8 @@ class AgentTaskRecord(Base):
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     assigned_agent_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     parent_task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    connection_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
     input: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     output: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)

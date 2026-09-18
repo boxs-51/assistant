@@ -57,7 +57,7 @@ def test_invoke_correlates_result_and_is_idempotent() -> None:
                 message_id="msg-2",
                 connection_id="conn-1",
                 invocation_id="inv-1",
-                payload={"ok": True},
+                payload={"output": {"ok": True}},
             ),
         )
         duplicate = await realtime.handle_inbound(
@@ -67,13 +67,50 @@ def test_invoke_correlates_result_and_is_idempotent() -> None:
                 message_id="msg-3",
                 connection_id="conn-1",
                 invocation_id="inv-1",
-                payload={"ok": False},
+                payload={"output": {"ok": False}},
             ),
         )
 
         assert result is True
         assert duplicate is False
         assert await task == {"ok": True}
+
+    asyncio.run(scenario())
+
+
+@pytest.mark.parametrize(
+    "output",
+    [
+        {"value": "ok"},
+        "plain text",
+        42,
+        [1, "two", None],
+        None,
+    ],
+)
+def test_result_output_round_trip_preserves_exact_json_value(output) -> None:
+    async def scenario() -> None:
+        registry, _ = make_active_connection()
+        realtime = RealtimeMultiplexer(registry)
+        task = asyncio.create_task(realtime.invoke(RealtimeEnvelope(
+            type="capability.invoke",
+            message_id="invoke-exact",
+            connection_id="conn-1",
+            invocation_id="inv-exact",
+            payload={},
+        )))
+        await asyncio.sleep(0)
+        assert await realtime.handle_inbound(
+            "conn-1",
+            RealtimeEnvelope(
+                type="capability.result",
+                message_id="result-exact",
+                connection_id="conn-1",
+                invocation_id="inv-exact",
+                payload={"output": output},
+            ),
+        )
+        assert await task == output
 
     asyncio.run(scenario())
 
@@ -137,7 +174,7 @@ def test_disconnect_fails_only_pending_invocations_for_connection() -> None:
                 message_id="msg-b-result",
                 connection_id="conn-b",
                 invocation_id="inv-b",
-                payload={"ok": True},
+                payload={"output": {"ok": True}},
             ),
         )
 
@@ -190,7 +227,7 @@ def test_progress_is_forwarded_without_completing_invocation() -> None:
                message_id="msg-result",
                connection_id="conn-1",
                invocation_id="inv-1",
-               payload={"ok": True},
+               payload={"output": {"ok": True}},
            ),
        )
        assert await task == {"ok": True}
@@ -278,7 +315,7 @@ def test_cross_connection_result_injection_is_rejected() -> None:
                 message_id="msg-injected",
                 connection_id="conn-b",
                 invocation_id="inv-a",
-                payload={"injected": True},
+                payload={"output": {"injected": True}},
             ),
         )
         assert accepted is False
@@ -291,7 +328,7 @@ def test_cross_connection_result_injection_is_rejected() -> None:
                 message_id="msg-a-result",
                 connection_id="conn-a",
                 invocation_id="inv-a",
-                payload={"ok": True},
+                payload={"output": {"ok": True}},
             ),
         )
         assert await task == {"ok": True}

@@ -232,7 +232,7 @@ async def test_agent_tool_loop_executes_on_client_and_returns_to_inference():
         connection_id="conn-1",
         execution_id="exec-1",
         invocation_id=invocation_id,
-        payload={"value": "hello"},
+        payload={"output": {"value": "hello"}},
     )
     handled = await realtime.handle_inbound("conn-1", inbound_envelope)
     assert handled is True

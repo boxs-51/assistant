@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from dataclasses import asdict, replace
+from datetime import datetime
 from typing import Any, Protocol, Sequence
 
 from .contracts.continuation import (
@@ -19,6 +20,11 @@ class ContinuationPersistence(Protocol):
         execution_id: str,
         state: dict[str, Any],
     ) -> Any: ...
+
+    async def load_continuation_state(
+        self,
+        execution_id: str,
+    ) -> dict[str, Any] | None: ...
 
 
 class ContinuationConflictError(RuntimeError):
@@ -46,6 +52,37 @@ class AgentContinuationService:
 
     def get_branch(self, branch_id: str) -> ContinuationBranch | None:
         return self._branches.get(branch_id)
+
+    async def ensure_loaded(self, execution_id: str) -> ExecutionCheckpoint | None:
+        """Rehydrate persisted continuation state after a process restart."""
+        if self.current_checkpoint(execution_id) is not None:
+            return self.current_checkpoint(execution_id)
+        loader = getattr(self._persistence, "load_continuation_state", None)
+        if loader is None:
+            return None
+        state = await loader(execution_id)
+        if not state:
+            return None
+        async with self._lock:
+            if self.current_checkpoint(execution_id) is not None:
+                return self.current_checkpoint(execution_id)
+            for checkpoint_id, raw in state.get("checkpoints", {}).items():
+                values = dict(raw)
+                values["reason"] = CheckpointReason(values["reason"])
+                values["state"] = ContinuationState(values["state"])
+                values["transcript"] = tuple(values.get("transcript") or ())
+                created_at = values.get("created_at")
+                if isinstance(created_at, str):
+                    values["created_at"] = datetime.fromisoformat(created_at)
+                self._checkpoints[checkpoint_id] = ExecutionCheckpoint(**values)
+            for branch_id, raw in state.get("branches", {}).items():
+                values = dict(raw)
+                values["state"] = ContinuationState(values["state"])
+                self._branches[branch_id] = ContinuationBranch(**values)
+            current_id = state.get("current_checkpoint_id")
+            if current_id in self._checkpoints:
+                self._current[execution_id] = current_id
+            return self.current_checkpoint(execution_id)
 
     async def checkpoint_disconnect(
         self,
@@ -120,6 +157,12 @@ class AgentContinuationService:
             if not user_id or user_id != base.metadata.get("owner_user_id"):
                 raise ContinuationAuthorizationError(
                     "Continuation branch owner does not match execution owner."
+                )
+            origin_client_id = base.metadata.get("origin_client_id")
+            resume_client_id = (metadata or {}).get("client_id")
+            if origin_client_id and resume_client_id != origin_client_id:
+                raise ContinuationAuthorizationError(
+                    "Continuation must resume on the originating client installation."
                 )
             branch = ContinuationBranch(
                 branch_id=f"branch-{uuid.uuid4().hex}",

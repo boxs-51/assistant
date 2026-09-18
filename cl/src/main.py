@@ -15,13 +15,13 @@ def main():
     )
     registry.load_all()
 
+    hitl=HITLManager()
     client_runtime = ClientRuntime(
         "http://localhost:8000",
         registry,
-        client_id="desktop-client",
+        hitl=hitl,
     )
 
-    hitl=HITLManager()
     engine = AgentEngine(
         registry=registry,
         hitl=hitl,

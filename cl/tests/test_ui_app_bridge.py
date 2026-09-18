@@ -98,6 +98,7 @@ class _ClientRuntime:
     def __init__(self, gateway):
         self.gateway = gateway
         self.auth_calls = []
+        self.chat_calls = []
         self.start_calls = 0
 
     def start(self):
@@ -123,6 +124,10 @@ class _ClientRuntime:
     def confirm_password_reset(self, payload):
         self.auth_calls.append(("confirm_password_reset", payload))
         return {"status": "success"}
+
+    def chat(self, payload):
+        self.chat_calls.append(payload)
+        return iter(())
 
 
 class _Engine:
@@ -212,3 +217,23 @@ def test_sidebar_session_load_bootstraps_auth_before_request():
 
     assert bridge._client_runtime.start_calls == 1
     assert sessions == [{"id": "session-1"}]
+
+
+def test_submit_prompt_uses_server_agent_runtime_by_default(monkeypatch):
+    bridge, _, _ = _bridge()
+
+    class ImmediateThread:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("cl.src.ui.bridge.threading.Thread", ImmediateThread)
+
+    bridge.submit_prompt("hello", conversation_id="conversation-1")
+
+    request = bridge._client_runtime.chat_calls[0]
+    assert request.agent_enabled is True
+    assert request.session_id == "conversation-1"
+    assert request.messages[0].content == "hello"

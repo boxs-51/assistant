@@ -102,7 +102,7 @@ def test_client_capability_invocation_uses_bound_connection_and_correlates_resul
                 connection_id="conn-1",
                 execution_id="exec-1",
                 invocation_id=invoke["invocation_id"],
-                payload={"value": "ok"},
+                payload={"output": {"value": "ok"}},
             ),
         )
         assert accepted is True

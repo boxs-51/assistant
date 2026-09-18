@@ -1,3 +1,4 @@
+import asyncio
 import json
 import uuid
 import structlog
@@ -58,6 +59,81 @@ async def _ensure_connection(websocket, identity, connection_runtime, envelope):
     return connection_id
 
 
+async def _resume_execution(websocket, identity, container, connection_id, envelope):
+    payload = envelope.payload
+    execution_id = str(payload.get("execution_id") or "")
+    checkpoint_id = str(payload.get("checkpoint_id") or "")
+    if not execution_id or not checkpoint_id:
+        raise ValueError("execution.resume requires execution_id and checkpoint_id")
+    if envelope.connection_id != connection_id:
+        raise ValueError("execution.resume connection_id does not match active connection")
+
+    snapshot = container.connection_runtime.registry.get(connection_id)
+    if not snapshot.is_usable or snapshot.user_id != identity.user_id:
+        raise PermissionError("Resume connection is not active for this principal")
+    service = container.continuation_service
+    checkpoint = await service.ensure_loaded(execution_id)
+    if checkpoint is None or checkpoint.checkpoint_id != checkpoint_id:
+        raise ValueError("STALE_CONTINUATION_CHECKPOINT")
+
+    implementations = container.capability_runtime.catalog.list_implementations_for_connection(
+        connection_id
+    )
+    if not any(
+        item.capability_id == checkpoint.pending_capability_id
+        and item.state.value == "ENABLED"
+        for item in implementations
+    ):
+        raise ValueError("PENDING_CAPABILITY_NOT_READY")
+
+    # Rehydrate and validate the durable execution before advancing the
+    # continuation transaction.  A missing/corrupt durable record must not
+    # leave the checkpoint marked RUNNING.
+    context = await container.agent_durable_store.resume_execution(
+        execution_id,
+        identity=identity,
+    )
+    if context is None:
+        raise LookupError(f"Unknown agent execution: {execution_id}")
+    context.agent = container.agent_registry.get(context.agent_id)
+    if context.agent is None:
+        raise LookupError(f"Agent '{context.agent_id}' is not registered")
+
+    branch = await service.reconnect(
+        execution_id=execution_id,
+        connection_id=connection_id,
+        user_id=identity.user_id,
+        metadata={"client_id": snapshot.metadata.get("client_id")},
+    )
+    merged = await service.confirm_merge(
+        execution_id=execution_id,
+        branch_id=branch.branch_id,
+        user_id=identity.user_id,
+    )
+    context.connection_id = connection_id
+    context.metadata["client_id"] = snapshot.metadata.get("client_id")
+
+    await _send_realtime(
+        websocket,
+        RealtimeEnvelope(
+            type="execution.resume.accepted",
+            message_id=f"resume-{uuid.uuid4().hex}",
+            connection_id=connection_id,
+            execution_id=execution_id,
+            payload={
+                "execution_id": execution_id,
+                "checkpoint_id": merged.checkpoint_id,
+                "state": "RUNNING",
+            },
+        ),
+    )
+    task = asyncio.create_task(
+        container.agent_runtime.execute(context),
+        name=f"resume:{execution_id}",
+    )
+    task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+
+
 @router.websocket("/ws")
 async def websocket_endpoint(
     websocket: WebSocket,
@@ -111,7 +187,7 @@ async def websocket_endpoint(
                         await _send_realtime(
                             websocket,
                             RealtimeEnvelope(
-                                type="connection.registered",
+                                type="capability.registered",
                                 message_id=f"capabilities-{uuid.uuid4().hex}",
                                 connection_id=active_connection_id,
                                 payload={
@@ -122,12 +198,20 @@ async def websocket_endpoint(
                                 },
                             ),
                         )
+                    elif envelope.type == "execution.resume":
+                        await _resume_execution(
+                            websocket,
+                            identity,
+                            container,
+                            active_connection_id,
+                            envelope,
+                        )
                     else:
                         await connection_runtime.handle_realtime_message(
                             active_connection_id,
                             envelope,
                         )
-            except (ValidationError, ValueError, RuntimeError) as error:
+            except (ValidationError, ValueError, RuntimeError, LookupError, PermissionError) as error:
                 logger.exception("Validation/Runtime error during WebSocket message processing", error=str(error))
                 await websocket.send_text(json.dumps({"status": "error", "message": str(error)}))
             except json.JSONDecodeError:

@@ -89,6 +89,53 @@ def test_disconnect_checkpoint_waits_and_reconnect_branch_is_isolated_until_merg
     asyncio.run(scenario())
 
 
+def test_continuation_state_rehydrates_after_process_restart():
+    async def scenario():
+        class Persistence:
+            def __init__(self):
+                self.states = {}
+
+            async def save_continuation_state(self, execution_id, state):
+                self.states[execution_id] = state
+
+            async def load_continuation_state(self, execution_id):
+                return self.states.get(execution_id)
+
+        persistence = Persistence()
+        before_restart = AgentContinuationService(persistence)
+        waiting = await before_restart.checkpoint_disconnect(
+            execution_id="exec-durable",
+            session_id="session-1",
+            owner_user_id="user-1",
+            connection_id="conn-1",
+            invocation_id="inv-1",
+            tool_call_id="call-1",
+            capability_id="desktop.echo",
+            iteration=2,
+            transcript=[{"role": "user", "content": "hello"}],
+            metadata={"origin_client_id": "client-1"},
+        )
+
+        after_restart = AgentContinuationService(persistence)
+        restored = await after_restart.ensure_loaded("exec-durable")
+        assert restored == waiting
+        branch = await after_restart.reconnect(
+            execution_id="exec-durable",
+            connection_id="conn-2",
+            user_id="user-1",
+            metadata={"client_id": "client-1"},
+        )
+        merged = await after_restart.confirm_merge(
+            execution_id="exec-durable",
+            branch_id=branch.branch_id,
+            user_id="user-1",
+        )
+        assert merged.state is ContinuationState.RUNNING
+        assert merged.current_connection_id == "conn-2"
+
+    asyncio.run(scenario())
+
+
 def test_merge_requires_owner_and_stale_branch_cannot_overwrite_main():
     async def scenario():
         service = AgentContinuationService()
