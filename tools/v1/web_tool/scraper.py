@@ -61,15 +61,6 @@ class WebScraper:
             self._browser = await self._playwright.chromium.launch(headless=True, args=launch_args)
         return self._browser
 
-    async def close(self):
-        """Giải phóng tài nguyên browser pool."""
-        if self._browser:
-            await self._browser.close()
-            self._browser = None
-        if self._playwright:
-            await self._playwright.stop()
-            self._playwright = None
-
     async def fetch_static(
         self, url: str, timeout: int, profile: str, proxies: Optional[Dict[str, str]]
     ) -> Tuple[Optional[str], Optional[int], str]:

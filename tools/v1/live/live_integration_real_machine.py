@@ -5,6 +5,7 @@ import time
 import unittest
 import warnings
 
+from pathlib import Path
 # Import các công cụ thực thi
 from tools.v1.desktop_tool import DesktopAutomation
 from tools.v1.terminal_tool import TerminalTool
@@ -18,14 +19,14 @@ class TestRealMachineIntegration(unittest.TestCase):
     # -------------------------------------------------------------------------
     # CẤU HÌNH ĐƯỜNG DẪN LÀM VIỆC & NHẬT KÝ KIỂM THỬ (LOGS)
     # -------------------------------------------------------------------------
-    BASE_DIR = r"D:\assistant"
+    BASE_DIR = Path(__file__).resolve().parent
     LOG_DIR = os.path.join(BASE_DIR, "logs", "test_integration_real_machine")
     LOG_FILE = os.path.join(LOG_DIR, "pipeline_execution.log")
 
     @classmethod
     def setUpClass(cls):
         """Thiết lập môi trường làm việc, khởi tạo thư mục log và các công cụ thực thi."""
-        # Chuyển về thư mục làm việc gốc D:\client_name nếu tồn tại
+        # Chuyển về thư mục làm việc gốc.
         if os.path.exists(cls.BASE_DIR):
             os.chdir(cls.BASE_DIR)
 

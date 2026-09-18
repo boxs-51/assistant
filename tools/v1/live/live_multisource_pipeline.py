@@ -4,11 +4,7 @@ import sys
 import unittest
 import datetime
 
-# Tự động chuyển thư mục làm việc về E:\assistant nếu tồn tại
-TARGET_DIR = r"E:\assistant"
-if os.path.exists(TARGET_DIR):
-    os.chdir(TARGET_DIR)
-
+from pathlib import Path
 # Import các công cụ chính từ hệ thống
 try:
     from tools.v1.web_tool import run as web_tool_run
@@ -38,8 +34,11 @@ class TestAdvancedMultiSourceOperations(unittest.TestCase):
     MIN_REQUIRED_SOURCES = 3
     MAX_SEARCH_RESULTS = 15
 
+    # Tự động chuyển thư mục làm việc
+    TARGET_DIR = Path(__file__).resolve().parent
+
     # Khai báo đường dẫn lưu trữ đầu ra
-    LOG_DIR = os.path.join(os.getcwd(), "logs", "test_web_tool_mutisoure")
+    LOG_DIR = os.path.join(TARGET_DIR, "logs", "test_web_tool_mutisoure")
     LOG_FILE = os.path.join(LOG_DIR, "pipeline_execution.log")
     LOG_FILE_DETAILED = os.path.join(LOG_DIR, "pipeline_execution_detailed.log")  # File log đầy đủ chi tiết
     FILE_WEB_RAW = os.path.join(LOG_DIR, "multisource_content_raw.txt")

@@ -30,4 +30,4 @@ jobs:
 
       - name: Run Phase 5.11 exit gate
         working-directory: se
-        run: python -m pytest -q cl/tests/architecture/test_phase5_11_exit_gate.py
+        run: python -m pytest -q se/tests/architecture/test_phase5_11_exit_gate.py

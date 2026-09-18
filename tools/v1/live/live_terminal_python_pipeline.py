@@ -4,10 +4,7 @@ import json
 import unittest
 import datetime
 
-# Tự động chuyển thư mục làm việc về E:\assistant nếu tồn tại
-TARGET_DIR = r"E:\assistant"
-if os.path.exists(TARGET_DIR):
-    os.chdir(TARGET_DIR)
+from pathlib import Path
 
 # Import các công cụ chính từ hệ thống
 try:
@@ -31,9 +28,12 @@ class TestTerminalAndModularPythonOperations(unittest.TestCase):
     # CẤU HÌNH MÔI TRƯỜNG VIRTUAL ENV & WORKSPACE
     # -------------------------------------------------------------------------
     PRIMARY_VENV_PYTHON = r"D:\assistant\.venv\Scripts\python.exe"
-    
+
+    # Tự động chuyển thư mục làm việc
+    TARGET_DIR = Path(__file__).resolve().parent
+
     # Thư mục chứa dự án Python đa module phục vụ test
-    LOG_DIR = os.path.join(os.getcwd(), "logs", "test_terminel")
+    LOG_DIR = os.path.join(TARGET_DIR, "logs", "test_terminel")
     LOG_FILE = os.path.join(LOG_DIR, "terminal_pipeline.log")
     WORKSPACE_DIR = os.path.join(LOG_DIR, "python_workspace")
     

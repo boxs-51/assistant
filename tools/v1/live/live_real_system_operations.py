@@ -4,10 +4,7 @@ import sys
 import unittest
 import datetime
 
-# Tự động chuyển thư mục làm việc về E:\assistant nếu tồn tại
-TARGET_DIR = r"E:\assistant"
-if os.path.exists(TARGET_DIR):
-    os.chdir(TARGET_DIR)
+from pathlib import Path
 
 # Import các công cụ chính từ hệ thống
 try:
@@ -30,9 +27,12 @@ class TestRealSystemOperations(unittest.TestCase):
     _pipeline_failed = False
 
     TARGET_SEARCH_QUERY = "du bao thoi tiet tai khanh hoa, co con bao nao khong"
-    
+
+    # Tự động chuyển thư mục làm việc
+    TARGET_DIR = Path(__file__).resolve().parent
+
     # Khai báo đường dẫn lưu trữ đầu ra
-    LOG_DIR = os.path.join(os.getcwd(), "logs","test_wed_tool")
+    LOG_DIR = os.path.join(TARGET_DIR, "logs","test_wed_tool")
     LOG_FILE = os.path.join(LOG_DIR, "pipeline_execution.log")
     FILE_WEB_RAW = os.path.join(LOG_DIR, "web_content_raw.txt")
     FILE_WEB_MODIFIED = os.path.join(LOG_DIR, "web_content_modified.txt")
