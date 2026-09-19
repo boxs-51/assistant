@@ -12,61 +12,49 @@ class TestWindowTool(unittest.TestCase):
 
     # ==================== 1. TEST KIỂM TRA DEPENDENCY ====================
 
-    @patch("tools.v1.window_tool.gw", None)
+    @patch("tools.v1.window_tool.pwc", None)
     def test_dependency_missing(self):
-        """Kiểm tra báo lỗi khi chưa cài đặt thư viện PyGetWindow."""
+        """Kiểm tra báo lỗi khi chưa cài đặt thư viện pywinctl."""
         err = self.tool._check_dependency()
-        self.assertIn("Lỗi: Thư viện 'PyGetWindow' chưa được cài đặt", err)
+        self.assertIn("Lỗi: Thư viện 'pywinctl' chưa được cài đặt", err)
 
         # Kiểm tra qua hàm list_windows
         res = self.tool.list_windows()
-        self.assertIn("Lỗi: Thư viện 'PyGetWindow' chưa được cài đặt", res)
+        self.assertIn("Lỗi: Thư viện 'pywinctl' chưa được cài đặt", res)
 
     # ==================== 2. TEST HELPER _GET_WINDOW_OBJECTS ====================
 
-    @patch("tools.v1.window_tool.gw")
-    def test_get_window_objects_empty_query(self, mock_gw):
+    @patch("tools.v1.window_tool.pwc")
+    def test_get_window_objects_empty_query(self, mock_pwc):
         """Kiểm tra báo lỗi khi query tìm kiếm trống."""
         res = self.tool._get_window_objects("")
         self.assertEqual(res, "Lỗi: Từ khóa tìm kiếm cửa sổ không được để trống.")
 
-    @patch("tools.v1.window_tool.gw")
-    def test_get_window_objects_exact_match(self, mock_gw):
-        """Kiểm tra tìm kiếm khi getWindowsWithTitle trả về kết quả."""
+    @patch("tools.v1.window_tool.pwc")
+    def test_get_window_objects_search(self, mock_pwc):
+        """Kiểm tra tìm kiếm cửa sổ thông qua getWindowsWithTitle của pywinctl."""
         mock_win = MagicMock()
         mock_win.title = "Notepad - Draft.txt"
-        mock_gw.getWindowsWithTitle.return_value = [mock_win]
+        mock_pwc.getWindowsWithTitle.return_value = [mock_win]
 
         wins = self.tool._get_window_objects("Notepad")
         self.assertEqual(len(wins), 1)
         self.assertEqual(wins[0].title, "Notepad - Draft.txt")
-
-    @patch("tools.v1.window_tool.gw")
-    def test_get_window_objects_fallback_search(self, mock_gw):
-        """Kiểm tra cơ chế fallback duyệt getAllWindows() khi getWindowsWithTitle không thấy."""
-        mock_gw.getWindowsWithTitle.return_value = []
-        
-        mock_win1 = MagicMock(title="Calculator")
-        mock_win2 = MagicMock(title="My Custom App - Notepad")
-        mock_gw.getAllWindows.return_value = [mock_win1, mock_win2]
-
-        wins = self.tool._get_window_objects("notepad")
-        self.assertEqual(len(wins), 1)
-        self.assertEqual(wins[0].title, "My Custom App - Notepad")
+        mock_pwc.getWindowsWithTitle.assert_called_once()
 
     # ==================== 3. TEST LIỆT KÊ CỬA SỔ (LIST) ====================
 
-    @patch("tools.v1.window_tool.gw")
-    def test_list_windows_success(self, mock_gw):
+    @patch("tools.v1.window_tool.pwc")
+    def test_list_windows_success(self, mock_pwc):
         """Kiểm tra lấy danh sách tiêu đề cửa sổ thành công."""
-        mock_gw.getAllTitles.return_value = ["  Chrome  ", "", "Notepad", "   "]
+        mock_pwc.getAllTitles.return_value = ["  Chrome  ", "", "Notepad", "   "]
         titles = self.tool.list_windows()
         self.assertEqual(titles, ["Chrome", "Notepad"])
 
-    @patch("tools.v1.window_tool.gw")
-    def test_list_windows_empty(self, mock_gw):
+    @patch("tools.v1.window_tool.pwc")
+    def test_list_windows_empty(self, mock_pwc):
         """Kiểm tra thông báo khi không có cửa sổ nào."""
-        mock_gw.getAllTitles.return_value = ["", "   "]
+        mock_pwc.getAllTitles.return_value = ["", "   "]
         res = self.tool.list_windows()
         self.assertIn("Không tìm thấy cửa sổ nào đang mở", res)
 
@@ -81,7 +69,41 @@ class TestWindowTool(unittest.TestCase):
         matches = self.tool.find_windows("Terminal")
         self.assertEqual(matches, ["Terminal - Bash"])
 
-    # ==================== 5. TEST THAO TÁC (FOCUS, CLOSE, MIN/MAX) ====================
+    # ==================== 5. TEST TỌA ĐỘ VÀ CLIENT AREA (GEOMETRY) ====================
+
+    @patch.object(WindowTool, "_get_window_objects")
+    def test_get_geometry_with_client_area(self, mock_get_objs):
+        """Kiểm tra lấy thông tin tọa độ tổng thể và Client Area từ pywinctl."""
+        mock_win = MagicMock()
+        mock_win.title = "Calculator"
+        mock_win.left = 100
+        mock_win.top = 100
+        mock_win.width = 400
+        mock_win.height = 500
+        mock_win.right = 500
+        mock_win.bottom = 600
+
+        # Mock Client Area Object từ pywinctl
+        mock_client = MagicMock()
+        mock_client.left = 105
+        mock_client.top = 130
+        mock_client.width = 390
+        mock_client.height = 460
+        mock_client.right = 495
+        mock_client.bottom = 590
+        mock_win.client = mock_client
+
+        mock_get_objs.return_value = [mock_win]
+
+        res = self.tool.get_geometry("Calculator")
+        self.assertIsInstance(res, dict)
+        self.assertEqual(res["title"], "Calculator")
+        self.assertEqual(res["overall"]["width"], 400)
+        self.assertEqual(res["client_area"]["width"], 390)
+        self.assertEqual(res["frame_elements"]["titlebar_height"], 30)  # 130 - 100
+        self.assertEqual(res["frame_elements"]["border_left"], 5)       # 105 - 100
+
+    # ==================== 6. TEST THAO TÁC (FOCUS, CLOSE, MIN/MAX) ====================
 
     @patch.object(WindowTool, "_get_window_objects")
     def test_focus_restores_and_activates(self, mock_get_objs):
@@ -118,7 +140,7 @@ class TestWindowTool(unittest.TestCase):
         mock_win.maximize.assert_called_once()
         self.assertIn("Thành công: Đã phóng to cửa sổ 'Paint'", res_max)
 
-    # ==================== 6. TEST DISPATCHER & ALIASES ====================
+    # ==================== 7. TEST DISPATCHER & ALIASES ====================
 
     @patch.object(WindowTool, "focus", return_value="focused")
     def test_execute_alias_and_kwargs(self, mock_focus):

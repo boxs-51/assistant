@@ -1,15 +1,13 @@
-import ctypes
-from ctypes import wintypes
 from typing import Dict, List, Optional, Union, Any
 
 try:
-    import pygetwindow as gw
-except ImportError:
-    gw = None
+    import pywinctl as pwc
+except Exception:
+    pwc = None
 
 TOOL_METADATA = {
     "name": "window_tool",
-    "description": "Công cụ quản lý cửa sổ ứng dụng: Liệt kê, tìm kiếm, kích hoạt (focus), thu nhỏ, phóng to, hoặc đóng cửa sổ đang chạy.",
+    "description": "Công cụ quản lý cửa sổ ứng dụng đa nền tảng (Windows/Linux/macOS): Liệt kê, tìm kiếm, kích hoạt (focus), thu nhỏ, phóng to, hoặc đóng cửa sổ đang chạy.",
     "base_risk": "MEDIUM",
     "effects": ["READ", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": [],
@@ -23,7 +21,7 @@ TOOL_METADATA = {
             },
             "title_query": {
                 "type": "string",
-                "description": "Từ khóa hoặc tên tiêu đề cửa sổ cần thao tác (Bắt buộc với ngoại trừ action='list').",
+                "description": "Từ khóa hoặc tên tiêu đề cửa sổ cần thao tác (Bắt buộc ngoại trừ action='list').",
             },
         },
         "required": ["action"],
@@ -31,15 +29,8 @@ TOOL_METADATA = {
 }
 
 
-class RECT(ctypes.Structure):
-    _fields_ = [
-        ("left", ctypes.c_long),
-        ("top", ctypes.c_long),
-        ("right", ctypes.c_long),
-        ("bottom", ctypes.c_long),
-    ]
 class WindowTool:
-    """Class quản lý và tương tác với các cửa sổ ứng dụng (PyGetWindow)."""
+    """Class quản lý và tương tác với các cửa sổ ứng dụng đa nền tảng (sử dụng pywinctl)."""
 
     def __init__(self):
         pass
@@ -48,16 +39,16 @@ class WindowTool:
     # HELPER: KIỂM TRA THƯ VIỆN & TÌM CỬA SỔ
     # ------------------------------------------------------------------
     def _check_dependency(self) -> Optional[str]:
-        """Kiểm tra xem thư viện pygetwindow đã được cài đặt chưa."""
-        if gw is None:
+        """Kiểm tra xem thư viện pywinctl đã được cài đặt chưa."""
+        if pwc is None:
             return (
-                "Lỗi: Thư viện 'PyGetWindow' chưa được cài đặt. "
-                "Vui lòng chạy 'pip install PyGetWindow'."
+                "Lỗi: Thư viện 'pywinctl' chưa được cài đặt hoặc "
+                "không hỗ trợ môi trường hiện tại. Vui lòng chạy 'pip install pywinctl'."
             )
         return None
 
     def _get_window_objects(self, title_query: str) -> Union[List[object], str]:
-        """Helper tìm kiếm danh sách đối tượng cửa sổ khớp từ khóa (DRY logic)."""
+        """Helper tìm kiếm danh sách đối tượng cửa sổ khớp từ khóa (không phân biệt hoa/thường)."""
         err = self._check_dependency()
         if err:
             return err
@@ -66,16 +57,12 @@ class WindowTool:
             return "Lỗi: Từ khóa tìm kiếm cửa sổ không được để trống."
 
         try:
-            windows = gw.getWindowsWithTitle(title_query)
-            if not isinstance(windows, list) or not windows:
-                all_wins = gw.getAllWindows()
-                if isinstance(all_wins, list):
-                    windows = [
-                        w for w in all_wins
-                        if getattr(w, "title", None) and title_query.lower() in w.title.lower()
-                    ]
-                else:
-                    windows = []
+            # PyWinCtl hỗ trợ tìm kiếm chứa chuỗi (CONTAINS) và bỏ qua hoa/thường (IGNORECASE)
+            windows = pwc.getWindowsWithTitle(
+                title_query,
+                condition=pwc.Re.CONTAINS,
+                flags=pwc.Re.IGNORECASE
+            )
             return windows
         except Exception as e:
             return f"Lỗi khi tìm kiếm đối tượng cửa sổ: {str(e)}"
@@ -92,7 +79,7 @@ class WindowTool:
         try:
             titles = [
                 title.strip()
-                for title in gw.getAllTitles()
+                for title in pwc.getAllTitles()
                 if title and title.strip()
             ]
             return titles if titles else "Thông báo: Không tìm thấy cửa sổ nào đang mở."
@@ -130,7 +117,6 @@ class WindowTool:
 
         win = windows[0]
 
-        # 1. Tọa độ tổng thể từ PyGetWindow
         result = {
             "title": getattr(win, "title", ""),
             "overall": {
@@ -145,47 +131,28 @@ class WindowTool:
             "frame_elements": None
         }
 
-        # 2. Lấy chi tiết Client Area, Titlebar, Border qua Win32 API (Nếu chạy trên Windows)
-        hwnd = getattr(win, "_hWnd", None)
-        if hwnd:
+        # Lấy Client Area native từ PyWinCtl (Hoạt động Cross-Platform)
+        if hasattr(win, "client") and win.client:
             try:
-                user32 = ctypes.windll.user32
-
-                # Lấy kích thước Client Area (Gốc tọa độ [0,0] tương đối trong lòng cửa sổ)
-                client_rect = RECT()
-                user32.GetClientRect(hwnd, ctypes.byref(client_rect))
-                c_width = client_rect.right - client_rect.left
-                c_height = client_rect.bottom - client_rect.top
-
-                # Quy đổi điểm (0,0) của Client Area sang tọa độ màn hình thực tế (Absolute Screen Coordinates)
-                pt = wintypes.POINT(0, 0)
-                user32.ClientToScreen(hwnd, ctypes.byref(pt))
-                c_left = pt.x
-                c_top = pt.y
-
+                c = win.client
                 result["client_area"] = {
-                    "left": c_left,
-                    "top": c_top,
-                    "width": c_width,
-                    "height": c_height,
-                    "right": c_left + c_width,
-                    "bottom": c_top + c_height,
+                    "left": c.left,
+                    "top": c.top,
+                    "width": c.width,
+                    "height": c.height,
+                    "right": c.right,
+                    "bottom": c.bottom,
                 }
 
-                # Tính toán kích thước Titlebar và viền (Border) dựa trên độ lệch tọa độ
-                border_left = c_left - win.left
-                titlebar_height = c_top - win.top
-                border_right = win.right - (c_left + c_width)
-                border_bottom = win.bottom - (c_top + c_height)
-
+                # Tính toán kích thước Titlebar và viền
                 result["frame_elements"] = {
-                    "titlebar_height": titlebar_height,  # Chiều cao thanh tiêu đề (+ viền trên)
-                    "border_left": border_left,          # Viền trái
-                    "border_right": border_right,        # Viền phải
-                    "border_bottom": border_bottom       # Viền dưới
+                    "titlebar_height": c.top - win.top,
+                    "border_left": c.left - win.left,
+                    "border_right": win.right - c.right,
+                    "border_bottom": win.bottom - c.bottom
                 }
             except Exception as e:
-                result["note"] = f"Không thể lấy chi tiết Client/Border qua Win32 API: {str(e)}"
+                result["note"] = f"Không thể lấy thông tin client area chi tiết: {str(e)}"
 
         return result
 
@@ -233,7 +200,7 @@ class WindowTool:
     # 6. THU NHỎ / PHÓNG TO (MINIMIZE / MAXIMIZE)
     # ------------------------------------------------------------------
     def minimize(self, title_query: str) -> str:
-        """Thu nhỏ cửa sổ xuống thanh Taskbar."""
+        """Thu nhỏ cửa sổ."""
         windows = self._get_window_objects(title_query)
         if isinstance(windows, str):
             return windows
@@ -271,10 +238,9 @@ class WindowTool:
         self,
         action: str,
         title_query: Optional[str] = None,
-        **kwargs  # Tiếp nhận và bỏ qua các tham số thừa từ ToolExecutor
+        **kwargs
     ) -> Union[List[str], str]:
         """Hàm điều hướng chung hỗ trợ gọi động theo action."""
-        # Dung hòa tên tham số từ LLM (title_query, title, query)
         target_title = title_query or kwargs.get("title") or kwargs.get("query")
 
         if action in ("list", "list_windows"):
