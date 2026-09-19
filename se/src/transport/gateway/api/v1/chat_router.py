@@ -29,6 +29,33 @@ router = APIRouter(tags=["LLM APIs Transport Layer"])
 logger = structlog.get_logger(__name__)
 
 
+_FAILURE_METADATA_FIELDS = (
+    "error_code",
+    "failure_domain",
+    "retryable",
+    "execution_id",
+    "provider",
+)
+
+
+def _transport_failure_payload(payload: dict[str, Any], *, default_error: str) -> dict[str, Any]:
+    result = {"error": payload.get("error", default_error)}
+    for field in _FAILURE_METADATA_FIELDS:
+        if field in payload:
+            result[field] = payload[field]
+    return result
+
+
+def _transport_failure_detail(payload: dict[str, Any]) -> str | dict[str, Any]:
+    result = _transport_failure_payload(
+        payload,
+        default_error="Provider execution failed",
+    )
+    # Keep the legacy non-streaming detail string when no structured metadata
+    # exists. R2.1 only widens the wire shape for classified failures.
+    return result["error"] if len(result) == 1 else result
+
+
 async def parse_and_validate_request(request: Request) -> GatewayChatRequest:
     try:
         raw_body = await request.json()
@@ -102,7 +129,12 @@ async def chat_completions_proxy(
 
             async def _on_fail(evt: BaseEvent):
                 if evt.session_id == session_id and evt.turn_id == turn_id:
-                    await queue.put({"error": evt.payload.get("error", "Unknown stream error")})
+                    await queue.put(
+                        _transport_failure_payload(
+                            evt.payload,
+                            default_error="Unknown stream error",
+                        )
+                    )
 
             yield ": ping\n\n"
 
@@ -193,7 +225,7 @@ async def chat_completions_proxy(
                 future.set_exception(
                     HTTPException(
                         status_code=evt.payload.get("status_code", 500),
-                        detail=evt.payload.get("error", "Provider execution failed"),
+                        detail=_transport_failure_detail(evt.payload),
                     )
                 )
 

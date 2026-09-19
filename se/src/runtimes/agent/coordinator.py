@@ -296,9 +296,12 @@ class MultiAgentCoordinator:
                 })
                 self._executions[execution.execution_id] = execution
             elif str(execution.result.get("state", "")).upper() == "WAITING":
-                wait_reason = execution.result.get("wait_reason") or "CONNECTION"
-                if isinstance(wait_reason, AgentExecutionWaitReason):
-                    wait_reason = wait_reason.value
+                wait_reason = execution.result.get("wait_reason")
+                if wait_reason is None:
+                    raise ValueError(
+                        "Canonical WAITING result requires explicit wait_reason."
+                    )
+                wait_reason = AgentExecutionWaitReason(wait_reason).value
                 task.status = AgentTaskStatus.WAITING
                 task.wait_reasons = [wait_reason]
                 AgentExecutionStateMachine.transition(

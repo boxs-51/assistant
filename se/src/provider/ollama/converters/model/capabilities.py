@@ -19,7 +19,7 @@ class OllamaCapabilityResolver:
         if any(k in m for k in VISION_KEYWORDS):
             caps.add(ModelCapability.VISION)
         if any(k in m for k in TOOL_KEYWORDS):
-            caps.add(ModelCapability.FUNCTION_CALLING)
+            caps.add(ModelCapability.TOOL_CALLING)
         return caps
 
     @staticmethod
@@ -32,7 +32,7 @@ class OllamaCapabilityResolver:
 
         # 1. Function Calling detection
         if "tools" in template or ".tools" in template:
-            caps.add(ModelCapability.FUNCTION_CALLING)
+            caps.add(ModelCapability.TOOL_CALLING)
 
         # 2. Vision/Multimodal detection
         if any(f in {"mllama", "llava", "clip"} for f in families) or "clip" in modelfile:

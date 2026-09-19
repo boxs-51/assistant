@@ -2,6 +2,9 @@ from typing import Optional, Any
 
 class ProviderError(Exception):
     """Lớp ngoại lệ cơ sở cho tất cả các lỗi liên quan đến provider."""
+    failure_domain = "PROVIDER"
+    retryable = False
+
     def __init__(
         self, 
         message: str, 
@@ -38,12 +41,12 @@ class ProviderAuthenticationError(ProviderError):
 
 class ProviderRateLimitError(ProviderError):
     """Lỗi do vượt quá giới hạn tần suất hoặc hết quota (hết tiền, giới hạn tokens). HTTP 429"""
-    pass
+    retryable = True
 
 
 class ProviderUnavailableError(ProviderError):
     """Lỗi khi provider không khả dụng hoặc bị timeout đột xuất. HTTP 502, 503, 504"""
-    pass
+    retryable = True
 
 
 class ResponseValidationError(ProviderError):

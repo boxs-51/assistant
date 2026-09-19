@@ -27,5 +27,7 @@ class AgentExecutionResult(BaseModel):
     usage: InferenceUsage = Field(default_factory=InferenceUsage)
     error_code: str | None = None
     error_message: str | None = None
+    failure_domain: str | None = None
+    retryable: bool = False
     continuation_state: ContinuationState | None = None
     checkpoint_id: str | None = None

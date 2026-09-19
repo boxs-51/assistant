@@ -4,6 +4,43 @@ from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ...domain.schemas.identity import Identity
 from ...infrastructure.storage.repositories.agent import AgentRepository
 from .contracts.context import AgentExecutionContext
+from .serialization import to_json_safe
+
+
+_EXECUTION_JSON_FIELDS = frozenset({
+    "request",
+    "result",
+    "context_state",
+    "transcript",
+    "inference_request",
+    "inference_response",
+})
+_TASK_JSON_FIELDS = frozenset({"wait_reasons", "input", "output"})
+_MESSAGE_JSON_FIELDS = frozenset({"payload"})
+_ITERATION_JSON_FIELDS = frozenset({
+    "tool_call_ids",
+    "transcript",
+    "inference_request",
+    "inference_response",
+})
+_TOOL_CALL_JSON_FIELDS = frozenset({"arguments", "extra_metadata"})
+_TOOL_RESULT_JSON_FIELDS = frozenset({"output", "extra_metadata"})
+
+
+def _normalize_json_fields(
+    values: Dict[str, Any],
+    fields: frozenset[str],
+    *,
+    path: str,
+) -> Dict[str, Any]:
+    normalized = dict(values)
+    for field in fields:
+        if field in normalized:
+            normalized[field] = to_json_safe(
+                normalized[field],
+                path=f"{path}.{field}",
+            )
+    return normalized
 
 
 class ExecutionConflictError(RuntimeError):
@@ -23,25 +60,56 @@ class DurableAgentStore:
             return record
 
     async def save_message(self, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _MESSAGE_JSON_FIELDS, path="agent_messages"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.save_message(values)
             await uow.commit()
             return record
 
     async def save_task(self, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _TASK_JSON_FIELDS, path="agent_tasks"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.save_task(values)
             await uow.commit()
             return record
 
     async def save_execution(self, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _EXECUTION_JSON_FIELDS, path="agent_executions"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.save_execution(values)
             await uow.commit()
             return record
 
     async def update_checkpoint(self, execution_id: str, values: Dict[str, Any]):
-        return await self.update_execution(execution_id, values)
+        values = _normalize_json_fields(
+            values, _EXECUTION_JSON_FIELDS, path="agent_executions"
+        )
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                raise KeyError(f"Unknown agent execution: {execution_id}")
+
+            incoming_state = values.get("context_state")
+            if incoming_state is not None:
+                current_state = to_json_safe(
+                    getattr(execution, "context_state", None) or {},
+                    path="agent_executions.context_state",
+                )
+                continuation = current_state.get("continuation")
+                merged_state = {**current_state, **incoming_state}
+                if continuation is not None and "continuation" not in incoming_state:
+                    merged_state["continuation"] = continuation
+                values["context_state"] = merged_state
+
+            record = await uow.agents.update_execution(execution_id, values)
+            await uow.commit()
+            return record
 
     async def save_continuation_state(
         self,
@@ -53,8 +121,14 @@ class DurableAgentStore:
             execution = await uow.agents.get_execution(execution_id)
             if execution is None:
                 raise KeyError(f"Unknown agent execution: {execution_id}")
-            context_state = dict(getattr(execution, "context_state", None) or {})
-            context_state["continuation"] = dict(state)
+            context_state = to_json_safe(
+                getattr(execution, "context_state", None) or {},
+                path="agent_executions.context_state",
+            )
+            context_state["continuation"] = to_json_safe(
+                state,
+                path="agent_executions.context_state.continuation",
+            )
             record = await uow.agents.update_execution(
                 execution_id,
                 {"context_state": context_state},
@@ -68,6 +142,9 @@ class DurableAgentStore:
         expected_revision: int,
         values: Dict[str, Any],
     ):
+        values = _normalize_json_fields(
+            values, _EXECUTION_JSON_FIELDS, path="agent_executions"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.compare_and_set_execution(
                 execution_id,
@@ -95,18 +172,27 @@ class DurableAgentStore:
             return dict(continuation) if continuation else None
 
     async def save_iteration(self, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _ITERATION_JSON_FIELDS, path="agent_iterations"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.save_iteration(values)
             await uow.commit()
             return record
 
     async def update_iteration(self, iteration_id: str, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _ITERATION_JSON_FIELDS, path="agent_iterations"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.update_iteration(iteration_id, values)
             await uow.commit()
             return record
 
     async def save_tool_call(self, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _TOOL_CALL_JSON_FIELDS, path="agent_tool_calls"
+        )
         async with self.uow_factory() as uow:
             existing = await uow.agents.get_tool_call(
                 values["execution_id"], values["tool_call_id"]
@@ -116,12 +202,18 @@ class DurableAgentStore:
             return record
 
     async def update_tool_call(self, tool_call_id: str, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _TOOL_CALL_JSON_FIELDS, path="agent_tool_calls"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.update_tool_call(tool_call_id, values)
             await uow.commit()
             return record
 
     async def save_tool_result(self, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _TOOL_RESULT_JSON_FIELDS, path="agent_tool_results"
+        )
         async with self.uow_factory() as uow:
             existing = await uow.agents.get_tool_result(
                 values["execution_id"], values["tool_call_id"]
@@ -137,6 +229,9 @@ class DurableAgentStore:
             return record
 
     async def update_execution(self, execution_id: str, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _EXECUTION_JSON_FIELDS, path="agent_executions"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.update_execution(execution_id, values)
             await uow.commit()
@@ -250,6 +345,9 @@ class DurableAgentStore:
             return context
 
     async def update_task(self, task_id: str, values: Dict[str, Any]):
+        values = _normalize_json_fields(
+            values, _TASK_JSON_FIELDS, path="agent_tasks"
+        )
         async with self.uow_factory() as uow:
             record = await uow.agents.update_task(task_id, values)
             await uow.commit()

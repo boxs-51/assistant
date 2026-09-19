@@ -921,6 +921,13 @@ class AgentRuntime:
                     last_tool_results=latest_tool_results,
                 )
             except Exception as exc:
+                error_code = (
+                    getattr(exc, "code", None)
+                    or getattr(exc, "error_code", None)
+                    or type(exc).__name__
+                )
+                failure_domain = getattr(exc, "failure_domain", None) or "AGENT"
+                retryable = bool(getattr(exc, "retryable", False))
                 record = iterations[-1] if iterations else None
                 if record is not None and record.state not in {
                     AgentLoopState.COMPLETED,
@@ -929,7 +936,7 @@ class AgentRuntime:
                 }:
                     record.close(
                         AgentLoopState.FAILED,
-                        error_code=getattr(exc, "code", type(exc).__name__),
+                        error_code=error_code,
                     )
                     await self._persist_iteration(record)
                     await self._publish(
@@ -941,16 +948,22 @@ class AgentRuntime:
                     await self._publish(
                         AgentEventName.EXECUTION_FAILED,
                         context,
-                        payload={"error_code": getattr(exc, "code", type(exc).__name__)},
+                        payload={
+                            "error_code": error_code,
+                            "failure_domain": failure_domain,
+                            "retryable": retryable,
+                        },
                     )
                 return self._terminal_result(
                     context,
                     iterations,
                     context.usage,
                     AgentLoopState.FAILED,
-                    getattr(exc, "code", type(exc).__name__),
+                    error_code,
                     str(exc),
                     last_tool_results=latest_tool_results,
+                    failure_domain=failure_domain,
+                    retryable=retryable,
                 )
 
         await self._publish(
@@ -1015,6 +1028,8 @@ class AgentRuntime:
         error_message: str,
         *,
         last_tool_results: Sequence[ToolExecutionResult] = (),
+        failure_domain: str = "AGENT",
+        retryable: bool = False,
     ) -> AgentExecutionResult:
         return AgentExecutionResult(
             execution_id=context.execution_id,
@@ -1025,6 +1040,8 @@ class AgentRuntime:
             usage=usage,
             error_code=error_code,
             error_message=error_message,
+            failure_domain=failure_domain,
+            retryable=retryable,
         )
 
 

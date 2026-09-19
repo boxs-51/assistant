@@ -286,7 +286,22 @@ class WorkflowRuntime(BaseRuntime):
                     ))
                 return
             if result.final_message is None:
-                raise RuntimeError(result.error_message or result.error_code or "Agent produced no final message.")
+                if result.error_code:
+                    await self.event_bus.publish(BaseEvent(
+                        event_name="provider.failed",  # compatibility event name
+                        session_id=event.session_id,
+                        turn_id=event.turn_id,
+                        payload={
+                            "error": result.error_message or result.error_code,
+                            "error_code": result.error_code,
+                            "failure_domain": result.failure_domain or "AGENT",
+                            "retryable": result.retryable,
+                            "execution_id": result.execution_id,
+                            "status_code": 500,
+                        },
+                    ))
+                    return
+                raise RuntimeError("Agent produced no final message.")
             response = {
                 "id": result.execution_id,
                 "model": getattr(agent, "model", None) or body.get("model", ""),
@@ -323,12 +338,20 @@ class WorkflowRuntime(BaseRuntime):
                     payload={"response": response},
                 ))
         except Exception as exc:
+            error_code = (
+                getattr(exc, "code", None)
+                or getattr(exc, "error_code", None)
+                or type(exc).__name__
+            )
             await self.event_bus.publish(BaseEvent(
                 event_name="provider.failed",
                 session_id=event.session_id,
                 turn_id=event.turn_id,
                 payload={
                     "error": str(exc),
+                    "error_code": error_code,
+                    "failure_domain": getattr(exc, "failure_domain", "AGENT"),
+                    "retryable": bool(getattr(exc, "retryable", False)),
                     "status_code": (
                         403 if isinstance(exc, PermissionError)
                         else 400 if isinstance(exc, (ValueError, LookupError))
