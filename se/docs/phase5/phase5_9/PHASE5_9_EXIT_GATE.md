@@ -2,7 +2,7 @@
 
 This is the canonical release gate for Phase 5.9 persistence and resume.
 
-The executable gate is `tests/architecture/test_phase5_9_exit_gate.py`.
+The executable gate is `se/tests/architecture/test_phase5_9_exit_gate.py`.
 
 ## P0
 

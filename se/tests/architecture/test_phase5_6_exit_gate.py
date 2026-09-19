@@ -301,7 +301,7 @@ def test_E5_ci_declares_full_suite_and_exit_gate_as_blocking_checks():
 
     assert "python -m pytest -q" in workflow
     assert (
-        "python -m pytest -q tests/architecture/test_phase5_6_exit_gate.py"
+        "python -m pytest -q se/tests/architecture/test_phase5_6_exit_gate.py"
         in workflow
     )
     assert "exit 1" not in workflow

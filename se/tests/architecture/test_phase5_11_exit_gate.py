@@ -194,6 +194,6 @@ def test_E6_E7_E8_E9_wiring_docs_and_ci_are_present():
     assert "[x]" in checklist
     assert "phase5_11/PHASE5_11_EXIT_GATE.md" in legacy
     assert "python -m pytest -q" in workflow
-    assert "python -m pytest -q tests/architecture/test_phase5_11_exit_gate.py" in workflow
+    assert "python -m pytest -q se/tests/architecture/test_phase5_11_exit_gate.py" in workflow
     assert "container.context_builder_port = ContextBuilderAdapter(" in main_source
     assert "context_builder=container.context_builder_port" in main_source

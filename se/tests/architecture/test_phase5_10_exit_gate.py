@@ -284,7 +284,7 @@ def test_E6_E7_E8_gate_docs_ci_and_legacy_reference_exist():
     for criterion in ("E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"):
         assert f"**{criterion}:**" in gate_doc
     assert "python -m pytest -q" in workflow
-    assert "python -m pytest -q tests/architecture/test_phase5_10_exit_gate.py" in workflow
+    assert "python -m pytest -q se/tests/architecture/test_phase5_10_exit_gate.py" in workflow
     assert "phase5_10/PHASE5_10_EXIT_GATE.md" in legacy
     main_source = MAIN_MODULE.read_text(encoding="utf-8")
     assert "container.agent_runtime = AgentRuntime(" in main_source

@@ -294,7 +294,7 @@ async def test_E4_resumed_committed_tool_result_is_not_dispatched_again():
 def test_E5_ci_declares_full_suite_and_phase_5_9_gate():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
     assert "python -m pytest -q" in workflow
-    assert "python -m pytest -q tests/architecture/test_phase5_9_exit_gate.py" in workflow
+    assert "python -m pytest -q se/tests/architecture/test_phase5_9_exit_gate.py" in workflow
     assert "pull_request:" in workflow
 
 

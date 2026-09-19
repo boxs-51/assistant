@@ -2,7 +2,7 @@
 
 This is the canonical release gate for agent lifecycle event publication and correlation.
 
-The executable gate is `tests/architecture/test_phase5_10_exit_gate.py`.
+The executable gate is `se/tests/architecture/test_phase5_10_exit_gate.py`.
 
 ## P0
 

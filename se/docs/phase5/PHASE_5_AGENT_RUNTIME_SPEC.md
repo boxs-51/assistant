@@ -336,7 +336,7 @@ src/runtimes/agent/tool_execution/
 
 > Canonical current status for this phase is the Phase 5.7 exit gate at
 > [`PHASE5_7_EXIT_GATE.md`](./PHASE5_7_EXIT_GATE.md) and
-> `tests/architecture/test_phase5_7_exit_gate.py`.
+> `se/tests/architecture/test_phase5_7_exit_gate.py`.
 >
 > Phase 5.7 hardens the existing canonical Agent tool boundary. It does not
 > change the `AgentRuntime` contract and does not introduce Phase 5.8 retry or
@@ -403,7 +403,7 @@ Repo hiện đã có `CapabilityError`, nên tiếp tục dùng contract đó th
 
 > Canonical current status for this phase is the Phase 5.8 exit gate at
 > [`PHASE5_8_EXIT_GATE.md`](./PHASE5_8_EXIT_GATE.md) and
-> `tests/architecture/test_phase5_8_exit_gate.py`.
+> `se/tests/architecture/test_phase5_8_exit_gate.py`.
 >
 > Không phải tool failure nào cũng retry.
 

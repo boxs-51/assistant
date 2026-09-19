@@ -2,7 +2,7 @@
 
 > **Canonical current status:** Phase 5.6 closure is governed by
 > [`PHASE5_6_EXIT_GATE.md`](./PHASE5_6_EXIT_GATE.md) and
-> `tests/architecture/test_phase5_6_exit_gate.py`.
+> `se/tests/architecture/test_phase5_6_exit_gate.py`.
 >
 > The matrix and narrative below are historical architecture-roadmap notes.
 > They must not be interpreted as the current Phase 5.6 release status.
@@ -22,7 +22,7 @@
 
 > **Current Phase 5.11 status:** Context Integration is closed by
 > [`PHASE5_11_EXIT_GATE.md`](./phase5_11/PHASE5_11_EXIT_GATE.md) and
-> `tests/architecture/test_phase5_11_exit_gate.py`. The historical matrix and
+> `se/tests/architecture/test_phase5_11_exit_gate.py`. The historical matrix and
 > P0 violation list below are superseded for the current Phase 5.11 status.
 
 ## 1. Kết luận Tổng thể

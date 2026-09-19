@@ -269,7 +269,7 @@ def parse_patch(content: str) -> list[PatchAction]:
                 else:
                     current_action.add_lines.append(line)
 
-            elif current_action.action_type == "UPDATE":
+            elif current_action.action_type in ("UPDATE", "DELETE"):
                 if line.startswith("@@"):
                     current_action.finish_hunk()
                 elif (
@@ -296,10 +296,64 @@ def parse_patch(content: str) -> list[PatchAction]:
     return actions
 
 
+def reverse_patch_actions(actions: list[PatchAction]) -> list[PatchAction]:
+    """Đảo ngược danh sách các PatchAction (Hoàn tác bản patch)."""
+    reversed_actions: list[PatchAction] = []
+
+    # Duyệt ngược lại các hành động
+    for action in reversed(actions):
+        rev_action = PatchAction("", action.filepath)
+
+        if action.action_type == "ADD":
+            # File được thêm -> Hoàn tác: Xóa file
+            rev_action.action_type = "DELETE"
+            rev_action.add_lines = action.add_lines[:]
+
+        elif action.action_type == "DELETE":
+            # File bị xóa -> Hoàn tác: Tạo lại file với nội dung cũ
+            rev_action.action_type = "ADD"
+            restored_lines: list[str] = []
+
+            if action.add_lines:
+                restored_lines = action.add_lines[:]
+            elif action.hunks:
+                for hunk in action.hunks:
+                    for line in hunk:
+                        if line.startswith("-"):
+                            restored_lines.append(line[1:])
+                        elif line.startswith(" "):
+                            restored_lines.append(line[1:])
+                        elif not line.startswith("+"):
+                            restored_lines.append(line)
+
+            rev_action.add_lines = restored_lines
+
+        elif action.action_type == "UPDATE":
+            # File được sửa -> Hoàn tác: Đảo dấu '+' và '-' trong tất cả các hunk
+            rev_action.action_type = "UPDATE"
+            for hunk in action.hunks:
+                rev_hunk: list[str] = []
+                for line in hunk:
+                    if line.startswith("+"):
+                        rev_hunk.append("-" + line[1:])
+                    elif line.startswith("-"):
+                        rev_hunk.append("+" + line[1:])
+                    else:
+                        rev_hunk.append(line)
+                rev_action.hunks.append(rev_hunk)
+
+        reversed_actions.append(rev_action)
+
+    return reversed_actions
+
+
 def apply_custom_patch(
-    patch_path: str, check_only: bool = False, force: bool = False
+    patch_path: str,
+    check_only: bool = False,
+    force: bool = False,
+    reverse: bool = False,
 ) -> bool:
-    """Xử lý file patch theo các chế độ: Check Mode, Atomic Default Mode, và Force Mode."""
+    """Xử lý file patch theo các chế độ: Apply, Reverse (Unapply), Check Mode, Atomic Default Mode, và Force Mode."""
     if not os.path.exists(patch_path):
         print(f"❌ Lỗi: Không tìm thấy file patch tại: {patch_path}")
         return False
@@ -321,6 +375,11 @@ def apply_custom_patch(
         print("⚠️ Cảnh báo: Không tìm thấy khối patch hợp lệ nào trong file.")
         return False
 
+    # ĐẢO NGƯỢC PATCH NẾU Ở CHẾ ĐỘ REVERSE
+    if reverse:
+        print("🔄 Đã bật chế độ HOÀN TÁC (Reverse Mode). Đang đảo ngược bản patch...")
+        actions = reverse_patch_actions(actions)
+
     # BƯỚC 1: Mô phỏng xử lý trên bộ nhớ (Pre-check)
     prepared_changes = []
     has_errors = False
@@ -341,8 +400,9 @@ def apply_custom_patch(
 
             elif action.action_type == "DELETE":
                 if not os.path.exists(action.filepath) and not force:
-                    # File cần xóa không tồn tại
-                    item["error"] = f"Không thể DELETE vì file không tồn tại: '{action.filepath}'"
+                    item["error"] = (
+                        f"Không thể DELETE vì file không tồn tại: '{action.filepath}'"
+                    )
                     has_errors = True
 
             elif action.action_type == "UPDATE":
@@ -378,12 +438,16 @@ def apply_custom_patch(
             if item["error"]:
                 print(f"❌ [LỖI] {fp}: {item['error']}")
             elif item["failed_hunks"]:
-                print(f"⚠️ [LỖI HUNK] {fp}: {len(item['failed_hunks'])} hunk bị thất bại.")
+                print(
+                    f"⚠️ [LỖI HUNK] {fp}: {len(item['failed_hunks'])} hunk bị thất bại."
+                )
             else:
                 print(f"✅ [OK] {fp} ({item['action_type']})")
 
         if has_errors:
-            print("\n❌ Kiểm tra thất bại: Patch chứa lỗi và không thể áp dụng sạch hoàn toàn.")
+            print(
+                "\n❌ Kiểm tra thất bại: Thao tác chứa lỗi và không thể thực hiện sạch hoàn toàn."
+            )
             return False
         print("\n🎉 Kiểm tra thành công: Tất cả các thay đổi đều hợp lệ!")
         return True
@@ -391,17 +455,23 @@ def apply_custom_patch(
     # Chế độ Mặc định (Không có --force)
     if has_errors and not force:
         print("❌ BÁO LỖI: Phát hiện lỗi trong quá trình phân tích/khớp patch!")
-        print("🛑 Mặc định script sẽ HỦY BỎ toàn bộ thao tác (không có file nào bị chỉnh sửa).")
+        print(
+            "🛑 Mặc định script sẽ HỦY BỎ toàn bộ thao tác (không có file nào bị chỉnh sửa)."
+        )
         print("\nChi tiết các file bị lỗi:")
         for item in prepared_changes:
             if item["error"]:
                 print(f"   - [{item['filepath']}]: {item['error']}")
             elif item["failed_hunks"]:
-                print(f"   - [{item['filepath']}]: {len(item['failed_hunks'])} hunk không tìm thấy context.")
+                print(
+                    f"   - [{item['filepath']}]: {len(item['failed_hunks'])} hunk không tìm thấy context."
+                )
 
         print("\n💡 Gợi ý:")
         print("   - Chạy `--check` để kiểm tra trước các file.")
-        print("   - Chạy `--force` (hoặc `-f`) để bỏ qua lỗi, áp dụng các phần khớp được và tạo file .rej chứa vị trí bị lỗi để tự sửa.")
+        print(
+            "   - Chạy `--force` (hoặc `-f`) để bỏ qua lỗi, áp dụng các phần khớp được và tạo file .rej chứa vị trí bị lỗi để tự sửa."
+        )
         return False
 
     # BƯỚC 3: Ghi thay đổi ra đĩa
@@ -427,31 +497,43 @@ def apply_custom_patch(
             if dir_name:
                 os.makedirs(dir_name, exist_ok=True)
 
-            if item["content_to_write"] is not None and not (item["error"] and item["action_type"] == "UPDATE"):
+            if item["content_to_write"] is not None and not (
+                item["error"] and item["action_type"] == "UPDATE"
+            ):
                 with open(filepath, "w", encoding="utf-8") as f:
                     f.write(item["content_to_write"])
 
             if item["failed_hunks"]:
                 rej_filepath = f"{filepath}.rej"
-                rej_content = format_rejected_hunks(filepath, item["failed_hunks"])
+                rej_content = format_rejected_hunks(
+                    filepath, item["failed_hunks"]
+                )
                 with open(rej_filepath, "w", encoding="utf-8") as f:
                     f.write(rej_content)
-                print(f"⚠️ Đã áp dụng một phần: {filepath} (Đã tạo file lỗi: {rej_filepath})")
+                print(
+                    f"⚠️ Đã áp dụng một phần: {filepath} (Đã tạo file lỗi: {rej_filepath})"
+                )
                 rej_count += 1
 
             elif item["error"]:
                 rej_filepath = f"{filepath}.rej"
                 rej_content = format_rejected_hunks(
                     filepath,
-                    item["action"].hunks if item["action"].hunks else [[l] for l in item["action"].add_lines],
+                    item["action"].hunks
+                    if item["action"].hunks
+                    else [[l] for l in item["action"].add_lines],
                 )
                 with open(rej_filepath, "w", encoding="utf-8") as f:
                     f.write(f"# Lỗi: {item['error']}\n" + rej_content)
-                print(f"❌ Bị lỗi [{filepath}]: {item['error']} (Đã tạo file lỗi: {rej_filepath})")
+                print(
+                    f"❌ Bị lỗi [{filepath}]: {item['error']} (Đã tạo file lỗi: {rej_filepath})"
+                )
                 failed_count += 1
 
             else:
-                act_str = "tạo mới" if item["action_type"] == "ADD" else "cập nhật"
+                act_str = (
+                    "tạo mới" if item["action_type"] == "ADD" else "cập nhật"
+                )
                 print(f"✅ Đã {act_str}: {filepath}")
                 success_count += 1
 
@@ -460,10 +542,10 @@ def apply_custom_patch(
             failed_count += 1
 
     print("\n" + "=" * 50)
-    print("📊 Kết quả áp dụng patch:")
+    print("📊 Kết quả thao tác patch:")
     print(f"   - Thành công: {success_count}/{len(actions)} file")
     if rej_count > 0:
-        print(f"   - Áp dụng một phần (xuất file .rej): {rej_count} file")
+        print(f"   - Thực hiện một phần (xuất file .rej): {rej_count} file")
     if failed_count > 0:
         print(f"   - Thất bại hoàn toàn: {failed_count} file")
 
@@ -472,12 +554,18 @@ def apply_custom_patch(
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Công cụ áp dụng file patch cho dự án."
+        description="Công cụ áp dụng hoặc hoàn tác file patch cho dự án."
     )
     parser.add_argument(
         "patch_path",
         type=str,
-        help="Đường dẫn tới file .patch cần áp dụng",
+        help="Đường dẫn tới file .patch cần áp dụng hoặc hoàn tác",
+    )
+    parser.add_argument(
+        "-R",
+        "--reverse",
+        action="store_true",
+        help="Chế độ hoàn tác (Unapply/Reverse): Đảo ngược bản patch để khôi phục mã nguồn về trạng thái ban đầu.",
     )
     parser.add_argument(
         "--check",
@@ -493,7 +581,10 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     success = apply_custom_patch(
-        args.patch_path, check_only=args.check, force=args.force
+        args.patch_path,
+        check_only=args.check,
+        force=args.force,
+        reverse=args.reverse,
     )
     if not success:
         sys.exit(1)

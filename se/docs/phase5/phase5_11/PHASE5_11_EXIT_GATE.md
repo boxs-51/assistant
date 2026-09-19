@@ -2,7 +2,7 @@
 
 This is the canonical release gate for Context Integration.
 
-The executable gate is `tests/architecture/test_phase5_11_exit_gate.py`.
+The executable gate is `se/tests/architecture/test_phase5_11_exit_gate.py`.
 
 ## P0
 

@@ -10,7 +10,7 @@ opening Phase 5.8.
 The authoritative executable gate is:
 
 ```text
-tests/architecture/test_phase5_7_exit_gate.py
+se/tests/architecture/test_phase5_7_exit_gate.py
 ```
 
 The gate is deliberately fail-closed. A green local result is necessary but
@@ -82,7 +82,7 @@ CI must run:
 
 ```text
 python -m pytest -q
-python -m pytest -q tests/architecture/test_phase5_7_exit_gate.py
+python -m pytest -q se/tests/architecture/test_phase5_7_exit_gate.py
 ```
 
 Proof:

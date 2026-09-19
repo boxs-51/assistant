@@ -9,7 +9,7 @@ This document is the canonical release gate for closing Phase 5.8 and opening Ph
 The authoritative executable gate is:
 
 ```text
-tests/architecture/test_phase5_8_exit_gate.py
+se/tests/architecture/test_phase5_8_exit_gate.py
 ```
 
 The gate is deliberately fail-closed. A green local result is necessary but not sufficient for the final decision: the repository CI run for the same commit must also be green.
