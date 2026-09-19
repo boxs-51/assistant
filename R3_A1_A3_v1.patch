@@ -1,0 +1,417 @@
+diff --git a/se/src/domain/schemas/agent_execution.py b/se/src/domain/schemas/agent_execution.py
+--- a/se/src/domain/schemas/agent_execution.py
++++ b/se/src/domain/schemas/agent_execution.py
+@@ -58,7 +58,11 @@ class AgentExecution(GatewayBaseModel):
+     session_id: str
+     agent_id: str
+     task_id: Optional[str] = None
++    branch_id: Optional[str] = None
+     parent_execution_id: Optional[str] = None
++    retry_of_execution_id: Optional[str] = None
++    base_execution_id: Optional[str] = None
++    base_checkpoint_id: Optional[str] = None
+     correlation_id: str
+     state: AgentExecutionState = AgentExecutionState.CREATED
+     wait_reason: Optional[AgentExecutionWaitReason] = None
+diff --git a/se/src/runtimes/agent/contracts/context.py b/se/src/runtimes/agent/contracts/context.py
+--- a/se/src/runtimes/agent/contracts/context.py
++++ b/se/src/runtimes/agent/contracts/context.py
+@@ -22,7 +22,11 @@ class AgentExecutionContext:
+ 
+     request_id: str | None = None
+     task_id: str | None = None
++    branch_id: str | None = None
+     parent_execution_id: str | None = None
++    retry_of_execution_id: str | None = None
++    base_execution_id: str | None = None
++    base_checkpoint_id: str | None = None
+     workflow_id: str | None = None
+     connection_id: str | None = None
+     agent: AgentDefinition | None = None
+@@ -57,7 +61,11 @@ class AgentExecutionContext:
+         limits: AgentExecutionLimits,
+         request_id: str | None = None,
+         task_id: str | None = None,
++        branch_id: str | None = None,
+         parent_execution_id: str | None = None,
++        retry_of_execution_id: str | None = None,
++        base_execution_id: str | None = None,
++        base_checkpoint_id: str | None = None,
+         workflow_id: str | None = None,
+         connection_id: str | None = None,
+         agent: AgentDefinition | None = None,
+@@ -78,7 +86,11 @@ class AgentExecutionContext:
+             limits=limits,
+             request_id=request_id,
+             task_id=task_id,
++            branch_id=branch_id,
+             parent_execution_id=parent_execution_id,
++            retry_of_execution_id=retry_of_execution_id,
++            base_execution_id=base_execution_id,
++            base_checkpoint_id=base_checkpoint_id,
+             workflow_id=workflow_id,
+             connection_id=connection_id,
+             agent=agent,
+diff --git a/se/src/infrastructure/storage/models/sql/agent/execution.py b/se/src/infrastructure/storage/models/sql/agent/execution.py
+--- a/se/src/infrastructure/storage/models/sql/agent/execution.py
++++ b/se/src/infrastructure/storage/models/sql/agent/execution.py
+@@ -15,7 +15,11 @@ class AgentExecutionRecord(Base):
+     session_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+     agent_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+     task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
++    branch_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+     parent_execution_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
++    retry_of_execution_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
++    base_execution_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
++    base_checkpoint_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+     correlation_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+     state: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
+     wait_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+diff --git a/se/src/infrastructure/storage/migrations/sql/versions/9a_r3_execution_lineage.py b/se/src/infrastructure/storage/migrations/sql/versions/9a_r3_execution_lineage.py
+new file mode 100644
+--- /dev/null
++++ b/se/src/infrastructure/storage/migrations/sql/versions/9a_r3_execution_lineage.py
+@@ -0,0 +1,68 @@
++"""Add R3 AgentExecution lineage representation.
++
++Revision ID: 9a_r3_execution_lineage
++Revises: 8a_agent_execution_waiting_cas
++"""
++
++from typing import Union
++
++from alembic import op
++import sqlalchemy as sa
++
++
++revision: str = "9a_r3_execution_lineage"
++down_revision: Union[str, None] = "8a_agent_execution_waiting_cas"
++branch_labels = None
++depends_on = None
++
++
++def upgrade() -> None:
++    op.add_column(
++        "agent_executions",
++        sa.Column("branch_id", sa.String(length=255), nullable=True),
++    )
++    op.add_column(
++        "agent_executions",
++        sa.Column("retry_of_execution_id", sa.String(length=255), nullable=True),
++    )
++    op.add_column(
++        "agent_executions",
++        sa.Column("base_execution_id", sa.String(length=255), nullable=True),
++    )
++    op.add_column(
++        "agent_executions",
++        sa.Column("base_checkpoint_id", sa.String(length=255), nullable=True),
++    )
++
++    op.create_index(
++        "ix_agent_executions_branch_id",
++        "agent_executions",
++        ["branch_id"],
++    )
++    op.create_index(
++        "ix_agent_executions_retry_of_execution_id",
++        "agent_executions",
++        ["retry_of_execution_id"],
++    )
++    op.create_index(
++        "ix_agent_executions_base_execution_id",
++        "agent_executions",
++        ["base_execution_id"],
++    )
++
++
++def downgrade() -> None:
++    op.drop_index(
++        "ix_agent_executions_base_execution_id",
++        table_name="agent_executions",
++    )
++    op.drop_index(
++        "ix_agent_executions_retry_of_execution_id",
++        table_name="agent_executions",
++    )
++    op.drop_index(
++        "ix_agent_executions_branch_id",
++        table_name="agent_executions",
++    )
++    op.drop_column("agent_executions", "base_checkpoint_id")
++    op.drop_column("agent_executions", "base_execution_id")
++    op.drop_column("agent_executions", "retry_of_execution_id")
++    op.drop_column("agent_executions", "branch_id")
+diff --git a/se/src/runtimes/agent/persistence.py b/se/src/runtimes/agent/persistence.py
+--- a/se/src/runtimes/agent/persistence.py
++++ b/se/src/runtimes/agent/persistence.py
+@@ -300,7 +300,17 @@ class DurableAgentStore:
+                 ),
+                 limits=restored_limits,
+                 request_id=state.get("request_id"),
+                 task_id=execution.task_id,
+-                parent_execution_id=state.get("parent_execution_id"),
++                branch_id=getattr(execution, "branch_id", None),
++                parent_execution_id=getattr(
++                    execution,
++                    "parent_execution_id",
++                    state.get("parent_execution_id"),
++                ),
++                retry_of_execution_id=getattr(
++                    execution, "retry_of_execution_id", None
++                ),
++                base_execution_id=getattr(execution, "base_execution_id", None),
++                base_checkpoint_id=getattr(execution, "base_checkpoint_id", None),
+                 workflow_id=state.get("workflow_id"),
+                 agent=agent,
+                 input=execution.request,
+diff --git a/se/src/runtimes/agent/contracts/events.py b/se/src/runtimes/agent/contracts/events.py
+--- a/se/src/runtimes/agent/contracts/events.py
++++ b/se/src/runtimes/agent/contracts/events.py
+@@ -25,6 +25,8 @@ class CorrelationContext(BaseModel):
+     correlation_id: str
+     session_id: str | None = None
+     execution_id: str
++    task_id: str | None = None
++    branch_id: str | None = None
+     request_id: str | None = None
+     parent_execution_id: str | None = None
+     iteration_id: str | None = None
+diff --git a/se/src/runtimes/agent/runtime.py b/se/src/runtimes/agent/runtime.py
+--- a/se/src/runtimes/agent/runtime.py
++++ b/se/src/runtimes/agent/runtime.py
+@@ -80,6 +80,8 @@ class AgentRuntime:
+                 correlation_id=context.correlation_id,
+                 session_id=context.session_id,
+                 execution_id=context.execution_id,
++                task_id=context.task_id,
++                branch_id=context.branch_id,
+                 request_id=request_id or context.request_id,
+                 parent_execution_id=context.parent_execution_id,
+                 iteration_id=(
+@@ -318,7 +320,11 @@ class AgentRuntime:
+                         "session_id": context.session_id,
+                         "agent_id": context.agent_id,
+                         "task_id": context.task_id,
++                        "branch_id": context.branch_id,
+                         "parent_execution_id": context.parent_execution_id,
++                        "retry_of_execution_id": context.retry_of_execution_id,
++                        "base_execution_id": context.base_execution_id,
++                        "base_checkpoint_id": context.base_checkpoint_id,
+                         "correlation_id": context.correlation_id,
+                         "state": AgentExecutionState.CREATED.value,
+                         "wait_reason": None,
+diff --git a/se/tests/architecture/test_r3_a1_a3_representation.py b/se/tests/architecture/test_r3_a1_a3_representation.py
+new file mode 100644
+--- /dev/null
++++ b/se/tests/architecture/test_r3_a1_a3_representation.py
+@@ -0,0 +1,186 @@
++from __future__ import annotations
++
++from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
++
++from se.src.domain.schemas.agent_execution import (
++    AgentExecution,
++    AgentExecutionLimits,
++    AgentExecutionState,
++    AgentExecutionWaitReason,
++)
++from se.src.domain.schemas.identity import Identity
++from se.src.infrastructure.storage.models.sql.base import Base
++from se.src.infrastructure.storage.repositories.agent import AgentRepository
++from se.src.runtimes.agent.contracts.context import AgentExecutionContext
++from se.src.runtimes.agent.contracts.events import AgentEventName
++from se.src.runtimes.agent.events import EventBusAgentEventPublisher
++from se.src.runtimes.agent.persistence import DurableAgentStore
++from se.src.runtimes.agent.runtime import AgentRuntime
++
++
++class _SqliteUow:
++    def __init__(self, sessions) -> None:
++        self._sessions = sessions
++        self.session = None
++        self.agents = None
++
++    async def __aenter__(self):
++        self.session = self._sessions()
++        self.agents = AgentRepository(self.session)
++        return self
++
++    async def __aexit__(self, exc_type, exc, tb):
++        try:
++            if exc_type is not None:
++                await self.session.rollback()
++        finally:
++            await self.session.close()
++
++    async def commit(self):
++        await self.session.commit()
++
++    async def rollback(self):
++        await self.session.rollback()
++
++
++class _RecordingBus:
++    def __init__(self) -> None:
++        self.events = []
++
++    def publish(self, event):
++        self.events.append(event)
++        return None
++
++
++def _identity() -> Identity:
++    return Identity(
++        user_id="user-r3",
++        auth_type="api_key",
++        scopes={"*"},
++    )
++
++
++def _context(execution_id: str = "exec-r3-a") -> AgentExecutionContext:
++    return AgentExecutionContext.create(
++        execution_id=execution_id,
++        agent_id="agent-r3",
++        session_id="session-r3",
++        correlation_id="corr-r3",
++        identity=_identity(),
++        limits=AgentExecutionLimits(timeout_seconds=5),
++        request_id="request-r3",
++        task_id="task-r3",
++        branch_id="branch-r3",
++        parent_execution_id="parent-r3",
++        retry_of_execution_id="retry-r3",
++        base_execution_id="base-r3",
++        base_checkpoint_id="checkpoint-r3",
++        workflow_id="workflow-r3",
++        causation_id="invocation-r3",
++        trace_id="trace-r3",
++        input={"prompt": "hello"},
++    )
++
++
++def test_a1_domain_and_context_keep_independent_lineage_dimensions():
++    execution = AgentExecution(
++        execution_id="exec-r3-a",
++        session_id="session-r3",
++        agent_id="agent-r3",
++        task_id="task-r3",
++        branch_id="branch-r3",
++        parent_execution_id="parent-r3",
++        retry_of_execution_id="retry-r3",
++        base_execution_id="base-r3",
++        base_checkpoint_id="checkpoint-r3",
++        correlation_id="corr-r3",
++        state=AgentExecutionState.WAITING,
++        wait_reason=AgentExecutionWaitReason.DEPENDENCY,
++        created_at=1.0,
++        updated_at=2.0,
++    )
++    context = _context()
++
++    assert execution.branch_id == "branch-r3"
++    assert execution.parent_execution_id == "parent-r3"
++    assert execution.retry_of_execution_id == "retry-r3"
++    assert execution.base_execution_id == "base-r3"
++    assert execution.base_checkpoint_id == "checkpoint-r3"
++
++    assert context.branch_id == "branch-r3"
++    assert context.parent_execution_id == "parent-r3"
++    assert context.retry_of_execution_id == "retry-r3"
++    assert context.base_execution_id == "base-r3"
++    assert context.base_checkpoint_id == "checkpoint-r3"
++    assert context.causation_id == "invocation-r3"
++    assert context.trace_id == "trace-r3"
++
++
++async def _sqlite_store():
++    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
++    async with engine.begin() as connection:
++        await connection.run_sync(Base.metadata.create_all)
++    sessions = async_sessionmaker(engine, expire_on_commit=False)
++    return engine, DurableAgentStore(lambda: _SqliteUow(sessions))
++
++
++async def test_a2_durable_store_round_trips_execution_lineage():
++    engine, store = await _sqlite_store()
++    try:
++        await store.save_execution(
++            {
++                "id": "exec-r3-durable",
++                "session_id": "session-r3",
++                "agent_id": "agent-r3",
++                "task_id": "task-r3",
++                "branch_id": "branch-r3",
++                "parent_execution_id": "parent-r3",
++                "retry_of_execution_id": "retry-r3",
++                "base_execution_id": "base-r3",
++                "base_checkpoint_id": "checkpoint-r3",
++                "correlation_id": "corr-r3",
++                "state": AgentExecutionState.WAITING.value,
++                "wait_reason": AgentExecutionWaitReason.DEPENDENCY.value,
++                "revision": 7,
++                "request": {"prompt": "hello"},
++                "context_state": {
++                    "request_id": "request-r3",
++                    "workflow_id": "workflow-r3",
++                    "causation_id": "invocation-r3",
++                    "trace_id": "trace-r3",
++                    "metadata": {"source": "r3-a2"},
++                    "limits": AgentExecutionLimits(
++                        timeout_seconds=5
++                    ).model_dump(mode="json"),
++                },
++            }
++        )
++
++        record = await store.load_execution("exec-r3-durable")
++        assert record.branch_id == "branch-r3"
++        assert record.retry_of_execution_id == "retry-r3"
++        assert record.base_execution_id == "base-r3"
++        assert record.base_checkpoint_id == "checkpoint-r3"
++
++        resumed = await store.resume_execution(
++            "exec-r3-durable",
++            identity=_identity(),
++        )
++        assert resumed is not None
++        assert resumed.task_id == "task-r3"
++        assert resumed.branch_id == "branch-r3"
++        assert resumed.parent_execution_id == "parent-r3"
++        assert resumed.retry_of_execution_id == "retry-r3"
++        assert resumed.base_execution_id == "base-r3"
++        assert resumed.base_checkpoint_id == "checkpoint-r3"
++        assert resumed.request_id == "request-r3"
++        assert resumed.workflow_id == "workflow-r3"
++        assert resumed.causation_id == "invocation-r3"
++        assert resumed.trace_id == "trace-r3"
++        assert resumed.resume_revision == 7
++    finally:
++        await engine.dispose()
++
++
++async def test_a3_agent_events_expose_task_and_branch_correlation():
++    bus = _RecordingBus()
++    runtime = AgentRuntime(
++        context_builder=None,
++        inference=None,
++        tool_execution=None,
++        execution_policy=None,
++        event_publisher=EventBusAgentEventPublisher(bus),
++    )
++
++    await runtime._publish(
++        AgentEventName.EXECUTION_STARTED,
++        _context("exec-r3-event"),
++    )
++
++    assert len(bus.events) == 1
++    correlation = bus.events[0].payload["correlation"]
++    assert correlation["execution_id"] == "exec-r3-event"
++    assert correlation["task_id"] == "task-r3"
++    assert correlation["branch_id"] == "branch-r3"
++    assert correlation["parent_execution_id"] == "parent-r3"
++    assert correlation["correlation_id"] == "corr-r3"
++    assert correlation["trace_id"] == "trace-r3"
++    assert correlation["causation_id"] == "invocation-r3"
++

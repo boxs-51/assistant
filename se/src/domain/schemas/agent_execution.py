@@ -66,7 +66,11 @@ class AgentExecution(GatewayBaseModel):
     session_id: str
     agent_id: str
     task_id: Optional[str] = None
+    branch_id: Optional[str] = None
     parent_execution_id: Optional[str] = None
+    retry_of_execution_id: Optional[str] = None
+    base_execution_id: Optional[str] = None
+    base_checkpoint_id: Optional[str] = None
     correlation_id: str
     state: AgentExecutionState = AgentExecutionState.CREATED
     wait_reason: Optional[AgentExecutionWaitReason] = None

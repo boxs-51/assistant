@@ -324,7 +324,17 @@ class DurableAgentStore:
                 limits=restored_limits,
                 request_id=state.get("request_id"),
                 task_id=execution.task_id,
-                parent_execution_id=state.get("parent_execution_id"),
+                branch_id=getattr(execution, "branch_id", None),
+                parent_execution_id=getattr(
+                    execution,
+                    "parent_execution_id",
+                    state.get("parent_execution_id"),
+                ),
+                retry_of_execution_id=getattr(
+                    execution, "retry_of_execution_id", None
+                ),
+                base_execution_id=getattr(execution, "base_execution_id", None),
+                base_checkpoint_id=getattr(execution, "base_checkpoint_id", None),
                 workflow_id=state.get("workflow_id"),
                 agent=agent,
                 input=execution.request,

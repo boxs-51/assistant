@@ -29,6 +29,8 @@ class CorrelationContext(BaseModel):
     correlation_id: str
     session_id: str | None = None
     execution_id: str
+    task_id: str | None = None
+    branch_id: str | None = None
     request_id: str | None = None
     parent_execution_id: str | None = None
     iteration_id: str | None = None

@@ -23,7 +23,11 @@ class AgentExecutionContext:
 
     request_id: str | None = None
     task_id: str | None = None
+    branch_id: str | None = None
     parent_execution_id: str | None = None
+    retry_of_execution_id: str | None = None
+    base_execution_id: str | None = None
+    base_checkpoint_id: str | None = None
     workflow_id: str | None = None
     connection_id: str | None = None
     agent: AgentDefinition | None = None
@@ -65,7 +69,11 @@ class AgentExecutionContext:
         limits: AgentExecutionLimits,
         request_id: str | None = None,
         task_id: str | None = None,
+        branch_id: str | None = None,
         parent_execution_id: str | None = None,
+        retry_of_execution_id: str | None = None,
+        base_execution_id: str | None = None,
+        base_checkpoint_id: str | None = None,
         workflow_id: str | None = None,
         connection_id: str | None = None,
         agent: AgentDefinition | None = None,
@@ -85,7 +93,11 @@ class AgentExecutionContext:
             limits=limits,
             request_id=request_id,
             task_id=task_id,
+            branch_id=branch_id,
             parent_execution_id=parent_execution_id,
+            retry_of_execution_id=retry_of_execution_id,
+            base_execution_id=base_execution_id,
+            base_checkpoint_id=base_checkpoint_id,
             workflow_id=workflow_id,
             connection_id=connection_id,
             agent=agent,
