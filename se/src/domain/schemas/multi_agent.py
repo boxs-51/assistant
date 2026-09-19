@@ -2,7 +2,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 
 from .base import GatewayBaseModel
-from pydantic import Field
+from pydantic import Field, model_validator
 
 
 class AgentSessionStatus(str, Enum):
@@ -15,10 +15,11 @@ class AgentTaskStatus(str, Enum):
     CREATED = "CREATED"
     ASSIGNED = "ASSIGNED"
     RUNNING = "RUNNING"
+    WAITING = "WAITING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
-    WAITING_FOR_CONNECTION = "WAITING_FOR_CONNECTION"
+    WAITING_FOR_CONNECTION = "WAITING"
 
 
 class AgentMessageType(str, Enum):
@@ -56,11 +57,23 @@ class AgentTask(GatewayBaseModel):
     connection_id: Optional[str] = None
     client_id: Optional[str] = None
     status: AgentTaskStatus = AgentTaskStatus.CREATED
+    wait_reasons: List[str] = Field(default_factory=list)
     input: Dict[str, Any] = Field(default_factory=dict)
     output: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
     created_at: float
     updated_at: float
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_waiting(cls, values):
+        if not isinstance(values, dict):
+            return values
+        values = dict(values)
+        if values.get("status") == "WAITING_FOR_CONNECTION":
+            values["status"] = AgentTaskStatus.WAITING
+            values.setdefault("wait_reasons", ["CONNECTION"])
+        return values
 
 
 class AgentSessionCreateRequest(GatewayBaseModel):

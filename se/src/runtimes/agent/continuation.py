@@ -69,7 +69,11 @@ class AgentContinuationService:
             for checkpoint_id, raw in state.get("checkpoints", {}).items():
                 values = dict(raw)
                 values["reason"] = CheckpointReason(values["reason"])
-                values["state"] = ContinuationState(values["state"])
+                raw_state = values["state"]
+                if raw_state == "WAITING_FOR_CONNECTION":
+                    raw_state = ContinuationState.WAITING.value
+                    values.setdefault("wait_reason", "CONNECTION")
+                values["state"] = ContinuationState(raw_state)
                 values["transcript"] = tuple(values.get("transcript") or ())
                 created_at = values.get("created_at")
                 if isinstance(created_at, str):
@@ -112,10 +116,11 @@ class AgentContinuationService:
                     else CheckpointReason.CONNECTION_DISCONNECTED
                 ),
                 state=(
-                    ContinuationState.WAITING_FOR_CONNECTION
+                    ContinuationState.WAITING
                     if waiting
                     else ContinuationState.RUNNING
                 ),
+                wait_reason="CONNECTION" if waiting else None,
                 parent_checkpoint_id=(
                     parent.checkpoint_id if parent is not None else None
                 ),
@@ -148,7 +153,7 @@ class AgentContinuationService:
             raise ValueError("Reconnect requires a new connection_id.")
         async with self._lock:
             base = self.current_checkpoint(execution_id)
-            if base is None or base.state is not ContinuationState.WAITING_FOR_CONNECTION:
+            if base is None or base.state is not ContinuationState.WAITING:
                 raise ContinuationConflictError(
                     "Execution is not waiting for a connection."
                 )

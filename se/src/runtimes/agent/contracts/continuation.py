@@ -8,7 +8,9 @@ from typing import Any, Mapping
 
 class ContinuationState(str, Enum):
     RUNNING = "RUNNING"
-    WAITING_FOR_CONNECTION = "WAITING_FOR_CONNECTION"
+    WAITING = "WAITING"
+    # Deprecated source alias; canonical serialization is WAITING.
+    WAITING_FOR_CONNECTION = "WAITING"
     READY_TO_MERGE = "READY_TO_MERGE"
 
 
@@ -27,6 +29,7 @@ class ExecutionCheckpoint:
     session_id: str
     reason: CheckpointReason
     state: ContinuationState
+    wait_reason: str | None = None
     parent_checkpoint_id: str | None = None
     origin_connection_id: str | None = None
     current_connection_id: str | None = None

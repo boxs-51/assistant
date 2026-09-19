@@ -1,19 +1,22 @@
 from typing import Dict, Set
 
-from ...domain.schemas.agent_execution import AgentExecutionState
+from ...domain.schemas.agent_execution import (
+    AgentExecutionState,
+    AgentExecutionWaitReason,
+    normalize_execution_waiting,
+)
 
 
 _ALLOWED: Dict[AgentExecutionState, Set[AgentExecutionState]] = {
     AgentExecutionState.CREATED: {AgentExecutionState.RUNNING, AgentExecutionState.CANCELLED},
     AgentExecutionState.RUNNING: {
-        AgentExecutionState.WAITING_AGENT,
+        AgentExecutionState.WAITING,
         AgentExecutionState.COMPLETED,
         AgentExecutionState.FAILED,
         AgentExecutionState.CANCELLED,
         AgentExecutionState.TIMEOUT,
-        AgentExecutionState.WAITING_FOR_CONNECTION,
     },
-    AgentExecutionState.WAITING_AGENT: {
+    AgentExecutionState.WAITING: {
         AgentExecutionState.RUNNING,
         AgentExecutionState.FAILED,
         AgentExecutionState.CANCELLED,
@@ -23,11 +26,6 @@ _ALLOWED: Dict[AgentExecutionState, Set[AgentExecutionState]] = {
     AgentExecutionState.FAILED: set(),
     AgentExecutionState.CANCELLED: set(),
     AgentExecutionState.TIMEOUT: set(),
-    AgentExecutionState.WAITING_FOR_CONNECTION: {
-        AgentExecutionState.RUNNING,
-        AgentExecutionState.CANCELLED,
-        AgentExecutionState.FAILED,
-    },
 }
 
 
@@ -41,3 +39,10 @@ class AgentExecutionStateMachine:
         if not AgentExecutionStateMachine.can_transition(current, target):
             raise ValueError(f"Invalid agent execution transition: {current} -> {target}")
         return target
+
+    @staticmethod
+    def validate_state(
+        state: AgentExecutionState | str,
+        wait_reason: AgentExecutionWaitReason | str | None,
+    ) -> tuple[AgentExecutionState, AgentExecutionWaitReason | None]:
+        return normalize_execution_waiting(state, wait_reason)

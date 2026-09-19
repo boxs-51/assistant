@@ -378,7 +378,14 @@ async def bootstrap_runtime_kernel(
     logger.info("Built-in agent support registered", support=builtin_support)
 
     # Cấu hình Multi-Agent Executor
-    async def execute_registered_agent_task(task, *, identity):
+    async def execute_registered_agent_task(
+        task,
+        *,
+        identity,
+        execution_id,
+        correlation_id,
+        parent_execution_id=None,
+    ):
         agent = container.agent_registry.get(task.assigned_agent_id)
         if agent is None:
             raise LookupError(f"Agent '{task.assigned_agent_id}' is not registered.")
@@ -408,13 +415,14 @@ async def bootstrap_runtime_kernel(
         if task.client_id:
             task_metadata["client_id"] = task.client_id
         execution_context = AgentExecutionContext.create(
-            execution_id=f"agent_{uuid.uuid4().hex}",
+            execution_id=execution_id,
             agent_id=agent.name,
             session_id=task.session_id,
-            correlation_id=f"corr_{uuid.uuid4().hex}",
+            correlation_id=correlation_id,
             identity=identity,
             limits=AgentExecutionLimits(),
             task_id=task.task_id,
+            parent_execution_id=parent_execution_id,
             connection_id=task.connection_id,
             agent=agent,
             input=dict(task.input),

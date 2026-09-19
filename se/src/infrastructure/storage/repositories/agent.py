@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 
 from ..interfaces.repository import BaseRepository
 from ..models.sql.agent import (
@@ -179,3 +179,25 @@ class AgentRepository(BaseRepository):
             setattr(record, key, value)
         await self.session.flush()
         return record
+
+    async def compare_and_set_execution(
+        self,
+        execution_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        """Atomically mutate one execution when its revision still matches."""
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == expected_revision,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)

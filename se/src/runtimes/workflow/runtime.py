@@ -256,6 +256,7 @@ class WorkflowRuntime(BaseRuntime):
                 )
                 waiting = {
                     "status": "WAITING_FOR_CONNECTION",
+                    "wait_reason": "CONNECTION",
                     "execution_id": result.execution_id,
                     "checkpoint_id": result.checkpoint_id,
                     "pending_capability_id": (

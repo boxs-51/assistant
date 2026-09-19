@@ -6,6 +6,27 @@ from ..schemas.request import GatewayChatRequest
 from ..schemas.response import GatewayResponse, GatewayStreamChunk
 from .realtime_client import GatewayRealtimeClient as PersistentGatewayRealtimeClient
 
+
+_LEGACY_WAIT_REASONS = {
+    "WAITING_FOR_CONNECTION": "CONNECTION",
+    "WAITING_AGENT": "AGENT",
+}
+
+
+def normalize_waiting_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Accept legacy and canonical server payloads, expose one CL shape."""
+    normalized = dict(payload)
+    status = normalized.get("status") or normalized.get("state")
+    legacy_reason = _LEGACY_WAIT_REASONS.get(status)
+    if legacy_reason is not None:
+        normalized["status"] = "WAITING"
+        normalized["wait_reason"] = legacy_reason
+    elif status == "WAITING":
+        if not normalized.get("wait_reason"):
+            raise ValueError("Canonical WAITING payload requires wait_reason")
+        normalized["status"] = "WAITING"
+    return normalized
+
 class GatewayLLMClient:
     def __init__(self, gateway_url: str, api_key: str = ""):
         self.base_url = gateway_url.rstrip('/')
@@ -69,7 +90,8 @@ class GatewayLLMClient:
             response = requests.post(self.gateway_url, headers=self.headers, json=json_data)
             response.raise_for_status()
             if response.status_code == 202:
-                return response.json()
+                body = response.json()
+                return normalize_waiting_payload(body) if isinstance(body, dict) else body
             return GatewayResponse.model_validate(response.json())
 
     def _stream_response(self, json_data: dict) -> Generator[Union[GatewayStreamChunk, Dict[str, Any]], None, None]:
@@ -83,12 +105,13 @@ class GatewayLLMClient:
                         if data_str == "[DONE]":
                             break
                         chunk_dict = json.loads(data_str)
-                        if (
-                            isinstance(chunk_dict, dict)
-                            and chunk_dict.get("status")
-                            in {"WAITING_FOR_CONNECTION", "AGENT_FALLBACK"}
-                        ):
-                            yield chunk_dict
+                        if isinstance(chunk_dict, dict) and chunk_dict.get("status") in {
+                            "WAITING",
+                            "WAITING_FOR_CONNECTION",
+                            "WAITING_AGENT",
+                            "AGENT_FALLBACK",
+                        }:
+                            yield normalize_waiting_payload(chunk_dict)
                         else:
                             yield GatewayStreamChunk.model_validate(chunk_dict)
 

@@ -19,6 +19,7 @@ class AgentTaskRecord(Base):
     connection_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
+    wait_reasons: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     input: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     output: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

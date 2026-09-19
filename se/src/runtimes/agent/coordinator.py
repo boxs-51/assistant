@@ -15,7 +15,11 @@ from ...domain.schemas.multi_agent import (
     AgentTask,
     AgentTaskStatus,
 )
-from ...domain.schemas.agent_execution import AgentExecution, AgentExecutionState
+from ...domain.schemas.agent_execution import (
+    AgentExecution,
+    AgentExecutionState,
+    AgentExecutionWaitReason,
+)
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from .state_machine import AgentExecutionStateMachine
 
@@ -170,6 +174,7 @@ class MultiAgentCoordinator:
             "connection_id": task.connection_id,
             "client_id": task.client_id,
             "status": task.status.value,
+            "wait_reasons": task.wait_reasons,
             "input": task.input,
         })
         return task
@@ -239,16 +244,6 @@ class MultiAgentCoordinator:
             updated_at=time.time(),
         )
         self._executions[execution.execution_id] = execution
-        await self._persist("save_execution", {
-            "id": execution.execution_id,
-            "session_id": execution.session_id,
-            "agent_id": execution.agent_id,
-            "task_id": execution.task_id,
-            "parent_execution_id": execution.parent_execution_id,
-            "correlation_id": execution.correlation_id,
-            "state": execution.state.value,
-            "request": execution.request,
-        })
         execution_limits = limits or AgentExecutionLimits()
         try:
             execution.state = AgentExecutionStateMachine.transition(
@@ -256,16 +251,30 @@ class MultiAgentCoordinator:
             )
             try:
                 executor_signature = inspect.signature(executor)
-                accepts_identity = (
-                    "identity" in executor_signature.parameters
-                    or any(
+                accepts_kwargs = any(
                         parameter.kind == inspect.Parameter.VAR_KEYWORD
                         for parameter in executor_signature.parameters.values()
-                    )
                 )
+                accepts_identity = "identity" in executor_signature.parameters or accepts_kwargs
+                runtime_owned = "execution_id" in executor_signature.parameters or accepts_kwargs
             except (TypeError, ValueError):
                 accepts_identity = False
-            result_value = executor(task, identity=identity) if accepts_identity else executor(task)
+                runtime_owned = False
+            if self.durable_store is not None and not runtime_owned:
+                raise RuntimeError(
+                    "Durable Agent execution requires an AgentRuntime-owned "
+                    "executor accepting execution_id."
+                )
+            executor_kwargs = {}
+            if accepts_identity:
+                executor_kwargs["identity"] = identity
+            if runtime_owned:
+                executor_kwargs.update(
+                    execution_id=execution.execution_id,
+                    correlation_id=execution.correlation_id,
+                    parent_execution_id=parent_execution_id,
+                )
+            result_value = executor(task, **executor_kwargs)
             if inspect.isawaitable(result_value):
                 result = await asyncio.wait_for(
                     result_value, timeout=execution_limits.timeout_seconds
@@ -274,10 +283,34 @@ class MultiAgentCoordinator:
                 result = result_value
             execution.result = result if isinstance(result, dict) else {"value": result}
             if execution.result.get("error_code") == "WAITING_FOR_CONNECTION":
-                task.status = AgentTaskStatus.WAITING_FOR_CONNECTION
-                execution.state = AgentExecutionStateMachine.transition(
-                    execution.state, AgentExecutionState.WAITING_FOR_CONNECTION
+                task.status = AgentTaskStatus.WAITING
+                task.wait_reasons = [AgentExecutionWaitReason.CONNECTION.value]
+                AgentExecutionStateMachine.transition(
+                    execution.state,
+                    AgentExecutionState.WAITING,
                 )
+                execution = AgentExecution.model_validate({
+                    **execution.model_dump(mode="python"),
+                    "state": AgentExecutionState.WAITING,
+                    "wait_reason": AgentExecutionWaitReason.CONNECTION,
+                })
+                self._executions[execution.execution_id] = execution
+            elif str(execution.result.get("state", "")).upper() == "WAITING":
+                wait_reason = execution.result.get("wait_reason") or "CONNECTION"
+                if isinstance(wait_reason, AgentExecutionWaitReason):
+                    wait_reason = wait_reason.value
+                task.status = AgentTaskStatus.WAITING
+                task.wait_reasons = [wait_reason]
+                AgentExecutionStateMachine.transition(
+                    execution.state,
+                    AgentExecutionState.WAITING,
+                )
+                execution = AgentExecution.model_validate({
+                    **execution.model_dump(mode="python"),
+                    "state": AgentExecutionState.WAITING,
+                    "wait_reason": wait_reason,
+                })
+                self._executions[execution.execution_id] = execution
             elif (
                 execution.result.get("error_code")
                 or str(execution.result.get("state", "")).upper()
@@ -319,13 +352,9 @@ class MultiAgentCoordinator:
         task.output = execution.result
         task.error = execution.error
         if self.durable_store:
-            await self.durable_store.update_execution(execution.execution_id, {
-                "state": execution.state.value,
-                "result": execution.result,
-                "error": execution.error,
-            })
             await self.durable_store.update_task(task.task_id, {
                 "status": task.status.value,
+                "wait_reasons": task.wait_reasons,
                 "output": task.output,
                 "error": task.error,
             })

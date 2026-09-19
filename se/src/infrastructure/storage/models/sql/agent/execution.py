@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -18,6 +18,8 @@ class AgentExecutionRecord(Base):
     parent_execution_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     correlation_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
+    wait_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     request: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     result: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     context_state: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
@@ -25,5 +27,7 @@ class AgentExecutionRecord(Base):
     inference_request: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     inference_response: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    started_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())

@@ -8,6 +8,7 @@ from .inference import InferenceMessage, InferenceUsage
 from .loop import AgentIteration, AgentLoopState
 from .tool import ToolExecutionResult
 from .continuation import ContinuationState
+from ....domain.schemas.agent_execution import AgentExecutionWaitReason
 
 
 class AgentExecutionResult(BaseModel):
@@ -18,6 +19,7 @@ class AgentExecutionResult(BaseModel):
     execution_id: str
     agent_id: str
     state: AgentLoopState
+    wait_reason: AgentExecutionWaitReason | None = None
     output: Any = None
     final_message: InferenceMessage | None = None
     iterations: tuple[AgentIteration, ...] = ()

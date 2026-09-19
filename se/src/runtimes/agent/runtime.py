@@ -4,7 +4,14 @@ import asyncio
 import json
 import time
 import uuid
+from datetime import datetime, timezone
 from typing import Any, Mapping, Sequence
+
+from ...domain.schemas.agent_execution import (
+    AgentExecutionState,
+    AgentExecutionWaitReason,
+    normalize_execution_waiting,
+)
 
 from .contracts import (
     AgentContextRequest,
@@ -28,6 +35,8 @@ from .contracts.events import (
     CorrelationContext,
 )
 from .contracts.continuation import ContinuationState
+from .persistence import ExecutionConflictError
+from .state_machine import AgentExecutionStateMachine
 
 
 class AgentRuntime:
@@ -283,7 +292,171 @@ class AgentRuntime:
             }
         )
 
+    def _has_execution_lifecycle_store(self) -> bool:
+        return all(
+            callable(getattr(self._durable_store, name, None))
+            for name in (
+                "load_execution",
+                "save_execution",
+                "compare_and_set_execution",
+            )
+        )
+
+    async def _begin_durable_execution(
+        self,
+        context: AgentExecutionContext,
+    ) -> int | None:
+        """Create a new execution or CAS-claim one durable WAITING execution."""
+        if not self._has_execution_lifecycle_store():
+            return None
+
+        record = await self._durable_store.load_execution(context.execution_id)
+        if record is None:
+            try:
+                await self._durable_store.save_execution(
+                    {
+                        "id": context.execution_id,
+                        "session_id": context.session_id,
+                        "agent_id": context.agent_id,
+                        "task_id": context.task_id,
+                        "parent_execution_id": context.parent_execution_id,
+                        "correlation_id": context.correlation_id,
+                        "state": AgentExecutionState.CREATED.value,
+                        "wait_reason": None,
+                        "revision": 0,
+                        "request": dict(context.input),
+                        "context_state": {
+                            "request_id": context.request_id,
+                            "parent_execution_id": context.parent_execution_id,
+                            "workflow_id": context.workflow_id,
+                            "metadata": dict(context.metadata),
+                            "causation_id": context.causation_id,
+                            "trace_id": context.trace_id,
+                            "connection_id": context.connection_id,
+                            "limits": context.limits.model_dump(mode="json"),
+                        },
+                    }
+                )
+            except Exception as exc:
+                # The primary key is the idempotent startup guard.  Convert a
+                # concurrent insert loss into the lifecycle conflict contract.
+                if await self._durable_store.load_execution(context.execution_id):
+                    raise ExecutionConflictError(
+                        f"AgentExecution already exists: {context.execution_id}"
+                    ) from exc
+                raise
+            expected_revision = 0
+            current_state = AgentExecutionState.CREATED
+        else:
+            current_state, _ = normalize_execution_waiting(
+                getattr(record, "state"),
+                getattr(record, "wait_reason", None),
+            )
+            if current_state is not AgentExecutionState.WAITING:
+                raise ExecutionConflictError(
+                    f"AgentExecution {context.execution_id} is {current_state.value}, "
+                    "not resumable WAITING"
+                )
+            expected_revision = getattr(record, "revision", 0)
+            if (
+                context.resume_revision is not None
+                and context.resume_revision != expected_revision
+            ):
+                raise ExecutionConflictError(
+                    f"Stale AgentExecution revision: {context.execution_id}@"
+                    f"{context.resume_revision}"
+                )
+
+        if not AgentExecutionStateMachine.can_transition(
+            current_state,
+            AgentExecutionState.RUNNING,
+        ):
+            raise ExecutionConflictError(
+                f"Cannot start AgentExecution from {current_state.value}"
+            )
+        await self._durable_store.compare_and_set_execution(
+            context.execution_id,
+            expected_revision,
+            {
+                "state": AgentExecutionState.RUNNING.value,
+                "wait_reason": None,
+                "started_at": datetime.now(timezone.utc),
+            },
+        )
+        return expected_revision + 1
+
+    async def _finish_durable_execution(
+        self,
+        result: AgentExecutionResult,
+        expected_revision: int | None,
+    ) -> None:
+        if expected_revision is None:
+            return
+        if result.state is AgentLoopState.WAITING:
+            target = AgentExecutionState.WAITING
+            reason = result.wait_reason
+        else:
+            target = AgentExecutionState(result.state.value)
+            reason = None
+        AgentExecutionStateMachine.validate_state(target, reason)
+        if not AgentExecutionStateMachine.can_transition(
+            AgentExecutionState.RUNNING,
+            target,
+        ):
+            raise ExecutionConflictError(
+                f"Invalid durable completion RUNNING -> {target.value}"
+            )
+        await self._durable_store.compare_and_set_execution(
+            result.execution_id,
+            expected_revision,
+            {
+                "state": target.value,
+                "wait_reason": reason.value if reason is not None else None,
+                "result": result.model_dump(mode="json"),
+                "error": result.error_message,
+                "completed_at": (
+                    None
+                    if target is AgentExecutionState.WAITING
+                    else datetime.now(timezone.utc)
+                ),
+            },
+        )
+
     async def execute(self, context: AgentExecutionContext) -> AgentExecutionResult:
+        """Run exactly one durable AgentExecution lifecycle."""
+        revision = await self._begin_durable_execution(context)
+        try:
+            result = await self._execute_loop(context)
+        except asyncio.CancelledError:
+            if revision is not None:
+                await self._durable_store.compare_and_set_execution(
+                    context.execution_id,
+                    revision,
+                    {
+                        "state": AgentExecutionState.CANCELLED.value,
+                        "wait_reason": None,
+                        "error": "Agent execution cancelled.",
+                        "completed_at": datetime.now(timezone.utc),
+                    },
+                )
+            raise
+        except Exception as exc:
+            if revision is not None:
+                await self._durable_store.compare_and_set_execution(
+                    context.execution_id,
+                    revision,
+                    {
+                        "state": AgentExecutionState.FAILED.value,
+                        "wait_reason": None,
+                        "error": str(exc),
+                        "completed_at": datetime.now(timezone.utc),
+                    },
+                )
+            raise
+        await self._finish_durable_execution(result, revision)
+        return result
+
+    async def _execute_loop(self, context: AgentExecutionContext) -> AgentExecutionResult:
         """Execute one agent until a final answer or terminal failure."""
         # The runtime should persist each iteration and tool checkpoint before
         # continuing the loop, then resume from the last durable checkpoint.
@@ -646,7 +819,7 @@ class AgentRuntime:
                         },
                     )
                     context.connection_id = None
-                    if checkpoint.state is ContinuationState.WAITING_FOR_CONNECTION:
+                    if checkpoint.state is ContinuationState.WAITING:
                         record.close(
                             AgentLoopState.FAILED,
                             error_code="WAITING_FOR_CONNECTION",
@@ -655,7 +828,8 @@ class AgentRuntime:
                         return AgentExecutionResult(
                             execution_id=context.execution_id,
                             agent_id=context.agent_id,
-                            state=AgentLoopState.FAILED,
+                            state=AgentLoopState.WAITING,
+                            wait_reason=AgentExecutionWaitReason.CONNECTION,
                             iterations=tuple(iterations),
                             last_tool_results=latest_tool_results,
                             usage=context.usage,

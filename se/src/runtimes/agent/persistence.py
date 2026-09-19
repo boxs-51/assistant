@@ -6,6 +6,10 @@ from ...infrastructure.storage.repositories.agent import AgentRepository
 from .contracts.context import AgentExecutionContext
 
 
+class ExecutionConflictError(RuntimeError):
+    """A durable execution create or revision compare-and-set lost a race."""
+
+
 class DurableAgentStore:
     """Adapter that persists multi-agent records through the existing UoW."""
 
@@ -55,6 +59,25 @@ class DurableAgentStore:
                 execution_id,
                 {"context_state": context_state},
             )
+            await uow.commit()
+            return record
+
+    async def compare_and_set_execution(
+        self,
+        execution_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.compare_and_set_execution(
+                execution_id,
+                expected_revision,
+                values,
+            )
+            if record is None:
+                raise ExecutionConflictError(
+                    f"Stale AgentExecution revision: {execution_id}@{expected_revision}"
+                )
             await uow.commit()
             return record
 
@@ -222,6 +245,7 @@ class DurableAgentStore:
                 else []
             )
             context.resume_pending_tool_calls = pending_tool_calls
+            context.resume_revision = getattr(execution, "revision", 0)
             await uow.commit()
             return context
 
