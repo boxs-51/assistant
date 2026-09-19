@@ -10,6 +10,7 @@ from se.src.runtimes.agent.contracts.inference import (
     InferenceMessage,
     InferenceResponse,
 )
+from se.src.runtimes.agent.ids import AgentExecutionIdFactory
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
     CapabilityExecutionMode,
@@ -66,7 +67,7 @@ async def test_executable_skill_runs_through_capability_runtime():
 
 
 @pytest.mark.asyncio
-async def test_agent_capability_runs_agent_runtime_with_same_execution_identity():
+async def test_agent_capability_creates_distinct_child_execution_identity():
     class AgentRuntime:
         def __init__(self):
             self.context = None
@@ -97,7 +98,15 @@ async def test_agent_capability_runs_agent_runtime_with_same_execution_identity(
     )
     runtime = CapabilityRuntime()
     runtime.register_capability(
-        AgentCapabilityDriver(definition, agent, agent_runtime)
+        AgentCapabilityDriver(
+            definition,
+            agent,
+            agent_runtime,
+            execution_id_factory=AgentExecutionIdFactory(
+                prefix="exec_",
+                token_factory=lambda: "child",
+            ),
+        )
     )
 
     result = await runtime.execute_capability(
@@ -110,6 +119,9 @@ async def test_agent_capability_runs_agent_runtime_with_same_execution_identity(
     )
 
     assert result.output["output"] == "done"
-    assert agent_runtime.context.execution_id == "exec-agent-capability"
+    assert agent_runtime.context.execution_id == "exec_child"
+    assert agent_runtime.context.execution_id != "exec-agent-capability"
+    assert agent_runtime.context.parent_execution_id == "exec-agent-capability"
+    assert agent_runtime.context.causation_id == "inv-agent-capability"
     assert agent_runtime.context.metadata["invocation_id"] == "inv-agent-capability"
     assert agent_runtime.context.input == {"prompt": "investigate"}

@@ -10,12 +10,16 @@ from ...domain.schemas.identity import Identity
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ..agent.contracts.context import AgentExecutionContext
 from ..agent.adapters.messages import jsonable
+from ..agent.ids import AgentExecutionIdFactory
 
 logger = structlog.get_logger(__name__)
 
 
 class WorkflowRuntime(BaseRuntime):
-    def __init__(self):
+    def __init__(
+        self,
+        execution_id_factory: AgentExecutionIdFactory | None = None,
+    ):
         manifest = RuntimeManifest(
             id="workflow_runtime",
             name="WorkflowRuntime",
@@ -24,6 +28,9 @@ class WorkflowRuntime(BaseRuntime):
         super().__init__(manifest=manifest)
         self.event_bus = None
         self.container = None
+        self._execution_id_factory = (
+            execution_id_factory or AgentExecutionIdFactory()
+        )
 
     async def initialize(self, context: RuntimeContext) -> None:
         self.container = context.container
@@ -233,7 +240,7 @@ class WorkflowRuntime(BaseRuntime):
             messages = body.get("messages", [])
             prompt = next((item.get("content") for item in reversed(messages) if item.get("role") == "user"), "")
             context = AgentExecutionContext.create(
-                execution_id=f"agent_{uuid.uuid4().hex}",
+                execution_id=self._execution_id_factory.new_id(),
                 agent_id=agent_id,
                 session_id=event.session_id,
                 correlation_id=event.turn_id or f"corr_{uuid.uuid4().hex}",

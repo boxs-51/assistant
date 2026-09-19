@@ -1,0 +1,599 @@
+diff --git a/se/src/runtimes/agent/ids.py b/se/src/runtimes/agent/ids.py
+new file mode 100644
+--- /dev/null
++++ b/se/src/runtimes/agent/ids.py
+@@ -0,0 +1,32 @@
++from __future__ import annotations
++
++import uuid
++from collections.abc import Callable
++
++
++class AgentExecutionIdFactory:
++    """Canonical allocator for AgentExecution identities.
++
++    The factory owns identity allocation only. AgentRuntime remains the
++    authority that creates and transitions the durable AgentExecution row.
++    """
++
++    def __init__(
++        self,
++        *,
++        prefix: str = "exec_",
++        token_factory: Callable[[], str] | None = None,
++    ) -> None:
++        if not prefix:
++            raise ValueError("Agent execution ID prefix must not be empty.")
++        self._prefix = prefix
++        self._token_factory = token_factory or (lambda: uuid.uuid4().hex)
++
++    def new_id(self) -> str:
++        token = str(self._token_factory()).strip()
++        if not token:
++            raise ValueError("Agent execution ID token must not be empty.")
++        return f"{self._prefix}{token}"
++
++
++__all__ = ["AgentExecutionIdFactory"]
+diff --git a/se/src/runtimes/workflow/runtime.py b/se/src/runtimes/workflow/runtime.py
+--- a/se/src/runtimes/workflow/runtime.py
++++ b/se/src/runtimes/workflow/runtime.py
+@@ -9,12 +9,16 @@ from ...domain.schemas.identity import Identity
+ from ...domain.schemas.agent_execution import AgentExecutionLimits
+ from ..agent.contracts.context import AgentExecutionContext
+ from ..agent.adapters.messages import jsonable
++from ..agent.ids import AgentExecutionIdFactory
+
+ logger = structlog.get_logger(__name__)
+
+
+ class WorkflowRuntime(BaseRuntime):
+-    def __init__(self):
++    def __init__(
++        self,
++        execution_id_factory: AgentExecutionIdFactory | None = None,
++    ):
+         manifest = RuntimeManifest(
+             id="workflow_runtime",
+             name="WorkflowRuntime",
+@@ -17,3 +22,6 @@ class WorkflowRuntime(BaseRuntime):
+         super().__init__(manifest=manifest)
+         self.event_bus = None
+         self.container = None
++        self._execution_id_factory = (
++            execution_id_factory or AgentExecutionIdFactory()
++        )
+@@ -168,6 +176,6 @@ class WorkflowRuntime(BaseRuntime):
+             prompt = next((item.get("content") for item in reversed(messages) if item.get("role") == "user"), "")
+             context = AgentExecutionContext.create(
+-                execution_id=f"agent_{uuid.uuid4().hex}",
++                execution_id=self._execution_id_factory.new_id(),
+                 agent_id=agent_id,
+                 session_id=event.session_id,
+                 correlation_id=event.turn_id or f"corr_{uuid.uuid4().hex}",
+diff --git a/se/src/runtimes/agent/coordinator.py b/se/src/runtimes/agent/coordinator.py
+--- a/se/src/runtimes/agent/coordinator.py
++++ b/se/src/runtimes/agent/coordinator.py
+@@ -19,6 +19,7 @@ from ...domain.schemas.agent_execution import (
+ )
+ from ...domain.schemas.agent_execution import AgentExecutionLimits
+ from .state_machine import AgentExecutionStateMachine
++from .ids import AgentExecutionIdFactory
+
+
+ class MultiAgentCoordinator:
+@@ -26,8 +27,17 @@ class MultiAgentCoordinator:
+     """Opt-in control plane for multi-agent sessions and delegation."""
+
+-    def __init__(self, agent_registry: AgentRegistry, durable_store=None, executor=None):
++    def __init__(
++        self,
++        agent_registry: AgentRegistry,
++        durable_store=None,
++        executor=None,
++        execution_id_factory: AgentExecutionIdFactory | None = None,
++    ):
+         self.agent_registry = agent_registry
+         self.durable_store = durable_store
+         self.executor = executor
++        self.execution_id_factory = (
++            execution_id_factory or AgentExecutionIdFactory()
++        )
+         self.agent_authorizer = None
+         self._sessions: Dict[str, AgentSession] = {}
+@@ -236,7 +244,7 @@ class MultiAgentCoordinator:
+         task = self.get_task(task_id, identity)
+         task.status = AgentTaskStatus.RUNNING
+         execution = AgentExecution(
+-            execution_id=f"exec_{uuid.uuid4().hex}",
++            execution_id=self.execution_id_factory.new_id(),
+             session_id=task.session_id,
+             agent_id=task.assigned_agent_id,
+             task_id=task.task_id,
+diff --git a/se/src/runtimes/capability/drivers/agent_driver.py b/se/src/runtimes/capability/drivers/agent_driver.py
+--- a/se/src/runtimes/capability/drivers/agent_driver.py
++++ b/se/src/runtimes/capability/drivers/agent_driver.py
+@@ -5,18 +5,28 @@ from typing import Any, Mapping
+ from ....domain.schemas.agent import AgentDefinition
+ from ....domain.schemas.agent_execution import AgentExecutionLimits
+ from ...agent.contracts.context import AgentExecutionContext
++from ...agent.ids import AgentExecutionIdFactory
+ from ..contracts.context import CapabilityExecutionContext
+ from ..contracts.definition import CapabilityDefinition
+ from .base import BaseCapabilityDriver
+
+
+ class AgentCapabilityDriver(BaseCapabilityDriver):
+     """Expose one registered server Agent through CapabilityRuntime."""
+
+-    def __init__(self, definition, agent: AgentDefinition, agent_runtime: Any):
++    def __init__(
++        self,
++        definition,
++        agent: AgentDefinition,
++        agent_runtime: Any,
++        execution_id_factory: AgentExecutionIdFactory | None = None,
++    ):
+         super().__init__(definition)
+         self._agent = agent
+         self._agent_runtime = agent_runtime
++        self._execution_id_factory = (
++            execution_id_factory or AgentExecutionIdFactory()
++        )
+
+     async def execute(
+         self,
+@@ -23,21 +33,30 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
+         arguments: Mapping[str, Any],
+     ) -> Any:
+         execution_context = AgentExecutionContext.create(
+-            execution_id=context.execution_id,
++            execution_id=self._execution_id_factory.new_id(),
+             agent_id=self._agent.name,
+             session_id=context.session_id or "",
+             correlation_id=(
+-                context.metadata.get("correlation_id")
++                context.correlation_id
++                or context.metadata.get("correlation_id")
+                 or context.invocation_id
+             ),
+             identity=context.identity,
+             limits=AgentExecutionLimits(),
+             request_id=context.request_id,
++            task_id=context.task_id,
++            branch_id=context.branch_id,
++            parent_execution_id=context.execution_id,
+             agent=self._agent,
+             input=dict(arguments),
+             connection_id=context.connection_id,
+             workflow_id=context.workflow_id,
+             metadata={**context.metadata, "invocation_id": context.invocation_id},
++            causation_id=context.invocation_id,
++            trace_id=(
++                context.trace_id
++                or context.metadata.get("trace_id")
++            ),
+         )
+         execution_context.cancellation_event = context.cancellation_event
+         result = await self._agent_runtime.execute(execution_context)
+diff --git a/se/src/runtimes/capability/local_support_loader.py b/se/src/runtimes/capability/local_support_loader.py
+--- a/se/src/runtimes/capability/local_support_loader.py
++++ b/se/src/runtimes/capability/local_support_loader.py
+@@ -28,6 +28,11 @@ class LazyAgentCapabilityDriver(BaseCapabilityDriver):
+     ) -> Any:
+         agent = self._loader.load_agent(self.definition.capability_id)
+         delegate = AgentCapabilityDriver(
+-            self.definition, agent, self._loader.container.agent_runtime
++            self.definition,
++            agent,
++            self._loader.container.agent_runtime,
++            execution_id_factory=getattr(
++                self._loader.container, "agent_execution_id_factory", None
++            ),
+         )
+         return await delegate.execute(context, arguments)
+diff --git a/se/src/application/container.py b/se/src/application/container.py
+--- a/se/src/application/container.py
++++ b/se/src/application/container.py
+@@ -47,6 +47,7 @@ class ApplicationContainer:
+     continuation_service: Optional[Any] = None
+     agent_runtime: Optional[Any] = None
+     agent_durable_store: Optional[Any] = None
++    agent_execution_id_factory: Optional[Any] = None
+     context_assembler: Optional[Any] = None
+     support_loader: Optional[Any] = None
+
+diff --git a/se/src/main.py b/se/src/main.py
+--- a/se/src/main.py
++++ b/se/src/main.py
+@@ -59,5 +59,6 @@ from .runtimes.agent.persistence import DurableAgentStore
+ from .runtimes.agent.runtime import AgentRuntime
+ from .runtimes.agent.continuation import AgentContinuationService
++from .runtimes.agent.ids import AgentExecutionIdFactory
+ from .runtimes.agent.assembly import DefaultAgentContextAssembler
+ from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
+ from .runtimes.agent.capabilities import RegistryAgentCapabilityResolver, RegistryAgentSkillResolver
+@@ -218,6 +219,7 @@ async def bootstrap_runtime_kernel(
+     capability_registry = CapabilityRegistry()
+     capability_catalog = CapabilityCatalog()
+     authorization_service = AuthorizationService()
++    agent_execution_id_factory = AgentExecutionIdFactory()
+
+     # 1. Tạo ApplicationContainer trước
+     container = ApplicationContainer(
+@@ -235,8 +237,10 @@ async def bootstrap_runtime_kernel(
+         capability_registry=capability_registry,
+         authorization_service=authorization_service,
++        agent_execution_id_factory=agent_execution_id_factory,
+         multi_agent_coordinator=MultiAgentCoordinator(
+             agent_registry,
+             durable_store=DurableAgentStore(eventing_manager.uow_factory),
++            execution_id_factory=agent_execution_id_factory,
+         ),
+         **(security_services or {}),
+     )
+@@ -272,7 +276,7 @@ async def bootstrap_runtime_kernel(
+         ("context_runtime", ContextRuntime()),
+         ("connection_runtime", connection_runtime),
+         ("session_runtime", SessionRuntime()),
+-        ("workflow_runtime", WorkflowRuntime()),
++        ("workflow_runtime", WorkflowRuntime(agent_execution_id_factory)),
+         (
+             "capability_runtime",
+             CapabilityRuntime(
+diff --git a/se/src/transport/gateway/api/v1/capability_router.py b/se/src/transport/gateway/api/v1/capability_router.py
+--- a/se/src/transport/gateway/api/v1/capability_router.py
++++ b/se/src/transport/gateway/api/v1/capability_router.py
+@@ -237,7 +237,14 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity =
+         implementations = []
+         agent_runtime = getattr(container, "agent_runtime", None)
+         if agent_runtime is not None:
+-            driver = AgentCapabilityDriver(definition, body, agent_runtime)
++            driver = AgentCapabilityDriver(
++                definition,
++                body,
++                agent_runtime,
++                execution_id_factory=getattr(
++                    container, "agent_execution_id_factory", None
++                ),
++            )
+             container.capability_runtime.register_capability(driver)
+             implementation_id = f"server:agent:{definition.capability_id}"
+             implementation = CapabilityImplementation.from_definition(
+diff --git a/se/tests/architecture/test_unified_capability_drivers.py b/se/tests/architecture/test_unified_capability_drivers.py
+--- a/se/tests/architecture/test_unified_capability_drivers.py
++++ b/se/tests/architecture/test_unified_capability_drivers.py
+@@ -9,7 +9,8 @@ from se.src.domain.schemas.identity import Identity
+ from se.src.runtimes.agent.contracts.inference import (
+     InferenceMessage,
+     InferenceResponse,
+ )
++from se.src.runtimes.agent.ids import AgentExecutionIdFactory
+ from se.src.runtimes.capability.contracts.definition import (
+     CapabilityDefinition,
+     CapabilityExecutionMode,
+@@ -50,7 +51,7 @@ async def test_executable_skill_runs_through_capability_runtime():
+
+
+ @pytest.mark.asyncio
+-async def test_agent_capability_runs_agent_runtime_with_same_execution_identity():
++async def test_agent_capability_creates_distinct_child_execution_identity():
+     class AgentRuntime:
+         def __init__(self):
+             self.context = None
+@@ -80,7 +81,15 @@ async def test_agent_capability_runs_agent_runtime_with_same_execution_identity():
+     )
+     runtime = CapabilityRuntime()
+     runtime.register_capability(
+-        AgentCapabilityDriver(definition, agent, agent_runtime)
++        AgentCapabilityDriver(
++            definition,
++            agent,
++            agent_runtime,
++            execution_id_factory=AgentExecutionIdFactory(
++                prefix="exec_",
++                token_factory=lambda: "child",
++            ),
++        )
+     )
+
+     result = await runtime.execute_capability(
+@@ -94,6 +102,9 @@ async def test_agent_capability_runs_agent_runtime_with_same_execution_identity():
+     )
+
+     assert result.output["output"] == "done"
+-    assert agent_runtime.context.execution_id == "exec-agent-capability"
++    assert agent_runtime.context.execution_id == "exec_child"
++    assert agent_runtime.context.execution_id != "exec-agent-capability"
++    assert agent_runtime.context.parent_execution_id == "exec-agent-capability"
++    assert agent_runtime.context.causation_id == "inv-agent-capability"
+     assert agent_runtime.context.metadata["invocation_id"] == "inv-agent-capability"
+     assert agent_runtime.context.input == {"prompt": "investigate"}
+diff --git a/se/tests/architecture/test_r3_c1_c3_execution_id_authority.py b/se/tests/architecture/test_r3_c1_c3_execution_id_authority.py
+new file mode 100644
+--- /dev/null
++++ b/se/tests/architecture/test_r3_c1_c3_execution_id_authority.py
+@@ -0,0 +1,283 @@
++from __future__ import annotations
++
++from types import SimpleNamespace
++
++import pytest
++
++from se.src.agent.registry import AgentRegistry
++from se.src.domain.schemas.agent import AgentDefinition
++from se.src.domain.schemas.agent_execution import AgentExecutionLimits
++from se.src.domain.schemas.event import BaseEvent
++from se.src.domain.schemas.identity import Identity
++from se.src.runtimes.agent.contracts import (
++    AgentExecutionResult,
++    AgentLoopState,
++    InferenceMessage,
++)
++from se.src.runtimes.agent.coordinator import MultiAgentCoordinator
++from se.src.runtimes.agent.ids import AgentExecutionIdFactory
++from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
++from se.src.runtimes.capability.contracts.definition import (
++    CapabilityDefinition,
++    CapabilityExecutionMode,
++    CapabilityKind,
++)
++from se.src.runtimes.capability.drivers.agent_driver import AgentCapabilityDriver
++from se.src.runtimes.capability.invocation import (
++    CapabilityInvocationLifecycle,
++    InMemoryCapabilityInvocationStore,
++)
++from se.src.runtimes.capability.runtime import CapabilityRuntime
++from se.src.runtimes.workflow.runtime import WorkflowRuntime
++
++
++def _identity() -> Identity:
++    return Identity(user_id="user-r3", auth_type="api_key", scopes={"*"})
++
++
++def _factory(*tokens: str) -> AgentExecutionIdFactory:
++    values = iter(tokens)
++    return AgentExecutionIdFactory(
++        prefix="exec_",
++        token_factory=lambda: next(values),
++    )
++
++
++def test_c1_execution_id_factory_is_deterministic_and_independent():
++    factory = _factory("one", "two")
++
++    assert factory.new_id() == "exec_one"
++    assert factory.new_id() == "exec_two"
++
++
++@pytest.mark.asyncio
++async def test_c2_multi_agent_coordinator_allocates_root_execution_once():
++    registry = AgentRegistry()
++    registry.register(
++        AgentDefinition(name="worker", goal="Work", instruction="Work")
++    )
++    coordinator = MultiAgentCoordinator(
++        registry,
++        execution_id_factory=_factory("root-task"),
++    )
++    identity = _identity()
++    session = coordinator.create_session(identity, ["worker"])
++    task = coordinator.create_task(
++        session.session_id,
++        "worker",
++        {"prompt": "hello"},
++        identity,
++    )
++    received = {}
++
++    async def executor(
++        task,
++        *,
++        identity,
++        execution_id,
++        correlation_id,
++        parent_execution_id=None,
++    ):
++        received["execution_id"] = execution_id
++        return {"ok": True}
++
++    execution = await coordinator.execute_task(
++        task.task_id,
++        identity,
++        executor,
++    )
++
++    assert execution.execution_id == "exec_root-task"
++    assert received["execution_id"] == "exec_root-task"
++
++
++@pytest.mark.asyncio
++async def test_c2_workflow_root_agent_uses_injected_execution_factory():
++    factory = _factory("root-chat")
++    runtime = WorkflowRuntime(factory)
++    agent = AgentDefinition(
++        name="agent-root",
++        goal="test",
++        instruction="test",
++    )
++    captured = {}
++
++    class _AgentRuntime:
++        async def execute(self, context):
++            captured["context"] = context
++            return AgentExecutionResult(
++                execution_id=context.execution_id,
++                agent_id=context.agent_id,
++                state=AgentLoopState.COMPLETED,
++                final_message=InferenceMessage(
++                    role="assistant",
++                    content="done",
++                ),
++            )
++
++    class _Bus:
++        async def publish(self, event):
++            return None
++
++    runtime.event_bus = _Bus()
++    runtime.container = SimpleNamespace(
++        capability_runtime=None,
++        agent_registry=SimpleNamespace(get=lambda agent_id: agent),
++        agent_runtime=_AgentRuntime(),
++    )
++    event = BaseEvent(
++        event_name="context.event.built",
++        session_id="session-1",
++        turn_id="turn-1",
++        payload={"identity": _identity()},
++    )
++    body = {
++        "agent_id": "agent-root",
++        "messages": [{"role": "user", "content": "hello"}],
++        "metadata": {},
++        "config": {},
++    }
++
++    await runtime._execute_agent(event, body)
++
++    assert captured["context"].execution_id == "exec_root-chat"
++    assert captured["context"].parent_execution_id is None
++
++
++@pytest.mark.asyncio
++async def test_c3_agent_driver_creates_e2_with_delegation_lineage():
++    agent = AgentDefinition(
++        name="agent-child",
++        goal="child",
++        instruction="child",
++    )
++    definition = CapabilityDefinition(
++        id=agent.name,
++        name=agent.name,
++        description=agent.goal,
++        kind=CapabilityKind.AGENT,
++        execution_mode=CapabilityExecutionMode.LONG_RUNNING,
++    )
++    captured = {}
++
++    class _AgentRuntime:
++        async def execute(self, context):
++            captured["context"] = context
++            return SimpleNamespace(
++                error_code=None,
++                error_message=None,
++                model_dump=lambda mode=None: {
++                    "execution_id": context.execution_id,
++                    "output": "done",
++                },
++            )
++
++    driver = AgentCapabilityDriver(
++        definition,
++        agent,
++        _AgentRuntime(),
++        execution_id_factory=_factory("child"),
++    )
++    parent_cancel = __import__("asyncio").Event()
++    context = CapabilityExecutionContext.create(
++        identity=_identity(),
++        execution_id="exec-e1",
++        invocation_id="inv-i1",
++        request_id="request-1",
++        session_id="session-1",
++        task_id="task-1",
++        branch_id="branch-1",
++        correlation_id="corr-1",
++        trace_id="trace-1",
++        connection_id="conn-1",
++        workflow_id="workflow-1",
++        cancellation_event=parent_cancel,
++    )
++
++    output = await driver.execute(context, {"prompt": "delegate"})
++    child = captured["context"]
++
++    assert output["execution_id"] == "exec_child"
++    assert child.execution_id == "exec_child"
++    assert child.execution_id != "exec-e1"
++    assert child.parent_execution_id == "exec-e1"
++    assert child.causation_id == "inv-i1"
++    assert child.task_id == "task-1"
++    assert child.branch_id == "branch-1"
++    assert child.correlation_id == "corr-1"
++    assert child.trace_id == "trace-1"
++    assert child.request_id == "request-1"
++    assert child.session_id == "session-1"
++    assert child.workflow_id == "workflow-1"
++    assert child.connection_id == "conn-1"
++    assert child.retry_of_execution_id is None
++    assert child.base_execution_id is None
++    assert child.base_checkpoint_id is None
++    assert child.cancellation_event is parent_cancel
++
++
++@pytest.mark.asyncio
++async def test_c3_capability_invocation_remains_owned_by_e1_while_child_is_e2():
++    agent = AgentDefinition(
++        name="agent-child",
++        goal="child",
++        instruction="child",
++    )
++    definition = CapabilityDefinition(
++        id=agent.name,
++        name=agent.name,
++        description=agent.goal,
++        kind=CapabilityKind.AGENT,
++        execution_mode=CapabilityExecutionMode.LONG_RUNNING,
++    )
++    captured = {}
++
++    class _AgentRuntime:
++        async def execute(self, context):
++            captured["context"] = context
++            return SimpleNamespace(
++                error_code=None,
++                error_message=None,
++                model_dump=lambda mode=None: {
++                    "execution_id": context.execution_id,
++                    "output": "done",
++                },
++            )
++
++    store = InMemoryCapabilityInvocationStore()
++    runtime = CapabilityRuntime(
++        invocation_lifecycle=CapabilityInvocationLifecycle(store)
++    )
++    runtime.register_capability(
++        AgentCapabilityDriver(
++            definition,
++            agent,
++            _AgentRuntime(),
++            execution_id_factory=_factory("child"),
++        )
++    )
++
++    result = await runtime.execute_capability(
++        definition.capability_id,
++        {"prompt": "delegate"},
++        _identity(),
++        execution_id="exec-e1",
++        invocation_id="inv-i1",
++        request_id="request-1",
++        session_id="session-1",
++        task_id="task-1",
++        branch_id="branch-1",
++        correlation_id="corr-1",
++        trace_id="trace-1",
++        workflow_id="workflow-1",
++    )
++
++    invocation = store.items["inv-i1"]
++    child = captured["context"]
++    assert invocation.execution_id == "exec-e1"
++    assert invocation.invocation_id == "inv-i1"
++    assert child.execution_id == "exec_child"
++    assert child.parent_execution_id == "exec-e1"
++    assert child.causation_id == "inv-i1"
++    assert result.output["execution_id"] == "exec_child"
++

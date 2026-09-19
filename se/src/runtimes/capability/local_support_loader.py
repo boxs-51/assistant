@@ -33,7 +33,12 @@ class LazyAgentCapabilityDriver(BaseCapabilityDriver):
     ) -> Any:
         agent = self._loader.load_agent(self.definition.capability_id)
         delegate = AgentCapabilityDriver(
-            self.definition, agent, self._loader.container.agent_runtime
+            self.definition,
+            agent,
+            self._loader.container.agent_runtime,
+            execution_id_factory=getattr(
+                self._loader.container, "agent_execution_id_factory", None
+            ),
         )
         return await delegate.execute(context, arguments)
 

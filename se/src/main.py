@@ -77,6 +77,7 @@ from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.continuation import AgentContinuationService
+from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
 from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
 from .runtimes.agent.capabilities import RegistryAgentCapabilityResolver, RegistryAgentSkillResolver
@@ -218,6 +219,7 @@ async def bootstrap_runtime_kernel(
     capability_registry = CapabilityRegistry()
     capability_catalog = CapabilityCatalog()
     authorization_service = AuthorizationService()
+    agent_execution_id_factory = AgentExecutionIdFactory()
 
     # 1. Tạo ApplicationContainer trước
     container = ApplicationContainer(
@@ -233,9 +235,11 @@ async def bootstrap_runtime_kernel(
         tool_registry=ToolRegistry(),
         capability_registry=capability_registry,
         authorization_service=authorization_service,
+        agent_execution_id_factory=agent_execution_id_factory,
         multi_agent_coordinator=MultiAgentCoordinator(
             agent_registry,
             durable_store=DurableAgentStore(eventing_manager.uow_factory),
+            execution_id_factory=agent_execution_id_factory,
         ),
         **(security_services or {}),
     )
@@ -277,7 +281,7 @@ async def bootstrap_runtime_kernel(
         ("context_runtime", ContextRuntime()),
         ("connection_runtime", connection_runtime),
         ("session_runtime", SessionRuntime()),
-        ("workflow_runtime", WorkflowRuntime()),
+        ("workflow_runtime", WorkflowRuntime(agent_execution_id_factory)),
         (
             "capability_runtime",
             CapabilityRuntime(

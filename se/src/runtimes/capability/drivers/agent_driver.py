@@ -5,6 +5,7 @@ from typing import Any, Mapping
 from ....domain.schemas.agent import AgentDefinition
 from ....domain.schemas.agent_execution import AgentExecutionLimits
 from ...agent.contracts.context import AgentExecutionContext
+from ...agent.ids import AgentExecutionIdFactory
 from ..contracts.context import CapabilityExecutionContext
 from ..contracts.definition import CapabilityDefinition
 from .base import BaseCapabilityDriver
@@ -13,10 +14,19 @@ from .base import BaseCapabilityDriver
 class AgentCapabilityDriver(BaseCapabilityDriver):
     """Expose one registered server Agent through CapabilityRuntime."""
 
-    def __init__(self, definition, agent: AgentDefinition, agent_runtime: Any):
+    def __init__(
+        self,
+        definition,
+        agent: AgentDefinition,
+        agent_runtime: Any,
+        execution_id_factory: AgentExecutionIdFactory | None = None,
+    ):
         super().__init__(definition)
         self._agent = agent
         self._agent_runtime = agent_runtime
+        self._execution_id_factory = (
+            execution_id_factory or AgentExecutionIdFactory()
+        )
 
     async def execute(
         self,
@@ -24,21 +34,30 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
         arguments: Mapping[str, Any],
     ) -> Any:
         execution_context = AgentExecutionContext.create(
-            execution_id=context.execution_id,
+            execution_id=self._execution_id_factory.new_id(),
             agent_id=self._agent.name,
             session_id=context.session_id or "",
             correlation_id=(
-                context.metadata.get("correlation_id")
+                context.correlation_id
+                or context.metadata.get("correlation_id")
                 or context.invocation_id
             ),
             identity=context.identity,
             limits=AgentExecutionLimits(),
             request_id=context.request_id,
+            task_id=context.task_id,
+            branch_id=context.branch_id,
+            parent_execution_id=context.execution_id,
             agent=self._agent,
             input=dict(arguments),
             connection_id=context.connection_id,
             workflow_id=context.workflow_id,
             metadata={**context.metadata, "invocation_id": context.invocation_id},
+            causation_id=context.invocation_id,
+            trace_id=(
+                context.trace_id
+                or context.metadata.get("trace_id")
+            ),
         )
         execution_context.cancellation_event = context.cancellation_event
         result = await self._agent_runtime.execute(execution_context)

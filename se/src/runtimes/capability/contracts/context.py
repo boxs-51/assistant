@@ -18,6 +18,10 @@ class CapabilityExecutionContext:
     invocation_id: str
     request_id: str | None = None
     session_id: str | None = None
+    task_id: str | None = None
+    branch_id: str | None = None
+    correlation_id: str | None = None
+    trace_id: str | None = None
     connection_id: str | None = None
     workflow_id: str | None = None
     deadline: float | None = None
@@ -34,6 +38,10 @@ class CapabilityExecutionContext:
         invocation_id: str | None = None,
         request_id: str | None = None,
         session_id: str | None = None,
+        task_id: str | None = None,
+        branch_id: str | None = None,
+        correlation_id: str | None = None,
+        trace_id: str | None = None,
         connection_id: str | None = None,
         workflow_id: str | None = None,
         timeout_seconds: float | None = None,
@@ -49,6 +57,10 @@ class CapabilityExecutionContext:
             invocation_id=invocation_id or f"capinv_{uuid.uuid4().hex}",
             request_id=request_id or getattr(identity, "request_id", None),
             session_id=session_id or getattr(identity, "session_id", None),
+            task_id=task_id,
+            branch_id=branch_id,
+            correlation_id=correlation_id,
+            trace_id=trace_id,
             connection_id=connection_id,
             workflow_id=workflow_id,
             deadline=deadline,

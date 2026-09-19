@@ -22,15 +22,25 @@ from ...domain.schemas.agent_execution import (
 )
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from .state_machine import AgentExecutionStateMachine
+from .ids import AgentExecutionIdFactory
 
 
 class MultiAgentCoordinator:
     """Opt-in control plane for multi-agent sessions and delegation."""
 
-    def __init__(self, agent_registry: AgentRegistry, durable_store=None, executor=None):
+    def __init__(
+        self,
+        agent_registry: AgentRegistry,
+        durable_store=None,
+        executor=None,
+        execution_id_factory: AgentExecutionIdFactory | None = None,
+    ):
         self.agent_registry = agent_registry
         self.durable_store = durable_store
         self.executor = executor
+        self.execution_id_factory = (
+            execution_id_factory or AgentExecutionIdFactory()
+        )
         self.agent_authorizer = None
         self._sessions: Dict[str, AgentSession] = {}
         self._tasks: Dict[str, AgentTask] = {}
@@ -233,7 +243,7 @@ class MultiAgentCoordinator:
         task = self.get_task(task_id, identity)
         task.status = AgentTaskStatus.RUNNING
         execution = AgentExecution(
-            execution_id=f"exec_{uuid.uuid4().hex}",
+            execution_id=self.execution_id_factory.new_id(),
             session_id=task.session_id,
             agent_id=task.assigned_agent_id,
             task_id=task.task_id,

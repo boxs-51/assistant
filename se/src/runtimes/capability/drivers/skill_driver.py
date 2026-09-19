@@ -37,7 +37,23 @@ class ExecutableSkillCapabilityDriver(BaseCapabilityDriver):
                 model=context.metadata.get("model"),
                 timeout_seconds=context.remaining_seconds,
                 cancellation_event=context.cancellation_event,
-                metadata={**context.metadata, "invocation_id": context.invocation_id},
+                metadata={
+                    **context.metadata,
+                    "invocation_id": context.invocation_id,
+                    **(
+                        {"task_id": context.task_id}
+                        if context.task_id is not None else {}
+                    ),
+                    **(
+                        {"branch_id": context.branch_id}
+                        if context.branch_id is not None else {}
+                    ),
+                    **(
+                        {"correlation_id": context.correlation_id}
+                        if context.correlation_id is not None else {}
+                    ),
+                    **({"trace_id": context.trace_id} if context.trace_id is not None else {}),
+                },
             )
         )
         return {

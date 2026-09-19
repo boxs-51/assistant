@@ -125,6 +125,10 @@ class CapabilityRuntime(BaseRuntime):
                 turn_id=event.turn_id,
                 request_id=event.payload.get("request_id"),
                 session_id=event.session_id,
+                task_id=event.payload.get("task_id"),
+                branch_id=event.payload.get("branch_id"),
+                correlation_id=event.payload.get("correlation_id"),
+                trace_id=event.payload.get("trace_id"),
                 workflow_id=event.payload.get("workflow_id"),
             )
 
@@ -305,6 +309,10 @@ class CapabilityRuntime(BaseRuntime):
         turn_id: str | None = None,
         request_id: str | None = None,
         session_id: str | None = None,
+        task_id: str | None = None,
+        branch_id: str | None = None,
+        correlation_id: str | None = None,
+        trace_id: str | None = None,
         connection_id: str | None = None,
         workflow_id: str | None = None,
         timeout_seconds: float | None = None,
@@ -313,6 +321,14 @@ class CapabilityRuntime(BaseRuntime):
     ) -> CapabilityResult:
         started = time.perf_counter()
         request_metadata = dict(metadata or {})
+        effective_correlation_id = (
+            correlation_id
+            if correlation_id is not None
+            else request_metadata.get("correlation_id")
+        )
+        effective_trace_id = (
+            trace_id if trace_id is not None else request_metadata.get("trace_id")
+        )
         metadata_connection_id = request_metadata.get("connection_id")
         if (
             connection_id is not None
@@ -339,6 +355,10 @@ class CapabilityRuntime(BaseRuntime):
             invocation_id=invocation_id,
             request_id=request_id,
             session_id=session_id,
+            task_id=task_id,
+            branch_id=branch_id,
+            correlation_id=effective_correlation_id,
+            trace_id=effective_trace_id,
             connection_id=(
                 connection_id
                 or metadata_connection_id
@@ -382,8 +402,8 @@ class CapabilityRuntime(BaseRuntime):
                 if timeout_seconds is not None
                 else None
             ),
-            correlation_id=request_metadata.get("correlation_id"),
-            trace_id=request_metadata.get("trace_id"),
+            correlation_id=context.correlation_id,
+            trace_id=context.trace_id,
         )
         await self.invocation_lifecycle.create(invocation)
         invocation.attempt = 1

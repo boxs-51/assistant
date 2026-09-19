@@ -54,7 +54,7 @@ class RemoteClientDriver(BaseCapabilityDriver):
             connection_id=context.connection_id,
             execution_id=context.execution_id,
             invocation_id=context.invocation_id,
-            trace_id=context.metadata.get("trace_id"),
+            trace_id=context.trace_id or context.metadata.get("trace_id"),
             payload={
                 "capability_id": self.name,
                 "arguments": dict(arguments),

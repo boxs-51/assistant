@@ -50,6 +50,7 @@ class ApplicationContainer:
     continuation_service: Optional[Any] = None
     agent_runtime: Optional[Any] = None
     agent_durable_store: Optional[Any] = None
+    agent_execution_id_factory: Optional[Any] = None
     context_assembler: Optional[Any] = None
     support_loader: Optional[Any] = None
 

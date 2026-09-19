@@ -233,7 +233,14 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
         implementations = []
         agent_runtime = getattr(container, "agent_runtime", None)
         if agent_runtime is not None:
-            driver = AgentCapabilityDriver(definition, body, agent_runtime)
+            driver = AgentCapabilityDriver(
+                definition,
+                body,
+                agent_runtime,
+                execution_id_factory=getattr(
+                    container, "agent_execution_id_factory", None
+                ),
+            )
             container.capability_runtime.register_capability(driver)
             implementation_id = f"server:agent:{definition.capability_id}"
             implementation = CapabilityImplementation.from_definition(

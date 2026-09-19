@@ -65,9 +65,15 @@ def apply_hunks_to_content(
     allow_rejects: bool = False,
 ) -> tuple[str, list[list[str]]]:
     """Áp dụng các hunk vào nội dung file. Trả về (nội_dung_mới, danh_sách_hunk_thất_bại)."""
-    file_lines = (
-        original_text.replace("\r\n", "\n").splitlines() if original_text else []
-    )
+    if original_text is not None and len(original_text) > 0:
+        # 1. Nhận diện định dạng xuống dòng gốc của file
+        is_crlf = "\r\n" in original_text
+        # Chuẩn hóa tạm thời về LF (\n) để xử lý trên bộ nhớ
+        file_lines = original_text.replace("\r\n", "\n").split("\n")
+    else:
+        is_crlf = False
+        file_lines = []
+
     search_idx = 0
     failed_hunks: list[list[str]] = []
 
@@ -79,16 +85,19 @@ def apply_hunks_to_content(
         new_lines: list[str] = []
 
         for line in hunk:
-            if line.startswith("-"):
-                old_lines.append(line[1:])
-            elif line.startswith("+"):
-                new_lines.append(line[1:])
-            elif line.startswith(" "):
-                old_lines.append(line[1:])
-                new_lines.append(line[1:])
+            # Xóa bỏ ký tự \r dư thừa nếu patch được tạo trên Windows
+            clean_line = line.rstrip("\r")
+
+            if clean_line.startswith("-"):
+                old_lines.append(clean_line[1:])
+            elif clean_line.startswith("+"):
+                new_lines.append(clean_line[1:])
+            elif clean_line.startswith(" "):
+                old_lines.append(clean_line[1:])
+                new_lines.append(clean_line[1:])
             else:
-                old_lines.append(line)
-                new_lines.append(line)
+                old_lines.append(clean_line)
+                new_lines.append(clean_line)
 
         if not old_lines:
             file_lines[search_idx:search_idx] = new_lines
@@ -114,7 +123,13 @@ def apply_hunks_to_content(
             file_lines[match_idx : match_idx + len(old_lines)] = new_lines
             search_idx = match_idx + len(new_lines)
 
-    return "\n".join(file_lines), failed_hunks
+    result_text = "\n".join(file_lines)
+
+    # 2. Khôi phục lại đúng chuẩn CRLF (\r\n) nếu file ban đầu sử dụng CRLF
+    if is_crlf:
+        result_text = result_text.replace("\r\n", "\n").replace("\n", "\r\n")
+
+    return result_text, failed_hunks
 
 
 def parse_patch(content: str) -> list[PatchAction]:
@@ -254,32 +269,33 @@ def parse_patch(content: str) -> list[PatchAction]:
                 continue
 
         if current_action:
+            clean_line = line.rstrip("\r")
             if current_action.action_type == "ADD":
-                if line.startswith("@@"):
+                if clean_line.startswith("@@"):
                     i += 1
                     continue
-                if line.startswith("index ") or line.startswith("new file mode"):
+                if clean_line.startswith("index ") or clean_line.startswith("new file mode"):
                     i += 1
                     continue
 
-                if line.startswith("+") or line.startswith(" "):
-                    current_action.add_lines.append(line[1:])
-                elif line == "":
+                if clean_line.startswith("+") or clean_line.startswith(" "):
+                    current_action.add_lines.append(clean_line[1:])
+                elif clean_line == "":
                     current_action.add_lines.append("")
                 else:
-                    current_action.add_lines.append(line)
+                    current_action.add_lines.append(clean_line)
 
             elif current_action.action_type in ("UPDATE", "DELETE"):
-                if line.startswith("@@"):
+                if clean_line.startswith("@@"):
                     current_action.finish_hunk()
                 elif (
-                    line.startswith("index ")
-                    or line.startswith("new file mode")
-                    or line.startswith("deleted file mode")
+                    clean_line.startswith("index ")
+                    or clean_line.startswith("new file mode")
+                    or clean_line.startswith("deleted file mode")
                 ):
                     pass
                 else:
-                    current_action.current_hunk.append(line)
+                    current_action.current_hunk.append(clean_line)
 
         i += 1
 
@@ -300,17 +316,14 @@ def reverse_patch_actions(actions: list[PatchAction]) -> list[PatchAction]:
     """Đảo ngược danh sách các PatchAction (Hoàn tác bản patch)."""
     reversed_actions: list[PatchAction] = []
 
-    # Duyệt ngược lại các hành động
     for action in reversed(actions):
         rev_action = PatchAction("", action.filepath)
 
         if action.action_type == "ADD":
-            # File được thêm -> Hoàn tác: Xóa file
             rev_action.action_type = "DELETE"
             rev_action.add_lines = action.add_lines[:]
 
         elif action.action_type == "DELETE":
-            # File bị xóa -> Hoàn tác: Tạo lại file với nội dung cũ
             rev_action.action_type = "ADD"
             restored_lines: list[str] = []
 
@@ -319,27 +332,28 @@ def reverse_patch_actions(actions: list[PatchAction]) -> list[PatchAction]:
             elif action.hunks:
                 for hunk in action.hunks:
                     for line in hunk:
-                        if line.startswith("-"):
-                            restored_lines.append(line[1:])
-                        elif line.startswith(" "):
-                            restored_lines.append(line[1:])
-                        elif not line.startswith("+"):
-                            restored_lines.append(line)
+                        clean_line = line.rstrip("\r")
+                        if clean_line.startswith("-"):
+                            restored_lines.append(clean_line[1:])
+                        elif clean_line.startswith(" "):
+                            restored_lines.append(clean_line[1:])
+                        elif not clean_line.startswith("+"):
+                            restored_lines.append(clean_line)
 
             rev_action.add_lines = restored_lines
 
         elif action.action_type == "UPDATE":
-            # File được sửa -> Hoàn tác: Đảo dấu '+' và '-' trong tất cả các hunk
             rev_action.action_type = "UPDATE"
             for hunk in action.hunks:
                 rev_hunk: list[str] = []
                 for line in hunk:
-                    if line.startswith("+"):
-                        rev_hunk.append("-" + line[1:])
-                    elif line.startswith("-"):
-                        rev_hunk.append("+" + line[1:])
+                    clean_line = line.rstrip("\r")
+                    if clean_line.startswith("+"):
+                        rev_hunk.append("-" + clean_line[1:])
+                    elif clean_line.startswith("-"):
+                        rev_hunk.append("+" + clean_line[1:])
                     else:
-                        rev_hunk.append(line)
+                        rev_hunk.append(clean_line)
                 rev_action.hunks.append(rev_hunk)
 
         reversed_actions.append(rev_action)
@@ -375,12 +389,10 @@ def apply_custom_patch(
         print("⚠️ Cảnh báo: Không tìm thấy khối patch hợp lệ nào trong file.")
         return False
 
-    # ĐẢO NGƯỢC PATCH NẾU Ở CHẾ ĐỘ REVERSE
     if reverse:
         print("🔄 Đã bật chế độ HOÀN TÁC (Reverse Mode). Đang đảo ngược bản patch...")
         actions = reverse_patch_actions(actions)
 
-    # BƯỚC 1: Mô phỏng xử lý trên bộ nhớ (Pre-check)
     prepared_changes = []
     has_errors = False
 
@@ -396,7 +408,10 @@ def apply_custom_patch(
 
         try:
             if action.action_type == "ADD":
-                item["content_to_write"] = "\n".join(action.add_lines)
+                content_str = "\n".join(action.add_lines)
+                if content_str and not content_str.endswith("\n"):
+                    content_str += "\n"
+                item["content_to_write"] = content_str
 
             elif action.action_type == "DELETE":
                 if not os.path.exists(action.filepath) and not force:
@@ -430,7 +445,6 @@ def apply_custom_patch(
 
         prepared_changes.append(item)
 
-    # BƯỚC 2: Chế độ --check
     if check_only:
         print("🔍 --- KẾT QUẢ KIỂM TRA (CHECK MODE) ---")
         for item in prepared_changes:
@@ -452,7 +466,6 @@ def apply_custom_patch(
         print("\n🎉 Kiểm tra thành công: Tất cả các thay đổi đều hợp lệ!")
         return True
 
-    # Chế độ Mặc định (Không có --force)
     if has_errors and not force:
         print("❌ BÁO LỖI: Phát hiện lỗi trong quá trình phân tích/khớp patch!")
         print(
@@ -474,7 +487,6 @@ def apply_custom_patch(
         )
         return False
 
-    # BƯỚC 3: Ghi thay đổi ra đĩa
     success_count = 0
     rej_count = 0
     failed_count = 0
@@ -500,7 +512,8 @@ def apply_custom_patch(
             if item["content_to_write"] is not None and not (
                 item["error"] and item["action_type"] == "UPDATE"
             ):
-                with open(filepath, "w", encoding="utf-8") as f:
+                # Ghi file với newline="" để tránh việc Python tự chuyển đổi LF sang CRLF trên Windows
+                with open(filepath, "w", encoding="utf-8", newline="") as f:
                     f.write(item["content_to_write"])
 
             if item["failed_hunks"]:
@@ -508,7 +521,7 @@ def apply_custom_patch(
                 rej_content = format_rejected_hunks(
                     filepath, item["failed_hunks"]
                 )
-                with open(rej_filepath, "w", encoding="utf-8") as f:
+                with open(rej_filepath, "w", encoding="utf-8", newline="") as f:
                     f.write(rej_content)
                 print(
                     f"⚠️ Đã áp dụng một phần: {filepath} (Đã tạo file lỗi: {rej_filepath})"
@@ -523,7 +536,7 @@ def apply_custom_patch(
                     if item["action"].hunks
                     else [[l] for l in item["action"].add_lines],
                 )
-                with open(rej_filepath, "w", encoding="utf-8") as f:
+                with open(rej_filepath, "w", encoding="utf-8", newline="") as f:
                     f.write(f"# Lỗi: {item['error']}\n" + rej_content)
                 print(
                     f"❌ Bị lỗi [{filepath}]: {item['error']} (Đã tạo file lỗi: {rej_filepath})"
