@@ -2,10 +2,10 @@
 
 **Repository:** `boxs-51/assistant`  
 **Original freeze baseline:** `e5f7898667556b120261663d8c6d712ddb16363d`  
-**Implementation audit baseline:** `340d035b837d8c52d9cf26bff9db9f2678ece964`  
+**Validated implementation baseline:** `782a3fe64ad740875a4489d2676d29b01cb6178c`  
 **Depends on:** R2.1 Stabilization Gate PASS  
-**Document status:** FROZEN CONTRACT + D0 provenance clarification  
-**Implementation status:** **A1→C3 IMPLEMENTED; D0→D3 EXIT GATE PENDING**
+**Document status:** FROZEN / COMPLETE  
+**Implementation status:** **R3 COMPLETE — A1→D3 PASS**
 
 ---
 

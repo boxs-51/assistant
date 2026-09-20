@@ -1,27 +1,27 @@
 # R3 — Execution Lineage Exit Gate
 
-**Baseline:** `340d035b837d8c52d9cf26bff9db9f2678ece964`  
-**Status:** PENDING — do not mark R3 COMPLETE until every gate below is green.
+**Validated implementation:** `782a3fe64ad740875a4489d2676d29b01cb6178c`  
+**Status:** **COMPLETE — all D0→D3 gates green on 2026-09-20.**
 
 ## D0 — parent provenance
 
-- [ ] direct AGENT capability creates root E2 with `parent_execution_id=null`
-- [ ] nested Agent capability receives typed `caller_agent_execution_id=E1`
-- [ ] mismatched typed caller/execution IDs fail closed
-- [ ] `connection_id` never creates ancestry
+- [x] direct AGENT capability creates root E2 with `parent_execution_id=null`
+- [x] nested Agent capability receives typed `caller_agent_execution_id=E1`
+- [x] mismatched typed caller/execution IDs fail closed
+- [x] `connection_id` never creates ancestry
 
 ## D1 — deterministic lineage contract
 
-- [ ] `E1 != E2`
-- [ ] `I1 != E1`
-- [ ] `I1 != E2`
-- [ ] `I1.execution_id == E1`
-- [ ] `E2.parent_execution_id == E1`
-- [ ] task/branch/correlation/trace/request/workflow propagate
-- [ ] `E2.causation_id == I1`
-- [ ] retry/base fields remain null for fresh delegation
-- [ ] non-Agent capability context remains valid with null Agent provenance
-- [ ] composition propagates provenance without fabricating it
+- [x] `E1 != E2`
+- [x] `I1 != E1`
+- [x] `I1 != E2`
+- [x] `I1.execution_id == E1`
+- [x] `E2.parent_execution_id == E1`
+- [x] task/branch/correlation/trace/request/workflow propagate
+- [x] `E2.causation_id == I1`
+- [x] retry/base fields remain null for fresh delegation
+- [x] non-Agent capability context remains valid with null Agent provenance
+- [x] composition propagates provenance without fabricating it
 
 ## D2 — real durable nested graph
 
@@ -116,3 +116,32 @@ R3 is COMPLETE only when:
 4. realtime/remote regressions pass.
 5. the complete `se/tests + tools + cl/tests` suite passes.
 6. completion evidence is recorded with the final commit SHA and test counts.
+
+## Completion evidence
+
+Validated on Windows / Python 3.12.10:
+
+```text
+D0/D1 focused contract:
+    6 passed
+
+D2 real SQLite nested durable lineage:
+    1 passed
+
+D3 Alembic upgrade-to-head smoke:
+    1 passed
+
+R3 A→C + R0/R2.1 targeted regression:
+    45 passed
+
+Realtime / WS / Phase 6.9→6.11 regression:
+    26 passed
+
+Full regression:
+    494 passed, 4 warnings
+```
+
+Known warnings are deprecation/resource-cleanup debt and are not R3 lineage
+failures. No GitHub Actions workflow run was associated with the validated
+implementation SHA at audit time; the completion decision is based on the
+recorded local exit-gate runs plus final HEAD code audit.
