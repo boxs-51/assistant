@@ -1,8 +1,8 @@
 # R5-E Durable Task Cancellation / CAS Exit Gate
 
-**Dependency:** R5-D must be green before applying this patch.
+**Dependency:** R5-D COMPLETE
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -57,18 +57,29 @@ py -m pytest -q se/tests tools cl/tests `
 ## Completion evidence
 
 ```text
-Patch check: <pending>
-Focused:     <pending>
-Broad:       <pending>
+Focused R5-E plus R5-D/R5-C/R5-B/R5-A/R0-R4 regressions:
+    49 passed in 13.84s
+
+Broad repository regression:
+    598 passed, 7 warnings in 61.74s
+    0 failures
+    explicit out-of-scope exclusion:
+        cl/tests/test_mcp_client_ownership.py
+
+Warnings:
+    Starlette anyio BlockingPortal deprecation
+    passlib argon2 version deprecation
+    Starlette HTTP_422 constant deprecation
+    Alembic path_separator deprecation
 ```
 
-## Phase status after implementation
+## Phase status after completion
 
 ```text
 R5-A COMPLETE
 R5-B COMPLETE
 R5-C COMPLETE
-R5-D COMPLETE only after its evidence gate
-R5-E IMPLEMENTED / PENDING TEST EVIDENCE
-R5 overall PENDING FINAL TEST EVIDENCE
+R5-D COMPLETE
+R5-E COMPLETE
+R5 overall COMPLETE
 ```

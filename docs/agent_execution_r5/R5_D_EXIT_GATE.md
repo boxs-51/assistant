@@ -2,7 +2,7 @@
 
 **Baseline:** `6249f62aaa8e6a4eab4c4902f09db0d999654dae`
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -54,9 +54,37 @@ py -m pytest -q se/tests tools cl/tests `
 ## Completion evidence
 
 ```text
-Patch check: <pending>
-Focused:     <pending>
-Broad:       <pending>
+Initial focused run:
+    42 passed, 1 failed
+
+Observed failure:
+    test_r5_d_capability_runtime_preserves_task_budget_error_code
+
+Root cause:
+    TASK_BUDGET_REQUIRED was raised by AgentCapabilityDriver before the
+    TaskBudgetError -> CapabilityError conversion boundary, so
+    CapabilityRuntime normalized it to CAPABILITY_EXECUTION_FAILED.
+
+Regression fix:
+    R5_D_STABLE_ERROR_BOUNDARY_FIX_v1.patch
+
+Targeted boundary gate after fix:
+    4 passed in 1.02s
+
+Focused R5-D/R5-C/R5-B/R5-A/R4/R3 gate:
+    43 passed in 11.28s
+
+Broad repository regression:
+    592 passed, 7 warnings in 65.12s
+    0 failures
+    explicit out-of-scope exclusion:
+        cl/tests/test_mcp_client_ownership.py
+
+Warnings:
+    Starlette anyio BlockingPortal deprecation
+    passlib argon2 version deprecation
+    Starlette HTTP_422 constant deprecation
+    Alembic path_separator deprecation
 ```
 
 ## Phase status
@@ -65,7 +93,7 @@ Broad:       <pending>
 R5-A COMPLETE
 R5-B COMPLETE
 R5-C COMPLETE
-R5-D IMPLEMENTED / PENDING TEST EVIDENCE
+R5-D COMPLETE
 R5-E PENDING
 R5 overall NOT COMPLETE
 ```

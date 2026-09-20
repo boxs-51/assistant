@@ -2,140 +2,13 @@ import asyncio
 import concurrent.futures
 import os
 import shutil
-import sys
 import threading
 import time
-from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
 import anyio
-from anyio.streams.text import TextReceiveStream
-
+from anyio.from_thread import BlockingPortal
 from mcp import Client, ClientSession, StdioServerParameters
-from mcp.client import stdio as mcp_stdio
-from mcp.client.stdio import stdio_client
-from mcp.os.win32 import utilities as mcp_win32
-from mcp.shared.message import SessionMessage
-
-
-@asynccontextmanager
-async def _windows_thread_stdio_client(server: StdioServerParameters):
-    """MCP 2.2 stdio transport for a Windows background event-loop thread.
-
-    MCP's public ``stdio_client`` first attempts ``anyio.open_process()`` and
-    only falls back to ``FallbackProcess`` after ``NotImplementedError``.  On
-    the application's dedicated MCP background thread that native attempt can
-    stall before the context yields.  Use the SDK's own Popen-backed fallback
-    and Job Object helpers directly, while preserving its stream framing and
-    deterministic shutdown helpers.
-
-    This workaround is intentionally Windows-only and isolated here; non-Windows
-    platforms continue to use the public ``stdio_client`` unchanged.
-    """
-    process = await mcp_win32._create_windows_fallback_process(
-        server.command,
-        list(server.args),
-        server.env,
-        sys.stderr,
-        server.cwd,
-    )
-
-    # Preserve MCP SDK 2.2's process-tree ownership semantics.
-    job = mcp_win32._create_job_object()
-    mcp_win32._maybe_assign_process_to_job(process, job)
-
-    read_send, read_stream = anyio.create_memory_object_stream[
-        SessionMessage | Exception
-    ](0)
-    write_stream, write_receive = anyio.create_memory_object_stream[SessionMessage](0)
-    shutting_down = False
-    writer_done = anyio.Event()
-
-    async def stdout_reader() -> None:
-        assert process.stdout is not None
-        stdout = TextReceiveStream(
-            process.stdout,
-            encoding=server.encoding,
-            errors=server.encoding_error_handler,
-        )
-        try:
-            async with read_send:
-                try:
-                    buffer = ""
-                    async for chunk in stdout:
-                        lines = (buffer + chunk).split("\n")
-                        buffer = lines.pop()
-                        for line in lines:
-                            try:
-                                await read_send.send(mcp_stdio._parse_line(line))
-                            except (
-                                anyio.ClosedResourceError,
-                                anyio.BrokenResourceError,
-                            ):
-                                return
-                finally:
-                    await mcp_stdio._drain_stdout(process)
-        except anyio.ClosedResourceError:
-            pass
-        except (anyio.BrokenResourceError, ConnectionError):
-            if not shutting_down:
-                raise
-
-    async def stdin_writer() -> None:
-        assert process.stdin is not None
-        try:
-            async with write_receive:
-                async for session_message in write_receive:
-                    payload = session_message.message.model_dump_json(
-                        by_alias=True,
-                        exclude_unset=True,
-                    )
-                    data = (payload + "\n").encode(
-                        encoding=server.encoding,
-                        errors=server.encoding_error_handler,
-                    )
-                    await process.stdin.send(data)
-        except (
-            anyio.ClosedResourceError,
-            anyio.BrokenResourceError,
-            OSError,
-        ):
-            await read_send.aclose()
-        finally:
-            writer_done.set()
-
-    async def shutdown_transport() -> None:
-        read_stream.close()
-        write_stream.close()
-        with anyio.move_on_after(mcp_stdio._WRITER_FLUSH_TIMEOUT):
-            await writer_done.wait()
-        await mcp_stdio._stop_server_process(process)
-        await mcp_stdio._aclose_all(
-            read_stream,
-            write_stream,
-            read_send,
-            write_receive,
-        )
-        await anyio.lowlevel.checkpoint()
-
-    async with anyio.create_task_group() as task_group:
-        task_group.start_soon(stdout_reader)
-        task_group.start_soon(stdin_writer)
-        try:
-            yield read_stream, write_stream
-        finally:
-            shutting_down = True
-            with anyio.CancelScope(shield=True):
-                await shutdown_transport()
-            task_group.cancel_scope.cancel()
-
-    await anyio.lowlevel.cancel_shielded_checkpoint()
-
-
-def _owned_stdio_client(server: StdioServerParameters):
-    if os.name == "nt":
-        return _windows_thread_stdio_client(server)
-    return stdio_client(server)
 
 
 class MCPClientAdapter:
@@ -273,9 +146,8 @@ class MCPClientAdapter:
             # falls back to the legacy initialize handshake when necessary.
             # The transport and Client contexts are still entered/exited by
             # this same long-lived lifecycle task, preserving AnyIO ownership.
-            transport = _owned_stdio_client(params)
             self._startup_phase = "NEGOTIATING"
-            async with Client(transport, mode="auto", cache=None) as client:
+            async with Client(params, mode="auto", cache=None) as client:
                 self.client = client
                 self.session = client.session
                 self._startup_phase = "DISCOVERING_TOOLS"
@@ -401,7 +273,7 @@ class MCPClientAdapter:
 
 
 class MCPManager:
-    """Own one event-loop thread for every client-side MCP stdio resource."""
+    """Own one AnyIO blocking portal for every client-side MCP stdio resource."""
 
     def __init__(
         self,
@@ -418,9 +290,14 @@ class MCPManager:
         self._state_lock = threading.RLock()
         self._lifecycle_lock = threading.Lock()
         self._owner_ready = threading.Event()
+        self._portal_starting = False
+        self._portal_start_error: Optional[BaseException] = None
+        self._portal: Optional[BlockingPortal] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._owner_thread_id: Optional[int] = None
+        self._owner_stop = threading.Event()
+        self._owner_force_stop = threading.Event()
         self._closing = False
         self._closed = False
         self._active_calls: Dict[
@@ -430,7 +307,7 @@ class MCPManager:
 
     def _owns_loop(self, loop: asyncio.AbstractEventLoop) -> bool:
         with self._state_lock:
-            return self._loop is loop and not self._closed
+            return self._loop is loop and self._portal is not None and not self._closed
 
     @property
     def owner_thread_id(self) -> Optional[int]:
@@ -445,64 +322,86 @@ class MCPManager:
     @property
     def is_running(self) -> bool:
         with self._state_lock:
+            loop = self._loop
             return bool(
-                self._loop is not None
-                and self._thread is not None
-                and self._thread.is_alive()
+                self._portal is not None
+                and loop is not None
+                and not loop.is_closed()
+                and self._owner_thread_id is not None
                 and not self._closed
             )
 
-    def _loop_main(self) -> None:
-        # MCP SDK 2.2.0 has a Windows stdio fallback specifically for event
-        # loops without native asyncio subprocess support.  In a dedicated
-        # background thread, the Proactor subprocess path can stall before the
-        # stdio context yields.  Force SelectorEventLoop on Windows so the SDK
-        # deterministically selects its Popen-backed FallbackProcess path.
-        if os.name == "nt":
-            loop = asyncio.SelectorEventLoop()
-        else:
-            loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        with self._state_lock:
-            self._loop = loop
-            self._owner_thread_id = threading.get_ident()
-            self._owner_ready.set()
+    def _portal_thread_main(self) -> None:
+        async def run_owner() -> None:
+            try:
+                async with BlockingPortal() as portal:
+                    loop = asyncio.get_running_loop()
+                    with self._state_lock:
+                        if self._closing or self._closed:
+                            raise RuntimeError(
+                                "MCPManager stopped while its owner portal was starting."
+                            )
+                        self._portal = portal
+                        self._loop = loop
+                        self._owner_thread_id = threading.get_ident()
+                        self._portal_starting = False
+                        self._owner_ready.set()
+
+                    # A plain threading.Event is the shutdown control plane.  The
+                    # caller never has to synchronously enter the portal just to
+                    # stop it, so shutdown remains bounded even if the owner loop
+                    # is unhealthy.
+                    await anyio.to_thread.run_sync(self._owner_stop.wait)
+                    if self._owner_force_stop.is_set():
+                        await portal.stop(cancel_remaining=True)
+            except BaseException as exc:
+                with self._state_lock:
+                    self._portal_start_error = exc
+                    self._portal_starting = False
+                    self._owner_ready.set()
+                raise
+            finally:
+                with self._state_lock:
+                    self._portal = None
+                    self._loop = None
+                    self._owner_thread_id = None
+                    self._portal_starting = False
+                    self._owner_ready.set()
 
         try:
-            loop.run_forever()
-        finally:
-            pending = [
-                task
-                for task in asyncio.all_tasks(loop)
-                if not task.done()
-            ]
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(
-                    asyncio.gather(*pending, return_exceptions=True)
-                )
-            loop.run_until_complete(loop.shutdown_asyncgens())
-            loop.run_until_complete(loop.shutdown_default_executor())
-            asyncio.set_event_loop(None)
-            loop.close()
-            with self._state_lock:
-                self._loop = None
-                self._owner_thread_id = None
+            anyio.run(run_owner, backend="asyncio")
+        except BaseException:
+            # The exact exception is already published through
+            # _portal_start_error.  Never let a background-thread traceback be
+            # the only signal available to the synchronous manager boundary.
+            pass
 
     def _ensure_owner_loop(self) -> asyncio.AbstractEventLoop:
         should_start = False
+        thread: Optional[threading.Thread] = None
         with self._state_lock:
             if self._closed:
                 raise RuntimeError("MCPManager is closed.")
             if self._closing:
                 raise RuntimeError("MCPManager is shutting down.")
 
-            thread = self._thread
-            if thread is None or not thread.is_alive():
+            existing = self._thread
+            if (
+                self._portal is not None
+                and self._loop is not None
+                and existing is not None
+                and existing.is_alive()
+            ):
+                return self._loop
+
+            if not self._portal_starting:
+                self._portal_starting = True
+                self._portal_start_error = None
                 self._owner_ready.clear()
+                self._owner_stop.clear()
+                self._owner_force_stop.clear()
                 thread = threading.Thread(
-                    target=self._loop_main,
+                    target=self._portal_thread_main,
                     name="mcp-client-event-loop",
                     daemon=True,
                 )
@@ -510,15 +409,30 @@ class MCPManager:
                 should_start = True
 
         if should_start:
+            assert thread is not None
             thread.start()
 
         if not self._owner_ready.wait(self.startup_timeout_seconds):
+            self._owner_force_stop.set()
+            self._owner_stop.set()
+            if thread is not None:
+                thread.join(timeout=self.startup_timeout_seconds)
             raise TimeoutError("Timed out starting MCP owner event loop.")
 
         with self._state_lock:
+            if self._portal_start_error is not None:
+                raise RuntimeError(
+                    "MCP owner event loop failed to start."
+                ) from self._portal_start_error
             loop = self._loop
-            thread = self._thread
-            if loop is None or thread is None or not thread.is_alive():
+            owner_thread = self._thread
+            if (
+                self._portal is None
+                or loop is None
+                or self._owner_thread_id is None
+                or owner_thread is None
+                or not owner_thread.is_alive()
+            ):
                 raise RuntimeError("MCP owner event loop failed to start.")
             return loop
 
@@ -537,28 +451,26 @@ class MCPManager:
             if self._closing and not allow_closing:
                 raise RuntimeError("MCPManager is shutting down.")
 
-            loop = self._loop
-            thread = self._thread
-            if loop is None or thread is None or not thread.is_alive():
+            portal = self._portal
+            owner_thread_id = self._owner_thread_id
+            if portal is None or self._loop is None or owner_thread_id is None:
                 raise RuntimeError("MCP owner event loop is not running.")
-            if thread is threading.current_thread():
+            if threading.get_ident() == owner_thread_id:
                 raise RuntimeError(
                     "Synchronous MCP bridge cannot block the MCP owner thread."
                 )
 
-            coroutine = coroutine_factory()
-            try:
-                return asyncio.run_coroutine_threadsafe(coroutine, loop)
-            except BaseException:
-                coroutine.close()
-                raise
+        async def runner():
+            return await coroutine_factory()
+
+        return portal.start_task_soon(runner)
 
     def _close_adapter_after_failed_start(self, adapter: MCPClientAdapter) -> None:
         try:
             future = self._submit(lambda: adapter.close())
             future.result(timeout=self.shutdown_timeout_seconds)
         except Exception:
-            # The owner-loop finalizer remains the last cleanup authority.
+            # The portal shutdown remains the final cleanup authority.
             pass
 
     def load_mcp_servers(
@@ -694,12 +606,17 @@ class MCPManager:
             if timeout_seconds is None
             else timeout_seconds
         )
+        started_at = time.monotonic()
+        deadline = started_at + timeout
+        # Reserve part of the total deadline for force-cancel + owner-thread
+        # unwind.  Spending the entire budget on graceful adapter close would
+        # leave zero time to reap the owner thread after a timeout.
+        graceful_deadline = started_at + (timeout * 0.8)
 
         with self._lifecycle_lock:
             with self._state_lock:
                 thread = self._thread
-                loop = self._loop
-                if thread is None and loop is None:
+                if thread is None:
                     self._closed = True
                     return
                 if thread is threading.current_thread():
@@ -718,41 +635,55 @@ class MCPManager:
                 future.cancel()
 
             close_error: Optional[BaseException] = None
+            close_future: Optional[concurrent.futures.Future] = None
             try:
+                remaining = max(0.0, graceful_deadline - time.monotonic())
+                if remaining <= 0:
+                    raise TimeoutError("MCP graceful shutdown deadline expired before close.")
                 close_future = self._submit(
                     self._close_all,
                     allow_closing=True,
                 )
-                close_future.result(timeout=timeout)
+                close_future.result(timeout=remaining)
             except BaseException as exc:
                 close_error = exc
+                if close_future is not None:
+                    close_future.cancel()
+                self._owner_force_stop.set()
             finally:
-                with self._state_lock:
-                    loop = self._loop
-                    thread = self._thread
+                # Never call BlockingPortal.__exit__ from this thread.  Its
+                # helper owns an unbounded thread.join().  Signal the manager-
+                # owned owner thread instead, then apply our own deadline.
+                self._owner_stop.set()
 
-                if loop is not None:
-                    loop.call_soon_threadsafe(loop.stop)
-                if thread is not None:
-                    thread.join(timeout=timeout)
-
-                with self._state_lock:
-                    thread_alive = bool(
-                        self._thread is not None
-                        and self._thread.is_alive()
-                    )
-                    self._closed = not thread_alive
-                    self._closing = thread_alive
-                    if not thread_alive:
-                        self._thread = None
-                        self.adapters.clear()
-                        self._active_calls.clear()
+            remaining = max(0.0, deadline - time.monotonic())
+            thread.join(timeout=remaining)
+            thread_alive = thread.is_alive()
 
             if thread_alive:
+                with self._state_lock:
+                    self._closing = True
+                    self._closed = False
                 raise RuntimeError(
                     "MCP owner thread did not stop within the shutdown timeout."
-                )
+                ) from close_error
+
+            with self._state_lock:
+                self._thread = None
+                self._portal = None
+                self._loop = None
+                self._owner_thread_id = None
+                self._portal_starting = False
+                self._portal_start_error = None
+                self._owner_ready.clear()
+                self._owner_stop.clear()
+                self._owner_force_stop.clear()
+                self.adapters.clear()
+                self._active_calls.clear()
+                self._closing = False
+                self._closed = True
+
             if close_error is not None:
                 raise RuntimeError(
-                    "MCP resources required forced owner-loop shutdown."
+                    "MCP resources required forced portal shutdown."
                 ) from close_error
