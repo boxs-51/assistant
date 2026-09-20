@@ -49,6 +49,7 @@ class ApplicationContainer:
     context_builder_port: Optional[Any] = None
     continuation_service: Optional[Any] = None
     agent_runtime: Optional[Any] = None
+    agent_execution_supervisor: Optional[Any] = None
     agent_durable_store: Optional[Any] = None
     agent_execution_id_factory: Optional[Any] = None
     context_assembler: Optional[Any] = None

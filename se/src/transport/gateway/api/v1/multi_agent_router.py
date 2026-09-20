@@ -149,6 +149,13 @@ async def cancel_agent_task(
     identity: Identity = Depends(get_current_identity),
 ):
     try:
+        cancel_and_wait = getattr(
+            coordinator,
+            "cancel_task_and_wait",
+            None,
+        )
+        if callable(cancel_and_wait):
+            return await cancel_and_wait(task_id, identity)
         return coordinator.cancel_task(task_id, identity)
     except Exception as error:
         raise map_error(error) from error

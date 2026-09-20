@@ -36,6 +36,11 @@ class LazyAgentCapabilityDriver(BaseCapabilityDriver):
             self.definition,
             agent,
             self._loader.container.agent_runtime,
+            execution_supervisor=getattr(
+                self._loader.container,
+                "agent_execution_supervisor",
+                None,
+            ),
             execution_id_factory=getattr(
                 self._loader.container, "agent_execution_id_factory", None
             ),

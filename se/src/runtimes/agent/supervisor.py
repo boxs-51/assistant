@@ -80,6 +80,11 @@ class AgentExecutionSupervisor:
             )
         )
 
+    async def quiesce(self) -> None:
+        """Reject new reservations; already-admitted reservations may start."""
+        async with self._lock:
+            self._closing = True
+
     async def reserve(
         self,
         context: AgentExecutionContext,
@@ -134,7 +139,6 @@ class AgentExecutionSupervisor:
     ) -> asyncio.Task[AgentExecutionResult]:
         """Consume one reservation and start its owned runtime task."""
         async with self._lock:
-            self._ensure_open_locked()
             reservation = self._reservations.get(token.token)
             if reservation is None or reservation.token != token:
                 raise AgentExecutionOwnershipError(

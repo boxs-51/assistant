@@ -487,9 +487,71 @@ class AgentRuntime:
 
         return expected_revision + 1
 
+    async def _cancel_durable_revision(
+        self,
+        context: AgentExecutionContext,
+        revision: int | None,
+        *,
+        error_message: str,
+    ) -> None:
+        if revision is None or not self._has_execution_lifecycle_store():
+            return
+        await self._durable_store.compare_and_set_execution(
+            context.execution_id,
+            revision,
+            {
+                "state": AgentExecutionState.CANCELLED.value,
+                "wait_reason": None,
+                "wait_expires_at": None,
+                "error": error_message,
+                "completed_at": context.clock.now_utc(),
+            },
+        )
+
+    async def cancel_claimed_execution(
+        self,
+        context: AgentExecutionContext,
+        revision: int,
+        *,
+        error_message: str = "RESUME_ACTIVATION_FAILED",
+    ) -> None:
+        """Fail closed when a claimed RUNNING resume cannot acquire an owner."""
+        await self._cancel_durable_revision(
+            context,
+            revision,
+            error_message=error_message,
+        )
+
+    async def _begin_durable_execution_owned(
+        self,
+        context: AgentExecutionContext,
+    ) -> int | None:
+        """Own the durable begin Task across outer coroutine cancellation."""
+        begin_task = asyncio.create_task(
+            self._begin_durable_execution(context),
+            name=f"agent-begin:{context.execution_id}",
+        )
+        try:
+            return await asyncio.shield(begin_task)
+        except asyncio.CancelledError:
+            outcome = await asyncio.gather(
+                begin_task,
+                return_exceptions=True,
+            )
+            revision = outcome[0]
+            if isinstance(revision, int) and not isinstance(revision, bool):
+                await self._cancel_durable_revision(
+                    context,
+                    revision,
+                    error_message=(
+                        "Agent execution cancelled during durable begin."
+                    ),
+                )
+            raise
+
     async def claim_resume(self, context: AgentExecutionContext) -> int:
         """Synchronously claim one durable WAITING execution before WS ACK."""
-        revision = await self._begin_durable_execution(context)
+        revision = await self._begin_durable_execution_owned(context)
         if revision is None:
             raise RuntimeError(
                 "Durable resume requires an AgentExecution lifecycle store."
@@ -589,22 +651,16 @@ class AgentRuntime:
         revision = (
             durable_revision
             if durable_revision is not None
-            else await self._begin_durable_execution(context)
+            else await self._begin_durable_execution_owned(context)
         )
         try:
             result = await self._execute_loop(context)
         except asyncio.CancelledError:
-            if revision is not None:
-                await self._durable_store.compare_and_set_execution(
-                    context.execution_id,
-                    revision,
-                    {
-                        "state": AgentExecutionState.CANCELLED.value,
-                        "wait_reason": None,
-                        "error": "Agent execution cancelled.",
-                        "completed_at": datetime.now(timezone.utc),
-                    },
-                )
+            await self._cancel_durable_revision(
+                context,
+                revision,
+                error_message="Agent execution cancelled.",
+            )
             raise
         except Exception as exc:
             if revision is not None:

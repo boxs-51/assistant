@@ -34,10 +34,12 @@ class MultiAgentCoordinator:
         durable_store=None,
         executor=None,
         execution_id_factory: AgentExecutionIdFactory | None = None,
+        execution_supervisor=None,
     ):
         self.agent_registry = agent_registry
         self.durable_store = durable_store
         self.executor = executor
+        self.execution_supervisor = execution_supervisor
         self.execution_id_factory = (
             execution_id_factory or AgentExecutionIdFactory()
         )
@@ -197,12 +199,49 @@ class MultiAgentCoordinator:
         return task
 
     def cancel_task(self, task_id: str, identity: Identity) -> AgentTask:
+        """Compatibility facade.
+
+        Production transport uses ``cancel_task_and_wait`` so process-local
+        runner and Agent execution ownership are drained before returning.
+        """
         task = self.get_task(task_id, identity)
         running = self._running_tasks.get(task_id)
         if running is not None and not running.done():
             running.cancel()
         task.status = AgentTaskStatus.CANCELLED
         task.updated_at = time.time()
+        return task
+
+    async def cancel_task_and_wait(
+        self,
+        task_id: str,
+        identity: Identity,
+    ) -> AgentTask:
+        task = self.get_task(task_id, identity)
+        runner = self._running_tasks.get(task_id)
+        task.status = AgentTaskStatus.CANCELLED
+        task.updated_at = time.time()
+
+        if runner is not None and not runner.done():
+            runner.cancel()
+
+        supervisor = self.execution_supervisor
+        if supervisor is not None:
+            await supervisor.cancel_task(task_id)
+
+        if runner is not None:
+            await asyncio.gather(runner, return_exceptions=True)
+
+        if self.durable_store:
+            await self.durable_store.update_task(
+                task.task_id,
+                {
+                    "status": task.status.value,
+                    "wait_reasons": task.wait_reasons,
+                    "output": task.output,
+                    "error": task.error,
+                },
+            )
         return task
 
     async def start_task(self, task_id: str, identity: Identity, executor) -> AgentTask:
@@ -221,10 +260,24 @@ class MultiAgentCoordinator:
         def cleanup(_completed):
             if self._running_tasks.get(task_id) is runner:
                 self._running_tasks.pop(task_id, None)
+            if not _completed.cancelled():
+                try:
+                    _completed.exception()
+                except Exception:
+                    pass
 
         runner.add_done_callback(cleanup)
         await asyncio.sleep(0)
         return task
+
+    async def shutdown(self) -> None:
+        runners = list(self._running_tasks.values())
+        for runner in runners:
+            if not runner.done():
+                runner.cancel()
+        if runners:
+            await asyncio.gather(*runners, return_exceptions=True)
+        self._running_tasks.clear()
 
     def close_session(self, session_id: str, identity: Identity) -> AgentSession:
         session = self._require_session(session_id, identity)

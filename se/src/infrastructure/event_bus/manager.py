@@ -57,19 +57,25 @@ class EventingManager:
         self.dispatcher._dependency_container = container
 
     def start(self):
-        if self.dispatcher_task is None:
+        if self.dispatcher_task is None or self.dispatcher_task.done():
             self.dispatcher_task = asyncio.create_task(self.dispatcher.start())
             logger.info("Event dispatcher background task started.")
 
-    async def shutdown(self):
-        """Gracefully shutdown the eventing manager."""
-        logger.info("Shutting down EventingManager...")
+    async def quiesce(self):
+        """Stop queue intake and drain all in-flight dispatcher workers."""
         if self.dispatcher_task and not self.dispatcher_task.done():
             self.dispatcher_task.cancel()
             try:
                 await self.dispatcher_task
             except asyncio.CancelledError:
                 logger.info("Event dispatcher task cancelled.")
+        self.dispatcher_task = None
+        await self.dispatcher.shutdown()
+
+    async def shutdown(self):
+        """Gracefully shutdown the eventing manager."""
+        logger.info("Shutting down EventingManager...")
+        await self.quiesce()
         await self.ws_manager.shutdown()
         logger.info("EventingManager has been shut down.")
 

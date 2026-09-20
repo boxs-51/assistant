@@ -8,6 +8,7 @@ from pydantic import ValidationError
 from .....infrastructure.event_bus.ws_manager import WebSocketConnectionManager
 from .....runtimes.capability.contracts.registration import ClientCapabilityRegistration
 from .....runtimes.connection.protocol import RealtimeEnvelope
+from .....runtimes.agent.supervisor import AgentExecutionSupervisor
 from ...authentication.dependency import get_current_identity, get_websocket_identity
 from .....domain.schemas.identity import Identity
 from ...dependencies import get_container
@@ -107,37 +108,66 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
         user_id=identity.user_id,
         metadata={"client_id": snapshot.metadata.get("client_id")},
     )
-    durable_revision = await container.agent_runtime.claim_resume(context)
-    merged = await service.confirm_merge(
-        execution_id=execution_id,
-        branch_id=branch.branch_id,
-        user_id=identity.user_id,
-    )
-    context.connection_id = connection_id
-    context.metadata["client_id"] = snapshot.metadata.get("client_id")
-
-    await _send_realtime(
-        websocket,
-        RealtimeEnvelope(
-            type="execution.resume.accepted",
-            message_id=f"resume-{uuid.uuid4().hex}",
-            connection_id=connection_id,
+    supervisor = getattr(
+        container,
+        "agent_execution_supervisor",
+        None,
+    ) or AgentExecutionSupervisor()
+    token = await supervisor.reserve(context)
+    durable_revision = None
+    started = False
+    try:
+        durable_revision = await container.agent_runtime.claim_resume(context)
+        merged = await service.confirm_merge(
             execution_id=execution_id,
-            payload={
-                "execution_id": execution_id,
-                "checkpoint_id": merged.checkpoint_id,
-                "state": "RUNNING",
-            },
-        ),
-    )
-    task = asyncio.create_task(
-        container.agent_runtime.execute(
+            branch_id=branch.branch_id,
+            user_id=identity.user_id,
+        )
+        context.connection_id = connection_id
+        context.metadata["client_id"] = snapshot.metadata.get("client_id")
+
+        await _send_realtime(
+            websocket,
+            RealtimeEnvelope(
+                type="execution.resume.accepted",
+                message_id=f"resume-{uuid.uuid4().hex}",
+                connection_id=connection_id,
+                execution_id=execution_id,
+                payload={
+                    "execution_id": execution_id,
+                    "checkpoint_id": merged.checkpoint_id,
+                    "state": "RUNNING",
+                },
+            ),
+        )
+        await supervisor.start_reserved(
+            token,
             context,
-            durable_revision=durable_revision,
-        ),
-        name=f"resume:{execution_id}",
-    )
-    task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
+            lambda: container.agent_runtime.execute(
+                context,
+                durable_revision=durable_revision,
+            ),
+        )
+        started = True
+    except BaseException as exc:
+        if not started:
+            await supervisor.release_reserved(token)
+            if durable_revision is not None:
+                cancel_claim = getattr(
+                    container.agent_runtime,
+                    "cancel_claimed_execution",
+                    None,
+                )
+                if callable(cancel_claim):
+                    await cancel_claim(
+                        context,
+                        durable_revision,
+                        error_message=(
+                            "RESUME_ACTIVATION_FAILED: "
+                            f"{type(exc).__name__}"
+                        ),
+                    )
+        raise
 
 
 @router.websocket("/ws")

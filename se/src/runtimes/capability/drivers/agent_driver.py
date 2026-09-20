@@ -20,10 +20,12 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
         agent: AgentDefinition,
         agent_runtime: Any,
         execution_id_factory: AgentExecutionIdFactory | None = None,
+        execution_supervisor: Any | None = None,
     ):
         super().__init__(definition)
         self._agent = agent
         self._agent_runtime = agent_runtime
+        self._execution_supervisor = execution_supervisor
         self._execution_id_factory = (
             execution_id_factory or AgentExecutionIdFactory()
         )
@@ -82,8 +84,13 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
                 or context.metadata.get("trace_id")
             ),
         )
-        execution_context.cancellation_event = context.cancellation_event
-        result = await self._agent_runtime.execute(execution_context)
+        if self._execution_supervisor is None:
+            result = await self._agent_runtime.execute(execution_context)
+        else:
+            result = await self._execution_supervisor.run(
+                execution_context,
+                lambda: self._agent_runtime.execute(execution_context),
+            )
         if result.error_code:
             error = RuntimeError(result.error_message or result.error_code)
             error.code = result.error_code

@@ -55,8 +55,22 @@ class EventDispatcher:
         self._uow_factory = uow_factory
         self._max_retries = max_retries
         self._idempotency_ttl = idempotency_ttl_seconds
+        self._active_tasks: set[asyncio.Task] = set()
+        self._closing = False
 
         logger.info("EventDispatcher initialized", max_retries=max_retries)
+
+    def _observe_dispatch_task(self, task: asyncio.Task) -> None:
+        self._active_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.result()
+        except Exception:
+            logger.error(
+                "Event dispatch worker failed",
+                exc_info=True,
+            )
 
     def _resolve_dependencies(self, handler: Callable) -> Tuple[Dict[str, Any], List[Tuple[str, Type]]]:
         resolved_deps = {}
@@ -177,13 +191,42 @@ class EventDispatcher:
 
     async def start(self):
         logger.info("EventDispatcher loop starting...")
-        while True:
+        self._closing = False
+        while not self._closing:
             try:
                 _, _, event, future = await self._queue.get()
-                asyncio.create_task(self._dispatch_event_task(event, future))
+                task = asyncio.create_task(
+                    self._dispatch_event_task(event, future),
+                    name=(
+                        "event-dispatch:"
+                        f"{getattr(event, 'event_name', 'unknown')}"
+                    ),
+                )
+                self._active_tasks.add(task)
+                task.add_done_callback(self._observe_dispatch_task)
                 self._queue.task_done()
             except Exception as e:
                 logger.critical("Fatal error in EventDispatcher loop", error=str(e), exc_info=True)
+
+    async def shutdown(self) -> None:
+        self._closing = True
+        tasks = list(self._active_tasks)
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._active_tasks.clear()
+
+        # No publication Future may remain pending after dispatcher shutdown.
+        while True:
+            try:
+                _priority, _sequence, _event, future = self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if future is not None and not future.done():
+                future.cancel()
+            self._queue.task_done()
 
     async def _dispatch_event_task(self, event: BaseEvent, future: asyncio.Future):
         """Worker task riêng biệt cho từng event để tránh ngắt đoạn Queue Loop."""
@@ -214,6 +257,10 @@ class EventDispatcher:
                 if future and not future.done():
                     future.set_result(True)
 
+        except asyncio.CancelledError:
+            if future and not future.done():
+                future.cancel()
+            raise
         except Exception as e:
             logger.error("Unhandled error during event dispatching", event_name=event.event_name, exc_info=True)
             if future and not future.done():

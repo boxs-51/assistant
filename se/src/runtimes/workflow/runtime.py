@@ -256,7 +256,18 @@ class WorkflowRuntime(BaseRuntime):
                     "timezone": body.get("metadata", {}).get("user", {}).get("timezone"),
                 },
             )
-            result = await self.container.agent_runtime.execute(context)
+            supervisor = getattr(
+                self.container,
+                "agent_execution_supervisor",
+                None,
+            )
+            if supervisor is None:
+                result = await self.container.agent_runtime.execute(context)
+            else:
+                result = await supervisor.run(
+                    context,
+                    lambda: self.container.agent_runtime.execute(context),
+                )
             if result.error_code == "WAITING_FOR_CONNECTION":
                 checkpoint = self.container.continuation_service.current_checkpoint(
                     result.execution_id

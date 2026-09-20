@@ -76,6 +76,7 @@ from .runtimes.capability.invocation import CapabilityInvocationLifecycle
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
+from .runtimes.agent.supervisor import AgentExecutionSupervisor
 from .runtimes.agent.continuation import AgentContinuationService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
@@ -220,6 +221,7 @@ async def bootstrap_runtime_kernel(
     capability_catalog = CapabilityCatalog()
     authorization_service = AuthorizationService()
     agent_execution_id_factory = AgentExecutionIdFactory()
+    agent_execution_supervisor = AgentExecutionSupervisor()
 
     # 1. Tạo ApplicationContainer trước
     container = ApplicationContainer(
@@ -236,9 +238,11 @@ async def bootstrap_runtime_kernel(
         capability_registry=capability_registry,
         authorization_service=authorization_service,
         agent_execution_id_factory=agent_execution_id_factory,
+        agent_execution_supervisor=agent_execution_supervisor,
         multi_agent_coordinator=MultiAgentCoordinator(
             agent_registry,
             durable_store=DurableAgentStore(eventing_manager.uow_factory),
+            execution_supervisor=agent_execution_supervisor,
             execution_id_factory=agent_execution_id_factory,
         ),
         **(security_services or {}),
@@ -432,7 +436,10 @@ async def bootstrap_runtime_kernel(
             input=dict(task.input),
             metadata=task_metadata,
         )
-        result = await container.agent_runtime.execute(execution_context)
+        result = await container.agent_execution_supervisor.run(
+            execution_context,
+            lambda: container.agent_runtime.execute(execution_context),
+        )
         return result.model_dump(mode="json")
 
     # Multi-agent HTTP tasks enter the canonical AgentRuntime loop.
@@ -478,6 +485,17 @@ async def lifespan(app: FastAPI):
     finally:
         # 2. Shutdown Sequence (Dọn dẹp trong try...finally)
         logger.info("Initiating Application Shutdown sequence...")
+
+        if container.agent_execution_supervisor:
+            await container.agent_execution_supervisor.quiesce()
+
+        await eventing_manager.quiesce()
+
+        if container.multi_agent_coordinator:
+            await container.multi_agent_coordinator.shutdown()
+
+        if container.agent_execution_supervisor:
+            await container.agent_execution_supervisor.shutdown()
 
         if container.runtime_kernel:
             await container.runtime_kernel.shutdown()

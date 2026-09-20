@@ -214,7 +214,7 @@ async def test_c3_agent_driver_creates_e2_with_delegation_lineage():
     assert child.retry_of_execution_id is None
     assert child.base_execution_id is None
     assert child.base_checkpoint_id is None
-    assert child.cancellation_event is parent_cancel
+    assert child.cancellation_event is not parent_cancel
 
 
 @pytest.mark.asyncio
