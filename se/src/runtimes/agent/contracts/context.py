@@ -1,18 +1,44 @@
 from __future__ import annotations
 
 import asyncio
-import time
+import math
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from ....domain.schemas.agent import AgentDefinition
 from ....domain.schemas.agent_execution import AgentExecutionLimits
 from ....domain.schemas.identity import Identity
+from .clock import ExecutionClock, SystemExecutionClock
 from .inference import InferenceUsage
+
+
+class UnknownActiveBudgetError(RuntimeError):
+    """Active execution budget is unknown and must not be regenerated."""
+
+
+class _UnsetActiveBudget:
+    pass
+
+
+_UNSET_ACTIVE_BUDGET = _UnsetActiveBudget()
+
+
+def _normalize_active_budget(value: float) -> float:
+    normalized = float(value)
+    if not math.isfinite(normalized) or normalized < 0:
+        raise ValueError(
+            "remaining_active_budget_seconds must be a finite non-negative value"
+        )
+    return normalized
+
 
 @dataclass(slots=True)
 class AgentExecutionContext:
-    """Request scope for one agent execution."""
+    """Request scope for one agent execution.
+
+    R4-A2 keeps the legacy ``deadline`` attribute as the process-local active
+    monotonic deadline. Durable state stores a remaining duration instead.
+    """
 
     execution_id: str
     agent_id: str
@@ -34,8 +60,14 @@ class AgentExecutionContext:
     input: Dict[str, Any] = field(default_factory=dict)
     metadata: Dict[str, Any] = field(default_factory=dict)
 
-    started_monotonic: float = field(default_factory=time.monotonic)
+    clock: ExecutionClock = field(
+        default_factory=SystemExecutionClock,
+        repr=False,
+        compare=False,
+    )
+    started_monotonic: float = 0.0
     deadline: float | None = None
+    remaining_active_budget_seconds: float | None = None
     iteration: int = 0
     tool_calls_used: int = 0
     retry_attempts_used: int = 0
@@ -81,9 +113,38 @@ class AgentExecutionContext:
         metadata: Optional[Dict[str, Any]] = None,
         causation_id: str | None = None,
         trace_id: str | None = None,
+        remaining_active_budget_seconds: (
+            float | None | _UnsetActiveBudget
+        ) = _UNSET_ACTIVE_BUDGET,
+        clock: ExecutionClock | None = None,
         now_monotonic: float | None = None,
     ) -> "AgentExecutionContext":
-        started = time.monotonic() if now_monotonic is None else now_monotonic
+        execution_clock = clock or SystemExecutionClock()
+        started = (
+            execution_clock.monotonic()
+            if now_monotonic is None
+            else float(now_monotonic)
+        )
+
+        if remaining_active_budget_seconds is _UNSET_ACTIVE_BUDGET:
+            remaining_budget = _normalize_active_budget(
+                limits.timeout_seconds
+            )
+        elif remaining_active_budget_seconds is None:
+            # Explicit None means legacy/unknown durable provenance.  Do not
+            # silently mint a fresh configured timeout.
+            remaining_budget = None
+        else:
+            remaining_budget = _normalize_active_budget(
+                remaining_active_budget_seconds
+            )
+
+        active_deadline = (
+            None
+            if remaining_budget is None
+            else started + remaining_budget
+        )
+
         return cls(
             execution_id=execution_id,
             agent_id=agent_id,
@@ -103,17 +164,43 @@ class AgentExecutionContext:
             agent=agent,
             input=dict(input or {}),
             metadata=dict(metadata or {}),
+            clock=execution_clock,
             started_monotonic=started,
-            deadline=started + limits.timeout_seconds,
+            deadline=active_deadline,
+            remaining_active_budget_seconds=remaining_budget,
             causation_id=causation_id,
             trace_id=trace_id,
         )
 
     @property
+    def active_deadline_monotonic(self) -> float | None:
+        """Explicit R4 name for the legacy process-local ``deadline``."""
+        return self.deadline
+
+    @active_deadline_monotonic.setter
+    def active_deadline_monotonic(self, value: float | None) -> None:
+        self.deadline = value
+
+    @property
+    def active_budget_running(self) -> bool:
+        return self.deadline is not None
+
+    @property
+    def remaining_active_seconds(self) -> float | None:
+        """Return live remaining budget, or the frozen durable duration."""
+        if self.deadline is not None:
+            return max(0.0, self.deadline - self.clock.monotonic())
+        return self.remaining_active_budget_seconds
+
+    @property
     def remaining_seconds(self) -> float:
-        if self.deadline is None:
-            return float("inf")
-        return max(0.0, self.deadline - time.monotonic())
+        """Backward-compatible execution remaining-time facade.
+
+        Unknown legacy budget fails closed as zero instead of becoming
+        unbounded or regenerating ``limits.timeout_seconds``.
+        """
+        remaining = self.remaining_active_seconds
+        return 0.0 if remaining is None else remaining
 
     @property
     def timed_out(self) -> bool:
@@ -125,6 +212,38 @@ class AgentExecutionContext:
 
     def cancel(self) -> None:
         self.cancellation_event.set()
+
+    def freeze_active_budget(self) -> float | None:
+        """Freeze active elapsed-time consumption into a durable duration."""
+        remaining = self.remaining_active_seconds
+        self.remaining_active_budget_seconds = remaining
+        self.deadline = None
+        return remaining
+
+    def restore_active_budget(
+        self,
+        remaining_active_budget_seconds: (
+            float | None | _UnsetActiveBudget
+        ) = _UNSET_ACTIVE_BUDGET,
+    ) -> float:
+        """Start an active monotonic deadline from a known remaining duration."""
+        if remaining_active_budget_seconds is not _UNSET_ACTIVE_BUDGET:
+            if remaining_active_budget_seconds is None:
+                self.remaining_active_budget_seconds = None
+            else:
+                self.remaining_active_budget_seconds = _normalize_active_budget(
+                    remaining_active_budget_seconds
+                )
+
+        remaining = self.remaining_active_budget_seconds
+        if remaining is None:
+            self.deadline = None
+            raise UnknownActiveBudgetError(
+                "Cannot restore Agent execution with unknown active budget."
+            )
+
+        self.deadline = self.clock.monotonic() + remaining
+        return remaining
 
     def next_iteration(self) -> int:
         self.iteration += 1

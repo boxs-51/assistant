@@ -1,4 +1,5 @@
-from .context import AgentExecutionContext
+from .clock import ExecutionClock, SystemExecutionClock
+from .context import AgentExecutionContext, UnknownActiveBudgetError
 from .loop import AgentIteration, AgentLoopState, transition, validate_transition
 from .inference import (
     InferenceMessage,
@@ -40,7 +41,10 @@ from .context_assembly import (
 )
 
 __all__ = [
+    "ExecutionClock",
+    "SystemExecutionClock",
     "AgentExecutionContext",
+    "UnknownActiveBudgetError",
     "AgentIteration",
     "AgentLoopState",
     "transition",
