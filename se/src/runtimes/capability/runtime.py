@@ -309,6 +309,8 @@ class CapabilityRuntime(BaseRuntime):
         *,
         execution_id: str | None = None,
         caller_agent_execution_id: str | None = None,
+        caller_execution_remaining_seconds: float | None = None,
+        caller_iteration_remaining_seconds: float | None = None,
         invocation_id: str | None = None,
         turn_id: str | None = None,
         request_id: str | None = None,
@@ -366,6 +368,12 @@ class CapabilityRuntime(BaseRuntime):
             execution_id=execution_id,
             invocation_id=invocation_id,
             caller_agent_execution_id=caller_agent_execution_id,
+            caller_execution_remaining_seconds=(
+                caller_execution_remaining_seconds
+            ),
+            caller_iteration_remaining_seconds=(
+                caller_iteration_remaining_seconds
+            ),
             request_id=request_id,
             session_id=session_id,
             task_id=task_id,

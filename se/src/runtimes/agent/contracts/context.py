@@ -70,6 +70,7 @@ class AgentExecutionContext:
     deadline: float | None = None
     remaining_active_budget_seconds: float | None = None
     wait_expires_at: datetime | None = None
+    iteration_deadline_monotonic: float | None = None
     iteration: int = 0
     tool_calls_used: int = 0
     retry_attempts_used: int = 0
@@ -198,6 +199,65 @@ class AgentExecutionContext:
         return self.remaining_active_budget_seconds
 
     @property
+    def remaining_iteration_seconds(self) -> float:
+        """Return the current iteration envelope bounded by execution time."""
+        execution_remaining = self.remaining_seconds
+        if self.iteration_deadline_monotonic is None:
+            return execution_remaining
+        iteration_remaining = max(
+            0.0,
+            self.iteration_deadline_monotonic - self.clock.monotonic(),
+        )
+        return min(execution_remaining, iteration_remaining)
+
+    @property
+    def iteration_timed_out(self) -> bool:
+        return (
+            self.iteration_deadline_monotonic is not None
+            and self.remaining_iteration_seconds <= 0.0
+            and not self.timed_out
+        )
+
+    def begin_iteration_budget(self) -> float:
+        """Start one process-local iteration deadline.
+
+        The deadline is never persisted. After restart a resumed pending tool
+        batch receives a new iteration envelope bounded by the reconstructed
+        execution budget.
+        """
+        execution_remaining = self.remaining_seconds
+        configured = getattr(
+            self.limits,
+            "iteration_timeout_seconds",
+            None,
+        )
+        budget = (
+            execution_remaining
+            if configured is None
+            else max(
+                0.0,
+                min(execution_remaining, float(configured)),
+            )
+        )
+        self.iteration_deadline_monotonic = (
+            self.clock.monotonic() + budget
+        )
+        return budget
+
+    def clear_iteration_budget(self) -> None:
+        self.iteration_deadline_monotonic = None
+
+    def remaining_for_operation(
+        self,
+        timeout_seconds: float | None,
+    ) -> float:
+        """Clamp an operation by execution + iteration + local timeout."""
+        remaining = self.remaining_iteration_seconds
+        if timeout_seconds is None:
+            return remaining
+        return max(0.0, min(remaining, float(timeout_seconds)))
+
+    @property
     def remaining_seconds(self) -> float:
         """Backward-compatible execution remaining-time facade.
 
@@ -223,6 +283,7 @@ class AgentExecutionContext:
         remaining = self.remaining_active_seconds
         self.remaining_active_budget_seconds = remaining
         self.deadline = None
+        self.clear_iteration_budget()
         return remaining
 
     def restore_active_budget(

@@ -17,6 +17,8 @@ class CapabilityExecutionContext:
     execution_id: str
     invocation_id: str
     caller_agent_execution_id: str | None = None
+    caller_execution_remaining_seconds: float | None = None
+    caller_iteration_remaining_seconds: float | None = None
     request_id: str | None = None
     session_id: str | None = None
     task_id: str | None = None
@@ -38,6 +40,8 @@ class CapabilityExecutionContext:
         execution_id: str | None = None,
         invocation_id: str | None = None,
         caller_agent_execution_id: str | None = None,
+        caller_execution_remaining_seconds: float | None = None,
+        caller_iteration_remaining_seconds: float | None = None,
         request_id: str | None = None,
         session_id: str | None = None,
         task_id: str | None = None,
@@ -58,6 +62,12 @@ class CapabilityExecutionContext:
             execution_id=execution_id or f"exec_{uuid.uuid4().hex}",
             invocation_id=invocation_id or f"capinv_{uuid.uuid4().hex}",
             caller_agent_execution_id=caller_agent_execution_id,
+            caller_execution_remaining_seconds=(
+                caller_execution_remaining_seconds
+            ),
+            caller_iteration_remaining_seconds=(
+                caller_iteration_remaining_seconds
+            ),
             request_id=request_id or getattr(identity, "request_id", None),
             session_id=session_id or getattr(identity, "session_id", None),
             task_id=task_id,

@@ -40,6 +40,21 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
             raise ValueError(
                 "Delegating Agent execution must own the capability invocation."
             )
+
+        child_limits = AgentExecutionLimits()
+        budget_bounds = [float(child_limits.timeout_seconds)]
+        for candidate in (
+            context.caller_execution_remaining_seconds,
+            context.caller_iteration_remaining_seconds,
+            context.remaining_seconds,
+        ):
+            if candidate is not None:
+                budget_bounds.append(max(0.0, float(candidate)))
+        child_budget = min(budget_bounds)
+        child_limits = child_limits.model_copy(
+            update={"timeout_seconds": child_budget}
+        )
+
         execution_context = AgentExecutionContext.create(
             execution_id=self._execution_id_factory.new_id(),
             agent_id=self._agent.name,
@@ -50,7 +65,8 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
                 or context.invocation_id
             ),
             identity=context.identity,
-            limits=AgentExecutionLimits(),
+            limits=child_limits,
+            remaining_active_budget_seconds=child_budget,
             request_id=context.request_id,
             task_id=context.task_id,
             branch_id=context.branch_id,

@@ -28,6 +28,10 @@ from ..tool_execution.validator import (
    JsonSchemaToolArgumentValidator,
    ToolArgumentValidator,
 )
+from ...capability.contracts.definition import (
+    CapabilityExecutionMode,
+    CapabilityKind,
+)
 from ...capability.contracts.implementation import CapabilityExecutionLocation
 from ...capability.catalog import CapabilityNotFoundError
 
@@ -120,8 +124,16 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 retryable=False,
             )
 
-        timeout = context.remaining_for(
-            getattr(context.limits, "tool_timeout_seconds", None)
+        caller_execution_remaining = context.remaining_seconds
+        caller_iteration_remaining = context.remaining_iteration_seconds
+        is_long_running = (
+            definition.execution_mode is CapabilityExecutionMode.LONG_RUNNING
+            or definition.kind is CapabilityKind.AGENT
+        )
+        timeout = context.remaining_for_operation(
+            None
+            if is_long_running
+            else getattr(context.limits, "tool_timeout_seconds", None)
         )
         if timeout <= 0:
             return self._failure(
@@ -141,6 +153,12 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 identity=context.identity,
                 execution_id=context.execution_id,
                 caller_agent_execution_id=context.execution_id,
+                caller_execution_remaining_seconds=(
+                    caller_execution_remaining
+                ),
+                caller_iteration_remaining_seconds=(
+                    caller_iteration_remaining
+                ),
                 invocation_id=request.invocation_id,
                 turn_id=context.metadata.get("turn_id"),
                 request_id=context.request_id,

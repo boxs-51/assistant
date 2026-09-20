@@ -265,7 +265,7 @@ class AgentRuntime:
                     max_parallel=context.limits.max_parallel_tools,
                 ),
                 context=context,
-                timeout_seconds=context.remaining_seconds,
+                timeout_seconds=context.remaining_iteration_seconds,
             )
             executed = list(_order_tool_results(pending, raw))
             iteration_id = f"{context.execution_id}:iteration:{context.iteration}"
@@ -539,6 +539,7 @@ class AgentRuntime:
                     + timedelta(seconds=ttl_seconds)
                 )
         else:
+            context.clear_iteration_budget()
             target = AgentExecutionState(result.state.value)
             reason = None
             context.wait_expires_at = None
@@ -640,10 +641,21 @@ class AgentRuntime:
         await self._publish(AgentEventName.EXECUTION_STARTED, context)
 
         if context.resume_pending_tool_calls:
-            latest_tool_results = await self._execute_resumed_tool_calls(context)
-            transcript.extend(_tool_results_to_messages(latest_tool_results))
-            context.resume_pending_tool_calls = []
-            await self._persist_execution_checkpoint(context, transcript)
+            context.begin_iteration_budget()
+            try:
+                latest_tool_results = await self._execute_resumed_tool_calls(
+                    context
+                )
+                transcript.extend(
+                    _tool_results_to_messages(latest_tool_results)
+                )
+                context.resume_pending_tool_calls = []
+                await self._persist_execution_checkpoint(
+                    context,
+                    transcript,
+                )
+            finally:
+                context.clear_iteration_budget()
 
         if self._execution_policy.check_start(context) is not PolicyDecision.ALLOW:
             rejected_state = (
@@ -685,6 +697,10 @@ class AgentRuntime:
             try:
                 context.ensure_active()
                 context.next_iteration()
+                if context.begin_iteration_budget() <= 0.0:
+                    raise TimeoutError(
+                        "Agent iteration deadline exceeded before iteration start."
+                    )
 
                 if (
                     self._execution_policy.check_iteration(context, iteration_number)
@@ -735,7 +751,7 @@ class AgentRuntime:
                         ),
                     ),
                     context=context,
-                    timeout_seconds=context.remaining_seconds,
+                    timeout_seconds=context.remaining_iteration_seconds,
                 )
 
                 # The first snapshot contains the authoritative session/system
@@ -746,8 +762,12 @@ class AgentRuntime:
                 request_id = f"inf_{uuid.uuid4().hex}"
                 record.inference_request_id = request_id
                 await self._persist_iteration(record)
-                inference_timeout = context.remaining_for(
-                    getattr(context.limits, "inference_timeout_seconds", None)
+                inference_timeout = context.remaining_for_operation(
+                    getattr(
+                        context.limits,
+                        "inference_timeout_seconds",
+                        None,
+                    )
                 )
                 if inference_timeout <= 0:
                     raise TimeoutError(
@@ -885,7 +905,7 @@ class AgentRuntime:
                             max_parallel=context.limits.max_parallel_tools,
                         ),
                         context=context,
-                        timeout_seconds=context.remaining_seconds,
+                        timeout_seconds=context.remaining_iteration_seconds,
                     )
                 except (asyncio.CancelledError, TimeoutError) as exc:
                     error_code = (
@@ -1024,6 +1044,7 @@ class AgentRuntime:
 
                 transcript.extend(_tool_results_to_messages(latest_tool_results))
                 await self._persist_execution_checkpoint(context, transcript)
+                context.clear_iteration_budget()
 
             except asyncio.CancelledError:
                 record = iterations[-1] if iterations else None
