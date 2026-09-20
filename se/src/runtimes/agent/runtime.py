@@ -78,6 +78,7 @@ class AgentRuntime:
         event_publisher: AgentEventPublisher | None = None,
         continuation_service=None,
         wait_policy: ExecutionWaitPolicy | None = None,
+        task_budget_service=None,
     ) -> None:
         self._context_builder = context_builder
         self._inference = inference
@@ -86,9 +87,68 @@ class AgentRuntime:
         self._durable_store = durable_store
         self._event_publisher = event_publisher
         self._continuation_service = continuation_service
+        self._task_budget_service = task_budget_service
         self._wait_policy = (
             wait_policy or ConfiguredExecutionWaitPolicy()
         )
+
+    def _uses_task_budget(
+        self,
+        context: AgentExecutionContext,
+    ) -> bool:
+        return (
+            context.task_id is not None
+            and self._task_budget_service is not None
+        )
+
+    @staticmethod
+    def _task_tool_call_payload(
+        request: ToolExecutionRequest,
+    ) -> dict[str, Any]:
+        return {
+            "execution_id": request.execution_id,
+            "tool_call_id": request.tool_call_id,
+            "capability_id": request.capability_id,
+            "arguments": dict(request.arguments),
+        }
+
+    async def _reserve_task_tool_calls(
+        self,
+        context: AgentExecutionContext,
+        requests: Sequence[ToolExecutionRequest],
+    ) -> None:
+        if not requests or not self._uses_task_budget(context):
+            return
+        assert context.task_id is not None
+        await self._task_budget_service.reserve_tool_call_batch(
+            context.task_id,
+            [
+                self._task_tool_call_payload(request)
+                for request in requests
+            ],
+        )
+
+    async def _transition_running_durable(
+        self,
+        context: AgentExecutionContext,
+        revision: int,
+        values: dict[str, Any],
+    ) -> int:
+        if self._uses_task_budget(context):
+            assert context.task_id is not None
+            return await self._task_budget_service.finish_task_scoped_execution(
+                context.task_id,
+                execution_id=context.execution_id,
+                source_revision=revision,
+                transition_values=values,
+                delegated=context.parent_execution_id is not None,
+            )
+        await self._durable_store.compare_and_set_execution(
+            context.execution_id,
+            revision,
+            values,
+        )
+        return revision + 1
 
     async def _publish(
         self,
@@ -258,6 +318,7 @@ class AgentRuntime:
                 committed.append(result)
         executed = []
         if pending:
+            await self._reserve_task_tool_calls(context, pending)
             raw = await self._await_contextual(
                 self._tool_execution.execute_many(
                     context,
@@ -340,39 +401,57 @@ class AgentRuntime:
         record = await self._durable_store.load_execution(context.execution_id)
         resume_remaining: float | None = None
         if record is None:
-            try:
-                await self._durable_store.save_execution(
+            new_values = {
+                "id": context.execution_id,
+                "session_id": context.session_id,
+                "agent_id": context.agent_id,
+                "task_id": context.task_id,
+                "branch_id": context.branch_id,
+                "parent_execution_id": context.parent_execution_id,
+                "retry_of_execution_id": context.retry_of_execution_id,
+                "base_execution_id": context.base_execution_id,
+                "base_checkpoint_id": context.base_checkpoint_id,
+                "correlation_id": context.correlation_id,
+                "state": AgentExecutionState.CREATED.value,
+                "wait_reason": None,
+                "revision": 0,
+                "remaining_active_budget_seconds": (
+                    context.remaining_active_budget_seconds
+                ),
+                "wait_expires_at": None,
+                "request": dict(context.input),
+                "context_state": {
+                    "request_id": context.request_id,
+                    "parent_execution_id": context.parent_execution_id,
+                    "workflow_id": context.workflow_id,
+                    "metadata": dict(context.metadata),
+                    "causation_id": context.causation_id,
+                    "trace_id": context.trace_id,
+                    "connection_id": context.connection_id,
+                    "limits": context.limits.model_dump(mode="json"),
+                },
+            }
+            if self._uses_task_budget(context):
+                assert context.task_id is not None
+                new_values.update(
                     {
-                        "id": context.execution_id,
-                        "session_id": context.session_id,
-                        "agent_id": context.agent_id,
-                        "task_id": context.task_id,
-                        "branch_id": context.branch_id,
-                        "parent_execution_id": context.parent_execution_id,
-                        "retry_of_execution_id": context.retry_of_execution_id,
-                        "base_execution_id": context.base_execution_id,
-                        "base_checkpoint_id": context.base_checkpoint_id,
-                        "correlation_id": context.correlation_id,
-                        "state": AgentExecutionState.CREATED.value,
-                        "wait_reason": None,
-                        "revision": 0,
-                        "remaining_active_budget_seconds": (
-                            context.remaining_active_budget_seconds
-                        ),
-                        "wait_expires_at": None,
-                        "request": dict(context.input),
-                        "context_state": {
-                            "request_id": context.request_id,
-                            "parent_execution_id": context.parent_execution_id,
-                            "workflow_id": context.workflow_id,
-                            "metadata": dict(context.metadata),
-                            "causation_id": context.causation_id,
-                            "trace_id": context.trace_id,
-                            "connection_id": context.connection_id,
-                            "limits": context.limits.model_dump(mode="json"),
-                        },
+                        "state": AgentExecutionState.RUNNING.value,
+                        "revision": 1,
+                        "started_at": context.clock.now_utc(),
                     }
                 )
+                return await (
+                    self._task_budget_service.start_task_scoped_execution(
+                        context.task_id,
+                        execution_id=context.execution_id,
+                        execution_values=new_values,
+                        # R5-D becomes the authoritative ancestry-depth
+                        # enforcer. R5-C only wires active fan-out accounting.
+                        delegation_depth=0,
+                    )
+                )
+            try:
+                await self._durable_store.save_execution(new_values)
             except Exception as exc:
                 # The primary key is the idempotent startup guard.  Convert a
                 # concurrent insert loss into the lifecycle conflict contract.
@@ -468,16 +547,30 @@ class AgentRuntime:
             raise ExecutionConflictError(
                 f"Cannot start AgentExecution from {current_state.value}"
             )
-        await self._durable_store.compare_and_set_execution(
-            context.execution_id,
-            expected_revision,
-            {
-                "state": AgentExecutionState.RUNNING.value,
-                "wait_reason": None,
-                "wait_expires_at": None,
-                "started_at": context.clock.now_utc(),
-            },
-        )
+        start_values = {
+            "state": AgentExecutionState.RUNNING.value,
+            "wait_reason": None,
+            "wait_expires_at": None,
+            "started_at": context.clock.now_utc(),
+        }
+        if (
+            current_state is AgentExecutionState.WAITING
+            and self._uses_task_budget(context)
+        ):
+            assert context.task_id is not None
+            await self._task_budget_service.resume_task_scoped_execution(
+                context.task_id,
+                execution_id=context.execution_id,
+                source_revision=expected_revision,
+                transition_values=start_values,
+                delegated=context.parent_execution_id is not None,
+            )
+        else:
+            await self._durable_store.compare_and_set_execution(
+                context.execution_id,
+                expected_revision,
+                start_values,
+            )
 
         if current_state is AgentExecutionState.WAITING:
             assert resume_remaining is not None
@@ -496,8 +589,8 @@ class AgentRuntime:
     ) -> None:
         if revision is None or not self._has_execution_lifecycle_store():
             return
-        await self._durable_store.compare_and_set_execution(
-            context.execution_id,
+        await self._transition_running_durable(
+            context,
             revision,
             {
                 "state": AgentExecutionState.CANCELLED.value,
@@ -634,8 +727,8 @@ class AgentRuntime:
                 context.remaining_active_budget_seconds
             )
 
-        await self._durable_store.compare_and_set_execution(
-            result.execution_id,
+        await self._transition_running_durable(
+            context,
             expected_revision,
             values,
         )
@@ -664,12 +757,13 @@ class AgentRuntime:
             raise
         except Exception as exc:
             if revision is not None:
-                await self._durable_store.compare_and_set_execution(
-                    context.execution_id,
+                await self._transition_running_durable(
+                    context,
                     revision,
                     {
                         "state": AgentExecutionState.FAILED.value,
                         "wait_reason": None,
+                        "wait_expires_at": None,
                         "error": str(exc),
                         "completed_at": datetime.now(timezone.utc),
                     },
@@ -841,6 +935,13 @@ class AgentRuntime:
                     },
                 )
 
+                if self._uses_task_budget(context):
+                    assert context.task_id is not None
+                    await self._task_budget_service.reserve_inference(
+                        context.task_id,
+                        request_id=request_id,
+                    )
+
                 response = await self._inference.complete(
                     InferenceRequest(
                         request_id=request_id,
@@ -857,6 +958,15 @@ class AgentRuntime:
                         metadata=dict(snapshot.metadata),
                     )
                 )
+
+                if self._uses_task_budget(context):
+                    assert context.task_id is not None
+                    await self._task_budget_service.account_usage(
+                        context.task_id,
+                        usage_key=request_id,
+                        tokens=response.usage.total_tokens,
+                        cost_usd=response.usage.estimated_cost_usd,
+                    )
 
                 await self._publish(
                     AgentEventName.INFERENCE_COMPLETED,
@@ -953,6 +1063,10 @@ class AgentRuntime:
                         payload={"capability_id": request.capability_id},
                     )
                     await self._persist_tool_call(request, iteration_id)
+                await self._reserve_task_tool_calls(
+                    context,
+                    tool_requests,
+                )
                 try:
                     raw_tool_results = await self._await_contextual(
                         self._tool_execution.execute_many(

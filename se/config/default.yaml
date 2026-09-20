@@ -30,6 +30,20 @@ gateway:
   port: 8000
   debug: false
 
+agent:
+  task_budget:
+    policy_version: "r5-v1"
+    deny_recursive_agent_cycle: true
+    max_total_executions: 64
+    max_active_executions: 8
+    max_active_branches: 16
+    max_parallel_agents: 4
+    max_total_tool_calls: 256
+    max_total_inference_calls: 128
+    max_total_tokens: 1000000
+    max_total_cost_usd: null
+    max_delegation_depth: 8
+
 oauth:
   google:
     client_id: "change-me"

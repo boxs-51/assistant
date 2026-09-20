@@ -4,7 +4,8 @@ from .schemas import (ConfigSchema, CircuitBreakerProviderSettings, Authenticati
                       CircuitBreakerSettings, DriverConfig, FillterSettings, FrontendSettings,
                       GatewaySettings, LoggingSettings, MetricsSettings, OAuthClientConfig,
                       OAuthSettings, ProviderConfig, ProviderSettings, RateLimitSettings, SemanticCacheSettings,
-                      StorageSettings, TokenBudgetSettings, TracingSettings)
+                      StorageSettings, TokenBudgetSettings, TracingSettings,
+                      AgentSettings, AgentTaskBudgetSettings)
 from .base import BaseConfigSource
 from .exceptions import ConfigError, ConfigValidationError
 from .manager import ConfigManager
@@ -49,4 +50,5 @@ __all__ = ["ConfigurationRegistry", "ConfigLoader", "ConfigSchema",
             "CircuitBreakerSettings", "DriverConfig", "FillterSettings", "FrontendSettings",
             "GatewaySettings", "LoggingSettings", "MetricsSettings", "OAuthClientConfig",
             "OAuthSettings", "ProviderConfig", "ProviderSettings", "RateLimitSettings", "SemanticCacheSettings",
-            "StorageSettings", "TokenBudgetSettings", "TracingSettings"]
+            "StorageSettings", "TokenBudgetSettings", "TracingSettings",
+            "AgentSettings", "AgentTaskBudgetSettings"]

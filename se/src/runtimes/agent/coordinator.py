@@ -35,11 +35,13 @@ class MultiAgentCoordinator:
         executor=None,
         execution_id_factory: AgentExecutionIdFactory | None = None,
         execution_supervisor=None,
+        task_budget_service=None,
     ):
         self.agent_registry = agent_registry
         self.durable_store = durable_store
         self.executor = executor
         self.execution_supervisor = execution_supervisor
+        self.task_budget_service = task_budget_service
         self.execution_id_factory = (
             execution_id_factory or AgentExecutionIdFactory()
         )
@@ -177,18 +179,28 @@ class MultiAgentCoordinator:
 
     async def create_task_async(self, *args, **kwargs) -> AgentTask:
         task = self.create_task(*args, **kwargs)
-        await self._persist("save_task", {
+        values = {
             "id": task.task_id,
             "session_id": task.session_id,
             "created_by": task.created_by,
             "assigned_agent_id": task.assigned_agent_id,
+            "revision": task.revision,
             "parent_task_id": task.parent_task_id,
             "connection_id": task.connection_id,
             "client_id": task.client_id,
             "status": task.status.value,
             "wait_reasons": task.wait_reasons,
             "input": task.input,
-        })
+        }
+        try:
+            if self.task_budget_service is not None:
+                await self.task_budget_service.create_task_with_budget(values)
+            else:
+                await self._persist("save_task", values)
+        except BaseException:
+            if self._tasks.get(task.task_id) is task:
+                self._tasks.pop(task.task_id, None)
+            raise
         return task
 
     def get_task(self, task_id: str, identity: Identity) -> AgentTask:

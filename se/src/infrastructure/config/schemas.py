@@ -1,3 +1,4 @@
+from decimal import Decimal
 from pydantic import BaseModel, Field, AnyHttpUrl, model_validator, ConfigDict, SecretStr
 from typing import Dict, Optional, Any
 from ...version import __version__
@@ -166,6 +167,36 @@ class TokenBudgetSettings(BaseModel):
     max_input_tokens: int = 32000
     max_output_tokens: int = 4096
 
+
+class AgentTaskBudgetSettings(BaseModel):
+    """Application-owned durable TaskBudget policy.
+
+    These limits are task-wide. They are intentionally separate from
+    AgentExecutionLimits, which remain execution-local.
+    """
+
+    policy_version: str = Field(default="r5-v1", min_length=1, max_length=64)
+    deny_recursive_agent_cycle: bool = True
+    max_total_executions: int = Field(default=64, gt=0)
+    max_active_executions: int = Field(default=8, gt=0)
+    max_active_branches: int = Field(default=16, gt=0)
+    max_parallel_agents: int = Field(default=4, gt=0)
+    max_total_tool_calls: int = Field(default=256, gt=0)
+    max_total_inference_calls: int = Field(default=128, gt=0)
+    max_total_tokens: int | None = Field(default=1_000_000, gt=0)
+    max_total_cost_usd: Decimal | None = Field(default=None, gt=Decimal("0"))
+    max_delegation_depth: int = Field(default=8, gt=0)
+
+    model_config = ConfigDict(frozen=True)
+
+
+class AgentSettings(BaseModel):
+    task_budget: AgentTaskBudgetSettings = Field(
+        default_factory=AgentTaskBudgetSettings
+    )
+
+    model_config = ConfigDict(frozen=True)
+
 class ConfigSchema(BaseModel):
     """
     Schema xác thực cuối cùng cho toàn bộ cấu hình ứng dụng.
@@ -180,6 +211,7 @@ class ConfigSchema(BaseModel):
     metrics: MetricsSettings = Field(default_factory=MetricsSettings)
     tracing: TracingSettings = Field(default_factory=TracingSettings)
     semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
+    agent: AgentSettings = Field(default_factory=AgentSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)

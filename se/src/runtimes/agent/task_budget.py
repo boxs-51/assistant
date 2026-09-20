@@ -4,7 +4,7 @@ import hashlib
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any, Callable
+from typing import Any, Callable, Sequence
 
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -137,10 +137,313 @@ class TaskBudgetService:
         self,
         uow_factory,
         *,
+        default_limits: TaskBudgetLimits | None = None,
+        default_policy: TaskBudgetPolicy | None = None,
         max_conflict_retries: int = 8,
     ) -> None:
         self._uow_factory = uow_factory
+        self._default_limits = default_limits
+        self._default_policy = default_policy
         self._max_conflict_retries = max(1, int(max_conflict_retries))
+
+    @property
+    def default_limits(self) -> TaskBudgetLimits | None:
+        return self._default_limits
+
+    @property
+    def default_policy(self) -> TaskBudgetPolicy | None:
+        return self._default_policy
+
+    async def create_task_with_budget(
+        self,
+        task_values: dict[str, Any],
+        *,
+        limits: TaskBudgetLimits | None = None,
+        policy: TaskBudgetPolicy | None = None,
+    ):
+        """Atomically persist one AgentTask and its initial TaskBudget."""
+        task_id = str(task_values.get("id") or "")
+        if not task_id:
+            raise ValueError("task_values.id must be non-empty")
+        limits = limits or self._default_limits
+        policy = policy or self._default_policy
+        if limits is None or policy is None:
+            raise TaskBudgetRequiredError(
+                "Task creation requires an application TaskBudget policy."
+            )
+
+        fingerprint = task_budget_policy_fingerprint(limits, policy)
+        normalized_task = dict(task_values)
+        for field in ("wait_reasons", "input", "output"):
+            if field in normalized_task:
+                normalized_task[field] = to_json_safe(
+                    normalized_task[field],
+                    path=f"agent_tasks.{field}",
+                )
+
+        async with self._uow_factory() as uow:
+            if await uow.agents.get_task(task_id) is not None:
+                raise TaskBudgetConflictError(
+                    f"AgentTask already exists: {task_id}"
+                )
+            task = await uow.agents.save_task(normalized_task)
+            await uow.agents.save_task_budget(
+                self._new_budget_values(
+                    task_id,
+                    limits,
+                    policy,
+                    fingerprint,
+                )
+            )
+            await uow.commit()
+            return task
+
+    async def start_task_scoped_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        execution_values: dict[str, Any],
+        delegation_depth: int = 0,
+    ) -> int:
+        """Atomically admit and persist a task-scoped RUNNING execution."""
+        if execution_values.get("state") != "RUNNING":
+            raise ValueError(
+                "task-scoped execution admission must insert RUNNING state"
+            )
+        if execution_values.get("revision") != 1:
+            raise ValueError(
+                "task-scoped execution admission must insert revision=1"
+            )
+        await self.reserve_new_execution(
+            task_id,
+            execution_id=execution_id,
+            execution_values=execution_values,
+            delegation_depth=delegation_depth,
+        )
+        return 1
+
+    async def resume_task_scoped_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        source_revision: int,
+        transition_values: dict[str, Any],
+        delegated: bool,
+    ) -> int:
+        """Atomically WAITING -> RUNNING and reacquire active capacity."""
+        if transition_values.get("state") != "RUNNING":
+            raise ValueError("resume transition must target RUNNING")
+
+        def mutate(budget: TaskBudget) -> dict[str, Any]:
+            self._require_open(budget)
+            if budget.active_executions >= budget.limits.max_active_executions:
+                raise TaskBudgetExceededError("max_active_executions reached")
+            if (
+                delegated
+                and budget.active_parallel_agents
+                >= budget.limits.max_parallel_agents
+            ):
+                raise TaskBudgetExceededError("max_parallel_agents reached")
+            return {
+                "active_executions": budget.active_executions + 1,
+                "active_parallel_agents": (
+                    budget.active_parallel_agents + 1
+                    if delegated
+                    else budget.active_parallel_agents
+                ),
+            }
+
+        return await self._transition_execution_with_budget(
+            task_id=task_id,
+            execution_id=execution_id,
+            source_revision=source_revision,
+            expected_state="WAITING",
+            transition_values=transition_values,
+            kind=TaskBudgetReservationKind.RESUME_EXECUTION,
+            reservation_key=f"{execution_id}:{source_revision}",
+            reservation_payload={
+                "execution_id": execution_id,
+                "source_revision": source_revision,
+                "delegated": delegated,
+            },
+            mutate_budget=mutate,
+        )
+
+    async def finish_task_scoped_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        source_revision: int,
+        transition_values: dict[str, Any],
+        delegated: bool,
+    ) -> int:
+        """Atomically release one RUNNING execution's active capacity."""
+        target_state = str(transition_values.get("state") or "")
+        if target_state not in {
+            "WAITING",
+            "COMPLETED",
+            "FAILED",
+            "CANCELLED",
+            "TIMEOUT",
+        }:
+            raise ValueError(
+                "finish transition must target WAITING or a terminal state"
+            )
+
+        target_revision = source_revision + 1
+
+        def mutate(budget: TaskBudget) -> dict[str, Any]:
+            if budget.active_executions <= 0:
+                raise TaskBudgetConflictError(
+                    "active_executions is already zero"
+                )
+            if delegated and budget.active_parallel_agents <= 0:
+                raise TaskBudgetConflictError(
+                    "active_parallel_agents is already zero"
+                )
+            return {
+                "active_executions": budget.active_executions - 1,
+                "active_parallel_agents": (
+                    budget.active_parallel_agents - 1
+                    if delegated
+                    else budget.active_parallel_agents
+                ),
+            }
+
+        return await self._transition_execution_with_budget(
+            task_id=task_id,
+            execution_id=execution_id,
+            source_revision=source_revision,
+            expected_state="RUNNING",
+            transition_values=transition_values,
+            kind=TaskBudgetReservationKind.RELEASE_EXECUTION,
+            reservation_key=f"{execution_id}:{target_revision}",
+            reservation_payload={
+                "execution_id": execution_id,
+                "target_revision": target_revision,
+                "target_state": target_state,
+                "delegated": delegated,
+            },
+            mutate_budget=mutate,
+        )
+
+    async def reserve_tool_call_batch(
+        self,
+        task_id: str,
+        calls: Sequence[dict[str, Any]],
+    ) -> TaskBudget:
+        """Atomically reserve all not-yet-reserved logical tool calls.
+
+        Each tool_call_id keeps its own durable reservation identity. Replays
+        after WAITING/resume therefore do not consume additional task budget.
+        """
+        normalized: list[tuple[str, dict[str, Any], str]] = []
+        seen: dict[str, str] = {}
+        for raw in calls:
+            payload = to_json_safe(
+                dict(raw),
+                path="task_budget.tool_call",
+            )
+            key = str(payload.get("tool_call_id") or "")
+            if not key:
+                raise ValueError("tool_call_id must be non-empty")
+            fingerprint = _reservation_fingerprint(
+                TaskBudgetReservationKind.TOOL_CALL,
+                key,
+                payload,
+            )
+            prior = seen.get(key)
+            if prior is not None:
+                if prior != fingerprint:
+                    raise TaskBudgetConflictError(
+                        "tool_call_id was reused with a different payload"
+                    )
+                continue
+            seen[key] = fingerprint
+            normalized.append((key, payload, fingerprint))
+
+        if not normalized:
+            raise ValueError("calls must not be empty")
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no "
+                                "TaskBudget."
+                            )
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    budget = _budget_from_record(budget_record)
+                    missing: list[tuple[str, dict[str, Any], str]] = []
+
+                    for key, payload, fingerprint in normalized:
+                        existing = (
+                            await uow.agents.get_task_budget_reservation(
+                                task_id,
+                                TaskBudgetReservationKind.TOOL_CALL.value,
+                                key,
+                            )
+                        )
+                        if existing is None:
+                            missing.append((key, payload, fingerprint))
+                        else:
+                            self._verify_reservation(existing, fingerprint)
+
+                    if not missing:
+                        await uow.commit()
+                        return budget
+
+                    self._require_open(budget)
+                    proposed = budget.used_tool_calls + len(missing)
+                    if proposed > budget.limits.max_total_tool_calls:
+                        raise TaskBudgetExceededError(
+                            "max_total_tool_calls exceeded"
+                        )
+
+                    updated = await uow.agents.compare_and_set_task_budget(
+                        task_id,
+                        budget.revision,
+                        {"used_tool_calls": proposed},
+                    )
+                    if updated is None:
+                        await uow.rollback()
+                        continue
+
+                    for key, _payload, fingerprint in missing:
+                        await uow.agents.save_task_budget_reservation(
+                            {
+                                "task_id": task_id,
+                                "kind": (
+                                    TaskBudgetReservationKind.TOOL_CALL.value
+                                ),
+                                "reservation_key": key,
+                                "payload_fingerprint": fingerprint,
+                            }
+                        )
+                    result = _budget_from_record(updated)
+                    await uow.commit()
+                    return result
+            except IntegrityError:
+                # Another writer may have committed one or more logical call
+                # reservations first. Re-read all keys in a fresh UoW.
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"Tool-call reservation conflicts exhausted for {task_id}"
+        )
 
     async def get_budget(self, task_id: str) -> TaskBudget | None:
         async with self._uow_factory() as uow:
@@ -591,6 +894,11 @@ class TaskBudgetService:
 
                     budget_record = await uow.agents.get_task_budget(task_id)
                     if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no "
+                                "TaskBudget."
+                            )
                         raise TaskBudgetRequiredError(
                             f"TaskBudget missing: {task_id}"
                         )
@@ -644,6 +952,145 @@ class TaskBudgetService:
 
         raise TaskBudgetConflictError(
             f"TaskBudget CAS conflicts exhausted for {task_id}"
+        )
+
+    async def _transition_execution_with_budget(
+        self,
+        *,
+        task_id: str,
+        execution_id: str,
+        source_revision: int,
+        expected_state: str,
+        transition_values: dict[str, Any],
+        kind: TaskBudgetReservationKind,
+        reservation_key: str,
+        reservation_payload: dict[str, Any],
+        mutate_budget: Callable[[TaskBudget], dict[str, Any]],
+    ) -> int:
+        if source_revision < 0:
+            raise ValueError("source_revision must be non-negative")
+        target_revision = source_revision + 1
+        normalized_values = _normalize_execution_store_values(
+            transition_values
+        )
+        # The durable transition key/revision/state are the semantic
+        # idempotency identity. Volatile timestamps/result payload fields are
+        # intentionally excluded so a retry after an uncertain commit can
+        # observe the first committed transition instead of conflicting on
+        # a newly generated timestamp.
+        fingerprint = _reservation_fingerprint(
+            kind,
+            reservation_key,
+            reservation_payload,
+        )
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    existing_reservation = (
+                        await uow.agents.get_task_budget_reservation(
+                            task_id,
+                            kind.value,
+                            reservation_key,
+                        )
+                    )
+                    if existing_reservation is not None:
+                        self._verify_reservation(
+                            existing_reservation,
+                            fingerprint,
+                        )
+                        execution = await uow.agents.get_execution(
+                            execution_id
+                        )
+                        if (
+                            execution is None
+                            or execution.task_id != task_id
+                            or execution.revision < target_revision
+                        ):
+                            raise TaskBudgetConflictError(
+                                "Durable transition reservation has no "
+                                "matching AgentExecution."
+                            )
+                        await uow.commit()
+                        return target_revision
+
+                    execution = await uow.agents.get_execution(execution_id)
+                    if execution is None or execution.task_id != task_id:
+                        raise TaskBudgetConflictError(
+                            f"Unknown task-scoped execution: {execution_id}"
+                        )
+                    if execution.revision != source_revision:
+                        raise TaskBudgetConflictError(
+                            "Stale AgentExecution revision: "
+                            f"{execution_id}@{source_revision}"
+                        )
+                    if str(execution.state) != expected_state:
+                        raise TaskBudgetConflictError(
+                            f"AgentExecution {execution_id} is "
+                            f"{execution.state}, expected {expected_state}"
+                        )
+
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no "
+                                "TaskBudget."
+                            )
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    budget = _budget_from_record(budget_record)
+                    budget_values = mutate_budget(budget)
+
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            task_id,
+                            budget.revision,
+                            budget_values,
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    updated_execution = (
+                        await uow.agents.compare_and_set_execution(
+                            execution_id,
+                            source_revision,
+                            normalized_values,
+                        )
+                    )
+                    if updated_execution is None:
+                        await uow.rollback()
+                        raise TaskBudgetConflictError(
+                            "AgentExecution CAS lost during TaskBudget "
+                            "transition."
+                        )
+
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": task_id,
+                            "kind": kind.value,
+                            "reservation_key": reservation_key,
+                            "payload_fingerprint": fingerprint,
+                        }
+                    )
+                    await uow.commit()
+                    return target_revision
+            except IntegrityError:
+                # Reservation uniqueness is the durable idempotency fence.
+                # A concurrent winner is observed on the next iteration.
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"Execution/TaskBudget transition conflicts exhausted for "
+            f"{execution_id}"
         )
 
     async def _load_idempotent(

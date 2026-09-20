@@ -77,6 +77,7 @@ from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.supervisor import AgentExecutionSupervisor
+from .runtimes.agent.task_budget import TaskBudgetService
 from .runtimes.agent.continuation import AgentContinuationService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
@@ -94,6 +95,7 @@ from .runtimes.agent.tool_execution import AgentToolExecutionCoordinator
 from .runtimes.agent.contracts.context import AgentExecutionContext
 from .runtimes.chat import DirectChatRuntime
 from .domain.schemas.agent_execution import AgentExecutionLimits
+from .domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
 from .domain.schemas.event import BaseEvent
 from .version import __version__
 logger = structlog.get_logger(__name__)
@@ -222,6 +224,31 @@ async def bootstrap_runtime_kernel(
     authorization_service = AuthorizationService()
     agent_execution_id_factory = AgentExecutionIdFactory()
     agent_execution_supervisor = AgentExecutionSupervisor()
+    task_budget_settings = config.agent.task_budget
+    task_budget_limits = TaskBudgetLimits(
+        max_total_executions=task_budget_settings.max_total_executions,
+        max_active_executions=task_budget_settings.max_active_executions,
+        max_active_branches=task_budget_settings.max_active_branches,
+        max_parallel_agents=task_budget_settings.max_parallel_agents,
+        max_total_tool_calls=task_budget_settings.max_total_tool_calls,
+        max_total_inference_calls=(
+            task_budget_settings.max_total_inference_calls
+        ),
+        max_total_tokens=task_budget_settings.max_total_tokens,
+        max_total_cost_usd=task_budget_settings.max_total_cost_usd,
+        max_delegation_depth=task_budget_settings.max_delegation_depth,
+    )
+    task_budget_policy = TaskBudgetPolicy(
+        version=task_budget_settings.policy_version,
+        deny_recursive_agent_cycle=(
+            task_budget_settings.deny_recursive_agent_cycle
+        ),
+    )
+    task_budget_service = TaskBudgetService(
+        eventing_manager.uow_factory,
+        default_limits=task_budget_limits,
+        default_policy=task_budget_policy,
+    )
 
     # 1. Tạo ApplicationContainer trước
     container = ApplicationContainer(
@@ -239,11 +266,14 @@ async def bootstrap_runtime_kernel(
         authorization_service=authorization_service,
         agent_execution_id_factory=agent_execution_id_factory,
         agent_execution_supervisor=agent_execution_supervisor,
+        task_budget_service=task_budget_service,
+        task_budget_policy=task_budget_policy,
         multi_agent_coordinator=MultiAgentCoordinator(
             agent_registry,
             durable_store=DurableAgentStore(eventing_manager.uow_factory),
             execution_supervisor=agent_execution_supervisor,
             execution_id_factory=agent_execution_id_factory,
+            task_budget_service=task_budget_service,
         ),
         **(security_services or {}),
     )
@@ -373,6 +403,7 @@ async def bootstrap_runtime_kernel(
         durable_store=container.agent_durable_store,
         event_publisher=EventBusAgentEventPublisher(container.event_bus),
         continuation_service=container.continuation_service,
+        task_budget_service=container.task_budget_service,
     )
     builtin_support = register_builtin_support(container)
     container.multi_agent_coordinator.agent_authorizer = (
