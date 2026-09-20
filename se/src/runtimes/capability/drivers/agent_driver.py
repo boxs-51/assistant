@@ -33,6 +33,13 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
         context: CapabilityExecutionContext,
         arguments: Mapping[str, Any],
     ) -> Any:
+        if (
+            context.caller_agent_execution_id is not None
+            and context.caller_agent_execution_id != context.execution_id
+        ):
+            raise ValueError(
+                "Delegating Agent execution must own the capability invocation."
+            )
         execution_context = AgentExecutionContext.create(
             execution_id=self._execution_id_factory.new_id(),
             agent_id=self._agent.name,
@@ -47,7 +54,7 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
             request_id=context.request_id,
             task_id=context.task_id,
             branch_id=context.branch_id,
-            parent_execution_id=context.execution_id,
+            parent_execution_id=context.caller_agent_execution_id,
             agent=self._agent,
             input=dict(arguments),
             connection_id=context.connection_id,

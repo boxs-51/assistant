@@ -52,6 +52,7 @@ def test_b1_capability_context_supports_typed_agent_lineage_and_direct_nulls():
         identity=_identity(),
         execution_id="exec-e1",
         invocation_id="inv-i1",
+        caller_agent_execution_id="exec-e1",
         session_id="session-1",
         task_id="task-1",
         branch_id="branch-1",
@@ -62,6 +63,7 @@ def test_b1_capability_context_supports_typed_agent_lineage_and_direct_nulls():
 
     assert agent_owned.execution_id == "exec-e1"
     assert agent_owned.invocation_id == "inv-i1"
+    assert agent_owned.caller_agent_execution_id == "exec-e1"
     assert agent_owned.task_id == "task-1"
     assert agent_owned.branch_id == "branch-1"
     assert agent_owned.correlation_id == "corr-1"
@@ -69,6 +71,7 @@ def test_b1_capability_context_supports_typed_agent_lineage_and_direct_nulls():
 
     assert direct.task_id is None
     assert direct.branch_id is None
+    assert direct.caller_agent_execution_id is None
     assert direct.correlation_id is None
     assert direct.trace_id is None
 
@@ -276,6 +279,7 @@ async def test_b3_composition_propagates_lineage_and_leaves_step_invocation_allo
         identity=_identity(),
         execution_id="exec-e1",
         invocation_id="inv-workflow",
+        caller_agent_execution_id="exec-e1",
         request_id="request-1",
         session_id="session-1",
         task_id="task-1",
@@ -291,6 +295,7 @@ async def test_b3_composition_propagates_lineage_and_leaves_step_invocation_allo
     assert len(calls) == 1
     call = calls[0]
     assert call["execution_id"] == "exec-e1"
+    assert call["caller_agent_execution_id"] == "exec-e1"
     assert call["task_id"] == "task-1"
     assert call["branch_id"] == "branch-1"
     assert call["correlation_id"] == "corr-1"

@@ -1,10 +1,11 @@
 # R3 — Execution Lineage Contract Freeze v2
 
 **Repository:** `boxs-51/assistant`  
-**Baseline commit:** `e5f7898667556b120261663d8c6d712ddb16363d`  
+**Original freeze baseline:** `e5f7898667556b120261663d8c6d712ddb16363d`  
+**Implementation audit baseline:** `340d035b837d8c52d9cf26bff9db9f2678ece964`  
 **Depends on:** R2.1 Stabilization Gate PASS  
-**Document status:** FINAL-REVIEW CANDIDATE / CONTRACT FREEZE v2  
-**Implementation status:** **NO R3 CODE / NO R3 PATCH**
+**Document status:** FROZEN CONTRACT + D0 provenance clarification  
+**Implementation status:** **A1→C3 IMPLEMENTED; D0→D3 EXIT GATE PENDING**
 
 ---
 
@@ -321,6 +322,7 @@ CapabilityExecutionContext:
 
     execution_id        # caller E1
     invocation_id       # I1
+    caller_agent_execution_id | null
 
     session_id
     task_id | null
@@ -344,6 +346,22 @@ Semantics:
 ```text
 CapabilityExecutionContext.execution_id = caller E1
 ```
+
+For Agent-owned capability calls:
+
+```text
+caller_agent_execution_id = E1
+caller_agent_execution_id == execution_id
+```
+
+For DIRECT/MCP/HTTP/non-Agent callers:
+
+```text
+caller_agent_execution_id = null
+```
+
+`AgentCapabilityDriver` may set `E2.parent_execution_id` only from this typed
+provenance field. A synthetic capability execution ID is never Agent ancestry.
 
 An Agent driver must never reinterpret this as child E2.
 

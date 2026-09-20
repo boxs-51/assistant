@@ -48,6 +48,7 @@ class DeclarativeWorkflowDriver(BaseCapabilityDriver):
                 arguments=resolved_arguments,
                 identity=context.identity,
                 execution_id=context.execution_id,
+                caller_agent_execution_id=context.caller_agent_execution_id,
                 request_id=context.request_id,
                 session_id=context.session_id,
                 task_id=context.task_id,

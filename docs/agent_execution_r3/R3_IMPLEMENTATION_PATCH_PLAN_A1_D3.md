@@ -1,10 +1,11 @@
 # R3 Execution Lineage — Implementation Patch Plan A1→D3
 
 **Repository:** `boxs-51/assistant`  
-**Baseline:** `e5f7898667556b120261663d8c6d712ddb16363d`  
+**Original planning baseline:** `e5f7898667556b120261663d8c6d712ddb16363d`  
+**Current implementation baseline:** `340d035b837d8c52d9cf26bff9db9f2678ece964`  
 **Contract basis:** `R3_EXECUTION_LINEAGE_CONTRACT_FREEZE_V2.md`  
 **Prerequisite:** R2.1 Stabilization Gate PASS  
-**Status:** PRE-IMPLEMENTATION PLAN — **NO R3 CODE**
+**Status:** **A1→C3 IMPLEMENTED; D0→D3 CLOSURE IN PROGRESS**
 
 ---
 
@@ -614,6 +615,34 @@ Child terminal result returns through I1 to E1.
 The current duplicate-RUNNING conflict disappears because E2 has its own durable row.
 
 ---
+
+# D0 — Direct AGENT provenance closure
+
+Generic capability execution may allocate a synthetic capability
+`execution_id`. That ID is not automatically a durable AgentExecution parent.
+
+Add typed provenance:
+
+```text
+CapabilityExecutionContext.caller_agent_execution_id
+```
+
+Rules:
+
+```text
+Agent tool path:
+  caller_agent_execution_id = E1
+  caller_agent_execution_id == execution_id
+
+direct/non-Agent path:
+  caller_agent_execution_id = null
+
+AgentCapabilityDriver:
+  E2.parent_execution_id = caller_agent_execution_id
+```
+
+This keeps direct AGENT execution valid as a root E2 and prevents dangling
+parent lineage.
 
 # Group D — Proof and regression
 

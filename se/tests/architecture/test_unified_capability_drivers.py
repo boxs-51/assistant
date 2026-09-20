@@ -114,6 +114,7 @@ async def test_agent_capability_creates_distinct_child_execution_identity():
         {"prompt": "investigate"},
         Identity(user_id="u1", auth_type="jwt"),
         execution_id="exec-agent-capability",
+        caller_agent_execution_id="exec-agent-capability",
         invocation_id="inv-agent-capability",
         session_id="session-1",
     )

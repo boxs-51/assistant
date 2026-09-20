@@ -121,6 +121,9 @@ class CapabilityRuntime(BaseRuntime):
                 arguments=arguments,
                 identity=identity,
                 execution_id=event.payload.get("execution_id"),
+                caller_agent_execution_id=event.payload.get(
+                    "caller_agent_execution_id"
+                ),
                 invocation_id=event.payload.get("invocation_id"),
                 turn_id=event.turn_id,
                 request_id=event.payload.get("request_id"),
@@ -305,6 +308,7 @@ class CapabilityRuntime(BaseRuntime):
         identity: Identity,
         *,
         execution_id: str | None = None,
+        caller_agent_execution_id: str | None = None,
         invocation_id: str | None = None,
         turn_id: str | None = None,
         request_id: str | None = None,
@@ -320,6 +324,14 @@ class CapabilityRuntime(BaseRuntime):
         metadata: Optional[Dict[str, Any]] = None,
     ) -> CapabilityResult:
         started = time.perf_counter()
+        if caller_agent_execution_id is not None:
+            if execution_id is None:
+                execution_id = caller_agent_execution_id
+            elif execution_id != caller_agent_execution_id:
+                raise ValueError(
+                    "caller_agent_execution_id must match execution_id "
+                    "for Agent-owned capability invocations."
+                )
         request_metadata = dict(metadata or {})
         effective_correlation_id = (
             correlation_id
@@ -353,6 +365,7 @@ class CapabilityRuntime(BaseRuntime):
             identity=identity,
             execution_id=execution_id,
             invocation_id=invocation_id,
+            caller_agent_execution_id=caller_agent_execution_id,
             request_id=request_id,
             session_id=session_id,
             task_id=task_id,
@@ -768,6 +781,9 @@ class CapabilityRuntime(BaseRuntime):
             arguments=arguments,
             identity=identity,
             execution_id=context.get("execution_id"),
+            caller_agent_execution_id=context.get(
+                "caller_agent_execution_id"
+            ),
             invocation_id=context.get("invocation_id"),
             turn_id=context.get("turn_id"),
             request_id=context.get("request_id"),
@@ -779,6 +795,7 @@ class CapabilityRuntime(BaseRuntime):
                 for key, value in context.items()
                 if key not in {
                     "execution_id",
+                    "caller_agent_execution_id",
                     "invocation_id",
                     "request_id",
                     "session_id",
