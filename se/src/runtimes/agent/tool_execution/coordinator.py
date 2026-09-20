@@ -479,6 +479,14 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             raise TimeoutError(
                 "Agent execution deadline exceeded during tool batch."
             )
+        except BaseException:
+            if not gather_task.done():
+                gather_task.cancel()
+            await asyncio.gather(
+                gather_task,
+                return_exceptions=True,
+            )
+            raise
         finally:
             if not cancellation_task.done():
                 cancellation_task.cancel()

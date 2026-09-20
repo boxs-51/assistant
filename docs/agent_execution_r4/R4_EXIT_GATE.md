@@ -1,7 +1,8 @@
 # R4 EXIT GATE — Active Budget / Wait TTL / Deadline Hierarchy
 
 **Baseline before completion patches:** `91ffb7052c5927a65c9b3bdd4cc847d50a64f29d`  
-**Status:** `PENDING TEST EVIDENCE`
+**Completion HEAD:** `90065c730c33ab3261063183570278d4ea13a424`  
+**Status:** `COMPLETE`
 
 ## Required implementation
 
@@ -16,8 +17,8 @@
 [x] D full regression evidence
 ```
 
-After applying the R4 completion patch sequence, C1-C3 may be ticked only when
-their focused tests are green.
+All implementation items are present on completion HEAD `90065c7` and the
+required R4 contracts are covered by the recorded focused/full-suite evidence.
 
 ## Frozen invariants
 
@@ -36,7 +37,7 @@ Nested synchronous Agent <= parent iteration remaining.
 R3 E1/I1/E2 lineage remains unchanged.
 ```
 
-## Apply order
+## Applied completion sequence
 
 ```text
 R4_C1_ITERATION_DEADLINE_v1.patch
@@ -87,22 +88,47 @@ py -m pytest -q `
 py -m pytest -q se/tests tools cl/tests
 ```
 
-## Completion evidence
-
-Fill after execution:
+## Completion evidence — 2026-09-20
 
 ```text
-Focused R4:
-    <pending>
+Focused R4 captured command:
+    40 passed, 1 warning in 6.37s
 
-Cross-phase:
-    <pending>
+Cross-phase regression:
+    96 passed in 31.23s
 
 Full suite:
-    <pending>
+    534 passed, 5 warnings in 72.41s
 
-Warnings:
-    <pending>
+Failures:
+    0
 ```
 
-R4 is COMPLETE only after all three gates are green.
+The captured focused command did not explicitly list
+`test_r4_a2_execution_budget_context.py`; the full `se/tests` suite includes
+that test module and completed with 534 passed and no failures. Therefore the
+A2 contract is covered by the recorded full-gate evidence even though the
+captured focused command was a subset of the documented focused command.
+
+Warnings were deprecation warnings plus Windows asyncio Proactor/subprocess
+cleanup warnings emitted after the suite. No warning demonstrates an R4 active
+budget, WAITING TTL, deadline hierarchy, or nested-Agent budget contract
+failure. Async ownership cleanup is audited separately in R5-A.
+
+## Closure
+
+```text
+R4-A1 COMPLETE
+R4-A2 COMPLETE
+R4-B1 COMPLETE
+R4-B2 COMPLETE
+R4-C1 COMPLETE
+R4-C2 COMPLETE
+R4-C3 COMPLETE
+R4-D  COMPLETE
+
+R4 COMPLETE
+```
+
+R5 may begin from completion HEAD `90065c7` without reopening R4 timing
+semantics unless a later regression produces direct contradictory evidence.

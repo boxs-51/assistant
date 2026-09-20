@@ -771,6 +771,14 @@ class CapabilityRuntime(BaseRuntime):
             driver_task.cancel()
             await asyncio.gather(driver_task, return_exceptions=True)
             raise asyncio.TimeoutError()
+        except BaseException:
+            if not driver_task.done():
+                driver_task.cancel()
+            await asyncio.gather(
+                driver_task,
+                return_exceptions=True,
+            )
+            raise
         finally:
             cancellation_task.cancel()
             await asyncio.gather(cancellation_task, return_exceptions=True)

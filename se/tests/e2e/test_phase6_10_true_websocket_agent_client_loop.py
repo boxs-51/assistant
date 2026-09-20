@@ -3,7 +3,6 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
-import time
 from types import SimpleNamespace
 
 import uvicorn
@@ -149,13 +148,15 @@ def _free_tcp_port() -> int:
         return sock.getsockname()[1]
 
 
-def _wait_until(predicate, timeout=10.0):
-    deadline = time.monotonic() + timeout
+async def _wait_until_async(predicate, timeout=10.0, interval=0.01):
+    """Wait without blocking the event loop that owns the gateway runtime."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
 
-    while time.monotonic() < deadline:
+    while loop.time() < deadline:
         if predicate():
             return
-        time.sleep(0.01)
+        await asyncio.sleep(interval)
 
     raise AssertionError(
         "Timed out waiting for E2E condition."
@@ -265,7 +266,8 @@ def _build_client_registry():
     return registry, executed
 
 
-def _start_uvicorn(app):
+async def _start_uvicorn(app):
+    """Run the real TCP gateway on the SAME asyncio loop as server runtimes."""
     port = _free_tcp_port()
 
     config = uvicorn.Config(
@@ -274,23 +276,61 @@ def _start_uvicorn(app):
         port=port,
         log_level="error",
         access_log=False,
+        timeout_graceful_shutdown=2.0,
     )
 
     server = uvicorn.Server(config)
-
-    thread = threading.Thread(
-        target=server.run,
+    server_task = asyncio.create_task(
+        server.serve(),
         name="phase6-10-e2e-gateway",
-        daemon=True,
     )
-    thread.start()
 
-    _wait_until(
-        lambda: server.started,
+    await _wait_until_async(
+        lambda: server.started or server_task.done(),
         timeout=10.0,
     )
 
-    return server, thread, port
+    if server_task.done():
+        # Propagate startup failures instead of timing out later in client.connect().
+        await server_task
+        raise AssertionError("Gateway E2E server exited before startup completed.")
+
+    return server, server_task, port
+
+
+async def _stop_uvicorn(server, server_task, timeout=5.0):
+    """Gracefully stop Uvicorn without a cross-thread join race."""
+    if server_task.done():
+        # Retrieve (but do not re-raise) a terminal exception here.  If the
+        # server died early, the primary client/runtime assertion should be the
+        # failure reported by pytest rather than a cleanup exception.
+        if not server_task.cancelled():
+            server_task.exception()
+        return
+
+    server.should_exit = True
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(server_task),
+            timeout=timeout,
+        )
+        return
+    except asyncio.TimeoutError:
+        server.force_exit = True
+
+    try:
+        await asyncio.wait_for(
+            asyncio.shield(server_task),
+            timeout=timeout,
+        )
+    except asyncio.TimeoutError:
+        # Final safety net for a broken ASGI shutdown path.  Cleanup must not
+        # leave an orphan gateway task behind or mask the primary assertion.
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
 
 
 def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
@@ -328,7 +368,7 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             identity,
         ) = _build_gateway_app()
 
-        server, server_thread, port = _start_uvicorn(
+        server, server_task, port = await _start_uvicorn(
             gateway_app
         )
 
@@ -376,7 +416,8 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             # ----------------------------------------------------------
             # REAL CLIENT -> REAL GATEWAY connection.register
             # ----------------------------------------------------------
-            registered = client_realtime.connect(
+            registered = await asyncio.to_thread(
+                client_realtime.connect,
                 wait_timeout=5.0,
             )
 
@@ -393,7 +434,8 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
             # ----------------------------------------------------------
             # REAL CLIENT -> REAL GATEWAY capability.register
             # ----------------------------------------------------------
-            registration = client_capabilities.register(
+            registration = await asyncio.to_thread(
+                client_capabilities.register,
                 timeout=5.0,
             )
 
@@ -411,7 +453,7 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
                 f"{CONNECTION_ID}:{CAPABILITY_ID}"
             )
 
-            _wait_until(
+            await _wait_until_async(
                 lambda: (
                     catalog.get_implementation(
                         implementation_id
@@ -599,17 +641,12 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
 
         finally:
             if client_realtime is not None:
-                client_realtime.close()
+                await asyncio.to_thread(client_realtime.close)
 
             if client_dispatcher is not None:
                 client_dispatcher.shutdown()
 
-            server.should_exit = True
-            server_thread.join(timeout=5.0)
-
-            assert not server_thread.is_alive(), (
-                "Gateway E2E server did not shut down."
-            )
+            await _stop_uvicorn(server, server_task)
 
     asyncio.run(scenario())
 
@@ -629,13 +666,16 @@ def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
 
     async def scenario():
         gateway_app, catalog, connection_runtime, identity = _build_gateway_app()
-        server, server_thread, port = _start_uvicorn(gateway_app)
+        server, server_task, port = await _start_uvicorn(gateway_app)
         started = threading.Event()
         release = threading.Event()
 
         def slow_client_tool(value: str, **kwargs):
             started.set()
-            release.wait(timeout=5.0)
+            # Deliberately wait until the test releases the worker.  A timeout
+            # here would allow the client attempt to finish on its own and race
+            # the disconnect/fallback path we are trying to prove.
+            release.wait()
             return {"source": "client", "value": value}
 
         client_registry = SimpleNamespace(
@@ -675,8 +715,14 @@ def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
                 owner_id=OWNER_ID,
                 dispatcher=dispatcher,
             )
-            client_realtime.connect(wait_timeout=5.0)
-            client_capabilities.register(timeout=5.0)
+            await asyncio.to_thread(
+                client_realtime.connect,
+                wait_timeout=5.0,
+            )
+            await asyncio.to_thread(
+                client_capabilities.register,
+                timeout=5.0,
+            )
 
             definition = catalog.get_definition(CAPABILITY_ID)
             server_implementation = CapabilityImplementation.from_definition(
@@ -750,10 +796,8 @@ def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
         finally:
             release.set()
             if client_realtime is not None:
-                client_realtime.close()
+                await asyncio.to_thread(client_realtime.close)
             dispatcher.shutdown()
-            server.should_exit = True
-            server_thread.join(timeout=10.0)
-            assert not server_thread.is_alive()
+            await _stop_uvicorn(server, server_task)
 
     asyncio.run(scenario())

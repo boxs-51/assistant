@@ -1204,6 +1204,14 @@ class AgentRuntime:
             raise asyncio.TimeoutError(
                 "Agent execution deadline exceeded."
             )
+        except BaseException:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(
+                task,
+                return_exceptions=True,
+            )
+            raise
         finally:
             cancel_task.cancel()
             await asyncio.gather(cancel_task, return_exceptions=True)
