@@ -3,6 +3,7 @@ from typing import Any, Dict, List, Optional
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ...domain.schemas.identity import Identity
 from ...infrastructure.storage.repositories.agent import AgentRepository
+from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
 from .serialization import to_json_safe
 
@@ -266,6 +267,7 @@ class DurableAgentStore:
         identity: Identity | None = None,
         limits: AgentExecutionLimits | None = None,
         agent=None,
+        clock: ExecutionClock | None = None,
     ) -> AgentExecutionContext | None:
         async with self.uow_factory() as uow:
             execution = await uow.agents.get_execution(execution_id)
@@ -342,6 +344,16 @@ class DurableAgentStore:
                 causation_id=state.get("causation_id"),
                 trace_id=state.get("trace_id"),
                 connection_id=state.get("connection_id"),
+                remaining_active_budget_seconds=getattr(
+                    execution,
+                    "remaining_active_budget_seconds",
+                    None,
+                ),
+                wait_expires_at=getattr(execution, "wait_expires_at", None),
+                clock=clock,
+                # Rehydration is read-only timing reconstruction.  Do not
+                # consume active budget until the WAITING -> RUNNING CAS wins.
+                activate_budget=False,
             )
             context.iteration = latest_iteration.iteration if latest_iteration else 0
             context.resume_transcript = getattr(execution, "transcript", None) or (

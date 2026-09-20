@@ -120,6 +120,7 @@ class AgentExecutionContext:
         ) = _UNSET_ACTIVE_BUDGET,
         clock: ExecutionClock | None = None,
         wait_expires_at: datetime | None = None,
+        activate_budget: bool = True,
         now_monotonic: float | None = None,
     ) -> "AgentExecutionContext":
         execution_clock = clock or SystemExecutionClock()
@@ -144,7 +145,7 @@ class AgentExecutionContext:
 
         active_deadline = (
             None
-            if remaining_budget is None
+            if remaining_budget is None or not activate_budget
             else started + remaining_budget
         )
 

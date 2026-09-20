@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import time
 import uuid
 from datetime import datetime, timedelta, timezone
@@ -41,6 +42,22 @@ from .wait_policy import (
     ConfiguredExecutionWaitPolicy,
     ExecutionWaitPolicy,
 )
+
+
+class ExecutionWaitExpiredError(ExecutionConflictError):
+    """A durable WAITING execution reached its wall-clock expiry."""
+
+
+class ExecutionResumeBudgetError(ExecutionConflictError):
+    """A durable WAITING execution has no resumable active-time budget."""
+
+
+def _utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
 
 
 class AgentRuntime:
@@ -321,6 +338,7 @@ class AgentRuntime:
             return None
 
         record = await self._durable_store.load_execution(context.execution_id)
+        resume_remaining: float | None = None
         if record is None:
             try:
                 await self._durable_store.save_execution(
@@ -385,6 +403,64 @@ class AgentRuntime:
                     f"{context.resume_revision}"
                 )
 
+            persisted_remaining = getattr(
+                record,
+                "remaining_active_budget_seconds",
+                None,
+            )
+            if persisted_remaining is None:
+                raise ExecutionResumeBudgetError(
+                    "UNKNOWN_ACTIVE_BUDGET: legacy WAITING execution cannot "
+                    "resume without a trusted remaining active duration."
+                )
+
+            resume_remaining = float(persisted_remaining)
+            if not math.isfinite(resume_remaining):
+                raise ExecutionResumeBudgetError(
+                    "INVALID_ACTIVE_BUDGET: persisted active duration is "
+                    "not finite."
+                )
+
+            now_utc = context.clock.now_utc()
+            wait_expires_at = _utc_datetime(
+                getattr(record, "wait_expires_at", None)
+            )
+            context.wait_expires_at = wait_expires_at
+
+            if resume_remaining <= 0.0:
+                await self._durable_store.compare_and_set_execution(
+                    context.execution_id,
+                    expected_revision,
+                    {
+                        "state": AgentExecutionState.TIMEOUT.value,
+                        "wait_reason": None,
+                        "wait_expires_at": None,
+                        "remaining_active_budget_seconds": 0.0,
+                        "error": "AGENT_EXECUTION_TIMEOUT",
+                        "completed_at": now_utc,
+                    },
+                )
+                raise ExecutionResumeBudgetError(
+                    "AGENT_EXECUTION_TIMEOUT: no active budget remains."
+                )
+
+            if wait_expires_at is not None and now_utc >= wait_expires_at:
+                await self._durable_store.compare_and_set_execution(
+                    context.execution_id,
+                    expected_revision,
+                    {
+                        "state": AgentExecutionState.TIMEOUT.value,
+                        "wait_reason": None,
+                        "wait_expires_at": None,
+                        "remaining_active_budget_seconds": resume_remaining,
+                        "error": "WAIT_TTL_EXPIRED",
+                        "completed_at": now_utc,
+                    },
+                )
+                raise ExecutionWaitExpiredError(
+                    "WAIT_TTL_EXPIRED: durable WAITING execution expired."
+                )
+
         if not AgentExecutionStateMachine.can_transition(
             current_state,
             AgentExecutionState.RUNNING,
@@ -392,20 +468,33 @@ class AgentRuntime:
             raise ExecutionConflictError(
                 f"Cannot start AgentExecution from {current_state.value}"
             )
-        context.wait_expires_at = None
         await self._durable_store.compare_and_set_execution(
             context.execution_id,
             expected_revision,
             {
                 "state": AgentExecutionState.RUNNING.value,
                 "wait_reason": None,
-                # B2 will validate expiry before this claim. B1 only prevents
-                # a stale WAITING expiry from remaining on a RUNNING row.
                 "wait_expires_at": None,
-                "started_at": datetime.now(timezone.utc),
+                "started_at": context.clock.now_utc(),
             },
         )
+
+        if current_state is AgentExecutionState.WAITING:
+            assert resume_remaining is not None
+            context.remaining_active_budget_seconds = resume_remaining
+            context.wait_expires_at = None
+            context.restore_active_budget(resume_remaining)
+
         return expected_revision + 1
+
+    async def claim_resume(self, context: AgentExecutionContext) -> int:
+        """Synchronously claim one durable WAITING execution before WS ACK."""
+        revision = await self._begin_durable_execution(context)
+        if revision is None:
+            raise RuntimeError(
+                "Durable resume requires an AgentExecution lifecycle store."
+            )
+        return revision
 
     async def _finish_durable_execution(
         self,
@@ -489,9 +578,18 @@ class AgentRuntime:
         )
         return result
 
-    async def execute(self, context: AgentExecutionContext) -> AgentExecutionResult:
+    async def execute(
+        self,
+        context: AgentExecutionContext,
+        *,
+        durable_revision: int | None = None,
+    ) -> AgentExecutionResult:
         """Run exactly one durable AgentExecution lifecycle."""
-        revision = await self._begin_durable_execution(context)
+        revision = (
+            durable_revision
+            if durable_revision is not None
+            else await self._begin_durable_execution(context)
+        )
         try:
             result = await self._execute_loop(context)
         except asyncio.CancelledError:

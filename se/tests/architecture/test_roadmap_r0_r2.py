@@ -261,6 +261,8 @@ async def test_r2_two_resume_claims_have_exactly_one_winner() -> None:
             state="WAITING",
             wait_reason="CONNECTION",
             revision=7,
+            remaining_active_budget_seconds=5.0,
+            wait_expires_at=None,
         )
     )
     runtime = AgentRuntime(

@@ -276,6 +276,7 @@ async def test_r4_b1_running_claim_clears_stale_wait_expiry_only():
             state="WAITING",
             wait_reason="CONNECTION",
             revision=7,
+            remaining_active_budget_seconds=60.0,
             wait_expires_at=stale_expiry,
         )
     )

@@ -99,12 +99,15 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
     if context.agent is None:
         raise LookupError(f"Agent '{context.agent_id}' is not registered")
 
+    # Branch creation does not advance the immutable checkpoint.  The durable
+    # WAITING -> RUNNING claim must win before confirm_merge() and before ACK.
     branch = await service.reconnect(
         execution_id=execution_id,
         connection_id=connection_id,
         user_id=identity.user_id,
         metadata={"client_id": snapshot.metadata.get("client_id")},
     )
+    durable_revision = await container.agent_runtime.claim_resume(context)
     merged = await service.confirm_merge(
         execution_id=execution_id,
         branch_id=branch.branch_id,
@@ -128,7 +131,10 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
         ),
     )
     task = asyncio.create_task(
-        container.agent_runtime.execute(context),
+        container.agent_runtime.execute(
+            context,
+            durable_revision=durable_revision,
+        ),
         name=f"resume:{execution_id}",
     )
     task.add_done_callback(lambda completed: completed.exception() if not completed.cancelled() else None)
