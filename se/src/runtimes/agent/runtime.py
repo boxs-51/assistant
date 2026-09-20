@@ -4,7 +4,7 @@ import asyncio
 import json
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
 
 from ...domain.schemas.agent_execution import (
@@ -37,6 +37,10 @@ from .contracts.events import (
 from .contracts.continuation import ContinuationState
 from .persistence import ExecutionConflictError
 from .state_machine import AgentExecutionStateMachine
+from .wait_policy import (
+    ConfiguredExecutionWaitPolicy,
+    ExecutionWaitPolicy,
+)
 
 
 class AgentRuntime:
@@ -56,6 +60,7 @@ class AgentRuntime:
         durable_store=None,
         event_publisher: AgentEventPublisher | None = None,
         continuation_service=None,
+        wait_policy: ExecutionWaitPolicy | None = None,
     ) -> None:
         self._context_builder = context_builder
         self._inference = inference
@@ -64,6 +69,9 @@ class AgentRuntime:
         self._durable_store = durable_store
         self._event_publisher = event_publisher
         self._continuation_service = continuation_service
+        self._wait_policy = (
+            wait_policy or ConfiguredExecutionWaitPolicy()
+        )
 
     async def _publish(
         self,
@@ -330,6 +338,10 @@ class AgentRuntime:
                         "state": AgentExecutionState.CREATED.value,
                         "wait_reason": None,
                         "revision": 0,
+                        "remaining_active_budget_seconds": (
+                            context.remaining_active_budget_seconds
+                        ),
+                        "wait_expires_at": None,
                         "request": dict(context.input),
                         "context_state": {
                             "request_id": context.request_id,
@@ -380,12 +392,16 @@ class AgentRuntime:
             raise ExecutionConflictError(
                 f"Cannot start AgentExecution from {current_state.value}"
             )
+        context.wait_expires_at = None
         await self._durable_store.compare_and_set_execution(
             context.execution_id,
             expected_revision,
             {
                 "state": AgentExecutionState.RUNNING.value,
                 "wait_reason": None,
+                # B2 will validate expiry before this claim. B1 only prevents
+                # a stale WAITING expiry from remaining on a RUNNING row.
+                "wait_expires_at": None,
                 "started_at": datetime.now(timezone.utc),
             },
         )
@@ -393,17 +409,51 @@ class AgentRuntime:
 
     async def _finish_durable_execution(
         self,
+        context: AgentExecutionContext,
         result: AgentExecutionResult,
         expected_revision: int | None,
-    ) -> None:
-        if expected_revision is None:
-            return
-        if result.state is AgentLoopState.WAITING:
+    ) -> AgentExecutionResult:
+        waiting_attempt = result.state is AgentLoopState.WAITING
+        if waiting_attempt:
             target = AgentExecutionState.WAITING
             reason = result.wait_reason
+            AgentExecutionStateMachine.validate_state(target, reason)
+
+            remaining = context.freeze_active_budget()
+            if remaining is None or remaining <= 0.0:
+                target = AgentExecutionState.TIMEOUT
+                reason = None
+                context.wait_expires_at = None
+                result = result.model_copy(
+                    update={
+                        "state": AgentLoopState.TIMEOUT,
+                        "wait_reason": None,
+                        "error_code": "AGENT_EXECUTION_TIMEOUT",
+                        "error_message": (
+                            "Agent execution active budget exhausted "
+                            "before WAITING."
+                        ),
+                        "continuation_state": None,
+                        "checkpoint_id": None,
+                    }
+                )
+            else:
+                assert reason is not None
+                ttl_seconds = self._wait_policy.wait_ttl_seconds(
+                    reason=reason,
+                    context=context,
+                )
+                context.wait_expires_at = (
+                    None
+                    if ttl_seconds is None
+                    else context.clock.now_utc()
+                    + timedelta(seconds=ttl_seconds)
+                )
         else:
             target = AgentExecutionState(result.state.value)
             reason = None
+            context.wait_expires_at = None
+
         AgentExecutionStateMachine.validate_state(target, reason)
         if not AgentExecutionStateMachine.can_transition(
             AgentExecutionState.RUNNING,
@@ -412,21 +462,32 @@ class AgentRuntime:
             raise ExecutionConflictError(
                 f"Invalid durable completion RUNNING -> {target.value}"
             )
+        if expected_revision is None:
+            return result
+
+        values = {
+            "state": target.value,
+            "wait_reason": reason.value if reason is not None else None,
+            "wait_expires_at": context.wait_expires_at,
+            "result": result.model_dump(mode="json"),
+            "error": result.error_message,
+            "completed_at": (
+                None
+                if target is AgentExecutionState.WAITING
+                else context.clock.now_utc()
+            ),
+        }
+        if waiting_attempt:
+            values["remaining_active_budget_seconds"] = (
+                context.remaining_active_budget_seconds
+            )
+
         await self._durable_store.compare_and_set_execution(
             result.execution_id,
             expected_revision,
-            {
-                "state": target.value,
-                "wait_reason": reason.value if reason is not None else None,
-                "result": result.model_dump(mode="json"),
-                "error": result.error_message,
-                "completed_at": (
-                    None
-                    if target is AgentExecutionState.WAITING
-                    else datetime.now(timezone.utc)
-                ),
-            },
+            values,
         )
+        return result
 
     async def execute(self, context: AgentExecutionContext) -> AgentExecutionResult:
         """Run exactly one durable AgentExecution lifecycle."""
@@ -459,7 +520,11 @@ class AgentRuntime:
                     },
                 )
             raise
-        await self._finish_durable_execution(result, revision)
+        result = await self._finish_durable_execution(
+            context,
+            result,
+            revision,
+        )
         return result
 
     async def _execute_loop(self, context: AgentExecutionContext) -> AgentExecutionResult:

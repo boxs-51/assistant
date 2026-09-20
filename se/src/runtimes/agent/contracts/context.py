@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import math
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Any, Dict, Optional
 
 from ....domain.schemas.agent import AgentDefinition
@@ -68,6 +69,7 @@ class AgentExecutionContext:
     started_monotonic: float = 0.0
     deadline: float | None = None
     remaining_active_budget_seconds: float | None = None
+    wait_expires_at: datetime | None = None
     iteration: int = 0
     tool_calls_used: int = 0
     retry_attempts_used: int = 0
@@ -117,6 +119,7 @@ class AgentExecutionContext:
             float | None | _UnsetActiveBudget
         ) = _UNSET_ACTIVE_BUDGET,
         clock: ExecutionClock | None = None,
+        wait_expires_at: datetime | None = None,
         now_monotonic: float | None = None,
     ) -> "AgentExecutionContext":
         execution_clock = clock or SystemExecutionClock()
@@ -168,6 +171,7 @@ class AgentExecutionContext:
             started_monotonic=started,
             deadline=active_deadline,
             remaining_active_budget_seconds=remaining_budget,
+            wait_expires_at=wait_expires_at,
             causation_id=causation_id,
             trace_id=trace_id,
         )
