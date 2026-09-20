@@ -11,6 +11,8 @@ from ..models.sql.agent import (
     AgentSessionMemberRecord,
     AgentSessionRecord,
     AgentTaskRecord,
+    TaskBudgetRecord,
+    TaskBudgetReservationRecord,
     AgentToolCallRecord,
     AgentToolResultRecord,
 )
@@ -73,6 +75,95 @@ class AgentRepository(BaseRepository):
             select(AgentTaskRecord).where(AgentTaskRecord.id == task_id)
         )
         return result.scalar_one_or_none()
+
+    async def compare_and_set_task(
+        self,
+        task_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(AgentTaskRecord)
+            .where(
+                AgentTaskRecord.id == task_id,
+                AgentTaskRecord.revision == expected_revision,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task(task_id)
+
+    async def save_task_budget(self, values: Dict[str, Any]):
+        record = TaskBudgetRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_budget(self, task_id: str):
+        result = await self.session.execute(
+            select(TaskBudgetRecord).where(
+                TaskBudgetRecord.task_id == task_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def compare_and_set_task_budget(
+        self,
+        task_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(TaskBudgetRecord)
+            .where(
+                TaskBudgetRecord.task_id == task_id,
+                TaskBudgetRecord.revision == expected_revision,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task_budget(task_id)
+
+    async def save_task_budget_reservation(
+        self,
+        values: Dict[str, Any],
+    ):
+        record = TaskBudgetReservationRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_budget_reservation(
+        self,
+        task_id: str,
+        kind: str,
+        reservation_key: str,
+    ):
+        result = await self.session.execute(
+            select(TaskBudgetReservationRecord).where(
+                TaskBudgetReservationRecord.task_id == task_id,
+                TaskBudgetReservationRecord.kind == kind,
+                TaskBudgetReservationRecord.reservation_key
+                == reservation_key,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def has_execution_for_task(self, task_id: str) -> bool:
+        result = await self.session.execute(
+            select(AgentExecutionRecord.id)
+            .where(AgentExecutionRecord.task_id == task_id)
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def save_execution(self, values: Dict[str, Any]):
         record = AgentExecutionRecord(**values)

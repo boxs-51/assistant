@@ -48,6 +48,14 @@ class ExecutionConflictError(RuntimeError):
     """A durable execution create or revision compare-and-set lost a race."""
 
 
+class TaskConflictError(RuntimeError):
+    """A durable AgentTask revision compare-and-set lost a race."""
+
+
+class TaskBudgetConflictError(RuntimeError):
+    """A durable TaskBudget revision compare-and-set lost a race."""
+
+
 class DurableAgentStore:
     """Adapter that persists multi-agent records through the existing UoW."""
 
@@ -77,6 +85,87 @@ class DurableAgentStore:
             record = await uow.agents.save_task(values)
             await uow.commit()
             return record
+
+    async def load_task(self, task_id: str):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_task(task_id)
+            await uow.commit()
+            return record
+
+    async def compare_and_set_task(
+        self,
+        task_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        values = _normalize_json_fields(
+            values, _TASK_JSON_FIELDS, path="agent_tasks"
+        )
+        async with self.uow_factory() as uow:
+            record = await uow.agents.compare_and_set_task(
+                task_id,
+                expected_revision,
+                values,
+            )
+            if record is None:
+                raise TaskConflictError(
+                    f"Stale AgentTask revision: {task_id}@{expected_revision}"
+                )
+            await uow.commit()
+            return record
+
+    async def save_task_budget(self, values: Dict[str, Any]):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.save_task_budget(values)
+            await uow.commit()
+            return record
+
+    async def load_task_budget(self, task_id: str):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_task_budget(task_id)
+            await uow.commit()
+            return record
+
+    async def compare_and_set_task_budget(
+        self,
+        task_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.compare_and_set_task_budget(
+                task_id,
+                expected_revision,
+                values,
+            )
+            if record is None:
+                raise TaskBudgetConflictError(
+                    f"Stale TaskBudget revision: "
+                    f"{task_id}@{expected_revision}"
+                )
+            await uow.commit()
+            return record
+
+    async def load_task_budget_reservation(
+        self,
+        task_id: str,
+        kind: str,
+        reservation_key: str,
+    ):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_task_budget_reservation(
+                task_id,
+                kind,
+                reservation_key,
+            )
+            await uow.commit()
+            return record
+
+    async def task_has_execution_history(self, task_id: str) -> bool:
+        async with self.uow_factory() as uow:
+            found = await uow.agents.has_execution_for_task(task_id)
+            await uow.commit()
+            return found
 
     async def save_execution(self, values: Dict[str, Any]):
         values = _normalize_json_fields(

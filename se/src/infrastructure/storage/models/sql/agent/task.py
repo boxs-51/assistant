@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from sqlalchemy import JSON, DateTime, String, Text, func
+from sqlalchemy import CheckConstraint, JSON, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -15,6 +15,12 @@ class AgentTaskRecord(Base):
     session_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     created_by: Mapped[str] = mapped_column(String(255), nullable=False)
     assigned_agent_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    revision: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     parent_task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     connection_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
@@ -25,3 +31,10 @@ class AgentTaskRecord(Base):
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "revision >= 0",
+            name="ck_agent_tasks_revision_nonnegative",
+        ),
+    )

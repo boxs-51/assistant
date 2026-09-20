@@ -53,6 +53,7 @@ class AgentTask(GatewayBaseModel):
     session_id: str
     created_by: str
     assigned_agent_id: str
+    revision: int = Field(default=0, ge=0)
     parent_task_id: Optional[str] = None
     connection_id: Optional[str] = None
     client_id: Optional[str] = None

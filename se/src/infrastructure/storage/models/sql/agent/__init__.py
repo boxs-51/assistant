@@ -5,6 +5,7 @@ from .tool_result import AgentToolResultRecord
 from .session import AgentSessionRecord, AgentSessionMemberRecord
 from .message import AgentMessageRecord
 from .task import AgentTaskRecord
+from .task_budget import TaskBudgetRecord, TaskBudgetReservationRecord
 
 __all__ = [
     "AgentExecutionRecord",
@@ -15,4 +16,6 @@ __all__ = [
     "AgentSessionMemberRecord",
     "AgentMessageRecord",
     "AgentTaskRecord",
+    "TaskBudgetRecord",
+    "TaskBudgetReservationRecord",
 ]

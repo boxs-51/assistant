@@ -24,6 +24,8 @@ class WebScraper:
         self._playwright: Optional[Playwright] = None
         self._browser: Optional[Browser] = None
         self._semaphore = asyncio.Semaphore(max_concurrency)
+        self._lifecycle_lock = asyncio.Lock()
+        self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
 
     async def __aenter__(self):
         return self
@@ -32,25 +34,59 @@ class WebScraper:
         await self.close()
 
     async def close(self):
-        """Giải phóng hoàn toàn tài nguyên Playwright."""
-        if self._browser:
-            try:
-                await self._browser.close()
-            except Exception:
-                pass
-            self._browser = None
-        if self._playwright:
-            try:
-                await self._playwright.stop()
-            except Exception:
-                pass
-            self._playwright = None
+        """Close browser + Playwright exactly once on their owning event loop."""
+        if self._owner_loop is not None and asyncio.get_running_loop() is not self._owner_loop:
+            raise RuntimeError(
+                "WebScraper Playwright resources must be closed on the event loop "
+                "that created them."
+            )
+
+        async with self._lifecycle_lock:
+            browser = self._browser
+            playwright = self._playwright
+
+            if browser is None and playwright is None:
+                return
+
+            first_error: Optional[Exception] = None
+
+            if browser is not None:
+                try:
+                    await browser.close()
+                except Exception as exc:
+                    first_error = exc
+                finally:
+                    self._browser = None
+
+            if playwright is not None:
+                try:
+                    await playwright.stop()
+                except Exception as exc:
+                    if first_error is None:
+                        first_error = exc
+                finally:
+                    self._playwright = None
+
+            if first_error is not None:
+                raise first_error
 
     async def _get_browser(self) -> Browser:
-        """Tái sử dụng 1 trình duyệt Chromium duy nhất cho toàn bộ ứng dụng."""
-        if not self._browser or not self._browser.is_connected():
-            if not self._playwright:
-                self._playwright = await async_playwright().start()
+        """Return the single Chromium instance owned by this event loop."""
+        async with self._lifecycle_lock:
+            current_loop = asyncio.get_running_loop()
+            if self._owner_loop is not None and current_loop is not self._owner_loop:
+                raise RuntimeError(
+                    "WebScraper Playwright resources cannot cross event-loop ownership."
+                )
+
+            if self._browser and self._browser.is_connected():
+                return self._browser
+
+            if self._playwright is None:
+                playwright = await async_playwright().start()
+                self._playwright = playwright
+                self._owner_loop = current_loop
+
             launch_args = [
                 "--disable-blink-features=AutomationControlled",
                 "--no-sandbox",
@@ -58,8 +94,11 @@ class WebScraper:
                 "--disable-web-security",
                 "--disable-features=IsolateOrigins,site-per-process",
             ]
-            self._browser = await self._playwright.chromium.launch(headless=True, args=launch_args)
-        return self._browser
+            self._browser = await self._playwright.chromium.launch(
+                headless=True,
+                args=launch_args,
+            )
+            return self._browser
 
     async def fetch_static(
         self, url: str, timeout: int, profile: str, proxies: Optional[Dict[str, str]]
@@ -170,8 +209,6 @@ class WebScraper:
                 html_content = await page.content()
                 
                 structured_data = await extract_tables_and_charts(html_content, page_obj=page)
-
-                await context.close()
 
                 if WebToolStealth.is_captcha_or_cf_present(html_content):
                     return html_content, cookies_dict, structured_data, "Cảnh báo: Trang web yêu cầu xác minh CAPTCHA thủ công."

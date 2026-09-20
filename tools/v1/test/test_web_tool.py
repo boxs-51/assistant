@@ -1,3 +1,4 @@
+import asyncio
 import unittest
 from unittest.mock import MagicMock, AsyncMock, patch
 import time
@@ -12,6 +13,10 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
         """Khởi tạo instance WebTool trước mỗi bài test."""
         self.proxies = ["http://1.1.1.1:8080", "http://2.2.2.2:8080", "http://3.3.3.3:8080"]
         self.tool = WebTool(proxy_list=self.proxies, default_timeout=5, min_content_length=50)
+
+    async def asyncTearDown(self):
+        """Close async resources before IsolatedAsyncioTestCase closes its loop."""
+        await self.tool.close()
 
     # ================= 1. TEST QUẢN LÝ PROXY & LATENCY =================
 
@@ -110,9 +115,67 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
         """Test khi cào tĩnh bị lỗi 403 HTTP, Proxy bị lỗi sẽ tự động bị loại khỏi pool."""
         self.tool.proxy_manager.valid_proxies = ["http://bad-proxy:8080"]
 
-        with patch.object(self.tool.scraper, "fetch_static", new_callable=AsyncMock, return_value=(None, 403, "HTTP 403 Forbidden")):
+        with patch.object(
+            self.tool.scraper,
+            "fetch_static",
+            new_callable=AsyncMock,
+            return_value=(None, 403, "HTTP 403 Forbidden"),
+        ), patch.object(
+            self.tool.scraper,
+            "fetch_dynamic_js_stealth",
+            new_callable=AsyncMock,
+            return_value=(None, None, None, "blocked"),
+        ) as mock_dynamic:
             await self.tool.scrape("https://blocked.com", max_retries=1)
-            self.assertNotIn("http://bad-proxy:8080", self.tool.proxy_manager.valid_proxies)
+
+        self.assertNotIn("http://bad-proxy:8080", self.tool.proxy_manager.valid_proxies)
+        mock_dynamic.assert_awaited_once()
+
+    async def test_concurrent_browser_initialization_has_single_owner(self):
+        """Concurrent dynamic scrapes must not spawn multiple Playwright drivers."""
+        counters = {"start": 0, "launch": 0, "browser_close": 0, "stop": 0}
+
+        class FakeBrowser:
+            def is_connected(self):
+                return True
+
+            async def close(self):
+                counters["browser_close"] += 1
+
+        class FakeChromium:
+            async def launch(self, **_kwargs):
+                counters["launch"] += 1
+                await asyncio.sleep(0)
+                return FakeBrowser()
+
+        class FakePlaywright:
+            def __init__(self):
+                self.chromium = FakeChromium()
+
+            async def stop(self):
+                counters["stop"] += 1
+
+        class FakeStarter:
+            async def start(self):
+                counters["start"] += 1
+                await asyncio.sleep(0)
+                return FakePlaywright()
+
+        with patch(
+            "tools.v1.web_tool.scraper.async_playwright",
+            side_effect=lambda: FakeStarter(),
+        ):
+            browsers = await asyncio.gather(
+                *(self.tool.scraper._get_browser() for _ in range(8))
+            )
+
+        self.assertTrue(all(browser is browsers[0] for browser in browsers))
+        self.assertEqual(counters["start"], 1)
+        self.assertEqual(counters["launch"], 1)
+
+        await self.tool.close()
+        self.assertEqual(counters["browser_close"], 1)
+        self.assertEqual(counters["stop"], 1)
 
     async def test_scrape_max_chars_limit(self):
         """Test giới hạn số lượng ký tự đầu ra max_chars."""
@@ -128,8 +191,10 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
     async def test_execute_search_routing(self, mock_search):
         """Test hàm execute điều hướng đúng sang search."""
         mock_search.return_value = "Search Results Markdown"
-        res = await self.tool.execute(action="search", query="test query", max_results=3)
+        with patch.object(self.tool, "close", new_callable=AsyncMock) as mock_close:
+            res = await self.tool.execute(action="search", query="test query", max_results=3)
         mock_search.assert_called_once_with(query="test query", max_results=3, output_format="markdown")
+        mock_close.assert_not_awaited()
 
     @patch.object(WebTool, "scrape", new_callable=AsyncMock)
     async def test_execute_scrape_routing(self, mock_scrape):
@@ -150,10 +215,15 @@ class TestWebToolComprehensive(unittest.IsolatedAsyncioTestCase):
 
     def test_run_function_wrapper(self):
         """Test hàm entrypoint global `run()`."""
-        with patch("tools.v1.web_tool.WebTool.execute") as mock_exec:
+        with patch("tools.v1.web_tool.WebTool.execute") as mock_exec, patch(
+            "tools.v1.web_tool.WebTool.close",
+            new_callable=AsyncMock,
+        ) as mock_close:
             mock_exec.return_value = "OK"
             res = run("search", query="hello")
             mock_exec.assert_called_once_with(action="search", query="hello")
+            self.assertEqual(res, "OK")
+            self.assertEqual(mock_close.await_count, 1)
 
 
 if __name__ == "__main__":

@@ -1,7 +1,7 @@
 # R5-A Async Ownership Exit Gate
 
 **Baseline:** `65b9a6afcf1ee9506ac4795e880aaaeae48f6fb6`  
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -55,18 +55,39 @@ py -m pytest -q se/tests tools cl/tests
 
 ## Completion evidence
 
-Fill after execution:
-
 ```text
-Focused: <pending>
-Full:    <pending>
-Failures:<pending>
-Warnings:<pending>
+Patch check: PASS
+Patch apply: 16/16 files
+Focused: 39 passed in 10.17s
+Full:    555 passed, 5 warnings in 84.73s
+Failures:0
+Warnings:5 counted deprecation warnings
 ```
 
-The known Windows `BaseSubprocessTransport` /
-`_ProactorBasePipeTransport.__del__` warnings must remain recorded separately
-unless tracemalloc proves they originate from an Agent-owned async task.
+Two post-suite Windows asyncio unraisable transport warnings were also emitted:
+
+```text
+BaseSubprocessTransport.__del__
+_ProactorBasePipeTransport.__del__
+ValueError: I/O operation on closed pipe
+```
+
+These are tracked as an unresolved Windows subprocess/transport resource
+cleanup issue.  They are not evidence of an R5-A Agent ownership invariant
+failure:
+
+- no focused/full test failed;
+- no `Task exception was never retrieved` was emitted;
+- Supervisor ownership tests drained to an empty registry;
+- coordinator cancellation/drain tests passed;
+- EventDispatcher worker drain tests passed.
+
+The repository contains Playwright-backed `tools/v1/web_tool` code and an
+existing comment about Windows Proactor subprocess-pipe cleanup, making that
+tooling path a plausible follow-up target.  The current traceback only points
+to asyncio transport destructors, however, so the root cause remains
+unattributed until a targeted tracemalloc/reproduction run identifies the
+creator.
 
 ## Status after implementation
 
@@ -74,9 +95,11 @@ unless tracemalloc proves they originate from an Agent-owned async task.
 R5-A1 COMPLETE
 R5-A2 COMPLETE
 R5-A3 COMPLETE
-R5-A4 IMPLEMENTED
-R5-A5 IMPLEMENTED
-R5-A6 PENDING TEST EVIDENCE
+R5-A4 COMPLETE
+R5-A5 COMPLETE
+R5-A6 COMPLETE
+
+R5-A Async Ownership COMPLETE
 
 R5-B TaskBudget NOT STARTED
 R5 overall NOT COMPLETE

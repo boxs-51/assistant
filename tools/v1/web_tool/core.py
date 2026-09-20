@@ -198,41 +198,43 @@ class WebTool:
         deduplicate: bool = True,
         **kwargs,
     ) -> str:
-        try:
-            if action == "search":
-                if not query:
-                    return "**Lỗi:** Action `search` yêu cầu tham số `query`."
-                return await self.search(query=query, max_results=max_results, output_format=output_format)
+        # Resource ownership belongs to the surrounding WebTool async context
+        # (or to an explicit caller of close()).  Dispatch must not implicitly
+        # close the object because doing so creates a second owner when execute()
+        # is called from ``async with WebTool()``.
+        if action == "search":
+            if not query:
+                return "**Lỗi:** Action `search` yêu cầu tham số `query`."
+            return await self.search(query=query, max_results=max_results, output_format=output_format)
 
-            elif action in ("scrape", "scrape_webpage", "read"):
-                if not url:
-                    return f"**Lỗi:** Action `{action}` yêu cầu tham số `url`."
-                return await self.scrape(
-                    url=url,
-                    force_js=force_js,
-                    wait_selector=wait_selector,
-                    timeout=timeout,
-                    max_chars=max_chars,
-                    captcha_api_key=captcha_api_key,
-                    output_format=output_format,
-                    clean_noise=clean_noise,
-                    deduplicate=deduplicate,
-                )
-            elif action == "scrape_many":
-                if not urls:
-                    return "**Lỗi:** Action `scrape_many` yêu cầu danh sách tham số `urls`."
-                return await self.scrape_many(
-                    urls=urls,
-                    force_js=force_js,
-                    wait_selector=wait_selector,
-                    timeout=timeout,
-                    max_chars=max_chars,
-                    captcha_api_key=captcha_api_key,
-                    output_format=output_format,
-                    clean_noise=clean_noise,
-                    deduplicate=deduplicate,
-                )
-            else:
-                return f"**Lỗi:** Action `{action}` không hợp lệ. Chọn `search`, `scrape` hoặc `scrape_many`."
-        finally:
-            await self.close()
+        if action in ("scrape", "scrape_webpage", "read"):
+            if not url:
+                return f"**Lỗi:** Action `{action}` yêu cầu tham số `url`."
+            return await self.scrape(
+                url=url,
+                force_js=force_js,
+                wait_selector=wait_selector,
+                timeout=timeout,
+                max_chars=max_chars,
+                captcha_api_key=captcha_api_key,
+                output_format=output_format,
+                clean_noise=clean_noise,
+                deduplicate=deduplicate,
+            )
+
+        if action == "scrape_many":
+            if not urls:
+                return "**Lỗi:** Action `scrape_many` yêu cầu danh sách tham số `urls`."
+            return await self.scrape_many(
+                urls=urls,
+                force_js=force_js,
+                wait_selector=wait_selector,
+                timeout=timeout,
+                max_chars=max_chars,
+                captcha_api_key=captcha_api_key,
+                output_format=output_format,
+                clean_noise=clean_noise,
+                deduplicate=deduplicate,
+            )
+
+        return f"**Lỗi:** Action `{action}` không hợp lệ. Chọn `search`, `scrape` hoặc `scrape_many`."

@@ -10,6 +10,15 @@ from .supervisor import (
     AgentExecutionSupervisorClosedError,
     ExecutionOwnershipToken,
 )
+from .task_budget import (
+    DelegationDepthExceededError,
+    TaskBudgetClosedError,
+    TaskBudgetConflictError,
+    TaskBudgetExceededError,
+    TaskBudgetLegacyUninitializedError,
+    TaskBudgetRequiredError,
+    TaskBudgetService,
+)
 
 __all__ = [
     "MultiAgentCoordinator",
@@ -19,6 +28,13 @@ __all__ = [
     "ExecutionOwnershipToken",
     "AgentExecutionOwnershipError",
     "AgentExecutionSupervisorClosedError",
+    "TaskBudgetService",
+    "TaskBudgetRequiredError",
+    "TaskBudgetLegacyUninitializedError",
+    "TaskBudgetClosedError",
+    "TaskBudgetExceededError",
+    "TaskBudgetConflictError",
+    "DelegationDepthExceededError",
     "DefaultAgentContextAssembler",
     "RegistryAgentCapabilityResolver",
     "RegistryAgentSkillResolver",
