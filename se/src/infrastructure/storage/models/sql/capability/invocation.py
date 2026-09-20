@@ -3,7 +3,17 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    JSON,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -11,11 +21,44 @@ from ..base import Base
 
 class CapabilityInvocationRecord(Base):
     __tablename__ = "capability_invocations"
+    __table_args__ = (
+        CheckConstraint(
+            "idempotency IN "
+            "('IDEMPOTENT', 'DEDUPLICATED', 'NON_IDEMPOTENT', 'UNKNOWN')",
+            name="ck_capability_invocations_idempotency",
+        ),
+        CheckConstraint(
+            "remote_outcome_state IS NULL OR remote_outcome_state IN "
+            "('NOT_DISPATCHED', 'IN_FLIGHT', 'OUTCOME_UNKNOWN', "
+            "'TERMINAL_COMMITTED')",
+            name="ck_capability_invocations_remote_outcome_state",
+        ),
+    )
 
     invocation_id: Mapped[str] = mapped_column(String(255), primary_key=True)
     capability_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    capability_version: Mapped[str | None] = mapped_column(String(64))
     kind: Mapped[str] = mapped_column(String(32), nullable=False)
     execution_mode: Mapped[str] = mapped_column(String(32), nullable=False)
+    idempotency: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default="UNKNOWN",
+        server_default="UNKNOWN",
+    )
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    owner_user_id: Mapped[str | None] = mapped_column(
+        String(255),
+        index=True,
+    )
+    origin_client_id: Mapped[str | None] = mapped_column(
+        String(255),
+        index=True,
+    )
+    remote_outcome_state: Mapped[str | None] = mapped_column(
+        String(32),
+        index=True,
+    )
     implementation_id: Mapped[str | None] = mapped_column(String(255), index=True)
     driver_kind: Mapped[str | None] = mapped_column(String(100))
     state: Mapped[str] = mapped_column(String(32), nullable=False, index=True)

@@ -19,6 +19,7 @@ from .contracts.definition import (
 from .drivers.mcp_driver import McpCapabilityDriver
 from .drivers.remote_client_driver import RemoteClientDriver
 from .driver_registry import CapabilityDriverRegistry
+from .fingerprint import capability_request_fingerprint
 from .invocation import CapabilityInvocationLifecycle
 from .contracts.invocation import CapabilityInvocation, CapabilityInvocationState
 from .catalog import CapabilityCatalog
@@ -403,11 +404,32 @@ class CapabilityRuntime(BaseRuntime):
             if selected_implementation is not None
             else type(driver).__name__
         )
+        origin_client_id = None
+        if (
+            selected_implementation is not None
+            and selected_implementation.location
+            is CapabilityExecutionLocation.CLIENT
+        ):
+            origin_client_id = selected_implementation.metadata.get(
+                "client_id"
+            )
+        elif isinstance(driver, RemoteClientDriver):
+            origin_client_id = request_metadata.get("client_id")
+
         invocation = CapabilityInvocation(
             invocation_id=context.invocation_id,
             capability_id=capability_id,
+            capability_version=driver.definition.version,
             kind=driver.definition.kind,
             execution_mode=driver.definition.execution_mode,
+            idempotency=driver.definition.idempotency,
+            request_fingerprint=capability_request_fingerprint(
+                capability_id=capability_id,
+                capability_version=driver.definition.version,
+                arguments=arguments,
+            ),
+            owner_user_id=identity.user_id,
+            origin_client_id=origin_client_id,
             implementation_id=effective_implementation_id,
             driver_kind=effective_driver_kind,
             session_id=context.session_id,

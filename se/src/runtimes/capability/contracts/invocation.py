@@ -6,7 +6,11 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from .definition import CapabilityExecutionMode, CapabilityKind
+from .definition import (
+    CapabilityExecutionMode,
+    CapabilityIdempotency,
+    CapabilityKind,
+)
 
 
 class CapabilityInvocationState(str, Enum):
@@ -29,6 +33,15 @@ class CapabilityWaitReason(str, Enum):
     RESOURCE = "RESOURCE"
 
 
+class RemoteOutcomeState(str, Enum):
+    """Durable certainty about a remote side effect, separate from lifecycle."""
+
+    NOT_DISPATCHED = "NOT_DISPATCHED"
+    IN_FLIGHT = "IN_FLIGHT"
+    OUTCOME_UNKNOWN = "OUTCOME_UNKNOWN"
+    TERMINAL_COMMITTED = "TERMINAL_COMMITTED"
+
+
 TERMINAL_INVOCATION_STATES = frozenset(
     {
         CapabilityInvocationState.COMPLETED,
@@ -44,8 +57,14 @@ class CapabilityInvocation(BaseModel):
 
     invocation_id: str
     capability_id: str
+    capability_version: str | None = None
     kind: CapabilityKind
     execution_mode: CapabilityExecutionMode
+    idempotency: CapabilityIdempotency = CapabilityIdempotency.UNKNOWN
+    request_fingerprint: str | None = None
+    owner_user_id: str | None = None
+    origin_client_id: str | None = None
+    remote_outcome_state: RemoteOutcomeState | None = None
     implementation_id: str | None = None
     driver_kind: str | None = None
     state: CapabilityInvocationState = CapabilityInvocationState.CREATED

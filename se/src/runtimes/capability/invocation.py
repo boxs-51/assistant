@@ -93,9 +93,15 @@ def transition_invocation(
 
 class CapabilityInvocationStore(Protocol):
     async def create(self, invocation: CapabilityInvocation) -> None: ...
+    async def get(
+        self, invocation_id: str
+    ) -> CapabilityInvocation | None: ...
     async def compare_and_set(
         self, invocation: CapabilityInvocation, expected_revision: int
     ) -> bool: ...
+    async def list_attempts(
+        self, invocation_id: str
+    ) -> list[CapabilityInvocationAttempt]: ...
 
 
 class InMemoryCapabilityInvocationStore:
@@ -107,6 +113,16 @@ class InMemoryCapabilityInvocationStore:
         if invocation.invocation_id in self.items:
             raise ValueError(f"Duplicate invocation_id: {invocation.invocation_id}")
         self.items[invocation.invocation_id] = invocation.model_copy(deep=True)
+
+    async def get(
+        self, invocation_id: str
+    ) -> CapabilityInvocation | None:
+        invocation = self.items.get(invocation_id)
+        return (
+            invocation.model_copy(deep=True)
+            if invocation is not None
+            else None
+        )
 
     async def compare_and_set(
         self, invocation: CapabilityInvocation, expected_revision: int
@@ -126,6 +142,21 @@ class InMemoryCapabilityInvocationStore:
         if attempt.attempt_id not in self.attempts:
             raise KeyError(attempt.attempt_id)
         self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+
+    async def list_attempts(
+        self, invocation_id: str
+    ) -> list[CapabilityInvocationAttempt]:
+        return [
+            item.model_copy(deep=True)
+            for item in sorted(
+                (
+                    attempt
+                    for attempt in self.attempts.values()
+                    if attempt.invocation_id == invocation_id
+                ),
+                key=lambda attempt: attempt.attempt_number,
+            )
+        ]
 
 
 class CapabilityInvocationLifecycle:

@@ -3,6 +3,21 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 
+REMOTE_OUTCOME_UNKNOWN = "REMOTE_OUTCOME_UNKNOWN"
+REMOTE_RESULT_RECONCILIATION_REQUIRED = (
+    "REMOTE_RESULT_RECONCILIATION_REQUIRED"
+)
+REMOTE_INVOCATION_CONFLICT = "REMOTE_INVOCATION_CONFLICT"
+
+R6_RECONCILIATION_ERROR_CODES = frozenset(
+    {
+        REMOTE_OUTCOME_UNKNOWN,
+        REMOTE_RESULT_RECONCILIATION_REQUIRED,
+        REMOTE_INVOCATION_CONFLICT,
+    }
+)
+
+
 @dataclass
 class CapabilityError(Exception):
     """Stable machine-readable failure contract and runtime exception."""

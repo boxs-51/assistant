@@ -23,6 +23,15 @@ class CapabilityExecutionMode(str, Enum):
     LONG_RUNNING = "LONG_RUNNING"
 
 
+class CapabilityIdempotency(str, Enum):
+    """Replay-safety contract for one logical capability invocation."""
+
+    IDEMPOTENT = "IDEMPOTENT"
+    DEDUPLICATED = "DEDUPLICATED"
+    NON_IDEMPOTENT = "NON_IDEMPOTENT"
+    UNKNOWN = "UNKNOWN"
+
+
 class CapabilityEffect(str, Enum):
     READ = "READ"
     WRITE = "WRITE"
@@ -78,6 +87,7 @@ class CapabilityDefinition(BaseModel):
     execution_kind: str = "PYTHON"
     kind: CapabilityKind = CapabilityKind.TOOL
     execution_mode: CapabilityExecutionMode = CapabilityExecutionMode.ONE_SHOT
+    idempotency: CapabilityIdempotency = CapabilityIdempotency.UNKNOWN
     effects: Set[CapabilityEffect] = Field(default_factory=set)
 
     require_auth: bool = False
