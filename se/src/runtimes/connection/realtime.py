@@ -117,6 +117,66 @@ class RealtimeMultiplexer:
             )
             raise
 
+    async def reconcile(
+        self,
+        envelope: RealtimeEnvelope,
+        *,
+        timeout: Optional[float] = None,
+    ) -> Dict[str, Any]:
+        """Query client-side invocation state without granting execution."""
+        if envelope.type != "capability.reconcile":
+            raise ValueError(
+                "RealtimeMultiplexer.reconcile requires capability.reconcile"
+            )
+        if not envelope.connection_id:
+            raise ValueError("capability.reconcile requires connection_id")
+        if not envelope.invocation_id:
+            raise ValueError("capability.reconcile requires invocation_id")
+
+        effective_timeout = (
+            self.default_timeout if timeout is None else float(timeout)
+        )
+        if effective_timeout <= 0:
+            raise TimeoutError("Realtime reconciliation timeout must be > 0")
+
+        socket = self.registry.require_active_socket(
+            envelope.connection_id
+        )
+        future = await self.multiplexer.register(
+            envelope.invocation_id,
+            envelope.connection_id,
+        )
+        try:
+            await socket.send_json(
+                envelope.model_dump(mode="json")
+            )
+        except asyncio.CancelledError:
+            await self.multiplexer.cancel(envelope.invocation_id)
+            raise
+        except Exception as exc:
+            failure = RemoteConnectionLost(
+                envelope.connection_id,
+                envelope.invocation_id,
+            )
+            await self.multiplexer.reject(
+                envelope.invocation_id,
+                failure,
+            )
+            raise failure from exc
+
+        try:
+            result = await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=effective_timeout,
+            )
+            return dict(result)
+        except asyncio.TimeoutError:
+            # Reconciliation timeout only abandons the query.  It must never
+            # send capability.cancel because reconcile carries no execution
+            # permission.
+            await self.multiplexer.cancel(envelope.invocation_id)
+            raise
+
     async def cancel(
         self,
         connection_id: str,
@@ -151,6 +211,7 @@ class RealtimeMultiplexer:
             "capability.error",
             "capability.cancelled",
             "capability.progress",
+            "capability.reconciliation",
         }
         if envelope.type in correlated_types and envelope.connection_id != connection_id:
             raise ValueError(
@@ -180,6 +241,13 @@ class RealtimeMultiplexer:
         if envelope.type == "capability.cancelled":
             return await self.multiplexer.cancel(
                 envelope.invocation_id or "",
+                connection_id,
+            )
+
+        if envelope.type == "capability.reconciliation":
+            return await self.multiplexer.resolve(
+                envelope.invocation_id or "",
+                dict(envelope.payload),
                 connection_id,
             )
 

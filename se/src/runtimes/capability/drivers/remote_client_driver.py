@@ -8,6 +8,7 @@ from ...connection.protocol import RealtimeEnvelope
 from ...connection.realtime import RealtimeMultiplexer
 from ..contracts.context import CapabilityExecutionContext
 from ..contracts.definition import CapabilityDefinition
+from ..fingerprint import capability_request_fingerprint
 from .base import BaseCapabilityDriver
 
 
@@ -67,7 +68,13 @@ class RemoteClientDriver(BaseCapabilityDriver):
             trace_id=context.trace_id or context.metadata.get("trace_id"),
             payload={
                 "capability_id": self.name,
+                "capability_version": self.definition.version,
                 "arguments": dict(arguments),
+                "request_fingerprint": capability_request_fingerprint(
+                    capability_id=self.name,
+                    capability_version=self.definition.version,
+                    arguments=arguments,
+                ),
             },
         )
 

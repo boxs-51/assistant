@@ -7,6 +7,9 @@ import pytest
 from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
 from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
 from se.src.runtimes.capability.drivers.remote_client_driver import RemoteClientDriver
+from se.src.runtimes.capability.fingerprint import (
+    capability_request_fingerprint,
+)
 from se.src.runtimes.connection.protocol import RealtimeEnvelope
 from se.src.runtimes.connection.registry import ConnectionRegistry
 from se.src.runtimes.connection.realtime import RealtimeMultiplexer
@@ -64,7 +67,13 @@ def test_remote_driver_preserves_correlation_and_arguments() -> None:
         assert sent["trace_id"] == "trace-1"
         assert sent["payload"] == {
             "capability_id": "filesystem.read",
+            "capability_version": "1.0",
             "arguments": {"path": "a.txt"},
+            "request_fingerprint": capability_request_fingerprint(
+                capability_id="filesystem.read",
+                capability_version="1.0",
+                arguments={"path": "a.txt"},
+            ),
         }
 
         assert await realtime.handle_inbound(

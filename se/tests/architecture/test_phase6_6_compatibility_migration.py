@@ -12,6 +12,9 @@ from se.src.runtimes.capability.contracts.implementation import (
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
+from se.src.runtimes.capability.fingerprint import (
+    capability_request_fingerprint,
+)
 from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.connection.protocol import RealtimeEnvelope
@@ -89,7 +92,13 @@ def test_capability_runtime_routes_client_without_agent_location_branch() -> Non
         assert socket.messages[0]["type"] == "capability.invoke"
         assert socket.messages[0]["payload"] == {
             "capability_id": "desktop.echo",
+            "capability_version": "1.0",
             "arguments": {"value": "ok"},
+            "request_fingerprint": capability_request_fingerprint(
+                capability_id="desktop.echo",
+                capability_version="1.0",
+                arguments={"value": "ok"},
+            ),
         }
 
         assert await realtime.handle_inbound(

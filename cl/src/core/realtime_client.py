@@ -339,6 +339,22 @@ class GatewayRealtimeClient:
             trace_id=trace_id,
         )
 
+    def send_reconciliation(
+        self,
+        invocation_id: str,
+        payload: Dict[str, Any],
+        *,
+        execution_id: Optional[str] = None,
+        trace_id: Optional[str] = None,
+    ) -> None:
+        self.send(
+            "capability.reconciliation",
+            payload,
+            invocation_id,
+            execution_id=execution_id,
+            trace_id=trace_id,
+        )
+
     def resume_execution(
         self,
         execution_id: str,

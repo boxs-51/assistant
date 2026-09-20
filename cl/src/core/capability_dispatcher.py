@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import threading
 import time
 from collections import OrderedDict
@@ -20,6 +22,9 @@ class TerminalOutcome:
     payload: Dict[str, Any]
     execution_id: str | None
     trace_id: str | None
+    capability_id: str | None
+    capability_version: str | None
+    request_fingerprint: str | None
     expires_at: float
 
 
@@ -27,6 +32,8 @@ class TerminalOutcome:
 class LocalInvocation:
     invocation_id: str
     capability_id: str
+    capability_version: str
+    request_fingerprint: str
     envelope: Dict[str, Any]
     cancellation_event: threading.Event
     future: Future
@@ -107,18 +114,60 @@ class CapabilityDispatcher:
             )
             return
 
+        local_version = self._capability_version(capability_id)
+        capability_version = str(
+            payload.get("capability_version") or local_version
+        )
+        request_fingerprint = self._request_fingerprint(
+            capability_id,
+            capability_version,
+            arguments,
+        )
+        declared_fingerprint = payload.get("request_fingerprint")
+        if capability_version != local_version or (
+            declared_fingerprint is not None
+            and declared_fingerprint != request_fingerprint
+        ):
+            self._emit_conflict(invocation_id, envelope)
+            return
+        if declared_fingerprint is not None:
+            request_fingerprint = str(declared_fingerprint)
+
         with self._lock:
             self._purge_terminal_locked()
-            if invocation_id in self._invocations:
+            existing = self._invocations.get(invocation_id)
+            if existing is not None:
+                if not self._same_semantics(
+                    existing.capability_id,
+                    existing.capability_version,
+                    existing.request_fingerprint,
+                    capability_id,
+                    capability_version,
+                    request_fingerprint,
+                ):
+                    self._emit_conflict(invocation_id, envelope)
                 return
             previous = self._terminal.get(invocation_id)
             if previous is not None:
+                if not self._same_semantics(
+                    previous.capability_id,
+                    previous.capability_version,
+                    previous.request_fingerprint,
+                    capability_id,
+                    capability_version,
+                    request_fingerprint,
+                ):
+                    self._emit_conflict(invocation_id, envelope)
+                    return
                 self._emit(invocation_id, previous)
                 return
             if not self._capacity.acquire(blocking=False):
                 self._record_and_emit(
                     invocation_id, envelope, "capability.error",
                     self._error("CLIENT_BUSY", "Local capability queue is full.", retryable=True),
+                    capability_id=capability_id,
+                    capability_version=capability_version,
+                    request_fingerprint=request_fingerprint,
                 )
                 return
             cancellation_event = threading.Event()
@@ -136,6 +185,8 @@ class CapabilityDispatcher:
             self._invocations[invocation_id] = LocalInvocation(
                 invocation_id,
                 capability_id,
+                capability_version,
+                request_fingerprint,
                 dict(envelope),
                 cancellation_event,
                 future,
@@ -177,7 +228,102 @@ class CapabilityDispatcher:
             event_type,
             payload,
             expected_epoch=invocation.epoch,
+            capability_id=invocation.capability_id,
+            capability_version=invocation.capability_version,
+            request_fingerprint=invocation.request_fingerprint,
         )
+
+    def reconcile(self, envelope: Dict[str, Any]) -> None:
+        invocation_id = envelope.get("invocation_id")
+        if not invocation_id:
+            return
+        if envelope.get("connection_id") != self.realtime.connection_id:
+            return
+        payload = envelope.get("payload") or {}
+        capability_id = payload.get("capability_id")
+        capability_version = payload.get("capability_version")
+        request_fingerprint = payload.get("request_fingerprint")
+        if not all(
+            isinstance(value, str) and value
+            for value in (
+                capability_id,
+                capability_version,
+                request_fingerprint,
+            )
+        ):
+            return
+
+        with self._lock:
+            self._purge_terminal_locked()
+            running = self._invocations.get(invocation_id)
+            terminal = self._terminal.get(invocation_id)
+
+            if running is not None:
+                if self._same_semantics(
+                    running.capability_id,
+                    running.capability_version,
+                    running.request_fingerprint,
+                    capability_id,
+                    capability_version,
+                    request_fingerprint,
+                ):
+                    response = {
+                        "status": "RUNNING",
+                        "capability_id": running.capability_id,
+                        "capability_version": running.capability_version,
+                        "request_fingerprint": running.request_fingerprint,
+                    }
+                else:
+                    response = self._conflict_reconciliation(
+                        capability_id,
+                        capability_version,
+                        request_fingerprint,
+                    )
+            elif terminal is not None:
+                if self._same_semantics(
+                    terminal.capability_id,
+                    terminal.capability_version,
+                    terminal.request_fingerprint,
+                    capability_id,
+                    capability_version,
+                    request_fingerprint,
+                ):
+                    terminal_type = {
+                        "capability.result": "result",
+                        "capability.error": "error",
+                        "capability.cancelled": "cancelled",
+                    }[terminal.event_type]
+                    response = {
+                        "status": "TERMINAL",
+                        "capability_id": terminal.capability_id,
+                        "capability_version": terminal.capability_version,
+                        "request_fingerprint": terminal.request_fingerprint,
+                        "terminal_type": terminal_type,
+                        "terminal_payload": dict(terminal.payload),
+                    }
+                else:
+                    response = self._conflict_reconciliation(
+                        capability_id,
+                        capability_version,
+                        request_fingerprint,
+                    )
+            else:
+                response = {
+                    "status": "NOT_FOUND",
+                    "capability_id": capability_id,
+                    "capability_version": capability_version,
+                    "request_fingerprint": request_fingerprint,
+                }
+
+        try:
+            self.realtime.send_reconciliation(
+                invocation_id,
+                response,
+                execution_id=envelope.get("execution_id"),
+                trace_id=envelope.get("trace_id"),
+            )
+        except Exception:
+            pass
 
     def cancel(self, invocation_id: str) -> bool:
         with self._lock:
@@ -216,12 +362,18 @@ class CapabilityDispatcher:
         payload,
         *,
         expected_epoch=None,
+        capability_id=None,
+        capability_version=None,
+        request_fingerprint=None,
     ) -> None:
         outcome = TerminalOutcome(
             event_type=event_type,
             payload=dict(payload),
             execution_id=envelope.get("execution_id"),
             trace_id=envelope.get("trace_id"),
+            capability_id=capability_id,
+            capability_version=capability_version,
+            request_fingerprint=request_fingerprint,
             expires_at=time.monotonic() + self._terminal_ttl,
         )
         with self._lock:
@@ -260,6 +412,83 @@ class CapabilityDispatcher:
             self._terminal.pop(key, None)
         while len(self._terminal) > self._max_terminal:
             self._terminal.popitem(last=False)
+
+    def _capability_version(self, capability_id: str) -> str:
+        tool = self.registry.tools.get(capability_id)
+        metadata = (
+            tool.get("metadata", {})
+            if isinstance(tool, dict)
+            else {}
+        )
+        return str(metadata.get("version", "1.0"))
+
+    @staticmethod
+    def _request_fingerprint(
+        capability_id: str,
+        capability_version: str,
+        arguments: Dict[str, Any],
+    ) -> str:
+        encoded = json.dumps(
+            {
+                "capability_id": capability_id,
+                "capability_version": capability_version,
+                "arguments": dict(arguments),
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def _same_semantics(
+        left_capability_id,
+        left_version,
+        left_fingerprint,
+        right_capability_id,
+        right_version,
+        right_fingerprint,
+    ) -> bool:
+        return (
+            left_capability_id == right_capability_id
+            and left_version == right_version
+            and left_fingerprint == right_fingerprint
+        )
+
+    def _emit_conflict(
+        self,
+        invocation_id: str,
+        envelope: Dict[str, Any],
+    ) -> None:
+        try:
+            self.realtime.send_error(
+                invocation_id,
+                code="REMOTE_INVOCATION_CONFLICT",
+                message=(
+                    "invocation_id is already bound to different request "
+                    "semantics."
+                ),
+                details={},
+                retryable=False,
+                execution_id=envelope.get("execution_id"),
+                trace_id=envelope.get("trace_id"),
+            )
+        except Exception:
+            pass
+
+    @staticmethod
+    def _conflict_reconciliation(
+        capability_id: str,
+        capability_version: str,
+        request_fingerprint: str,
+    ) -> Dict[str, Any]:
+        return {
+            "status": "CONFLICT",
+            "capability_id": capability_id,
+            "capability_version": capability_version,
+            "request_fingerprint": request_fingerprint,
+        }
 
     @staticmethod
     def _error(code, message, *, retryable=False, details=None):

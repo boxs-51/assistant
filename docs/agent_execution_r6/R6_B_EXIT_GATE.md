@@ -4,7 +4,7 @@
 
 **Dependency:** R6-A COMPLETE
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -109,9 +109,35 @@ py -m pytest -q se/tests tools cl/tests `
 ## Completion evidence
 
 ```text
-Patch check: <pending>
-Focused:     <pending>
-Broad:       <pending>
+Patch/application:
+    PASS
+
+Focused R6-B gate before fixture correction:
+    39 passed
+    1 failed
+
+The sole failure was the real-WebSocket safe-fallback fixture.  The fixture
+registered the client capability with the fail-safe default:
+
+    idempotency = UNKNOWN
+
+R6-B correctly blocked fallback after OUTCOME_UNKNOWN.  The fixture was then
+corrected to declare the behavior it was intended to test:
+
+    idempotency = IDEMPOTENT
+
+Single corrected E2E:
+    1 passed in 6.56s
+
+Focused R6-B gate:
+    40 passed in 6.71s
+
+Repository-wide gate:
+    618 passed
+    9 warnings
+    97.79s
+
+No test failures remain.
 ```
 
 ## Phase status
@@ -119,8 +145,8 @@ Broad:       <pending>
 ```text
 R5      COMPLETE
 R6-A    COMPLETE
-R6-B    IMPLEMENTED / PENDING TEST EVIDENCE
-R6-C    PENDING
+R6-B    COMPLETE
+R6-C    ACTIVE
 R6-D    PENDING
 R6-E    PENDING
 R6      NOT COMPLETE

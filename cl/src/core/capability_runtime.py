@@ -179,6 +179,12 @@ class CapabilityRuntime:
 
             return True
 
+        if message_type == "capability.reconcile":
+            self.dispatcher.reconcile(
+                envelope
+            )
+            return True
+
         if message_type == "capability.registered":
             self.realtime.mark_capabilities_registered(
                 envelope

@@ -43,6 +43,7 @@ _TRANSITIONS = {
     },
     CapabilityInvocationState.WAITING: {
         CapabilityInvocationState.DISPATCHING,
+        CapabilityInvocationState.COMPLETED,
         CapabilityInvocationState.FAILED,
         CapabilityInvocationState.CANCELLED,
         CapabilityInvocationState.TIMED_OUT,

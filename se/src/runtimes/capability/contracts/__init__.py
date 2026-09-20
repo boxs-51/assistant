@@ -14,6 +14,11 @@ from .error import (
     R6_RECONCILIATION_ERROR_CODES,
 )
 from .invocation import RemoteOutcomeState
+from .reconciliation import (
+    RemoteReconciliationResult,
+    RemoteReconciliationStatus,
+    RemoteTerminalType,
+)
 
 __all__ = [
     "CapabilityDefinition",
@@ -26,4 +31,7 @@ __all__ = [
     "REMOTE_OUTCOME_UNKNOWN",
     "REMOTE_RESULT_RECONCILIATION_REQUIRED",
     "R6_RECONCILIATION_ERROR_CODES",
+    "RemoteReconciliationResult",
+    "RemoteReconciliationStatus",
+    "RemoteTerminalType",
 ]

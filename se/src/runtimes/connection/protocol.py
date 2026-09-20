@@ -18,6 +18,8 @@ RealtimeMessageType = Literal[
     "capability.error",
     "capability.cancel",
     "capability.cancelled",
+    "capability.reconcile",
+    "capability.reconciliation",
     "assistant.delta",
     "assistant.completed",
     "assistant.error",
@@ -55,6 +57,8 @@ class RealtimeEnvelope(BaseModel):
             "capability.error",
             "capability.cancel",
             "capability.cancelled",
+            "capability.reconcile",
+            "capability.reconciliation",
         }
 
         if self.type in invocation_required and not self.invocation_id:

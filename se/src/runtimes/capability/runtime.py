@@ -25,6 +25,7 @@ from .drivers.remote_client_driver import RemoteClientDriver
 from .driver_registry import CapabilityDriverRegistry
 from .fingerprint import capability_request_fingerprint
 from .invocation import CapabilityInvocationLifecycle
+from .reconciliation import RemoteInvocationReconciliationService
 from .contracts.invocation import (
     CapabilityInvocation,
     CapabilityInvocationState,
@@ -89,9 +90,39 @@ class CapabilityRuntime(BaseRuntime):
         self.realtime = realtime
         self.driver_registry = driver_registry or CapabilityDriverRegistry()
         self.invocation_lifecycle = invocation_lifecycle or CapabilityInvocationLifecycle()
+        effective_connections = (
+            connection_registry
+            or getattr(realtime, "registry", None)
+        )
+        self.reconciliation_service = (
+            RemoteInvocationReconciliationService(
+                self.invocation_lifecycle,
+                effective_connections,
+                realtime,
+            )
+            if effective_connections is not None and realtime is not None
+            else None
+        )
         
         self._subscribed = False
         self.mcp_manager = None
+
+    async def reconcile_remote_invocation(
+        self,
+        invocation_id: str,
+        connection_id: str,
+        *,
+        timeout: float | None = None,
+    ):
+        if self.reconciliation_service is None:
+            raise RuntimeError(
+                "Remote invocation reconciliation is unavailable."
+            )
+        return await self.reconciliation_service.reconcile(
+            invocation_id,
+            connection_id,
+            timeout=timeout,
+        )
 
     async def initialize(self, context: RuntimeContext) -> None:
         await super().initialize(context)

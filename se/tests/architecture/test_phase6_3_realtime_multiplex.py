@@ -135,6 +135,57 @@ def test_timeout_sends_cancel() -> None:
     asyncio.run(scenario())
 
 
+def test_reconciliation_query_is_correlated_without_execution_permission() -> None:
+    async def scenario() -> None:
+        registry, socket = make_active_connection()
+        realtime = RealtimeMultiplexer(registry)
+        task = asyncio.create_task(
+            realtime.reconcile(
+                RealtimeEnvelope(
+                    type="capability.reconcile",
+                    message_id="reconcile-1",
+                    connection_id="conn-1",
+                    invocation_id="inv-1",
+                    payload={
+                        "capability_id": "tool.echo",
+                        "capability_version": "1.0",
+                        "request_fingerprint": "abc",
+                    },
+                )
+            )
+        )
+        await asyncio.sleep(0)
+        assert socket.messages == [
+            {
+                **socket.messages[0],
+                "type": "capability.reconcile",
+            }
+        ]
+        assert await realtime.handle_inbound(
+            "conn-1",
+            RealtimeEnvelope(
+                type="capability.reconciliation",
+                message_id="reconciliation-1",
+                connection_id="conn-1",
+                invocation_id="inv-1",
+                payload={
+                    "status": "NOT_FOUND",
+                    "capability_id": "tool.echo",
+                    "capability_version": "1.0",
+                    "request_fingerprint": "abc",
+                },
+            ),
+        )
+        assert await task == {
+            "status": "NOT_FOUND",
+            "capability_id": "tool.echo",
+            "capability_version": "1.0",
+            "request_fingerprint": "abc",
+        }
+
+    asyncio.run(scenario())
+
+
 def test_disconnect_fails_only_pending_invocations_for_connection() -> None:
     async def scenario() -> None:
         registry = ConnectionRegistry()
