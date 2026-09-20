@@ -2,7 +2,7 @@
 
 **Baseline:** `1f6fd54a15872005a971927e8597f55c5a343f40`
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -54,20 +54,33 @@ py -m pytest -q se/tests tools cl/tests
 ## Completion evidence
 
 ```text
-Patch check: <pending>
-Focused:     <pending>
-Full:        <pending>
+Patch check: PASS
+Patch apply: 15/15 files
+Focused:     27 passed, 2 warnings in 101.85s
+Full:        573 passed, 7 warnings in 401.55s
+Failures:    0
 ```
+
+The warnings are deprecation/configuration warnings only:
+
+```text
+Starlette / anyio BlockingPortal deprecation
+passlib argon2 version deprecation
+Starlette HTTP 422 constant deprecation
+Alembic path_separator deprecation
+```
+
+No warning indicates a TaskBudget correctness failure.
 
 ## Phase status
 
 ```text
 R5-A COMPLETE
-R5-B1 IMPLEMENTED
-R5-B2 IMPLEMENTED
-R5-B3 IMPLEMENTED
-R5-B4 IMPLEMENTED
-R5-B PENDING TEST EVIDENCE
+R5-B1 COMPLETE
+R5-B2 COMPLETE
+R5-B3 COMPLETE
+R5-B4 COMPLETE
+R5-B COMPLETE
 
 R5-C PENDING
 R5-D PENDING

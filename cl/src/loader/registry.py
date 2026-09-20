@@ -27,6 +27,15 @@ class DynamicRegistry:
 
     def load_all(self):
         """Khởi chạy điều phối nạp dữ liệu từ các sub-modules"""
+        # v1 ownership hardening intentionally does not implement transactional
+        # /init reload.  Fail before mutating the live registry instead of
+        # spawning a second MCP generation or partially replacing self.tools.
+        if self.mcp_mgr.has_active_adapters:
+            raise RuntimeError(
+                "Registry reload with active MCP servers is disabled until "
+                "transactional MCP reload is implemented."
+            )
+
         # 1. Config & Constitution
         self.settings = self.config_loader.load_settings()
         self.constitution = self.config_loader.load_constitution()
@@ -42,6 +51,10 @@ class DynamicRegistry:
 
         # 4. Skills
         self.skills = self.skill_mgr.load_skills()
+
+    def shutdown(self) -> None:
+        """Deterministically close MCP subprocesses owned by this registry."""
+        self.mcp_mgr.shutdown()
 
     def execute_slash_command(self, cmd: str) -> str:
         cmd = cmd.strip()
