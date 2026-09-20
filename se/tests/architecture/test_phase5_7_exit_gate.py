@@ -21,8 +21,8 @@ from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.identity import Identity
 
 ROOT = Path(__file__).resolve().parents[3]
-EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_7" / "PHASE5_7_EXIT_GATE.md"
-LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "phase5" / "PHASE_5_AGENT_RUNTIME_SPEC.md"
+EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_7_EXIT_GATE.md"
+LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "legacy" /"phase5" / "PHASE_5_AGENT_RUNTIME_SPEC.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-7-exit-gate.yml"
 
 

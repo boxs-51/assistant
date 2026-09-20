@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from sqlalchemy import JSON, DateTime, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -24,6 +24,12 @@ class AgentExecutionRecord(Base):
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
     wait_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    remaining_active_budget_seconds: Mapped[Optional[float]] = mapped_column(
+        Float, nullable=True
+    )
+    wait_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        DateTime(timezone=True), nullable=True, index=True
+    )
     request: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
     result: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)
     context_state: Mapped[Optional[Dict[str, Any]]] = mapped_column(JSON, nullable=True)

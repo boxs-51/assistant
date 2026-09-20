@@ -26,9 +26,9 @@ from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDri
 from se.src.agent.registry import AgentRegistry
 
 ROOT = Path(__file__).resolve().parents[3]
-EXIT_GATE_DOC = ROOT / "se" / "docs" / "phase5" / "phase5_11" / "PHASE5_11_EXIT_GATE.md"
-CHECKLIST = ROOT / "se" / "docs" / "phase5" / "phase5_11" / "PHASE5_11_TASK_CHECKLIST.md"
-LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "phase5" / "Agent_Execution_System.md"
+EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_11_EXIT_GATE.md"
+CHECKLIST = ROOT / "se" / "docs" /  "legacy" / "phase5" / "phase5_11" / "PHASE5_11_TASK_CHECKLIST.md"
+LEGACY_STATUS_DOC = ROOT / "se" / "docs" /  "legacy" / "phase5" / "Agent_Execution_System.md"
 CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-11-exit-gate.yml"
 MAIN_MODULE = ROOT / "se" / "src" / "main.py"
 

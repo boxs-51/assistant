@@ -1,3 +1,4 @@
+from datetime import datetime
 from enum import Enum
 from typing import Any, Dict, Optional
 
@@ -75,6 +76,8 @@ class AgentExecution(GatewayBaseModel):
     state: AgentExecutionState = AgentExecutionState.CREATED
     wait_reason: Optional[AgentExecutionWaitReason] = None
     revision: int = 0
+    remaining_active_budget_seconds: Optional[float] = None
+    wait_expires_at: Optional[datetime] = None
     request: Dict[str, Any] = Field(default_factory=dict)
     result: Optional[Dict[str, Any]] = None
     error: Optional[str] = None
