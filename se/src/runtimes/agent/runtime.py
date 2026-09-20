@@ -1137,21 +1137,22 @@ class AgentRuntime:
                         },
                     )
 
-                disconnected = [
+                remote_waiting = [
                     item
                     for item in latest_tool_results
-                    if item.metadata.get("original_error_code")
-                    == "REMOTE_CONNECTION_LOST"
-                ]
-                if disconnected and self._continuation_service is not None:
-                    lost = disconnected[0]
-                    server_continuation_available = bool(
-                        getattr(
-                            self._tool_execution,
-                            "can_continue_server_side",
-                            lambda capability_id: False,
-                        )(lost.capability_id)
+                    if (
+                        item.error_code
+                        in {
+                            "REMOTE_CONNECTION_LOST",
+                            "REMOTE_OUTCOME_UNKNOWN",
+                            "REMOTE_RESULT_RECONCILIATION_REQUIRED",
+                        }
+                        or item.metadata.get("original_error_code")
+                        == "REMOTE_CONNECTION_LOST"
                     )
+                ]
+                if remote_waiting and self._continuation_service is not None:
+                    lost = remote_waiting[0]
                     old_connection_id = (
                         lost.metadata.get("connection_id")
                         or context.connection_id
@@ -1177,9 +1178,10 @@ class AgentRuntime:
                         capability_id=lost.capability_id,
                         iteration=iteration_number,
                         transcript=checkpoint_transcript,
-                        server_continuation_available=server_continuation_available,
+                        server_continuation_available=False,
                         metadata={
-                            "origin_client_id": context.metadata.get("client_id")
+                            "origin_client_id": context.metadata.get("client_id"),
+                            "remote_error_code": lost.error_code,
                         },
                     )
                     context.connection_id = None

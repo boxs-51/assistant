@@ -84,6 +84,10 @@ class CapabilityRuntime:
                         "execution_kind": "PYTHON",
                         "kind": metadata.get("kind", "TOOL"),
                         "execution_mode": metadata.get("execution_mode", "ONE_SHOT"),
+                        "idempotency": metadata.get(
+                            "idempotency",
+                            "UNKNOWN",
+                        ),
                         "effects": metadata.get("effects", []),
                         "require_auth": metadata.get(
                             "require_auth",

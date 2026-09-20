@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import socket
 import threading
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
 import uvicorn
@@ -38,6 +39,7 @@ from se.src.runtimes.capability.registration import (
 from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.connection.runtime import ConnectionRuntime
+from se.src.runtimes.context.temporal import TemporalContextProvider
 from se.src.transport.gateway.api.v1 import events_router
 from se.src.transport.gateway.authentication.dependency import (
     get_websocket_identity
@@ -249,6 +251,7 @@ def _build_client_registry():
                     "description": (
                         "Real client-side E2E echo tool"
                     ),
+                    "idempotency": "IDEMPOTENT",
                     "parameters": {
                         "type": "object",
                         "properties": {
@@ -524,8 +527,31 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
                 AuthorizationService(),
                 capability_catalog=catalog,
             )
+
+            # This E2E verifies that temporal context is rebuilt for every
+            # inference. Do not depend on host wall-clock resolution for that
+            # assertion: two fast consecutive datetime.now() calls may return
+            # the same value on some Windows timer configurations.
+            temporal_tick = 0
+
+            def advancing_clock(zone):
+                nonlocal temporal_tick
+                value = (
+                    datetime(
+                        2026,
+                        9,
+                        20,
+                        tzinfo=timezone.utc,
+                    )
+                    + timedelta(seconds=temporal_tick)
+                )
+                temporal_tick += 1
+                return value.astimezone(zone)
+
             context_assembler = DefaultAgentContextAssembler(
-                DefaultAgentSystemPromptProvider(),
+                DefaultAgentSystemPromptProvider(
+                    TemporalContextProvider(advancing_clock)
+                ),
                 RegistryAgentCapabilityResolver(
                     agent_registry=agent_registry,
                     capability_registry=gateway_capability_registry,
@@ -652,7 +678,7 @@ def test_phase6_10_1_true_websocket_remote_agent_tool_loop():
 
 
 def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
-    """A real socket loss creates attempt 2 without changing invocation ID."""
+    """An explicitly IDEMPOTENT socket loss may safely create attempt 2."""
     from se.src.runtimes.capability.contracts.implementation import (
         CapabilityExecutionLocation,
         CapabilityImplementation,
@@ -685,6 +711,7 @@ def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
                     "metadata": {
                         "name": CAPABILITY_ID,
                         "description": "Disconnecting client tool",
+                        "idempotency": "IDEMPOTENT",
                         "parameters": {
                             "type": "object",
                             "properties": {"value": {"type": "string"}},

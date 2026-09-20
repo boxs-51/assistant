@@ -16,11 +16,13 @@ class PatchAction:
         self.add_lines: list[str] = []
         self.hunks: list[list[str]] = []
         self.current_hunk: list[str] = []
+        self.in_hunk: bool = False  # Đánh dấu đã vào khối hunk (sau @@) hay chưa
 
     def finish_hunk(self) -> None:
         if self.current_hunk:
             self.hunks.append(self.current_hunk)
             self.current_hunk = []
+        self.in_hunk = False
 
 
 def find_sequence(
@@ -46,6 +48,32 @@ def find_sequence_fuzzy(target: list[str], pattern: list[str]) -> int:
         norm_target = [t.strip() for t in target[i : i + m]]
         if norm_target == norm_pattern:
             return i
+    return -1
+
+
+def find_sequence_blank_tolerant(target: list[str], pattern: list[str]) -> int:
+    """Tìm kiếm linh hoạt hỗ trợ khớp đoạn mã khi số lượng dòng trống (\n) chênh lệch nhẹ ở đầu/cuối hunk."""
+    start_offset = 0
+    end_offset = len(pattern)
+
+    # Loại bỏ các dòng trống ở đầu và cuối pattern để tìm đoạn mã cốt lõi
+    while start_offset < end_offset and not pattern[start_offset].strip():
+        start_offset += 1
+    while end_offset > start_offset and not pattern[end_offset - 1].strip():
+        end_offset -= 1
+
+    trimmed_pattern = pattern[start_offset:end_offset]
+    if not trimmed_pattern:
+        return -1
+
+    idx = find_sequence(target, trimmed_pattern)
+    if idx != -1:
+        return max(0, idx - start_offset)
+
+    idx_fuzzy = find_sequence_fuzzy(target, trimmed_pattern)
+    if idx_fuzzy != -1:
+        return max(0, idx_fuzzy - start_offset)
+
     return -1
 
 
@@ -85,7 +113,6 @@ def apply_hunks_to_content(
         new_lines: list[str] = []
 
         for line in hunk:
-            # Xóa bỏ ký tự \r dư thừa nếu patch được tạo trên Windows
             clean_line = line.rstrip("\r")
 
             if clean_line.startswith("-"):
@@ -95,7 +122,11 @@ def apply_hunks_to_content(
             elif clean_line.startswith(" "):
                 old_lines.append(clean_line[1:])
                 new_lines.append(clean_line[1:])
+            elif clean_line.startswith("\\"):
+                # Bỏ qua dòng chú thích "\ No newline at end of file"
+                continue
             else:
+                # Dòng trống (\n) hoặc dòng context trôi khoảng trắng
                 old_lines.append(clean_line)
                 new_lines.append(clean_line)
 
@@ -104,12 +135,17 @@ def apply_hunks_to_content(
             search_idx += len(new_lines)
             continue
 
+        # 1. Tìm khớp chính xác từ vị trí hiện tại
         match_idx = find_sequence(file_lines, old_lines, start_idx=search_idx)
+        # 2. Tìm khớp chính xác từ đầu file
         if match_idx == -1:
             match_idx = find_sequence(file_lines, old_lines, start_idx=0)
-
+        # 3. Tìm khớp linh hoạt (bỏ qua khoảng trắng đầu/cuối dòng)
         if match_idx == -1:
             match_idx = find_sequence_fuzzy(file_lines, old_lines)
+        # 4. Tìm khớp linh hoạt xử lý chênh lệch dòng trống (\n)
+        if match_idx == -1:
+            match_idx = find_sequence_blank_tolerant(file_lines, old_lines)
 
         if match_idx == -1:
             if not allow_rejects:
@@ -135,8 +171,9 @@ def apply_hunks_to_content(
 def parse_patch(content: str) -> list[PatchAction]:
     """Phân tích file patch để bóc tách hành động Add/Update/Delete và các đường dẫn file."""
     actions: list[PatchAction] = []
-    content = content.replace("\xa0", " ")
-    lines = content.splitlines()
+    # Chuẩn hóa xuống dòng và khoảng trắng đặc biệt
+    content = content.replace("\r\n", "\n").replace("\xa0", " ")
+    lines = content.split("\n")
     i = 0
     current_action: PatchAction | None = None
 
@@ -189,7 +226,7 @@ def parse_patch(content: str) -> list[PatchAction]:
                     or current_action.action_type == "DELETE"
                 ):
                     actions.append(current_action)
-                current_action = None
+            current_action = None
 
             parts = line.split()
             target_path = None
@@ -288,6 +325,10 @@ def parse_patch(content: str) -> list[PatchAction]:
             elif current_action.action_type in ("UPDATE", "DELETE"):
                 if clean_line.startswith("@@"):
                     current_action.finish_hunk()
+                    current_action.in_hunk = True
+                elif not current_action.in_hunk:
+                    # Bỏ qua các dòng trống (\n) hoặc tiêu đề nhiễu nằm trước @@ đầu tiên
+                    pass
                 elif (
                     clean_line.startswith("index ")
                     or clean_line.startswith("new file mode")
@@ -512,7 +553,6 @@ def apply_custom_patch(
             if item["content_to_write"] is not None and not (
                 item["error"] and item["action_type"] == "UPDATE"
             ):
-                # Ghi file với newline="" để tránh việc Python tự chuyển đổi LF sang CRLF trên Windows
                 with open(filepath, "w", encoding="utf-8", newline="") as f:
                     f.write(item["content_to_write"])
 

@@ -2,7 +2,7 @@
 
 **Baseline:** `6b3ff6bb0edfedb985401fa86ea7a9924e3cf73d`
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -60,17 +60,52 @@ py -m pytest -q se/tests tools cl/tests `
 ## Completion evidence
 
 ```text
-Patch check: <pending>
-Focused:     <pending>
-Broad:       <pending>
+Patch check:
+    PASS
+    all 13 R6-A patch actions validated before apply
+
+Focused R6-A gate:
+    12 passed, 2 warnings in 12.21s
+
+Initial repository-wide gate:
+    608 passed, 1 failed, 9 warnings in 117.44s
+
+The only failure was:
+    test_phase6_10_1_true_websocket_remote_agent_tool_loop
+
+The remote WebSocket/tool/second-inference path itself completed successfully.
+The failure was the temporal-context assertion:
+
+    second_request.messages[0].content
+        !=
+    first_request.messages[0].content
+
+Both prompt timestamps were equal because the test depended on host wall-clock
+resolution.  This was unrelated to R6-A domain/persistence behavior.
+
+The E2E was corrected to inject a deterministic advancing
+TemporalContextProvider rather than depending on two datetime.now() calls
+being observably different.
+
+Post-fix E2E evidence:
+    run 1: 2 passed in 6.56s
+    run 2: 2 passed in 5.03s
+    run 3: 2 passed in 5.27s
+    run 4: 2 passed in 6.22s
+
+No R6-A production/domain/persistence regression was observed.
+
+No full repository-wide rerun after the deterministic temporal-test fix has
+yet been reported.  The R6-B broad exit gate must re-run the complete declared
+repository scope and therefore provides the next full-suite confirmation.
 ```
 
 ## Phase status
 
 ```text
 R5   COMPLETE
-R6-A IMPLEMENTED / PENDING TEST EVIDENCE
-R6-B PENDING
+R6-A COMPLETE
+R6-B ACTIVE
 R6-C PENDING
 R6-D PENDING
 R6-E PENDING

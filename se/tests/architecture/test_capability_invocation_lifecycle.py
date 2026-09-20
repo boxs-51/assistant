@@ -7,6 +7,7 @@ from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
     CapabilityExecutionMode,
+    CapabilityIdempotency,
     CapabilityKind,
 )
 from se.src.runtimes.capability.contracts.invocation import (
@@ -143,6 +144,7 @@ async def test_disconnect_retries_server_with_same_invocation_id():
         id="tool.hybrid",
         name="tool.hybrid",
         description="client first, server fallback",
+        idempotency=CapabilityIdempotency.IDEMPOTENT,
     )
     catalog = CapabilityCatalog()
     catalog.register_definition(definition)
@@ -220,6 +222,10 @@ async def test_disconnect_retries_server_with_same_invocation_id():
         CapabilityInvocationState.COMPLETED,
     ]
     assert store.items["inv-fallback"].state is CapabilityInvocationState.COMPLETED
+    assert (
+        store.items["inv-fallback"].remote_outcome_state.value
+        == "OUTCOME_UNKNOWN"
+    )
 
 
 @pytest.mark.asyncio

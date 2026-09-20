@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Mapping
+from typing import Any, Awaitable, Callable, Mapping
 
 from ...connection.protocol import RealtimeEnvelope
 from ...connection.realtime import RealtimeMultiplexer
@@ -19,16 +19,26 @@ class RemoteClientDriver(BaseCapabilityDriver):
         definition: CapabilityDefinition,
         realtime: RealtimeMultiplexer,
         connection_id: str,
+        dispatch_started_handler: (
+            Callable[[RealtimeEnvelope], Awaitable[None] | None] | None
+        ) = None,
     ) -> None:
         super().__init__(definition)
         if not connection_id:
             raise ValueError("RemoteClientDriver requires connection_id")
         self._realtime = realtime
         self._connection_id = connection_id
+        self._dispatch_started_handler = dispatch_started_handler
 
     @property
     def connection_id(self) -> str:
         return self._connection_id
+
+    def set_dispatch_started_handler(
+        self,
+        handler: Callable[[RealtimeEnvelope], Awaitable[None] | None] | None,
+    ) -> None:
+        self._dispatch_started_handler = handler
 
     async def execute(
         self,
@@ -62,6 +72,10 @@ class RemoteClientDriver(BaseCapabilityDriver):
         )
 
         try:
+            if self._dispatch_started_handler is not None:
+                observed = self._dispatch_started_handler(envelope)
+                if asyncio.iscoroutine(observed):
+                    await observed
             return await self._realtime.invoke(
                 envelope,
                 timeout=timeout,

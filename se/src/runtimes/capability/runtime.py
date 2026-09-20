@@ -9,11 +9,15 @@ from ...kernel.base import BaseRuntime, HealthStatus, RuntimeContext, RuntimeMan
 from .registry import CapabilityRegistry, CapabilityState
 from .drivers.base import BaseCapabilityDriver
 from .contracts.context import CapabilityExecutionContext
-from .contracts.error import CapabilityError
+from .contracts.error import (
+    CapabilityError,
+    REMOTE_OUTCOME_UNKNOWN,
+)
 from .contracts.result import CapabilityResult
 from .contracts.definition import (
     CapabilityDefinition,
     CapabilityExecutionMode,
+    CapabilityIdempotency,
     CapabilityKind,
 )
 from .drivers.mcp_driver import McpCapabilityDriver
@@ -21,7 +25,12 @@ from .drivers.remote_client_driver import RemoteClientDriver
 from .driver_registry import CapabilityDriverRegistry
 from .fingerprint import capability_request_fingerprint
 from .invocation import CapabilityInvocationLifecycle
-from .contracts.invocation import CapabilityInvocation, CapabilityInvocationState
+from .contracts.invocation import (
+    CapabilityInvocation,
+    CapabilityInvocationState,
+    CapabilityWaitReason,
+    RemoteOutcomeState,
+)
 from .catalog import CapabilityCatalog
 from .contracts.implementation import (
     CapabilityExecutionLocation,
@@ -35,8 +44,14 @@ from .policy import (
     CapabilityRequestContext,
     CapabilityRoutingPolicy,
 )
-from ...runtimes.connection.registry import ConnectionRegistry
-from ...runtimes.connection.realtime import RealtimeMultiplexer
+from ...runtimes.connection.registry import (
+    ConnectionRegistry,
+    ConnectionStateError,
+)
+from ...runtimes.connection.realtime import (
+    RealtimeMultiplexer,
+    RemoteCapabilityError,
+)
 from ...runtimes.connection.multiplexer import RemoteConnectionLost
 from ...domain.schemas.identity import Identity
 from ...domain.schemas.event import BaseEvent
@@ -430,6 +445,11 @@ class CapabilityRuntime(BaseRuntime):
             ),
             owner_user_id=identity.user_id,
             origin_client_id=origin_client_id,
+            remote_outcome_state=(
+                RemoteOutcomeState.NOT_DISPATCHED
+                if isinstance(driver, RemoteClientDriver)
+                else None
+            ),
             implementation_id=effective_implementation_id,
             driver_kind=effective_driver_kind,
             session_id=context.session_id,
@@ -449,6 +469,7 @@ class CapabilityRuntime(BaseRuntime):
             trace_id=context.trace_id,
         )
         await self.invocation_lifecycle.create(invocation)
+        self._bind_remote_dispatch_started(driver, invocation)
         invocation.attempt = 1
         attempt = await self.invocation_lifecycle.start_attempt(
             invocation,
@@ -474,6 +495,97 @@ class CapabilityRuntime(BaseRuntime):
         )
         started_at = datetime.now(timezone.utc)
         excluded_implementation_ids: set[str] = set()
+
+        async def try_remote_retry(
+            retry_error: dict[str, Any],
+            *,
+            allow_retry: bool,
+        ) -> bool:
+            nonlocal driver
+            nonlocal selected_implementation_id
+            nonlocal selected_implementation
+            nonlocal effective_implementation_id
+            nonlocal effective_driver_kind
+            nonlocal attempt
+
+            can_retry = (
+                allow_retry
+                and invocation.attempt < invocation.max_attempts
+                and self.catalog is not None
+                and selected_implementation_id is not None
+            )
+            if not can_retry:
+                return False
+
+            if attempt.completed_at is None:
+                await self.invocation_lifecycle.finish_attempt(
+                    attempt,
+                    CapabilityInvocationState.FAILED,
+                    error=retry_error,
+                )
+            await self.invocation_lifecycle.transition(
+                invocation,
+                CapabilityInvocationState.RETRYING,
+                attempt_id=attempt.attempt_id,
+            )
+            excluded_implementation_ids.add(selected_implementation_id)
+            retry_metadata = {
+                **request_metadata,
+                "excluded_implementation_ids": sorted(
+                    excluded_implementation_ids
+                ),
+            }
+            try:
+                driver, selected_implementation_id = (
+                    self._resolve_execution_driver(
+                        capability_id,
+                        identity,
+                        retry_metadata,
+                        connection_id=connection_id,
+                    )
+                )
+            except Exception:
+                driver = None
+                return False
+
+            if driver is not None and not self.authorization.is_allowed(
+                identity,
+                driver,
+            ):
+                driver = None
+                return False
+
+            assert driver is not None
+            assert selected_implementation_id is not None
+            selected_implementation = self.catalog.get_implementation(
+                selected_implementation_id
+            )
+            effective_implementation_id = selected_implementation_id
+            effective_driver_kind = selected_implementation.driver_kind
+            invocation.implementation_id = effective_implementation_id
+            invocation.driver_kind = effective_driver_kind
+            invocation.connection_id = selected_implementation.connection_id
+            invocation.attempt += 1
+            context.attempt = invocation.attempt
+            self._bind_remote_dispatch_started(driver, invocation)
+            attempt = await self.invocation_lifecycle.start_attempt(
+                invocation,
+                implementation_id=effective_implementation_id,
+                driver_kind=effective_driver_kind,
+                connection_id=selected_implementation.connection_id,
+            )
+            await self.invocation_lifecycle.transition(
+                invocation,
+                CapabilityInvocationState.DISPATCHING,
+                attempt_id=attempt.attempt_id,
+            )
+            await self.invocation_lifecycle.transition(
+                invocation,
+                CapabilityInvocationState.RUNNING,
+                attempt_id=attempt.attempt_id,
+            )
+            return True
+
         while True:
             try:
                 raw_output = await self._execute_driver_once(
@@ -483,105 +595,168 @@ class CapabilityRuntime(BaseRuntime):
                     arguments=arguments,
                 )
                 break
-            except RemoteConnectionLost as exc:
+            except ConnectionStateError as exc:
+                # The transport rejected the connection before remote invoke
+                # could enter the send boundary.  Restore the durable proof
+                # that this attempt did not dispatch.
+                if (
+                    isinstance(driver, RemoteClientDriver)
+                    and invocation.remote_outcome_state
+                    is RemoteOutcomeState.IN_FLIGHT
+                ):
+                    await self.invocation_lifecycle.update_remote_outcome(
+                        invocation,
+                        RemoteOutcomeState.NOT_DISPATCHED,
+                    )
                 details = {
-                    "connection_id": exc.connection_id,
-                    "invocation_id": exc.invocation_id,
+                    "connection_id": context.connection_id,
+                    "invocation_id": context.invocation_id,
+                    "remote_outcome_state": (
+                        invocation.remote_outcome_state.value
+                        if invocation.remote_outcome_state is not None
+                        else None
+                    ),
+                    "idempotency": invocation.idempotency.value,
+                    "request_fingerprint": invocation.request_fingerprint,
                 }
                 retry_error = {
                     "code": "REMOTE_CONNECTION_LOST",
                     "message": str(exc),
                     "details": details,
                 }
-                can_retry = (
-                    invocation.attempt < invocation.max_attempts
-                    and self.catalog is not None
-                    and selected_implementation_id is not None
-                )
-                if can_retry:
-                    await self.invocation_lifecycle.finish_attempt(
-                        attempt, CapabilityInvocationState.FAILED, error=retry_error
-                    )
-                    await self.invocation_lifecycle.transition(
-                        invocation,
-                        CapabilityInvocationState.RETRYING,
-                        attempt_id=attempt.attempt_id,
-                    )
-                    excluded_implementation_ids.add(selected_implementation_id)
-                    retry_metadata = {
-                        **request_metadata,
-                        "excluded_implementation_ids": sorted(
-                            excluded_implementation_ids
-                        ),
-                    }
-                    try:
-                        driver, selected_implementation_id = self._resolve_execution_driver(
-                            capability_id,
-                            identity,
-                            retry_metadata,
-                            connection_id=connection_id,
-                        )
-                    except Exception:
-                        driver = None
-                    if driver is not None and not self.authorization.is_allowed(
-                        identity, driver
-                    ):
-                        driver = None
-                    if driver is not None:
-                        selected_implementation = self.catalog.get_implementation(
-                            selected_implementation_id
-                        )
-                        effective_implementation_id = selected_implementation_id
-                        effective_driver_kind = selected_implementation.driver_kind
-                        invocation.implementation_id = effective_implementation_id
-                        invocation.driver_kind = effective_driver_kind
-                        invocation.connection_id = selected_implementation.connection_id
-                        invocation.attempt += 1
-                        context.attempt = invocation.attempt
-                        attempt = await self.invocation_lifecycle.start_attempt(
-                            invocation,
-                            implementation_id=effective_implementation_id,
-                            driver_kind=effective_driver_kind,
-                            connection_id=selected_implementation.connection_id,
-                        )
-                        await self.invocation_lifecycle.transition(
-                            invocation,
-                            CapabilityInvocationState.DISPATCHING,
-                            attempt_id=attempt.attempt_id,
-                        )
-                        await self.invocation_lifecycle.transition(
-                            invocation,
-                            CapabilityInvocationState.RUNNING,
-                            attempt_id=attempt.attempt_id,
-                        )
-                        continue
+                if await try_remote_retry(
+                    retry_error,
+                    allow_retry=True,
+                ):
+                    continue
 
                 normalized = CapabilityError(
-                    code="CAPABILITY_EXECUTION_FAILED",
+                    code="REMOTE_CONNECTION_LOST",
                     message=str(exc),
-                    category="EXECUTION",
-                    retryable=can_retry,
-                    safe_for_client=False,
+                    category="CONNECTION",
+                    retryable=False,
+                    safe_for_client=True,
                     cause_type=type(exc).__name__,
                     capability_id=capability_id,
                     invocation_id=context.invocation_id,
                     details=details,
                 )
                 error = normalized.model_dump()
-                # The attempt may already have been closed before routing the
-                # retry failed; avoid a second terminal write in that case.
+                if attempt.completed_at is None:
+                    await self.invocation_lifecycle.finish_attempt(
+                        attempt,
+                        CapabilityInvocationState.FAILED,
+                        error=error,
+                    )
+                await self.invocation_lifecycle.transition(
+                    invocation,
+                    CapabilityInvocationState.WAITING,
+                    wait_reason=CapabilityWaitReason.CONNECTION,
+                    attempt_id=attempt.attempt_id,
+                )
+                raise normalized from exc
+            except RemoteConnectionLost as exc:
+                if (
+                    isinstance(driver, RemoteClientDriver)
+                    and invocation.remote_outcome_state
+                    is not RemoteOutcomeState.OUTCOME_UNKNOWN
+                ):
+                    await self.invocation_lifecycle.update_remote_outcome(
+                        invocation,
+                        RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    )
+                details = {
+                    "connection_id": exc.connection_id,
+                    "invocation_id": exc.invocation_id,
+                    "remote_outcome_state": RemoteOutcomeState.OUTCOME_UNKNOWN.value,
+                    "idempotency": invocation.idempotency.value,
+                    "request_fingerprint": invocation.request_fingerprint,
+                }
+                retry_error = {
+                    "code": REMOTE_OUTCOME_UNKNOWN,
+                    "message": str(exc),
+                    "details": details,
+                }
+                replay_safe = invocation.idempotency in {
+                    CapabilityIdempotency.IDEMPOTENT,
+                    CapabilityIdempotency.DEDUPLICATED,
+                }
+                if await try_remote_retry(
+                    retry_error,
+                    allow_retry=replay_safe,
+                ):
+                    continue
+
+                normalized = CapabilityError(
+                    code=REMOTE_OUTCOME_UNKNOWN,
+                    message=str(exc),
+                    category="RECONCILIATION",
+                    retryable=False,
+                    safe_for_client=True,
+                    cause_type=type(exc).__name__,
+                    capability_id=capability_id,
+                    invocation_id=context.invocation_id,
+                    details=details,
+                )
+                error = normalized.model_dump()
                 if attempt.completed_at is None:
                     await self.invocation_lifecycle.finish_attempt(
                         attempt, CapabilityInvocationState.FAILED, error=error
                     )
                 await self.invocation_lifecycle.transition(
                     invocation,
+                    CapabilityInvocationState.WAITING,
+                    wait_reason=CapabilityWaitReason.CONNECTION,
+                    attempt_id=attempt.attempt_id,
+                )
+                raise normalized from exc
+            except RemoteCapabilityError as exc:
+                details = {
+                    "remote_details": exc.details,
+                    "remote_outcome_state": (
+                        RemoteOutcomeState.TERMINAL_COMMITTED.value
+                    ),
+                }
+                normalized = CapabilityError(
+                    code=exc.code,
+                    message=str(exc),
+                    category="REMOTE",
+                    retryable=exc.retryable,
+                    safe_for_client=True,
+                    cause_type=type(exc).__name__,
+                    capability_id=capability_id,
+                    invocation_id=context.invocation_id,
+                    details=details,
+                )
+                error = normalized.model_dump()
+                await self.invocation_lifecycle.finish_attempt(
+                    attempt,
+                    CapabilityInvocationState.FAILED,
+                    error=error,
+                )
+                await self.invocation_lifecycle.transition(
+                    invocation,
                     CapabilityInvocationState.FAILED,
                     attempt_id=attempt.attempt_id,
                     error=error,
+                    remote_outcome_state=(
+                        RemoteOutcomeState.TERMINAL_COMMITTED
+                    ),
                 )
                 raise normalized from exc
             except asyncio.TimeoutError as exc:
+                if (
+                    isinstance(driver, RemoteClientDriver)
+                    and invocation.remote_outcome_state
+                    in {
+                        RemoteOutcomeState.NOT_DISPATCHED,
+                        RemoteOutcomeState.IN_FLIGHT,
+                    }
+                ):
+                    await self.invocation_lifecycle.update_remote_outcome(
+                        invocation,
+                        RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    )
                 error = {"code": "CAPABILITY_TIMEOUT", "message": str(exc)}
                 await self.invocation_lifecycle.finish_attempt(
                     attempt, CapabilityInvocationState.TIMED_OUT, error=error
@@ -603,6 +778,18 @@ class CapabilityRuntime(BaseRuntime):
                     invocation_id=context.invocation_id,
                 ) from exc
             except asyncio.CancelledError as exc:
+                if (
+                    isinstance(driver, RemoteClientDriver)
+                    and invocation.remote_outcome_state
+                    in {
+                        RemoteOutcomeState.NOT_DISPATCHED,
+                        RemoteOutcomeState.IN_FLIGHT,
+                    }
+                ):
+                    await self.invocation_lifecycle.update_remote_outcome(
+                        invocation,
+                        RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    )
                 error = {"code": "CAPABILITY_CANCELLED", "message": str(exc)}
                 await self.invocation_lifecycle.finish_attempt(
                     attempt, CapabilityInvocationState.CANCELLED, error=error
@@ -636,6 +823,15 @@ class CapabilityRuntime(BaseRuntime):
                 )
                 raise
             except Exception as exc:
+                if (
+                    isinstance(driver, RemoteClientDriver)
+                    and invocation.remote_outcome_state
+                    is RemoteOutcomeState.IN_FLIGHT
+                ):
+                    await self.invocation_lifecycle.update_remote_outcome(
+                        invocation,
+                        RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    )
                 original_code = getattr(exc, "code", None)
                 details: Dict[str, Any] = {}
                 if original_code:
@@ -676,6 +872,11 @@ class CapabilityRuntime(BaseRuntime):
             CapabilityInvocationState.COMPLETED,
             attempt_id=attempt.attempt_id,
             output=raw_output,
+            remote_outcome_state=(
+                RemoteOutcomeState.TERMINAL_COMMITTED
+                if isinstance(driver, RemoteClientDriver)
+                else None
+            ),
         )
         return CapabilityResult(
             invocation_id=context.invocation_id,
@@ -694,6 +895,26 @@ class CapabilityRuntime(BaseRuntime):
                 ),
             },
         )
+
+    def _bind_remote_dispatch_started(
+        self,
+        driver: BaseCapabilityDriver,
+        invocation: CapabilityInvocation,
+    ) -> None:
+        if not isinstance(driver, RemoteClientDriver):
+            return
+
+        async def mark_started(_envelope) -> None:
+            if (
+                invocation.remote_outcome_state
+                is RemoteOutcomeState.NOT_DISPATCHED
+            ):
+                await self.invocation_lifecycle.update_remote_outcome(
+                    invocation,
+                    RemoteOutcomeState.IN_FLIGHT,
+                )
+
+        driver.set_dispatch_started_handler(mark_started)
 
     def _resolve_execution_driver(
         self,

@@ -11,6 +11,7 @@ from .contracts.invocation import (
     CapabilityInvocationEvent,
     CapabilityInvocationState,
     CapabilityWaitReason,
+    RemoteOutcomeState,
 )
 
 
@@ -48,6 +49,7 @@ _TRANSITIONS = {
     },
     CapabilityInvocationState.RETRYING: {
         CapabilityInvocationState.DISPATCHING,
+        CapabilityInvocationState.WAITING,
         CapabilityInvocationState.FAILED,
         CapabilityInvocationState.CANCELLED,
         CapabilityInvocationState.TIMED_OUT,
@@ -59,6 +61,44 @@ _TRANSITIONS = {
 }
 
 
+_REMOTE_OUTCOME_TRANSITIONS = {
+    None: {
+        RemoteOutcomeState.NOT_DISPATCHED,
+    },
+    RemoteOutcomeState.NOT_DISPATCHED: {
+        RemoteOutcomeState.IN_FLIGHT,
+        RemoteOutcomeState.OUTCOME_UNKNOWN,
+        RemoteOutcomeState.TERMINAL_COMMITTED,
+    },
+    RemoteOutcomeState.IN_FLIGHT: {
+        # Transport may prove that an attempted dispatch never reached the
+        # send boundary.  This correction is conservative and is the only
+        # backwards certainty transition R6-B permits.
+        RemoteOutcomeState.NOT_DISPATCHED,
+        RemoteOutcomeState.OUTCOME_UNKNOWN,
+        RemoteOutcomeState.TERMINAL_COMMITTED,
+    },
+    RemoteOutcomeState.OUTCOME_UNKNOWN: {
+        RemoteOutcomeState.TERMINAL_COMMITTED,
+    },
+    RemoteOutcomeState.TERMINAL_COMMITTED: set(),
+}
+
+
+def _validate_remote_outcome_transition(
+    current: RemoteOutcomeState | None,
+    target: RemoteOutcomeState,
+) -> None:
+    if target is current:
+        return
+    if target not in _REMOTE_OUTCOME_TRANSITIONS[current]:
+        current_name = current.value if current is not None else "NONE"
+        raise InvalidInvocationTransition(
+            "Invalid remote outcome transition: "
+            f"{current_name} -> {target.value}"
+        )
+
+
 def transition_invocation(
     invocation: CapabilityInvocation,
     state: CapabilityInvocationState,
@@ -66,6 +106,7 @@ def transition_invocation(
     wait_reason: CapabilityWaitReason | None = None,
     output: Any = None,
     error: dict[str, Any] | None = None,
+    remote_outcome_state: RemoteOutcomeState | None = None,
 ) -> tuple[CapabilityInvocationState, CapabilityInvocation]:
     previous = invocation.state
     if state not in _TRANSITIONS[previous]:
@@ -76,10 +117,20 @@ def transition_invocation(
         raise InvalidInvocationTransition("WAITING requires wait_reason")
     if state is not CapabilityInvocationState.WAITING and wait_reason is not None:
         raise InvalidInvocationTransition("wait_reason is only valid for WAITING")
+    if (
+        remote_outcome_state is not None
+        and remote_outcome_state is not invocation.remote_outcome_state
+    ):
+        _validate_remote_outcome_transition(
+            invocation.remote_outcome_state,
+            remote_outcome_state,
+        )
 
     now = datetime.now(timezone.utc)
     invocation.state = state
     invocation.wait_reason = wait_reason
+    if remote_outcome_state is not None:
+        invocation.remote_outcome_state = remote_outcome_state
     invocation.updated_at = now
     invocation.revision += 1
     if state is CapabilityInvocationState.RUNNING and invocation.started_at is None:
@@ -189,6 +240,32 @@ class CapabilityInvocationLifecycle:
                 f"Concurrent invocation update rejected: {invocation.invocation_id}"
             )
         await self._publish(invocation, previous=previous, attempt_id=attempt_id)
+        return invocation
+
+    async def update_remote_outcome(
+        self,
+        invocation: CapabilityInvocation,
+        state: RemoteOutcomeState,
+    ) -> CapabilityInvocation:
+        """CAS one certainty-only transition without changing lifecycle state."""
+        if invocation.remote_outcome_state is state:
+            return invocation
+        _validate_remote_outcome_transition(
+            invocation.remote_outcome_state,
+            state,
+        )
+        expected_revision = invocation.revision
+        invocation.remote_outcome_state = state
+        invocation.updated_at = datetime.now(timezone.utc)
+        invocation.revision += 1
+        if not await self.store.compare_and_set(
+            invocation,
+            expected_revision,
+        ):
+            raise RuntimeError(
+                "Concurrent invocation remote-outcome update rejected: "
+                f"{invocation.invocation_id}"
+            )
         return invocation
 
     async def start_attempt(

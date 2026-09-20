@@ -105,7 +105,11 @@ class AgentContinuationService:
     ) -> ExecutionCheckpoint:
         async with self._lock:
             parent = self.current_checkpoint(execution_id)
-            waiting = not server_continuation_available
+            # R6-B freezes the distinction between implementation availability
+            # and replay safety.  The compatibility flag remains accepted so
+            # older callers do not break, but it no longer grants permission
+            # to continue a possibly side-effecting invocation.
+            waiting = True
             checkpoint = ExecutionCheckpoint(
                 checkpoint_id=f"checkpoint-{uuid.uuid4().hex}",
                 execution_id=execution_id,
@@ -134,6 +138,9 @@ class AgentContinuationService:
                 metadata={
                     **dict(metadata or {}),
                     "owner_user_id": owner_user_id,
+                    "server_continuation_available": bool(
+                        server_continuation_available
+                    ),
                 },
             )
             self._checkpoints[checkpoint.checkpoint_id] = checkpoint

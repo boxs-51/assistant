@@ -184,7 +184,7 @@ def test_merge_requires_owner_and_stale_branch_cannot_overwrite_main():
     asyncio.run(scenario())
 
 
-def test_server_continuation_checkpoint_remains_running_without_confirmation():
+def test_server_availability_does_not_make_disconnect_replay_safe():
     async def scenario():
         service = AgentContinuationService()
         checkpoint = await service.checkpoint_disconnect(
@@ -199,13 +199,14 @@ def test_server_continuation_checkpoint_remains_running_without_confirmation():
             transcript=[],
             server_continuation_available=True,
         )
-        assert checkpoint.state is ContinuationState.RUNNING
-        with pytest.raises(ContinuationConflictError):
-            await service.reconnect(
-                execution_id="exec-1",
-                connection_id="conn-2",
-                user_id="user-1",
-            )
+        assert checkpoint.state is ContinuationState.WAITING_FOR_CONNECTION
+        assert checkpoint.metadata["server_continuation_available"] is True
+        branch = await service.reconnect(
+            execution_id="exec-1",
+            connection_id="conn-2",
+            user_id="user-1",
+        )
+        assert branch.base_checkpoint_id == checkpoint.checkpoint_id
 
     asyncio.run(scenario())
 
@@ -311,7 +312,7 @@ def test_agent_enters_waiting_for_connection_when_remote_is_still_required():
     asyncio.run(scenario())
 
 
-def test_agent_continues_server_side_after_client_disconnect():
+def test_agent_does_not_treat_server_availability_as_replay_safety():
     async def scenario():
         service = AgentContinuationService()
         inference = _Inference()
@@ -323,9 +324,12 @@ def test_agent_continues_server_side_after_client_disconnect():
             continuation_service=service,
         )
         result = await runtime.execute(_agent_context())
-        assert result.state.value == "COMPLETED"
-        assert result.output == "done"
-        assert inference.calls == 2
-        assert service.current_checkpoint("exec-runtime").state is ContinuationState.RUNNING
+        assert result.state.value == "WAITING"
+        assert result.error_code == "WAITING_FOR_CONNECTION"
+        assert inference.calls == 1
+        assert (
+            service.current_checkpoint("exec-runtime").state
+            is ContinuationState.WAITING_FOR_CONNECTION
+        )
 
     asyncio.run(scenario())

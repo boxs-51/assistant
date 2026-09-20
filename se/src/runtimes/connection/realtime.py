@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Awaitable, Callable, Dict, Optional
 
-from .multiplexer import ConnectionMultiplexer
+from .multiplexer import ConnectionMultiplexer, RemoteConnectionLost
 from .protocol import RealtimeEnvelope
 from .registry import ConnectionRegistry
 
@@ -88,9 +88,22 @@ class RealtimeMultiplexer:
             await socket.send_json(
                 envelope.model_dump(mode="json")
             )
-        except BaseException as exc:
-            await self.multiplexer.reject(envelope.invocation_id, exc)
+        except asyncio.CancelledError:
+            await self.multiplexer.cancel(envelope.invocation_id)
             raise
+        except Exception as exc:
+            # Once send_json has been attempted the server cannot prove that
+            # the peer received zero bytes.  Normalize the transport failure
+            # to the R6 "may have executed" boundary.
+            failure = RemoteConnectionLost(
+                envelope.connection_id,
+                envelope.invocation_id,
+            )
+            await self.multiplexer.reject(
+                envelope.invocation_id,
+                failure,
+            )
+            raise failure from exc
 
         try:
             return await asyncio.wait_for(
