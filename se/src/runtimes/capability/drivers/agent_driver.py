@@ -6,6 +6,11 @@ from ....domain.schemas.agent import AgentDefinition
 from ....domain.schemas.agent_execution import AgentExecutionLimits
 from ...agent.contracts.context import AgentExecutionContext
 from ...agent.ids import AgentExecutionIdFactory
+from ...agent.task_budget import (
+    TaskBudgetError,
+    TaskBudgetRequiredError,
+)
+from ..contracts.error import CapabilityError
 from ..contracts.context import CapabilityExecutionContext
 from ..contracts.definition import CapabilityDefinition
 from .base import BaseCapabilityDriver
@@ -42,6 +47,24 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
             raise ValueError(
                 "Delegating Agent execution must own the capability invocation."
             )
+
+        if (
+            context.caller_agent_execution_id is not None
+            and not context.task_id
+        ):
+            exc = TaskBudgetRequiredError(
+                "Agent-to-Agent delegation requires durable Task scope."
+            )
+            raise CapabilityError(
+                code=exc.code,
+                message=str(exc),
+                category="POLICY",
+                retryable=False,
+                safe_for_client=True,
+                cause_type=type(exc).__name__,
+                capability_id=self.definition.capability_id,
+                invocation_id=context.invocation_id,
+            ) from exc
 
         child_limits = AgentExecutionLimits()
         budget_bounds = [float(child_limits.timeout_seconds)]
@@ -85,12 +108,36 @@ class AgentCapabilityDriver(BaseCapabilityDriver):
             ),
         )
         if self._execution_supervisor is None:
-            result = await self._agent_runtime.execute(execution_context)
+            try:
+                result = await self._agent_runtime.execute(execution_context)
+            except TaskBudgetError as exc:
+                raise CapabilityError(
+                    code=exc.code,
+                    message=str(exc),
+                    category="POLICY",
+                    retryable=False,
+                    safe_for_client=True,
+                    cause_type=type(exc).__name__,
+                    capability_id=self.definition.capability_id,
+                    invocation_id=context.invocation_id,
+                ) from exc
         else:
-            result = await self._execution_supervisor.run(
-                execution_context,
-                lambda: self._agent_runtime.execute(execution_context),
-            )
+            try:
+                result = await self._execution_supervisor.run(
+                    execution_context,
+                    lambda: self._agent_runtime.execute(execution_context),
+                )
+            except TaskBudgetError as exc:
+                raise CapabilityError(
+                    code=exc.code,
+                    message=str(exc),
+                    category="POLICY",
+                    retryable=False,
+                    safe_for_client=True,
+                    cause_type=type(exc).__name__,
+                    capability_id=self.definition.capability_id,
+                    invocation_id=context.invocation_id,
+                ) from exc
         if result.error_code:
             error = RuntimeError(result.error_message or result.error_code)
             error.code = result.error_code

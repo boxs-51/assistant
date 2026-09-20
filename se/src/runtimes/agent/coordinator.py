@@ -2,6 +2,7 @@ import time
 import uuid
 import asyncio
 import inspect
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from ...agent.registry import AgentRegistry
@@ -51,6 +52,33 @@ class MultiAgentCoordinator:
         self._messages: Dict[str, List[AgentMessage]] = {}
         self._executions: Dict[str, AgentExecution] = {}
         self._running_tasks: Dict[str, asyncio.Task] = {}
+
+    @staticmethod
+    def _record_timestamp(value, fallback: float) -> float:
+        if isinstance(value, datetime):
+            return value.timestamp()
+        if isinstance(value, (int, float)):
+            return float(value)
+        return fallback
+
+    def _sync_task_from_record(
+        self,
+        task: AgentTask,
+        record,
+    ) -> AgentTask:
+        """Refresh the in-memory Task view from the durable CAS winner."""
+        task.revision = int(getattr(record, "revision", task.revision))
+        task.status = AgentTaskStatus(str(getattr(record, "status")))
+        task.wait_reasons = list(
+            getattr(record, "wait_reasons", None) or []
+        )
+        task.output = getattr(record, "output", None)
+        task.error = getattr(record, "error", None)
+        task.updated_at = self._record_timestamp(
+            getattr(record, "updated_at", None),
+            time.time(),
+        )
+        return task
 
     async def _persist(self, method: str, values: dict):
         if self.durable_store is not None:
@@ -216,6 +244,11 @@ class MultiAgentCoordinator:
         Production transport uses ``cancel_task_and_wait`` so process-local
         runner and Agent execution ownership are drained before returning.
         """
+        if self.task_budget_service is not None:
+            raise RuntimeError(
+                "Durable AgentTask cancellation requires "
+                "cancel_task_and_wait()."
+            )
         task = self.get_task(task_id, identity)
         running = self._running_tasks.get(task_id)
         if running is not None and not running.done():
@@ -231,8 +264,23 @@ class MultiAgentCoordinator:
     ) -> AgentTask:
         task = self.get_task(task_id, identity)
         runner = self._running_tasks.get(task_id)
-        task.status = AgentTaskStatus.CANCELLED
-        task.updated_at = time.time()
+
+        if self.task_budget_service is not None:
+            durable = await self.task_budget_service.cancel_task(
+                task_id,
+                values={
+                    "wait_reasons": task.wait_reasons,
+                    "output": task.output,
+                    "error": task.error,
+                },
+            )
+            self._sync_task_from_record(task, durable)
+            # COMPLETED/FAILED is an already-authoritative terminal winner.
+            if task.status is not AgentTaskStatus.CANCELLED:
+                return task
+        else:
+            task.status = AgentTaskStatus.CANCELLED
+            task.updated_at = time.time()
 
         if runner is not None and not runner.done():
             runner.cancel()
@@ -244,7 +292,7 @@ class MultiAgentCoordinator:
         if runner is not None:
             await asyncio.gather(runner, return_exceptions=True)
 
-        if self.durable_store:
+        if self.durable_store and self.task_budget_service is None:
             await self.durable_store.update_task(
                 task.task_id,
                 {
@@ -260,8 +308,15 @@ class MultiAgentCoordinator:
         task = self.get_task(task_id, identity)
         if task_id in self._running_tasks and not self._running_tasks[task_id].done():
             raise ValueError(f"Agent task '{task_id}' is already running.")
-        if task.status in {AgentTaskStatus.COMPLETED, AgentTaskStatus.CANCELLED}:
-            raise ValueError(f"Agent task '{task_id}' is already terminal.")
+        if task.status in {
+            AgentTaskStatus.WAITING,
+            AgentTaskStatus.COMPLETED,
+            AgentTaskStatus.FAILED,
+            AgentTaskStatus.CANCELLED,
+        }:
+            raise ValueError(
+                f"Agent task '{task_id}' cannot start from {task.status.value}."
+            )
 
         runner = asyncio.create_task(
             self.execute_task(task_id, identity, executor),
@@ -306,7 +361,37 @@ class MultiAgentCoordinator:
         parent_execution_id: Optional[str] = None,
     ) -> AgentExecution:
         task = self.get_task(task_id, identity)
-        task.status = AgentTaskStatus.RUNNING
+        if task.status is AgentTaskStatus.WAITING:
+            raise ValueError(
+                f"Agent task '{task_id}' is WAITING and must resume its "
+                "existing AgentExecution."
+            )
+        if task.status in {
+            AgentTaskStatus.COMPLETED,
+            AgentTaskStatus.FAILED,
+            AgentTaskStatus.CANCELLED,
+        }:
+            raise ValueError(f"Agent task '{task_id}' is already terminal.")
+
+        if self.task_budget_service is not None:
+            durable = await self.task_budget_service.transition_task(
+                task_id,
+                allowed_source_states=("ASSIGNED",),
+                target_state="RUNNING",
+                values={
+                    "wait_reasons": [],
+                    "output": None,
+                    "error": None,
+                },
+            )
+            self._sync_task_from_record(task, durable)
+            if task.status is not AgentTaskStatus.RUNNING:
+                raise ValueError(
+                    f"Agent task '{task_id}' is already terminal."
+                )
+        else:
+            task.status = AgentTaskStatus.RUNNING
+
         execution = AgentExecution(
             execution_id=self.execution_id_factory.new_id(),
             session_id=task.session_id,
@@ -320,6 +405,8 @@ class MultiAgentCoordinator:
         )
         self._executions[execution.execution_id] = execution
         execution_limits = limits or AgentExecutionLimits()
+        target_status = AgentTaskStatus.RUNNING
+        target_wait_reasons: list[str] = []
         try:
             execution.state = AgentExecutionStateMachine.transition(
                 execution.state, AgentExecutionState.RUNNING
@@ -358,8 +445,10 @@ class MultiAgentCoordinator:
                 result = result_value
             execution.result = result if isinstance(result, dict) else {"value": result}
             if execution.result.get("error_code") == "WAITING_FOR_CONNECTION":
-                task.status = AgentTaskStatus.WAITING
-                task.wait_reasons = [AgentExecutionWaitReason.CONNECTION.value]
+                target_status = AgentTaskStatus.WAITING
+                target_wait_reasons = [
+                    AgentExecutionWaitReason.CONNECTION.value
+                ]
                 AgentExecutionStateMachine.transition(
                     execution.state,
                     AgentExecutionState.WAITING,
@@ -377,8 +466,8 @@ class MultiAgentCoordinator:
                         "Canonical WAITING result requires explicit wait_reason."
                     )
                 wait_reason = AgentExecutionWaitReason(wait_reason).value
-                task.status = AgentTaskStatus.WAITING
-                task.wait_reasons = [wait_reason]
+                target_status = AgentTaskStatus.WAITING
+                target_wait_reasons = [wait_reason]
                 AgentExecutionStateMachine.transition(
                     execution.state,
                     AgentExecutionState.WAITING,
@@ -399,37 +488,62 @@ class MultiAgentCoordinator:
                     or execution.result.get("error_code")
                     or "Agent execution failed."
                 )
-                task.status = AgentTaskStatus.FAILED
+                target_status = AgentTaskStatus.FAILED
                 execution.state = AgentExecutionStateMachine.transition(
                     execution.state, AgentExecutionState.FAILED
                 )
             else:
-                task.status = AgentTaskStatus.COMPLETED
+                target_status = AgentTaskStatus.COMPLETED
                 execution.state = AgentExecutionStateMachine.transition(
                     execution.state, AgentExecutionState.COMPLETED
                 )
         except asyncio.TimeoutError:
             execution.error = "Agent execution timed out."
-            task.status = AgentTaskStatus.FAILED
+            target_status = AgentTaskStatus.FAILED
             execution.state = AgentExecutionStateMachine.transition(
                 execution.state, AgentExecutionState.TIMEOUT
             )
         except asyncio.CancelledError:
             execution.error = "Agent execution cancelled."
-            task.status = AgentTaskStatus.CANCELLED
+            target_status = AgentTaskStatus.CANCELLED
             execution.state = AgentExecutionStateMachine.transition(
                 execution.state, AgentExecutionState.CANCELLED
             )
         except Exception as exc:
             execution.error = str(exc)
-            task.status = AgentTaskStatus.FAILED
+            target_status = AgentTaskStatus.FAILED
             execution.state = AgentExecutionStateMachine.transition(
                 execution.state, AgentExecutionState.FAILED
             )
         execution.updated_at = time.time()
-        task.output = execution.result
-        task.error = execution.error
-        if self.durable_store:
+        target_values = {
+            "wait_reasons": target_wait_reasons,
+            "output": execution.result,
+            "error": execution.error,
+        }
+        if self.task_budget_service is not None:
+            if target_status is AgentTaskStatus.WAITING:
+                durable = await self.task_budget_service.transition_task(
+                    task_id,
+                    allowed_source_states=("RUNNING",),
+                    target_state=AgentTaskStatus.WAITING.value,
+                    values=target_values,
+                )
+            else:
+                durable = await self.task_budget_service.terminalize_task(
+                    task_id,
+                    allowed_source_states=("RUNNING",),
+                    target_state=target_status.value,
+                    values=target_values,
+                )
+            self._sync_task_from_record(task, durable)
+        else:
+            task.status = target_status
+            task.wait_reasons = target_wait_reasons
+            task.output = execution.result
+            task.error = execution.error
+
+        if self.durable_store and self.task_budget_service is None:
             await self.durable_store.update_task(task.task_id, {
                 "status": task.status.value,
                 "wait_reasons": task.wait_reasons,

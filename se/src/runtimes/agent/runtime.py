@@ -433,6 +433,13 @@ class AgentRuntime:
             }
             if self._uses_task_budget(context):
                 assert context.task_id is not None
+                delegation = (
+                    await self._task_budget_service.resolve_delegation_admission(
+                        context.task_id,
+                        parent_execution_id=context.parent_execution_id,
+                        child_agent_id=context.agent_id,
+                    )
+                )
                 new_values.update(
                     {
                         "state": AgentExecutionState.RUNNING.value,
@@ -445,9 +452,7 @@ class AgentRuntime:
                         context.task_id,
                         execution_id=context.execution_id,
                         execution_values=new_values,
-                        # R5-D becomes the authoritative ancestry-depth
-                        # enforcer. R5-C only wires active fan-out accounting.
-                        delegation_depth=0,
+                        delegation_depth=delegation.delegation_depth,
                     )
                 )
             try:

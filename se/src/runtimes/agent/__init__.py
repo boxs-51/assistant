@@ -11,6 +11,8 @@ from .supervisor import (
     ExecutionOwnershipToken,
 )
 from .task_budget import (
+    AgentDelegationCycleError,
+    DelegationAdmission,
     DelegationDepthExceededError,
     TaskBudgetClosedError,
     TaskBudgetConflictError,
@@ -29,6 +31,8 @@ __all__ = [
     "AgentExecutionOwnershipError",
     "AgentExecutionSupervisorClosedError",
     "TaskBudgetService",
+    "DelegationAdmission",
+    "AgentDelegationCycleError",
     "TaskBudgetRequiredError",
     "TaskBudgetLegacyUninitializedError",
     "TaskBudgetClosedError",

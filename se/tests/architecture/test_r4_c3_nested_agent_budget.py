@@ -110,6 +110,7 @@ async def test_r4_c3_parent_execution_can_be_tighter_than_parent_iteration():
         caller_execution_remaining_seconds=5.0,
         caller_iteration_remaining_seconds=7.0,
         session_id="session-r4",
+        task_id="task-r4",
         correlation_id="corr-r4",
     )
 

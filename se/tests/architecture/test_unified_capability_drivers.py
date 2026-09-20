@@ -117,6 +117,7 @@ async def test_agent_capability_creates_distinct_child_execution_identity():
         caller_agent_execution_id="exec-agent-capability",
         invocation_id="inv-agent-capability",
         session_id="session-1",
+        task_id="task-agent-capability",
     )
 
     assert result.output["output"] == "done"

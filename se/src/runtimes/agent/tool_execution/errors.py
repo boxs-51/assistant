@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from ...capability.contracts.error import CapabilityError
+from ..task_budget import TaskBudgetError
 
 CAPABILITY_NOT_FOUND = "CAPABILITY_NOT_FOUND"
 CAPABILITY_UNAUTHORIZED = "CAPABILITY_UNAUTHORIZED"
@@ -55,6 +56,18 @@ def normalize_tool_exception(
     """
     if isinstance(exc, CapabilityError):
         return exc
+
+    if isinstance(exc, TaskBudgetError):
+        return CapabilityError(
+            code=exc.code,
+            message=str(exc),
+            category="POLICY",
+            retryable=False,
+            safe_for_client=True,
+            cause_type=type(exc).__name__,
+            capability_id=capability_id,
+            invocation_id=invocation_id,
+        )
 
     original_code = getattr(exc, "code", None)
     details: dict[str, Any] = {}

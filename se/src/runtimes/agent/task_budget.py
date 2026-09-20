@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Sequence
@@ -51,6 +52,20 @@ class DelegationDepthExceededError(TaskBudgetError):
     code = "DELEGATION_DEPTH_EXCEEDED"
 
 
+class AgentDelegationCycleError(TaskBudgetError):
+    code = "AGENT_DELEGATION_CYCLE"
+
+
+@dataclass(frozen=True, slots=True)
+class DelegationAdmission:
+    task_id: str
+    parent_execution_id: str | None
+    child_agent_id: str
+    delegation_depth: int
+    ancestor_execution_ids: tuple[str, ...]
+    ancestor_agent_ids: tuple[str, ...]
+
+
 _EXECUTION_JSON_FIELDS = frozenset({
     "request",
     "result",
@@ -59,6 +74,8 @@ _EXECUTION_JSON_FIELDS = frozenset({
     "inference_request",
     "inference_response",
 })
+_TASK_JSON_FIELDS = frozenset({"wait_reasons", "input", "output"})
+_TASK_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 
 def _normalize_execution_store_values(
@@ -70,6 +87,19 @@ def _normalize_execution_store_values(
             normalized[field] = to_json_safe(
                 normalized[field],
                 path=f"agent_executions.{field}",
+            )
+    return normalized
+
+
+def _normalize_task_store_values(
+    values: dict[str, Any],
+) -> dict[str, Any]:
+    normalized = dict(values)
+    for field in _TASK_JSON_FIELDS:
+        if field in normalized:
+            normalized[field] = to_json_safe(
+                normalized[field],
+                path=f"agent_tasks.{field}",
             )
     return normalized
 
@@ -154,6 +184,121 @@ class TaskBudgetService:
     def default_policy(self) -> TaskBudgetPolicy | None:
         return self._default_policy
 
+    async def resolve_delegation_admission(
+        self,
+        task_id: str,
+        *,
+        parent_execution_id: str | None,
+        child_agent_id: str,
+    ) -> DelegationAdmission:
+        """Derive delegation depth and Agent ancestry from durable lineage.
+
+        Caller metadata is deliberately not accepted here.  R5-D treats
+        AgentExecution.parent_execution_id + agent_id as the only ancestry
+        authority that survives restart and multi-worker execution.
+        """
+        if not task_id:
+            raise TaskBudgetRequiredError(
+                "Delegated Agent execution requires a durable task_id."
+            )
+        if not child_agent_id:
+            raise ValueError("child_agent_id must be non-empty")
+
+        async with self._uow_factory() as uow:
+            budget_record = await uow.agents.get_task_budget(task_id)
+            if budget_record is None:
+                if await uow.agents.has_execution_for_task(task_id):
+                    raise TaskBudgetLegacyUninitializedError(
+                        "Task has durable execution history but no TaskBudget."
+                    )
+                raise TaskBudgetRequiredError(
+                    f"TaskBudget missing: {task_id}"
+                )
+            budget = _budget_from_record(budget_record)
+            self._require_open(budget)
+
+            if parent_execution_id is None:
+                admission = DelegationAdmission(
+                    task_id=task_id,
+                    parent_execution_id=None,
+                    child_agent_id=child_agent_id,
+                    delegation_depth=0,
+                    ancestor_execution_ids=(),
+                    ancestor_agent_ids=(),
+                )
+                await uow.commit()
+                return admission
+
+            ancestor_execution_ids: list[str] = []
+            ancestor_agent_ids: list[str] = []
+            seen_execution_ids: set[str] = set()
+            current_execution_id: str | None = parent_execution_id
+
+            while current_execution_id is not None:
+                if current_execution_id in seen_execution_ids:
+                    raise TaskBudgetConflictError(
+                        "Durable Agent delegation lineage contains an "
+                        "execution-id cycle."
+                    )
+                seen_execution_ids.add(current_execution_id)
+
+                execution = await uow.agents.get_execution(
+                    current_execution_id
+                )
+                if execution is None:
+                    raise TaskBudgetConflictError(
+                        "Delegation parent execution does not exist: "
+                        f"{current_execution_id}"
+                    )
+                if execution.task_id != task_id:
+                    raise TaskBudgetConflictError(
+                        "Delegation parent belongs to a different AgentTask."
+                    )
+
+                ancestor_execution_ids.append(execution.id)
+                ancestor_agent_ids.append(execution.agent_id)
+
+                # Every durable AgentExecution on this Task was admitted
+                # through used_executions. Exceeding that count proves the
+                # lineage graph is inconsistent even before a cycle repeats.
+                if len(ancestor_execution_ids) > budget.used_executions:
+                    raise TaskBudgetConflictError(
+                        "Durable Agent delegation lineage exceeds the "
+                        "TaskBudget execution history."
+                    )
+
+                current_execution_id = execution.parent_execution_id
+
+            delegation_depth = len(ancestor_execution_ids)
+            if (
+                delegation_depth
+                > budget.limits.max_delegation_depth
+            ):
+                raise DelegationDepthExceededError(
+                    f"delegation_depth={delegation_depth} exceeds "
+                    f"{budget.limits.max_delegation_depth}"
+                )
+
+            if (
+                budget.deny_recursive_agent_cycle
+                and child_agent_id in ancestor_agent_ids
+            ):
+                raise AgentDelegationCycleError(
+                    f"Agent '{child_agent_id}' already exists in durable "
+                    "delegation ancestry."
+                )
+
+            admission = DelegationAdmission(
+                task_id=task_id,
+                parent_execution_id=parent_execution_id,
+                child_agent_id=child_agent_id,
+                delegation_depth=delegation_depth,
+                ancestor_execution_ids=tuple(ancestor_execution_ids),
+                ancestor_agent_ids=tuple(ancestor_agent_ids),
+            )
+            await uow.commit()
+            return admission
+
     async def create_task_with_budget(
         self,
         task_values: dict[str, Any],
@@ -197,6 +342,208 @@ class TaskBudgetService:
             )
             await uow.commit()
             return task
+
+    async def transition_task(
+        self,
+        task_id: str,
+        *,
+        allowed_source_states: Sequence[str],
+        target_state: str,
+        values: dict[str, Any] | None = None,
+    ):
+        """CAS one nonterminal AgentTask while TaskBudget remains OPEN.
+
+        If a concurrent terminal transition already won, return that durable
+        winner unchanged so stale completion/start logic cannot resurrect it.
+        """
+        target_state = str(target_state)
+        if target_state in _TASK_TERMINAL_STATES:
+            raise ValueError(
+                "terminal target requires terminalize_task()"
+            )
+        allowed = {str(item) for item in allowed_source_states}
+        if not allowed:
+            raise ValueError("allowed_source_states must not be empty")
+        normalized = _normalize_task_store_values(values or {})
+        normalized["status"] = target_state
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    task = await uow.agents.get_task(task_id)
+                    if task is None:
+                        raise TaskBudgetRequiredError(
+                            f"Unknown AgentTask: {task_id}"
+                        )
+                    current_state = str(task.status)
+                    if current_state in _TASK_TERMINAL_STATES:
+                        await uow.commit()
+                        return task
+
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no "
+                                "TaskBudget."
+                            )
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    budget = _budget_from_record(budget_record)
+                    self._require_open(budget)
+
+                    if current_state == target_state:
+                        await uow.commit()
+                        return task
+                    if current_state not in allowed:
+                        raise TaskBudgetConflictError(
+                            f"AgentTask {task_id} is {current_state}, "
+                            f"expected one of {sorted(allowed)}"
+                        )
+
+                    updated = await uow.agents.compare_and_set_task(
+                        task_id,
+                        task.revision,
+                        normalized,
+                    )
+                    if updated is None:
+                        await uow.rollback()
+                        continue
+                    await uow.commit()
+                    return updated
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"AgentTask CAS conflicts exhausted for {task_id}"
+        )
+
+    async def terminalize_task(
+        self,
+        task_id: str,
+        *,
+        allowed_source_states: Sequence[str],
+        target_state: str,
+        values: dict[str, Any] | None = None,
+    ):
+        """Atomically terminalize AgentTask and close its TaskBudget.
+
+        Any already-terminal Task is authoritative.  This makes completion
+        after cancellation and repeated cancellation fail closed without
+        resurrecting or rewriting the durable winner.
+        """
+        target_state = str(target_state)
+        if target_state not in _TASK_TERMINAL_STATES:
+            raise ValueError(
+                "target_state must be COMPLETED, FAILED or CANCELLED"
+            )
+        allowed = {str(item) for item in allowed_source_states}
+        if not allowed:
+            raise ValueError("allowed_source_states must not be empty")
+        normalized = _normalize_task_store_values(values or {})
+        normalized["status"] = target_state
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    task = await uow.agents.get_task(task_id)
+                    if task is None:
+                        raise TaskBudgetRequiredError(
+                            f"Unknown AgentTask: {task_id}"
+                        )
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no "
+                                "TaskBudget."
+                            )
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    budget = _budget_from_record(budget_record)
+                    current_state = str(task.status)
+
+                    if current_state in _TASK_TERMINAL_STATES:
+                        if budget.state is TaskBudgetState.OPEN:
+                            closed = (
+                                await uow.agents.compare_and_set_task_budget(
+                                    task_id,
+                                    budget.revision,
+                                    {
+                                        "state": TaskBudgetState.CLOSED.value,
+                                        "closed_at": datetime.now(timezone.utc),
+                                    },
+                                )
+                            )
+                            if closed is None:
+                                await uow.rollback()
+                                continue
+                        await uow.commit()
+                        return task
+
+                    if current_state not in allowed:
+                        raise TaskBudgetConflictError(
+                            f"AgentTask {task_id} is {current_state}, "
+                            f"expected one of {sorted(allowed)}"
+                        )
+                    if budget.state is not TaskBudgetState.OPEN:
+                        raise TaskBudgetConflictError(
+                            "Nonterminal AgentTask has CLOSED TaskBudget."
+                        )
+
+                    updated_task = await uow.agents.compare_and_set_task(
+                        task_id,
+                        task.revision,
+                        normalized,
+                    )
+                    if updated_task is None:
+                        await uow.rollback()
+                        continue
+
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            task_id,
+                            budget.revision,
+                            {
+                                "state": TaskBudgetState.CLOSED.value,
+                                "closed_at": datetime.now(timezone.utc),
+                            },
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.commit()
+                    return updated_task
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"AgentTask/TaskBudget terminal CAS conflicts exhausted for "
+            f"{task_id}"
+        )
+
+    async def cancel_task(
+        self,
+        task_id: str,
+        *,
+        values: dict[str, Any] | None = None,
+    ):
+        return await self.terminalize_task(
+            task_id,
+            allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
+            target_state="CANCELLED",
+            values=values,
+        )
 
     async def start_task_scoped_execution(
         self,
@@ -1189,7 +1536,9 @@ class TaskBudgetService:
 
 
 __all__ = [
+    "AgentDelegationCycleError",
     "DelegationDepthExceededError",
+    "DelegationAdmission",
     "TaskBudgetClosedError",
     "TaskBudgetConflictError",
     "TaskBudgetError",

@@ -2,12 +2,140 @@ import asyncio
 import concurrent.futures
 import os
 import shutil
+import sys
 import threading
 import time
+from contextlib import asynccontextmanager
 from typing import Any, Dict, List, Optional
 
-from mcp import ClientSession, StdioServerParameters
+import anyio
+from anyio.streams.text import TextReceiveStream
+
+from mcp import Client, ClientSession, StdioServerParameters
+from mcp.client import stdio as mcp_stdio
 from mcp.client.stdio import stdio_client
+from mcp.os.win32 import utilities as mcp_win32
+from mcp.shared.message import SessionMessage
+
+
+@asynccontextmanager
+async def _windows_thread_stdio_client(server: StdioServerParameters):
+    """MCP 2.2 stdio transport for a Windows background event-loop thread.
+
+    MCP's public ``stdio_client`` first attempts ``anyio.open_process()`` and
+    only falls back to ``FallbackProcess`` after ``NotImplementedError``.  On
+    the application's dedicated MCP background thread that native attempt can
+    stall before the context yields.  Use the SDK's own Popen-backed fallback
+    and Job Object helpers directly, while preserving its stream framing and
+    deterministic shutdown helpers.
+
+    This workaround is intentionally Windows-only and isolated here; non-Windows
+    platforms continue to use the public ``stdio_client`` unchanged.
+    """
+    process = await mcp_win32._create_windows_fallback_process(
+        server.command,
+        list(server.args),
+        server.env,
+        sys.stderr,
+        server.cwd,
+    )
+
+    # Preserve MCP SDK 2.2's process-tree ownership semantics.
+    job = mcp_win32._create_job_object()
+    mcp_win32._maybe_assign_process_to_job(process, job)
+
+    read_send, read_stream = anyio.create_memory_object_stream[
+        SessionMessage | Exception
+    ](0)
+    write_stream, write_receive = anyio.create_memory_object_stream[SessionMessage](0)
+    shutting_down = False
+    writer_done = anyio.Event()
+
+    async def stdout_reader() -> None:
+        assert process.stdout is not None
+        stdout = TextReceiveStream(
+            process.stdout,
+            encoding=server.encoding,
+            errors=server.encoding_error_handler,
+        )
+        try:
+            async with read_send:
+                try:
+                    buffer = ""
+                    async for chunk in stdout:
+                        lines = (buffer + chunk).split("\n")
+                        buffer = lines.pop()
+                        for line in lines:
+                            try:
+                                await read_send.send(mcp_stdio._parse_line(line))
+                            except (
+                                anyio.ClosedResourceError,
+                                anyio.BrokenResourceError,
+                            ):
+                                return
+                finally:
+                    await mcp_stdio._drain_stdout(process)
+        except anyio.ClosedResourceError:
+            pass
+        except (anyio.BrokenResourceError, ConnectionError):
+            if not shutting_down:
+                raise
+
+    async def stdin_writer() -> None:
+        assert process.stdin is not None
+        try:
+            async with write_receive:
+                async for session_message in write_receive:
+                    payload = session_message.message.model_dump_json(
+                        by_alias=True,
+                        exclude_unset=True,
+                    )
+                    data = (payload + "\n").encode(
+                        encoding=server.encoding,
+                        errors=server.encoding_error_handler,
+                    )
+                    await process.stdin.send(data)
+        except (
+            anyio.ClosedResourceError,
+            anyio.BrokenResourceError,
+            OSError,
+        ):
+            await read_send.aclose()
+        finally:
+            writer_done.set()
+
+    async def shutdown_transport() -> None:
+        read_stream.close()
+        write_stream.close()
+        with anyio.move_on_after(mcp_stdio._WRITER_FLUSH_TIMEOUT):
+            await writer_done.wait()
+        await mcp_stdio._stop_server_process(process)
+        await mcp_stdio._aclose_all(
+            read_stream,
+            write_stream,
+            read_send,
+            write_receive,
+        )
+        await anyio.lowlevel.checkpoint()
+
+    async with anyio.create_task_group() as task_group:
+        task_group.start_soon(stdout_reader)
+        task_group.start_soon(stdin_writer)
+        try:
+            yield read_stream, write_stream
+        finally:
+            shutting_down = True
+            with anyio.CancelScope(shield=True):
+                await shutdown_transport()
+            task_group.cancel_scope.cancel()
+
+    await anyio.lowlevel.cancel_shielded_checkpoint()
+
+
+def _owned_stdio_client(server: StdioServerParameters):
+    if os.name == "nt":
+        return _windows_thread_stdio_client(server)
+    return stdio_client(server)
 
 
 class MCPClientAdapter:
@@ -24,6 +152,7 @@ class MCPClientAdapter:
         self.config = dict(server_config)
         self._manager = manager
 
+        self.client: Optional[Client] = None
         self.session: Optional[ClientSession] = None
         self._owner_loop: Optional[asyncio.AbstractEventLoop] = None
         self._lifecycle_task: Optional[asyncio.Task] = None
@@ -32,6 +161,7 @@ class MCPClientAdapter:
         self._inflight: set[asyncio.Task] = set()
         self._mapped_tools: Dict[str, Dict[str, Any]] = {}
         self._runtime_error: Optional[BaseException] = None
+        self._startup_phase = "NEW"
 
     def _build_server_params(self) -> StdioServerParameters:
         env = os.environ.copy()
@@ -53,6 +183,7 @@ class MCPClientAdapter:
             command=cmd,
             args=self.config.get("args", []),
             env=env,
+            cwd=self.config.get("cwd"),
         )
 
     def _assert_owner_loop(self) -> asyncio.AbstractEventLoop:
@@ -135,19 +266,25 @@ class MCPClientAdapter:
             raise RuntimeError("MCP adapter lifecycle was not initialized.")
 
         params = self._build_server_params()
+        self._startup_phase = "SPAWNING_STDIO"
         try:
-            # Enter and exit both contexts in this same long-lived task.  MCP
-            # stdio uses AnyIO task groups/cancel scopes, so same-loop alone is
-            # not a sufficient ownership guarantee.
-            async with stdio_client(params) as (read_stream, write_stream):
-                async with ClientSession(read_stream, write_stream) as session:
-                    self.session = session
-                    await session.initialize()
-                    listed = await session.list_tools()
-                    self._mapped_tools = self._map_tools(listed.tools)
-                    if not ready.done():
-                        ready.set_result(dict(self._mapped_tools))
-                    await close_event.wait()
+            # MCP SDK 2.x has two protocol eras.  The first-class Client owns
+            # negotiation: it probes server/discover for modern servers and
+            # falls back to the legacy initialize handshake when necessary.
+            # The transport and Client contexts are still entered/exited by
+            # this same long-lived lifecycle task, preserving AnyIO ownership.
+            transport = _owned_stdio_client(params)
+            self._startup_phase = "NEGOTIATING"
+            async with Client(transport, mode="auto", cache=None) as client:
+                self.client = client
+                self.session = client.session
+                self._startup_phase = "DISCOVERING_TOOLS"
+                listed = await client.list_tools()
+                self._mapped_tools = self._map_tools(listed.tools)
+                self._startup_phase = "READY"
+                if not ready.done():
+                    ready.set_result(dict(self._mapped_tools))
+                await close_event.wait()
         except asyncio.CancelledError:
             if not ready.done():
                 ready.cancel()
@@ -159,6 +296,7 @@ class MCPClientAdapter:
             raise
         finally:
             self.session = None
+            self.client = None
 
     @staticmethod
     def _observe_lifecycle(task: asyncio.Task) -> None:
@@ -171,15 +309,15 @@ class MCPClientAdapter:
 
     async def get_mapped_tools(self) -> Dict[str, Dict[str, Any]]:
         self._assert_owner_loop()
-        if self.session is None:
+        if self.client is None:
             raise RuntimeError(f"MCP adapter '{self.server_name}' is not connected.")
-        listed = await self.session.list_tools()
+        listed = await self.client.list_tools()
         self._mapped_tools = self._map_tools(listed.tools)
         return dict(self._mapped_tools)
 
     async def call_tool(self, tool_name: str, arguments: Dict[str, Any]) -> str:
         self._assert_owner_loop()
-        if self.session is None:
+        if self.client is None:
             detail = (
                 f": {self._runtime_error}"
                 if self._runtime_error is not None
@@ -194,7 +332,7 @@ class MCPClientAdapter:
             raise RuntimeError("MCP call has no owning asyncio task.")
         self._inflight.add(task)
         try:
-            result = await self.session.call_tool(tool_name, arguments=arguments)
+            result = await self.client.call_tool(tool_name, arguments)
         finally:
             self._inflight.discard(task)
 
@@ -211,6 +349,7 @@ class MCPClientAdapter:
         lifecycle = self._lifecycle_task
         if lifecycle is None:
             self.session = None
+            self.client = None
             return
 
         current = asyncio.current_task()
@@ -236,6 +375,7 @@ class MCPClientAdapter:
             await asyncio.gather(lifecycle, return_exceptions=True)
 
         self.session = None
+        self.client = None
         self._mapped_tools = {}
 
     def _create_execution_handler(self, original_tool_name: str):
@@ -455,7 +595,8 @@ class MCPManager:
                     self._close_adapter_after_failed_start(adapter)
                     print(
                         f"❌ Lỗi kết nối MCP Server [{server_name}]: "
-                        f"{type(exc).__name__}: {exc!r}"
+                        f"{type(exc).__name__}: {exc!r} "
+                        f"(phase={adapter._startup_phase})"
                     )
                     continue
 
