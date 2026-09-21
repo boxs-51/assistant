@@ -41,6 +41,8 @@ class _FakeClock:
 class _MemoryStore:
     def __init__(self, record=None) -> None:
         self.record = record
+        self.checkpoints = {}
+        self.pending_invocations = {}
 
     async def load_execution(self, execution_id):
         if self.record is None or self.record.id != execution_id:
@@ -69,6 +71,37 @@ class _MemoryStore:
             setattr(self.record, key, value)
         self.record.revision += 1
         return self.record
+
+    async def commit_waiting_checkpoint(
+        self,
+        execution_id,
+        expected_revision,
+        values,
+        *,
+        checkpoint_values,
+        pending_invocations,
+    ):
+        if (
+            self.record is None
+            or self.record.id != execution_id
+            or self.record.revision != expected_revision
+        ):
+            raise ExecutionConflictError("stale")
+        checkpoint = dict(checkpoint_values)
+        checkpoint_id = checkpoint["checkpoint_id"]
+        if checkpoint["execution_revision"] != expected_revision + 1:
+            raise ExecutionConflictError("checkpoint revision mismatch")
+        self.checkpoints[checkpoint_id] = checkpoint
+        self.pending_invocations[checkpoint_id] = list(pending_invocations)
+        next_values = {
+            **values,
+            "current_checkpoint_id": checkpoint_id,
+        }
+        return await self.compare_and_set_execution(
+            execution_id,
+            expected_revision,
+            next_values,
+        )
 
 
 def _context(
@@ -194,6 +227,8 @@ async def test_r4_b1_waiting_freezes_budget_and_persists_ttl_in_same_cas():
     assert store.record.remaining_active_budget_seconds == 40.0
     assert store.record.wait_expires_at == expected_expiry
     assert store.record.completed_at is None
+    assert store.record.current_checkpoint_id == "exec-r4-b1:checkpoint:2"
+    assert "exec-r4-b1:checkpoint:2" in store.checkpoints
 
     assert context.active_budget_running is False
     assert context.remaining_active_budget_seconds == 40.0
@@ -221,6 +256,8 @@ async def test_r4_b1_missing_ttl_policy_keeps_wait_expiry_null():
     assert store.record.state == "WAITING"
     assert store.record.remaining_active_budget_seconds == 50.0
     assert store.record.wait_expires_at is None
+    assert store.record.current_checkpoint_id == "exec-r4-b1:checkpoint:2"
+    assert "exec-r4-b1:checkpoint:2" in store.checkpoints
     assert context.wait_expires_at is None
 
 
