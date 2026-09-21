@@ -122,6 +122,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 code=code,
                 message=validation.error_message or code,
                 retryable=False,
+                pre_dispatch=True,
             )
 
         caller_execution_remaining = context.remaining_seconds
@@ -141,6 +142,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 code="CAPABILITY_TIMEOUT",
                 message="Agent execution deadline exceeded before tool start.",
                 retryable=True,
+                pre_dispatch=True,
             )
 
         if not await context.reserve_tool_call():
@@ -261,7 +263,11 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         code: str,
     ) -> ToolExecutionResult:
         return CapabilityToolExecutionAdapter._failure(
-            request, code=code, message=code, retryable=False
+            request,
+            code=code,
+            message=code,
+            retryable=False,
+            pre_dispatch=True,
         )
 
     @staticmethod
@@ -272,7 +278,11 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         message: str,
         retryable: bool,
         metadata: dict[str, Any] | None = None,
+        pre_dispatch: bool = False,
     ) -> ToolExecutionResult:
+        result_metadata = dict(metadata or {})
+        if pre_dispatch:
+            result_metadata["r7_commit_authority"] = "AGENT_PRE_DISPATCH"
         return ToolExecutionResult(
             execution_id=request.execution_id,
             iteration=request.iteration,
@@ -283,5 +293,5 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             error_code=code,
             error_message=message,
             retryable=retryable,
-            metadata=dict(metadata or {}),
+            metadata=result_metadata,
         )
