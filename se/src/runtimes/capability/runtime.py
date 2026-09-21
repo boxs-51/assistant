@@ -40,6 +40,7 @@ from .contracts.invocation import (
     CapabilityWaitReason,
     ExistingInvocationContinuationMode,
     RemoteOutcomeState,
+    TERMINAL_INVOCATION_STATES,
 )
 from .catalog import CapabilityCatalog
 from .contracts.implementation import (
@@ -648,7 +649,13 @@ class CapabilityRuntime(BaseRuntime):
         )
         numbers = sorted(item.attempt_number for item in attempts)
         expected = list(range(1, invocation.attempt + 1))
-        if numbers != expected:
+        if (
+            numbers != expected
+            or any(
+                item.state not in TERMINAL_INVOCATION_STATES
+                for item in attempts
+            )
+        ):
             raise CapabilityError(
                 code=CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT,
                 message="CapabilityInvocation attempt history is inconsistent.",
@@ -660,6 +667,9 @@ class CapabilityRuntime(BaseRuntime):
                 details={
                     "invocation_attempt": invocation.attempt,
                     "attempt_numbers": numbers,
+                    "attempt_states": [
+                        item.state.value for item in attempts
+                    ],
                 },
             )
 

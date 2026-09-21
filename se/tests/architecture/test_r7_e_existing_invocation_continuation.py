@@ -518,3 +518,27 @@ async def test_r7_e_unknown_idempotency_cannot_replay_unknown_outcome():
     assert [item.attempt_number for item in await store.list_attempts(
         invocation.invocation_id
     )] == [1]
+
+
+
+@pytest.mark.asyncio
+async def test_r7_e_nonterminal_prior_attempt_history_is_fail_closed():
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.IDEMPOTENT,
+        outcome=RemoteOutcomeState.OUTCOME_UNKNOWN,
+    )
+    store.attempts["att-old-1"].state = CapabilityInvocationState.RUNNING
+
+    with pytest.raises(CapabilityError) as raised:
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K2,
+            mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+        )
+
+    assert raised.value.code == CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT
+    assert [item.attempt_number for item in await store.list_attempts(
+        invocation.invocation_id
+    )] == [1]

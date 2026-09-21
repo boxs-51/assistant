@@ -15,6 +15,7 @@ from ....runtimes.capability.contracts.invocation import (
     CapabilityInvocationState,
     CapabilityWaitReason,
     RemoteOutcomeState,
+    TERMINAL_INVOCATION_STATES,
 )
 from ..models.sql.capability import (
     CapabilityInvocationAttemptRecord,
@@ -201,19 +202,31 @@ class SqlCapabilityInvocationStore:
                     await uow.rollback()
                     return False
 
-                high_water = (
+                prior_attempts = (
                     await uow.session.execute(
-                        select(
-                            func.max(
-                                CapabilityInvocationAttemptRecord.attempt_number
-                            )
-                        ).where(
+                        select(CapabilityInvocationAttemptRecord)
+                        .where(
                             CapabilityInvocationAttemptRecord.invocation_id
                             == invocation.invocation_id
                         )
+                        .order_by(
+                            CapabilityInvocationAttemptRecord.attempt_number
+                        )
                     )
-                ).scalar_one()
-                if int(high_water or 0) != expected_attempt:
+                ).scalars().all()
+                prior_numbers = [
+                    int(item.attempt_number) for item in prior_attempts
+                ]
+                if prior_numbers != list(range(1, expected_attempt + 1)):
+                    await uow.rollback()
+                    return False
+                terminal_values = {
+                    item.value for item in TERMINAL_INVOCATION_STATES
+                }
+                if any(
+                    item.state not in terminal_values
+                    for item in prior_attempts
+                ):
                     await uow.rollback()
                     return False
 

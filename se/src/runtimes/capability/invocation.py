@@ -215,14 +215,21 @@ class InMemoryCapabilityInvocationStore:
             or current.state is not CapabilityInvocationState.WAITING
         ):
             return False
-        existing_numbers = [
-            item.attempt_number
+        existing_attempts = [
+            item
             for item in self.attempts.values()
             if item.invocation_id == invocation.invocation_id
+        ]
+        existing_numbers = [
+            item.attempt_number for item in existing_attempts
         ]
         high_water = max(existing_numbers, default=0)
         if (
             current.attempt != high_water
+            or any(
+                item.state not in TERMINAL_INVOCATION_STATES
+                for item in existing_attempts
+            )
             or attempt.attempt_number != current.attempt + 1
             or invocation.attempt != attempt.attempt_number
             or attempt.attempt_id in self.attempts

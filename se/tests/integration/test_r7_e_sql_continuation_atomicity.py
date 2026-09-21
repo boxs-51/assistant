@@ -241,3 +241,45 @@ async def test_r7_e_sql_start_failure_rolls_back_invocation_running_cas(tmp_path
         assert attempts[-1].state is CapabilityInvocationState.DISPATCHING
     finally:
         await driver.disconnect()
+
+
+
+@pytest.mark.asyncio
+async def test_r7_e_sql_begin_rejects_nonterminal_prior_attempt_atomically(tmp_path):
+    driver, store, lifecycle = await _sql_lifecycle(tmp_path)
+    try:
+        original = _invocation("inv-r7e-prior-running")
+        await store.create(original)
+        await store.save_attempt(
+            CapabilityInvocationAttempt(
+                attempt_id="att-prior-running-1",
+                invocation_id=original.invocation_id,
+                attempt_number=1,
+                implementation_id="conn-k1:tool.r7e.sql",
+                driver_kind="REMOTE_CLIENT",
+                connection_id="conn-k1",
+                state=CapabilityInvocationState.RUNNING,
+            )
+        )
+        loaded = await store.get(original.invocation_id)
+        assert loaded is not None
+
+        with pytest.raises(RuntimeError, match="continuation rejected"):
+            await lifecycle.begin_continuation_attempt(
+                loaded,
+                implementation_id="conn-k2:tool.r7e.sql",
+                driver_kind="REMOTE_CLIENT",
+                connection_id="conn-k2",
+                continuation_mode="REPLAY_SAFE",
+            )
+
+        persisted = await store.get(original.invocation_id)
+        attempts = await store.list_attempts(original.invocation_id)
+        assert persisted is not None
+        assert persisted.state is CapabilityInvocationState.WAITING
+        assert persisted.revision == original.revision
+        assert [item.state for item in attempts] == [
+            CapabilityInvocationState.RUNNING
+        ]
+    finally:
+        await driver.disconnect()
