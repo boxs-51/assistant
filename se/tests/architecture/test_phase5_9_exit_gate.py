@@ -150,7 +150,7 @@ async def test_E2_resume_rehydrates_latest_iteration_and_pending_calls():
 
 @pytest.mark.asyncio
 async def test_E3_committed_tool_results_are_not_inserted_twice():
-    committed = SimpleNamespace(tool_call_id="call-1")
+    committed = SimpleNamespace(tool_call_id="call-1", commit_state="COMMITTED")
     saved = []
 
     class Agents:
@@ -266,6 +266,7 @@ async def test_E4_resumed_committed_tool_result_is_not_dispatched_again():
                 error_message=None,
                 retryable=False,
                 extra_metadata={"attempt": 1},
+                commit_state="COMMITTED",
             )
 
         async def save_tool_result(self, values):
