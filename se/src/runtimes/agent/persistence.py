@@ -1679,6 +1679,10 @@ class DurableAgentStore:
                 activate_budget=False,
             )
             context.iteration = plan.iteration
+            durable_tool_calls = await uow.agents.list_tool_calls(
+                plan.execution_id
+            )
+            context.tool_calls_used = len(durable_tool_calls)
             context.resume_transcript = [
                 item.model_dump(mode="json")
                 for item in plan.transcript_snapshot
