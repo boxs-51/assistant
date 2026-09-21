@@ -15,6 +15,10 @@ from ..contracts.tool import (
     ToolExecutionRequest,
     ToolExecutionResult,
 )
+from ..contracts.resume import (
+    ResumeInvocationAction,
+    ResumeInvocationActionKind,
+)
 from ..tool_execution.errors import (
    AGENT_TOOL_BUDGET_EXCEEDED,
    AGENT_TOOL_NOT_VISIBLE,
@@ -32,6 +36,7 @@ from ...capability.contracts.definition import (
     CapabilityExecutionMode,
     CapabilityKind,
 )
+from ...capability.contracts.invocation import ExistingInvocationContinuationMode
 from ...capability.contracts.implementation import CapabilityExecutionLocation
 from ...capability.catalog import CapabilityNotFoundError
 
@@ -205,6 +210,95 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 message=normalized.message,
                 retryable=normalized.retryable,
                 metadata=dict(normalized.details),
+            )
+
+    async def continue_invocation(
+        self,
+        context: AgentExecutionContext,
+        action: ResumeInvocationAction,
+    ) -> ToolExecutionResult:
+        """Continue exactly one R7-E logical invocation.
+
+        This path intentionally bypasses ordinary execute_capability(), tool-call
+        admission and retry accounting. The logical tool call was admitted before
+        the WAITING checkpoint; R7-E owns the new durable attempt and its fences.
+        """
+
+        if action.action is ResumeInvocationActionKind.REUSE_COMMITTED:
+            raise ValueError(
+                "REUSE_COMMITTED must be loaded from durable AgentToolResult."
+            )
+        if context.connection_id is None:
+            raise ValueError(
+                "R7 continuation requires a claimed target connection."
+            )
+        context.ensure_active()
+
+        mode = ExistingInvocationContinuationMode(action.action.value)
+        try:
+            result = await self._capability_runtime.continue_invocation(
+                action.invocation_id,
+                target_connection_id=context.connection_id,
+                mode=mode,
+                expected_revision=action.expected_invocation_revision,
+                expected_request_fingerprint=action.request_fingerprint,
+                cancellation_event=context.cancellation_event,
+            )
+            return ToolExecutionResult(
+                execution_id=context.execution_id,
+                iteration=context.iteration,
+                invocation_id=action.invocation_id,
+                tool_call_id=action.tool_call_id,
+                capability_id=action.capability_id,
+                success=True,
+                output=result.output,
+                metadata={
+                    **dict(result.metadata),
+                    "r7_resume_action": action.action.value,
+                },
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            normalized = normalize_tool_exception(
+                exc,
+                capability_id=action.capability_id,
+                invocation_id=action.invocation_id,
+            )
+            metadata = {
+                **dict(normalized.details),
+                "r7_resume_action": action.action.value,
+                "r7_expected_invocation_revision": (
+                    action.expected_invocation_revision
+                ),
+            }
+            lifecycle = getattr(
+                self._capability_runtime,
+                "invocation_lifecycle",
+                None,
+            )
+            store = getattr(lifecycle, "store", None)
+            getter = getattr(store, "get", None)
+            if callable(getter):
+                current = await getter(action.invocation_id)
+                if current is not None:
+                    metadata["attempt"] = current.attempt
+                    metadata["remote_outcome_state"] = (
+                        current.remote_outcome_state.value
+                        if current.remote_outcome_state is not None
+                        else None
+                    )
+            return ToolExecutionResult(
+                execution_id=context.execution_id,
+                iteration=context.iteration,
+                invocation_id=action.invocation_id,
+                tool_call_id=action.tool_call_id,
+                capability_id=action.capability_id,
+                success=False,
+                error_code=normalized.code,
+                error_message=normalized.message,
+                retryable=normalized.retryable,
+                metadata=metadata,
             )
 
     async def execute_many(
