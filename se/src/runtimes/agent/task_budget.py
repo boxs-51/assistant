@@ -160,6 +160,105 @@ def _budget_from_record(record) -> TaskBudget:
     )
 
 
+async def prepare_resume_capacity_in_uow(
+    uow,
+    *,
+    task_id: str,
+    execution_id: str,
+    source_revision: int,
+    delegated: bool,
+) -> TaskBudget:
+    """Stage R7-F resume capacity inside the caller's transaction.
+
+    This primitive deliberately does not mutate AgentExecution and does not
+    commit. The caller must couple the staged TaskBudget/reservation writes
+    with its own WAITING -> RUNNING authority CAS.
+    """
+
+    if source_revision < 0:
+        raise ValueError("source_revision must be non-negative")
+
+    task = await uow.agents.get_task(task_id)
+    if task is None:
+        raise TaskBudgetRequiredError(f"Unknown AgentTask: {task_id}")
+    if str(task.status) in _TASK_TERMINAL_STATES:
+        raise TaskBudgetClosedError(
+            f"Terminal AgentTask cannot resume execution: {task_id}"
+        )
+
+    budget_record = await uow.agents.get_task_budget(task_id)
+    if budget_record is None:
+        if await uow.agents.has_execution_for_task(task_id):
+            raise TaskBudgetLegacyUninitializedError(
+                "Task has durable execution history but no TaskBudget."
+            )
+        raise TaskBudgetRequiredError(f"TaskBudget missing: {task_id}")
+
+    budget = _budget_from_record(budget_record)
+    if budget.state is not TaskBudgetState.OPEN:
+        raise TaskBudgetClosedError(f"TaskBudget is CLOSED: {task_id}")
+
+    reservation_key = f"{execution_id}:{source_revision}"
+    payload = {
+        "execution_id": execution_id,
+        "source_revision": source_revision,
+        "delegated": delegated,
+    }
+    fingerprint = _reservation_fingerprint(
+        TaskBudgetReservationKind.RESUME_EXECUTION,
+        reservation_key,
+        payload,
+    )
+    existing = await uow.agents.get_task_budget_reservation(
+        task_id,
+        TaskBudgetReservationKind.RESUME_EXECUTION.value,
+        reservation_key,
+    )
+    if existing is not None:
+        if existing.payload_fingerprint != fingerprint:
+            raise TaskBudgetConflictError(
+                "resume reservation_key was reused with a different payload"
+            )
+        raise TaskBudgetConflictError(
+            "resume capacity reservation already exists before execution claim"
+        )
+
+    if budget.active_executions >= budget.limits.max_active_executions:
+        raise TaskBudgetExceededError("max_active_executions reached")
+    if (
+        delegated
+        and budget.active_parallel_agents >= budget.limits.max_parallel_agents
+    ):
+        raise TaskBudgetExceededError("max_parallel_agents reached")
+
+    updated = await uow.agents.compare_and_set_task_budget(
+        task_id,
+        budget.revision,
+        {
+            "active_executions": budget.active_executions + 1,
+            "active_parallel_agents": (
+                budget.active_parallel_agents + 1
+                if delegated
+                else budget.active_parallel_agents
+            ),
+        },
+    )
+    if updated is None:
+        raise TaskBudgetConflictError(
+            f"Stale TaskBudget revision during resume: {task_id}@{budget.revision}"
+        )
+
+    await uow.agents.save_task_budget_reservation(
+        {
+            "task_id": task_id,
+            "kind": TaskBudgetReservationKind.RESUME_EXECUTION.value,
+            "reservation_key": reservation_key,
+            "payload_fingerprint": fingerprint,
+        }
+    )
+    return _budget_from_record(updated)
+
+
 class TaskBudgetService:
     """Durable TaskBudget policy and transaction coordinator.
 
@@ -1593,4 +1692,5 @@ __all__ = [
     "TaskBudgetLegacyUninitializedError",
     "TaskBudgetRequiredError",
     "TaskBudgetService",
+    "prepare_resume_capacity_in_uow",
 ]
