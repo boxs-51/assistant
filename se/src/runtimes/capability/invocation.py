@@ -154,6 +154,12 @@ class CapabilityInvocationStore(Protocol):
     async def list_attempts(
         self, invocation_id: str
     ) -> list[CapabilityInvocationAttempt]: ...
+    async def begin_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool: ...
 
 
 class InMemoryCapabilityInvocationStore:
@@ -189,6 +195,41 @@ class InMemoryCapabilityInvocationStore:
         if attempt.attempt_id in self.attempts:
             raise ValueError(f"Duplicate attempt_id: {attempt.attempt_id}")
         self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+
+    async def begin_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        current = self.items.get(invocation.invocation_id)
+        if (
+            current is None
+            or current.revision != expected_revision
+            or current.state is not CapabilityInvocationState.WAITING
+        ):
+            return False
+        existing_numbers = [
+            item.attempt_number
+            for item in self.attempts.values()
+            if item.invocation_id == invocation.invocation_id
+        ]
+        high_water = max(existing_numbers, default=0)
+        if (
+            current.attempt != high_water
+            or attempt.attempt_number != current.attempt + 1
+            or invocation.attempt != attempt.attempt_number
+            or attempt.attempt_id in self.attempts
+            or any(
+                item.invocation_id == invocation.invocation_id
+                and item.attempt_number == attempt.attempt_number
+                for item in self.attempts.values()
+            )
+        ):
+            return False
+        self.items[invocation.invocation_id] = invocation.model_copy(deep=True)
+        self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+        return True
 
     async def update_attempt(self, attempt: CapabilityInvocationAttempt) -> None:
         if attempt.attempt_id not in self.attempts:
@@ -268,6 +309,66 @@ class CapabilityInvocationLifecycle:
                 f"{invocation.invocation_id}"
             )
         return invocation
+
+    async def begin_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        *,
+        implementation_id: str,
+        driver_kind: str,
+        connection_id: str | None,
+        continuation_mode: str,
+    ) -> tuple[CapabilityInvocation, CapabilityInvocationAttempt]:
+        if invocation.state is not CapabilityInvocationState.WAITING:
+            raise InvalidInvocationTransition(
+                "Existing invocation continuation requires WAITING state"
+            )
+        expected_revision = invocation.revision
+        candidate = invocation.model_copy(deep=True)
+        candidate.implementation_id = implementation_id
+        candidate.driver_kind = driver_kind
+        candidate.connection_id = connection_id
+        candidate.attempt += 1
+        candidate.max_attempts = max(candidate.max_attempts, candidate.attempt)
+        previous, candidate = transition_invocation(
+            candidate,
+            CapabilityInvocationState.DISPATCHING,
+        )
+        attempt = CapabilityInvocationAttempt(
+            attempt_id=f"att_{uuid.uuid4().hex}",
+            invocation_id=candidate.invocation_id,
+            attempt_number=candidate.attempt,
+            implementation_id=implementation_id,
+            driver_kind=driver_kind,
+            connection_id=connection_id,
+            state=CapabilityInvocationState.DISPATCHING,
+            started_at=datetime.now(timezone.utc),
+            metadata={
+                "continuation_mode": continuation_mode,
+                "source_revision": expected_revision,
+                "source_remote_outcome_state": (
+                    invocation.remote_outcome_state.value
+                    if invocation.remote_outcome_state is not None
+                    else None
+                ),
+            },
+        )
+        begin = getattr(self.store, "begin_continuation_attempt", None)
+        if not callable(begin):
+            raise RuntimeError(
+                "Invocation store does not support atomic continuation attempts"
+            )
+        if not await begin(candidate, expected_revision, attempt):
+            raise RuntimeError(
+                "Concurrent invocation continuation rejected: "
+                f"{candidate.invocation_id}"
+            )
+        await self._publish(
+            candidate,
+            previous=previous,
+            attempt_id=attempt.attempt_id,
+        )
+        return candidate, attempt
 
     async def start_attempt(
         self,

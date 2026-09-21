@@ -1,7 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from fastapi.encoders import jsonable_encoder
+from sqlalchemy.exc import IntegrityError
 
 from ....runtimes.capability.contracts.definition import (
     CapabilityExecutionMode,
@@ -164,6 +165,72 @@ class SqlCapabilityInvocationStore:
                 return False
             await uow.commit()
             return True
+
+    async def begin_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        """Atomically CAS WAITING invocation state and insert attempt N+1."""
+        expected_attempt = attempt.attempt_number - 1
+        if (
+            expected_attempt < 0
+            or invocation.attempt != attempt.attempt_number
+            or invocation.state is not CapabilityInvocationState.DISPATCHING
+        ):
+            return False
+
+        async with self._uow_factory() as uow:
+            try:
+                result = await uow.session.execute(
+                    update(CapabilityInvocationRecord)
+                    .where(
+                        CapabilityInvocationRecord.invocation_id
+                        == invocation.invocation_id,
+                        CapabilityInvocationRecord.revision
+                        == expected_revision,
+                        CapabilityInvocationRecord.state
+                        == CapabilityInvocationState.WAITING.value,
+                        CapabilityInvocationRecord.attempt
+                        == expected_attempt,
+                    )
+                    .values(**self._values(invocation))
+                )
+                if result.rowcount != 1:
+                    await uow.rollback()
+                    return False
+
+                high_water = (
+                    await uow.session.execute(
+                        select(
+                            func.max(
+                                CapabilityInvocationAttemptRecord.attempt_number
+                            )
+                        ).where(
+                            CapabilityInvocationAttemptRecord.invocation_id
+                            == invocation.invocation_id
+                        )
+                    )
+                ).scalar_one()
+                if int(high_water or 0) != expected_attempt:
+                    await uow.rollback()
+                    return False
+
+                values = attempt.model_dump(mode="python")
+                values["state"] = attempt.state.value
+                values["metadata_json"] = jsonable_encoder(
+                    values.pop("metadata")
+                )
+                values["error"] = jsonable_encoder(values["error"])
+                uow.session.add(
+                    CapabilityInvocationAttemptRecord(**values)
+                )
+                await uow.commit()
+                return True
+            except IntegrityError:
+                await uow.rollback()
+                return False
 
     async def list_attempts(
         self, invocation_id: str
