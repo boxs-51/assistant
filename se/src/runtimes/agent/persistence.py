@@ -382,7 +382,53 @@ class DurableAgentStore:
             await uow.commit()
             return record
 
+    @staticmethod
+    def _validate_tool_result_invocation_identity(values, invocation) -> None:
+        expected = {
+            "invocation_id": invocation.invocation_id,
+            "capability_id": invocation.capability_id,
+            "execution_id": invocation.execution_id,
+            "tool_call_id": invocation.tool_call_id,
+        }
+        for key, authoritative in expected.items():
+            supplied = values.get(key)
+            if authoritative is not None and supplied != authoritative:
+                raise ExecutionConflictError(
+                    f"Tool-result {key} does not match CapabilityInvocation authority."
+                )
+
+    @staticmethod
+    def _terminal_projection_from_invocation(values, invocation) -> Dict[str, Any]:
+        projected = dict(values)
+        error = dict(invocation.error or {})
+        succeeded = str(invocation.state) == "COMPLETED"
+        projected.update(
+            {
+                "success": succeeded,
+                "output": invocation.output,
+                "error_code": None if succeeded else (
+                    error.get("error_code") or error.get("code")
+                ),
+                "error_message": None if succeeded else (
+                    error.get("error_message") or error.get("message")
+                ),
+                "retryable": False if succeeded else bool(error.get("retryable", False)),
+                "commit_state": "COMMITTED",
+                "extra_metadata": {
+                    **dict(projected.get("extra_metadata") or {}),
+                    "r7_commit_authority": "CAPABILITY_INVOCATION",
+                    "r7_invocation_revision": invocation.revision,
+                },
+            }
+        )
+        return projected
+
     async def save_tool_result(self, values: Dict[str, Any]):
+        """Persist one projection without treating transport ambiguity as truth.
+
+        Local/server outcomes commit immediately. A linked remote invocation is
+        model-consumable only after R6 marks its outcome TERMINAL_COMMITTED.
+        """
         values = _normalize_json_fields(
             values, _TOOL_RESULT_JSON_FIELDS, path="agent_tool_results"
         )
@@ -390,13 +436,104 @@ class DurableAgentStore:
             existing = await uow.agents.get_tool_result(
                 values["execution_id"], values["tool_call_id"]
             )
-            record = existing or await uow.agents.save_tool_result(values)
+            invocation = None
+            invocation_repo = getattr(uow, "capability_invocations", None)
+            if invocation_repo is not None and values.get("invocation_id"):
+                invocation = await invocation_repo.get_record(values["invocation_id"])
+
+            if invocation is None:
+                values["commit_state"] = "COMMITTED"
+            else:
+                self._validate_tool_result_invocation_identity(values, invocation)
+                remote_state = getattr(invocation, "remote_outcome_state", None)
+                if remote_state is None:
+                    values["commit_state"] = "COMMITTED"
+                elif str(remote_state) == "TERMINAL_COMMITTED":
+                    values = self._terminal_projection_from_invocation(
+                        values, invocation
+                    )
+                else:
+                    values["commit_state"] = "PROVISIONAL"
+
+            if existing is None:
+                record = await uow.agents.save_tool_result(values)
+            elif getattr(existing, "commit_state", "PROVISIONAL") == "COMMITTED":
+                record = existing
+            elif values["commit_state"] == "COMMITTED":
+                record = await uow.agents.update_tool_result(
+                    values["execution_id"],
+                    values["tool_call_id"],
+                    values,
+                )
+            else:
+                record = existing
             await uow.commit()
             return record
 
     async def load_tool_result(self, execution_id: str, tool_call_id: str):
         async with self.uow_factory() as uow:
             record = await uow.agents.get_tool_result(execution_id, tool_call_id)
+            await uow.commit()
+            return record
+
+    async def load_committed_tool_result(
+        self,
+        execution_id: str,
+        tool_call_id: str,
+    ):
+        """Return only model-consumable result projections.
+
+        A PROVISIONAL remote projection may be promoted exactly once when R6
+        already carries TERMINAL_COMMITTED authority. Promotion uses the R6
+        terminal output/error rather than the stale transport projection.
+        """
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_tool_result(execution_id, tool_call_id)
+            if record is None:
+                await uow.commit()
+                return None
+            if getattr(record, "commit_state", "PROVISIONAL") == "COMMITTED":
+                await uow.commit()
+                return record
+
+            invocation_repo = getattr(uow, "capability_invocations", None)
+            if invocation_repo is None:
+                await uow.commit()
+                return None
+            invocation = await invocation_repo.get_record(record.invocation_id)
+            if invocation is None:
+                await uow.commit()
+                return None
+            values = {
+                "id": record.id,
+                "execution_id": record.execution_id,
+                "iteration_id": record.iteration_id,
+                "tool_call_id": record.tool_call_id,
+                "invocation_id": record.invocation_id,
+                "capability_id": record.capability_id,
+                "success": record.success,
+                "output": record.output,
+                "error_code": record.error_code,
+                "error_message": record.error_message,
+                "retryable": record.retryable,
+                "extra_metadata": dict(record.extra_metadata or {}),
+                "attempt": record.attempt,
+            }
+            self._validate_tool_result_invocation_identity(values, invocation)
+            if str(getattr(invocation, "remote_outcome_state", None)) != "TERMINAL_COMMITTED":
+                await uow.commit()
+                return None
+
+            values = _normalize_json_fields(
+                self._terminal_projection_from_invocation(values, invocation),
+                _TOOL_RESULT_JSON_FIELDS,
+                path="agent_tool_results",
+            )
+            record = await uow.agents.update_tool_result(
+                execution_id,
+                tool_call_id,
+                values,
+            )
             await uow.commit()
             return record
 
@@ -452,8 +589,89 @@ class DurableAgentStore:
                 key=lambda item: item.iteration,
                 default=None,
             )
+            checkpoint = None
+            checkpoint_id = getattr(execution, "current_checkpoint_id", None)
+            if checkpoint_id:
+                checkpoint = await uow.agents.get_execution_checkpoint(checkpoint_id)
+                if (
+                    checkpoint is None
+                    or checkpoint.execution_id != execution.id
+                    or checkpoint.execution_revision != execution.revision
+                ):
+                    raise ExecutionConflictError(
+                        "AgentExecution current checkpoint is missing or stale."
+                    )
+                latest_iteration = next(
+                    (
+                        item for item in iterations
+                        if item.iteration == checkpoint.iteration
+                    ),
+                    None,
+                )
+                if latest_iteration is None:
+                    raise ExecutionConflictError(
+                        "Checkpoint iteration is missing from durable history."
+                    )
+
+            async def sanitize_transcript(raw):
+                sanitized = []
+                for message in list(raw or []):
+                    if message.get("role") != "tool":
+                        sanitized.append(message)
+                        continue
+                    tool_call_id = message.get("tool_call_id")
+                    if not tool_call_id:
+                        continue
+                    result = await uow.agents.get_tool_result(
+                        execution_id,
+                        tool_call_id,
+                    )
+                    if (
+                        result is not None
+                        and getattr(result, "commit_state", "PROVISIONAL")
+                        == "COMMITTED"
+                    ):
+                        sanitized.append(message)
+                return sanitized
+
+            resume_transcript = await sanitize_transcript(
+                (
+                    checkpoint.transcript_snapshot
+                    if checkpoint is not None
+                    else getattr(execution, "transcript", None) or (
+                        getattr(latest_iteration, "transcript", None)
+                        if latest_iteration
+                        else []
+                    )
+                )
+            )
+
             pending_tool_calls = []
             if latest_iteration is not None:
+                calls = await uow.agents.list_tool_calls(
+                    execution_id,
+                    latest_iteration.id,
+                )
+                by_id = {item.tool_call_id: item for item in calls}
+                canonical_ids = list(
+                    getattr(latest_iteration, "tool_call_ids", None) or []
+                )
+                if checkpoint is not None and not canonical_ids:
+                    raise ExecutionConflictError(
+                        "Checkpointed tool batch has no canonical tool_call_ids."
+                    )
+                ordered_calls = []
+                for tool_call_id in canonical_ids:
+                    item = by_id.get(tool_call_id)
+                    if item is None:
+                        raise ExecutionConflictError(
+                            f"Missing durable tool call {tool_call_id!r} "
+                            "referenced by checkpoint iteration."
+                        )
+                    ordered_calls.append(item)
+                if checkpoint is None and not canonical_ids:
+                    ordered_calls = calls
+
                 pending_tool_calls = [
                     {
                         "execution_id": item.execution_id,
@@ -473,11 +691,7 @@ class DurableAgentStore:
                             "persisted_status": item.status,
                         },
                     }
-                    for item in await uow.agents.list_tool_calls(
-                        execution_id,
-                        latest_iteration.id,
-                    )
-                    if item.status != "COMPLETED"
+                    for item in ordered_calls
                 ]
 
             state = getattr(execution, "context_state", None) or {}
@@ -527,11 +741,7 @@ class DurableAgentStore:
                 activate_budget=False,
             )
             context.iteration = latest_iteration.iteration if latest_iteration else 0
-            context.resume_transcript = getattr(execution, "transcript", None) or (
-                getattr(latest_iteration, "transcript", None)
-                if latest_iteration
-                else []
-            )
+            context.resume_transcript = resume_transcript
             context.resume_pending_tool_calls = pending_tool_calls
             context.resume_revision = getattr(execution, "revision", 0)
             await uow.commit()
