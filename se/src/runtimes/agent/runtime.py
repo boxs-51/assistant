@@ -312,6 +312,19 @@ class AgentRuntime:
                 record = None
         if record is None:
             return None
+        expected_identity = {
+            "execution_id": request.execution_id,
+            "invocation_id": request.invocation_id,
+            "tool_call_id": request.tool_call_id,
+            "capability_id": request.capability_id,
+        }
+        for key, expected in expected_identity.items():
+            actual = getattr(record, key, None)
+            if actual != expected:
+                raise ExecutionConflictError(
+                    f"Committed tool-result {key} does not match resume request: "
+                    f"{actual!r} != {expected!r}."
+                )
         return ToolExecutionResult(
             execution_id=record.execution_id,
             iteration=request.iteration,
@@ -1242,21 +1255,35 @@ class AgentRuntime:
                         },
                     )
 
-                remote_waiting = [
-                    item
-                    for item in latest_tool_results
-                    if (
-                        item.tool_call_id in uncommitted_tool_call_ids
-                        or item.error_code
-                        in {
-                            "REMOTE_CONNECTION_LOST",
-                            "REMOTE_OUTCOME_UNKNOWN",
-                            "REMOTE_RESULT_RECONCILIATION_REQUIRED",
-                        }
-                        or item.metadata.get("original_error_code")
-                        == "REMOTE_CONNECTION_LOST"
+                commitment_aware = callable(
+                    getattr(
+                        self._durable_store,
+                        "load_committed_tool_result",
+                        None,
                     )
-                ]
+                )
+                if commitment_aware:
+                    remote_waiting = [
+                        item
+                        for item in latest_tool_results
+                        if item.tool_call_id in uncommitted_tool_call_ids
+                    ]
+                else:
+                    remote_waiting = [
+                        item
+                        for item in latest_tool_results
+                        if (
+                            item.tool_call_id in uncommitted_tool_call_ids
+                            or item.error_code
+                            in {
+                                "REMOTE_CONNECTION_LOST",
+                                "REMOTE_OUTCOME_UNKNOWN",
+                                "REMOTE_RESULT_RECONCILIATION_REQUIRED",
+                            }
+                            or item.metadata.get("original_error_code")
+                            == "REMOTE_CONNECTION_LOST"
+                        )
+                    ]
                 if remote_waiting and self._continuation_service is not None:
                     lost = remote_waiting[0]
                     old_connection_id = (
