@@ -12,6 +12,9 @@ from se.src.domain.schemas.identity import Identity
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
+    AgentIterationRecord,
+    AgentToolCallRecord,
+    AgentToolResultRecord,
 )
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.models.sql.capability import (
@@ -772,6 +775,179 @@ async def test_r7_f4_prepare_resume_plan_context_is_read_only_and_checkpoint_dir
             assert execution.state == "WAITING"
             assert execution.revision == 2
             assert execution.bound_connection_id is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_f3_revalidates_committed_active_slot_without_pending_action(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path, "committed-active-slot.sqlite"
+    )
+    try:
+        await _seed_non_task(sessions)
+        async with factory() as uow:
+            iteration_id = f"{EXECUTION}:iteration:1"
+            uow.session.add(
+                AgentIterationRecord(
+                    id=iteration_id,
+                    execution_id=EXECUTION,
+                    iteration=1,
+                    state="WAITING",
+                    tool_call_ids=[TOOL_CALL, "call-already-committed"],
+                )
+            )
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="tool-row-already-committed",
+                    execution_id=EXECUTION,
+                    iteration_id=iteration_id,
+                    invocation_id="inv-already-committed",
+                    tool_call_id="call-already-committed",
+                    capability_id="tool.already.committed",
+                    arguments={},
+                    status="COMPLETED",
+                    extra_metadata={},
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id="result-already-committed",
+                    execution_id=EXECUTION,
+                    iteration_id=iteration_id,
+                    invocation_id="inv-already-committed",
+                    tool_call_id="call-already-committed",
+                    capability_id="tool.already.committed",
+                    success=True,
+                    output={"value": "committed"},
+                    retryable=False,
+                    extra_metadata={},
+                    commit_state="COMMITTED",
+                    attempt=1,
+                )
+            )
+            await uow.commit()
+
+        base = _plan()
+        plan = replace(
+            base,
+            ordered_tool_call_ids=(
+                TOOL_CALL,
+                "call-already-committed",
+            ),
+            plan_fingerprint="",
+        )
+        plan = replace(plan, plan_fingerprint=resume_plan_fingerprint(plan))
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-committed-active-slot")
+        )
+
+        result = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+        assert result.consumed_execution_revision == 3
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "RUNNING"
+            assert durable_claim.state == "CONSUMED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_f3_provisional_no_action_active_slot_blocks_claim(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path, "provisional-active-slot.sqlite"
+    )
+    try:
+        await _seed_non_task(sessions)
+        async with factory() as uow:
+            iteration_id = f"{EXECUTION}:iteration:1"
+            uow.session.add(
+                AgentIterationRecord(
+                    id=iteration_id,
+                    execution_id=EXECUTION,
+                    iteration=1,
+                    state="WAITING",
+                    tool_call_ids=[TOOL_CALL, "call-provisional"],
+                )
+            )
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="tool-row-provisional",
+                    execution_id=EXECUTION,
+                    iteration_id=iteration_id,
+                    invocation_id="inv-provisional",
+                    tool_call_id="call-provisional",
+                    capability_id="tool.provisional",
+                    arguments={},
+                    status="PENDING",
+                    extra_metadata={},
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id="result-provisional",
+                    execution_id=EXECUTION,
+                    iteration_id=iteration_id,
+                    invocation_id="inv-provisional",
+                    tool_call_id="call-provisional",
+                    capability_id="tool.provisional",
+                    success=False,
+                    output=None,
+                    error_code="REMOTE_OUTCOME_UNKNOWN",
+                    error_message="unknown",
+                    retryable=True,
+                    extra_metadata={},
+                    commit_state="PROVISIONAL",
+                    attempt=1,
+                )
+            )
+            await uow.commit()
+
+        base = _plan()
+        plan = replace(
+            base,
+            ordered_tool_call_ids=(TOOL_CALL, "call-provisional"),
+            plan_fingerprint="",
+        )
+        plan = replace(plan, plan_fingerprint=resume_plan_fingerprint(plan))
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-provisional-active-slot")
+        )
+
+        with pytest.raises(ResumeClaimRejected) as raised:
+            await store.consume_resume_claim(
+                ResumeClaimConsumeSpec(
+                    plan=plan,
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    expected_claim_revision=claim.revision,
+                    now_utc=datetime.now(timezone.utc),
+                )
+            )
+        assert raised.value.code == "STALE_RECONCILIATION_SNAPSHOT"
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "WAITING"
+            assert execution.revision == 2
+            assert durable_claim.state == "REJECTED"
             await uow.commit()
     finally:
         await engine.dispose()
