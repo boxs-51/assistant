@@ -1278,13 +1278,13 @@ class AgentRuntime:
                         if item in remote_waiting
                     ]
                     context.waiting_origin_connection_id = old_connection_id
-                    checkpoint_transcript = [
-                        item.model_dump(mode="json")
-                        for item in [
-                            *transcript,
-                            *_tool_results_to_messages(latest_tool_results),
-                        ]
-                    ]
+                    # Legacy continuation remains writable during the
+                    # migration window, but it must obey the same R7-C safety
+                    # boundary: never persist provisional active-batch tool
+                    # messages as resumable model context.
+                    checkpoint_transcript = list(
+                        context.waiting_checkpoint_transcript
+                    )
                     checkpoint = await self._continuation_service.checkpoint_disconnect(
                         execution_id=context.execution_id,
                         session_id=context.session_id,
