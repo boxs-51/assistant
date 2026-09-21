@@ -26,6 +26,7 @@ from .contracts.resume import (
     ResumeClaimIntent,
     ResumeClaimState,
     ResumeInvocationActionKind,
+    ResumeTriggerType,
     normalize_resume_trigger_type,
     resume_plan_fingerprint,
 )
@@ -877,6 +878,8 @@ class DurableAgentStore:
             and record.client_id == plan.target_client_id
             and record.connection_id == plan.target_connection_id
             and record.wait_reason == "CONNECTION"
+            and normalize_resume_trigger_type(record.trigger_type)
+            is ResumeTriggerType.CLIENT_RECONNECT
         )
 
     async def _reject_created_claim_in_uow(
@@ -912,6 +915,21 @@ class DurableAgentStore:
         now_utc = _utc_datetime(spec.now_utc)
         if now_utc is None:
             raise ValueError("now_utc must be set")
+        if not plan.target_user_id:
+            raise ResumeClaimRejected(
+                "FOREIGN_PRINCIPAL",
+                "CLIENT_RECONNECT plan requires a target principal.",
+            )
+        if not plan.target_client_id:
+            raise ResumeClaimRejected(
+                "FOREIGN_CLIENT",
+                "CLIENT_RECONNECT plan requires a stable target client_id.",
+            )
+        if not plan.target_connection_id:
+            raise ResumeClaimRejected(
+                "CONNECTION_NOT_READY",
+                "CLIENT_RECONNECT plan requires a target connection_id.",
+            )
 
         async with self.uow_factory() as uow:
             claim = await uow.agents.get_resume_claim(spec.claim_id)
@@ -1155,7 +1173,15 @@ class DurableAgentStore:
                 plan.checkpoint_id
             )
             actions = tuple(plan.invocation_actions)
-            if len(pending) != len(actions):
+            if (
+                len(pending) != len(actions)
+                or {item.invocation_id for item in pending}
+                != {item.invocation_id for item in actions}
+                or {item.tool_call_id for item in pending}
+                != {item.tool_call_id for item in actions}
+                or len({item.invocation_id for item in actions}) != len(actions)
+                or len({item.tool_call_id for item in actions}) != len(actions)
+            ):
                 error = await self._reject_created_claim_in_uow(
                     uow, claim, code="STALE_CHECKPOINT", now_utc=now_utc
                 )
@@ -1180,6 +1206,7 @@ class DurableAgentStore:
                     or snapshot.capability_version != action.capability_version
                     or snapshot.request_fingerprint != action.request_fingerprint
                     or snapshot.idempotency != action.idempotency.value
+                    or snapshot.origin_client_id != plan.target_client_id
                 ):
                     error = await self._reject_created_claim_in_uow(
                         uow,
