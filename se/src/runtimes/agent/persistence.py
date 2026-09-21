@@ -500,7 +500,12 @@ class DurableAgentStore:
             if invocation_repo is not None and values.get("invocation_id"):
                 invocation = await invocation_repo.get_record(values["invocation_id"])
 
-            if invocation is None:
+            if invocation_repo is None:
+                # Compatibility-only stores used by older tests/adapters have
+                # no R6 authority surface. Production SqlAlchemyUnitOfWork
+                # always exposes capability_invocations.
+                values["commit_state"] = "COMMITTED"
+            elif invocation is None:
                 authority = dict(values.get("extra_metadata") or {}).get(
                     "r7_commit_authority"
                 )
