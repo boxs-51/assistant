@@ -1,15 +1,42 @@
+from datetime import datetime, timezone
+import math
 from typing import Any, Dict, List, Optional
+import uuid
+
+from sqlalchemy.exc import IntegrityError, OperationalError
 
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ...domain.schemas.identity import Identity
 from ...infrastructure.storage.repositories.agent import AgentRepository
+from ..capability.contracts.definition import CapabilityIdempotency
+from ..capability.contracts.invocation import (
+    CapabilityInvocationState,
+    CapabilityWaitReason,
+    RemoteOutcomeState,
+    TERMINAL_INVOCATION_STATES,
+)
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
 from .contracts.resume import (
     CheckpointPendingInvocation,
     DurableExecutionCheckpoint,
+    ResumeClaim,
+    ResumeClaimConsumeResult,
+    ResumeClaimConsumeSpec,
+    ResumeClaimIntent,
+    ResumeClaimState,
+    ResumeInvocationActionKind,
+    normalize_resume_trigger_type,
+    resume_plan_fingerprint,
 )
+from .resume_claim import ResumeClaimDeferred, ResumeClaimError, ResumeClaimRejected
 from .serialization import to_json_safe
+from .task_budget import (
+    TaskBudgetClosedError,
+    TaskBudgetExceededError,
+    TaskBudgetConflictError as RuntimeTaskBudgetConflictError,
+    prepare_resume_capacity_in_uow,
+)
 from .waiting_checkpoint import (
     WaitingCheckpointConflictError,
     stage_waiting_checkpoint,
@@ -63,6 +90,21 @@ class TaskConflictError(RuntimeError):
 
 class TaskBudgetConflictError(RuntimeError):
     """A durable TaskBudget revision compare-and-set lost a race."""
+
+
+def _utc_datetime(value: datetime | None) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def _enum_value(value):
+    return getattr(value, "value", value)
+
+
+_TASK_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 
 class DurableAgentStore:
@@ -689,6 +731,652 @@ class DurableAgentStore:
             observed_remote_outcome_state=record.observed_remote_outcome_state,
             origin_client_id=record.origin_client_id,
             origin_connection_id=record.origin_connection_id,
+        )
+
+    @staticmethod
+    def _resume_claim_contract(record) -> ResumeClaim:
+        return ResumeClaim(
+            claim_id=record.claim_id,
+            execution_id=record.execution_id,
+            checkpoint_id=record.checkpoint_id,
+            resume_request_id=record.resume_request_id,
+            expected_execution_revision=record.expected_execution_revision,
+            user_id=record.user_id,
+            wait_reason=record.wait_reason,
+            trigger_type=normalize_resume_trigger_type(record.trigger_type).value,
+            plan_fingerprint=record.plan_fingerprint,
+            claim_expires_at=_utc_datetime(record.claim_expires_at),
+            client_id=record.client_id,
+            connection_id=record.connection_id,
+            state=ResumeClaimState(record.state),
+            revision=record.revision,
+            rejection_code=record.rejection_code,
+            consumed_execution_revision=record.consumed_execution_revision,
+            metadata=dict(record.metadata_json or {}),
+            created_at=_utc_datetime(record.created_at),
+            consumed_at=_utc_datetime(record.consumed_at),
+            rejected_at=_utc_datetime(record.rejected_at),
+            expired_at=_utc_datetime(record.expired_at),
+        )
+
+    @staticmethod
+    def _claim_intent_matches(record, intent: ResumeClaimIntent) -> bool:
+        return (
+            record.execution_id == intent.execution_id
+            and record.checkpoint_id == intent.checkpoint_id
+            and record.expected_execution_revision
+            == intent.expected_execution_revision
+            and record.plan_fingerprint == intent.plan_fingerprint
+            and record.user_id == intent.user_id
+            and record.client_id == intent.client_id
+            and record.connection_id == intent.connection_id
+            and record.wait_reason == intent.wait_reason
+            and normalize_resume_trigger_type(record.trigger_type)
+            is normalize_resume_trigger_type(intent.trigger_type)
+        )
+
+    async def load_resume_claim_by_request_id(
+        self,
+        resume_request_id: str,
+    ) -> ResumeClaim | None:
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_resume_claim_by_request_id(
+                resume_request_id
+            )
+            result = (
+                self._resume_claim_contract(record)
+                if record is not None
+                else None
+            )
+            await uow.commit()
+            return result
+
+    async def get_or_create_resume_claim(
+        self,
+        intent: ResumeClaimIntent,
+    ) -> ResumeClaim:
+        """Persist one idempotent CREATED resume intent.
+
+        Retrying the same resume_request_id never extends claim TTL and never
+        acquires AgentExecution or TaskBudget authority.
+        """
+
+        if not intent.resume_request_id:
+            raise ValueError("resume_request_id must be non-empty")
+        if not intent.execution_id or not intent.checkpoint_id:
+            raise ValueError("execution_id/checkpoint_id must be non-empty")
+        if intent.expected_execution_revision < 0:
+            raise ValueError("expected_execution_revision must be non-negative")
+        expires_at = _utc_datetime(intent.claim_expires_at)
+        if expires_at is None:
+            raise ValueError("claim_expires_at must be set")
+
+        values = {
+            "claim_id": f"resume-claim-{uuid.uuid4().hex}",
+            "execution_id": intent.execution_id,
+            "checkpoint_id": intent.checkpoint_id,
+            "resume_request_id": intent.resume_request_id,
+            "expected_execution_revision": intent.expected_execution_revision,
+            "user_id": intent.user_id,
+            "client_id": intent.client_id,
+            "connection_id": intent.connection_id,
+            "wait_reason": intent.wait_reason,
+            "trigger_type": normalize_resume_trigger_type(
+                intent.trigger_type
+            ).value,
+            "state": ResumeClaimState.CREATED.value,
+            "revision": 0,
+            "plan_fingerprint": intent.plan_fingerprint,
+            "claim_expires_at": expires_at,
+            "metadata_json": to_json_safe(
+                dict(intent.metadata),
+                path="agent_resume_claims.metadata",
+            ),
+        }
+
+        try:
+            async with self.uow_factory() as uow:
+                existing = await uow.agents.get_resume_claim_by_request_id(
+                    intent.resume_request_id
+                )
+                if existing is not None:
+                    if not self._claim_intent_matches(existing, intent):
+                        raise ResumeClaimRejected(
+                            "RESUME_REQUEST_CONFLICT",
+                            "resume_request_id was reused with different semantics.",
+                        )
+                    result = self._resume_claim_contract(existing)
+                    await uow.commit()
+                    return result
+
+                record = await uow.agents.save_resume_claim(values)
+                result = self._resume_claim_contract(record)
+                await uow.commit()
+                return result
+        except IntegrityError:
+            # Concurrent create: the UNIQUE(resume_request_id) winner is the
+            # only durable claim. Re-read and verify semantic equality.
+            async with self.uow_factory() as uow:
+                existing = await uow.agents.get_resume_claim_by_request_id(
+                    intent.resume_request_id
+                )
+                if existing is None:
+                    raise ResumeClaimRejected(
+                        "RESUME_CONFLICT",
+                        "Concurrent ResumeClaim creation lost without a durable winner.",
+                    )
+                if not self._claim_intent_matches(existing, intent):
+                    raise ResumeClaimRejected(
+                        "RESUME_REQUEST_CONFLICT",
+                        "resume_request_id winner has different semantics.",
+                    )
+                result = self._resume_claim_contract(existing)
+                await uow.commit()
+                return result
+
+    @staticmethod
+    def _claim_matches_plan(record, spec: ResumeClaimConsumeSpec) -> bool:
+        plan = spec.plan
+        return (
+            record.resume_request_id == spec.resume_request_id
+            and record.execution_id == plan.execution_id
+            and record.checkpoint_id == plan.checkpoint_id
+            and record.expected_execution_revision
+            == plan.expected_execution_revision
+            and record.plan_fingerprint == plan.plan_fingerprint
+            and record.user_id == plan.target_user_id
+            and record.client_id == plan.target_client_id
+            and record.connection_id == plan.target_connection_id
+            and record.wait_reason == "CONNECTION"
+        )
+
+    async def _reject_created_claim_in_uow(
+        self,
+        uow,
+        claim,
+        *,
+        code: str,
+        now_utc: datetime,
+    ) -> ResumeClaimError:
+        rejected = await uow.agents.compare_and_set_resume_claim(
+            claim.claim_id,
+            claim.revision,
+            ResumeClaimState.CREATED.value,
+            {
+                "state": ResumeClaimState.REJECTED.value,
+                "rejection_code": code,
+                "rejected_at": now_utc,
+            },
+        )
+        if rejected is None:
+            return ResumeClaimRejected(
+                "STALE_RESUME_CLAIM",
+                "ResumeClaim changed while rejection was being recorded.",
+            )
+        return ResumeClaimRejected(code, code)
+
+    async def _consume_resume_claim_once(
+        self,
+        spec: ResumeClaimConsumeSpec,
+    ) -> ResumeClaimConsumeResult | ResumeClaimError:
+        plan = spec.plan
+        now_utc = _utc_datetime(spec.now_utc)
+        if now_utc is None:
+            raise ValueError("now_utc must be set")
+
+        async with self.uow_factory() as uow:
+            claim = await uow.agents.get_resume_claim(spec.claim_id)
+            if claim is None:
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "STALE_RESUME_CLAIM",
+                    "ResumeClaim does not exist.",
+                )
+            if not self._claim_matches_plan(claim, spec):
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "RESUME_REQUEST_CONFLICT",
+                    "ResumeClaim semantics do not match the frozen ResumePlan.",
+                )
+
+            if claim.state == ResumeClaimState.CONSUMED.value:
+                if claim.consumed_execution_revision is None:
+                    await uow.commit()
+                    return ResumeClaimRejected(
+                        "STALE_RESUME_CLAIM",
+                        "CONSUMED ResumeClaim has no consumed execution revision.",
+                    )
+                result = ResumeClaimConsumeResult(
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    execution_id=claim.execution_id,
+                    checkpoint_id=claim.checkpoint_id,
+                    source_execution_revision=claim.expected_execution_revision,
+                    consumed_execution_revision=claim.consumed_execution_revision,
+                    remaining_active_budget_seconds=plan.remaining_active_budget_seconds,
+                    bound_client_id=claim.client_id,
+                    bound_connection_id=claim.connection_id,
+                    already_consumed=True,
+                )
+                await uow.commit()
+                return result
+            if claim.state == ResumeClaimState.EXPIRED.value:
+                await uow.commit()
+                return ResumeClaimRejected("CLAIM_EXPIRED", "ResumeClaim expired.")
+            if claim.state == ResumeClaimState.REJECTED.value:
+                code = claim.rejection_code or "STALE_RESUME_CLAIM"
+                await uow.commit()
+                return ResumeClaimRejected(code, code)
+            if (
+                claim.state != ResumeClaimState.CREATED.value
+                or claim.revision != spec.expected_claim_revision
+            ):
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "STALE_RESUME_CLAIM",
+                    "ResumeClaim state/revision is stale.",
+                )
+
+            claim_expires_at = _utc_datetime(claim.claim_expires_at)
+            if claim_expires_at is None or now_utc >= claim_expires_at:
+                expired = await uow.agents.compare_and_set_resume_claim(
+                    claim.claim_id,
+                    claim.revision,
+                    ResumeClaimState.CREATED.value,
+                    {
+                        "state": ResumeClaimState.EXPIRED.value,
+                        "expired_at": now_utc,
+                    },
+                )
+                if expired is None:
+                    await uow.rollback()
+                    return ResumeClaimRejected(
+                        "STALE_RESUME_CLAIM",
+                        "ResumeClaim changed while expiring.",
+                    )
+                await uow.commit()
+                return ResumeClaimRejected("CLAIM_EXPIRED", "ResumeClaim expired.")
+
+            computed_fingerprint = resume_plan_fingerprint(plan)
+            if computed_fingerprint != plan.plan_fingerprint:
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="STALE_RESUME_CLAIM",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            execution = await uow.agents.get_execution(plan.execution_id)
+            if execution is None:
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="RESUME_CONFLICT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+            if (
+                str(execution.state) != "WAITING"
+                or execution.revision != plan.expected_execution_revision
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="RESUME_CONFLICT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+            if (
+                execution.current_checkpoint_id != plan.checkpoint_id
+                or str(execution.wait_reason) != "CONNECTION"
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="STALE_CHECKPOINT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                plan.checkpoint_id
+            )
+            if (
+                checkpoint is None
+                or checkpoint.execution_id != plan.execution_id
+                or checkpoint.execution_revision != execution.revision
+                or checkpoint.session_id != plan.session_id
+                or checkpoint.task_id != plan.task_id
+                or checkpoint.branch_id != plan.branch_id
+                or checkpoint.iteration != plan.iteration
+                or checkpoint.wait_reason != str(execution.wait_reason)
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="STALE_CHECKPOINT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+
+            remaining = checkpoint.remaining_active_budget_seconds
+            if (
+                remaining is None
+                or not math.isfinite(float(remaining))
+                or float(remaining) <= 0.0
+                or float(remaining) != float(plan.remaining_active_budget_seconds)
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="RESUME_CONFLICT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+
+            execution_wait_expires_at = _utc_datetime(execution.wait_expires_at)
+            checkpoint_wait_expires_at = _utc_datetime(checkpoint.wait_expires_at)
+            if execution_wait_expires_at != checkpoint_wait_expires_at:
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="STALE_CHECKPOINT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+            if (
+                execution_wait_expires_at is not None
+                and now_utc >= execution_wait_expires_at
+            ):
+                timed_out = await uow.agents.compare_and_set_waiting_execution(
+                    plan.execution_id,
+                    plan.expected_execution_revision,
+                    plan.checkpoint_id,
+                    "CONNECTION",
+                    {
+                        "state": "TIMEOUT",
+                        "wait_reason": None,
+                        "wait_expires_at": None,
+                        "remaining_active_budget_seconds": float(remaining),
+                        "error": "WAIT_TTL_EXPIRED",
+                        "completed_at": now_utc,
+                    },
+                )
+                if timed_out is None:
+                    await uow.rollback()
+                    return ResumeClaimRejected(
+                        "RESUME_CONFLICT",
+                        "Execution changed while applying WAIT expiry.",
+                    )
+                rejected = await uow.agents.compare_and_set_resume_claim(
+                    claim.claim_id,
+                    claim.revision,
+                    ResumeClaimState.CREATED.value,
+                    {
+                        "state": ResumeClaimState.REJECTED.value,
+                        "rejection_code": "WAIT_EXPIRED",
+                        "rejected_at": now_utc,
+                    },
+                )
+                if rejected is None:
+                    await uow.rollback()
+                    return ResumeClaimRejected(
+                        "STALE_RESUME_CLAIM",
+                        "ResumeClaim changed during WAIT expiry.",
+                    )
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "WAIT_EXPIRED",
+                    "WAITING execution TTL expired.",
+                )
+
+            if checkpoint.origin_client_id != plan.target_client_id:
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="FOREIGN_CLIENT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+            if (
+                checkpoint.origin_connection_id
+                and checkpoint.origin_connection_id == plan.target_connection_id
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="CONNECTION_NOT_READY", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+
+            pending = await uow.agents.list_checkpoint_pending_invocations(
+                plan.checkpoint_id
+            )
+            actions = tuple(plan.invocation_actions)
+            if len(pending) != len(actions):
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="STALE_CHECKPOINT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+            pending_by_invocation = {item.invocation_id: item for item in pending}
+            terminal_states = {
+                item.value for item in TERMINAL_INVOCATION_STATES
+            }
+            safe_replay = {
+                CapabilityIdempotency.IDEMPOTENT.value,
+                CapabilityIdempotency.DEDUPLICATED.value,
+            }
+
+            for action in actions:
+                snapshot = pending_by_invocation.get(action.invocation_id)
+                if (
+                    snapshot is None
+                    or snapshot.ordinal != action.ordinal
+                    or snapshot.tool_call_id != action.tool_call_id
+                    or snapshot.capability_id != action.capability_id
+                    or snapshot.capability_version != action.capability_version
+                    or snapshot.request_fingerprint != action.request_fingerprint
+                    or snapshot.idempotency != action.idempotency.value
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="STALE_CHECKPOINT",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
+                invocation = await uow.capability_invocations.get_record(
+                    action.invocation_id
+                )
+                expected_outcome = (
+                    action.expected_remote_outcome_state.value
+                    if action.expected_remote_outcome_state is not None
+                    else None
+                )
+                if (
+                    invocation is None
+                    or invocation.execution_id != plan.execution_id
+                    or invocation.tool_call_id != action.tool_call_id
+                    or invocation.capability_id != action.capability_id
+                    or invocation.capability_version != action.capability_version
+                    or invocation.request_fingerprint != action.request_fingerprint
+                    or invocation.idempotency != action.idempotency.value
+                    or invocation.owner_user_id != plan.target_user_id
+                    or invocation.origin_client_id != plan.target_client_id
+                    or invocation.revision != action.expected_invocation_revision
+                    or invocation.state != action.expected_invocation_state.value
+                    or invocation.remote_outcome_state != expected_outcome
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="STALE_RECONCILIATION_SNAPSHOT",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
+                if action.action is ResumeInvocationActionKind.REUSE_COMMITTED:
+                    tool_result = await uow.agents.get_tool_result(
+                        plan.execution_id,
+                        action.tool_call_id,
+                    )
+                    if (
+                        invocation.state not in terminal_states
+                        or invocation.remote_outcome_state
+                        != RemoteOutcomeState.TERMINAL_COMMITTED.value
+                        or tool_result is None
+                        or getattr(tool_result, "commit_state", "PROVISIONAL")
+                        != "COMMITTED"
+                        or tool_result.invocation_id != action.invocation_id
+                        or tool_result.capability_id != action.capability_id
+                    ):
+                        error = await self._reject_created_claim_in_uow(
+                            uow,
+                            claim,
+                            code="STALE_RECONCILIATION_SNAPSHOT",
+                            now_utc=now_utc,
+                        )
+                        await uow.commit()
+                        return error
+                elif action.action is ResumeInvocationActionKind.DISPATCH_NOT_DISPATCHED:
+                    if (
+                        invocation.state != CapabilityInvocationState.WAITING.value
+                        or invocation.wait_reason
+                        != CapabilityWaitReason.CONNECTION.value
+                        or invocation.remote_outcome_state
+                        != RemoteOutcomeState.NOT_DISPATCHED.value
+                    ):
+                        error = await self._reject_created_claim_in_uow(
+                            uow,
+                            claim,
+                            code="STALE_RECONCILIATION_SNAPSHOT",
+                            now_utc=now_utc,
+                        )
+                        await uow.commit()
+                        return error
+                elif action.action is ResumeInvocationActionKind.REPLAY_SAFE:
+                    if (
+                        invocation.state != CapabilityInvocationState.WAITING.value
+                        or invocation.wait_reason
+                        != CapabilityWaitReason.CONNECTION.value
+                        or invocation.remote_outcome_state
+                        not in {
+                            RemoteOutcomeState.IN_FLIGHT.value,
+                            RemoteOutcomeState.OUTCOME_UNKNOWN.value,
+                        }
+                        or invocation.idempotency not in safe_replay
+                    ):
+                        error = await self._reject_created_claim_in_uow(
+                            uow,
+                            claim,
+                            code="STALE_RECONCILIATION_SNAPSHOT",
+                            now_utc=now_utc,
+                        )
+                        await uow.commit()
+                        return error
+
+            if plan.task_id is not None:
+                task = await uow.agents.get_task(plan.task_id)
+                if (
+                    task is None
+                    or task.session_id != plan.session_id
+                    or task.created_by != plan.target_user_id
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow, claim, code="TASK_TERMINAL", now_utc=now_utc
+                    )
+                    await uow.commit()
+                    return error
+                if str(task.status) in _TASK_TERMINAL_STATES:
+                    error = await self._reject_created_claim_in_uow(
+                        uow, claim, code="TASK_TERMINAL", now_utc=now_utc
+                    )
+                    await uow.commit()
+                    return error
+
+                await prepare_resume_capacity_in_uow(
+                    uow,
+                    task_id=plan.task_id,
+                    execution_id=plan.execution_id,
+                    source_revision=plan.expected_execution_revision,
+                    delegated=plan.parent_execution_id is not None,
+                )
+
+            updated_execution = await uow.agents.compare_and_set_waiting_execution(
+                plan.execution_id,
+                plan.expected_execution_revision,
+                plan.checkpoint_id,
+                "CONNECTION",
+                {
+                    "state": "RUNNING",
+                    "wait_reason": None,
+                    "wait_expires_at": None,
+                    "bound_client_id": plan.target_client_id,
+                    "bound_connection_id": plan.target_connection_id,
+                    "started_at": now_utc,
+                },
+            )
+            if updated_execution is None:
+                await uow.rollback()
+                return ResumeClaimRejected(
+                    "RESUME_CONFLICT",
+                    "AgentExecution claim CAS lost.",
+                )
+
+            consumed_revision = plan.expected_execution_revision + 1
+            consumed = await uow.agents.compare_and_set_resume_claim(
+                claim.claim_id,
+                claim.revision,
+                ResumeClaimState.CREATED.value,
+                {
+                    "state": ResumeClaimState.CONSUMED.value,
+                    "consumed_at": now_utc,
+                    "consumed_execution_revision": consumed_revision,
+                },
+            )
+            if consumed is None:
+                await uow.rollback()
+                return ResumeClaimRejected(
+                    "STALE_RESUME_CLAIM",
+                    "ResumeClaim consumption CAS lost.",
+                )
+
+            result = ResumeClaimConsumeResult(
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                execution_id=plan.execution_id,
+                checkpoint_id=plan.checkpoint_id,
+                source_execution_revision=plan.expected_execution_revision,
+                consumed_execution_revision=consumed_revision,
+                remaining_active_budget_seconds=float(remaining),
+                bound_client_id=plan.target_client_id,
+                bound_connection_id=plan.target_connection_id,
+                already_consumed=False,
+            )
+            await uow.commit()
+            return result
+
+    async def consume_resume_claim(
+        self,
+        spec: ResumeClaimConsumeSpec,
+    ) -> ResumeClaimConsumeResult:
+        """Atomically acquire R7-F durable resume authority.
+
+        The transaction revalidates the normalized checkpoint and every R7-D
+        invocation snapshot, then couples TaskBudget reacquisition (when
+        task-scoped), AgentExecution WAITING -> RUNNING and ResumeClaim
+        CREATED -> CONSUMED.
+        """
+
+        for _ in range(8):
+            try:
+                outcome = await self._consume_resume_claim_once(spec)
+                if isinstance(outcome, ResumeClaimError):
+                    raise outcome
+                return outcome
+            except IntegrityError:
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise ResumeClaimDeferred(
+            "RESUME_CONFLICT",
+            "ResumeClaim SQL conflicts exhausted.",
+            retryable=True,
         )
 
     async def load_current_checkpoint(
