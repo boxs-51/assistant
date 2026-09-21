@@ -1213,8 +1213,20 @@ class AgentRuntime:
                 latest_tool_results = tuple(
                     _order_tool_results(tool_requests, raw_tool_results)
                 )
-                for result in latest_tool_results:
+                committed_batch: list[ToolExecutionResult] = []
+                uncommitted_tool_call_ids: set[str] = set()
+                for request, result in zip(tool_requests, latest_tool_results):
                     await self._persist_tool_result(result, iteration_id)
+                    if self._durable_store is None:
+                        committed_batch.append(result)
+                    else:
+                        committed_result = await self._load_committed_tool_result(
+                            request
+                        )
+                        if committed_result is None:
+                            uncommitted_tool_call_ids.add(result.tool_call_id)
+                        else:
+                            committed_batch.append(committed_result)
                     await self._publish(
                         AgentEventName.TOOL_COMPLETED
                         if result.success
@@ -1234,7 +1246,8 @@ class AgentRuntime:
                     item
                     for item in latest_tool_results
                     if (
-                        item.error_code
+                        item.tool_call_id in uncommitted_tool_call_ids
+                        or item.error_code
                         in {
                             "REMOTE_CONNECTION_LOST",
                             "REMOTE_OUTCOME_UNKNOWN",
@@ -1313,6 +1326,20 @@ class AgentRuntime:
                             continuation_state=checkpoint.state,
                             checkpoint_id=checkpoint.checkpoint_id,
                         )
+
+                    raise ExecutionConflictError(
+                        "Remote tool result is not COMMITTED and continuation "
+                        "did not produce a durable WAITING checkpoint."
+                    )
+                if remote_waiting:
+                    raise ExecutionConflictError(
+                        "PROVISIONAL tool result cannot enter model context "
+                        "without a durable continuation checkpoint."
+                    )
+
+                latest_tool_results = tuple(
+                    _order_tool_results(tool_requests, committed_batch)
+                )
 
                 # ToolExecutionAdapter may update context.usage with per-tool
                 # accounting. Context is authoritative after the tool batch.
