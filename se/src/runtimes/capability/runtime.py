@@ -10,7 +10,14 @@ from .registry import CapabilityRegistry, CapabilityState
 from .drivers.base import BaseCapabilityDriver
 from .contracts.context import CapabilityExecutionContext
 from .contracts.error import (
+    CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT,
+    CAPABILITY_CONTINUATION_INVALID_STATE,
+    CAPABILITY_CONTINUATION_NOT_FOUND,
+    CAPABILITY_CONTINUATION_STALE,
+    CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+    CAPABILITY_CONTINUATION_UNSAFE,
     CapabilityError,
+    REMOTE_INVOCATION_CONFLICT,
     REMOTE_OUTCOME_UNKNOWN,
 )
 from .contracts.result import CapabilityResult
@@ -28,8 +35,10 @@ from .invocation import CapabilityInvocationLifecycle
 from .reconciliation import RemoteInvocationReconciliationService
 from .contracts.invocation import (
     CapabilityInvocation,
+    CapabilityInvocationAttempt,
     CapabilityInvocationState,
     CapabilityWaitReason,
+    ExistingInvocationContinuationMode,
     RemoteOutcomeState,
 )
 from .catalog import CapabilityCatalog
@@ -348,6 +357,441 @@ class CapabilityRuntime(BaseRuntime):
                 )
         return len(descriptors)
 
+    async def continue_invocation(
+        self,
+        invocation_id: str,
+        *,
+        target_connection_id: str | None,
+        mode: ExistingInvocationContinuationMode,
+        expected_revision: int,
+        expected_request_fingerprint: str,
+        cancellation_event: asyncio.Event | None = None,
+    ) -> CapabilityResult:
+        """Continue one durable logical invocation by creating exactly one attempt.
+
+        This is intentionally distinct from execute_capability: that method
+        creates a new logical CapabilityInvocation, while this method reuses
+        the existing row and preserves its semantic identity.
+        """
+        started = time.perf_counter()
+        cancellation_event = cancellation_event or asyncio.Event()
+        if cancellation_event.is_set():
+            raise asyncio.CancelledError()
+
+        try:
+            mode = ExistingInvocationContinuationMode(mode)
+        except ValueError as exc:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_UNSAFE,
+                message=f"Unsupported continuation mode: {mode!r}",
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                invocation_id=invocation_id,
+            ) from exc
+
+        store = self.invocation_lifecycle.store
+        invocation = await store.get(invocation_id)
+        if invocation is None:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_NOT_FOUND,
+                message=f"Unknown capability invocation: {invocation_id}",
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                invocation_id=invocation_id,
+            )
+
+        self._validate_existing_continuation(
+            invocation,
+            mode=mode,
+            expected_revision=expected_revision,
+            expected_request_fingerprint=expected_request_fingerprint,
+        )
+        await self._validate_attempt_history(invocation)
+
+        driver, implementation = self._resolve_continuation_target(
+            invocation,
+            target_connection_id=target_connection_id,
+        )
+
+        context = CapabilityExecutionContext.create(
+            identity=None,
+            execution_id=invocation.execution_id,
+            invocation_id=invocation.invocation_id,
+            caller_agent_execution_id=invocation.execution_id,
+            session_id=invocation.session_id,
+            correlation_id=invocation.correlation_id,
+            trace_id=invocation.trace_id,
+            connection_id=target_connection_id,
+            workflow_id=invocation.workflow_id,
+            attempt=invocation.attempt + 1,
+            cancellation_event=cancellation_event,
+            metadata={
+                "tool_call_id": invocation.tool_call_id,
+                "continuation_mode": mode.value,
+                "request_fingerprint": invocation.request_fingerprint,
+            },
+        )
+
+        try:
+            invocation, attempt = (
+                await self.invocation_lifecycle.begin_continuation_attempt(
+                    invocation,
+                    implementation_id=implementation.implementation_id,
+                    driver_kind=implementation.driver_kind,
+                    connection_id=target_connection_id,
+                    continuation_mode=mode.value,
+                )
+            )
+        except RuntimeError as exc:
+            current = await store.get(invocation_id)
+            code = (
+                CAPABILITY_CONTINUATION_STALE
+                if current is not None
+                and current.revision != expected_revision
+                else CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT
+            )
+            raise CapabilityError(
+                code=code,
+                message=str(exc),
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+                details={
+                    "expected_revision": expected_revision,
+                    "current_revision": (
+                        current.revision if current is not None else None
+                    ),
+                },
+            ) from exc
+
+        context.attempt = invocation.attempt
+        self._bind_remote_dispatch_started(driver, invocation)
+        await self.invocation_lifecycle.transition(
+            invocation,
+            CapabilityInvocationState.RUNNING,
+            attempt_id=attempt.attempt_id,
+        )
+        attempt.state = CapabilityInvocationState.RUNNING
+
+        return await self._run_invocation_attempt(
+            invocation=invocation,
+            attempt=attempt,
+            driver=driver,
+            selected_implementation_id=implementation.implementation_id,
+            selected_implementation=implementation,
+            effective_implementation_id=implementation.implementation_id,
+            effective_driver_kind=implementation.driver_kind,
+            context=context,
+            capability_id=invocation.capability_id,
+            arguments=invocation.arguments,
+            identity=None,
+            request_metadata=dict(context.metadata),
+            routing_connection_id=target_connection_id,
+            started=started,
+            allow_internal_retry=False,
+            continuation_mode=mode,
+        )
+
+    def _validate_existing_continuation(
+        self,
+        invocation: CapabilityInvocation,
+        *,
+        mode: ExistingInvocationContinuationMode,
+        expected_revision: int,
+        expected_request_fingerprint: str,
+    ) -> None:
+        if invocation.revision != expected_revision:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_STALE,
+                message="CapabilityInvocation revision changed after planning.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+                details={
+                    "expected_revision": expected_revision,
+                    "current_revision": invocation.revision,
+                },
+            )
+        if (
+            not invocation.capability_version
+            or not invocation.request_fingerprint
+            or invocation.request_fingerprint
+            != expected_request_fingerprint
+        ):
+            raise CapabilityError(
+                code=REMOTE_INVOCATION_CONFLICT,
+                message="Continuation semantic fingerprint does not match.",
+                category="RECONCILIATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        recomputed = capability_request_fingerprint(
+            capability_id=invocation.capability_id,
+            capability_version=invocation.capability_version,
+            arguments=invocation.arguments,
+        )
+        if recomputed != invocation.request_fingerprint:
+            raise CapabilityError(
+                code=REMOTE_INVOCATION_CONFLICT,
+                message="Durable invocation arguments no longer match fingerprint.",
+                category="RECONCILIATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        if not invocation.execution_id or not invocation.tool_call_id:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_INVALID_STATE,
+                message=(
+                    "Agent-owned continuation requires durable execution_id "
+                    "and tool_call_id lineage."
+                ),
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        if (
+            invocation.state is not CapabilityInvocationState.WAITING
+            or invocation.wait_reason is not CapabilityWaitReason.CONNECTION
+        ):
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_INVALID_STATE,
+                message=(
+                    "Existing invocation continuation requires "
+                    "WAITING(CONNECTION)."
+                ),
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+                details={
+                    "state": invocation.state.value,
+                    "wait_reason": (
+                        invocation.wait_reason.value
+                        if invocation.wait_reason is not None
+                        else None
+                    ),
+                },
+            )
+
+        if mode is ExistingInvocationContinuationMode.DISPATCH_NOT_DISPATCHED:
+            allowed = (
+                invocation.remote_outcome_state
+                is RemoteOutcomeState.NOT_DISPATCHED
+            )
+        else:
+            allowed = (
+                invocation.remote_outcome_state
+                in {
+                    RemoteOutcomeState.IN_FLIGHT,
+                    RemoteOutcomeState.OUTCOME_UNKNOWN,
+                }
+                and invocation.idempotency
+                in {
+                    CapabilityIdempotency.IDEMPOTENT,
+                    CapabilityIdempotency.DEDUPLICATED,
+                }
+            )
+        if not allowed:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_UNSAFE,
+                message=(
+                    f"Continuation mode {mode.value} is incompatible with "
+                    "the durable R6 outcome/idempotency snapshot."
+                ),
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+                details={
+                    "remote_outcome_state": (
+                        invocation.remote_outcome_state.value
+                        if invocation.remote_outcome_state is not None
+                        else None
+                    ),
+                    "idempotency": invocation.idempotency.value,
+                },
+            )
+
+    async def _validate_attempt_history(
+        self,
+        invocation: CapabilityInvocation,
+    ) -> None:
+        attempts = await self.invocation_lifecycle.store.list_attempts(
+            invocation.invocation_id
+        )
+        numbers = sorted(item.attempt_number for item in attempts)
+        expected = list(range(1, invocation.attempt + 1))
+        if numbers != expected:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT,
+                message="CapabilityInvocation attempt history is inconsistent.",
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+                details={
+                    "invocation_attempt": invocation.attempt,
+                    "attempt_numbers": numbers,
+                },
+            )
+
+    def _resolve_continuation_target(
+        self,
+        invocation: CapabilityInvocation,
+        *,
+        target_connection_id: str | None,
+    ) -> tuple[RemoteClientDriver, CapabilityImplementation]:
+        if (
+            not target_connection_id
+            or self.catalog is None
+            or self.connection_registry is None
+            or self.realtime is None
+        ):
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation target connection is unavailable.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        if target_connection_id == invocation.connection_id:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation requires a new connection generation.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        try:
+            snapshot = self.connection_registry.get(target_connection_id)
+        except Exception as exc:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation target connection does not exist.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            ) from exc
+        if not snapshot.is_usable:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation target connection is not ACTIVE.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        client_id = str(snapshot.metadata.get("client_id") or "")
+        if (
+            not invocation.owner_user_id
+            or snapshot.user_id != invocation.owner_user_id
+            or not invocation.origin_client_id
+            or client_id != invocation.origin_client_id
+        ):
+            raise CapabilityError(
+                code="CAPABILITY_UNAUTHORIZED",
+                message=(
+                    "Continuation target must be the same user and stable "
+                    "client installation."
+                ),
+                category="AUTHORIZATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+
+        try:
+            definition = self.catalog.get_definition(
+                invocation.capability_id
+            )
+            candidates = [
+                item
+                for item in self.catalog.list_implementations(
+                    invocation.capability_id,
+                    routable_only=True,
+                )
+                if (
+                    item.location is CapabilityExecutionLocation.CLIENT
+                    and item.connection_id == target_connection_id
+                    and item.owner_id == invocation.owner_user_id
+                    and str(item.metadata.get("client_id") or "")
+                    == invocation.origin_client_id
+                    and item.version == invocation.capability_version
+                )
+            ]
+        except Exception as exc:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation capability is not available on target.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            ) from exc
+
+        if definition.version != invocation.capability_version:
+            raise CapabilityError(
+                code=REMOTE_INVOCATION_CONFLICT,
+                message="Continuation capability version changed.",
+                category="RECONCILIATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        if len(candidates) != 1:
+            code = (
+                REMOTE_INVOCATION_CONFLICT
+                if len(candidates) > 1
+                else CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE
+            )
+            raise CapabilityError(
+                code=code,
+                message=(
+                    "Continuation requires exactly one matching client "
+                    "implementation on the target connection."
+                ),
+                category="CONTINUATION",
+                retryable=(len(candidates) == 0),
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+                details={"candidate_count": len(candidates)},
+            )
+        implementation = candidates[0]
+        return (
+            RemoteClientDriver(
+                definition,
+                self.realtime,
+                target_connection_id,
+            ),
+            implementation,
+        )
+
     async def execute_capability(
         self, 
         capability_id: str,
@@ -519,6 +963,44 @@ class CapabilityRuntime(BaseRuntime):
             attempt_id=attempt.attempt_id,
         )
 
+        return await self._run_invocation_attempt(
+            invocation=invocation,
+            attempt=attempt,
+            driver=driver,
+            selected_implementation_id=selected_implementation_id,
+            selected_implementation=selected_implementation,
+            effective_implementation_id=effective_implementation_id,
+            effective_driver_kind=effective_driver_kind,
+            context=context,
+            capability_id=capability_id,
+            arguments=arguments,
+            identity=identity,
+            request_metadata=request_metadata,
+            routing_connection_id=connection_id,
+            started=started,
+            allow_internal_retry=True,
+        )
+
+    async def _run_invocation_attempt(
+        self,
+        *,
+        invocation: CapabilityInvocation,
+        attempt: CapabilityInvocationAttempt,
+        driver: BaseCapabilityDriver,
+        selected_implementation_id: str | None,
+        selected_implementation: CapabilityImplementation | None,
+        effective_implementation_id: str,
+        effective_driver_kind: str,
+        context: CapabilityExecutionContext,
+        capability_id: str,
+        arguments: Mapping[str, Any],
+        identity: Identity | None,
+        request_metadata: Dict[str, Any],
+        routing_connection_id: str | None,
+        started: float,
+        allow_internal_retry: bool,
+        continuation_mode: ExistingInvocationContinuationMode | None = None,
+    ) -> CapabilityResult:
         logger.info(
             "Executing capability",
             capability_id=capability_id,
@@ -540,7 +1022,8 @@ class CapabilityRuntime(BaseRuntime):
             nonlocal attempt
 
             can_retry = (
-                allow_retry
+                allow_internal_retry
+                and allow_retry
                 and invocation.attempt < invocation.max_attempts
                 and self.catalog is not None
                 and selected_implementation_id is not None
@@ -572,7 +1055,7 @@ class CapabilityRuntime(BaseRuntime):
                         capability_id,
                         identity,
                         retry_metadata,
-                        connection_id=connection_id,
+                        connection_id=routing_connection_id,
                     )
                 )
             except Exception:
@@ -634,6 +1117,8 @@ class CapabilityRuntime(BaseRuntime):
                     isinstance(driver, RemoteClientDriver)
                     and invocation.remote_outcome_state
                     is RemoteOutcomeState.IN_FLIGHT
+                    and continuation_mode
+                    is not ExistingInvocationContinuationMode.REPLAY_SAFE
                 ):
                     await self.invocation_lifecycle.update_remote_outcome(
                         invocation,
@@ -922,6 +1407,14 @@ class CapabilityRuntime(BaseRuntime):
                 **(
                     {"implementation_id": selected_implementation_id}
                     if selected_implementation_id is not None
+                    else {}
+                ),
+                **(
+                    {
+                        "continuation_mode": continuation_mode.value,
+                        "request_fingerprint": invocation.request_fingerprint,
+                    }
+                    if continuation_mode is not None
                     else {}
                 ),
             },
