@@ -432,13 +432,7 @@ async def test_r7_f4_provisional_continuation_never_enters_model_context_or_term
     consumed = _consumed(plan)
     executor = _ContinuationExecutor(provisional=True)
     coordinator = AgentToolExecutionCoordinator(executor)
-    store = _Store.__new__(_Store)
-    _Store.__init__(store, _plan())
-    store.plan = plan
-    store.execution.id = plan.execution_id
-    store.execution.current_checkpoint_id = plan.checkpoint_id
-    store.execution.bound_client_id = plan.target_client_id
-    store.execution.bound_connection_id = plan.target_connection_id
+    store = _Store(plan)
     store.results = {}
     builder = _ContextBuilder()
     runtime = AgentRuntime(
