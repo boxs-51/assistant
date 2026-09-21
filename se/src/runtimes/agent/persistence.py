@@ -361,6 +361,27 @@ class DurableAgentStore:
             await uow.commit()
             return record
 
+    @staticmethod
+    def _validate_existing_tool_call_identity(existing, values) -> None:
+        expected = {
+            "execution_id": existing.execution_id,
+            "iteration_id": existing.iteration_id,
+            "invocation_id": existing.invocation_id,
+            "tool_call_id": existing.tool_call_id,
+            "capability_id": existing.capability_id,
+        }
+        for key, durable in expected.items():
+            supplied = values.get(key)
+            if supplied != durable:
+                raise ExecutionConflictError(
+                    f"Conflicting durable tool-call {key}: "
+                    f"{supplied!r} != {durable!r}."
+                )
+        if dict(values.get("arguments") or {}) != dict(existing.arguments or {}):
+            raise ExecutionConflictError(
+                "Conflicting durable tool-call arguments for reused tool_call_id."
+            )
+
     async def save_tool_call(self, values: Dict[str, Any]):
         values = _normalize_json_fields(
             values, _TOOL_CALL_JSON_FIELDS, path="agent_tool_calls"
@@ -369,7 +390,11 @@ class DurableAgentStore:
             existing = await uow.agents.get_tool_call(
                 values["execution_id"], values["tool_call_id"]
             )
-            record = existing or await uow.agents.save_tool_call(values)
+            if existing is not None:
+                self._validate_existing_tool_call_identity(existing, values)
+                record = existing
+            else:
+                record = await uow.agents.save_tool_call(values)
             await uow.commit()
             return record
 
@@ -381,6 +406,40 @@ class DurableAgentStore:
             record = await uow.agents.update_tool_call(tool_call_id, values)
             await uow.commit()
             return record
+
+    @staticmethod
+    def _validate_existing_tool_result_identity(existing, values) -> None:
+        expected = {
+            "execution_id": existing.execution_id,
+            "iteration_id": existing.iteration_id,
+            "invocation_id": existing.invocation_id,
+            "tool_call_id": existing.tool_call_id,
+            "capability_id": existing.capability_id,
+        }
+        for key, durable in expected.items():
+            supplied = values.get(key)
+            if supplied != durable:
+                raise ExecutionConflictError(
+                    f"Conflicting durable tool-result {key}: "
+                    f"{supplied!r} != {durable!r}."
+                )
+
+    @staticmethod
+    def _validate_committed_tool_result_content(existing, values) -> None:
+        comparable = {
+            "success": existing.success,
+            "output": existing.output,
+            "error_code": existing.error_code,
+            "error_message": existing.error_message,
+            "retryable": existing.retryable,
+        }
+        for key, durable in comparable.items():
+            supplied = values.get(key)
+            if supplied != durable:
+                raise ExecutionConflictError(
+                    f"Conflicting COMMITTED tool-result {key}: "
+                    f"{supplied!r} != {durable!r}."
+                )
 
     @staticmethod
     def _validate_tool_result_invocation_identity(values, invocation) -> None:
@@ -442,7 +501,13 @@ class DurableAgentStore:
                 invocation = await invocation_repo.get_record(values["invocation_id"])
 
             if invocation is None:
-                values["commit_state"] = "COMMITTED"
+                authority = dict(values.get("extra_metadata") or {}).get(
+                    "r7_commit_authority"
+                )
+                if authority == "AGENT_PRE_DISPATCH":
+                    values["commit_state"] = "COMMITTED"
+                else:
+                    values["commit_state"] = "PROVISIONAL"
             else:
                 self._validate_tool_result_invocation_identity(values, invocation)
                 remote_state = getattr(invocation, "remote_outcome_state", None)
@@ -457,16 +522,19 @@ class DurableAgentStore:
 
             if existing is None:
                 record = await uow.agents.save_tool_result(values)
-            elif getattr(existing, "commit_state", "PROVISIONAL") == "COMMITTED":
-                record = existing
-            elif values["commit_state"] == "COMMITTED":
-                record = await uow.agents.update_tool_result(
-                    values["execution_id"],
-                    values["tool_call_id"],
-                    values,
-                )
             else:
-                record = existing
+                self._validate_existing_tool_result_identity(existing, values)
+                if getattr(existing, "commit_state", "PROVISIONAL") == "COMMITTED":
+                    self._validate_committed_tool_result_content(existing, values)
+                    record = existing
+                elif values["commit_state"] == "COMMITTED":
+                    record = await uow.agents.update_tool_result(
+                        values["execution_id"],
+                        values["tool_call_id"],
+                        values,
+                    )
+                else:
+                    record = existing
             await uow.commit()
             return record
 
@@ -627,11 +695,31 @@ class DurableAgentStore:
                         tool_call_id,
                     )
                     if (
-                        result is not None
-                        and getattr(result, "commit_state", "PROVISIONAL")
-                        == "COMMITTED"
+                        result is None
+                        or getattr(result, "commit_state", "PROVISIONAL")
+                        != "COMMITTED"
                     ):
-                        sanitized.append(message)
+                        continue
+                    sanitized.append(
+                        {
+                            "role": "tool",
+                            "content": (
+                                result.output
+                                if result.success
+                                else {
+                                    "error_code": result.error_code,
+                                    "error_message": result.error_message,
+                                }
+                            ),
+                            "tool_calls": [],
+                            "name": result.capability_id,
+                            "tool_call_id": result.tool_call_id,
+                            "metadata": {
+                                "success": result.success,
+                                "retryable": result.retryable,
+                            },
+                        }
+                    )
                 return sanitized
 
             resume_transcript = await sanitize_transcript(
