@@ -4,7 +4,7 @@
 
 **Dependencies:** R6-A COMPLETE, R6-B COMPLETE, R6-C COMPLETE
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -140,6 +140,39 @@ a terminal result, reconciliation reports UNKNOWN and does not authorize a
 blind duplicate execution.
 ```
 
+## Completion evidence
+
+```text
+Windows SQLite ownership regression:
+    9 passed in 1.49s
+
+Focused R6-D gate:
+    31 passed in 4.96s
+
+R6 compatibility/regression gate:
+    26 passed in 4.21s
+
+Repository-wide gate:
+    637 passed
+    9 warnings
+    103.68s
+```
+
+The nine repository-wide warnings are existing dependency/configuration
+deprecations and are not R6-D correctness failures.
+
+One transport cleanup diagnostic was observed during the focused gate:
+
+```text
+Future exception was never retrieved
+RemoteConnectionLost(...)
+```
+
+This originates from the existing realtime send-failure path after a pending
+future is rejected.  It does not invalidate the durable client ledger exit
+gate, but it is a mandatory R6-E preflight item because R6-E owns canonical
+transport fault injection and async task/future ownership validation.
+
 ## Phase status
 
 ```text
@@ -147,8 +180,8 @@ R5      COMPLETE
 R6-A    COMPLETE
 R6-B    COMPLETE
 R6-C    COMPLETE
-R6-D    IMPLEMENTED / PENDING TEST EVIDENCE
-R6-E    PENDING
+R6-D    COMPLETE
+R6-E    ACTIVE
 R6      NOT COMPLETE
 ```
 

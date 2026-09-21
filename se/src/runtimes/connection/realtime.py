@@ -59,6 +59,61 @@ class RealtimeMultiplexer:
         self.default_timeout = float(default_timeout)
         self.progress_handler = progress_handler
 
+    @staticmethod
+    def _drain_owned_future(
+        future: asyncio.Future[Any],
+    ) -> None:
+        """Release caller ownership of one correlation future.
+
+        A Future completed with an exception must have that exception
+        retrieved before the final reference is dropped, otherwise asyncio
+        reports "Future exception was never retrieved".  If the Future is
+        still pending, cancellation is the correct local ownership release;
+        it does not imply any rollback of a remote side effect.
+        """
+        if future.cancelled():
+            return
+        if future.done():
+            future.exception()
+            return
+        future.cancel()
+
+    async def _abandon_pending(
+        self,
+        invocation_id: str,
+        connection_id: str,
+        future: asyncio.Future[Any],
+    ) -> None:
+        """Remove local correlation ownership without remote semantics."""
+        await self.multiplexer.cancel(
+            invocation_id,
+            connection_id,
+        )
+        self._drain_owned_future(future)
+
+    async def _cancel_remote_and_abandon(
+        self,
+        connection_id: str,
+        invocation_id: str,
+        future: asyncio.Future[Any],
+    ) -> None:
+        """Best-effort remote cancel plus deterministic local cleanup."""
+        try:
+            await self.cancel(
+                connection_id,
+                invocation_id,
+            )
+        except Exception:
+            # Cancellation cleanup must not replace the caller's original
+            # TimeoutError/CancelledError with a secondary transport failure.
+            pass
+        finally:
+            await self._abandon_pending(
+                invocation_id,
+                connection_id,
+                future,
+            )
+
     async def invoke(
         self,
         envelope: RealtimeEnvelope,
@@ -89,7 +144,11 @@ class RealtimeMultiplexer:
                 envelope.model_dump(mode="json")
             )
         except asyncio.CancelledError:
-            await self.multiplexer.cancel(envelope.invocation_id)
+            await self._abandon_pending(
+                envelope.invocation_id,
+                envelope.connection_id,
+                future,
+            )
             raise
         except Exception as exc:
             # Once send_json has been attempted the server cannot prove that
@@ -99,9 +158,14 @@ class RealtimeMultiplexer:
                 envelope.connection_id,
                 envelope.invocation_id,
             )
-            await self.multiplexer.reject(
+            # Do not reject the Future and then raise the same failure
+            # directly: that leaves an exception-bearing Future with no
+            # remaining awaiter.  The caller owns the direct exception path,
+            # so abandon/cancel the local correlation Future instead.
+            await self._abandon_pending(
                 envelope.invocation_id,
-                failure,
+                envelope.connection_id,
+                future,
             )
             raise failure from exc
 
@@ -111,9 +175,17 @@ class RealtimeMultiplexer:
                 timeout=effective_timeout,
             )
         except asyncio.TimeoutError:
-            await self.cancel(
+            await self._cancel_remote_and_abandon(
                 envelope.connection_id,
                 envelope.invocation_id,
+                future,
+            )
+            raise
+        except asyncio.CancelledError:
+            await self._cancel_remote_and_abandon(
+                envelope.connection_id,
+                envelope.invocation_id,
+                future,
             )
             raise
 
@@ -151,16 +223,21 @@ class RealtimeMultiplexer:
                 envelope.model_dump(mode="json")
             )
         except asyncio.CancelledError:
-            await self.multiplexer.cancel(envelope.invocation_id)
+            await self._abandon_pending(
+                envelope.invocation_id,
+                envelope.connection_id,
+                future,
+            )
             raise
         except Exception as exc:
             failure = RemoteConnectionLost(
                 envelope.connection_id,
                 envelope.invocation_id,
             )
-            await self.multiplexer.reject(
+            await self._abandon_pending(
                 envelope.invocation_id,
-                failure,
+                envelope.connection_id,
+                future,
             )
             raise failure from exc
 
@@ -174,7 +251,20 @@ class RealtimeMultiplexer:
             # Reconciliation timeout only abandons the query.  It must never
             # send capability.cancel because reconcile carries no execution
             # permission.
-            await self.multiplexer.cancel(envelope.invocation_id)
+            await self._abandon_pending(
+                envelope.invocation_id,
+                envelope.connection_id,
+                future,
+            )
+            raise
+        except asyncio.CancelledError:
+            # Same rule as timeout: reconciliation is query-only and caller
+            # cancellation must not be converted into capability.cancel.
+            await self._abandon_pending(
+                envelope.invocation_id,
+                envelope.connection_id,
+                future,
+            )
             raise
 
     async def cancel(
