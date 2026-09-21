@@ -36,7 +36,15 @@ from .contracts.events import (
     CorrelationContext,
 )
 from .contracts.continuation import ContinuationState
+from .contracts.resume import (
+    ResumeClaimConsumeResult,
+    ResumeInvocationAction,
+    ResumeInvocationActionKind,
+    ResumePlan,
+    resume_plan_fingerprint,
+)
 from .persistence import ExecutionConflictError
+from .resume_claim import ResumeActivationError
 from .state_machine import AgentExecutionStateMachine
 from .wait_policy import (
     ConfiguredExecutionWaitPolicy,
@@ -405,6 +413,291 @@ class AgentRuntime:
             executed = committed_executed
         by_id = {item.tool_call_id: item for item in [*committed, *executed]}
         return tuple(by_id[item.tool_call_id] for item in requests)
+
+    @staticmethod
+    def _resume_action_request(
+        context: AgentExecutionContext,
+        action: ResumeInvocationAction,
+    ) -> ToolExecutionRequest:
+        return ToolExecutionRequest(
+            execution_id=context.execution_id,
+            iteration=context.iteration,
+            invocation_id=action.invocation_id,
+            tool_call_id=action.tool_call_id,
+            capability_id=action.capability_id,
+            connection_id=context.connection_id,
+            arguments={},
+            metadata={"r7_resume_action": action.action.value},
+        )
+
+    async def _activate_claimed_resume_context(
+        self,
+        context: AgentExecutionContext,
+        plan: ResumePlan,
+        consumed: ResumeClaimConsumeResult,
+    ) -> None:
+        """Verify F3 authority and start the active monotonic budget."""
+
+        if self._durable_store is None:
+            raise ResumeActivationError(
+                "RESUME_AUTHORITY_UNAVAILABLE",
+                "Claimed resume requires durable AgentExecution storage.",
+            )
+        if resume_plan_fingerprint(plan) != plan.plan_fingerprint:
+            raise ResumeActivationError(
+                "STALE_RESUME_PLAN",
+                "ResumePlan fingerprint changed after claim consumption.",
+            )
+        if (
+            consumed.execution_id != plan.execution_id
+            or consumed.checkpoint_id != plan.checkpoint_id
+            or consumed.source_execution_revision
+            != plan.expected_execution_revision
+            or consumed.consumed_execution_revision
+            != plan.expected_execution_revision + 1
+            or consumed.bound_client_id != plan.target_client_id
+            or consumed.bound_connection_id != plan.target_connection_id
+            or float(consumed.remaining_active_budget_seconds)
+            != float(plan.remaining_active_budget_seconds)
+        ):
+            raise ResumeActivationError(
+                "STALE_RESUME_CLAIM",
+                "Consumed ResumeClaim authority does not match ResumePlan.",
+            )
+        if (
+            context.execution_id != plan.execution_id
+            or context.session_id != plan.session_id
+            or context.agent_id != plan.agent_id
+            or context.task_id != plan.task_id
+            or context.branch_id != plan.branch_id
+            or context.parent_execution_id != plan.parent_execution_id
+            or context.retry_of_execution_id != plan.retry_of_execution_id
+            or context.base_execution_id != plan.base_execution_id
+            or context.base_checkpoint_id != plan.base_checkpoint_id
+            or context.correlation_id != plan.correlation_id
+            or context.identity.user_id != plan.target_user_id
+            or context.resume_revision != plan.expected_execution_revision
+        ):
+            raise ResumeActivationError(
+                "STALE_RESUME_CONTEXT",
+                "Prepared resume context no longer matches ResumePlan.",
+            )
+
+        execution = await self._durable_store.load_execution(
+            plan.execution_id
+        )
+        if execution is None:
+            raise ResumeActivationError(
+                "RESUME_AUTHORITY_UNAVAILABLE",
+                "Consumed AgentExecution is missing.",
+            )
+        if (
+            str(execution.state) != AgentExecutionState.RUNNING.value
+            or execution.revision != consumed.consumed_execution_revision
+            or execution.current_checkpoint_id != plan.checkpoint_id
+            or execution.bound_client_id != plan.target_client_id
+            or execution.bound_connection_id != plan.target_connection_id
+            or execution.session_id != plan.session_id
+            or execution.agent_id != plan.agent_id
+            or execution.task_id != plan.task_id
+            or execution.branch_id != plan.branch_id
+            or execution.parent_execution_id != plan.parent_execution_id
+            or execution.retry_of_execution_id != plan.retry_of_execution_id
+            or execution.base_execution_id != plan.base_execution_id
+            or execution.base_checkpoint_id != plan.base_checkpoint_id
+            or execution.correlation_id != plan.correlation_id
+        ):
+            raise ResumeActivationError(
+                "STALE_RESUME_AUTHORITY",
+                "Durable RUNNING authority differs from consumed ResumeClaim.",
+            )
+        durable_remaining = getattr(
+            execution,
+            "remaining_active_budget_seconds",
+            None,
+        )
+        if (
+            durable_remaining is None
+            or float(durable_remaining)
+            != float(consumed.remaining_active_budget_seconds)
+        ):
+            raise ResumeActivationError(
+                "STALE_RESUME_AUTHORITY",
+                "Durable active budget differs from consumed ResumeClaim.",
+            )
+
+        context.connection_id = plan.target_connection_id
+        context.metadata["client_id"] = plan.target_client_id
+        context.wait_expires_at = None
+        context.resume_revision = consumed.consumed_execution_revision
+        context.remaining_active_budget_seconds = (
+            consumed.remaining_active_budget_seconds
+        )
+        context.restore_active_budget(
+            consumed.remaining_active_budget_seconds
+        )
+
+    async def _execute_resume_plan_actions(
+        self,
+        context: AgentExecutionContext,
+        plan: ResumePlan,
+    ) -> tuple[ToolExecutionResult, ...]:
+        """Resolve every R7-D action without creating a new logical invocation."""
+
+        if self._durable_store is None:
+            raise ResumeActivationError(
+                "RESUME_AUTHORITY_UNAVAILABLE",
+                "R7-F4 requires durable tool-result commitment.",
+            )
+
+        actions = tuple(
+            sorted(plan.invocation_actions, key=lambda item: item.ordinal)
+        )
+        action_tool_ids = tuple(item.tool_call_id for item in actions)
+        if (
+            len({item.ordinal for item in actions}) != len(actions)
+            or len({item.invocation_id for item in actions}) != len(actions)
+            or len({item.tool_call_id for item in actions}) != len(actions)
+            or action_tool_ids != tuple(plan.ordered_tool_call_ids)
+        ):
+            raise ResumeActivationError(
+                "STALE_RESUME_PLAN",
+                "Resume action ordering differs from canonical tool-call order.",
+            )
+
+        by_tool_call: dict[str, ToolExecutionResult] = {}
+        continuation_actions: list[ResumeInvocationAction] = []
+
+        for action in actions:
+            if action.action is ResumeInvocationActionKind.REUSE_COMMITTED:
+                request = self._resume_action_request(context, action)
+                committed = await self._load_committed_tool_result(request)
+                if committed is None:
+                    raise ResumeActivationError(
+                        "STALE_RECONCILIATION_SNAPSHOT",
+                        "REUSE_COMMITTED result is no longer model-consumable.",
+                    )
+                by_tool_call[action.tool_call_id] = committed
+            else:
+                continuation_actions.append(action)
+
+        if continuation_actions:
+            continuation_runner = getattr(
+                self._tool_execution,
+                "continue_invocations",
+                None,
+            )
+            if not callable(continuation_runner):
+                raise ResumeActivationError(
+                    "R7_CONTINUATION_UNAVAILABLE",
+                    "Tool execution boundary does not expose R7-E continuation.",
+                )
+
+            raw_results = await self._await_contextual(
+                continuation_runner(
+                    context,
+                    continuation_actions,
+                    max_parallel=context.limits.max_parallel_tools,
+                ),
+                context=context,
+                timeout_seconds=context.remaining_iteration_seconds,
+            )
+            raw_by_id = {
+                item.tool_call_id: item for item in raw_results
+            }
+            if len(raw_by_id) != len(continuation_actions):
+                raise ResumeActivationError(
+                    "R7_CONTINUATION_RESULT_CONFLICT",
+                    "Continuation batch returned duplicate or missing results.",
+                )
+
+            iteration_id = (
+                f"{context.execution_id}:iteration:{context.iteration}"
+            )
+            for action in continuation_actions:
+                result = raw_by_id.get(action.tool_call_id)
+                if (
+                    result is None
+                    or result.execution_id != context.execution_id
+                    or result.invocation_id != action.invocation_id
+                    or result.capability_id != action.capability_id
+                ):
+                    raise ResumeActivationError(
+                        "R7_CONTINUATION_RESULT_CONFLICT",
+                        "Continuation result identity differs from ResumePlan.",
+                    )
+
+                await self._persist_tool_result(result, iteration_id)
+                request = self._resume_action_request(context, action)
+                committed = await self._load_committed_tool_result(request)
+                if committed is None:
+                    # A connection loss / stale R7-E fence can leave the
+                    # invocation non-terminal. Never turn that provisional
+                    # transport outcome into model context. R7-G owns recovery.
+                    raise ResumeActivationError(
+                        "RESUME_ACTION_NOT_COMMITTED",
+                        "Continued invocation has no TERMINAL_COMMITTED projection.",
+                        retryable=True,
+                    )
+                by_tool_call[action.tool_call_id] = committed
+
+        if set(by_tool_call) != set(plan.ordered_tool_call_ids):
+            raise ResumeActivationError(
+                "R7_CONTINUATION_RESULT_CONFLICT",
+                "Resume action batch did not produce complete committed coverage.",
+            )
+        return tuple(
+            by_tool_call[tool_call_id]
+            for tool_call_id in plan.ordered_tool_call_ids
+        )
+
+    async def execute_claimed_resume(
+        self,
+        context: AgentExecutionContext,
+        *,
+        plan: ResumePlan,
+        consumed: ResumeClaimConsumeResult,
+    ) -> AgentExecutionResult:
+        """Activate one F3-consumed claim and continue its Agent execution.
+
+        No supervisor reservation, transport ACK, recovery checkpoint, or wire
+        decision is performed here. Those post-claim ownership semantics are
+        deliberately reserved for R7-G.
+        """
+
+        await self._activate_claimed_resume_context(
+            context,
+            plan,
+            consumed,
+        )
+
+        context.begin_iteration_budget()
+        try:
+            resumed_results = await self._execute_resume_plan_actions(
+                context,
+                plan,
+            )
+            transcript = [
+                InferenceMessage.model_validate(item)
+                for item in context.resume_transcript
+            ]
+            transcript.extend(_tool_results_to_messages(resumed_results))
+            context.resume_transcript = [
+                item.model_dump(mode="json") for item in transcript
+            ]
+            context.resume_pending_tool_calls = []
+            await self._persist_execution_checkpoint(
+                context,
+                transcript,
+            )
+        finally:
+            context.clear_iteration_budget()
+
+        return await self.execute(
+            context,
+            durable_revision=consumed.consumed_execution_revision,
+            initial_tool_results=resumed_results,
+        )
 
     async def _persist_tool_call(self, request: ToolExecutionRequest, iteration_id: str) -> None:
         if self._durable_store is None:
@@ -879,6 +1172,7 @@ class AgentRuntime:
         context: AgentExecutionContext,
         *,
         durable_revision: int | None = None,
+        initial_tool_results: Sequence[ToolExecutionResult] = (),
     ) -> AgentExecutionResult:
         """Run exactly one durable AgentExecution lifecycle."""
         revision = (
@@ -887,7 +1181,10 @@ class AgentRuntime:
             else await self._begin_durable_execution_owned(context)
         )
         try:
-            result = await self._execute_loop(context)
+            result = await self._execute_loop(
+                context,
+                initial_tool_results=initial_tool_results,
+            )
         except asyncio.CancelledError:
             await self._cancel_durable_revision(
                 context,
@@ -916,7 +1213,12 @@ class AgentRuntime:
         )
         return result
 
-    async def _execute_loop(self, context: AgentExecutionContext) -> AgentExecutionResult:
+    async def _execute_loop(
+        self,
+        context: AgentExecutionContext,
+        *,
+        initial_tool_results: Sequence[ToolExecutionResult] = (),
+    ) -> AgentExecutionResult:
         """Execute one agent until a final answer or terminal failure."""
         # The runtime should persist each iteration and tool checkpoint before
         # continuing the loop, then resume from the last durable checkpoint.
@@ -925,7 +1227,9 @@ class AgentRuntime:
             InferenceMessage.model_validate(item)
             for item in context.resume_transcript
         ]
-        latest_tool_results: tuple[ToolExecutionResult, ...] = ()
+        latest_tool_results: tuple[ToolExecutionResult, ...] = tuple(
+            initial_tool_results
+        )
         total_usage = context.usage
 
         await self._publish(AgentEventName.EXECUTION_STARTED, context)
