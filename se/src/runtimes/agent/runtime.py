@@ -133,6 +133,9 @@ class AgentRuntime:
         context: AgentExecutionContext,
         revision: int,
         values: dict[str, Any],
+        *,
+        checkpoint_values: dict[str, Any] | None = None,
+        pending_invocations: Sequence[dict[str, Any]] = (),
     ) -> int:
         if self._uses_task_budget(context):
             assert context.task_id is not None
@@ -142,7 +145,23 @@ class AgentRuntime:
                 source_revision=revision,
                 transition_values=values,
                 delegated=context.parent_execution_id is not None,
+                checkpoint_values=checkpoint_values,
+                pending_invocations=pending_invocations,
             )
+        if (
+            checkpoint_values is not None
+            and callable(
+                getattr(self._durable_store, "commit_waiting_checkpoint", None)
+            )
+        ):
+            await self._durable_store.commit_waiting_checkpoint(
+                context.execution_id,
+                revision,
+                values,
+                checkpoint_values=checkpoint_values,
+                pending_invocations=list(pending_invocations),
+            )
+            return revision + 1
         await self._durable_store.compare_and_set_execution(
             context.execution_id,
             revision,
@@ -732,11 +751,51 @@ class AgentRuntime:
                 context.remaining_active_budget_seconds
             )
 
+        checkpoint_values = None
+        pending_invocations: Sequence[dict[str, Any]] = ()
+        if target is AgentExecutionState.WAITING:
+            checkpoint_id = (
+                f"{context.execution_id}:checkpoint:{expected_revision + 1}"
+            )
+            checkpoint_values = {
+                "checkpoint_id": checkpoint_id,
+                "execution_id": context.execution_id,
+                "execution_revision": expected_revision + 1,
+                "session_id": context.session_id,
+                "task_id": context.task_id,
+                "branch_id": context.branch_id,
+                "iteration": context.iteration,
+                "wait_reason": reason.value if reason is not None else "",
+                "remaining_active_budget_seconds": (
+                    context.remaining_active_budget_seconds
+                ),
+                "wait_expires_at": context.wait_expires_at,
+                "origin_client_id": context.metadata.get("client_id"),
+                "origin_connection_id": context.waiting_origin_connection_id,
+                "transcript_snapshot": context.waiting_checkpoint_transcript,
+                "metadata_json": {
+                    "request_id": context.request_id,
+                    "correlation_id": context.correlation_id,
+                    "trace_id": context.trace_id,
+                },
+            }
+            pending_invocations = tuple(context.waiting_pending_invocations)
+            result = result.model_copy(
+                update={"checkpoint_id": checkpoint_id}
+            )
+            values["result"] = result.model_dump(mode="json")
+
         await self._transition_running_durable(
             context,
             expected_revision,
             values,
+            checkpoint_values=checkpoint_values,
+            pending_invocations=pending_invocations,
         )
+        if target is AgentExecutionState.WAITING:
+            context.waiting_checkpoint_transcript = []
+            context.waiting_pending_invocations = []
+            context.waiting_origin_connection_id = None
         return result
 
     async def execute(
@@ -1158,6 +1217,20 @@ class AgentRuntime:
                         or context.connection_id
                         or ""
                     )
+                    context.waiting_checkpoint_transcript = [
+                        item.model_dump(mode="json") for item in transcript
+                    ]
+                    context.waiting_pending_invocations = [
+                        {
+                            "ordinal": ordinal,
+                            "invocation_id": item.invocation_id,
+                            "tool_call_id": item.tool_call_id,
+                            "capability_id": item.capability_id,
+                        }
+                        for ordinal, item in enumerate(latest_tool_results)
+                        if item in remote_waiting
+                    ]
+                    context.waiting_origin_connection_id = old_connection_id
                     checkpoint_transcript = [
                         item.model_dump(mode="json")
                         for item in [

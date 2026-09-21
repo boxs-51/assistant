@@ -19,6 +19,10 @@ from ...domain.schemas.task_budget import (
     task_budget_policy_fingerprint,
 )
 from .serialization import to_json_safe
+from .waiting_checkpoint import (
+    stage_waiting_checkpoint,
+    verify_committed_waiting_checkpoint,
+)
 
 
 class TaskBudgetError(RuntimeError):
@@ -626,6 +630,8 @@ class TaskBudgetService:
         source_revision: int,
         transition_values: dict[str, Any],
         delegated: bool,
+        checkpoint_values: dict[str, Any] | None = None,
+        pending_invocations: Sequence[dict[str, Any]] = (),
     ) -> int:
         """Atomically release one RUNNING execution's active capacity."""
         target_state = str(transition_values.get("state") or "")
@@ -641,6 +647,10 @@ class TaskBudgetService:
             )
 
         target_revision = source_revision + 1
+        if target_state != "WAITING" and checkpoint_values is not None:
+            raise ValueError(
+                "checkpoint_values are only valid for WAITING transitions"
+            )
 
         def mutate(budget: TaskBudget) -> dict[str, Any]:
             if budget.active_executions <= 0:
@@ -673,8 +683,24 @@ class TaskBudgetService:
                 "target_revision": target_revision,
                 "target_state": target_state,
                 "delegated": delegated,
+                "checkpoint_id": (
+                    str(checkpoint_values.get("checkpoint_id"))
+                    if checkpoint_values is not None
+                    else None
+                ),
+                "pending_invocations": [
+                    {
+                        "ordinal": int(item["ordinal"]),
+                        "invocation_id": str(item["invocation_id"]),
+                        "tool_call_id": str(item["tool_call_id"]),
+                        "capability_id": str(item["capability_id"]),
+                    }
+                    for item in pending_invocations
+                ],
             },
             mutate_budget=mutate,
+            checkpoint_values=checkpoint_values,
+            pending_invocations=pending_invocations,
         )
 
     async def reserve_tool_call_batch(
@@ -1313,6 +1339,8 @@ class TaskBudgetService:
         reservation_key: str,
         reservation_payload: dict[str, Any],
         mutate_budget: Callable[[TaskBudget], dict[str, Any]],
+        checkpoint_values: dict[str, Any] | None = None,
+        pending_invocations: Sequence[dict[str, Any]] = (),
     ) -> int:
         if source_revision < 0:
             raise ValueError("source_revision must be non-negative")
@@ -1358,6 +1386,14 @@ class TaskBudgetService:
                                 "Durable transition reservation has no "
                                 "matching AgentExecution."
                             )
+                        if checkpoint_values is not None:
+                            await verify_committed_waiting_checkpoint(
+                                uow,
+                                execution=execution,
+                                source_revision=source_revision,
+                                checkpoint_values=checkpoint_values,
+                                pending_invocations=pending_invocations,
+                            )
                         await uow.commit()
                         return target_revision
 
@@ -1401,11 +1437,22 @@ class TaskBudgetService:
                         await uow.rollback()
                         continue
 
+                    execution_values = normalized_values
+                    if checkpoint_values is not None:
+                        execution_values = await stage_waiting_checkpoint(
+                            uow,
+                            execution=execution,
+                            source_revision=source_revision,
+                            transition_values=normalized_values,
+                            checkpoint_values=checkpoint_values,
+                            pending_invocations=pending_invocations,
+                        )
+
                     updated_execution = (
                         await uow.agents.compare_and_set_execution(
                             execution_id,
                             source_revision,
-                            normalized_values,
+                            execution_values,
                         )
                     )
                     if updated_execution is None:

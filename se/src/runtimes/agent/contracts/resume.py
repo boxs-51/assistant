@@ -65,6 +65,12 @@ class CheckpointPendingInvocation:
     invocation_revision: int
     tool_call_id: str
     capability_id: str
+    capability_version: str | None = None
+    request_fingerprint: str | None = None
+    idempotency: str = "UNKNOWN"
+    observed_remote_outcome_state: str | None = None
+    origin_client_id: str | None = None
+    origin_connection_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

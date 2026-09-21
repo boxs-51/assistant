@@ -6,6 +6,11 @@ from ...infrastructure.storage.repositories.agent import AgentRepository
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
 from .serialization import to_json_safe
+from .waiting_checkpoint import (
+    WaitingCheckpointConflictError,
+    stage_waiting_checkpoint,
+    verify_committed_waiting_checkpoint,
+)
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -244,6 +249,83 @@ class DurableAgentStore:
             if record is None:
                 raise ExecutionConflictError(
                     f"Stale AgentExecution revision: {execution_id}@{expected_revision}"
+                )
+            await uow.commit()
+            return record
+
+    async def commit_waiting_checkpoint(
+        self,
+        execution_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+        *,
+        checkpoint_values: Dict[str, Any],
+        pending_invocations: List[Dict[str, Any]],
+    ):
+        """Atomically persist one non-task normalized WAITING safe point."""
+        values = _normalize_json_fields(
+            values, _EXECUTION_JSON_FIELDS, path="agent_executions"
+        )
+        target_revision = expected_revision + 1
+        checkpoint_id = str(checkpoint_values["checkpoint_id"])
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                raise ExecutionConflictError(
+                    f"Unknown AgentExecution: {execution_id}"
+                )
+
+            if execution.revision == target_revision:
+                try:
+                    await verify_committed_waiting_checkpoint(
+                        uow,
+                        execution=execution,
+                        source_revision=expected_revision,
+                        checkpoint_values=checkpoint_values,
+                        pending_invocations=pending_invocations,
+                    )
+                except WaitingCheckpointConflictError as exc:
+                    raise ExecutionConflictError(str(exc)) from exc
+                await uow.commit()
+                return execution
+
+            if (
+                execution.revision != expected_revision
+                or str(execution.state) != "RUNNING"
+            ):
+                raise ExecutionConflictError(
+                    f"Stale AgentExecution revision/state: "
+                    f"{execution_id}@{expected_revision}"
+                )
+
+            try:
+                transition_values = await stage_waiting_checkpoint(
+                    uow,
+                    execution=execution,
+                    source_revision=expected_revision,
+                    transition_values=values,
+                    checkpoint_values=checkpoint_values,
+                    pending_invocations=pending_invocations,
+                )
+            except WaitingCheckpointConflictError as exc:
+                raise ExecutionConflictError(str(exc)) from exc
+
+            record = await uow.agents.compare_and_set_execution(
+                execution_id,
+                expected_revision,
+                transition_values,
+            )
+            if record is None:
+                await uow.rollback()
+                raise ExecutionConflictError(
+                    f"Stale AgentExecution revision: "
+                    f"{execution_id}@{expected_revision}"
+                )
+            if record.current_checkpoint_id != checkpoint_id:
+                await uow.rollback()
+                raise ExecutionConflictError(
+                    "WAITING CAS did not retain normalized checkpoint pointer."
                 )
             await uow.commit()
             return record

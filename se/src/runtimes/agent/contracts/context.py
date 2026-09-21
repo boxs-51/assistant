@@ -80,6 +80,13 @@ class AgentExecutionContext:
     resume_transcript: list[Dict[str, Any]] = field(default_factory=list)
     resume_pending_tool_calls: list[Dict[str, Any]] = field(default_factory=list)
     resume_revision: int | None = None
+    waiting_checkpoint_transcript: list[Dict[str, Any]] = field(
+        default_factory=list
+    )
+    waiting_pending_invocations: list[Dict[str, Any]] = field(
+        default_factory=list
+    )
+    waiting_origin_connection_id: str | None = None
     cancellation_event: asyncio.Event = field(default_factory=asyncio.Event)
     _tool_budget_lock: asyncio.Lock = field(
         default_factory=asyncio.Lock,

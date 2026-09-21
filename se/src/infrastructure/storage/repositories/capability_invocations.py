@@ -21,6 +21,22 @@ from ..models.sql.capability import (
 )
 
 
+class CapabilityInvocationRepository:
+    """Transaction-scoped R6 invocation access for shared SQL UoWs."""
+
+    def __init__(self, session) -> None:
+        self.session = session
+
+    async def get_record(
+        self,
+        invocation_id: str,
+    ) -> CapabilityInvocationRecord | None:
+        return await self.session.get(
+            CapabilityInvocationRecord,
+            invocation_id,
+        )
+
+
 class SqlCapabilityInvocationStore:
     """Durable invocation authority with revision-based CAS transitions."""
 

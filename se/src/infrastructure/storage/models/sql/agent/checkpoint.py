@@ -93,6 +93,18 @@ class AgentCheckpointPendingInvocationRecord(Base):
             "invocation_revision >= 0",
             name="ck_agent_checkpoint_pending_invocations_revision_nonnegative",
         ),
+        CheckConstraint(
+            "idempotency IN "
+            "('IDEMPOTENT', 'DEDUPLICATED', 'NON_IDEMPOTENT', 'UNKNOWN')",
+            name="ck_agent_checkpoint_pending_invocations_idempotency",
+        ),
+        CheckConstraint(
+            "observed_remote_outcome_state IS NULL OR "
+            "observed_remote_outcome_state IN "
+            "('NOT_DISPATCHED', 'IN_FLIGHT', 'OUTCOME_UNKNOWN', "
+            "'TERMINAL_COMMITTED')",
+            name="ck_agent_checkpoint_pending_invocations_remote_outcome",
+        ),
         UniqueConstraint(
             "checkpoint_id",
             "invocation_id",
@@ -115,3 +127,11 @@ class AgentCheckpointPendingInvocationRecord(Base):
     invocation_revision: Mapped[int] = mapped_column(Integer, nullable=False)
     tool_call_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
     capability_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    capability_version: Mapped[str | None] = mapped_column(String(64))
+    request_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    idempotency: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="UNKNOWN", server_default="UNKNOWN"
+    )
+    observed_remote_outcome_state: Mapped[str | None] = mapped_column(String(32))
+    origin_client_id: Mapped[str | None] = mapped_column(String(255))
+    origin_connection_id: Mapped[str | None] = mapped_column(String(255))
