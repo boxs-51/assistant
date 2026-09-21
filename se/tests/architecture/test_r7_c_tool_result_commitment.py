@@ -20,9 +20,18 @@ from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.agent.contracts import (
     AgentExecutionContext,
+    InferenceMessage,
+    InferenceResponse,
+    InferenceToolCall,
+    InferenceUsage,
+    ToolExecutionRequest,
     ToolExecutionResult,
 )
-from se.src.runtimes.agent.persistence import DurableAgentStore
+from se.src.runtimes.agent.contracts.policy import PolicyDecision
+from se.src.runtimes.agent.persistence import (
+    DurableAgentStore,
+    ExecutionConflictError,
+)
 from se.src.runtimes.agent.runtime import AgentRuntime
 
 
@@ -493,3 +502,463 @@ async def test_r7_c_resumed_batch_materializes_results_in_original_parallel_call
         "call-3",
     ]
     assert [item.output["value"] for item in reconstructed] == [2, 1, 3]
+
+
+
+@pytest.mark.asyncio
+async def test_r7_c_reused_tool_call_id_with_different_invocation_is_rejected(tmp_path):
+    engine, sessions = await _schema(tmp_path, "r7c-call-collision.sqlite")
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r7-c",
+                    session_id="session-r7-c",
+                    agent_id="agent-r7-c",
+                    correlation_id="corr-r7-c",
+                    state="RUNNING",
+                    revision=1,
+                    request={},
+                )
+            )
+            uow.session.add_all(
+                [
+                    AgentIterationRecord(
+                        id="iter-1",
+                        execution_id="exec-r7-c",
+                        iteration=1,
+                        state="WAITING_TOOL",
+                        tool_call_ids=["call-reused"],
+                    ),
+                    AgentIterationRecord(
+                        id="iter-2",
+                        execution_id="exec-r7-c",
+                        iteration=2,
+                        state="WAITING_TOOL",
+                        tool_call_ids=["call-reused"],
+                    ),
+                ]
+            )
+            await uow.commit()
+
+        await store.save_tool_call(
+            {
+                "id": "call-reused",
+                "execution_id": "exec-r7-c",
+                "iteration_id": "iter-1",
+                "invocation_id": "inv-old",
+                "tool_call_id": "call-reused",
+                "capability_id": "tool.echo",
+                "arguments": {"value": "old"},
+                "status": "PENDING",
+                "extra_metadata": {},
+            }
+        )
+
+        with pytest.raises(ExecutionConflictError, match="iteration_id"):
+            await store.save_tool_call(
+                {
+                    "id": "call-reused",
+                    "execution_id": "exec-r7-c",
+                    "iteration_id": "iter-2",
+                    "invocation_id": "inv-new",
+                    "tool_call_id": "call-reused",
+                    "capability_id": "tool.echo",
+                    "arguments": {"value": "new"},
+                    "status": "PENDING",
+                    "extra_metadata": {},
+                }
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_c_conflicting_committed_result_is_rejected(tmp_path):
+    engine, sessions = await _schema(tmp_path, "r7c-result-conflict.sqlite")
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r7-c",
+                    session_id="session-r7-c",
+                    agent_id="agent-r7-c",
+                    correlation_id="corr-r7-c",
+                    state="RUNNING",
+                    revision=1,
+                    request={},
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="iter-1",
+                    execution_id="exec-r7-c",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-1"],
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id="result-1",
+                    execution_id="exec-r7-c",
+                    iteration_id="iter-1",
+                    tool_call_id="call-1",
+                    invocation_id="inv-1",
+                    capability_id="tool.echo",
+                    success=True,
+                    output={"value": "durable"},
+                    commit_state="COMMITTED",
+                )
+            )
+            await uow.commit()
+
+        with pytest.raises(ExecutionConflictError, match="COMMITTED tool-result output"):
+            await store.save_tool_result(
+                {
+                    "id": "result-1",
+                    "execution_id": "exec-r7-c",
+                    "iteration_id": "iter-1",
+                    "tool_call_id": "call-1",
+                    "invocation_id": "inv-1",
+                    "capability_id": "tool.echo",
+                    "success": True,
+                    "output": {"value": "conflict"},
+                    "error_code": None,
+                    "error_message": None,
+                    "retryable": False,
+                    "extra_metadata": {
+                        "r7_commit_authority": "AGENT_PRE_DISPATCH",
+                    },
+                    "attempt": 1,
+                }
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_c_committed_loader_rejects_request_identity_mismatch():
+    class Store:
+        async def load_committed_tool_result(self, execution_id, tool_call_id):
+            return type(
+                "Record",
+                (),
+                {
+                    "execution_id": execution_id,
+                    "invocation_id": "inv-old",
+                    "tool_call_id": tool_call_id,
+                    "capability_id": "tool.echo",
+                    "success": True,
+                    "output": {"old": True},
+                    "error_code": None,
+                    "error_message": None,
+                    "retryable": False,
+                    "extra_metadata": {},
+                    "commit_state": "COMMITTED",
+                },
+            )()
+
+    runtime = AgentRuntime(
+        context_builder=None,
+        inference=None,
+        tool_execution=None,
+        execution_policy=None,
+        durable_store=Store(),
+    )
+    request = ToolExecutionRequest(
+        execution_id="exec-1",
+        iteration=2,
+        invocation_id="inv-new",
+        tool_call_id="call-1",
+        capability_id="tool.echo",
+        arguments={},
+    )
+
+    with pytest.raises(ExecutionConflictError, match="invocation_id"):
+        await runtime._load_committed_tool_result(request)
+
+
+@pytest.mark.asyncio
+async def test_r7_c_legacy_transcript_rematerializes_exact_committed_payload(tmp_path):
+    engine, sessions = await _schema(tmp_path, "r7c-canonical-transcript.sqlite")
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r7-c",
+                    session_id="session-r7-c",
+                    agent_id="agent-r7-c",
+                    correlation_id="corr-r7-c",
+                    state="WAITING_TOOL",
+                    revision=0,
+                    request={},
+                    transcript=[
+                        {"role": "user", "content": "hello"},
+                        {
+                            "role": "tool",
+                            "name": "tool.remote",
+                            "tool_call_id": "call-c",
+                            "content": {
+                                "error_code": "REMOTE_OUTCOME_UNKNOWN",
+                                "error_message": "stale poison",
+                            },
+                            "metadata": {"success": False},
+                        },
+                    ],
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="iter-r7-c",
+                    execution_id="exec-r7-c",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=[],
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id="result-call-c",
+                    execution_id="exec-r7-c",
+                    iteration_id="iter-r7-c",
+                    tool_call_id="call-c",
+                    invocation_id="inv-call-c",
+                    capability_id="tool.remote",
+                    success=True,
+                    output={"authoritative": 42},
+                    commit_state="COMMITTED",
+                )
+            )
+            await uow.commit()
+
+        context = await store.resume_execution("exec-r7-c")
+        assert context is not None
+        assert context.resume_transcript[1]["content"] == {"authoritative": 42}
+        assert context.resume_transcript[1]["metadata"] == {
+            "success": True,
+            "retryable": False,
+        }
+        assert "REMOTE_OUTCOME_UNKNOWN" not in repr(context.resume_transcript)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_c_missing_expected_invocation_authority_fails_closed(tmp_path):
+    engine, sessions = await _schema(tmp_path, "r7c-missing-authority.sqlite")
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r7-c",
+                    session_id="session-r7-c",
+                    agent_id="agent-r7-c",
+                    correlation_id="corr-r7-c",
+                    state="RUNNING",
+                    revision=1,
+                    request={},
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="iter-1",
+                    execution_id="exec-r7-c",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-missing", "call-pre"],
+                )
+            )
+            await uow.commit()
+
+        missing = await store.save_tool_result(
+            {
+                "id": "result-missing",
+                "execution_id": "exec-r7-c",
+                "iteration_id": "iter-1",
+                "tool_call_id": "call-missing",
+                "invocation_id": "inv-missing",
+                "capability_id": "tool.remote",
+                "success": True,
+                "output": {"unsafe": True},
+                "error_code": None,
+                "error_message": None,
+                "retryable": False,
+                "extra_metadata": {},
+                "attempt": 1,
+            }
+        )
+        assert missing.commit_state == "PROVISIONAL"
+        assert await store.load_committed_tool_result(
+            "exec-r7-c", "call-missing"
+        ) is None
+
+        predispatch = await store.save_tool_result(
+            {
+                "id": "result-pre",
+                "execution_id": "exec-r7-c",
+                "iteration_id": "iter-1",
+                "tool_call_id": "call-pre",
+                "invocation_id": "inv-pre",
+                "capability_id": "tool.missing",
+                "success": False,
+                "output": None,
+                "error_code": "CAPABILITY_NOT_FOUND",
+                "error_message": "CAPABILITY_NOT_FOUND",
+                "retryable": False,
+                "extra_metadata": {
+                    "r7_commit_authority": "AGENT_PRE_DISPATCH",
+                },
+                "attempt": 1,
+            }
+        )
+        assert predispatch.commit_state == "COMMITTED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_c_terminal_committed_reserved_error_code_does_not_enter_waiting():
+    context = AgentExecutionContext.create(
+        execution_id="exec-terminal-error",
+        agent_id="agent-1",
+        session_id="session-1",
+        correlation_id="corr-1",
+        identity=Identity(user_id="user-1", auth_type="api_key", scopes={"*"}),
+        limits=AgentExecutionLimits(max_iterations=3, timeout_seconds=5),
+    )
+
+    class ContextBuilder:
+        async def build(self, context, request):
+            return type("Snapshot", (), {"messages": [], "tools": [], "metadata": {}})()
+
+    class Inference:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            calls = (
+                (
+                    InferenceToolCall(
+                        id="call-terminal-error",
+                        name="tool.remote",
+                        arguments={},
+                    ),
+                )
+                if self.calls == 1
+                else ()
+            )
+            return InferenceResponse(
+                request_id=request.request_id,
+                execution_id=request.execution_id,
+                iteration=request.iteration,
+                message=InferenceMessage(
+                    role="assistant",
+                    content="done" if self.calls > 1 else "",
+                    tool_calls=calls,
+                ),
+                usage=InferenceUsage(),
+                provider="test",
+                model="test",
+            )
+
+    class Policy:
+        def check_start(self, context):
+            return PolicyDecision.ALLOW
+
+        def check_iteration(self, context, iteration):
+            return PolicyDecision.ALLOW
+
+    terminal = ToolExecutionResult(
+        execution_id="exec-terminal-error",
+        iteration=1,
+        invocation_id="inv-terminal-error",
+        tool_call_id="call-terminal-error",
+        capability_id="tool.remote",
+        success=False,
+        error_code="REMOTE_CONNECTION_LOST",
+        error_message="authoritative remote terminal error",
+        retryable=False,
+    )
+
+    class Executor:
+        async def execute_many(self, context, requests, *, max_parallel):
+            request = requests[0]
+            return [
+                terminal.model_copy(
+                    update={
+                        "iteration": request.iteration,
+                        "invocation_id": request.invocation_id,
+                    }
+                )
+            ]
+
+    class Store:
+        def __init__(self):
+            self.iterations = {}
+            self.saved_result = None
+
+        async def load_iteration(self, execution_id, *, iteration_number=None, iteration_id=None):
+            return self.iterations.get(iteration_number)
+
+        async def save_iteration(self, values):
+            item = type("Iteration", (), values)()
+            self.iterations[values["iteration"]] = item
+            return item
+
+        async def update_iteration(self, iteration_id, values):
+            item = next(
+                item for item in self.iterations.values()
+                if item.id == iteration_id
+            )
+            for key, value in values.items():
+                setattr(item, key, value)
+            return item
+
+        async def save_tool_call(self, values):
+            return type("Call", (), values)()
+
+        async def save_tool_result(self, values):
+            self.saved_result = dict(values)
+            return type("Result", (), values)()
+
+        async def load_committed_tool_result(self, execution_id, tool_call_id):
+            if self.saved_result is None:
+                return None
+            values = dict(self.saved_result)
+            values.update(
+                {
+                    "success": False,
+                    "error_code": "REMOTE_CONNECTION_LOST",
+                    "error_message": "authoritative remote terminal error",
+                    "retryable": False,
+                    "output": None,
+                    "extra_metadata": {},
+                    "commit_state": "COMMITTED",
+                }
+            )
+            return type("Result", (), values)()
+
+        async def update_checkpoint(self, execution_id, values):
+            return None
+
+    inference = Inference()
+    runtime = AgentRuntime(
+        context_builder=ContextBuilder(),
+        inference=inference,
+        tool_execution=Executor(),
+        execution_policy=Policy(),
+        durable_store=Store(),
+        continuation_service=None,
+    )
+
+    result = await runtime._execute_loop(context)
+
+    assert result.state.value == "COMPLETED"
+    assert result.error_code is None
+    assert inference.calls == 2
