@@ -269,17 +269,56 @@ class WorkflowRuntime(BaseRuntime):
                     lambda: self.container.agent_runtime.execute(context),
                 )
             if result.error_code == "WAITING_FOR_CONNECTION":
-                checkpoint = self.container.continuation_service.current_checkpoint(
-                    result.execution_id
+                checkpoint = None
+                pending = ()
+                durable_store = getattr(
+                    self.container,
+                    "agent_durable_store",
+                    None,
+                )
+                current_loader = getattr(
+                    durable_store,
+                    "load_current_checkpoint",
+                    None,
+                )
+                pending_loader = getattr(
+                    durable_store,
+                    "load_checkpoint_pending_invocations",
+                    None,
+                )
+                if callable(current_loader):
+                    checkpoint = await current_loader(result.execution_id)
+                    if checkpoint is not None and callable(pending_loader):
+                        pending = await pending_loader(checkpoint.checkpoint_id)
+                elif getattr(self.container, "continuation_service", None) is not None:
+                    checkpoint = self.container.continuation_service.current_checkpoint(
+                        result.execution_id
+                    )
+
+                pending_capability_ids = [
+                    item.capability_id
+                    for item in pending
+                ]
+                legacy_pending = (
+                    getattr(checkpoint, "pending_capability_id", None)
+                    if not pending_capability_ids
+                    else None
                 )
                 waiting = {
                     "status": "WAITING_FOR_CONNECTION",
                     "wait_reason": "CONNECTION",
                     "execution_id": result.execution_id,
-                    "checkpoint_id": result.checkpoint_id,
-                    "pending_capability_id": (
-                        checkpoint.pending_capability_id if checkpoint else None
+                    "checkpoint_id": (
+                        checkpoint.checkpoint_id
+                        if checkpoint is not None
+                        else result.checkpoint_id
                     ),
+                    "pending_capability_id": (
+                        pending_capability_ids[0]
+                        if pending_capability_ids
+                        else legacy_pending
+                    ),
+                    "pending_capability_ids": pending_capability_ids,
                     "retry_policy": "USER_CONFIRM",
                 }
                 if body.get("config", {}).get("stream"):

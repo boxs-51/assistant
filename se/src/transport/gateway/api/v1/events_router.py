@@ -9,6 +9,10 @@ from .....infrastructure.event_bus.ws_manager import WebSocketConnectionManager
 from .....runtimes.capability.contracts.registration import ClientCapabilityRegistration
 from .....runtimes.connection.protocol import RealtimeEnvelope
 from .....runtimes.agent.supervisor import AgentExecutionSupervisor
+from .....runtimes.agent.resume_planning import (
+    ResumePlanDeferred,
+    ResumePlanRejected,
+)
 from ...authentication.dependency import get_current_identity, get_websocket_identity
 from .....domain.schemas.identity import Identity
 from ...dependencies import get_container
@@ -72,6 +76,91 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
     snapshot = container.connection_runtime.registry.get(connection_id)
     if not snapshot.is_usable or snapshot.user_id != identity.user_id:
         raise PermissionError("Resume connection is not active for this principal")
+
+    planning_service = getattr(container, "resume_planning_service", None)
+    if planning_service is not None:
+        client_id = str(snapshot.metadata.get("client_id") or "")
+        try:
+            plan = await planning_service.build_resume_plan(
+                execution_id,
+                checkpoint_id,
+                target_user_id=identity.user_id,
+                target_client_id=client_id or None,
+                target_connection_id=connection_id,
+            )
+        except ResumePlanDeferred as exc:
+            await _send_realtime(
+                websocket,
+                RealtimeEnvelope(
+                    type="execution.resume.preflight",
+                    message_id=f"resume-preflight-{uuid.uuid4().hex}",
+                    connection_id=connection_id,
+                    execution_id=execution_id,
+                    payload={
+                        "execution_id": execution_id,
+                        "checkpoint_id": checkpoint_id,
+                        "status": "DEFERRED",
+                        "code": exc.code,
+                        "message": str(exc),
+                    },
+                ),
+            )
+            return
+        except ResumePlanRejected as exc:
+            await _send_realtime(
+                websocket,
+                RealtimeEnvelope(
+                    type="execution.resume.preflight",
+                    message_id=f"resume-preflight-{uuid.uuid4().hex}",
+                    connection_id=connection_id,
+                    execution_id=execution_id,
+                    payload={
+                        "execution_id": execution_id,
+                        "checkpoint_id": checkpoint_id,
+                        "status": "REJECTED",
+                        "code": exc.code,
+                        "message": str(exc),
+                    },
+                ),
+            )
+            return
+
+        await _send_realtime(
+            websocket,
+            RealtimeEnvelope(
+                type="execution.resume.preflight",
+                message_id=f"resume-preflight-{uuid.uuid4().hex}",
+                connection_id=connection_id,
+                execution_id=execution_id,
+                payload={
+                    "execution_id": plan.execution_id,
+                    "checkpoint_id": plan.checkpoint_id,
+                    "status": "PLAN_READY",
+                    "plan_fingerprint": plan.plan_fingerprint,
+                    "expected_execution_revision": (
+                        plan.expected_execution_revision
+                    ),
+                    "actions": [
+                        {
+                            "ordinal": item.ordinal,
+                            "invocation_id": item.invocation_id,
+                            "tool_call_id": item.tool_call_id,
+                            "capability_id": item.capability_id,
+                            "action": item.action.value,
+                            "expected_invocation_revision": (
+                                item.expected_invocation_revision
+                            ),
+                        }
+                        for item in plan.invocation_actions
+                    ],
+                    "activation": "R7_D_PREFLIGHT_ONLY",
+                },
+            ),
+        )
+        return
+
+    # Compatibility-only Phase 6.9 path. Production bootstrap always binds
+    # resume_planning_service, so R7-D never reaches reconnect/claim/merge.
     service = container.continuation_service
     checkpoint = await service.ensure_loaded(execution_id)
     if checkpoint is None or checkpoint.checkpoint_id != checkpoint_id:

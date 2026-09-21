@@ -377,7 +377,8 @@ class GatewayRealtimeClient:
         )
         message = self._wait_for_message(
             lambda item: (
-                item.get("type") == "execution.resume.accepted"
+                item.get("type")
+                in {"execution.resume.preflight", "execution.resume.accepted"}
                 and item.get("connection_id") == self.connection_id
                 and item.get("execution_id") == execution_id
             ),

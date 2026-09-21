@@ -79,6 +79,7 @@ from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.supervisor import AgentExecutionSupervisor
 from .runtimes.agent.task_budget import TaskBudgetService
 from .runtimes.agent.continuation import AgentContinuationService
+from .runtimes.agent.resume_planning import AgentResumePlanningService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
 from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
@@ -394,6 +395,10 @@ async def bootstrap_runtime_kernel(
     container.agent_durable_store = DurableAgentStore(eventing_manager.uow_factory)
     container.continuation_service = AgentContinuationService(
         container.agent_durable_store
+    )
+    container.resume_planning_service = AgentResumePlanningService(
+        container.agent_durable_store,
+        container.capability_runtime,
     )
     container.agent_runtime = AgentRuntime(
         context_builder=container.context_builder_port,

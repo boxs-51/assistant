@@ -1284,7 +1284,7 @@ class AgentRuntime:
                             == "REMOTE_CONNECTION_LOST"
                         )
                     ]
-                if remote_waiting and self._continuation_service is not None:
+                if remote_waiting:
                     lost = remote_waiting[0]
                     old_connection_id = (
                         lost.metadata.get("connection_id")
@@ -1305,34 +1305,13 @@ class AgentRuntime:
                         if item in remote_waiting
                     ]
                     context.waiting_origin_connection_id = old_connection_id
-                    # Legacy continuation remains writable during the
-                    # migration window, but it must obey the same R7-C safety
-                    # boundary: never persist provisional active-batch tool
-                    # messages as resumable model context.
-                    checkpoint_transcript = list(
-                        context.waiting_checkpoint_transcript
-                    )
-                    checkpoint = await self._continuation_service.checkpoint_disconnect(
-                        execution_id=context.execution_id,
-                        session_id=context.session_id,
-                        owner_user_id=context.identity.user_id,
-                        connection_id=old_connection_id,
-                        invocation_id=(
-                            lost.metadata.get("invocation_id")
-                            or lost.invocation_id
-                        ),
-                        tool_call_id=lost.tool_call_id,
-                        capability_id=lost.capability_id,
-                        iteration=iteration_number,
-                        transcript=checkpoint_transcript,
-                        server_continuation_available=False,
-                        metadata={
-                            "origin_client_id": context.metadata.get("client_id"),
-                            "remote_error_code": lost.error_code,
-                        },
-                    )
                     context.connection_id = None
-                    if checkpoint.state is ContinuationState.WAITING:
+
+                    # R7-B normalized WAITING is the canonical production
+                    # authority. The Phase 6.9 continuation service remains
+                    # only for compatibility stores without durable lifecycle
+                    # primitives.
+                    if self._has_execution_lifecycle_store():
                         record.close(
                             AgentLoopState.FAILED,
                             error_code="WAITING_FOR_CONNECTION",
@@ -1350,18 +1329,55 @@ class AgentRuntime:
                             error_message=(
                                 "Remote capability requires a new connection."
                             ),
-                            continuation_state=checkpoint.state,
-                            checkpoint_id=checkpoint.checkpoint_id,
+                            continuation_state=ContinuationState.WAITING,
+                            checkpoint_id=None,
                         )
 
-                    raise ExecutionConflictError(
-                        "Remote tool result is not COMMITTED and continuation "
-                        "did not produce a durable WAITING checkpoint."
-                    )
-                if remote_waiting:
+                    if self._continuation_service is not None:
+                        checkpoint = await self._continuation_service.checkpoint_disconnect(
+                            execution_id=context.execution_id,
+                            session_id=context.session_id,
+                            owner_user_id=context.identity.user_id,
+                            connection_id=old_connection_id,
+                            invocation_id=(
+                                lost.metadata.get("invocation_id")
+                                or lost.invocation_id
+                            ),
+                            tool_call_id=lost.tool_call_id,
+                            capability_id=lost.capability_id,
+                            iteration=iteration_number,
+                            transcript=list(context.waiting_checkpoint_transcript),
+                            server_continuation_available=False,
+                            metadata={
+                                "origin_client_id": context.metadata.get("client_id"),
+                                "remote_error_code": lost.error_code,
+                            },
+                        )
+                        if checkpoint.state is ContinuationState.WAITING:
+                            record.close(
+                                AgentLoopState.FAILED,
+                                error_code="WAITING_FOR_CONNECTION",
+                            )
+                            await self._persist_iteration(record)
+                            return AgentExecutionResult(
+                                execution_id=context.execution_id,
+                                agent_id=context.agent_id,
+                                state=AgentLoopState.WAITING,
+                                wait_reason=AgentExecutionWaitReason.CONNECTION,
+                                iterations=tuple(iterations),
+                                last_tool_results=latest_tool_results,
+                                usage=context.usage,
+                                error_code="WAITING_FOR_CONNECTION",
+                                error_message=(
+                                    "Remote capability requires a new connection."
+                                ),
+                                continuation_state=checkpoint.state,
+                                checkpoint_id=checkpoint.checkpoint_id,
+                            )
+
                     raise ExecutionConflictError(
                         "PROVISIONAL tool result cannot enter model context "
-                        "without a durable continuation checkpoint."
+                        "without a durable WAITING checkpoint."
                     )
 
                 latest_tool_results = tuple(

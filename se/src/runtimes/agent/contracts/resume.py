@@ -5,12 +5,27 @@ from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Mapping
 
+from ...capability.contracts.definition import CapabilityIdempotency
+from ...capability.contracts.invocation import (
+    CapabilityInvocationState,
+    RemoteOutcomeState,
+)
+from .inference import InferenceMessage
+
 
 class ToolResultCommitState(str, Enum):
     """Durable certainty of the Agent tool-result projection."""
 
     PROVISIONAL = "PROVISIONAL"
     COMMITTED = "COMMITTED"
+
+
+class ResumeInvocationActionKind(str, Enum):
+    """Only execution-safe dispositions R7 may carry past planning."""
+
+    REUSE_COMMITTED = "REUSE_COMMITTED"
+    DISPATCH_NOT_DISPATCHED = "DISPATCH_NOT_DISPATCHED"
+    REPLAY_SAFE = "REPLAY_SAFE"
 
 
 class ResumeClaimState(str, Enum):
@@ -74,6 +89,59 @@ class CheckpointPendingInvocation:
 
 
 @dataclass(frozen=True, slots=True)
+class ResumeInvocationAction:
+    """One immutable R6-backed disposition for a checkpointed invocation."""
+
+    invocation_id: str
+    tool_call_id: str
+    ordinal: int
+    capability_id: str
+    capability_version: str
+    request_fingerprint: str
+    idempotency: CapabilityIdempotency
+    expected_invocation_revision: int
+    expected_invocation_state: CapabilityInvocationState
+    expected_remote_outcome_state: RemoteOutcomeState | None
+    action: ResumeInvocationActionKind
+
+
+@dataclass(frozen=True, slots=True)
+class ResumePlan:
+    """Immutable, read-only R7-D plan. It owns no execution authority."""
+
+    execution_id: str
+    checkpoint_id: str
+    expected_execution_revision: int
+    plan_fingerprint: str
+
+    agent_id: str
+    session_id: str
+    task_id: str | None
+    branch_id: str | None
+    parent_execution_id: str | None
+    retry_of_execution_id: str | None
+    base_execution_id: str | None
+    base_checkpoint_id: str | None
+
+    correlation_id: str
+    trace_id: str | None
+    request_id: str | None
+
+    iteration: int
+    ordered_tool_call_ids: tuple[str, ...]
+    transcript_snapshot: tuple[InferenceMessage, ...]
+
+    remaining_active_budget_seconds: float
+    wait_expires_at: datetime | None
+
+    target_user_id: str
+    target_client_id: str | None
+    target_connection_id: str | None
+
+    invocation_actions: tuple[ResumeInvocationAction, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class ResumeClaim:
     """Durable resume intent; CREATED owns no execution authority."""
 
@@ -105,6 +173,9 @@ class ResumeClaim:
 __all__ = [
     "CheckpointPendingInvocation",
     "DurableExecutionCheckpoint",
+    "ResumeInvocationAction",
+    "ResumeInvocationActionKind",
+    "ResumePlan",
     "ResumeClaim",
     "ResumeClaimState",
     "ToolResultCommitState",

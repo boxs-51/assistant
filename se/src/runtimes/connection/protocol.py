@@ -24,6 +24,7 @@ RealtimeMessageType = Literal[
     "assistant.completed",
     "assistant.error",
     "execution.resume",
+    "execution.resume.preflight",
     "execution.resume.accepted",
 ]
 
@@ -71,6 +72,7 @@ class RealtimeEnvelope(BaseModel):
             "capability.register",
             "capability.registered",
             "execution.resume",
+            "execution.resume.preflight",
             "execution.resume.accepted",
         }
         if self.type in connection_required and not self.connection_id:

@@ -5,6 +5,10 @@ from ...domain.schemas.identity import Identity
 from ...infrastructure.storage.repositories.agent import AgentRepository
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
+from .contracts.resume import (
+    CheckpointPendingInvocation,
+    DurableExecutionCheckpoint,
+)
 from .serialization import to_json_safe
 from .waiting_checkpoint import (
     WaitingCheckpointConflictError,
@@ -640,6 +644,162 @@ class DurableAgentStore:
                     record = max(iterations, key=lambda item: item.iteration, default=None)
             await uow.commit()
             return record
+
+    @staticmethod
+    def _checkpoint_contract(record) -> DurableExecutionCheckpoint:
+        return DurableExecutionCheckpoint(
+            checkpoint_id=record.checkpoint_id,
+            execution_id=record.execution_id,
+            execution_revision=record.execution_revision,
+            session_id=record.session_id,
+            task_id=record.task_id,
+            branch_id=record.branch_id,
+            parent_checkpoint_id=record.parent_checkpoint_id,
+            iteration=record.iteration,
+            wait_reason=record.wait_reason,
+            remaining_active_budget_seconds=record.remaining_active_budget_seconds,
+            wait_expires_at=record.wait_expires_at,
+            origin_client_id=record.origin_client_id,
+            origin_connection_id=record.origin_connection_id,
+            transcript_snapshot=(
+                tuple(dict(item) for item in record.transcript_snapshot)
+                if record.transcript_snapshot is not None
+                else None
+            ),
+            transcript_ref=record.transcript_ref,
+            transcript_version=record.transcript_version,
+            side_effect_watermark=record.side_effect_watermark,
+            legacy_source_key=record.legacy_source_key,
+            metadata=dict(record.metadata_json or {}),
+            created_at=record.created_at,
+        )
+
+    @staticmethod
+    def _pending_invocation_contract(record) -> CheckpointPendingInvocation:
+        return CheckpointPendingInvocation(
+            checkpoint_id=record.checkpoint_id,
+            ordinal=record.ordinal,
+            invocation_id=record.invocation_id,
+            invocation_revision=record.invocation_revision,
+            tool_call_id=record.tool_call_id,
+            capability_id=record.capability_id,
+            capability_version=record.capability_version,
+            request_fingerprint=record.request_fingerprint,
+            idempotency=record.idempotency,
+            observed_remote_outcome_state=record.observed_remote_outcome_state,
+            origin_client_id=record.origin_client_id,
+            origin_connection_id=record.origin_connection_id,
+        )
+
+    async def load_current_checkpoint(
+        self,
+        execution_id: str,
+    ) -> DurableExecutionCheckpoint | None:
+        """Load only the normalized checkpoint named by AgentExecution."""
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                await uow.commit()
+                return None
+            checkpoint_id = getattr(execution, "current_checkpoint_id", None)
+            if not checkpoint_id:
+                await uow.commit()
+                return None
+            checkpoint = await uow.agents.get_execution_checkpoint(checkpoint_id)
+            if (
+                checkpoint is None
+                or checkpoint.execution_id != execution.id
+                or checkpoint.execution_revision != execution.revision
+            ):
+                raise ExecutionConflictError(
+                    "AgentExecution current normalized checkpoint is missing or stale."
+                )
+            result = self._checkpoint_contract(checkpoint)
+            await uow.commit()
+            return result
+
+    async def load_checkpoint_pending_invocations(
+        self,
+        checkpoint_id: str,
+    ) -> tuple[CheckpointPendingInvocation, ...]:
+        async with self.uow_factory() as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint(checkpoint_id)
+            if checkpoint is None:
+                await uow.commit()
+                return ()
+            rows = await uow.agents.list_checkpoint_pending_invocations(
+                checkpoint_id
+            )
+            result = tuple(
+                self._pending_invocation_contract(item)
+                for item in rows
+            )
+            await uow.commit()
+            return result
+
+    async def load_committed_checkpoint_transcript(
+        self,
+        execution_id: str,
+        checkpoint_id: str,
+        *,
+        active_tool_call_ids: tuple[str, ...] = (),
+    ) -> tuple[dict[str, Any], ...]:
+        """Return the R7-C safe prefix for one normalized checkpoint."""
+
+        active_ids = set(active_tool_call_ids)
+        async with self.uow_factory() as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint(checkpoint_id)
+            if checkpoint is None or checkpoint.execution_id != execution_id:
+                raise ExecutionConflictError(
+                    "Normalized checkpoint does not belong to execution."
+                )
+            if checkpoint.transcript_snapshot is None:
+                raise ExecutionConflictError(
+                    "R7-D requires an inline reconstructable transcript snapshot."
+                )
+
+            result: list[dict[str, Any]] = []
+            for raw in checkpoint.transcript_snapshot:
+                message = dict(raw)
+                if message.get("role") != "tool":
+                    result.append(message)
+                    continue
+                tool_call_id = message.get("tool_call_id")
+                if not tool_call_id or tool_call_id in active_ids:
+                    continue
+                durable = await uow.agents.get_tool_result(
+                    execution_id,
+                    tool_call_id,
+                )
+                if (
+                    durable is None
+                    or getattr(durable, "commit_state", "PROVISIONAL")
+                    != "COMMITTED"
+                ):
+                    continue
+                result.append(
+                    {
+                        "role": "tool",
+                        "content": (
+                            durable.output
+                            if durable.success
+                            else {
+                                "error_code": durable.error_code,
+                                "error_message": durable.error_message,
+                            }
+                        ),
+                        "tool_calls": [],
+                        "name": durable.capability_id,
+                        "tool_call_id": durable.tool_call_id,
+                        "metadata": {
+                            "success": durable.success,
+                            "retryable": durable.retryable,
+                        },
+                    }
+                )
+            await uow.commit()
+            return tuple(result)
 
     async def resume_execution(
         self,
