@@ -748,6 +748,8 @@ class CapabilityRuntime(BaseRuntime):
                 )
                 if (
                     item.location is CapabilityExecutionLocation.CLIENT
+                    and item.owner_type is CapabilityOwnerType.CLIENT
+                    and item.driver_kind == "REMOTE_CLIENT"
                     and item.connection_id == target_connection_id
                     and item.owner_id == invocation.owner_user_id
                     and str(item.metadata.get("client_id") or "")

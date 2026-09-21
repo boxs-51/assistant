@@ -333,6 +333,7 @@ async def test_r7_e_replay_safe_predispatch_failure_never_downgrades_old_infligh
         outcome=RemoteOutcomeState.IN_FLIGHT,
         realtime=realtime,
     )
+    store.items[invocation.invocation_id].max_attempts = 5
 
     with pytest.raises(CapabilityError) as raised:
         await runtime.continue_invocation(
@@ -375,6 +376,145 @@ async def test_r7_e_definition_idempotency_drift_rejects_before_attempt():
         )
 
     assert raised.value.code == REMOTE_INVOCATION_CONFLICT
+    assert [item.attempt_number for item in await store.list_attempts(
+        invocation.invocation_id
+    )] == [1]
+
+
+
+@pytest.mark.asyncio
+async def test_r7_e_wrong_mode_state_wait_reason_and_lineage_fail_before_attempt():
+    cases = (
+        ("wrong-mode", None, None, None),
+        ("state", CapabilityInvocationState.COMPLETED, None, None),
+        ("wait", None, CapabilityWaitReason.DEPENDENCY, None),
+        ("lineage", None, None, "missing"),
+    )
+    for case, state, wait_reason, lineage in cases:
+        runtime, store, invocation, fingerprint = await _runtime(
+            idempotency=CapabilityIdempotency.IDEMPOTENT,
+            outcome=RemoteOutcomeState.OUTCOME_UNKNOWN,
+        )
+        current = store.items[invocation.invocation_id]
+        if state is not None:
+            current.state = state
+        if wait_reason is not None:
+            current.wait_reason = wait_reason
+        if lineage == "missing":
+            current.execution_id = None
+
+        mode = (
+            ExistingInvocationContinuationMode.DISPATCH_NOT_DISPATCHED
+            if case == "wrong-mode"
+            else ExistingInvocationContinuationMode.REPLAY_SAFE
+        )
+        with pytest.raises(CapabilityError) as raised:
+            await runtime.continue_invocation(
+                invocation.invocation_id,
+                target_connection_id=K2,
+                mode=mode,
+                expected_revision=invocation.revision,
+                expected_request_fingerprint=fingerprint,
+            )
+        assert raised.value.code in {
+            CAPABILITY_CONTINUATION_UNSAFE,
+            "CAPABILITY_CONTINUATION_INVALID_STATE",
+        }
+        assert [item.attempt_number for item in await store.list_attempts(
+            invocation.invocation_id
+        )] == [1]
+
+
+@pytest.mark.asyncio
+async def test_r7_e_durable_argument_fingerprint_corruption_rejects_before_attempt():
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.IDEMPOTENT,
+        outcome=RemoteOutcomeState.OUTCOME_UNKNOWN,
+    )
+    store.items[invocation.invocation_id].arguments = {"value": "corrupted"}
+
+    with pytest.raises(CapabilityError) as raised:
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K2,
+            mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+        )
+
+    assert raised.value.code == REMOTE_INVOCATION_CONFLICT
+    assert [item.attempt_number for item in await store.list_attempts(
+        invocation.invocation_id
+    )] == [1]
+
+
+@pytest.mark.asyncio
+async def test_r7_e_target_must_be_new_active_same_principal_client_generation():
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.IDEMPOTENT,
+        outcome=RemoteOutcomeState.OUTCOME_UNKNOWN,
+    )
+
+    with pytest.raises(CapabilityError) as same_generation:
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K1,
+            mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+        )
+    assert same_generation.value.code == "CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE"
+
+    runtime.connection_registry.disconnect(K2)
+    with pytest.raises(CapabilityError) as inactive:
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K2,
+            mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+        )
+    assert inactive.value.code == "CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE"
+
+    runtime.connection_registry.register(
+        "foreign-session",
+        "foreign-user",
+        socket=object(),
+        metadata={"client_id": CLIENT_ID},
+        connection_id="conn-r7e-foreign",
+    )
+    runtime.connection_registry.activate("conn-r7e-foreign")
+    with pytest.raises(CapabilityError) as foreign:
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id="conn-r7e-foreign",
+            mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+        )
+    assert foreign.value.code == "CAPABILITY_UNAUTHORIZED"
+    assert [item.attempt_number for item in await store.list_attempts(
+        invocation.invocation_id
+    )] == [1]
+
+
+@pytest.mark.asyncio
+async def test_r7_e_unknown_idempotency_cannot_replay_unknown_outcome():
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.UNKNOWN,
+        outcome=RemoteOutcomeState.OUTCOME_UNKNOWN,
+    )
+
+    with pytest.raises(CapabilityError) as raised:
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K2,
+            mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+        )
+
+    assert raised.value.code == CAPABILITY_CONTINUATION_UNSAFE
     assert [item.attempt_number for item in await store.list_attempts(
         invocation.invocation_id
     )] == [1]

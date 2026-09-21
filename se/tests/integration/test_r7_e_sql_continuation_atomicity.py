@@ -192,3 +192,52 @@ async def test_r7_e_sql_start_transition_updates_invocation_and_attempt_atomical
         assert attempts[-1].state is CapabilityInvocationState.RUNNING
     finally:
         await driver.disconnect()
+
+
+
+@pytest.mark.asyncio
+async def test_r7_e_sql_start_failure_rolls_back_invocation_running_cas(tmp_path):
+    driver, store, lifecycle = await _sql_lifecycle(tmp_path)
+    try:
+        original = _invocation("inv-r7e-start-rollback")
+        await store.create(original)
+        await _seed_attempt_one(store, original.invocation_id)
+        loaded = await store.get(original.invocation_id)
+        assert loaded is not None
+
+        dispatching, attempt = await lifecycle.begin_continuation_attempt(
+            loaded,
+            implementation_id="conn-k2:tool.r7e.sql",
+            driver_kind="REMOTE_CLIENT",
+            connection_id="conn-k2",
+            continuation_mode="REPLAY_SAFE",
+        )
+        running = dispatching.model_copy(
+            update={
+                "state": CapabilityInvocationState.RUNNING,
+                "revision": dispatching.revision + 1,
+            }
+        )
+        missing_attempt = attempt.model_copy(
+            update={
+                "attempt_id": "att-does-not-exist",
+                "state": CapabilityInvocationState.RUNNING,
+            }
+        )
+
+        started = await store.start_continuation_attempt(
+            running,
+            dispatching.revision,
+            missing_attempt,
+        )
+        assert started is False
+
+        persisted = await store.get(original.invocation_id)
+        attempts = await store.list_attempts(original.invocation_id)
+        assert persisted is not None
+        assert persisted.state is CapabilityInvocationState.DISPATCHING
+        assert persisted.revision == dispatching.revision
+        assert attempts[-1].attempt_id == attempt.attempt_id
+        assert attempts[-1].state is CapabilityInvocationState.DISPATCHING
+    finally:
+        await driver.disconnect()
