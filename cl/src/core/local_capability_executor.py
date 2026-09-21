@@ -26,7 +26,15 @@ class LocalCapabilityExecutor:
         self.hitl = hitl or HITLManager()
         self.risk = RiskAnalyzer("")
 
-    def execute(self, capability_id, arguments, envelope, cancellation_event):
+    def execute(
+        self,
+        capability_id,
+        arguments,
+        envelope,
+        cancellation_event,
+        *,
+        before_target_call=None,
+    ):
         target, metadata = self._resolve(capability_id)
         if target is None:
             raise LookupError(f"Capability '{capability_id}' is not executable on this client.")
@@ -52,6 +60,8 @@ class LocalCapabilityExecutor:
             raise LocalExecutionDenied(f"Local user denied capability '{capability_id}'.")
         if cancellation_event.is_set():
             raise LocalExecutionCancelled()
+        if before_target_call is not None:
+            before_target_call()
         result = self._call(target, arguments, envelope, cancellation_event)
         if inspect.isawaitable(result):
             result = asyncio.run(result)

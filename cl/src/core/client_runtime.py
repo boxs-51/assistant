@@ -12,6 +12,7 @@ import requests
 from .auth_session import AuthSessionStore
 from .capability_dispatcher import CapabilityDispatcher
 from .capability_runtime import CapabilityRuntime
+from .client_invocation_ledger import ClientInvocationLedger
 from .gateway_client import GatewayLLMClient
 from .installation_identity import InstallationIdentityStore
 from .realtime_client import GatewayRealtimeClient
@@ -41,6 +42,7 @@ class ClientRuntime:
         owner_id: Optional[str] = None,
         session_store: Optional[AuthSessionStore] = None,
         installation_store: Optional[InstallationIdentityStore] = None,
+        invocation_ledger: Optional[ClientInvocationLedger] = None,
         hitl=None,
     ) -> None:
         self.registry = registry
@@ -60,6 +62,16 @@ class ClientRuntime:
         else:
             self.installation_store = InstallationIdentityStore()
             self.client_id = self.installation_store.load_or_create()
+        if invocation_ledger is not None:
+            self.invocation_ledger = invocation_ledger
+        elif self.installation_store is not None:
+            self.invocation_ledger = ClientInvocationLedger(
+                self.installation_store.path.with_name(
+                    "client-invocations.sqlite3"
+                )
+            )
+        else:
+            self.invocation_ledger = ClientInvocationLedger()
         self.gateway = GatewayLLMClient(gateway_url, api_key=api_key)
         if not self._external_api_key:
             self._load_saved_session()
@@ -72,6 +84,9 @@ class ClientRuntime:
             registry,
             self.realtime,
             hitl=hitl,
+            invocation_ledger=self.invocation_ledger,
+            client_id=self.client_id,
+            principal_id=self.owner_id,
         )
         self.capabilities = CapabilityRuntime(
             registry,
@@ -133,6 +148,11 @@ class ClientRuntime:
                 if not self.owner_id:
                     raise RuntimeError("Unable to determine owner_id.")
                 self.capabilities.owner_id = self.owner_id
+            self.dispatcher.set_identity(
+                self.client_id,
+                self.owner_id,
+            )
+            self.capabilities.owner_id = self.owner_id
             self._state = ClientRuntimeState.AUTH_READY
             if self._generation_started:
                 self._replace_realtime_generation()
@@ -191,11 +211,15 @@ class ClientRuntime:
 
     def _activate_authenticated_identity(self, tokens: dict) -> dict:
         identity = self.gateway.current_session()
+        self._persist_session(identity)
+        self._drain_current_generation()
         self.owner_id = identity["user_id"]
         self.principal_type = identity.get("principal_type", "user")
         self.capabilities.owner_id = self.owner_id
-        self._persist_session(identity)
-        self._drain_current_generation()
+        self.dispatcher.set_identity(
+            self.client_id,
+            self.owner_id,
+        )
         self.start()
         return {"user": identity, "tokens": tokens}
 
@@ -297,6 +321,10 @@ class ClientRuntime:
         self._drain_current_generation()
         self.owner_id = None
         self.principal_type = None
+        self.dispatcher.set_identity(
+            self.client_id,
+            None,
+        )
         self.gateway.clear_access_token()
         self.gateway.refresh_token_value = None
         if not self._external_api_key:

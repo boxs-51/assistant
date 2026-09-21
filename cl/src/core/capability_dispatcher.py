@@ -9,6 +9,12 @@ from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Dict
 
+from .client_invocation_ledger import (
+    ClientInvocationLedger,
+    ClientInvocationLedgerConflict,
+    ClientInvocationLedgerState,
+    ClientInvocationRecord,
+)
 from .local_capability_executor import (
     LocalCapabilityExecutor,
     LocalExecutionCancelled,
@@ -34,6 +40,8 @@ class LocalInvocation:
     capability_id: str
     capability_version: str
     request_fingerprint: str
+    client_id: str | None
+    principal_id: str | None
     envelope: Dict[str, Any]
     cancellation_event: threading.Event
     future: Future
@@ -54,6 +62,9 @@ class CapabilityDispatcher:
         terminal_ttl: float = 300.0,
         max_terminal: int = 1024,
         local_executor: LocalCapabilityExecutor | None = None,
+        invocation_ledger: ClientInvocationLedger | None = None,
+        client_id: str | None = None,
+        principal_id: str | None = None,
     ) -> None:
         self.registry = registry
         self.realtime = realtime
@@ -70,9 +81,21 @@ class CapabilityDispatcher:
         self._terminal: OrderedDict[str, TerminalOutcome] = OrderedDict()
         self._registered_capabilities: frozenset[str] = frozenset()
         self._epoch = 0
+        self.invocation_ledger = invocation_ledger
+        self._client_id = client_id
+        self._principal_id = principal_id
 
     def set_realtime(self, realtime) -> None:
         self.realtime = realtime
+
+    def set_identity(
+        self,
+        client_id: str | None,
+        principal_id: str | None,
+    ) -> None:
+        with self._lock:
+            self._client_id = client_id
+            self._principal_id = principal_id
 
     def update_registration_snapshot(self, capability_ids) -> None:
         self._registered_capabilities = frozenset(capability_ids)
@@ -132,6 +155,7 @@ class CapabilityDispatcher:
             return
         if declared_fingerprint is not None:
             request_fingerprint = str(declared_fingerprint)
+        idempotency = self._capability_idempotency(capability_id)
 
         with self._lock:
             self._purge_terminal_locked()
@@ -161,6 +185,32 @@ class CapabilityDispatcher:
                     return
                 self._emit(invocation_id, previous)
                 return
+            durable = self._ledger_get(invocation_id)
+            if durable is not None:
+                if not self._same_semantics(
+                    durable.capability_id,
+                    durable.capability_version,
+                    durable.request_fingerprint,
+                    capability_id,
+                    capability_version,
+                    request_fingerprint,
+                ) or durable.idempotency != idempotency:
+                    self._emit_conflict(invocation_id, envelope)
+                    return
+                if durable.state is ClientInvocationLedgerState.TERMINAL:
+                    outcome = self._terminal_from_record(
+                        durable,
+                        envelope,
+                    )
+                    self._terminal[invocation_id] = outcome
+                    self._terminal.move_to_end(invocation_id)
+                    self._purge_terminal_locked()
+                    self._emit(invocation_id, outcome)
+                    return
+                if durable.state is ClientInvocationLedgerState.RUNNING:
+                    # A prior process may have entered the target call.  A
+                    # duplicate invoke is not reconciliation permission.
+                    return
             if not self._capacity.acquire(blocking=False):
                 self._record_and_emit(
                     invocation_id, envelope, "capability.error",
@@ -170,14 +220,45 @@ class CapabilityDispatcher:
                     request_fingerprint=request_fingerprint,
                 )
                 return
+            ledger_identity = self._ledger_identity()
+            if ledger_identity is not None:
+                try:
+                    durable = self.invocation_ledger.prepare(
+                        client_id=ledger_identity[0],
+                        principal_id=ledger_identity[1],
+                        invocation_id=invocation_id,
+                        capability_id=capability_id,
+                        capability_version=capability_version,
+                        request_fingerprint=request_fingerprint,
+                        idempotency=idempotency,
+                    )
+                except ClientInvocationLedgerConflict:
+                    self._capacity.release()
+                    self._emit_conflict(invocation_id, envelope)
+                    return
+                if durable.state is ClientInvocationLedgerState.TERMINAL:
+                    self._capacity.release()
+                    outcome = self._terminal_from_record(
+                        durable,
+                        envelope,
+                    )
+                    self._terminal[invocation_id] = outcome
+                    self._terminal.move_to_end(invocation_id)
+                    self._purge_terminal_locked()
+                    self._emit(invocation_id, outcome)
+                    return
+                if durable.state is ClientInvocationLedgerState.RUNNING:
+                    self._capacity.release()
+                    return
             cancellation_event = threading.Event()
             try:
                 future = self._executor.submit(
-                    self.local_executor.execute,
+                    self._execute_local,
                     capability_id,
                     arguments,
                     envelope,
                     cancellation_event,
+                    ledger_identity,
                 )
             except BaseException:
                 self._capacity.release()
@@ -187,6 +268,16 @@ class CapabilityDispatcher:
                 capability_id,
                 capability_version,
                 request_fingerprint,
+                (
+                    ledger_identity[0]
+                    if ledger_identity is not None
+                    else None
+                ),
+                (
+                    ledger_identity[1]
+                    if ledger_identity is not None
+                    else None
+                ),
                 dict(envelope),
                 cancellation_event,
                 future,
@@ -231,6 +322,38 @@ class CapabilityDispatcher:
             capability_id=invocation.capability_id,
             capability_version=invocation.capability_version,
             request_fingerprint=invocation.request_fingerprint,
+            client_id=invocation.client_id,
+            principal_id=invocation.principal_id,
+        )
+
+    def _execute_local(
+        self,
+        capability_id,
+        arguments,
+        envelope,
+        cancellation_event,
+        ledger_identity,
+    ):
+        before_target_call = None
+        if ledger_identity is not None and self.invocation_ledger is not None:
+            client_id, principal_id = ledger_identity
+            invocation_id = envelope.get("invocation_id")
+
+            def mark_running() -> None:
+                self.invocation_ledger.mark_running(
+                    client_id=client_id,
+                    principal_id=principal_id,
+                    invocation_id=invocation_id,
+                )
+
+            before_target_call = mark_running
+
+        return self.local_executor.execute(
+            capability_id,
+            arguments,
+            envelope,
+            cancellation_event,
+            before_target_call=before_target_call,
         )
 
     def reconcile(self, envelope: Dict[str, Any]) -> None:
@@ -308,12 +431,51 @@ class CapabilityDispatcher:
                         request_fingerprint,
                     )
             else:
-                response = {
-                    "status": "NOT_FOUND",
-                    "capability_id": capability_id,
-                    "capability_version": capability_version,
-                    "request_fingerprint": request_fingerprint,
-                }
+                durable = self._ledger_get(invocation_id)
+                if durable is not None and not self._same_semantics(
+                    durable.capability_id,
+                    durable.capability_version,
+                    durable.request_fingerprint,
+                    capability_id,
+                    capability_version,
+                    request_fingerprint,
+                ):
+                    response = self._conflict_reconciliation(
+                        capability_id,
+                        capability_version,
+                        request_fingerprint,
+                    )
+                elif (
+                    durable is not None
+                    and durable.state
+                    is ClientInvocationLedgerState.TERMINAL
+                ):
+                    response = {
+                        "status": "TERMINAL",
+                        "capability_id": durable.capability_id,
+                        "capability_version": durable.capability_version,
+                        "request_fingerprint": durable.request_fingerprint,
+                        "terminal_type": durable.terminal_type,
+                        "terminal_payload": dict(
+                            durable.terminal_payload or {}
+                        ),
+                        "ledger_state": durable.state.value,
+                    }
+                elif durable is not None:
+                    response = {
+                        "status": "UNKNOWN",
+                        "capability_id": durable.capability_id,
+                        "capability_version": durable.capability_version,
+                        "request_fingerprint": durable.request_fingerprint,
+                        "ledger_state": durable.state.value,
+                    }
+                else:
+                    response = {
+                        "status": "NOT_FOUND",
+                        "capability_id": capability_id,
+                        "capability_version": capability_version,
+                        "request_fingerprint": request_fingerprint,
+                    }
 
         try:
             self.realtime.send_reconciliation(
@@ -365,6 +527,8 @@ class CapabilityDispatcher:
         capability_id=None,
         capability_version=None,
         request_fingerprint=None,
+        client_id=None,
+        principal_id=None,
     ) -> None:
         outcome = TerminalOutcome(
             event_type=event_type,
@@ -379,6 +543,30 @@ class CapabilityDispatcher:
         with self._lock:
             if expected_epoch is not None and expected_epoch != self._epoch:
                 return
+            if (
+                self.invocation_ledger is not None
+                and client_id
+                and principal_id
+                and capability_id
+                and capability_version
+                and request_fingerprint
+            ):
+                terminal_type = {
+                    "capability.result": "result",
+                    "capability.error": "error",
+                    "capability.cancelled": "cancelled",
+                }[event_type]
+                try:
+                    self.invocation_ledger.commit_terminal(
+                        client_id=client_id,
+                        principal_id=principal_id,
+                        invocation_id=invocation_id,
+                        terminal_type=terminal_type,
+                        terminal_payload=dict(payload),
+                    )
+                except ClientInvocationLedgerConflict:
+                    self._emit_conflict(invocation_id, envelope)
+                    return
             existing = self._terminal.get(invocation_id)
             if existing is not None:
                 outcome = existing
@@ -421,6 +609,62 @@ class CapabilityDispatcher:
             else {}
         )
         return str(metadata.get("version", "1.0"))
+
+    def _capability_idempotency(self, capability_id: str) -> str:
+        tool = self.registry.tools.get(capability_id)
+        metadata = (
+            tool.get("metadata", {})
+            if isinstance(tool, dict)
+            else {}
+        )
+        return str(metadata.get("idempotency", "UNKNOWN"))
+
+    def _ledger_identity(self) -> tuple[str, str] | None:
+        if (
+            self.invocation_ledger is None
+            or not self._client_id
+            or not self._principal_id
+        ):
+            return None
+        return self._client_id, self._principal_id
+
+    def _ledger_get(
+        self,
+        invocation_id: str,
+    ) -> ClientInvocationRecord | None:
+        identity = self._ledger_identity()
+        if identity is None:
+            return None
+        return self.invocation_ledger.get(
+            client_id=identity[0],
+            principal_id=identity[1],
+            invocation_id=invocation_id,
+        )
+
+    def _terminal_from_record(
+        self,
+        record: ClientInvocationRecord,
+        envelope: Dict[str, Any],
+    ) -> TerminalOutcome:
+        event_type = {
+            "result": "capability.result",
+            "error": "capability.error",
+            "cancelled": "capability.cancelled",
+        }.get(record.terminal_type)
+        if event_type is None:
+            raise ClientInvocationLedgerConflict(
+                "Durable terminal record has invalid terminal_type."
+            )
+        return TerminalOutcome(
+            event_type=event_type,
+            payload=dict(record.terminal_payload or {}),
+            execution_id=envelope.get("execution_id"),
+            trace_id=envelope.get("trace_id"),
+            capability_id=record.capability_id,
+            capability_version=record.capability_version,
+            request_fingerprint=record.request_fingerprint,
+            expires_at=time.monotonic() + self._terminal_ttl,
+        )
 
     @staticmethod
     def _request_fingerprint(

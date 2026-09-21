@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict
 
@@ -30,3 +30,4 @@ class RemoteReconciliationResult(BaseModel):
     request_fingerprint: str
     terminal_type: RemoteTerminalType | None = None
     terminal_payload: dict[str, Any] | None = None
+    ledger_state: Literal["PREPARED", "RUNNING", "TERMINAL"] | None = None

@@ -4,7 +4,7 @@
 
 **Dependencies:** R6-A COMPLETE, R6-B COMPLETE
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Scope
 
@@ -119,14 +119,32 @@ py -m pytest -q se/tests tools cl/tests
 Same-process result-send loss must be recoverable on a new connection
 generation without executing the capability a second time.
 
+## Completion evidence
+
+```text
+Compatibility regression gate:
+    6 passed in 1.44s
+
+Focused R6-C gate:
+    41 passed in 3.99s
+
+Repository-wide gate:
+    627 passed
+    9 warnings
+    119.18s
+```
+
+The broad-gate warnings are existing dependency/configuration deprecations.
+No R6-C correctness failure remains.
+
 ## Phase status
 
 ```text
 R5      COMPLETE
 R6-A    COMPLETE
 R6-B    COMPLETE
-R6-C    IMPLEMENTED / PENDING TEST EVIDENCE
-R6-D    PENDING
+R6-C    COMPLETE
+R6-D    ACTIVE
 R6-E    PENDING
 R6      NOT COMPLETE
 ```
