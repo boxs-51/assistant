@@ -296,6 +296,12 @@ async def test_r7_d_unknown_idempotent_builds_replay_safe_plan_without_claim():
 @pytest.mark.asyncio
 async def test_r7_d_not_dispatched_classifies_without_reconciliation():
     store = _PlanStore()
+    store.pending = (
+        replace(
+            store.pending[0],
+            observed_remote_outcome_state="NOT_DISPATCHED",
+        ),
+    )
     caps = _CapabilityRuntime(
         _invocation(outcome=RemoteOutcomeState.NOT_DISPATCHED)
     )
@@ -403,6 +409,12 @@ async def test_r7_d_semantic_fingerprint_drift_is_rejected():
 @pytest.mark.asyncio
 async def test_r7_d_missing_target_capability_defers_safe_future_action():
     store = _PlanStore()
+    store.pending = (
+        replace(
+            store.pending[0],
+            observed_remote_outcome_state="NOT_DISPATCHED",
+        ),
+    )
     caps = _CapabilityRuntime(
         _invocation(outcome=RemoteOutcomeState.NOT_DISPATCHED),
         ready=False,
