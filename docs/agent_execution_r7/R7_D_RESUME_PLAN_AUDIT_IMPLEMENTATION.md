@@ -6,7 +6,7 @@
 - Baseline: `45f7a6353b46fdb9054ef41c457fbee424849429`
 - Branch: `r7-d-resume-plan`
 - Depends on: R7-C CLOSED / VERIFIED
-- Status: **IMPLEMENTED / VERIFICATION PENDING**
+- Status: **CLOSED / VERIFIED**
 
 ## Scope
 
@@ -319,5 +319,18 @@ Post-green review found and hardened four correctness gaps before closure:
    requires exact AgentToolResult identity and exact terminal R6 projection,
    not merely the presence of a COMMITTED row.
 
-R7-D remains **IMPLEMENTED / VERIFICATION PENDING** until CI on the hardening
-commit is green.
+## Final verification
+
+Verified implementation HEAD: `7862c748161b18e53438129165a7a417d71f008f`
+
+- Architecture Baseline — success
+- Phase 5.6 Exit Gate — success
+- Phase 5.7 Exit Gate — success
+- Phase 5.8 Exit Gate — success
+- Phase 5.9 Exit Gate — success
+- Phase 5.10 Exit Gate — success
+- Phase 5.11 Exit Gate — success
+- Linux root suite: **692 passed, 1 skipped, 14 warnings**
+- Windows client contracts: **38 passed**
+
+R7-D is **CLOSED / VERIFIED**. R7-E/F/G/H remain intentionally deferred.
