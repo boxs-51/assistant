@@ -82,6 +82,25 @@ class _InvocationStore:
         return self.invocation.model_copy(deep=True)
 
 
+class _ConnectionRegistry:
+    def __init__(
+        self,
+        *,
+        usable=True,
+        user_id="user-1",
+        client_id="client-1",
+    ):
+        self.snapshot = SimpleNamespace(
+            is_usable=usable,
+            user_id=user_id,
+            metadata={"client_id": client_id},
+        )
+
+    def get(self, connection_id):
+        assert connection_id == "conn-new"
+        return self.snapshot
+
+
 class _Catalog:
     def __init__(self, *, ready=True):
         self.ready = ready
@@ -107,10 +126,18 @@ class _CapabilityRuntime:
         reconciliation_status=None,
         ready=True,
         reconciled_invocation=None,
+        connection_usable=True,
+        connection_user_id="user-1",
+        connection_client_id="client-1",
     ):
         self.store = _InvocationStore(invocation)
         self.invocation_lifecycle = SimpleNamespace(store=self.store)
         self.catalog = _Catalog(ready=ready)
+        self.connection_registry = _ConnectionRegistry(
+            usable=connection_usable,
+            user_id=connection_user_id,
+            client_id=connection_client_id,
+        )
         self.reconciliation_status = reconciliation_status
         self.reconciled_invocation = reconciled_invocation
         self.reconcile_calls = 0
@@ -186,9 +213,18 @@ class _PlanStore:
             ),
         )
         self.committed = None
+        self.task = SimpleNamespace(
+            id="task-1",
+            session_id="session-1",
+            created_by="user-1",
+            status="RUNNING",
+        )
 
     async def load_execution(self, execution_id):
         return self.execution if execution_id == "exec-1" else None
+
+    async def load_task(self, task_id):
+        return self.task if task_id == "task-1" else None
 
     async def load_current_checkpoint(self, execution_id):
         return self.checkpoint
@@ -275,7 +311,18 @@ async def test_r7_d_not_dispatched_classifies_without_reconciliation():
 @pytest.mark.asyncio
 async def test_r7_d_reconciled_terminal_reuses_committed_projection():
     store = _PlanStore()
-    store.committed = SimpleNamespace(commit_state="COMMITTED")
+    store.committed = SimpleNamespace(
+        commit_state="COMMITTED",
+        execution_id="exec-1",
+        tool_call_id="call-1",
+        invocation_id="inv-1",
+        capability_id="desktop.echo",
+        success=True,
+        output={"ok": True},
+        error_code=None,
+        error_message=None,
+        retryable=False,
+    )
     reconciled = _invocation(
         outcome=RemoteOutcomeState.TERMINAL_COMMITTED,
         revision=5,
@@ -544,3 +591,93 @@ async def test_r7_d_execution_resume_is_preflight_only_no_claim_or_runtime_start
     assert socket.messages[0]["payload"]["status"] == "PLAN_READY"
     assert socket.messages[0]["payload"]["activation"] == "R7_D_PREFLIGHT_ONLY"
     assert socket.messages[0]["payload"]["plan_fingerprint"] == "f" * 64
+
+
+@pytest.mark.asyncio
+async def test_r7_d_rejects_invocation_revision_regression_below_checkpoint_watermark():
+    store = _PlanStore()
+    store.pending = (
+        replace(store.pending[0], invocation_revision=5),
+    )
+    caps = _CapabilityRuntime(_invocation(revision=4))
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "INVOCATION_REVISION_REGRESSION"
+    assert caps.reconcile_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_d_rejects_remote_outcome_regression_from_unknown_to_not_dispatched():
+    store = _PlanStore()
+    caps = _CapabilityRuntime(
+        _invocation(
+            outcome=RemoteOutcomeState.NOT_DISPATCHED,
+            revision=5,
+        )
+    )
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "REMOTE_OUTCOME_REGRESSION"
+    assert caps.reconcile_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_d_terminal_task_never_produces_plan_ready():
+    store = _PlanStore()
+    store.task.status = "CANCELLED"
+    caps = _CapabilityRuntime(_invocation())
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "TASK_TERMINAL"
+    assert caps.reconcile_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_d_planner_revalidates_target_connection_authority():
+    store = _PlanStore()
+    caps = _CapabilityRuntime(
+        _invocation(),
+        connection_usable=False,
+    )
+
+    with pytest.raises(ResumePlanDeferred) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "RESUME_CONNECTION_UNAVAILABLE"
+    assert caps.reconcile_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_d_reuse_committed_rejects_mismatched_terminal_projection():
+    store = _PlanStore()
+    store.committed = SimpleNamespace(
+        commit_state="COMMITTED",
+        execution_id="exec-1",
+        tool_call_id="call-1",
+        invocation_id="inv-other",
+        capability_id="desktop.echo",
+        success=True,
+        output={"ok": True},
+        error_code=None,
+        error_message=None,
+        retryable=False,
+    )
+    invocation = _invocation(
+        outcome=RemoteOutcomeState.TERMINAL_COMMITTED,
+        revision=5,
+    )
+    invocation.state = CapabilityInvocationState.COMPLETED
+    invocation.wait_reason = None
+    invocation.output = {"ok": True}
+    caps = _CapabilityRuntime(invocation)
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "COMMITTED_TOOL_RESULT_CONFLICT"

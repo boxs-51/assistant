@@ -302,4 +302,22 @@ py -m pytest -q `
 py -m pytest -q
 ```
 
-R7-D remains **IMPLEMENTED / VERIFICATION PENDING** until CI is green.
+## Final senior-architect hardening
+
+Post-green review found and hardened four correctness gaps before closure:
+
+1. **P0 remote-outcome watermark regression** — a checkpoint that observed
+   `OUTCOME_UNKNOWN` must never later classify a regressed
+   `NOT_DISPATCHED` row as dispatch-safe. Planner now validates monotonic R6
+   outcome progress from the checkpoint watermark.
+2. **P1 invocation revision regression** — current invocation revision must be
+   `>= checkpoint.invocation_revision`.
+3. **P1 Task terminal / K2 authority validation** — planner now rejects
+   terminal/cancelled tasks and independently revalidates target connection
+   usability, principal and stable client identity.
+4. **P1 committed-result semantic authority** — `REUSE_COMMITTED` now
+   requires exact AgentToolResult identity and exact terminal R6 projection,
+   not merely the presence of a COMMITTED row.
+
+R7-D remains **IMPLEMENTED / VERIFICATION PENDING** until CI on the hardening
+commit is green.

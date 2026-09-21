@@ -15,9 +15,12 @@ from ..capability.contracts.error import (
 )
 from ..capability.contracts.implementation import CapabilityImplementationState
 from ..capability.contracts.invocation import (
+    TERMINAL_INVOCATION_STATES,
     CapabilityInvocation,
+    CapabilityInvocationState,
     RemoteOutcomeState,
 )
+from ..connection.contracts import ConnectionNotFoundError
 from ..capability.contracts.reconciliation import RemoteReconciliationStatus
 from ..connection.multiplexer import RemoteConnectionLost
 from .contracts.inference import InferenceMessage
@@ -71,6 +74,43 @@ class AgentResumePlanningService:
             CapabilityImplementationState.DEGRADED,
         }
     )
+    _TASK_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+    _OUTCOME_PROGRESS = {
+        None: frozenset(
+            {
+                RemoteOutcomeState.NOT_DISPATCHED,
+                RemoteOutcomeState.IN_FLIGHT,
+                RemoteOutcomeState.OUTCOME_UNKNOWN,
+                RemoteOutcomeState.TERMINAL_COMMITTED,
+                None,
+            }
+        ),
+        RemoteOutcomeState.NOT_DISPATCHED: frozenset(
+            {
+                RemoteOutcomeState.NOT_DISPATCHED,
+                RemoteOutcomeState.IN_FLIGHT,
+                RemoteOutcomeState.OUTCOME_UNKNOWN,
+                RemoteOutcomeState.TERMINAL_COMMITTED,
+            }
+        ),
+        RemoteOutcomeState.IN_FLIGHT: frozenset(
+            {
+                RemoteOutcomeState.IN_FLIGHT,
+                RemoteOutcomeState.NOT_DISPATCHED,
+                RemoteOutcomeState.OUTCOME_UNKNOWN,
+                RemoteOutcomeState.TERMINAL_COMMITTED,
+            }
+        ),
+        RemoteOutcomeState.OUTCOME_UNKNOWN: frozenset(
+            {
+                RemoteOutcomeState.OUTCOME_UNKNOWN,
+                RemoteOutcomeState.TERMINAL_COMMITTED,
+            }
+        ),
+        RemoteOutcomeState.TERMINAL_COMMITTED: frozenset(
+            {RemoteOutcomeState.TERMINAL_COMMITTED}
+        ),
+    }
 
     def __init__(
         self,
@@ -92,6 +132,12 @@ class AgentResumePlanningService:
         target_client_id: str | None,
         target_connection_id: str,
     ) -> ResumePlan:
+        self._validate_target_connection(
+            target_user_id=target_user_id,
+            target_client_id=target_client_id,
+            target_connection_id=target_connection_id,
+        )
+
         execution = await self._store.load_execution(execution_id)
         if execution is None:
             raise ResumePlanRejected(
@@ -141,6 +187,30 @@ class AgentResumePlanningService:
                 "FOREIGN_CLIENT",
                 "Resume client does not match checkpoint origin client.",
             )
+
+        if execution.task_id:
+            task = await self._store.load_task(execution.task_id)
+            if task is None:
+                raise ResumePlanRejected(
+                    "RESUME_TASK_NOT_FOUND",
+                    f"Unknown AgentTask: {execution.task_id}",
+                )
+            if task.session_id != execution.session_id:
+                raise ResumePlanRejected(
+                    "TASK_SEMANTIC_CONFLICT",
+                    "AgentTask session does not match AgentExecution.",
+                )
+            if task.created_by != target_user_id:
+                raise ResumePlanRejected(
+                    "FOREIGN_PRINCIPAL",
+                    "AgentTask owner does not match resume principal.",
+                )
+            task_status = getattr(task.status, "value", task.status)
+            if str(task_status) in self._TASK_TERMINAL_STATES:
+                raise ResumePlanRejected(
+                    "TASK_TERMINAL",
+                    f"AgentTask {execution.task_id} is already {task_status}.",
+                )
 
         remaining = checkpoint.remaining_active_budget_seconds
         if remaining is None or not math.isfinite(float(remaining)):
@@ -278,6 +348,43 @@ class AgentResumePlanningService:
                     "Pending invocation ordinal disagrees with tool_call_ids.",
                 )
 
+    def _validate_target_connection(
+        self,
+        *,
+        target_user_id: str,
+        target_client_id: str | None,
+        target_connection_id: str,
+    ) -> None:
+        registry = getattr(self._capabilities, "connection_registry", None)
+        if registry is None:
+            raise ResumePlanRejected(
+                "CONNECTION_REGISTRY_UNAVAILABLE",
+                "Connection authority is unavailable during resume planning.",
+            )
+        try:
+            snapshot = registry.get(target_connection_id)
+        except ConnectionNotFoundError as exc:
+            raise ResumePlanDeferred(
+                "RESUME_CONNECTION_UNAVAILABLE",
+                "Target resume connection is no longer registered.",
+            ) from exc
+        if not snapshot.is_usable:
+            raise ResumePlanDeferred(
+                "RESUME_CONNECTION_UNAVAILABLE",
+                "Target resume connection is not ACTIVE/usable.",
+            )
+        if snapshot.user_id != target_user_id:
+            raise ResumePlanRejected(
+                "FOREIGN_PRINCIPAL",
+                "Target resume connection belongs to another principal.",
+            )
+        connection_client_id = str(snapshot.metadata.get("client_id") or "")
+        if target_client_id and connection_client_id != target_client_id:
+            raise ResumePlanRejected(
+                "FOREIGN_CLIENT",
+                "Target connection stable client identity changed.",
+            )
+
     async def _load_invocation(self, invocation_id: str) -> CapabilityInvocation:
         lifecycle = getattr(self._capabilities, "invocation_lifecycle", None)
         store = getattr(lifecycle, "store", None)
@@ -303,6 +410,24 @@ class AgentResumePlanningService:
         target_user_id: str,
         target_client_id: str | None,
     ) -> None:
+        if invocation.revision < snapshot.invocation_revision:
+            raise ResumePlanRejected(
+                "INVOCATION_REVISION_REGRESSION",
+                "CapabilityInvocation revision is older than checkpoint watermark.",
+            )
+
+        observed = (
+            RemoteOutcomeState(snapshot.observed_remote_outcome_state)
+            if snapshot.observed_remote_outcome_state is not None
+            else None
+        )
+        allowed = AgentResumePlanningService._OUTCOME_PROGRESS[observed]
+        if invocation.remote_outcome_state not in allowed:
+            raise ResumePlanRejected(
+                "REMOTE_OUTCOME_REGRESSION",
+                "CapabilityInvocation remote outcome regressed behind checkpoint watermark.",
+            )
+
         expected = {
             "execution_id": execution_id,
             "tool_call_id": snapshot.tool_call_id,
@@ -357,7 +482,8 @@ class AgentResumePlanningService:
         if outcome is RemoteOutcomeState.TERMINAL_COMMITTED:
             await self._require_committed_projection(
                 execution_id,
-                snapshot.tool_call_id,
+                snapshot,
+                invocation,
             )
             return self._action(
                 snapshot,
@@ -417,7 +543,8 @@ class AgentResumePlanningService:
                 )
             await self._require_committed_projection(
                 execution_id,
-                snapshot.tool_call_id,
+                snapshot,
+                current,
             )
             return self._action(
                 snapshot,
@@ -457,17 +584,63 @@ class AgentResumePlanningService:
     async def _require_committed_projection(
         self,
         execution_id: str,
-        tool_call_id: str,
+        snapshot: CheckpointPendingInvocation,
+        invocation: CapabilityInvocation,
     ) -> None:
+        if (
+            invocation.remote_outcome_state
+            is not RemoteOutcomeState.TERMINAL_COMMITTED
+            or invocation.state not in TERMINAL_INVOCATION_STATES
+        ):
+            raise ResumePlanRejected(
+                "TERMINAL_INVOCATION_AUTHORITY_INVALID",
+                "REUSE_COMMITTED requires terminal R6 lifecycle and outcome authority.",
+            )
+
         result = await self._store.load_committed_tool_result(
             execution_id,
-            tool_call_id,
+            snapshot.tool_call_id,
         )
         if result is None:
             raise ResumePlanRejected(
                 "COMMITTED_TOOL_RESULT_MISSING",
                 "Terminal R6 authority has no committed AgentToolResult projection.",
             )
+
+        identity = {
+            "execution_id": execution_id,
+            "tool_call_id": snapshot.tool_call_id,
+            "invocation_id": invocation.invocation_id,
+            "capability_id": invocation.capability_id,
+        }
+        for field, expected in identity.items():
+            if getattr(result, field, None) != expected:
+                raise ResumePlanRejected(
+                    "COMMITTED_TOOL_RESULT_CONFLICT",
+                    f"Committed AgentToolResult {field} does not match R6 authority.",
+                )
+
+        error = dict(invocation.error or {})
+        succeeded = invocation.state is CapabilityInvocationState.COMPLETED
+        projection = {
+            "success": succeeded,
+            "output": invocation.output,
+            "error_code": None if succeeded else (
+                error.get("error_code") or error.get("code")
+            ),
+            "error_message": None if succeeded else (
+                error.get("error_message") or error.get("message")
+            ),
+            "retryable": False if succeeded else bool(
+                error.get("retryable", False)
+            ),
+        }
+        for field, expected in projection.items():
+            if getattr(result, field, None) != expected:
+                raise ResumePlanRejected(
+                    "COMMITTED_TOOL_RESULT_CONFLICT",
+                    f"Committed AgentToolResult {field} differs from terminal R6 projection.",
+                )
 
     def _require_target_capability(
         self,
