@@ -190,13 +190,21 @@ def test_reconcile_caller_cancellation_releases_pending_without_remote_cancel():
         )
         await asyncio.sleep(0)
         assert socket.messages[0]["type"] == "capability.reconcile"
-        assert await realtime.multiplexer.pending_count() == 1
+        assert await realtime.multiplexer.pending_count() == 0
+        assert (
+            await realtime.reconciliation_multiplexer.pending_count()
+            == 1
+        )
 
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task
 
         assert await realtime.multiplexer.pending_count() == 0
+        assert (
+            await realtime.reconciliation_multiplexer.pending_count()
+            == 0
+        )
         assert [
             item["type"] for item in socket.messages
         ] == ["capability.reconcile"]

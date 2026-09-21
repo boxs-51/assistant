@@ -6,6 +6,8 @@
 
 **Status:** ACTIVE / PRE-IMPLEMENTATION AUDIT
 
+**Preflight:** R6-E0 COMPLETE
+
 ## Goal
 
 Prove the complete R6 contract through real network and process-generation
@@ -35,7 +37,7 @@ REAL local capability
 ClientInvocationLedger
 ```
 
-## E0 — Mandatory async ownership preflight
+## E0 — Mandatory async ownership preflight — COMPLETE
 
 Before accepting the R6-E exit gate, remove:
 
@@ -70,6 +72,15 @@ creator/owner of every pending asyncio Future/Task
 
 Fault-injection tests must not pass while emitting an unobserved Future
 exception.
+
+Evidence:
+
+```text
+dedicated E0: 5 passed
+focused transport/R6: 33 passed
+broad repository: 642 passed, 9 warnings
+unobserved Future diagnostics: 0
+```
 
 ## Canonical R6-E scenarios
 

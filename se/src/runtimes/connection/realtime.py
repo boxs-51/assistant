@@ -56,6 +56,13 @@ class RealtimeMultiplexer:
 
         self.registry = registry
         self.multiplexer = multiplexer or ConnectionMultiplexer()
+        # Execution terminal frames and reconciliation responses share the
+        # same logical invocation_id, but they are different correlation
+        # domains. A late result/error/cancelled frame from execution must not
+        # resolve or cancel a newer reconciliation waiter.
+        self.reconciliation_multiplexer = (
+            ConnectionMultiplexer()
+        )
         self.default_timeout = float(default_timeout)
         self.progress_handler = progress_handler
 
@@ -83,9 +90,12 @@ class RealtimeMultiplexer:
         invocation_id: str,
         connection_id: str,
         future: asyncio.Future[Any],
+        *,
+        multiplexer: ConnectionMultiplexer | None = None,
     ) -> None:
         """Remove local correlation ownership without remote semantics."""
-        await self.multiplexer.cancel(
+        owner = multiplexer or self.multiplexer
+        await owner.cancel(
             invocation_id,
             connection_id,
         )
@@ -214,7 +224,7 @@ class RealtimeMultiplexer:
         socket = self.registry.require_active_socket(
             envelope.connection_id
         )
-        future = await self.multiplexer.register(
+        future = await self.reconciliation_multiplexer.register(
             envelope.invocation_id,
             envelope.connection_id,
         )
@@ -227,6 +237,7 @@ class RealtimeMultiplexer:
                 envelope.invocation_id,
                 envelope.connection_id,
                 future,
+                multiplexer=self.reconciliation_multiplexer,
             )
             raise
         except Exception as exc:
@@ -238,6 +249,7 @@ class RealtimeMultiplexer:
                 envelope.invocation_id,
                 envelope.connection_id,
                 future,
+                multiplexer=self.reconciliation_multiplexer,
             )
             raise failure from exc
 
@@ -255,6 +267,7 @@ class RealtimeMultiplexer:
                 envelope.invocation_id,
                 envelope.connection_id,
                 future,
+                multiplexer=self.reconciliation_multiplexer,
             )
             raise
         except asyncio.CancelledError:
@@ -264,6 +277,7 @@ class RealtimeMultiplexer:
                 envelope.invocation_id,
                 envelope.connection_id,
                 future,
+                multiplexer=self.reconciliation_multiplexer,
             )
             raise
 
@@ -335,7 +349,7 @@ class RealtimeMultiplexer:
             )
 
         if envelope.type == "capability.reconciliation":
-            return await self.multiplexer.resolve(
+            return await self.reconciliation_multiplexer.resolve(
                 envelope.invocation_id or "",
                 dict(envelope.payload),
                 connection_id,
@@ -364,7 +378,14 @@ class RealtimeMultiplexer:
         connection_id: str,
         error: Optional[BaseException] = None,
     ) -> int:
-        return await self.multiplexer.fail_connection(
+        execution_failed = await self.multiplexer.fail_connection(
             connection_id,
             error,
         )
+        reconciliation_failed = (
+            await self.reconciliation_multiplexer.fail_connection(
+                connection_id,
+                error,
+            )
+        )
+        return execution_failed + reconciliation_failed

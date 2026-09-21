@@ -2,7 +2,7 @@
 
 **Phase:** R6-E preflight
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Audit finding
 
@@ -156,6 +156,45 @@ cancellation
 reconcile cancellation/timeout never emits capability.cancel
 ```
 
-Only after this gate is green should R6-E1 through R6-E11 real-TCP
-fault-injection harness work begin.
+## Completion evidence
+
+```text
+Dedicated E0 gate:
+    5 passed in 0.68s
+
+Focused transport/R6 regression gate:
+    33 passed in 2.72s
+
+Repository-wide gate:
+    642 passed
+    9 warnings
+    98.12s
+```
+
+No:
+
+```text
+Future exception was never retrieved
+```
+
+diagnostic was emitted by the focused or broad gate.
+
+The nine broad-gate warnings remain dependency/configuration deprecations and
+are not E0 correctness failures.
+
+## Exit decision
+
+The E0 async ownership gate is satisfied:
+
+```text
+send failure
+timeout
+caller cancellation
+disconnect/send race
+```
+
+all return local correlation ownership to zero without leaving an
+exception-bearing Future unobserved.
+
+R6-E1 through R6-E11 real-TCP fault-injection harness work may now begin.
 

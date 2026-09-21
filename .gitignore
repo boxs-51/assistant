@@ -15,3 +15,6 @@ artifacts/
 logs/
 log/
 *.log
+
+# Ephemeral client identity/ledger directories created by tests.
+.client-identity-test-*/
