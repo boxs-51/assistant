@@ -537,6 +537,53 @@ class AgentRuntime:
             consumed.remaining_active_budget_seconds
         )
 
+    async def _load_committed_tool_result_by_id(
+        self,
+        context: AgentExecutionContext,
+        tool_call_id: str,
+    ) -> ToolExecutionResult:
+        """Load one canonical active-batch slot without a pending R7 action."""
+
+        if self._durable_store is None:
+            raise ResumeActivationError(
+                "RESUME_AUTHORITY_UNAVAILABLE",
+                "R7-F4 requires durable tool-result commitment.",
+            )
+        loader = getattr(
+            self._durable_store,
+            "load_committed_tool_result",
+            None,
+        )
+        if not callable(loader):
+            raise ResumeActivationError(
+                "RESUME_AUTHORITY_UNAVAILABLE",
+                "Durable store cannot load committed tool results.",
+            )
+        record = await loader(context.execution_id, tool_call_id)
+        if (
+            record is None
+            or getattr(record, "commit_state", "PROVISIONAL") != "COMMITTED"
+            or record.execution_id != context.execution_id
+            or record.tool_call_id != tool_call_id
+        ):
+            raise ResumeActivationError(
+                "STALE_RECONCILIATION_SNAPSHOT",
+                "Canonical active-batch slot is no longer COMMITTED.",
+            )
+        return ToolExecutionResult(
+            execution_id=record.execution_id,
+            iteration=context.iteration,
+            invocation_id=record.invocation_id,
+            tool_call_id=record.tool_call_id,
+            capability_id=record.capability_id,
+            success=record.success,
+            output=record.output,
+            error_code=record.error_code,
+            error_message=record.error_message,
+            retryable=record.retryable,
+            metadata=dict(record.extra_metadata or {}),
+        )
+
     async def _execute_resume_plan_actions(
         self,
         context: AgentExecutionContext,
@@ -553,12 +600,18 @@ class AgentRuntime:
         actions = tuple(
             sorted(plan.invocation_actions, key=lambda item: item.ordinal)
         )
-        action_tool_ids = tuple(item.tool_call_id for item in actions)
+        ordered_ids = tuple(plan.ordered_tool_call_ids)
         if (
-            len({item.ordinal for item in actions}) != len(actions)
+            len(set(ordered_ids)) != len(ordered_ids)
+            or len({item.ordinal for item in actions}) != len(actions)
             or len({item.invocation_id for item in actions}) != len(actions)
             or len({item.tool_call_id for item in actions}) != len(actions)
-            or action_tool_ids != tuple(plan.ordered_tool_call_ids)
+            or any(
+                item.ordinal < 0
+                or item.ordinal >= len(ordered_ids)
+                or ordered_ids[item.ordinal] != item.tool_call_id
+                for item in actions
+            )
         ):
             raise ResumeActivationError(
                 "STALE_RESUME_PLAN",
@@ -566,6 +619,16 @@ class AgentRuntime:
             )
 
         by_tool_call: dict[str, ToolExecutionResult] = {}
+        action_ids = {item.tool_call_id for item in actions}
+        for tool_call_id in ordered_ids:
+            if tool_call_id in action_ids:
+                continue
+            by_tool_call[tool_call_id] = (
+                await self._load_committed_tool_result_by_id(
+                    context,
+                    tool_call_id,
+                )
+            )
         continuation_actions: list[ResumeInvocationAction] = []
 
         for action in actions:
@@ -641,14 +704,14 @@ class AgentRuntime:
                     )
                 by_tool_call[action.tool_call_id] = committed
 
-        if set(by_tool_call) != set(plan.ordered_tool_call_ids):
+        if set(by_tool_call) != set(ordered_ids):
             raise ResumeActivationError(
                 "R7_CONTINUATION_RESULT_CONFLICT",
                 "Resume action batch did not produce complete committed coverage.",
             )
         return tuple(
             by_tool_call[tool_call_id]
-            for tool_call_id in plan.ordered_tool_call_ids
+            for tool_call_id in ordered_ids
         )
 
     async def execute_claimed_resume(
