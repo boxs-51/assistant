@@ -351,3 +351,30 @@ async def test_r7_e_replay_safe_predispatch_failure_never_downgrades_old_infligh
     assert persisted.remote_outcome_state is RemoteOutcomeState.IN_FLIGHT
     assert [item.attempt_number for item in attempts] == [1, 2]
     assert attempts[-1].state is CapabilityInvocationState.FAILED
+
+
+
+@pytest.mark.asyncio
+async def test_r7_e_definition_idempotency_drift_rejects_before_attempt():
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.IDEMPOTENT,
+        outcome=RemoteOutcomeState.OUTCOME_UNKNOWN,
+    )
+    changed = runtime.catalog.get_definition(CAPABILITY_ID).model_copy(
+        update={"idempotency": CapabilityIdempotency.NON_IDEMPOTENT}
+    )
+    runtime.catalog.register_definition(changed, allow_update=True)
+
+    with pytest.raises(CapabilityError) as raised:
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K2,
+            mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+        )
+
+    assert raised.value.code == REMOTE_INVOCATION_CONFLICT
+    assert [item.attempt_number for item in await store.list_attempts(
+        invocation.invocation_id
+    )] == [1]

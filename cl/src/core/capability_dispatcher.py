@@ -207,9 +207,13 @@ class CapabilityDispatcher:
                     self._purge_terminal_locked()
                     self._emit(invocation_id, outcome)
                     return
-                if durable.state is ClientInvocationLedgerState.RUNNING:
-                    # A prior process may have entered the target call.  A
-                    # duplicate invoke is not reconciliation permission.
+                if (
+                    durable.state is ClientInvocationLedgerState.RUNNING
+                    and not self._durable_running_replay_safe(idempotency)
+                ):
+                    # A prior process may have entered the target call.  Only
+                    # replay-safe semantics may deliberately re-enter after a
+                    # process restart; unsafe/unknown effects stay blocked.
                     return
             if not self._capacity.acquire(blocking=False):
                 self._record_and_emit(
@@ -247,7 +251,10 @@ class CapabilityDispatcher:
                     self._purge_terminal_locked()
                     self._emit(invocation_id, outcome)
                     return
-                if durable.state is ClientInvocationLedgerState.RUNNING:
+                if (
+                    durable.state is ClientInvocationLedgerState.RUNNING
+                    and not self._durable_running_replay_safe(idempotency)
+                ):
                     self._capacity.release()
                     return
             cancellation_event = threading.Event()
@@ -325,6 +332,10 @@ class CapabilityDispatcher:
             client_id=invocation.client_id,
             principal_id=invocation.principal_id,
         )
+
+    @staticmethod
+    def _durable_running_replay_safe(idempotency: str) -> bool:
+        return idempotency in {"IDEMPOTENT", "DEDUPLICATED"}
 
     def _execute_local(
         self,

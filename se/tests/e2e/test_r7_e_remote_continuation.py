@@ -472,3 +472,79 @@ async def test_r7_e_real_tcp_deduplicated_terminal_ledger_prevents_second_effect
     finally:
         await _close_client(generation)
         await _stop_gateway(server, server_task)
+
+
+
+@pytest.mark.asyncio
+async def test_r7_e_real_tcp_replay_safe_restarts_durable_running_idempotent(tmp_path):
+    app, catalog, connections = _build_gateway_app()
+    server, server_task, port = await _start_gateway(app)
+    generation = None
+    calls = []
+    invocation_id = "inv-r7e-running-replay"
+    value = "expected"
+    fingerprint = capability_request_fingerprint(
+        capability_id=CAPABILITY_ID,
+        capability_version="1.0",
+        arguments={"value": value},
+    )
+    ledger = ClientInvocationLedger(tmp_path / "running-idempotent.sqlite3")
+    ledger.prepare(
+        client_id=CLIENT_ID,
+        principal_id=USER_ID,
+        invocation_id=invocation_id,
+        capability_id=CAPABILITY_ID,
+        capability_version="1.0",
+        request_fingerprint=fingerprint,
+        idempotency=CapabilityIdempotency.IDEMPOTENT.value,
+    )
+    ledger.mark_running(
+        client_id=CLIENT_ID,
+        principal_id=USER_ID,
+        invocation_id=invocation_id,
+    )
+
+    try:
+        generation = await _connect_client(
+            port=port,
+            registry=_client_registry(
+                lambda value, **kwargs: (
+                    calls.append(value)
+                    or {"source": "replayed-after-restart", "value": value}
+                ),
+                idempotency=CapabilityIdempotency.IDEMPOTENT,
+            ),
+            ledger=ledger,
+            connection_id="r7e-k2-running-replay",
+        )
+        runtime, store = _server_runtime(catalog, connections)
+        invocation, seeded_fingerprint = await _seed_waiting(
+            runtime,
+            invocation_id=invocation_id,
+            outcome=RemoteOutcomeState.OUTCOME_UNKNOWN,
+            value=value,
+        )
+        assert seeded_fingerprint == fingerprint
+
+        result = await asyncio.wait_for(
+            runtime.continue_invocation(
+                invocation.invocation_id,
+                target_connection_id=generation.connection_id,
+                mode=ExistingInvocationContinuationMode.REPLAY_SAFE,
+                expected_revision=invocation.revision,
+                expected_request_fingerprint=fingerprint,
+            ),
+            timeout=5.0,
+        )
+
+        assert calls == [value]
+        assert result.output == {
+            "source": "replayed-after-restart",
+            "value": value,
+        }
+        attempts = await store.list_attempts(invocation_id)
+        assert [item.attempt_number for item in attempts] == [1, 2]
+        assert len(store.items) == 1
+    finally:
+        await _close_client(generation)
+        await _stop_gateway(server, server_task)

@@ -51,7 +51,7 @@ def _wait(predicate, timeout=2.0):
     raise AssertionError("Timed out waiting for dispatcher state")
 
 
-def _registry(func):
+def _registry(func, *, idempotency="NON_IDEMPOTENT"):
     return SimpleNamespace(
         tools={
             "tool.side_effect": {
@@ -59,7 +59,7 @@ def _registry(func):
                 "metadata": {
                     "name": "tool.side_effect",
                     "version": "3.0",
-                    "idempotency": "NON_IDEMPOTENT",
+                    "idempotency": idempotency,
                     "base_risk": "LOW",
                 },
             }
@@ -420,3 +420,56 @@ def test_sqlite_handles_are_released_after_each_operation(tmp_path):
     # Windows raises WinError 32 here if any SQLite connection handle leaked.
     path.unlink()
     assert not path.exists()
+
+
+
+@pytest.mark.parametrize("idempotency", ["IDEMPOTENT", "DEDUPLICATED"])
+def test_running_after_restart_replays_only_when_semantics_are_safe(
+    tmp_path,
+    idempotency,
+):
+    path = tmp_path / f"safe-running-{idempotency}.sqlite3"
+    bootstrap = ClientInvocationLedger(path)
+    fingerprint = CapabilityDispatcher._request_fingerprint(
+        "tool.side_effect",
+        "3.0",
+        {"value": "x"},
+    )
+    bootstrap.prepare(
+        client_id="client-1",
+        principal_id="user-1",
+        invocation_id="inv-1",
+        capability_id="tool.side_effect",
+        capability_version="3.0",
+        request_fingerprint=fingerprint,
+        idempotency=idempotency,
+    )
+    bootstrap.mark_running(
+        client_id="client-1",
+        principal_id="user-1",
+        invocation_id="inv-1",
+    )
+
+    called = []
+    realtime = _Realtime("conn-2")
+    dispatcher = _dispatcher(
+        _registry(
+            lambda value: called.append(value) or {"value": value},
+            idempotency=idempotency,
+        ),
+        realtime,
+        ClientInvocationLedger(path),
+    )
+    try:
+        dispatcher.dispatch(_invoke(dispatcher, "conn-2"))
+        _wait(lambda: any(item[0] == "result" for item in realtime.events))
+        assert called == ["x"]
+        record = bootstrap.get(
+            client_id="client-1",
+            principal_id="user-1",
+            invocation_id="inv-1",
+        )
+        assert record is not None
+        assert record.state is ClientInvocationLedgerState.TERMINAL
+    finally:
+        dispatcher.shutdown()

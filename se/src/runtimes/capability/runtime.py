@@ -470,12 +470,23 @@ class CapabilityRuntime(BaseRuntime):
 
         context.attempt = invocation.attempt
         self._bind_remote_dispatch_started(driver, invocation)
-        await self.invocation_lifecycle.transition(
-            invocation,
-            CapabilityInvocationState.RUNNING,
-            attempt_id=attempt.attempt_id,
-        )
-        attempt.state = CapabilityInvocationState.RUNNING
+        try:
+            invocation, attempt = (
+                await self.invocation_lifecycle.start_continuation_attempt(
+                    invocation,
+                    attempt,
+                )
+            )
+        except RuntimeError as exc:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_STALE,
+                message=str(exc),
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            ) from exc
 
         return await self._run_invocation_attempt(
             invocation=invocation,
@@ -753,10 +764,15 @@ class CapabilityRuntime(BaseRuntime):
                 invocation_id=invocation.invocation_id,
             ) from exc
 
-        if definition.version != invocation.capability_version:
+        if (
+            definition.version != invocation.capability_version
+            or definition.kind is not invocation.kind
+            or definition.execution_mode is not invocation.execution_mode
+            or definition.idempotency is not invocation.idempotency
+        ):
             raise CapabilityError(
                 code=REMOTE_INVOCATION_CONFLICT,
-                message="Continuation capability version changed.",
+                message="Continuation capability contract changed.",
                 category="RECONCILIATION",
                 retryable=False,
                 safe_for_client=True,

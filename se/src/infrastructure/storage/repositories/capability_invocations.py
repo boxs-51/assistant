@@ -232,6 +232,60 @@ class SqlCapabilityInvocationStore:
                 await uow.rollback()
                 return False
 
+    async def start_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        """Atomically move continuation invocation+attempt to RUNNING."""
+        if (
+            invocation.state is not CapabilityInvocationState.RUNNING
+            or attempt.state is not CapabilityInvocationState.RUNNING
+            or attempt.invocation_id != invocation.invocation_id
+            or attempt.attempt_number != invocation.attempt
+        ):
+            return False
+
+        async with self._uow_factory() as uow:
+            invocation_result = await uow.session.execute(
+                update(CapabilityInvocationRecord)
+                .where(
+                    CapabilityInvocationRecord.invocation_id
+                    == invocation.invocation_id,
+                    CapabilityInvocationRecord.revision
+                    == expected_revision,
+                    CapabilityInvocationRecord.state
+                    == CapabilityInvocationState.DISPATCHING.value,
+                    CapabilityInvocationRecord.attempt
+                    == invocation.attempt,
+                )
+                .values(**self._values(invocation))
+            )
+            if invocation_result.rowcount != 1:
+                await uow.rollback()
+                return False
+
+            attempt_result = await uow.session.execute(
+                update(CapabilityInvocationAttemptRecord)
+                .where(
+                    CapabilityInvocationAttemptRecord.attempt_id
+                    == attempt.attempt_id,
+                    CapabilityInvocationAttemptRecord.invocation_id
+                    == invocation.invocation_id,
+                    CapabilityInvocationAttemptRecord.attempt_number
+                    == invocation.attempt,
+                    CapabilityInvocationAttemptRecord.state
+                    == CapabilityInvocationState.DISPATCHING.value,
+                )
+                .values(state=CapabilityInvocationState.RUNNING.value)
+            )
+            if attempt_result.rowcount != 1:
+                await uow.rollback()
+                return False
+            await uow.commit()
+            return True
+
     async def list_attempts(
         self, invocation_id: str
     ) -> list[CapabilityInvocationAttempt]:

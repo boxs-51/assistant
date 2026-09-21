@@ -160,6 +160,12 @@ class CapabilityInvocationStore(Protocol):
         expected_revision: int,
         attempt: CapabilityInvocationAttempt,
     ) -> bool: ...
+    async def start_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool: ...
 
 
 class InMemoryCapabilityInvocationStore:
@@ -225,6 +231,30 @@ class InMemoryCapabilityInvocationStore:
                 and item.attempt_number == attempt.attempt_number
                 for item in self.attempts.values()
             )
+        ):
+            return False
+        self.items[invocation.invocation_id] = invocation.model_copy(deep=True)
+        self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+        return True
+
+    async def start_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        current = self.items.get(invocation.invocation_id)
+        stored_attempt = self.attempts.get(attempt.attempt_id)
+        if (
+            current is None
+            or current.revision != expected_revision
+            or current.state is not CapabilityInvocationState.DISPATCHING
+            or stored_attempt is None
+            or stored_attempt.invocation_id != invocation.invocation_id
+            or stored_attempt.attempt_number != invocation.attempt
+            or stored_attempt.state is not CapabilityInvocationState.DISPATCHING
+            or invocation.state is not CapabilityInvocationState.RUNNING
+            or attempt.state is not CapabilityInvocationState.RUNNING
         ):
             return False
         self.items[invocation.invocation_id] = invocation.model_copy(deep=True)
@@ -369,6 +399,44 @@ class CapabilityInvocationLifecycle:
             attempt_id=attempt.attempt_id,
         )
         return candidate, attempt
+
+    async def start_continuation_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        attempt: CapabilityInvocationAttempt,
+    ) -> tuple[CapabilityInvocation, CapabilityInvocationAttempt]:
+        if invocation.state is not CapabilityInvocationState.DISPATCHING:
+            raise InvalidInvocationTransition(
+                "Continuation attempt start requires DISPATCHING state"
+            )
+        expected_revision = invocation.revision
+        candidate = invocation.model_copy(deep=True)
+        previous, candidate = transition_invocation(
+            candidate,
+            CapabilityInvocationState.RUNNING,
+        )
+        running_attempt = attempt.model_copy(deep=True)
+        running_attempt.state = CapabilityInvocationState.RUNNING
+        start = getattr(self.store, "start_continuation_attempt", None)
+        if not callable(start):
+            raise RuntimeError(
+                "Invocation store does not support atomic continuation start"
+            )
+        if not await start(
+            candidate,
+            expected_revision,
+            running_attempt,
+        ):
+            raise RuntimeError(
+                "Concurrent continuation attempt start rejected: "
+                f"{candidate.invocation_id}"
+            )
+        await self._publish(
+            candidate,
+            previous=previous,
+            attempt_id=running_attempt.attempt_id,
+        )
+        return candidate, running_attempt
 
     async def start_attempt(
         self,

@@ -157,3 +157,38 @@ async def test_r7_e_sql_attempt_high_water_conflict_rolls_back_invocation_cas(tm
         assert attempts == []
     finally:
         await driver.disconnect()
+
+
+
+@pytest.mark.asyncio
+async def test_r7_e_sql_start_transition_updates_invocation_and_attempt_atomically(tmp_path):
+    driver, store, lifecycle = await _sql_lifecycle(tmp_path)
+    try:
+        original = _invocation("inv-r7e-start")
+        await store.create(original)
+        await _seed_attempt_one(store, original.invocation_id)
+        loaded = await store.get(original.invocation_id)
+        assert loaded is not None
+
+        dispatching, attempt = await lifecycle.begin_continuation_attempt(
+            loaded,
+            implementation_id="conn-k2:tool.r7e.sql",
+            driver_kind="REMOTE_CLIENT",
+            connection_id="conn-k2",
+            continuation_mode="REPLAY_SAFE",
+        )
+        running, running_attempt = await lifecycle.start_continuation_attempt(
+            dispatching,
+            attempt,
+        )
+
+        persisted = await store.get(original.invocation_id)
+        attempts = await store.list_attempts(original.invocation_id)
+        assert persisted is not None
+        assert persisted.state is CapabilityInvocationState.RUNNING
+        assert persisted.revision == original.revision + 2
+        assert running.state is CapabilityInvocationState.RUNNING
+        assert running_attempt.state is CapabilityInvocationState.RUNNING
+        assert attempts[-1].state is CapabilityInvocationState.RUNNING
+    finally:
+        await driver.disconnect()
