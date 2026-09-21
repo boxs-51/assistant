@@ -694,6 +694,20 @@ class DurableAgentStore:
                     for item in ordered_calls
                 ]
 
+            if latest_iteration is not None:
+                current_batch_ids = set(
+                    getattr(latest_iteration, "tool_call_ids", None) or []
+                )
+                if current_batch_ids:
+                    resume_transcript = [
+                        message
+                        for message in resume_transcript
+                        if not (
+                            message.get("role") == "tool"
+                            and message.get("tool_call_id") in current_batch_ids
+                        )
+                    ]
+
             state = getattr(execution, "context_state", None) or {}
             restored_limits = limits or AgentExecutionLimits.model_validate(
                 state.get("limits", {})
