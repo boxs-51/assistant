@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 import math
 from datetime import datetime, timezone
 from typing import Any, Callable
@@ -29,6 +27,7 @@ from .contracts.resume import (
     ResumeInvocationAction,
     ResumeInvocationActionKind,
     ResumePlan,
+    resume_plan_fingerprint,
 )
 
 
@@ -753,67 +752,8 @@ class AgentResumePlanningService:
 
     @staticmethod
     def _fingerprint(values: dict[str, Any]) -> str:
-        actions = [
-            {
-                "invocation_id": item.invocation_id,
-                "tool_call_id": item.tool_call_id,
-                "ordinal": item.ordinal,
-                "capability_id": item.capability_id,
-                "capability_version": item.capability_version,
-                "request_fingerprint": item.request_fingerprint,
-                "idempotency": item.idempotency.value,
-                "expected_invocation_revision": item.expected_invocation_revision,
-                "expected_invocation_state": item.expected_invocation_state.value,
-                "expected_remote_outcome_state": (
-                    item.expected_remote_outcome_state.value
-                    if item.expected_remote_outcome_state is not None
-                    else None
-                ),
-                "action": item.action.value,
-            }
-            for item in values["invocation_actions"]
-        ]
-        payload = {
-            "execution_id": values["execution_id"],
-            "checkpoint_id": values["checkpoint_id"],
-            "expected_execution_revision": values["expected_execution_revision"],
-            "agent_id": values["agent_id"],
-            "session_id": values["session_id"],
-            "task_id": values["task_id"],
-            "branch_id": values["branch_id"],
-            "parent_execution_id": values["parent_execution_id"],
-            "retry_of_execution_id": values["retry_of_execution_id"],
-            "base_execution_id": values["base_execution_id"],
-            "base_checkpoint_id": values["base_checkpoint_id"],
-            "correlation_id": values["correlation_id"],
-            "trace_id": values["trace_id"],
-            "request_id": values["request_id"],
-            "iteration": values["iteration"],
-            "ordered_tool_call_ids": list(values["ordered_tool_call_ids"]),
-            "transcript_snapshot": [
-                item.model_dump(mode="json")
-                for item in values["transcript_snapshot"]
-            ],
-            "remaining_active_budget_seconds": values[
-                "remaining_active_budget_seconds"
-            ],
-            "wait_expires_at": (
-                values["wait_expires_at"].isoformat()
-                if values["wait_expires_at"] is not None
-                else None
-            ),
-            "target_user_id": values["target_user_id"],
-            "target_client_id": values["target_client_id"],
-            "target_connection_id": values["target_connection_id"],
-            "invocation_actions": actions,
-        }
-        encoded = json.dumps(
-            payload,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-        return hashlib.sha256(encoded).hexdigest()
+        return resume_plan_fingerprint(values)
+
 
 
 __all__ = [
