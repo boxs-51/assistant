@@ -5,6 +5,14 @@ import asyncio
 import pytest
 
 from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
+from se.src.runtimes.agent.contracts.context import AgentExecutionContext
+from se.src.runtimes.agent.contracts.resume import (
+    ResumeInvocationAction,
+    ResumeInvocationActionKind,
+)
 from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
@@ -542,3 +550,76 @@ async def test_r7_e_nonterminal_prior_attempt_history_is_fail_closed():
     assert [item.attempt_number for item in await store.list_attempts(
         invocation.invocation_id
     )] == [1]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("idempotency", "outcome", "action_kind"),
+    [
+        (
+            CapabilityIdempotency.NON_IDEMPOTENT,
+            RemoteOutcomeState.NOT_DISPATCHED,
+            ResumeInvocationActionKind.DISPATCH_NOT_DISPATCHED,
+        ),
+        (
+            CapabilityIdempotency.IDEMPOTENT,
+            RemoteOutcomeState.OUTCOME_UNKNOWN,
+            ResumeInvocationActionKind.REPLAY_SAFE,
+        ),
+    ],
+)
+async def test_r7_f4_agent_adapter_enters_exact_r7_e_continuation_path(
+    idempotency,
+    outcome,
+    action_kind,
+):
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=idempotency,
+        outcome=outcome,
+    )
+    adapter = CapabilityToolExecutionAdapter(
+        runtime,
+        tool_policy=None,
+        execution_policy=None,
+    )
+    context = AgentExecutionContext.create(
+        execution_id=EXECUTION_ID,
+        agent_id="agent-r7f4",
+        session_id="session-r7e",
+        correlation_id="corr-r7f4",
+        identity=Identity(
+            user_id=USER_ID,
+            auth_type="api_key",
+            scopes={"*"},
+        ),
+        limits=AgentExecutionLimits(),
+        connection_id=K2,
+    )
+    context.iteration = 3
+    action = ResumeInvocationAction(
+        invocation_id=invocation.invocation_id,
+        tool_call_id=TOOL_CALL_ID,
+        ordinal=0,
+        capability_id=CAPABILITY_ID,
+        capability_version="1.0",
+        request_fingerprint=fingerprint,
+        idempotency=idempotency,
+        expected_invocation_revision=invocation.revision,
+        expected_invocation_state=CapabilityInvocationState.WAITING,
+        expected_remote_outcome_state=outcome,
+        action=action_kind,
+    )
+
+    result = await adapter.continue_invocation(context, action)
+
+    persisted = await store.get(invocation.invocation_id)
+    attempts = await store.list_attempts(invocation.invocation_id)
+    assert result.invocation_id == invocation.invocation_id
+    assert result.tool_call_id == TOOL_CALL_ID
+    assert result.metadata["r7_resume_action"] == action_kind.value
+    assert result.metadata["continuation_mode"] == action_kind.value
+    assert persisted is not None
+    assert persisted.attempt == 2
+    assert persisted.state is CapabilityInvocationState.COMPLETED
+    assert persisted.remote_outcome_state is RemoteOutcomeState.TERMINAL_COMMITTED
+    assert [item.attempt_number for item in attempts] == [1, 2]
