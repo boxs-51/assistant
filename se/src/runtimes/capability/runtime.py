@@ -469,7 +469,6 @@ class CapabilityRuntime(BaseRuntime):
             ) from exc
 
         context.attempt = invocation.attempt
-        self._bind_remote_dispatch_started(driver, invocation)
         try:
             invocation, attempt = (
                 await self.invocation_lifecycle.start_continuation_attempt(
@@ -487,6 +486,9 @@ class CapabilityRuntime(BaseRuntime):
                 capability_id=invocation.capability_id,
                 invocation_id=invocation.invocation_id,
             ) from exc
+        # Bind only after the atomic RUNNING transition so the dispatch
+        # callback closes over the current invocation revision.
+        self._bind_remote_dispatch_started(driver, invocation)
 
         return await self._run_invocation_attempt(
             invocation=invocation,
