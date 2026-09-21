@@ -175,8 +175,7 @@ async def test_r7_c_checkpoint_reconstruction_sanitizes_provisional_and_preserve
     try:
         checkpoint_id = "exec-r7-c:checkpoint:2"
         async with _Uow(sessions) as uow:
-            uow.session.add(
-                AgentExecutionRecord(
+            execution = AgentExecutionRecord(
                     id="exec-r7-c",
                     session_id="session-r7-c",
                     agent_id="agent-r7-c",
@@ -184,7 +183,7 @@ async def test_r7_c_checkpoint_reconstruction_sanitizes_provisional_and_preserve
                     state="WAITING",
                     wait_reason="CONNECTION",
                     revision=2,
-                    current_checkpoint_id=checkpoint_id,
+                    current_checkpoint_id=None,
                     request={},
                     transcript=[
                         {"role": "user", "content": "legacy"},
@@ -195,7 +194,8 @@ async def test_r7_c_checkpoint_reconstruction_sanitizes_provisional_and_preserve
                         },
                     ],
                 )
-            )
+            uow.session.add(execution)
+            await uow.session.flush()
             uow.session.add(
                 AgentIterationRecord(
                     id="iter-r7-c",
@@ -229,6 +229,9 @@ async def test_r7_c_checkpoint_reconstruction_sanitizes_provisional_and_preserve
                     metadata_json={},
                 )
             )
+
+            await uow.session.flush()
+            execution.current_checkpoint_id = checkpoint_id
 
             for call_id in ("call-1", "call-3", "call-2"):
                 uow.session.add(
@@ -287,13 +290,10 @@ async def test_r7_c_checkpoint_reconstruction_sanitizes_provisional_and_preserve
         context = await store.resume_execution("exec-r7-c")
         assert context is not None
         assert context.iteration == 3
+        # The active batch is re-materialized after resume, so even already
+        # committed current-batch messages are stripped from the safe prefix.
         assert context.resume_transcript == [
             {"role": "user", "content": "checkpoint-prefix"},
-            {
-                "role": "tool",
-                "tool_call_id": "call-2",
-                "content": {"ok": 2},
-            },
         ]
         assert "PROVISIONAL-POISON" not in repr(context.resume_transcript)
         assert [
