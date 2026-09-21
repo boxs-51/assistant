@@ -32,9 +32,6 @@ from .contracts.resume import (
 from .resume_claim import ResumeClaimDeferred, ResumeClaimError, ResumeClaimRejected
 from .serialization import to_json_safe
 from .task_budget import (
-    TaskBudgetClosedError,
-    TaskBudgetExceededError,
-    TaskBudgetConflictError as RuntimeTaskBudgetConflictError,
     prepare_resume_capacity_in_uow,
 )
 from .waiting_checkpoint import (
@@ -98,10 +95,6 @@ def _utc_datetime(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
-
-
-def _enum_value(value):
-    return getattr(value, "value", value)
 
 
 _TASK_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
@@ -939,6 +932,23 @@ class DurableAgentStore:
                     "ResumeClaim semantics do not match the frozen ResumePlan.",
                 )
 
+            computed_fingerprint = resume_plan_fingerprint(plan)
+            if computed_fingerprint != plan.plan_fingerprint:
+                if claim.state == ResumeClaimState.CREATED.value:
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="STALE_RESUME_CLAIM",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "STALE_RESUME_CLAIM",
+                    "ResumePlan fingerprint does not match its semantics.",
+                )
+
             if claim.state == ResumeClaimState.CONSUMED.value:
                 if claim.consumed_execution_revision is None:
                     await uow.commit()
@@ -997,17 +1007,6 @@ class DurableAgentStore:
                 await uow.commit()
                 return ResumeClaimRejected("CLAIM_EXPIRED", "ResumeClaim expired.")
 
-            computed_fingerprint = resume_plan_fingerprint(plan)
-            if computed_fingerprint != plan.plan_fingerprint:
-                error = await self._reject_created_claim_in_uow(
-                    uow,
-                    claim,
-                    code="STALE_RESUME_CLAIM",
-                    now_utc=now_utc,
-                )
-                await uow.commit()
-                return error
-
             execution = await uow.agents.get_execution(plan.execution_id)
             if execution is None:
                 error = await self._reject_created_claim_in_uow(
@@ -1018,6 +1017,22 @@ class DurableAgentStore:
             if (
                 str(execution.state) != "WAITING"
                 or execution.revision != plan.expected_execution_revision
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow, claim, code="RESUME_CONFLICT", now_utc=now_utc
+                )
+                await uow.commit()
+                return error
+            if (
+                execution.session_id != plan.session_id
+                or execution.agent_id != plan.agent_id
+                or execution.task_id != plan.task_id
+                or execution.branch_id != plan.branch_id
+                or execution.parent_execution_id != plan.parent_execution_id
+                or execution.retry_of_execution_id != plan.retry_of_execution_id
+                or execution.base_execution_id != plan.base_execution_id
+                or execution.base_checkpoint_id != plan.base_checkpoint_id
+                or execution.correlation_id != plan.correlation_id
             ):
                 error = await self._reject_created_claim_in_uow(
                     uow, claim, code="RESUME_CONFLICT", now_utc=now_utc
@@ -1068,7 +1083,11 @@ class DurableAgentStore:
 
             execution_wait_expires_at = _utc_datetime(execution.wait_expires_at)
             checkpoint_wait_expires_at = _utc_datetime(checkpoint.wait_expires_at)
-            if execution_wait_expires_at != checkpoint_wait_expires_at:
+            plan_wait_expires_at = _utc_datetime(plan.wait_expires_at)
+            if (
+                execution_wait_expires_at != checkpoint_wait_expires_at
+                or checkpoint_wait_expires_at != plan_wait_expires_at
+            ):
                 error = await self._reject_created_claim_in_uow(
                     uow, claim, code="STALE_CHECKPOINT", now_utc=now_utc
                 )
