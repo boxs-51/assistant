@@ -4,7 +4,7 @@
 
 **Dependency:** R6-E0 COMPLETE
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Harness boundary
 
@@ -153,3 +153,18 @@ broad repository gate green
 no "Future exception was never retrieved"
 no automatic duplicate NON_IDEMPOTENT/UNKNOWN side effect
 ```
+
+## Completion evidence
+
+```text
+canonical module:
+    12 passed in 4.86s
+
+transport/R6 regression:
+    50 passed in 6.65s
+
+broad repository:
+    660 passed, 9 warnings in 78.36s
+```
+
+The exit rule is satisfied.

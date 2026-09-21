@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from sqlalchemy import JSON, Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import JSON, Boolean, CheckConstraint, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -12,6 +12,10 @@ class AgentToolResultRecord(Base):
     __tablename__ = "agent_tool_results"
     __table_args__ = (
         UniqueConstraint("execution_id", "tool_call_id", name="uq_agent_tool_result_execution_call"),
+        CheckConstraint(
+            "commit_state IN ('PROVISIONAL', 'COMMITTED')",
+            name="ck_agent_tool_results_commit_state",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True, default=default_uuid_str)
@@ -31,6 +35,13 @@ class AgentToolResultRecord(Base):
     retryable: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     extra_metadata: Mapped[Optional[Dict[str, Any]]] = mapped_column(
         "metadata", JSON, nullable=True, default=dict
+    )
+    commit_state: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="PROVISIONAL",
+        server_default="PROVISIONAL",
+        index=True,
     )
     attempt: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())

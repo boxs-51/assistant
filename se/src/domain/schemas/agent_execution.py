@@ -76,6 +76,9 @@ class AgentExecution(GatewayBaseModel):
     state: AgentExecutionState = AgentExecutionState.CREATED
     wait_reason: Optional[AgentExecutionWaitReason] = None
     revision: int = 0
+    current_checkpoint_id: Optional[str] = None
+    bound_client_id: Optional[str] = None
+    bound_connection_id: Optional[str] = None
     remaining_active_budget_seconds: Optional[float] = None
     wait_expires_at: Optional[datetime] = None
     request: Dict[str, Any] = Field(default_factory=dict)

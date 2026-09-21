@@ -5,9 +5,12 @@ from sqlalchemy import select, update
 
 from ..interfaces.repository import BaseRepository
 from ..models.sql.agent import (
+    AgentCheckpointPendingInvocationRecord,
+    AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
     AgentIterationRecord,
     AgentMessageRecord,
+    AgentResumeClaimRecord,
     AgentSessionMemberRecord,
     AgentSessionRecord,
     AgentTaskRecord,
@@ -292,3 +295,97 @@ class AgentRepository(BaseRepository):
             return None
         await self.session.flush()
         return await self.get_execution(execution_id)
+
+    async def save_execution_checkpoint(self, values: Dict[str, Any]):
+        record = AgentExecutionCheckpointRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_execution_checkpoint(self, checkpoint_id: str):
+        result = await self.session.execute(
+            select(AgentExecutionCheckpointRecord).where(
+                AgentExecutionCheckpointRecord.checkpoint_id == checkpoint_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_execution_checkpoints(self, execution_id: str):
+        result = await self.session.execute(
+            select(AgentExecutionCheckpointRecord)
+            .where(AgentExecutionCheckpointRecord.execution_id == execution_id)
+            .order_by(AgentExecutionCheckpointRecord.created_at.asc())
+        )
+        return list(result.scalars().all())
+
+    async def save_checkpoint_pending_invocation(
+        self,
+        values: Dict[str, Any],
+    ):
+        record = AgentCheckpointPendingInvocationRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def list_checkpoint_pending_invocations(self, checkpoint_id: str):
+        result = await self.session.execute(
+            select(AgentCheckpointPendingInvocationRecord)
+            .where(
+                AgentCheckpointPendingInvocationRecord.checkpoint_id
+                == checkpoint_id
+            )
+            .order_by(AgentCheckpointPendingInvocationRecord.ordinal.asc())
+        )
+        return list(result.scalars().all())
+
+    async def save_resume_claim(self, values: Dict[str, Any]):
+        record = AgentResumeClaimRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_resume_claim(self, claim_id: str):
+        result = await self.session.execute(
+            select(AgentResumeClaimRecord).where(
+                AgentResumeClaimRecord.claim_id == claim_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_resume_claim_by_request_id(self, resume_request_id: str):
+        result = await self.session.execute(
+            select(AgentResumeClaimRecord).where(
+                AgentResumeClaimRecord.resume_request_id == resume_request_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def compare_and_set_resume_claim(
+        self,
+        claim_id: str,
+        expected_revision: int,
+        expected_state: str,
+        values: Dict[str, Any],
+    ):
+        """CAS one ResumeClaim without opening a second transaction.
+
+        R7-D composes this primitive with AgentExecution and TaskBudget CAS in
+        the same UnitOfWork.  R7-A intentionally does not expose a high-level
+        DurableAgentStore method that would commit the claim independently.
+        """
+
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(AgentResumeClaimRecord)
+            .where(
+                AgentResumeClaimRecord.claim_id == claim_id,
+                AgentResumeClaimRecord.revision == expected_revision,
+                AgentResumeClaimRecord.state == expected_state,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_resume_claim(claim_id)

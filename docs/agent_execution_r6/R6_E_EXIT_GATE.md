@@ -4,7 +4,7 @@
 
 **Dependencies:** R6-A COMPLETE, R6-B COMPLETE, R6-C COMPLETE, R6-D COMPLETE
 
-**Status:** ACTIVE / PRE-IMPLEMENTATION AUDIT
+**Status:** COMPLETE
 
 **Preflight:** R6-E0 COMPLETE
 
@@ -291,6 +291,31 @@ py -m pytest -q se/tests tools cl/tests
 
 MCP ownership remains post-R14 and is not an R6-E implementation dependency.
 
+## Completion evidence
+
+```text
+focused correlation/E11 gate:
+    26 passed in 2.59s
+    repeated: 26 passed in 2.54s
+
+canonical real-TCP E1->E11:
+    12 passed in 4.86s
+
+transport/R6 regression:
+    50 passed in 6.65s
+
+repository-wide:
+    660 passed
+    9 warnings
+    78.36s
+```
+
+No unobserved-Future or pending-task diagnostic was emitted by the final
+gates.
+
+The canonical run also closed the late execution-terminal vs reconciliation
+correlation race by separating execution and reconciliation pending domains.
+
 ## R6 exit gate
 
 R6 may become COMPLETE only when:
@@ -314,7 +339,8 @@ R6-A    COMPLETE
 R6-B    COMPLETE
 R6-C    COMPLETE
 R6-D    COMPLETE
-R6-E    ACTIVE
-R6      NOT COMPLETE
+R6-E0   COMPLETE
+R6-E    COMPLETE
+R6      COMPLETE
 ```
 

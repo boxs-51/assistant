@@ -2841,6 +2841,15 @@ No orphan async task and no uncontrolled branching/delegation.
 
 # Phase R6 — Remote Invocation Reconciliation / Idempotency
 
+**Implementation status:** COMPLETE
+
+Formal evidence:
+
+```text
+docs/agent_execution_r6/R6_COMPLETION.md
+docs/agent_execution_r6/R6_E_COMPLETION.md
+```
+
 ## Goal
 
 Solve remote side-effect ambiguity before general continuation and branching.

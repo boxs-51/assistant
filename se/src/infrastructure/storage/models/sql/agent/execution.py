@@ -24,6 +24,15 @@ class AgentExecutionRecord(Base):
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
     wait_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    current_checkpoint_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    bound_client_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, index=True
+    )
+    bound_connection_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True, index=True
+    )
     remaining_active_budget_seconds: Mapped[Optional[float]] = mapped_column(
         Float, nullable=True
     )

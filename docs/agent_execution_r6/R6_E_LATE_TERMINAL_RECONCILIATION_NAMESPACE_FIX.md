@@ -1,6 +1,6 @@
 # R6-E — Late Execution Terminal vs Reconciliation Correlation Namespace
 
-**Status:** IMPLEMENTED / PENDING TEST EVIDENCE
+**Status:** COMPLETE
 
 ## Fault discovered by canonical E11
 
@@ -127,5 +127,22 @@ transport regression
 broad repository gate
 ```
 
-R6-E remains ACTIVE until all gates are green.
+Final evidence:
+
+```text
+focused namespace/E11:
+    26 passed in 2.59s
+    repeated: 26 passed in 2.54s
+
+canonical R6-E1->E11:
+    12 passed
+
+transport regression:
+    50 passed
+
+broad repository:
+    660 passed, 9 warnings
+```
+
+The namespace race is closed and R6-E is COMPLETE.
 

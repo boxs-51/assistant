@@ -30,6 +30,13 @@ from .continuation import (
     ContinuationState,
     ExecutionCheckpoint,
 )
+from .resume import (
+    CheckpointPendingInvocation,
+    DurableExecutionCheckpoint,
+    ResumeClaim,
+    ResumeClaimState,
+    ToolResultCommitState,
+)
 from .context_assembly import (
     AgentCapabilityResolver,
     AgentCapabilityView,
@@ -74,6 +81,11 @@ __all__ = [
     "ContinuationBranch",
     "ContinuationState",
     "ExecutionCheckpoint",
+    "CheckpointPendingInvocation",
+    "DurableExecutionCheckpoint",
+    "ResumeClaim",
+    "ResumeClaimState",
+    "ToolResultCommitState",
     "AgentCapabilityResolver",
     "AgentCapabilityView",
     "AgentSkillView",
