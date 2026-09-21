@@ -310,6 +310,35 @@ class AgentRepository(BaseRepository):
         await self.session.flush()
         return await self.get_execution(execution_id)
 
+    async def compare_and_set_waiting_execution(
+        self,
+        execution_id: str,
+        expected_revision: int,
+        expected_checkpoint_id: str,
+        expected_wait_reason: str,
+        values: Dict[str, Any],
+    ):
+        """CAS one normalized WAITING execution using the full R7 fence."""
+
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == expected_revision,
+                AgentExecutionRecord.state == "WAITING",
+                AgentExecutionRecord.current_checkpoint_id
+                == expected_checkpoint_id,
+                AgentExecutionRecord.wait_reason == expected_wait_reason,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
     async def save_execution_checkpoint(self, values: Dict[str, Any]):
         record = AgentExecutionCheckpointRecord(**values)
         self.session.add(record)
