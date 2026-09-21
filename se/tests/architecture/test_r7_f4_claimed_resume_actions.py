@@ -457,3 +457,56 @@ async def test_r7_f4_provisional_continuation_never_enters_model_context_or_term
     assert store.execution.state == "RUNNING"
     assert store.execution.revision == 3
     assert executor.ordinary_execute_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_f4_canonical_committed_slot_without_pending_action_is_reused():
+    base = _plan()
+    # call-1 is already committed before the checkpoint pending set is frozen.
+    # R7-D therefore needs actions only for call-2/call-3 while canonical
+    # reconstruction must still emit all three slots in original order.
+    plan = replace(
+        base,
+        invocation_actions=base.invocation_actions[1:],
+        plan_fingerprint="",
+    )
+    plan = replace(plan, plan_fingerprint=resume_plan_fingerprint(plan))
+    context = _context(plan)
+    consumed = _consumed(plan)
+    executor = _ContinuationExecutor()
+    coordinator = AgentToolExecutionCoordinator(executor)
+    store = _Store(base)
+    store.plan = plan
+    builder = _ContextBuilder()
+    runtime = AgentRuntime(
+        context_builder=builder,
+        inference=_Inference(),
+        tool_execution=coordinator,
+        execution_policy=_Policy(),
+        durable_store=store,
+    )
+
+    result = await runtime.execute_claimed_resume(
+        context,
+        plan=plan,
+        consumed=consumed,
+    )
+
+    assert [item.tool_call_id for item in result.last_tool_results] == [
+        "call-1",
+        "call-2",
+        "call-3",
+    ]
+    tool_messages = [
+        item for item in builder.last_messages if item.role == "tool"
+    ]
+    assert [item.tool_call_id for item in tool_messages] == [
+        "call-1",
+        "call-2",
+        "call-3",
+    ]
+    assert {item.tool_call_id for item in executor.continued} == {
+        "call-2",
+        "call-3",
+    }
+    assert executor.ordinary_execute_calls == 0
