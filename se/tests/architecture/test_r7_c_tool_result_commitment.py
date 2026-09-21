@@ -16,7 +16,14 @@ from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.capability_invocations import (
     CapabilityInvocationRepository,
 )
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.contracts import (
+    AgentExecutionContext,
+    ToolExecutionResult,
+)
 from se.src.runtimes.agent.persistence import DurableAgentStore
+from se.src.runtimes.agent.runtime import AgentRuntime
 
 
 class _Uow:
@@ -370,3 +377,119 @@ async def test_r7_c_legacy_resume_transcript_is_fail_closed_for_uncommitted_tool
         ]
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_c_resumed_batch_materializes_results_in_original_parallel_call_order():
+    context = AgentExecutionContext.create(
+        execution_id="exec-order",
+        agent_id="agent-order",
+        session_id="session-order",
+        correlation_id="corr-order",
+        identity=Identity(
+            user_id="user-order",
+            auth_type="api_key",
+            scopes={"*"},
+        ),
+        limits=AgentExecutionLimits(
+            max_iterations=4,
+            max_parallel_tools=3,
+            timeout_seconds=5,
+        ),
+    )
+    context.iteration = 3
+    context.resume_pending_tool_calls = [
+        {
+            "execution_id": "exec-order",
+            "iteration": 3,
+            "invocation_id": "inv-2",
+            "tool_call_id": "call-2",
+            "capability_id": "tool.remote",
+            "arguments": {"value": 2},
+        },
+        {
+            "execution_id": "exec-order",
+            "iteration": 3,
+            "invocation_id": "inv-1",
+            "tool_call_id": "call-1",
+            "capability_id": "tool.remote",
+            "arguments": {"value": 1},
+        },
+        {
+            "execution_id": "exec-order",
+            "iteration": 3,
+            "invocation_id": "inv-3",
+            "tool_call_id": "call-3",
+            "capability_id": "tool.remote",
+            "arguments": {"value": 3},
+        },
+    ]
+
+    def result(call_id, value):
+        return ToolExecutionResult(
+            execution_id="exec-order",
+            iteration=3,
+            invocation_id=f"inv-{call_id[-1]}",
+            tool_call_id=call_id,
+            capability_id="tool.remote",
+            success=True,
+            output={"value": value},
+        )
+
+    committed = {
+        "call-2": result("call-2", 2),
+        "call-3": result("call-3", 3),
+    }
+
+    class Store:
+        async def load_committed_tool_result(self, execution_id, tool_call_id):
+            value = committed.get(tool_call_id)
+            if value is None:
+                return None
+            return type(
+                "Record",
+                (),
+                {
+                    "execution_id": value.execution_id,
+                    "invocation_id": value.invocation_id,
+                    "tool_call_id": value.tool_call_id,
+                    "capability_id": value.capability_id,
+                    "success": value.success,
+                    "output": value.output,
+                    "error_code": value.error_code,
+                    "error_message": value.error_message,
+                    "retryable": value.retryable,
+                    "extra_metadata": value.metadata,
+                    "commit_state": "COMMITTED",
+                },
+            )()
+
+        async def save_tool_result(self, values):
+            committed_result = result(
+                values["tool_call_id"],
+                values["output"]["value"],
+            )
+            committed[values["tool_call_id"]] = committed_result
+
+    class Executor:
+        async def execute_many(self, context, requests, *, max_parallel):
+            assert [item.tool_call_id for item in requests] == ["call-1"]
+            assert max_parallel == 3
+            return [result("call-1", 1)]
+
+    runtime = AgentRuntime(
+        context_builder=None,
+        inference=None,
+        tool_execution=Executor(),
+        execution_policy=None,
+        durable_store=Store(),
+    )
+
+    reconstructed = await runtime._execute_resumed_tool_calls(context)
+
+    assert [item.tool_call_id for item in reconstructed] == [
+        "call-2",
+        "call-1",
+        "call-3",
+    ]
+    assert [item.output["value"] for item in reconstructed] == [2, 1, 3]
