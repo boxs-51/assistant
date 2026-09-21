@@ -33,6 +33,13 @@ class CapabilityWaitReason(str, Enum):
     RESOURCE = "RESOURCE"
 
 
+class ExistingInvocationContinuationMode(str, Enum):
+    """Execution-safe modes for continuing one durable logical invocation."""
+
+    DISPATCH_NOT_DISPATCHED = "DISPATCH_NOT_DISPATCHED"
+    REPLAY_SAFE = "REPLAY_SAFE"
+
+
 class RemoteOutcomeState(str, Enum):
     """Durable certainty about a remote side effect, separate from lifecycle."""
 
