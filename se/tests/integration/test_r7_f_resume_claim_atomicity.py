@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
+from se.src.domain.schemas.identity import Identity
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
@@ -728,6 +729,49 @@ async def test_r7_f_two_distinct_claims_have_at_most_one_consumed_winner(tmp_pat
             assert len(consumed) == 1
             assert execution.state == "RUNNING"
             assert execution.revision == 3
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_f4_prepare_resume_plan_context_is_read_only_and_checkpoint_directed(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(tmp_path, "f4-context.sqlite")
+    try:
+        await _seed_non_task(sessions)
+        plan = _plan()
+        identity = Identity(
+            user_id=USER,
+            session_id=SESSION,
+            auth_type="api_key",
+            scopes={"*"},
+        )
+
+        context = await store.prepare_resume_plan_context(
+            plan,
+            identity=identity,
+        )
+
+        assert context.execution_id == plan.execution_id
+        assert context.connection_id == K2
+        assert context.iteration == plan.iteration
+        assert context.resume_revision == plan.expected_execution_revision
+        assert context.resume_pending_tool_calls == []
+        assert context.active_budget_running is False
+        assert context.remaining_active_budget_seconds == 20.0
+        assert context.metadata["client_id"] == CLIENT
+        assert context.metadata["r7_resume_plan_fingerprint"] == plan.plan_fingerprint
+        assert tuple(
+            item["role"] for item in context.resume_transcript
+        ) == tuple(item.role for item in plan.transcript_snapshot)
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            assert execution.state == "WAITING"
+            assert execution.revision == 2
+            assert execution.bound_connection_id is None
             await uow.commit()
     finally:
         await engine.dispose()
