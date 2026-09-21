@@ -321,7 +321,7 @@ Post-green review found and hardened four correctness gaps before closure:
 
 ## Final verification
 
-Verified implementation HEAD: `7862c748161b18e53438129165a7a417d71f008f`
+Verified implementation HEAD: `d8ceacab07fca9474eff62ad2c6ec91a5fdf1138`
 
 - Architecture Baseline — success
 - Phase 5.6 Exit Gate — success
@@ -330,7 +330,14 @@ Verified implementation HEAD: `7862c748161b18e53438129165a7a417d71f008f`
 - Phase 5.9 Exit Gate — success
 - Phase 5.10 Exit Gate — success
 - Phase 5.11 Exit Gate — success
-- Linux root suite: **692 passed, 1 skipped, 14 warnings**
+- Linux root suite: **698 passed, 1 skipped, 14 warnings**
 - Windows client contracts: **38 passed**
+
+Final last-mile audit additionally closed:
+
+- P0: generic durable execution CAS can no longer publish WAITING without the normalized checkpoint transaction;
+- P1: AgentExecution/checkpoint wait_reason parity is mandatory;
+- P1: stable origin client identity is mandatory for connection preflight;
+- P1: every canonical active parallel tool call must be covered by a pending snapshot or durable COMMITTED result.
 
 R7-D is **CLOSED / VERIFIED**. R7-E/F/G/H remain intentionally deferred.

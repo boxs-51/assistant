@@ -4,7 +4,7 @@
 
 - Repository: `boxs-51/assistant`
 - R7-C baseline: `45f7a6353b46fdb9054ef41c457fbee424849429`
-- Verified R7-D implementation HEAD: `7862c748161b18e53438129165a7a417d71f008f`
+- Verified R7-D implementation HEAD: `d8ceacab07fca9474eff62ad2c6ec91a5fdf1138`
 - Branch: `r7-d-resume-plan`
 - PR: #2
 - Status: **CLOSED / VERIFIED**
@@ -267,18 +267,129 @@ The NOT_DISPATCHED fixtures were also corrected so their checkpoint watermark
 truthfully records `NOT_DISPATCHED`; a checkpoint that recorded
 `OUTCOME_UNKNOWN` is intentionally rejected if current state regresses.
 
+## Last-mile hardening after closure re-audit
+
+A final branch-wide audit after the first R7-D completion found one additional
+P0 and three P1 contract gaps. All four were fixed before entering R7-E.
+
+### P0 — normalized WAITING authority is stronger than generic execution lifecycle
+
+Previously `AgentRuntime._has_execution_lifecycle_store()` required only:
+
+```text
+load_execution
+save_execution
+compare_and_set_execution
+```
+
+That was enough to skip the legacy Phase 6.9 checkpoint path, but a partial
+durable store without `commit_waiting_checkpoint()` could later fall back to
+plain AgentExecution CAS and expose:
+
+```text
+AgentExecution.state == WAITING
+AgentExecution.current_checkpoint_id == NULL
+```
+
+R7-D now distinguishes generic execution lifecycle from canonical normalized
+WAITING authority.
+
+For non-task execution:
+
+```text
+checkpoint_values != None
+AND commit_waiting_checkpoint unavailable
+    -> fail closed
+    -> plain WAITING CAS is forbidden
+```
+
+For task-scoped execution,
+`TaskBudgetService.finish_task_scoped_execution()` remains the canonical
+atomic writer because it commits TaskBudget release + checkpoint + pending
+snapshots + RUNNING -> WAITING in one UoW.
+
+The remote-wait path also checks normalized WAITING authority before returning
+a resumable WAITING result.
+
+### P1 — execution/checkpoint wait-reason parity
+
+Resume planning now requires:
+
+```text
+AgentExecution.state == WAITING
+AgentExecution.wait_reason == checkpoint.wait_reason
+AgentExecution.wait_reason == CONNECTION
+```
+
+A drifted execution/checkpoint pair rejects with `WAIT_REASON_CONFLICT`;
+checkpoint state alone is no longer sufficient.
+
+### P1 — stable client affinity is proof, not optional metadata
+
+Connection resume now fails closed unless a stable `client_id` exists at every
+authority layer:
+
+```text
+target connection client_id
+checkpoint.origin_client_id
+CheckpointPendingInvocation.origin_client_id
+CapabilityInvocation.origin_client_id
+```
+
+All must match the resume `target_client_id`.
+
+Missing origin-client authority rejects with
+`RESUME_ORIGIN_CLIENT_MISSING`; a missing target/connection client identity
+rejects with `RESUME_CLIENT_ID_REQUIRED`.
+
+Nullable schema fields remain available for legacy/migration representation,
+but R7-D connection preflight no longer converts absent identity proof into
+execution-safe planning authority.
+
+### P1 — complete active parallel-batch coverage
+
+`CheckpointPendingInvocation.ordinal` ordering alone did not prove that every
+canonical active-batch tool call was accounted for.
+
+R7-D now validates the full canonical `iteration.tool_call_ids` batch:
+
+```text
+for every active tool_call_id:
+    pending snapshot exists
+    OR durable COMMITTED AgentToolResult exists
+```
+
+If a canonical call is in neither set, planning rejects with
+`CHECKPOINT_ACTIVE_BATCH_INCOMPLETE`.
+
+Overlap is intentionally allowed after the checkpoint: a call that was pending
+at checkpoint time may later become COMMITTED through normal delivery or R6
+reconciliation. The invariant is complete coverage, not permanent mutual
+exclusivity.
+
+### Compatibility regression caught by CI
+
+The first last-mile hardening run correctly caused two old R4 architecture
+tests to fail because their in-memory fake exposed generic execution CAS but did
+not implement the normalized checkpoint transaction.
+
+The production fail-closed behavior was retained. The fake was upgraded with a
+minimal `commit_waiting_checkpoint()` implementation and assertions that
+`current_checkpoint_id` is populated, so the older budget-freeze tests now
+exercise the current R7 durability contract instead of weakening it.
+
 ## CI evidence
 
-Verified on implementation HEAD `7862c748161b18e53438129165a7a417d71f008f`.
+Verified on implementation HEAD `d8ceacab07fca9474eff62ad2c6ec91a5fdf1138`.
 
 Architecture Baseline:
 
 ```text
 python -m pytest -q
-692 passed, 1 skipped, 14 warnings in 53.04s
+698 passed, 1 skipped, 14 warnings in 55.80s
 
 python -m pytest -q cl/tests
-38 passed in 6.08s
+38 passed in 6.52s
 ```
 
 All workflow gates succeeded:
