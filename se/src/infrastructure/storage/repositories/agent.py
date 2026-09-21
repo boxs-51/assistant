@@ -229,6 +229,20 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def update_tool_result(
+        self,
+        execution_id: str,
+        tool_call_id: str,
+        values: Dict[str, Any],
+    ):
+        record = await self.get_tool_result(execution_id, tool_call_id)
+        if record is None:
+            return None
+        for key, value in values.items():
+            setattr(record, key, value)
+        await self.session.flush()
+        return record
+
     async def get_tool_call(self, execution_id: str, tool_call_id: str):
         result = await self.session.execute(
             select(AgentToolCallRecord).where(
