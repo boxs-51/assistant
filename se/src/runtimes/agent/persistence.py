@@ -1197,6 +1197,37 @@ class DurableAgentStore:
                 CapabilityIdempotency.DEDUPLICATED.value,
             }
 
+            action_tool_call_ids = {
+                item.tool_call_id for item in actions
+            }
+            for tool_call_id in plan.ordered_tool_call_ids:
+                if tool_call_id in action_tool_call_ids:
+                    continue
+                tool_call = await uow.agents.get_tool_call(
+                    plan.execution_id,
+                    tool_call_id,
+                )
+                tool_result = await uow.agents.get_tool_result(
+                    plan.execution_id,
+                    tool_call_id,
+                )
+                if (
+                    tool_call is None
+                    or tool_result is None
+                    or getattr(tool_result, "commit_state", "PROVISIONAL")
+                    != "COMMITTED"
+                    or tool_result.invocation_id != tool_call.invocation_id
+                    or tool_result.capability_id != tool_call.capability_id
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="STALE_RECONCILIATION_SNAPSHOT",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
             for action in actions:
                 snapshot = pending_by_invocation.get(action.invocation_id)
                 if (
