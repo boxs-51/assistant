@@ -12,6 +12,7 @@ from ..contracts.tool import (
     ToolExecutionRequest,
     ToolExecutionResult,
 )
+from ..contracts.resume import ResumeInvocationAction
 
 
 RetryDecider = Callable[[ToolExecutionResult, int], bool]
@@ -395,6 +396,116 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             raise
 
         return self._order_results(request_list, raw_results)
+
+    async def continue_invocation(
+        self,
+        context: AgentExecutionContext,
+        action: ResumeInvocationAction,
+    ) -> ToolExecutionResult:
+        """Delegate one R7-E continuation without ordinary retry orchestration."""
+
+        runner = getattr(self._executor, "continue_invocation", None)
+        if not callable(runner):
+            raise RuntimeError(
+                "R7 continuation executor is unavailable."
+            )
+        return await runner(context, action)
+
+    async def continue_invocations(
+        self,
+        context: AgentExecutionContext,
+        actions: Sequence[ResumeInvocationAction],
+        *,
+        max_parallel: int,
+    ) -> Sequence[ToolExecutionResult]:
+        """Run an R7 continuation subset concurrently and return plan order.
+
+        R7-E's durable expected_revision fence owns duplicate-attempt safety.
+        The Phase-5 retry ledger is intentionally bypassed because these are
+        new attempts of existing logical invocations, not new tool calls.
+        """
+
+        if max_parallel < 1:
+            raise ValueError("max_parallel must be >= 1.")
+        action_list = list(actions)
+        if not action_list:
+            return []
+
+        seen_invocations: set[str] = set()
+        seen_tool_calls: set[str] = set()
+        for action in action_list:
+            if action.invocation_id in seen_invocations:
+                raise ValueError(
+                    "Duplicate invocation_id in continuation batch: "
+                    f"{action.invocation_id!r}."
+                )
+            if action.tool_call_id in seen_tool_calls:
+                raise ValueError(
+                    "Duplicate tool_call_id in continuation batch: "
+                    f"{action.tool_call_id!r}."
+                )
+            seen_invocations.add(action.invocation_id)
+            seen_tool_calls.add(action.tool_call_id)
+
+        semaphore = asyncio.Semaphore(
+            min(max_parallel, context.limits.max_parallel_tools)
+        )
+
+        async def run_one(
+            action: ResumeInvocationAction,
+        ) -> ToolExecutionResult:
+            async with semaphore:
+                return await self.continue_invocation(context, action)
+
+        tasks = [
+            asyncio.create_task(
+                run_one(action),
+                name=(
+                    f"tool-resume:{context.execution_id}:"
+                    f"{action.invocation_id}"
+                ),
+            )
+            for action in action_list
+        ]
+        try:
+            raw_results = await self._gather_with_cancellation(
+                context,
+                tasks,
+            )
+        except BaseException:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
+        by_id: dict[str, ToolExecutionResult] = {}
+        for result in raw_results:
+            if result.tool_call_id in by_id:
+                raise ValueError(
+                    "Duplicate resumed tool result for tool_call_id="
+                    f"{result.tool_call_id!r}."
+                )
+            by_id[result.tool_call_id] = result
+
+        ordered: list[ToolExecutionResult] = []
+        for action in action_list:
+            result = by_id.get(action.tool_call_id)
+            if result is None:
+                raise ValueError(
+                    "Missing resumed result for tool_call_id="
+                    f"{action.tool_call_id!r}."
+                )
+            if (
+                result.execution_id != context.execution_id
+                or result.invocation_id != action.invocation_id
+                or result.capability_id != action.capability_id
+            ):
+                raise ValueError(
+                    "R7 continuation result identity does not match action."
+                )
+            ordered.append(result)
+        return ordered
 
     def can_continue_server_side(self, capability_id: str) -> bool:
         checker = getattr(self._executor, "can_continue_server_side", None)
