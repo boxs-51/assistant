@@ -185,6 +185,7 @@ class CapabilityDispatcher:
                     return
                 self._emit(invocation_id, previous)
                 return
+            replay_existing_running = False
             durable = self._ledger_get(invocation_id)
             if durable is not None:
                 if not self._same_semantics(
@@ -207,14 +208,12 @@ class CapabilityDispatcher:
                     self._purge_terminal_locked()
                     self._emit(invocation_id, outcome)
                     return
-                if (
-                    durable.state is ClientInvocationLedgerState.RUNNING
-                    and not self._durable_running_replay_safe(idempotency)
-                ):
-                    # A prior process may have entered the target call.  Only
-                    # replay-safe semantics may deliberately re-enter after a
-                    # process restart; unsafe/unknown effects stay blocked.
-                    return
+                if durable.state is ClientInvocationLedgerState.RUNNING:
+                    if not self._durable_running_replay_safe(idempotency):
+                        # A prior process may have entered the target call.
+                        # Unsafe/unknown effects remain blocked.
+                        return
+                    replay_existing_running = True
             if not self._capacity.acquire(blocking=False):
                 self._record_and_emit(
                     invocation_id, envelope, "capability.error",
@@ -251,12 +250,11 @@ class CapabilityDispatcher:
                     self._purge_terminal_locked()
                     self._emit(invocation_id, outcome)
                     return
-                if (
-                    durable.state is ClientInvocationLedgerState.RUNNING
-                    and not self._durable_running_replay_safe(idempotency)
-                ):
-                    self._capacity.release()
-                    return
+                if durable.state is ClientInvocationLedgerState.RUNNING:
+                    if not self._durable_running_replay_safe(idempotency):
+                        self._capacity.release()
+                        return
+                    replay_existing_running = True
             cancellation_event = threading.Event()
             try:
                 future = self._executor.submit(
@@ -266,6 +264,7 @@ class CapabilityDispatcher:
                     envelope,
                     cancellation_event,
                     ledger_identity,
+                    replay_existing_running,
                 )
             except BaseException:
                 self._capacity.release()
@@ -344,9 +343,14 @@ class CapabilityDispatcher:
         envelope,
         cancellation_event,
         ledger_identity,
+        replay_existing_running=False,
     ):
         before_target_call = None
-        if ledger_identity is not None and self.invocation_ledger is not None:
+        if (
+            ledger_identity is not None
+            and self.invocation_ledger is not None
+            and not replay_existing_running
+        ):
             client_id, principal_id = ledger_identity
             invocation_id = envelope.get("invocation_id")
 
