@@ -289,10 +289,27 @@ class AgentRuntime:
     ) -> ToolExecutionResult | None:
         if self._durable_store is None:
             return None
-        record = await self._durable_store.load_tool_result(
-            request.execution_id,
-            request.tool_call_id,
+        committed_loader = getattr(
+            self._durable_store,
+            "load_committed_tool_result",
+            None,
         )
+        if callable(committed_loader):
+            record = await committed_loader(
+                request.execution_id,
+                request.tool_call_id,
+            )
+        else:
+            record = await self._durable_store.load_tool_result(
+                request.execution_id,
+                request.tool_call_id,
+            )
+            if (
+                record is not None
+                and getattr(record, "commit_state", "PROVISIONAL")
+                != "COMMITTED"
+            ):
+                record = None
         if record is None:
             return None
         return ToolExecutionResult(
@@ -349,8 +366,25 @@ class AgentRuntime:
             )
             executed = list(_order_tool_results(pending, raw))
             iteration_id = f"{context.execution_id}:iteration:{context.iteration}"
+            committed_executed: list[ToolExecutionResult] = []
             for result in executed:
                 await self._persist_tool_result(result, iteration_id)
+                if self._durable_store is None:
+                    committed_executed.append(result)
+                    continue
+                request = next(
+                    item
+                    for item in pending
+                    if item.tool_call_id == result.tool_call_id
+                )
+                committed_result = await self._load_committed_tool_result(request)
+                if committed_result is None:
+                    raise ExecutionConflictError(
+                        "Resumed tool outcome is not COMMITTED and cannot "
+                        "enter model context."
+                    )
+                committed_executed.append(committed_result)
+            executed = committed_executed
         by_id = {item.tool_call_id: item for item in [*committed, *executed]}
         return tuple(by_id[item.tool_call_id] for item in requests)
 
