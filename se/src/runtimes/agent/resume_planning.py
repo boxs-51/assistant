@@ -166,10 +166,20 @@ class AgentResumePlanningService:
                 "STALE_CHECKPOINT",
                 "Checkpoint revision does not match AgentExecution revision.",
             )
-        if checkpoint.wait_reason != "CONNECTION":
+        execution_wait_reason = getattr(
+            getattr(execution, "wait_reason", None),
+            "value",
+            getattr(execution, "wait_reason", None),
+        )
+        if execution_wait_reason != checkpoint.wait_reason:
+            raise ResumePlanRejected(
+                "WAIT_REASON_CONFLICT",
+                "AgentExecution and normalized checkpoint wait_reason differ.",
+            )
+        if execution_wait_reason != "CONNECTION":
             raise ResumePlanRejected(
                 "UNSUPPORTED_RESUME_TRIGGER",
-                f"R7-D connection preflight cannot resume {checkpoint.wait_reason!r}.",
+                f"R7-D connection preflight cannot resume {execution_wait_reason!r}.",
             )
         if (
             checkpoint.origin_connection_id
@@ -179,10 +189,12 @@ class AgentResumePlanningService:
                 "RESUME_CONNECTION_NOT_NEW",
                 "Reconnect must use a new connection generation.",
             )
-        if (
-            checkpoint.origin_client_id
-            and checkpoint.origin_client_id != target_client_id
-        ):
+        if not checkpoint.origin_client_id:
+            raise ResumePlanRejected(
+                "RESUME_ORIGIN_CLIENT_MISSING",
+                "Connection WAITING checkpoint has no stable origin client.",
+            )
+        if checkpoint.origin_client_id != target_client_id:
             raise ResumePlanRejected(
                 "FOREIGN_CLIENT",
                 "Resume client does not match checkpoint origin client.",
@@ -258,6 +270,11 @@ class AgentResumePlanningService:
                 "Connection WAITING checkpoint has no pending invocation snapshots.",
             )
         self._validate_pending_order(pending, ordered_tool_call_ids)
+        await self._validate_active_batch_coverage(
+            execution_id,
+            ordered_tool_call_ids,
+            pending,
+        )
 
         transcript_raw = await self._store.load_committed_checkpoint_transcript(
             execution_id,
@@ -348,6 +365,38 @@ class AgentResumePlanningService:
                     "Pending invocation ordinal disagrees with tool_call_ids.",
                 )
 
+    async def _validate_active_batch_coverage(
+        self,
+        execution_id: str,
+        ordered_tool_call_ids: tuple[str, ...],
+        pending: tuple[CheckpointPendingInvocation, ...],
+    ) -> None:
+        """Fail closed if an active parallel call vanished from the checkpoint.
+
+        A canonical active-batch tool call is accounted for when it has an R7
+        pending snapshot, or when its durable result is already COMMITTED. A
+        pending row may later also become committed after reconciliation; that
+        overlap is valid and does not weaken the coverage proof.
+        """
+        pending_ids = {item.tool_call_id for item in pending}
+        missing: list[str] = []
+        for tool_call_id in ordered_tool_call_ids:
+            if tool_call_id in pending_ids:
+                continue
+            committed = await self._store.load_committed_tool_result(
+                execution_id,
+                tool_call_id,
+            )
+            if committed is None:
+                missing.append(tool_call_id)
+        if missing:
+            raise ResumePlanRejected(
+                "CHECKPOINT_ACTIVE_BATCH_INCOMPLETE",
+                "Canonical active tool batch has calls with neither a pending "
+                "snapshot nor a committed durable result: "
+                + ", ".join(missing),
+            )
+
     def _validate_target_connection(
         self,
         *,
@@ -355,6 +404,11 @@ class AgentResumePlanningService:
         target_client_id: str | None,
         target_connection_id: str,
     ) -> None:
+        if not target_client_id:
+            raise ResumePlanRejected(
+                "RESUME_CLIENT_ID_REQUIRED",
+                "Connection resume requires a stable client_id.",
+            )
         registry = getattr(self._capabilities, "connection_registry", None)
         if registry is None:
             raise ResumePlanRejected(
@@ -379,7 +433,12 @@ class AgentResumePlanningService:
                 "Target resume connection belongs to another principal.",
             )
         connection_client_id = str(snapshot.metadata.get("client_id") or "")
-        if target_client_id and connection_client_id != target_client_id:
+        if not connection_client_id:
+            raise ResumePlanRejected(
+                "RESUME_CLIENT_ID_REQUIRED",
+                "Target connection has no stable client_id.",
+            )
+        if connection_client_id != target_client_id:
             raise ResumePlanRejected(
                 "FOREIGN_CLIENT",
                 "Target connection stable client identity changed.",
@@ -451,18 +510,17 @@ class AgentResumePlanningService:
                 "FOREIGN_PRINCIPAL",
                 "CapabilityInvocation owner does not match resume principal.",
             )
-        if (
-            invocation.origin_client_id
-            and invocation.origin_client_id != target_client_id
-        ):
+        if not invocation.origin_client_id or not snapshot.origin_client_id:
+            raise ResumePlanRejected(
+                "RESUME_ORIGIN_CLIENT_MISSING",
+                "Pending remote invocation lacks stable origin client authority.",
+            )
+        if invocation.origin_client_id != target_client_id:
             raise ResumePlanRejected(
                 "FOREIGN_CLIENT",
                 "CapabilityInvocation origin client differs from resume client.",
             )
-        if (
-            snapshot.origin_client_id
-            and snapshot.origin_client_id != target_client_id
-        ):
+        if snapshot.origin_client_id != target_client_id:
             raise ResumePlanRejected(
                 "FOREIGN_CLIENT",
                 "Checkpoint invocation client differs from resume client.",

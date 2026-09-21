@@ -148,13 +148,18 @@ class AgentRuntime:
                 checkpoint_values=checkpoint_values,
                 pending_invocations=pending_invocations,
             )
-        if (
-            checkpoint_values is not None
-            and callable(
-                getattr(self._durable_store, "commit_waiting_checkpoint", None)
+        if checkpoint_values is not None:
+            writer = getattr(
+                self._durable_store,
+                "commit_waiting_checkpoint",
+                None,
             )
-        ):
-            await self._durable_store.commit_waiting_checkpoint(
+            if not callable(writer):
+                raise ExecutionConflictError(
+                    "NORMALIZED_WAITING_AUTHORITY_UNAVAILABLE: durable "
+                    "WAITING requires commit_waiting_checkpoint()."
+                )
+            await writer(
                 context.execution_id,
                 revision,
                 values,
@@ -454,6 +459,30 @@ class AgentRuntime:
                 "save_execution",
                 "compare_and_set_execution",
             )
+        )
+
+    def _has_normalized_waiting_authority(
+        self,
+        context: AgentExecutionContext,
+    ) -> bool:
+        """Return whether this execution can atomically publish R7 WAITING.
+
+        Generic execution lifecycle CAS is deliberately insufficient: once R7
+        is active, WAITING must never become visible without its normalized
+        checkpoint and ordered pending-invocation snapshots.
+        """
+        if not self._has_execution_lifecycle_store():
+            return False
+        if self._uses_task_budget(context):
+            return callable(
+                getattr(
+                    self._task_budget_service,
+                    "finish_task_scoped_execution",
+                    None,
+                )
+            )
+        return callable(
+            getattr(self._durable_store, "commit_waiting_checkpoint", None)
         )
 
     async def _begin_durable_execution(
@@ -1312,6 +1341,13 @@ class AgentRuntime:
                     # only for compatibility stores without durable lifecycle
                     # primitives.
                     if self._has_execution_lifecycle_store():
+                        if not self._has_normalized_waiting_authority(context):
+                            raise ExecutionConflictError(
+                                "NORMALIZED_WAITING_AUTHORITY_UNAVAILABLE: "
+                                "durable execution lifecycle cannot publish "
+                                "WAITING without the canonical R7 checkpoint "
+                                "transaction."
+                            )
                         record.close(
                             AgentLoopState.FAILED,
                             error_code="WAITING_FOR_CONNECTION",

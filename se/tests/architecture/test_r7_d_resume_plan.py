@@ -15,7 +15,8 @@ from se.src.runtimes.agent.contracts import (
     ResumeInvocationActionKind,
     ResumePlan,
 )
-from se.src.runtimes.agent.persistence import DurableAgentStore
+from se.src.runtimes.agent.persistence import DurableAgentStore, ExecutionConflictError
+from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.resume_planning import (
     AgentResumePlanningService,
     ResumePlanDeferred,
@@ -168,6 +169,7 @@ class _PlanStore:
         self.execution = SimpleNamespace(
             id="exec-1",
             state="WAITING",
+            wait_reason="CONNECTION",
             revision=7,
             current_checkpoint_id="cp-1",
             agent_id="agent-1",
@@ -213,6 +215,8 @@ class _PlanStore:
             ),
         )
         self.committed = None
+        self.committed_by_tool_call = {}
+        self.tool_call_ids = ["call-1"]
         self.task = SimpleNamespace(
             id="task-1",
             session_id="session-1",
@@ -240,7 +244,7 @@ class _PlanStore:
         iteration_id=None,
     ):
         assert iteration_number == 3
-        return SimpleNamespace(tool_call_ids=["call-1"])
+        return SimpleNamespace(tool_call_ids=list(self.tool_call_ids))
 
     async def load_committed_checkpoint_transcript(
         self,
@@ -253,7 +257,7 @@ class _PlanStore:
         return ({"role": "user", "content": "hello"},)
 
     async def load_committed_tool_result(self, execution_id, tool_call_id):
-        return self.committed
+        return self.committed_by_tool_call.get(tool_call_id, self.committed)
 
 
 def _service(store, caps):
@@ -693,3 +697,121 @@ async def test_r7_d_reuse_committed_rejects_mismatched_terminal_projection():
         await _build(_service(store, caps))
 
     assert raised.value.code == "COMMITTED_TOOL_RESULT_CONFLICT"
+
+
+
+@pytest.mark.asyncio
+async def test_r7_d_partial_lifecycle_store_cannot_publish_waiting_without_checkpoint():
+    class PartialDurableStore:
+        def __init__(self):
+            self.cas_calls = 0
+
+        async def load_execution(self, execution_id):
+            return None
+
+        async def save_execution(self, values):
+            return values
+
+        async def compare_and_set_execution(
+            self,
+            execution_id,
+            revision,
+            values,
+        ):
+            self.cas_calls += 1
+            return SimpleNamespace(revision=revision + 1)
+
+    store = PartialDurableStore()
+    runtime = AgentRuntime(
+        context_builder=None,
+        inference=None,
+        tool_execution=None,
+        execution_policy=None,
+        durable_store=store,
+    )
+    context = SimpleNamespace(
+        execution_id="exec-1",
+        task_id=None,
+        parent_execution_id=None,
+    )
+
+    assert runtime._has_execution_lifecycle_store() is True
+    assert runtime._has_normalized_waiting_authority(context) is False
+
+    with pytest.raises(ExecutionConflictError, match="NORMALIZED_WAITING_AUTHORITY_UNAVAILABLE"):
+        await runtime._transition_running_durable(
+            context,
+            7,
+            {"state": "WAITING", "wait_reason": "CONNECTION"},
+            checkpoint_values={
+                "checkpoint_id": "cp-1",
+                "execution_id": "exec-1",
+            },
+            pending_invocations=(),
+        )
+
+    assert store.cas_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_d_execution_and_checkpoint_wait_reason_must_match():
+    store = _PlanStore()
+    store.execution.wait_reason = "HITL"
+    caps = _CapabilityRuntime(_invocation())
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "WAIT_REASON_CONFLICT"
+    assert caps.reconcile_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("missing_authority", ["checkpoint", "snapshot", "invocation"])
+async def test_r7_d_connection_resume_requires_stable_origin_client_authority(
+    missing_authority,
+):
+    store = _PlanStore()
+    invocation = _invocation()
+    if missing_authority == "checkpoint":
+        store.checkpoint = replace(store.checkpoint, origin_client_id=None)
+    elif missing_authority == "snapshot":
+        store.pending = (
+            replace(store.pending[0], origin_client_id=None),
+        )
+    else:
+        invocation.origin_client_id = None
+    caps = _CapabilityRuntime(invocation)
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "RESUME_ORIGIN_CLIENT_MISSING"
+    assert caps.reconcile_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_d_parallel_active_batch_requires_pending_or_committed_coverage():
+    store = _PlanStore()
+    store.tool_call_ids = ["call-1", "call-2", "call-3"]
+    store.pending = (
+        replace(
+            store.pending[0],
+            ordinal=2,
+            tool_call_id="call-3",
+            invocation_id="inv-3",
+        ),
+    )
+    store.committed_by_tool_call["call-1"] = SimpleNamespace(
+        commit_state="COMMITTED",
+        execution_id="exec-1",
+        tool_call_id="call-1",
+    )
+    caps = _CapabilityRuntime(_invocation())
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "CHECKPOINT_ACTIVE_BATCH_INCOMPLETE"
+    assert "call-2" in str(raised.value)
+    assert caps.reconcile_calls == 0
