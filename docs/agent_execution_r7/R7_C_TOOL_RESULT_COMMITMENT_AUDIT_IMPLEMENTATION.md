@@ -6,7 +6,7 @@
 - Audited baseline: `24f3c5fc808729cbe714e13650c37262bccfef48`
 - Implementation branch: `r7-c-tool-result-commitment`
 - Depends on: R7-B CLOSED
-- Status: **IMPLEMENTED / VERIFICATION PENDING**
+- Status: **CLOSED / VERIFIED**
 
 ## Goal
 
@@ -246,4 +246,16 @@ py -m pytest -q `
 py -m pytest -q se/tests tools cl/tests
 ```
 
-This branch has no GitHub workflow/status result at the time of this implementation review, and the current tool environment cannot execute the repository locally. R7-C must therefore remain **IMPLEMENTED / VERIFICATION PENDING** until these commands are green.
+Final verification on implementation HEAD `bbf4e7fd1a2a73a19cae8e3b9441bdc0a834763d` is green:
+
+- Architecture Baseline — success
+- Phase 5.6 Exit Gate — success
+- Phase 5.7 Exit Gate — success
+- Phase 5.8 Exit Gate — success
+- Phase 5.9 Exit Gate — success
+- Phase 5.10 Exit Gate — success
+- Phase 5.11 Exit Gate — success
+- Linux root suite: `python -m pytest -q` -> **678 passed, 1 skipped, 14 warnings**
+- Windows client contracts: `python -m pytest -q cl/tests` -> **38 passed**
+
+R7-C is therefore **CLOSED / VERIFIED**.
