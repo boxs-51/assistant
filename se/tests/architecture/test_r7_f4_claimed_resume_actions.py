@@ -347,6 +347,7 @@ async def test_r7_f4_continuation_coordinator_preserves_action_order():
     plan = _plan()
     context = _context(plan)
     context.restore_active_budget(plan.remaining_active_budget_seconds)
+    context.tool_calls_used = 3
     executor = _ContinuationExecutor()
     coordinator = AgentToolExecutionCoordinator(executor)
 
@@ -365,6 +366,7 @@ async def test_r7_f4_continuation_coordinator_preserves_action_order():
         ResumeInvocationActionKind.REPLAY_SAFE,
     }
     assert executor.ordinary_execute_calls == 0
+    assert context.tool_calls_used == 3
 
 
 @pytest.mark.asyncio
