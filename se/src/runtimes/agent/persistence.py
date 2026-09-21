@@ -26,6 +26,7 @@ from .contracts.resume import (
     ResumeClaimIntent,
     ResumeClaimState,
     ResumeInvocationActionKind,
+    ResumePlan,
     ResumeTriggerType,
     normalize_resume_trigger_type,
     resume_plan_fingerprint,
@@ -1530,6 +1531,164 @@ class DurableAgentStore:
                 )
             await uow.commit()
             return tuple(result)
+
+    async def prepare_resume_plan_context(
+        self,
+        plan: ResumePlan,
+        *,
+        identity: Identity,
+        limits: AgentExecutionLimits | None = None,
+        agent=None,
+        clock: ExecutionClock | None = None,
+    ) -> AgentExecutionContext:
+        """Reconstruct the exact read-only R7-D context before claim consume.
+
+        This method never acquires execution authority. It exists so R7-G can
+        reserve process-local ownership using the same cancellation scope
+        before F3 atomically consumes the ResumeClaim.
+        """
+
+        if resume_plan_fingerprint(plan) != plan.plan_fingerprint:
+            raise ExecutionConflictError(
+                "STALE_RESUME_PLAN: plan fingerprint does not match semantics."
+            )
+        if identity.user_id != plan.target_user_id:
+            raise ExecutionConflictError(
+                "FOREIGN_PRINCIPAL: resume identity differs from plan."
+            )
+        if not plan.target_client_id or not plan.target_connection_id:
+            raise ExecutionConflictError(
+                "CONNECTION_NOT_READY: resume plan has no K2 identity."
+            )
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(plan.execution_id)
+            if execution is None:
+                raise ExecutionConflictError(
+                    f"Unknown AgentExecution: {plan.execution_id}"
+                )
+            if (
+                str(execution.state) != "WAITING"
+                or execution.revision != plan.expected_execution_revision
+                or execution.current_checkpoint_id != plan.checkpoint_id
+                or str(execution.wait_reason) != "CONNECTION"
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RESUME_PLAN: execution is no longer the planned "
+                    "WAITING authority."
+                )
+            if (
+                execution.session_id != plan.session_id
+                or execution.agent_id != plan.agent_id
+                or execution.task_id != plan.task_id
+                or execution.branch_id != plan.branch_id
+                or execution.parent_execution_id != plan.parent_execution_id
+                or execution.retry_of_execution_id != plan.retry_of_execution_id
+                or execution.base_execution_id != plan.base_execution_id
+                or execution.base_checkpoint_id != plan.base_checkpoint_id
+                or execution.correlation_id != plan.correlation_id
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RESUME_PLAN: execution lineage differs from plan."
+                )
+
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                plan.checkpoint_id
+            )
+            if (
+                checkpoint is None
+                or checkpoint.execution_id != plan.execution_id
+                or checkpoint.execution_revision
+                != plan.expected_execution_revision
+                or checkpoint.session_id != plan.session_id
+                or checkpoint.task_id != plan.task_id
+                or checkpoint.branch_id != plan.branch_id
+                or checkpoint.iteration != plan.iteration
+                or checkpoint.wait_reason != "CONNECTION"
+                or checkpoint.origin_client_id != plan.target_client_id
+            ):
+                raise ExecutionConflictError(
+                    "STALE_CHECKPOINT: normalized checkpoint differs from plan."
+                )
+
+            execution_remaining = getattr(
+                execution,
+                "remaining_active_budget_seconds",
+                None,
+            )
+            checkpoint_remaining = getattr(
+                checkpoint,
+                "remaining_active_budget_seconds",
+                None,
+            )
+            if (
+                execution_remaining is None
+                or checkpoint_remaining is None
+                or float(execution_remaining)
+                != float(plan.remaining_active_budget_seconds)
+                or float(checkpoint_remaining)
+                != float(plan.remaining_active_budget_seconds)
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RESUME_PLAN: active budget differs from checkpoint."
+                )
+            if (
+                _utc_datetime(getattr(execution, "wait_expires_at", None))
+                != _utc_datetime(plan.wait_expires_at)
+                or _utc_datetime(getattr(checkpoint, "wait_expires_at", None))
+                != _utc_datetime(plan.wait_expires_at)
+            ):
+                raise ExecutionConflictError(
+                    "STALE_CHECKPOINT: wait expiry differs from plan."
+                )
+
+            state = getattr(execution, "context_state", None) or {}
+            restored_limits = limits or AgentExecutionLimits.model_validate(
+                state.get("limits", {})
+            )
+            metadata = dict(state.get("metadata", {}) or {})
+            metadata["client_id"] = plan.target_client_id
+            metadata["r7_resume_plan_fingerprint"] = plan.plan_fingerprint
+
+            context = AgentExecutionContext.create(
+                execution_id=plan.execution_id,
+                agent_id=plan.agent_id,
+                session_id=plan.session_id,
+                correlation_id=plan.correlation_id,
+                identity=identity,
+                limits=restored_limits,
+                request_id=plan.request_id,
+                task_id=plan.task_id,
+                branch_id=plan.branch_id,
+                parent_execution_id=plan.parent_execution_id,
+                retry_of_execution_id=plan.retry_of_execution_id,
+                base_execution_id=plan.base_execution_id,
+                base_checkpoint_id=plan.base_checkpoint_id,
+                workflow_id=state.get("workflow_id"),
+                connection_id=plan.target_connection_id,
+                agent=agent,
+                input=dict(execution.request or {}),
+                metadata=metadata,
+                causation_id=state.get("causation_id"),
+                trace_id=plan.trace_id,
+                remaining_active_budget_seconds=(
+                    plan.remaining_active_budget_seconds
+                ),
+                wait_expires_at=plan.wait_expires_at,
+                clock=clock,
+                activate_budget=False,
+            )
+            context.iteration = plan.iteration
+            context.resume_transcript = [
+                item.model_dump(mode="json")
+                for item in plan.transcript_snapshot
+            ]
+            # Canonical R7-F4 never sends pending calls through the legacy
+            # ordinary execute_capability() resume path.
+            context.resume_pending_tool_calls = []
+            context.resume_revision = plan.expected_execution_revision
+            await uow.commit()
+            return context
 
     async def resume_execution(
         self,
