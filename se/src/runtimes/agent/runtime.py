@@ -690,9 +690,15 @@ class AgentRuntime:
                         "Continuation result identity differs from ResumePlan.",
                     )
 
-                await self._persist_tool_result(result, iteration_id)
                 request = self._resume_action_request(context, action)
                 committed = await self._load_committed_tool_result(request)
+                if committed is None:
+                    # Persist transport output only when no durable committed
+                    # projection has already won a post-claim race. This keeps
+                    # stale continuation failures from conflicting with an
+                    # authoritative terminal result committed by another actor.
+                    await self._persist_tool_result(result, iteration_id)
+                    committed = await self._load_committed_tool_result(request)
                 if committed is None:
                     # A connection loss / stale R7-E fence can leave the
                     # invocation non-terminal. Never turn that provisional
