@@ -827,45 +827,41 @@ class DurableAgentStore:
             ),
         }
 
-        try:
-            async with self.uow_factory() as uow:
-                existing = await uow.agents.get_resume_claim_by_request_id(
-                    intent.resume_request_id
-                )
-                if existing is not None:
-                    if not self._claim_intent_matches(existing, intent):
-                        raise ResumeClaimRejected(
-                            "RESUME_REQUEST_CONFLICT",
-                            "resume_request_id was reused with different semantics.",
-                        )
-                    result = self._resume_claim_contract(existing)
+        for _ in range(8):
+            try:
+                async with self.uow_factory() as uow:
+                    existing = await uow.agents.get_resume_claim_by_request_id(
+                        intent.resume_request_id
+                    )
+                    if existing is not None:
+                        if not self._claim_intent_matches(existing, intent):
+                            raise ResumeClaimRejected(
+                                "RESUME_REQUEST_CONFLICT",
+                                "resume_request_id was reused with different semantics.",
+                            )
+                        result = self._resume_claim_contract(existing)
+                        await uow.commit()
+                        return result
+
+                    record = await uow.agents.save_resume_claim(values)
+                    result = self._resume_claim_contract(record)
                     await uow.commit()
                     return result
+            except IntegrityError:
+                # UNIQUE(resume_request_id) is the durable creation fence.
+                # Re-read the winner in a fresh transaction.
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
 
-                record = await uow.agents.save_resume_claim(values)
-                result = self._resume_claim_contract(record)
-                await uow.commit()
-                return result
-        except IntegrityError:
-            # Concurrent create: the UNIQUE(resume_request_id) winner is the
-            # only durable claim. Re-read and verify semantic equality.
-            async with self.uow_factory() as uow:
-                existing = await uow.agents.get_resume_claim_by_request_id(
-                    intent.resume_request_id
-                )
-                if existing is None:
-                    raise ResumeClaimRejected(
-                        "RESUME_CONFLICT",
-                        "Concurrent ResumeClaim creation lost without a durable winner.",
-                    )
-                if not self._claim_intent_matches(existing, intent):
-                    raise ResumeClaimRejected(
-                        "RESUME_REQUEST_CONFLICT",
-                        "resume_request_id winner has different semantics.",
-                    )
-                result = self._resume_claim_contract(existing)
-                await uow.commit()
-                return result
+        raise ResumeClaimDeferred(
+            "RESUME_CONFLICT",
+            "ResumeClaim creation conflicts exhausted.",
+            retryable=True,
+        )
 
     @staticmethod
     def _claim_matches_plan(record, spec: ResumeClaimConsumeSpec) -> bool:
