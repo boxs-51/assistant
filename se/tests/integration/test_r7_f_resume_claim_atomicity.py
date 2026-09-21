@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
@@ -547,6 +548,186 @@ async def test_r7_f_task_budget_reacquire_rolls_back_when_execution_cas_loses(
             assert budget.active_executions == 0
             assert reservation is None
             assert durable_claim.state == "CREATED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_f_concurrent_same_request_creates_one_durable_claim(tmp_path):
+    engine, sessions, factory, store = await _setup(tmp_path, "intent-race.sqlite")
+    try:
+        await _seed_non_task(sessions)
+        plan = _plan()
+        intent = _intent(plan, "rr-create-race")
+        first, second = await asyncio.gather(
+            store.get_or_create_resume_claim(intent),
+            store.get_or_create_resume_claim(intent),
+        )
+        assert first.claim_id == second.claim_id
+
+        async with factory() as uow:
+            row = await uow.agents.get_resume_claim_by_request_id("rr-create-race")
+            assert row is not None
+            assert row.claim_id == first.claim_id
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_f_task_scoped_consume_reacquires_capacity_once(tmp_path):
+    engine, sessions, factory, store = await _setup(tmp_path, "budget-success.sqlite")
+    try:
+        await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f")
+        claim = await store.get_or_create_resume_claim(_intent(plan, "rr-budget-success"))
+
+        result = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+        assert result.consumed_execution_revision == 3
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            budget = await uow.agents.get_task_budget("task-r7f")
+            reservation = await uow.agents.get_task_budget_reservation(
+                "task-r7f",
+                "RESUME_EXECUTION",
+                f"{EXECUTION}:2",
+            )
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "RUNNING"
+            assert execution.revision == 3
+            assert budget.active_executions == 1
+            assert budget.used_executions == 1
+            assert reservation is not None
+            assert durable_claim.state == "CONSUMED"
+            await uow.commit()
+
+        duplicate = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+        assert duplicate.already_consumed is True
+        async with factory() as uow:
+            budget = await uow.agents.get_task_budget("task-r7f")
+            assert budget.active_executions == 1
+            assert budget.used_executions == 1
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_f_claim_cas_loss_rolls_back_execution_budget_and_reservation(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, factory, store = await _setup(tmp_path, "claim-cas-rollback.sqlite")
+    try:
+        await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f")
+        claim = await store.get_or_create_resume_claim(_intent(plan, "rr-claim-cas-loss"))
+        original = AgentRepository.compare_and_set_resume_claim
+
+        async def lose_consumption(self, *args, **kwargs):
+            values = kwargs.get("values")
+            if values is None and len(args) >= 4:
+                values = args[3]
+            if values and values.get("state") == "CONSUMED":
+                return None
+            return await original(self, *args, **kwargs)
+
+        monkeypatch.setattr(
+            AgentRepository,
+            "compare_and_set_resume_claim",
+            lose_consumption,
+        )
+
+        with pytest.raises(ResumeClaimRejected) as raised:
+            await store.consume_resume_claim(
+                ResumeClaimConsumeSpec(
+                    plan=plan,
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    expected_claim_revision=claim.revision,
+                    now_utc=datetime.now(timezone.utc),
+                )
+            )
+        assert raised.value.code == "STALE_RESUME_CLAIM"
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            budget = await uow.agents.get_task_budget("task-r7f")
+            reservation = await uow.agents.get_task_budget_reservation(
+                "task-r7f",
+                "RESUME_EXECUTION",
+                f"{EXECUTION}:2",
+            )
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "WAITING"
+            assert execution.revision == 2
+            assert budget.active_executions == 0
+            assert reservation is None
+            assert durable_claim.state == "CREATED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_f_two_distinct_claims_have_at_most_one_consumed_winner(tmp_path):
+    engine, sessions, factory, store = await _setup(tmp_path, "claim-race.sqlite")
+    try:
+        await _seed_non_task(sessions)
+        plan = _plan()
+        first = await store.get_or_create_resume_claim(_intent(plan, "rr-race-a"))
+        second = await store.get_or_create_resume_claim(_intent(plan, "rr-race-b"))
+
+        def spec(claim):
+            return ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+
+        outcomes = await asyncio.gather(
+            store.consume_resume_claim(spec(first)),
+            store.consume_resume_claim(spec(second)),
+            return_exceptions=True,
+        )
+        successes = [item for item in outcomes if not isinstance(item, BaseException)]
+        failures = [item for item in outcomes if isinstance(item, BaseException)]
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert isinstance(failures[0], ResumeClaimRejected)
+        assert failures[0].code in {"RESUME_CONFLICT", "STALE_RESUME_CLAIM"}
+
+        async with factory() as uow:
+            first_row = await uow.agents.get_resume_claim(first.claim_id)
+            second_row = await uow.agents.get_resume_claim(second.claim_id)
+            consumed = [
+                row for row in (first_row, second_row)
+                if row.state == "CONSUMED"
+            ]
+            execution = await uow.agents.get_execution(EXECUTION)
+            assert len(consumed) == 1
+            assert execution.state == "RUNNING"
+            assert execution.revision == 3
             await uow.commit()
     finally:
         await engine.dispose()
