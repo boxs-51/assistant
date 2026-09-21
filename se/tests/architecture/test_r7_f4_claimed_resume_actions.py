@@ -510,3 +510,50 @@ async def test_r7_f4_canonical_committed_slot_without_pending_action_is_reused()
         "call-3",
     }
     assert executor.ordinary_execute_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r7_f4_postclaim_terminal_race_prefers_committed_authority():
+    action = _action(0, ResumeInvocationActionKind.REPLAY_SAFE)
+    base = _plan()
+    plan = replace(
+        base,
+        ordered_tool_call_ids=(action.tool_call_id,),
+        invocation_actions=(action,),
+        plan_fingerprint="",
+    )
+    plan = replace(plan, plan_fingerprint=resume_plan_fingerprint(plan))
+    context = _context(plan)
+    consumed = _consumed(plan)
+
+    # Simulate another actor terminal-committing the invocation after F3
+    # consumed the claim but before this activation receives its stale R7-E
+    # result. _Store seeds the canonical slot as COMMITTED.
+    store = _Store(plan)
+    executor = _ContinuationExecutor(provisional=True)
+    coordinator = AgentToolExecutionCoordinator(executor)
+    builder = _ContextBuilder()
+    runtime = AgentRuntime(
+        context_builder=builder,
+        inference=_Inference(),
+        tool_execution=coordinator,
+        execution_policy=_Policy(),
+        durable_store=store,
+    )
+
+    result = await runtime.execute_claimed_resume(
+        context,
+        plan=plan,
+        consumed=consumed,
+    )
+
+    assert result.output == "resumed-final"
+    assert result.last_tool_results[0].success is True
+    assert result.last_tool_results[0].output == {"ordinal": 0}
+    tool_messages = [
+        item for item in builder.last_messages if item.role == "tool"
+    ]
+    assert len(tool_messages) == 1
+    assert tool_messages[0].content == {"ordinal": 0}
+    assert store.results[action.tool_call_id].commit_state == "COMMITTED"
+    assert executor.ordinary_execute_calls == 0
