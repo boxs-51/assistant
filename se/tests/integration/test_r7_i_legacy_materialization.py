@@ -395,3 +395,66 @@ async def test_r7_i_materializes_pre_normalized_waiting_spelling(tmp_path):
         assert execution.current_checkpoint_id == "legacy-cp-1"
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_preserves_checkpoint_time_pending_slot_after_late_commit(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-late-commit.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(sessions)
+        async with sessions() as session:
+            invocation = await session.get(
+                CapabilityInvocationRecord,
+                "inv-pending",
+            )
+            invocation.state = "COMPLETED"
+            invocation.wait_reason = None
+            invocation.remote_outcome_state = "TERMINAL_COMMITTED"
+            invocation.output = {"late": True}
+            invocation.revision = 4
+            session.add(
+                AgentToolResultRecord(
+                    id="result-pending-late",
+                    execution_id="exec-legacy",
+                    iteration_id="iter-2",
+                    tool_call_id="call-pending",
+                    invocation_id="inv-pending",
+                    capability_id="tool.remote",
+                    success=True,
+                    output={"late": True},
+                    retryable=False,
+                    commit_state="COMMITTED",
+                    attempt=1,
+                )
+            )
+            await session.commit()
+
+        checkpoint = await store.materialize_legacy_checkpoint(
+            "exec-legacy",
+            requested_checkpoint_id="legacy-cp-1",
+            target_user_id="user-1",
+            target_client_id="client-1",
+        )
+        assert checkpoint is not None
+
+        pending = await store.load_checkpoint_pending_invocations(
+            "legacy-cp-1"
+        )
+        assert len(pending) == 1
+        assert pending[0].ordinal == 1
+        assert pending[0].invocation_id == "inv-pending"
+        assert (
+            pending[0].observed_remote_outcome_state
+            == "TERMINAL_COMMITTED"
+        )
+    finally:
+        await engine.dispose()
