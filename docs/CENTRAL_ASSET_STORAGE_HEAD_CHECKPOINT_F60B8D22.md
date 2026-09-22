@@ -1,3 +1,33 @@
+# PRIORITY UPDATE — CENTRAL ASSET STORAGE PAUSED THROUGH R14+
+
+> Final R7 sync is complete and F5-0 has already been re-frozen.
+>
+> **Implementation of F5/F6/F7/F8 is now intentionally deferred until the Agent Execution /
+> Continuation / Branching roadmap completes R8→R14+ and its production exit gates.**
+>
+> Active roadmap source:
+>
+> ```text
+> docs/AGENT_EXECUTION_CONTINUATION_BRANCHING_ROADMAP_V2.md
+> ```
+>
+> Asset work resumes only after the final post-R14+ HEAD is known, at which point the frozen
+> F5-0 contract must be re-audited before implementation.
+>
+> Current asset status:
+>
+> ```text
+> F1 CLOSED
+> F2 GREEN
+> F2-H CLOSED
+> F3 CLOSED
+> F4 CLOSED
+> F5-0 CONTRACT FROZEN / IMPLEMENTATION PAUSED
+> F5-1+ PAUSED
+> ```
+
+---
+
 # CURRENT STATUS UPDATE — FINAL R7 SYNC COMPLETE
 
 > This file remains the historical F1→F4 pause checkpoint at code baseline `f60b8d22`.
