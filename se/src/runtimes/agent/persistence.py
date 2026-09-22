@@ -224,6 +224,15 @@ class DurableAgentStore:
         values = _normalize_json_fields(
             values, _EXECUTION_JSON_FIELDS, path="agent_executions"
         )
+        context_state = values.get("context_state")
+        if (
+            isinstance(context_state, dict)
+            and "continuation" in context_state
+        ):
+            raise ExecutionConflictError(
+                "LEGACY_CONTINUATION_READ_ONLY: "
+                "new AgentExecution rows cannot write legacy continuation JSON."
+            )
         async with self.uow_factory() as uow:
             record = await uow.agents.save_execution(values)
             await uow.commit()
