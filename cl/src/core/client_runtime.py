@@ -438,8 +438,10 @@ class ClientRuntime:
                 self._confirmed_capability_ids
             )
         ):
-            if entry.state is not ResumeTicketState.RETRY_SAME_REQUEST:
-                entry.state = ResumeTicketState.BLOCKED
+            # Capability readiness is a hard fence even for lost-ACK retries.
+            # The request identity itself remains preserved on the entry, so
+            # becoming eligible later still retries the same request id.
+            entry.state = ResumeTicketState.BLOCKED
             return
         if entry.state not in {
             ResumeTicketState.RETRY_SAME_REQUEST,
