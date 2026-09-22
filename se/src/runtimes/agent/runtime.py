@@ -1072,6 +1072,22 @@ class AgentRuntime:
                         child_agent_id=context.agent_id,
                     )
                 )
+                if context.parent_execution_id is not None:
+                    if delegation.branch_id is None:
+                        raise ExecutionConflictError(
+                            "Delegated execution has no durable TaskBranch."
+                        )
+                    if (
+                        context.branch_id is not None
+                        and context.branch_id != delegation.branch_id
+                    ):
+                        raise ExecutionConflictError(
+                            "Delegated execution branch does not match durable "
+                            "parent lineage."
+                        )
+                    context.branch_id = delegation.branch_id
+                    new_values["branch_id"] = delegation.branch_id
+
                 new_values.update(
                     {
                         "state": AgentExecutionState.RUNNING.value,
@@ -1079,6 +1095,21 @@ class AgentRuntime:
                         "started_at": context.clock.now_utc(),
                     }
                 )
+                if (
+                    context.parent_execution_id is None
+                    and context.branch_id is None
+                ):
+                    admission = await (
+                        self._task_budget_service
+                        .start_root_task_scoped_execution(
+                            context.task_id,
+                            execution_id=context.execution_id,
+                            execution_values=new_values,
+                        )
+                    )
+                    context.branch_id = admission.branch_id
+                    return admission.execution_revision
+
                 return await (
                     self._task_budget_service.start_task_scoped_execution(
                         context.task_id,
