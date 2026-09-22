@@ -696,3 +696,47 @@ def test_nonretryable_rejection_tombstones_duplicate_waiting_ticket():
             assert entry.active_resume_request_id is None
     finally:
         runtime.stop()
+
+
+def test_terminal_authority_ack_never_regresses_execution_watermark():
+    runtime = _runtime()
+    responses = deque(
+        [
+            _accepted("exec-1", "cp-1", "placeholder", revision=8),
+            _failed("exec-2", "cp-2", "placeholder", revision=7),
+        ]
+    )
+
+    def behavior(execution_id, checkpoint_id, request_id):
+        message = responses.popleft()
+        message["execution_id"] = execution_id
+        message["payload"]["execution_id"] = execution_id
+        message["payload"]["checkpoint_id"] = checkpoint_id
+        message["payload"]["resume_request_id"] = request_id
+        return message
+
+    fake = _FakeRealtime("conn-1", behavior)
+    _install_ready_transport(runtime, fake)
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload(revision=8))
+        _wait(lambda: runtime._execution_resume_watermarks.get("exec-1") == 9)
+
+        assert runtime._ingest_waiting_payload(
+            _ticket_payload(
+                execution_id="exec-2",
+                checkpoint_id="cp-2",
+                revision=8,
+            )
+        )
+        _wait(lambda: runtime._execution_resume_watermarks.get("exec-2") == 9)
+
+        assert not runtime._ingest_waiting_payload(_ticket_payload(revision=8))
+        assert not runtime._ingest_waiting_payload(
+            _ticket_payload(
+                execution_id="exec-2",
+                checkpoint_id="cp-2",
+                revision=8,
+            )
+        )
+    finally:
+        runtime.stop()
