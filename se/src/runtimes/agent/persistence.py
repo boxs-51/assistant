@@ -244,38 +244,9 @@ class DurableAgentStore:
                     getattr(execution, "context_state", None) or {},
                     path="agent_executions.context_state",
                 )
-                continuation = current_state.get("continuation")
-                merged_state = {**current_state, **incoming_state}
-                if continuation is not None and "continuation" not in incoming_state:
-                    merged_state["continuation"] = continuation
-                values["context_state"] = merged_state
+                values["context_state"] = {**current_state, **incoming_state}
 
             record = await uow.agents.update_execution(execution_id, values)
-            await uow.commit()
-            return record
-
-    async def save_continuation_state(
-        self,
-        execution_id: str,
-        state: Dict[str, Any],
-    ):
-        """Persist Phase 6.9 continuation data in the existing JSON column."""
-        async with self.uow_factory() as uow:
-            execution = await uow.agents.get_execution(execution_id)
-            if execution is None:
-                raise KeyError(f"Unknown agent execution: {execution_id}")
-            context_state = to_json_safe(
-                getattr(execution, "context_state", None) or {},
-                path="agent_executions.context_state",
-            )
-            context_state["continuation"] = to_json_safe(
-                state,
-                path="agent_executions.context_state.continuation",
-            )
-            record = await uow.agents.update_execution(
-                execution_id,
-                {"context_state": context_state},
-            )
             await uow.commit()
             return record
 
@@ -377,19 +348,6 @@ class DurableAgentStore:
                 )
             await uow.commit()
             return record
-
-    async def load_continuation_state(
-        self,
-        execution_id: str,
-    ) -> Dict[str, Any] | None:
-        async with self.uow_factory() as uow:
-            execution = await uow.agents.get_execution(execution_id)
-            await uow.commit()
-            if execution is None:
-                return None
-            context_state = dict(getattr(execution, "context_state", None) or {})
-            continuation = context_state.get("continuation")
-            return dict(continuation) if continuation else None
 
     async def save_iteration(self, values: Dict[str, Any]):
         values = _normalize_json_fields(
