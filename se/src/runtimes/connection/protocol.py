@@ -26,6 +26,8 @@ RealtimeMessageType = Literal[
     "execution.resume",
     "execution.resume.preflight",
     "execution.resume.accepted",
+    "execution.resume.rejected",
+    "execution.resume.failed",
 ]
 
 
@@ -74,6 +76,8 @@ class RealtimeEnvelope(BaseModel):
             "execution.resume",
             "execution.resume.preflight",
             "execution.resume.accepted",
+            "execution.resume.rejected",
+            "execution.resume.failed",
         }
         if self.type in connection_required and not self.connection_id:
             raise ValueError(
