@@ -285,6 +285,23 @@ def test_equal_revision_different_checkpoint_fails_closed():
             _ticket_payload(checkpoint_id="cp-2", revision=8)
         )
         assert runtime.pending_resume_tickets == ()
+
+        # The conflict is execution-level, not only entry-level. A repeated
+        # delivery of C2@8 must remain tombstoned and cannot become eligible.
+        assert not runtime._ingest_waiting_payload(
+            _ticket_payload(checkpoint_id="cp-2", revision=8)
+        )
+        assert runtime.pending_resume_tickets == ()
+        assert runtime._execution_resume_conflicts["exec-1"] == 8
+
+        # A strictly newer authoritative revision resolves the old conflict.
+        assert runtime._ingest_waiting_payload(
+            _ticket_payload(checkpoint_id="cp-3", revision=9)
+        )
+        assert runtime._execution_resume_conflicts.get("exec-1") is None
+        assert [item.key for item in runtime.pending_resume_tickets] == [
+            ("exec-1", "cp-3")
+        ]
     finally:
         runtime.stop()
 
