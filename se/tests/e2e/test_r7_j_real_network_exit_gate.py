@@ -927,3 +927,256 @@ async def test_r7_j_server_restart_while_waiting_resumes_from_sql_only(
             )
         if restarted_state is not None:
             await restarted_state.engine.dispose()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_r7_j_lost_accepted_ack_retries_same_request_on_k3(
+    tmp_path,
+    monkeypatch,
+):
+    server_state = await _build_server(
+        tmp_path,
+        db_path=tmp_path / "r7-j-lost-ack.sqlite3",
+    )
+
+    original_resume = events_router._resume_execution
+    original_send = events_router._send_realtime
+    resume_requests = []
+    accepted_writes = []
+    dropped_first_accepted = {"value": False}
+
+    async def recording_resume(
+        websocket,
+        identity,
+        container,
+        connection_id,
+        envelope,
+    ):
+        request_id = str(
+            (envelope.payload or {}).get("resume_request_id") or ""
+        )
+        if request_id:
+            resume_requests.append((connection_id, request_id))
+        return await original_resume(
+            websocket,
+            identity,
+            container,
+            connection_id,
+            envelope,
+        )
+
+    async def drop_first_accepted(websocket, envelope):
+        if envelope.type == "execution.resume.accepted":
+            payload = dict(envelope.payload or {})
+            accepted_writes.append(
+                (
+                    envelope.connection_id,
+                    str(payload.get("resume_request_id") or ""),
+                )
+            )
+            if not dropped_first_accepted["value"]:
+                dropped_first_accepted["value"] = True
+                # Durable handoff ACCEPTED has already committed before this
+                # call. Close the real socket instead of sending the ACK.
+                await websocket.close(code=1011)
+                return
+        await original_send(websocket, envelope)
+
+    monkeypatch.setattr(
+        events_router,
+        "_resume_execution",
+        recording_resume,
+    )
+    monkeypatch.setattr(
+        events_router,
+        "_send_realtime",
+        drop_first_accepted,
+    )
+
+    server, server_task, port = await _start_gateway(server_state.app)
+
+    k1_started = threading.Event()
+    k1_release = threading.Event()
+    k1 = None
+    client = None
+    effects = []
+
+    def k1_tool(value: str, **kwargs):
+        k1_started.set()
+        k1_release.wait(timeout=15.0)
+        return {"source": "k1-late", "value": value}
+
+    def resumed_tool(value: str, **kwargs):
+        effects.append(value)
+        return {
+            "source": "resume-client",
+            "value": value,
+            "effect_count": len(effects),
+        }
+
+    try:
+        ledger_path = tmp_path / "r7-j-lost-ack-client.sqlite3"
+        k1 = await _connect_k1(
+            port,
+            _client_registry(k1_tool),
+            ledger_path,
+        )
+        context = AgentExecutionContext.create(
+            execution_id=EXECUTION_ID,
+            agent_id=AGENT_ID,
+            session_id=SESSION_ID,
+            correlation_id="r7j-lost-ack-correlation",
+            identity=server_state.identity,
+            limits=AgentExecutionLimits(
+                max_iterations=4,
+                max_tool_calls=4,
+                timeout_seconds=30,
+            ),
+            connection_id=K1,
+            agent=server_state.agent,
+            metadata={
+                "client_id": CLIENT_ID,
+                "model": "r7j-test",
+            },
+        )
+        first_run = asyncio.create_task(
+            server_state.supervisor.run(
+                context,
+                lambda: server_state.agent_runtime.execute(context),
+            )
+        )
+        assert await asyncio.to_thread(k1_started.wait, 5.0)
+        await asyncio.to_thread(k1.realtime.close)
+        waiting_result = await asyncio.wait_for(first_run, timeout=10.0)
+        assert waiting_result.state.value == "WAITING"
+
+        waiting_execution = await server_state.durable_store.load_execution(
+            EXECUTION_ID
+        )
+        checkpoint = await server_state.durable_store.load_current_checkpoint(
+            EXECUTION_ID
+        )
+        assert checkpoint is not None
+        assert checkpoint.execution_revision == waiting_execution.revision
+
+        # Make K1 process death deterministic before K2/K3 recovery.
+        await _close_k1(k1)
+        k1 = None
+        k1_release.set()
+
+        resume_starts = []
+        original_start_reserved = server_state.supervisor.start_reserved
+
+        async def recording_start_reserved(
+            token,
+            resume_context,
+            runner,
+        ):
+            resume_starts.append(
+                (
+                    resume_context.execution_id,
+                    resume_context.connection_id,
+                )
+            )
+            return await original_start_reserved(
+                token,
+                resume_context,
+                runner,
+            )
+
+        server_state.supervisor.start_reserved = recording_start_reserved
+
+        client = ClientRuntime(
+            f"http://127.0.0.1:{port}",
+            _client_registry(resumed_tool),
+            api_key="r7-j",
+            client_id=CLIENT_ID,
+            owner_id=USER_ID,
+            invocation_ledger=ClientInvocationLedger(ledger_path),
+        )
+        await asyncio.to_thread(client.start)
+
+        await _wait_async(
+            lambda: len(resume_requests) >= 2,
+            timeout=15.0,
+        )
+        first_connection, first_request_id = resume_requests[0]
+        second_connection, second_request_id = resume_requests[1]
+
+        assert dropped_first_accepted["value"] is True
+        assert first_connection != second_connection
+        assert first_request_id == second_request_id
+        assert first_request_id
+        assert client.client_id == CLIENT_ID
+
+        async def _completed_after_lost_ack():
+            record = await server_state.durable_store.load_execution(
+                EXECUTION_ID
+            )
+            return record if record.state == "COMPLETED" else None
+
+        completed = await _wait_async(
+            _completed_after_lost_ack,
+            timeout=15.0,
+        )
+        assert completed.id == EXECUTION_ID
+
+        await _wait_async(
+            lambda: client.pending_resume_tickets == (),
+            timeout=10.0,
+        )
+        assert client.connection_id == second_connection
+        assert effects == ["r7-j"]
+
+        async with server_state.sessions() as session:
+            claims = (
+                await session.execute(
+                    select(AgentResumeClaimRecord).where(
+                        AgentResumeClaimRecord.execution_id
+                        == EXECUTION_ID
+                    )
+                )
+            ).scalars().all()
+        assert len(claims) == 1
+        claim = claims[0]
+        assert claim.state == "CONSUMED"
+        assert claim.resume_request_id == first_request_id
+        assert claim.connection_id == first_connection
+        assert claim.consumed_execution_revision == (
+            waiting_execution.revision + 1
+        )
+
+        # The replayed ACK on K3 must not reserve/start a second runtime task.
+        assert len(resume_starts) == 1
+        assert resume_starts[0][0] == EXECUTION_ID
+        assert resume_starts[0][1] == first_connection
+
+        assert len(accepted_writes) == 2
+        assert accepted_writes[0] == (
+            first_connection,
+            first_request_id,
+        )
+        assert accepted_writes[1] == (
+            second_connection,
+            first_request_id,
+        )
+
+        assert server_state.supervisor.active_execution_ids() == ()
+        assert (
+            await server_state.connections.realtime.multiplexer.pending_count()
+            == 0
+        )
+        assert (
+            await server_state.connections.realtime.reconciliation_multiplexer.pending_count()
+            == 0
+        )
+    finally:
+        k1_release.set()
+        if client is not None:
+            await asyncio.to_thread(client.stop)
+        if k1 is not None:
+            await _close_k1(k1)
+        await server_state.supervisor.shutdown()
+        await _stop_gateway(server, server_task)
+        await server_state.engine.dispose()
