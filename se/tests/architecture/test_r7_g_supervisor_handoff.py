@@ -50,11 +50,11 @@ def _identity():
     )
 
 
-def _envelope():
+def _envelope(connection_id=K2):
     return RealtimeEnvelope(
         type="execution.resume",
         message_id="resume-r7g",
-        connection_id=K2,
+        connection_id=connection_id,
         execution_id=EXECUTION,
         payload={
             "execution_id": EXECUTION,
@@ -434,6 +434,71 @@ async def test_r7_g_lost_accepted_ack_replays_durable_outcome_without_second_cla
     assert len(replayed) == 1
     assert replayed[0]["payload"]["claim_id"] == "claim-r7g"
     assert replayed[0]["payload"]["accepted_revision"] == 8
+    assert store.consume_calls == 1
+    assert store.create_calls == 1
+    assert runtime.activation_calls == 1
+    assert runtime.execute_calls == 1
+    assert len(store.handoff_calls) == 1
+    assert planner.calls == 1
+    await supervisor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_r7_g_lost_ack_replays_on_new_connection_generation_for_same_stable_client():
+    plan = _plan()
+    store = _Store(plan)
+    runtime = _Runtime()
+    supervisor = AgentExecutionSupervisor()
+    planner = _Planner(plan, fail_after_first=True)
+    container = _container(
+        plan,
+        store,
+        runtime,
+        supervisor,
+        planner=planner,
+    )
+
+    first_socket = _Socket(
+        supervisor=supervisor,
+        runtime=runtime,
+        drop_first_accepted=True,
+    )
+    with pytest.raises(ConnectionError, match="lost resume ACK"):
+        await _resume_execution(
+            first_socket,
+            _identity(),
+            container,
+            K2,
+            _envelope(K2),
+        )
+    await _drain_owned_task()
+
+    assert store.claim.metadata["r7_g_handoff"]["status"] == "ACCEPTED"
+    assert store.claim.connection_id == K2
+    assert store.consume_calls == 1
+    assert runtime.activation_calls == 1
+    assert runtime.execute_calls == 1
+
+    replacement_connection = "conn-r7g-k3"
+    retry_socket = _Socket(supervisor=supervisor, runtime=runtime)
+    await _resume_execution(
+        retry_socket,
+        _identity(),
+        container,
+        replacement_connection,
+        _envelope(replacement_connection),
+    )
+
+    replayed = [
+        item
+        for item in retry_socket.messages
+        if item["type"] == "execution.resume.accepted"
+    ]
+    assert len(replayed) == 1
+    assert replayed[0]["connection_id"] == replacement_connection
+    assert replayed[0]["payload"]["claim_id"] == "claim-r7g"
+    assert replayed[0]["payload"]["accepted_revision"] == 8
+    assert store.claim.connection_id == K2
     assert store.consume_calls == 1
     assert store.create_calls == 1
     assert runtime.activation_calls == 1
