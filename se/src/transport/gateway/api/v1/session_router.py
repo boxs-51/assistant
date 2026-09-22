@@ -100,10 +100,13 @@ async def delete_session(
     container: ApplicationContainer = Depends(get_container),
 ):
     async with container.uow_factory() as uow:
-        deleted = await uow.sessions.delete_owned_session(
-            session_id,
-            identity.user_id,
-        )
+        try:
+            deleted = await uow.sessions.delete_owned_session(
+                session_id,
+                identity.user_id,
+            )
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
         if not deleted:
             raise HTTPException(status_code=404, detail="Session not found.")
         await uow.commit()

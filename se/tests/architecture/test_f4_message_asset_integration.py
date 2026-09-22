@@ -12,8 +12,9 @@ from se.src.application.messages import (
     MessageAccessDeniedError,
 )
 from se.src.context.manager import ContextEngine
-from se.src.domain.schemas.attachment import GatewayAttachment
+from se.src.domain.schemas.attachment import GatewayAttachment, DocumentContent
 from se.src.domain.schemas.identity import Identity
+from se.src.domain.schemas.message import MessageContentPart
 from se.src.infrastructure.storage.models.sql.agent.execution import (
     AgentExecutionRecord,
 )
@@ -420,3 +421,99 @@ def test_f4_provider_rejects_unhydrated_canonical_asset():
                 ]
             }
         )
+
+
+
+def test_f4_file_content_keeps_document_subtype_and_page_range():
+    part = MessageContentPart.model_validate(
+        {
+            "type": "file",
+            "data": {
+                "attachment": {
+                    "asset_id": "asset-doc",
+                    "mime_type": "application/pdf",
+                    "source": "asset",
+                },
+                "page_range": "2-5",
+                "extracted_text": "excerpt",
+            },
+        }
+    )
+    assert isinstance(part.data, DocumentContent)
+    assert part.data.page_range == "2-5"
+    assert part.data.extracted_text == "excerpt"
+
+
+@pytest.mark.asyncio
+async def test_f4_session_delete_is_blocked_while_r7_execution_is_live():
+    engine, sessions = await _database()
+    try:
+        await _seed_asset(
+            sessions,
+            asset_id="asset-a",
+            owner="user-a",
+            filename="a.png",
+            mime_type="image/png",
+        )
+        service = CanonicalMessageService(lambda: _Uow(sessions))
+        await service.persist_request_messages(
+            session_id="session-a",
+            owner_user_id="user-a",
+            organization_id=None,
+            turn_id="turn-a",
+            messages=[{"role": "user", "content": [_image("asset-a")]}],
+        )
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-live-delete",
+                    session_id="session-a",
+                    agent_id="agent-a",
+                    correlation_id="corr-a",
+                    state="WAITING",
+                    revision=1,
+                    request={},
+                )
+            )
+            await uow.commit()
+
+        with pytest.raises(RuntimeError, match="live agent execution"):
+            async with _Uow(sessions) as uow:
+                await uow.sessions.delete_owned_session(
+                    "session-a",
+                    "user-a",
+                )
+                await uow.commit()
+
+        async with _Uow(sessions) as uow:
+            assert await uow.sessions.get_by_id("session-a") is not None
+            refs = await uow.assets.list_references_for_file("asset-a")
+            assert len(refs) == 1
+            assert await uow.assets.has_live_references("asset-a") is True
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f4_generic_reference_api_cannot_bypass_message_authority():
+    engine, sessions = await _database()
+    try:
+        await _seed_asset(
+            sessions,
+            asset_id="asset-a",
+            owner="user-a",
+            filename="a.png",
+            mime_type="image/png",
+        )
+        async with _Uow(sessions) as uow:
+            with pytest.raises(ValueError, match="dedicated reference authority"):
+                await uow.assets.create_reference(
+                    {
+                        "file_id": "asset-a",
+                        "reference_type": "MESSAGE_CONTENT",
+                        "message_id": "fake-message",
+                        "content_part_index": 0,
+                    }
+                )
+    finally:
+        await engine.dispose()

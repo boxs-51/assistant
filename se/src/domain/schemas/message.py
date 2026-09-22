@@ -35,31 +35,50 @@ class MessageContentPart(GatewayBaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def _migrate_legacy_text_content(cls, value):
+    def _normalize_content_part(cls, value):
         if not isinstance(value, dict):
             return value
 
-        raw_type = value.get("type")
-        part_type = raw_type.value if hasattr(raw_type, "value") else raw_type
-        if part_type not in {"text", "thinking"} or value.get("text") is not None:
-            return value
-
-        legacy = value.get("data")
-        text = None
-        if isinstance(legacy, str):
-            text = legacy
-        elif isinstance(legacy, dict) and isinstance(legacy.get("data"), str):
-            text = legacy["data"]
-            if legacy.get("format") == "code":
-                language = legacy.get("language") or "text"
-                text = f"~~~{language}\n{text}\n~~~"
-
-        if text is None:
-            return value
-
         migrated = dict(value)
-        migrated["text"] = text
-        migrated["data"] = None
+        raw_type = migrated.get("type")
+        part_type = raw_type.value if hasattr(raw_type, "value") else raw_type
+
+        if part_type in {"text", "thinking"}:
+            if migrated.get("text") is not None:
+                return migrated
+            legacy = migrated.get("data")
+            text = None
+            if isinstance(legacy, str):
+                text = legacy
+            elif isinstance(legacy, dict) and isinstance(legacy.get("data"), str):
+                text = legacy["data"]
+                if legacy.get("format") == "code":
+                    language = legacy.get("language") or "text"
+                    fence = chr(96) * 3
+                    text = f"{fence}{language}\n{text}\n{fence}"
+            if text is not None:
+                migrated["text"] = text
+                migrated["data"] = None
+            return migrated
+
+        data = migrated.get("data")
+        if data is None:
+            return migrated
+        if part_type == "image":
+            migrated["data"] = ImageContent.model_validate(data)
+        elif part_type == "audio":
+            migrated["data"] = AudioContent.model_validate(data)
+        elif part_type == "video":
+            migrated["data"] = VideoContent.model_validate(data)
+        elif part_type == "file":
+            if isinstance(data, dict) and "attachment" in data:
+                migrated["data"] = DocumentContent.model_validate(data)
+            elif isinstance(data, DocumentContent):
+                migrated["data"] = data
+            else:
+                migrated["data"] = GatewayAttachment.model_validate(data)
+        elif part_type == "url":
+            migrated["data"] = UrlContent.model_validate(data)
         return migrated
 
 

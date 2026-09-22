@@ -10,6 +10,7 @@ from ...interfaces.database import DatabaseDriver
 from ...models.sql.chat_data.session import Session, Message
 from ...models.sql.chat_data.attachment import Attachment
 from ...models.sql.assets.reference import FileReferenceRecord
+from ...models.sql.agent.execution import AgentExecutionRecord
 
 logger = structlog.get_logger(__name__)
 
@@ -171,6 +172,19 @@ class SessionRepository(BaseRepository):
         )
         if owned.scalar_one_or_none() is None:
             return False
+
+        live_execution = await self.session.execute(
+            select(AgentExecutionRecord.id)
+            .where(
+                AgentExecutionRecord.session_id == session_id,
+                AgentExecutionRecord.state.in_(("CREATED", "RUNNING", "WAITING")),
+            )
+            .limit(1)
+        )
+        if live_execution.scalar_one_or_none() is not None:
+            raise RuntimeError(
+                "Session has a live agent execution and cannot be deleted."
+            )
 
         message_ids_result = await self.session.execute(
             select(Message.id).where(Message.session_id == session_id)
