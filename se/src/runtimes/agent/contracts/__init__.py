@@ -24,6 +24,14 @@ from .events import (
     CorrelationContext,
 )
 from .result import AgentExecutionResult
+from .fork import (
+    ForkPlan,
+    ForkSideEffectSnapshot,
+    committed_result_fingerprint,
+    fork_plan_fingerprint,
+    fork_side_effect_fingerprint,
+    fork_transcript_fingerprint,
+)
 from .resume import (
     CheckpointPendingInvocation,
     DurableExecutionCheckpoint,
@@ -80,6 +88,12 @@ __all__ = [
     "AgentEventPublisher",
     "CorrelationContext",
     "AgentExecutionResult",
+    "ForkPlan",
+    "ForkSideEffectSnapshot",
+    "committed_result_fingerprint",
+    "fork_plan_fingerprint",
+    "fork_side_effect_fingerprint",
+    "fork_transcript_fingerprint",
     "CheckpointPendingInvocation",
     "DurableExecutionCheckpoint",
     "ResumeInvocationAction",
