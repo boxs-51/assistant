@@ -92,6 +92,31 @@ def _resume_exception_code(exc: BaseException, fallback: str) -> str:
     return fallback
 
 
+def _resume_claim_matches_wire_request(
+    claim,
+    *,
+    execution_id: str,
+    checkpoint_id: str,
+    resume_request_id: str,
+    user_id: str,
+    client_id: str,
+    connection_id: str,
+) -> bool:
+    state = getattr(claim.state, "value", str(claim.state))
+    connection_matches = (
+        claim.connection_id == connection_id
+        or state == ResumeClaimState.CONSUMED.value
+    )
+    return (
+        claim.resume_request_id == resume_request_id
+        and claim.execution_id == execution_id
+        and claim.checkpoint_id == checkpoint_id
+        and claim.user_id == user_id
+        and claim.client_id == client_id
+        and connection_matches
+    )
+
+
 def _resume_claim_matches_plan(claim, plan, resume_request_id: str) -> bool:
     return (
         claim.resume_request_id == resume_request_id
@@ -365,8 +390,58 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
         raise PermissionError("Resume connection is not active for this principal")
 
     planning_service = getattr(container, "resume_planning_service", None)
+    durable_store = getattr(container, "agent_durable_store", None)
+    supervisor = getattr(container, "agent_execution_supervisor", None)
+    client_id = str(snapshot.metadata.get("client_id") or "")
+
+    # Lost-ACK replay must precede planning. The original accepted execution
+    # may already be RUNNING or terminal, in which case rebuilding a WAITING
+    # ResumePlan would incorrectly turn a successful resume into a rejection.
+    if (
+        planning_service is not None
+        and resume_request_id
+        and durable_store is not None
+        and supervisor is not None
+    ):
+        replay_claim = await durable_store.load_resume_claim_by_request_id(
+            resume_request_id
+        )
+        if replay_claim is not None:
+            if not _resume_claim_matches_wire_request(
+                replay_claim,
+                execution_id=execution_id,
+                checkpoint_id=checkpoint_id,
+                resume_request_id=resume_request_id,
+                user_id=identity.user_id,
+                client_id=client_id,
+                connection_id=connection_id,
+            ):
+                await _send_resume_rejected(
+                    websocket,
+                    connection_id=connection_id,
+                    execution_id=execution_id,
+                    checkpoint_id=checkpoint_id,
+                    resume_request_id=resume_request_id,
+                    claim_id=replay_claim.claim_id,
+                    code="RESUME_REQUEST_CONFLICT",
+                    message=(
+                        "resume_request_id was reused with different "
+                        "resume semantics."
+                    ),
+                )
+                return
+            if await _replay_resume_claim_outcome(
+                websocket,
+                connection_id=connection_id,
+                execution_id=execution_id,
+                checkpoint_id=checkpoint_id,
+                resume_request_id=resume_request_id,
+                claim=replay_claim,
+                supervisor=supervisor,
+            ):
+                return
+
     if planning_service is not None:
-        client_id = str(snapshot.metadata.get("client_id") or "")
         try:
             plan = await planning_service.build_resume_plan(
                 execution_id,
@@ -473,9 +548,7 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             )
             return
 
-        durable_store = getattr(container, "agent_durable_store", None)
         runtime = getattr(container, "agent_runtime", None)
-        supervisor = getattr(container, "agent_execution_supervisor", None)
         if durable_store is None or runtime is None or supervisor is None:
             await _send_resume_rejected(
                 websocket,
