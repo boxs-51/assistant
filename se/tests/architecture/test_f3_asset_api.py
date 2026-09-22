@@ -151,6 +151,8 @@ async def test_f3_range_download_returns_partial_content_contract():
     assert response.headers["content-length"] == "4"
     assert response.headers["accept-ranges"] == "bytes"
     assert response.headers["etag"] == '"' + ("a" * 64) + '"'
+    assert response.headers["content-disposition"].startswith("attachment;")
+    assert response.headers["content-security-policy"] == "sandbox"
     assert service.last_range == (2, 5)
 
 

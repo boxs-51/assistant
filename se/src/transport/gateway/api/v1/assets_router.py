@@ -97,7 +97,7 @@ def _content_disposition(filename: str) -> str:
     ascii_name = safe.encode("ascii", "ignore").decode("ascii") or "asset.bin"
     ascii_name = ascii_name.replace('"', "")
     return (
-        f'inline; filename="{ascii_name}"; '
+        f'attachment; filename="{ascii_name}"; '
         f"filename*=UTF-8''{quote(safe, safe='')}"
     )
 
@@ -163,6 +163,7 @@ async def upload_asset(
     chunk_bytes = settings.upload_chunk_bytes
 
     if file.size is not None and file.size > max_bytes:
+        await file.close()
         raise HTTPException(
             status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             detail=f"Upload exceeds the {max_bytes}-byte asset limit.",
@@ -305,6 +306,7 @@ async def stream_asset_content(
         "Content-Disposition": _content_disposition(descriptor.filename),
         "Cache-Control": "private, no-store",
         "X-Content-Type-Options": "nosniff",
+        "Content-Security-Policy": "sandbox",
     }
     if descriptor.sha256:
         headers["ETag"] = f'"{descriptor.sha256}"'
