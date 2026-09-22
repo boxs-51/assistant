@@ -138,7 +138,13 @@ def _invocation_values(*, execution_id=EXECUTION, revision=5):
     }
 
 
-def _plan(*, task_id=None, revision=2, wait_expires_at=None) -> ResumePlan:
+def _plan(
+    *,
+    task_id=None,
+    branch_id=None,
+    revision=2,
+    wait_expires_at=None,
+) -> ResumePlan:
     action = ResumeInvocationAction(
         invocation_id=INVOCATION,
         tool_call_id=TOOL_CALL,
@@ -160,7 +166,7 @@ def _plan(*, task_id=None, revision=2, wait_expires_at=None) -> ResumePlan:
         agent_id=AGENT,
         session_id=SESSION,
         task_id=task_id,
-        branch_id=None,
+        branch_id=branch_id,
         parent_execution_id=None,
         retry_of_execution_id=None,
         base_execution_id=None,
@@ -288,6 +294,9 @@ async def _seed_task_waiting(sessions, factory):
         },
     )
     async with factory() as uow:
+        execution = await uow.agents.get_execution(EXECUTION)
+        branch_id = execution.branch_id
+        assert branch_id is not None
         uow.session.add(CapabilityInvocationRecord(**_invocation_values()))
         await uow.commit()
 
@@ -309,7 +318,7 @@ async def _seed_task_waiting(sessions, factory):
             "execution_revision": 2,
             "session_id": SESSION,
             "task_id": "task-r7f",
-            "branch_id": None,
+            "branch_id": branch_id,
             "iteration": 1,
             "wait_reason": "CONNECTION",
             "remaining_active_budget_seconds": 20.0,
@@ -328,6 +337,7 @@ async def _seed_task_waiting(sessions, factory):
             }
         ],
     )
+    return branch_id
 
 
 @pytest.mark.asyncio
@@ -514,8 +524,8 @@ async def test_r7_f_task_budget_reacquire_rolls_back_when_execution_cas_loses(
 ):
     engine, sessions, factory, store = await _setup(tmp_path, "budget-rollback.sqlite")
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(_intent(plan, "rr-budget-rollback"))
 
         async def lose_execution_cas(self, *args, **kwargs):
@@ -584,8 +594,8 @@ async def test_r7_f_concurrent_same_request_creates_one_durable_claim(tmp_path):
 async def test_r7_f_task_scoped_consume_reacquires_capacity_once(tmp_path):
     engine, sessions, factory, store = await _setup(tmp_path, "budget-success.sqlite")
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(_intent(plan, "rr-budget-success"))
 
         result = await store.consume_resume_claim(
@@ -642,8 +652,8 @@ async def test_r7_f_claim_cas_loss_rolls_back_execution_budget_and_reservation(
 ):
     engine, sessions, factory, store = await _setup(tmp_path, "claim-cas-rollback.sqlite")
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(_intent(plan, "rr-claim-cas-loss"))
         original = AgentRepository.compare_and_set_resume_claim
 
@@ -1036,8 +1046,8 @@ async def test_r7_g_real_recovery_checkpoint_releases_task_budget_and_keeps_clai
         "r7-g-real-recovery.sqlite",
     )
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         identity = Identity(
             user_id=USER,
             session_id=SESSION,
