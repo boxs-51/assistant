@@ -359,29 +359,51 @@ class GatewayRealtimeClient:
         self,
         execution_id: str,
         checkpoint_id: str,
+        resume_request_id: str,
         *,
         timeout: Optional[float] = None,
     ) -> Dict[str, Any]:
+        """Send one canonical R7 resume attempt and await its semantic outcome.
+
+        The caller owns resume_request_id lifecycle. Transport uncertainty must
+        therefore be retried by the caller with this exact same identifier.
+        """
+
         if not self.capabilities_registered:
             raise RealtimeConnectionError(
                 "Capabilities must be registered before execution.resume."
             )
+        if not resume_request_id:
+            raise ValueError("Canonical execution.resume requires resume_request_id")
         self.send(
             "execution.resume",
             {
                 "execution_id": execution_id,
                 "checkpoint_id": checkpoint_id,
-                "connection_id": self.connection_id,
+                "resume_request_id": resume_request_id,
             },
             execution_id=execution_id,
         )
+
+        def matches(item: Dict[str, Any]) -> bool:
+            if item.get("type") not in {
+                "execution.resume.accepted",
+                "execution.resume.rejected",
+                "execution.resume.failed",
+            }:
+                return False
+            if item.get("connection_id") != self.connection_id:
+                return False
+            payload = item.get("payload") or {}
+            return (
+                (payload.get("execution_id") or item.get("execution_id"))
+                == execution_id
+                and payload.get("checkpoint_id") == checkpoint_id
+                and payload.get("resume_request_id") == resume_request_id
+            )
+
         message = self._wait_for_message(
-            lambda item: (
-                item.get("type")
-                in {"execution.resume.preflight", "execution.resume.accepted"}
-                and item.get("connection_id") == self.connection_id
-                and item.get("execution_id") == execution_id
-            ),
+            matches,
             self.timeout if timeout is None else timeout,
         )
         if message is None:
@@ -415,7 +437,11 @@ class GatewayRealtimeClient:
 
                 message = json.loads(raw)
 
-                self._push_inbound(message)
+                # execution.waiting is unsolicited ticket publication rather
+                # than a request/ACK correlation frame. Keeping it forever in
+                # the waiter deque would leak one item per replay/reconnect.
+                if message.get("type") != "execution.waiting":
+                    self._push_inbound(message)
 
                 if self._on_message is not None:
                     try:
