@@ -180,6 +180,34 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_waiting_executions_for_client(
+        self,
+        *,
+        owner_user_id: str,
+        client_id: str,
+    ):
+        """Read current normalized WAITING executions owned by one principal/client."""
+
+        result = await self.session.execute(
+            select(AgentExecutionRecord)
+            .join(
+                AgentSessionRecord,
+                AgentSessionRecord.id == AgentExecutionRecord.session_id,
+            )
+            .where(
+                AgentSessionRecord.owner_user_id == owner_user_id,
+                AgentExecutionRecord.state == "WAITING",
+                AgentExecutionRecord.wait_reason == "CONNECTION",
+                AgentExecutionRecord.bound_client_id == client_id,
+                AgentExecutionRecord.current_checkpoint_id.is_not(None),
+            )
+            .order_by(
+                AgentExecutionRecord.updated_at.asc(),
+                AgentExecutionRecord.id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
     async def get_iteration(self, iteration_id: str):
         result = await self.session.execute(
             select(AgentIterationRecord).where(AgentIterationRecord.id == iteration_id)
