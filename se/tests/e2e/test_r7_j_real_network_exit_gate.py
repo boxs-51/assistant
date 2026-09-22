@@ -1194,3 +1194,224 @@ async def test_r7_j_lost_accepted_ack_retries_same_request_on_k3(
         await server_state.supervisor.shutdown()
         await _stop_gateway(server, server_task)
         await server_state.engine.dispose()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_r7_j_real_tcp_two_resume_requests_have_one_authority_winner(
+    tmp_path,
+):
+    server_state = await _build_server(
+        tmp_path,
+        db_path=tmp_path / "r7-j-resume-race.sqlite3",
+    )
+    server, server_task, port = await _start_gateway(server_state.app)
+
+    k1_started = threading.Event()
+    k1_release = threading.Event()
+    k1 = None
+    generation_a = None
+    generation_b = None
+    effects = []
+
+    def k1_tool(value: str, **kwargs):
+        k1_started.set()
+        k1_release.wait(timeout=15.0)
+        return {"source": "k1-late", "value": value}
+
+    def race_tool(value: str, **kwargs):
+        effects.append(
+            {
+                "value": value,
+                "connection_id": kwargs.get("connection_id"),
+            }
+        )
+        return {
+            "source": "race-winner",
+            "value": value,
+            "effect_count": len(effects),
+        }
+
+    try:
+        ledger_path = tmp_path / "r7-j-race-client.sqlite3"
+        k1 = await _connect_k1(
+            port,
+            _client_registry(k1_tool),
+            ledger_path,
+        )
+        context = AgentExecutionContext.create(
+            execution_id=EXECUTION_ID,
+            agent_id=AGENT_ID,
+            session_id=SESSION_ID,
+            correlation_id="r7j-race-correlation",
+            identity=server_state.identity,
+            limits=AgentExecutionLimits(
+                max_iterations=4,
+                max_tool_calls=4,
+                timeout_seconds=30,
+            ),
+            connection_id=K1,
+            agent=server_state.agent,
+            metadata={
+                "client_id": CLIENT_ID,
+                "model": "r7j-test",
+            },
+        )
+        first_run = asyncio.create_task(
+            server_state.supervisor.run(
+                context,
+                lambda: server_state.agent_runtime.execute(context),
+            )
+        )
+        assert await asyncio.to_thread(k1_started.wait, 5.0)
+        await asyncio.to_thread(k1.realtime.close)
+        waiting_result = await asyncio.wait_for(first_run, timeout=10.0)
+        assert waiting_result.state.value == "WAITING"
+
+        waiting_execution = await server_state.durable_store.load_execution(
+            EXECUTION_ID
+        )
+        checkpoint = await server_state.durable_store.load_current_checkpoint(
+            EXECUTION_ID
+        )
+        assert checkpoint is not None
+
+        await _close_k1(k1)
+        k1 = None
+        k1_release.set()
+
+        generation_a = await _connect_generation(
+            port,
+            "r7j-k2a",
+            _client_registry(race_tool),
+            ledger_path,
+        )
+        generation_b = await _connect_generation(
+            port,
+            "r7j-k2b",
+            _client_registry(race_tool),
+            ledger_path,
+        )
+
+        original_build = (
+            server_state.container.resume_planning_service.build_resume_plan
+            if hasattr(server_state, "container")
+            else None
+        )
+        planning_service = server_state.app.state.container.resume_planning_service
+        original_build = planning_service.build_resume_plan
+        plans_ready = []
+        release_plans = asyncio.Event()
+
+        async def barrier_build(*args, **kwargs):
+            plan = await original_build(*args, **kwargs)
+            plans_ready.append(
+                (
+                    plan.target_connection_id,
+                    plan.plan_fingerprint,
+                )
+            )
+            if len(plans_ready) >= 2:
+                release_plans.set()
+            await asyncio.wait_for(release_plans.wait(), timeout=8.0)
+            return plan
+
+        planning_service.build_resume_plan = barrier_build
+
+        request_a = "rr-r7j-race-a"
+        request_b = "rr-r7j-race-b"
+        response_a, response_b = await asyncio.gather(
+            asyncio.to_thread(
+                generation_a.realtime.resume_execution,
+                EXECUTION_ID,
+                checkpoint.checkpoint_id,
+                request_a,
+                timeout=12.0,
+            ),
+            asyncio.to_thread(
+                generation_b.realtime.resume_execution,
+                EXECUTION_ID,
+                checkpoint.checkpoint_id,
+                request_b,
+                timeout=12.0,
+            ),
+        )
+
+        responses = [response_a, response_b]
+        accepted = [
+            item
+            for item in responses
+            if item["type"] == "execution.resume.accepted"
+        ]
+        rejected = [
+            item
+            for item in responses
+            if item["type"] == "execution.resume.rejected"
+        ]
+        assert len(accepted) == 1
+        assert len(rejected) == 1
+        assert rejected[0]["payload"]["code"] == "RESUME_CONFLICT"
+        assert rejected[0]["payload"]["retryable"] is True
+        assert len(plans_ready) == 2
+        assert plans_ready[0][1] != ""
+        assert plans_ready[0][1] == plans_ready[1][1]
+
+        winner_connection = accepted[0]["connection_id"]
+        winner_request_id = accepted[0]["payload"]["resume_request_id"]
+        assert winner_connection in {"r7j-k2a", "r7j-k2b"}
+        assert winner_request_id in {request_a, request_b}
+
+        async def _completed_after_race():
+            record = await server_state.durable_store.load_execution(
+                EXECUTION_ID
+            )
+            return record if record.state == "COMPLETED" else None
+
+        completed = await _wait_async(
+            _completed_after_race,
+            timeout=15.0,
+        )
+        assert completed.id == EXECUTION_ID
+        assert completed.bound_connection_id == winner_connection
+        assert completed.bound_client_id == CLIENT_ID
+
+        assert len(effects) == 1
+        assert effects[0]["connection_id"] == winner_connection
+
+        async with server_state.sessions() as session:
+            claims = (
+                await session.execute(
+                    select(AgentResumeClaimRecord).where(
+                        AgentResumeClaimRecord.execution_id
+                        == EXECUTION_ID
+                    )
+                )
+            ).scalars().all()
+        assert len(claims) == 1
+        assert claims[0].state == "CONSUMED"
+        assert claims[0].resume_request_id == winner_request_id
+        assert claims[0].connection_id == winner_connection
+        assert claims[0].consumed_execution_revision == (
+            waiting_execution.revision + 1
+        )
+
+        assert server_state.supervisor.active_execution_ids() == ()
+        assert (
+            await server_state.connections.realtime.multiplexer.pending_count()
+            == 0
+        )
+        assert (
+            await server_state.connections.realtime.reconciliation_multiplexer.pending_count()
+            == 0
+        )
+    finally:
+        k1_release.set()
+        if generation_a is not None:
+            await _close_k1(generation_a)
+        if generation_b is not None:
+            await _close_k1(generation_b)
+        if k1 is not None:
+            await _close_k1(k1)
+        await server_state.supervisor.shutdown()
+        await _stop_gateway(server, server_task)
+        await server_state.engine.dispose()
