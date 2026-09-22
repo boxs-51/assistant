@@ -111,6 +111,7 @@ class AgentForkPlanningService:
             execution.task_id != task_id
             or execution.branch_id != source_branch_id
             or execution.session_id != task.session_id
+            or execution.agent_id != task.assigned_agent_id
         ):
             raise ForkPlanRejected(
                 "FORK_EXECUTION_LINEAGE_CONFLICT",
@@ -127,9 +128,15 @@ class AgentForkPlanningService:
                 "Requested checkpoint is not AgentExecution.current_checkpoint_id.",
             )
 
-        checkpoint = await self._store.load_current_checkpoint(
-            source_execution_id
-        )
+        try:
+            checkpoint = await self._store.load_current_checkpoint(
+                source_execution_id
+            )
+        except ExecutionConflictError as exc:
+            raise ForkPlanRejected(
+                "FORK_STALE_CHECKPOINT",
+                str(exc),
+            ) from exc
         if checkpoint is None:
             raise ForkPlanRejected(
                 "FORK_CHECKPOINT_NOT_FOUND",
