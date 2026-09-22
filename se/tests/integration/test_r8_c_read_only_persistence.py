@@ -115,13 +115,14 @@ def _checkpoint():
 
 
 def _result(tool_call_id: str, output: str, *, committed=True):
+    suffix = tool_call_id.removeprefix("call-")
     return AgentToolResultRecord(
         id=f"result-{tool_call_id}",
         execution_id="exec-r8-c",
         iteration_id="iter-r8-c",
         tool_call_id=tool_call_id,
-        invocation_id=f"inv-{tool_call_id}",
-        capability_id=f"tool.{tool_call_id}",
+        invocation_id=suffix,
+        capability_id=f"tool.{suffix}",
         success=True,
         output={"value": output},
         retryable=False,
@@ -160,6 +161,8 @@ async def _seed_source(sessions, *, provisional=False, pending=False):
         session.add(_checkpoint())
         session.add(_result("call-a", "A", committed=not provisional))
         session.add(_result("call-b", "B"))
+        session.add(_invocation("a"))
+        session.add(_invocation("b"))
         if pending:
             session.add(
                 AgentCheckpointPendingInvocationRecord(
