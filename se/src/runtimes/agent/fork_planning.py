@@ -764,7 +764,12 @@ async def revalidate_fork_plan_in_uow(
             "ForkPlan semantic fingerprint no longer matches its payload.",
         )
 
-    task = await uow.agents.get_task(plan.task_id)
+    task_loader = getattr(
+        uow.agents,
+        "get_task_for_update",
+        uow.agents.get_task,
+    )
+    task = await task_loader(plan.task_id)
     if task is None:
         raise ForkPlanRejected(
             "FORK_TASK_NOT_FOUND",
