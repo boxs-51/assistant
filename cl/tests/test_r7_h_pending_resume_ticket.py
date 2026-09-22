@@ -740,3 +740,23 @@ def test_terminal_authority_ack_never_regresses_execution_watermark():
         )
     finally:
         runtime.stop()
+
+
+def test_realtime_waiter_queue_excludes_unsolicited_dispatch_frames():
+    client = GatewayRealtimeClient(
+        "http://gateway",
+        {"Authorization": "Bearer token"},
+        connection_id="conn-1",
+        client_id="client-1",
+    )
+    assert client._is_waiter_message({"type": "connection.registered"})
+    assert client._is_waiter_message({"type": "capability.registered"})
+    assert client._is_waiter_message({"type": "execution.resume.accepted"})
+    assert client._is_waiter_message({"type": "execution.resume.rejected"})
+    assert client._is_waiter_message({"type": "execution.resume.failed"})
+    assert client._is_waiter_message({"status": "error"})
+
+    assert not client._is_waiter_message({"type": "execution.waiting"})
+    assert not client._is_waiter_message({"type": "capability.invoke"})
+    assert not client._is_waiter_message({"type": "capability.cancel"})
+    assert not client._is_waiter_message({"type": "capability.reconcile"})
