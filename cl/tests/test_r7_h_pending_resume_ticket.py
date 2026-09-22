@@ -5,7 +5,7 @@ from types import SimpleNamespace
 import pytest
 
 from cl.src.core.client_runtime import ClientRuntime, ClientRuntimeState
-from cl.src.core.realtime_client import RealtimeHandshakeError
+from cl.src.core.realtime_client import GatewayRealtimeClient, RealtimeHandshakeError
 from cl.src.core.resume_ticket import (
     PendingResumeEntry,
     PendingResumeTicket,
@@ -63,6 +63,25 @@ def _rejected(execution_id, checkpoint_id, request_id, code, *, retryable=False)
             "resume_request_id": request_id,
             "code": code,
             "retryable": retryable,
+        },
+    }
+
+
+def _failed(execution_id, checkpoint_id, request_id, revision=10):
+    return {
+        "type": "execution.resume.failed",
+        "connection_id": "conn-any",
+        "execution_id": execution_id,
+        "payload": {
+            "execution_id": execution_id,
+            "checkpoint_id": checkpoint_id,
+            "resume_request_id": request_id,
+            "claim_id": "claim-1",
+            "code": "RUNTIME_HANDOFF_FAILED",
+            "state": "WAITING",
+            "wait_reason": "RECOVERY",
+            "recovery_checkpoint_id": "cp-recovery",
+            "recovery_revision": revision,
         },
     }
 
@@ -301,5 +320,187 @@ def test_principal_drain_invalidates_pending_tickets_and_watermarks():
             runtime._invalidate_resume_state_locked()
         assert runtime.pending_resume_tickets == ()
         assert runtime._execution_resume_watermarks == {}
+    finally:
+        runtime.stop()
+
+
+def test_realtime_resume_sends_canonical_request_and_matches_rejected_outcome():
+    client = GatewayRealtimeClient(
+        "http://gateway",
+        {"Authorization": "Bearer token"},
+        connection_id="conn-1",
+        client_id="client-1",
+    )
+    client._capabilities_registered.set()
+    sent = []
+
+    def fake_send(event_type, payload, invocation_id=None, **correlation):
+        sent.append((event_type, payload, invocation_id, correlation))
+
+    response = _rejected(
+        "exec-1",
+        "cp-1",
+        "rr-1",
+        "RESUME_CONFLICT",
+        retryable=True,
+    )
+    response["connection_id"] = "conn-1"
+
+    def fake_wait(predicate, timeout):
+        assert predicate(response)
+        return response
+
+    client.send = fake_send
+    client._wait_for_message = fake_wait
+
+    result = client.resume_execution("exec-1", "cp-1", "rr-1", timeout=0.01)
+    assert result is response
+    assert sent == [
+        (
+            "execution.resume",
+            {
+                "execution_id": "exec-1",
+                "checkpoint_id": "cp-1",
+                "resume_request_id": "rr-1",
+            },
+            None,
+            {"execution_id": "exec-1"},
+        )
+    ]
+
+
+def test_http_and_sse_waiting_payloads_are_ingested_without_consuming_output():
+    runtime = _runtime()
+    waiting = _ticket_payload()
+    try:
+        runtime.gateway.send_request = lambda payload: dict(waiting)
+        result = runtime.chat({"config": {"stream": False}})
+        assert result == waiting
+        assert [item.key for item in runtime.pending_resume_tickets] == [
+            ("exec-1", "cp-1")
+        ]
+
+        with runtime._lock:
+            runtime._invalidate_resume_state_locked()
+
+        def stream():
+            yield dict(waiting)
+            yield {"status": "other"}
+
+        runtime.gateway.send_request = lambda payload: stream()
+        output = list(runtime.chat({"config": {"stream": True}}))
+        assert output == [waiting, {"status": "other"}]
+        assert [item.key for item in runtime.pending_resume_tickets] == [
+            ("exec-1", "cp-1")
+        ]
+    finally:
+        runtime.stop()
+
+
+def test_retryable_rejection_waits_for_fresh_ticket_before_new_request():
+    runtime = _runtime()
+    requests = []
+
+    def behavior(execution_id, checkpoint_id, request_id):
+        requests.append(request_id)
+        if len(requests) == 1:
+            return _rejected(
+                execution_id,
+                checkpoint_id,
+                request_id,
+                "RESUME_CONFLICT",
+                retryable=True,
+            )
+        return _accepted(execution_id, checkpoint_id, request_id)
+
+    fake = _FakeRealtime("conn-1", behavior)
+    _install_ready_transport(runtime, fake)
+
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        _wait(lambda: len(requests) == 1)
+        time.sleep(0.1)
+        assert len(requests) == 1
+
+        # Duplicate canonical publication is a fresh eligibility signal.
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        _wait(lambda: len(requests) == 2)
+        assert requests[0] != requests[1]
+        _wait(lambda: runtime.pending_resume_tickets == ())
+    finally:
+        runtime.stop()
+
+
+def test_failed_resume_advances_recovery_watermark_and_never_retries_old_checkpoint():
+    runtime = _runtime()
+    fake = _FakeRealtime(
+        "conn-1",
+        lambda e, c, r: _failed(e, c, r, revision=10),
+    )
+    _install_ready_transport(runtime, fake)
+
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload(revision=8))
+        _wait(lambda: len(fake.calls) == 1)
+        _wait(lambda: runtime.pending_resume_tickets == ())
+        assert runtime._execution_resume_watermarks["exec-1"] == 10
+
+        time.sleep(0.1)
+        assert len(fake.calls) == 1
+        assert not runtime._ingest_waiting_payload(
+            _ticket_payload(checkpoint_id="cp-1", revision=8)
+        )
+
+        recovery = _ticket_payload(
+            checkpoint_id="cp-recovery",
+            revision=10,
+            wait_reason="RECOVERY",
+            auto=False,
+        )
+        assert runtime._ingest_waiting_payload(recovery)
+        time.sleep(0.1)
+        assert len(fake.calls) == 1
+    finally:
+        runtime.stop()
+
+
+def test_lost_ack_same_request_remains_blocked_until_new_generation_capability_ack():
+    runtime = _runtime()
+    runtime._suppress_reconnect = True
+
+    def lost_ack(*_):
+        raise RealtimeHandshakeError("lost ACK")
+
+    first = _FakeRealtime("conn-1", lost_ack)
+    _install_ready_transport(runtime, first, generation=1)
+
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        _wait(lambda: len(first.calls) >= 1)
+        request_id = first.calls[0][2]
+
+        with runtime._lock:
+            runtime._ready = False
+            runtime._state = ClientRuntimeState.DISCONNECTED
+            runtime._confirmed_capability_ids = frozenset()
+
+        second = _FakeRealtime(
+            "conn-2",
+            lambda e, c, r: _accepted(e, c, r),
+        )
+        _install_ready_transport(runtime, second, generation=2)
+        with runtime._lock:
+            runtime._confirmed_capability_ids = frozenset()
+            runtime._resume_condition.notify_all()
+
+        time.sleep(0.15)
+        assert second.calls == []
+
+        with runtime._lock:
+            runtime._confirmed_capability_ids = frozenset({"tool.echo"})
+            runtime._resume_condition.notify_all()
+
+        _wait(lambda: len(second.calls) == 1)
+        assert second.calls[0][2] == request_id
     finally:
         runtime.stop()
