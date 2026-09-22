@@ -374,24 +374,37 @@ async def test_r5_b_parallel_agent_limit_counts_delegated_children_only(
             ),
         )
 
+        await service.transition_task(
+            "task-parallel",
+            allowed_source_states=("CREATED",),
+            target_state="RUNNING",
+            values={},
+        )
+
         root_values = _execution_values("task-parallel", "exec-root")
-        root = await service.reserve_new_execution(
+        root_values["state"] = "RUNNING"
+        root_values["revision"] = 1
+        root_admission = await service.start_root_task_scoped_execution(
             "task-parallel",
             execution_id="exec-root",
             execution_values=root_values,
-            delegation_depth=0,
         )
+        root = await service.get_budget("task-parallel")
         assert root.active_executions == 1
         assert root.active_parallel_agents == 0
 
         child_values = _execution_values("task-parallel", "exec-child")
+        child_values["state"] = "RUNNING"
+        child_values["revision"] = 1
         child_values["parent_execution_id"] = "exec-root"
-        child = await service.reserve_new_execution(
+        child_values["branch_id"] = root_admission.branch_id
+        await service.start_task_scoped_execution(
             "task-parallel",
             execution_id="exec-child",
             execution_values=child_values,
             delegation_depth=1,
         )
+        child = await service.get_budget("task-parallel")
         assert child.active_executions == 2
         assert child.active_parallel_agents == 1
 
@@ -399,12 +412,15 @@ async def test_r5_b_parallel_agent_limit_counts_delegated_children_only(
             "task-parallel",
             "exec-child-2",
         )
+        second_child["state"] = "RUNNING"
+        second_child["revision"] = 1
         second_child["parent_execution_id"] = "exec-root"
+        second_child["branch_id"] = root_admission.branch_id
         with pytest.raises(
             TaskBudgetExceededError,
             match="max_parallel_agents",
         ):
-            await service.reserve_new_execution(
+            await service.start_task_scoped_execution(
                 "task-parallel",
                 execution_id="exec-child-2",
                 execution_values=second_child,
