@@ -4,7 +4,9 @@ import random
 import threading
 import time
 import uuid
+from datetime import datetime, timezone
 from enum import Enum
+from types import GeneratorType
 from typing import Optional
 
 import requests
@@ -16,6 +18,12 @@ from .client_invocation_ledger import ClientInvocationLedger
 from .gateway_client import GatewayLLMClient
 from .installation_identity import InstallationIdentityStore
 from .realtime_client import GatewayRealtimeClient
+from .resume_ticket import (
+    PendingResumeEntry,
+    PendingResumeTicket,
+    ResumeProtocolOutcome,
+    ResumeTicketState,
+)
 
 
 class ClientRuntimeState(str, Enum):
@@ -102,6 +110,14 @@ class ClientRuntime:
         self._reconnect_thread: Optional[threading.Thread] = None
         self._suppress_reconnect = False
         self._stopping = False
+        self._pending_resume_tickets: dict[
+            tuple[str, str], PendingResumeEntry
+        ] = {}
+        self._execution_resume_watermarks: dict[str, int] = {}
+        self._confirmed_capability_ids: frozenset[str] = frozenset()
+        self._resume_condition = threading.Condition(self._lock)
+        self._resume_worker_thread: Optional[threading.Thread] = None
+        self._resume_worker_stop = False
 
     @property
     def ready(self) -> bool:
@@ -110,6 +126,20 @@ class ClientRuntime:
     @property
     def state(self) -> ClientRuntimeState:
         return self._state
+
+    @property
+    def pending_resume_tickets(self) -> tuple[PendingResumeTicket, ...]:
+        with self._lock:
+            return tuple(
+                entry.ticket
+                for entry in self._pending_resume_tickets.values()
+                if not entry.terminal
+            )
+
+    @property
+    def confirmed_capability_ids(self) -> frozenset[str]:
+        with self._lock:
+            return self._confirmed_capability_ids
 
     def _build_realtime(self, connection_id: str, generation: int):
         return GatewayRealtimeClient(
@@ -128,6 +158,7 @@ class ClientRuntime:
         old.close()
         self._generation += 1
         self.connection_id = f"cl-{uuid.uuid4().hex}"
+        self._confirmed_capability_ids = frozenset()
         self.realtime = self._build_realtime(self.connection_id, self._generation)
         self.dispatcher.set_realtime(self.realtime)
         self.capabilities.realtime = self.realtime
@@ -162,10 +193,15 @@ class ClientRuntime:
             self._state = ClientRuntimeState.CONNECTING
             self.realtime.connect()
             self._state = ClientRuntimeState.REGISTERING_CAPABILITIES
-            self.capabilities.register()
+            registration_ack = self.capabilities.register()
+            self._confirmed_capability_ids = self._confirmed_from_registration_ack(
+                registration_ack
+            )
             self._started = True
             self._ready = True
             self._state = ClientRuntimeState.READY
+            self._ensure_resume_worker_locked()
+            self._resume_condition.notify_all()
 
     def _load_saved_session(self) -> None:
         saved = self.session_store.load()
