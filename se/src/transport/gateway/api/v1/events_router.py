@@ -438,14 +438,18 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
     supervisor = getattr(container, "agent_execution_supervisor", None)
     client_id = str(snapshot.metadata.get("client_id") or "")
 
-    if (
-        planning_service is None
-        or durable_store is None
+    if planning_service is None:
+        raise RuntimeError(
+            "R7_CANONICAL_RESUME_AUTHORITY_UNAVAILABLE: "
+            "resume planning service is required."
+        )
+    if resume_request_id and (
+        durable_store is None
         or supervisor is None
     ):
         raise RuntimeError(
             "R7_CANONICAL_RESUME_AUTHORITY_UNAVAILABLE: "
-            "resume planning, durable store and supervisor are required."
+            "durable store and supervisor are required for resume authority."
         )
 
     # Lost-ACK replay must precede planning. The original accepted execution
