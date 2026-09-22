@@ -200,6 +200,12 @@ class ClientRuntime:
             self._started = True
             self._ready = True
             self._state = ClientRuntimeState.READY
+            # A new capability-ACKed transport generation is a fresh
+            # eligibility signal for previously deferred (but not uncertain)
+            # requests. Lost-ACK retries remain RETRY_SAME_REQUEST.
+            for entry in self._pending_resume_tickets.values():
+                if entry.state is ResumeTicketState.WAIT_REFRESH:
+                    entry.state = ResumeTicketState.OBSERVED
             self._ensure_resume_worker_locked()
             self._resume_condition.notify_all()
 
@@ -578,11 +584,10 @@ class ClientRuntime:
         entry.last_outcome_code = outcome.code
         entry.clear_resume_request_for_new_attempt()
         if outcome.code == "CLAIM_EXPIRED":
+            # The old request is known not to own authority. A new request ID
+            # may be allocated only if the ticket remains currently eligible.
+            entry.state = ResumeTicketState.OBSERVED
             self._classify_resume_entry_locked(entry)
-            if entry.state is ResumeTicketState.BLOCKED and self._ready:
-                # A current ticket may begin a new request once the old claim
-                # is known to have expired.
-                entry.state = ResumeTicketState.ELIGIBLE
             return
         if outcome.retryable:
             entry.state = ResumeTicketState.WAIT_REFRESH
