@@ -1,4 +1,5 @@
 import time
+from datetime import datetime, timedelta, timezone
 from collections import deque
 from types import SimpleNamespace
 
@@ -555,5 +556,33 @@ def test_failed_without_recovery_revision_tombstones_old_checkpoint_by_authority
         assert not runtime._ingest_waiting_payload(_ticket_payload(revision=8))
         time.sleep(0.05)
         assert len(fake.calls) == 1
+    finally:
+        runtime.stop()
+
+
+def test_wait_ttl_does_not_abort_same_request_ack_recovery():
+    runtime = _runtime()
+    expired_payload = _ticket_payload()
+    expired_payload["wait_expires_at"] = (
+        datetime.now(timezone.utc) - timedelta(seconds=1)
+    ).isoformat()
+    ticket = PendingResumeTicket.from_payload(expired_payload)
+    entry = PendingResumeEntry(
+        ticket=ticket,
+        principal_id="user-1",
+        state=ResumeTicketState.RETRY_SAME_REQUEST,
+        active_resume_request_id="rr-issued-before-expiry",
+    )
+
+    try:
+        with runtime._lock:
+            runtime._execution_resume_watermarks["exec-1"] = 8
+            runtime._confirmed_capability_ids = frozenset({"tool.echo"})
+            runtime._ready = True
+            runtime._state = ClientRuntimeState.READY
+            runtime._classify_resume_entry_locked(entry)
+
+        assert entry.state is ResumeTicketState.RETRY_SAME_REQUEST
+        assert entry.active_resume_request_id == "rr-issued-before-expiry"
     finally:
         runtime.stop()

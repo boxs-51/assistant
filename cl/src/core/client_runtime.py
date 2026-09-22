@@ -420,7 +420,14 @@ class ClientRuntime:
         if entry.terminal:
             return
         ticket = entry.ticket
-        if self._ticket_expired(ticket):
+        if (
+            self._ticket_expired(ticket)
+            and entry.active_resume_request_id is None
+        ):
+            # WAIT TTL gates NEW authority attempts. Once a request id has
+            # actually been issued, an ACK may be lost after the TTL boundary;
+            # replaying that same id is required to learn CONSUMED/EXPIRED/
+            # REJECTED durable outcome safely.
             entry.state = ResumeTicketState.EXPIRED
             return
         if (
