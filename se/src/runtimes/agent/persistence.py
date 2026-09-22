@@ -17,7 +17,7 @@ from ..capability.contracts.invocation import (
 )
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
-from .contracts.inference import InferenceUsage
+from .contracts.inference import InferenceMessage, InferenceUsage
 from .contracts.resume import (
     CheckpointPendingInvocation,
     DurableExecutionCheckpoint,
@@ -717,6 +717,198 @@ class DurableAgentStore:
             )
             await uow.commit()
             return record
+
+    async def load_fork_capability_invocations(
+        self,
+        execution_id: str,
+    ) -> tuple[Any, ...]:
+        """Read all durable CapabilityInvocation rows for R8-C planning.
+
+        This method deliberately uses the transaction-scoped repository and
+        performs no reconciliation, projection promotion, or lifecycle write.
+        """
+        async with self.uow_factory() as uow:
+            repository = getattr(uow, "capability_invocations", None)
+            if repository is None:
+                raise ExecutionConflictError(
+                    "FORK_INVOCATION_STORE_UNAVAILABLE: "
+                    "shared UoW has no capability invocation repository."
+                )
+            rows = await repository.list_records_for_execution(execution_id)
+            await uow.commit()
+            return tuple(rows)
+
+    async def load_fork_committed_tool_result(
+        self,
+        execution_id: str,
+        tool_call_id: str,
+    ):
+        """Read an already-COMMITTED tool projection without promoting it."""
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_tool_result(
+                execution_id,
+                tool_call_id,
+            )
+            if (
+                record is None
+                or getattr(record, "commit_state", "PROVISIONAL")
+                != "COMMITTED"
+            ):
+                await uow.commit()
+                return None
+            await uow.commit()
+            return record
+
+    @staticmethod
+    def _fork_tool_result_message(record) -> InferenceMessage:
+        return InferenceMessage(
+            role="tool",
+            name=record.capability_id,
+            tool_call_id=record.tool_call_id,
+            content=(
+                record.output
+                if record.success
+                else {
+                    "error_code": record.error_code,
+                    "error_message": record.error_message,
+                }
+            ),
+            metadata={
+                "success": record.success,
+                "retryable": record.retryable,
+            },
+        )
+
+    async def load_fork_safe_checkpoint_transcript(
+        self,
+        execution_id: str,
+        checkpoint_id: str,
+    ) -> tuple[InferenceMessage, ...]:
+        """Strict R8-C transcript proof with zero durable mutation.
+
+        Unlike the R7 resume-prefix reader, this helper never silently drops a
+        tool projection. Every source tool message must already be backed by a
+        COMMITTED AgentToolResult and the checkpoint active batch is rebuilt in
+        canonical AgentIteration.tool_call_ids order.
+        """
+
+        async with self.uow_factory() as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                checkpoint_id
+            )
+            if (
+                checkpoint is None
+                or checkpoint.execution_id != execution_id
+            ):
+                raise ExecutionConflictError(
+                    "FORK_CHECKPOINT_LINEAGE_CONFLICT: "
+                    "normalized checkpoint does not belong to source execution."
+                )
+            if checkpoint.transcript_snapshot is None:
+                raise ExecutionConflictError(
+                    "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE: "
+                    "inline transcript snapshot is required."
+                )
+
+            pending = await uow.agents.list_checkpoint_pending_invocations(
+                checkpoint_id
+            )
+            if pending:
+                raise ExecutionConflictError(
+                    "FORK_PENDING_INVOCATIONS: source checkpoint was cut "
+                    "with unresolved invocation snapshots."
+                )
+
+            iterations = await uow.agents.list_iterations(execution_id)
+            iteration = next(
+                (
+                    item
+                    for item in iterations
+                    if int(item.iteration) == int(checkpoint.iteration)
+                ),
+                None,
+            )
+            if iteration is None:
+                raise ExecutionConflictError(
+                    "FORK_TRANSCRIPT_UNSAFE: checkpoint iteration is missing."
+                )
+
+            ordered_tool_call_ids = tuple(
+                str(item)
+                for item in (iteration.tool_call_ids or ())
+            )
+            active_ids = set(ordered_tool_call_ids)
+            committed: dict[str, Any] = {}
+
+            async def require_committed(tool_call_id: str):
+                cached = committed.get(tool_call_id)
+                if cached is not None:
+                    return cached
+                record = await uow.agents.get_tool_result(
+                    execution_id,
+                    tool_call_id,
+                )
+                if (
+                    record is None
+                    or getattr(record, "commit_state", "PROVISIONAL")
+                    != "COMMITTED"
+                ):
+                    raise ExecutionConflictError(
+                        "FORK_TRANSCRIPT_UNSAFE: tool result "
+                        f"{tool_call_id!r} is not durably COMMITTED."
+                    )
+                if (
+                    record.execution_id != execution_id
+                    or record.tool_call_id != tool_call_id
+                ):
+                    raise ExecutionConflictError(
+                        "FORK_COMMITTED_RESULT_CONFLICT: tool-result identity "
+                        "does not match source execution."
+                    )
+                committed[tool_call_id] = record
+                return record
+
+            result: list[InferenceMessage] = []
+            seen_active: set[str] = set()
+            for raw in checkpoint.transcript_snapshot:
+                message = InferenceMessage.model_validate(raw)
+                if message.role != "tool":
+                    result.append(message)
+                    continue
+
+                tool_call_id = message.tool_call_id
+                if not tool_call_id:
+                    raise ExecutionConflictError(
+                        "FORK_TRANSCRIPT_UNSAFE: tool message has no "
+                        "tool_call_id."
+                    )
+                durable = await require_committed(tool_call_id)
+                canonical = self._fork_tool_result_message(durable)
+                if (
+                    message.model_dump(mode="json")
+                    != canonical.model_dump(mode="json")
+                ):
+                    raise ExecutionConflictError(
+                        "FORK_TRANSCRIPT_UNSAFE: raw tool message differs "
+                        "from durable COMMITTED projection."
+                    )
+
+                if tool_call_id in active_ids:
+                    if tool_call_id in seen_active:
+                        raise ExecutionConflictError(
+                            "FORK_TRANSCRIPT_UNSAFE: active tool projection "
+                            "appears more than once."
+                        )
+                    seen_active.add(tool_call_id)
+                    continue
+                result.append(canonical)
+
+            for tool_call_id in ordered_tool_call_ids:
+                durable = await require_committed(tool_call_id)
+                result.append(self._fork_tool_result_message(durable))
+
+            await uow.commit()
+            return tuple(result)
 
     async def update_execution(self, execution_id: str, values: Dict[str, Any]):
         values = _normalize_json_fields(
