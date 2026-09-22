@@ -36,6 +36,7 @@ from se.src.runtimes.agent.contracts.resume import (
 )
 from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.resume_claim import ResumeClaimRejected
+from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.task_budget import TaskBudgetService
 from se.src.runtimes.capability.contracts.definition import CapabilityIdempotency
 from se.src.runtimes.capability.contracts.invocation import (
@@ -1021,6 +1022,119 @@ async def test_r7_f3_provisional_no_action_active_slot_blocks_claim(
             assert execution.state == "WAITING"
             assert execution.revision == 2
             assert durable_claim.state == "REJECTED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_g_real_recovery_checkpoint_releases_task_budget_and_keeps_claim_consumed(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r7-g-real-recovery.sqlite",
+    )
+    try:
+        await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f")
+        identity = Identity(
+            user_id=USER,
+            session_id=SESSION,
+            auth_type="api_key",
+            scopes={"*"},
+        )
+        context = await store.prepare_resume_plan_context(
+            plan,
+            identity=identity,
+        )
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r7g-real-recovery")
+        )
+        consumed = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            budget_before = await uow.agents.get_task_budget("task-r7f")
+            assert execution.state == "RUNNING"
+            assert execution.revision == 3
+            assert execution.bound_connection_id == K2
+            assert budget_before.active_executions == 1
+            await uow.commit()
+
+        budget_service = TaskBudgetService(
+            factory,
+            default_limits=_limits(),
+            default_policy=TaskBudgetPolicy(version="r7-f"),
+        )
+        runtime = AgentRuntime(
+            context_builder=object(),
+            inference=object(),
+            tool_execution=object(),
+            execution_policy=object(),
+            durable_store=store,
+            task_budget_service=budget_service,
+        )
+
+        recovery_checkpoint_id, recovery_revision = (
+            await runtime.recover_claimed_resume(
+                context,
+                plan=plan,
+                consumed=consumed,
+                error_message="RUNTIME_HANDOFF_FAILED: activation barrier failed",
+            )
+        )
+
+        assert recovery_checkpoint_id == f"{EXECUTION}:checkpoint:4"
+        assert recovery_revision == 4
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                recovery_checkpoint_id
+            )
+            pending = await uow.agents.list_checkpoint_pending_invocations(
+                recovery_checkpoint_id
+            )
+            budget_after = await uow.agents.get_task_budget("task-r7f")
+            release = await uow.agents.get_task_budget_reservation(
+                "task-r7f",
+                "RELEASE_EXECUTION",
+                f"{EXECUTION}:4",
+            )
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+
+            assert execution.state == "WAITING"
+            assert execution.wait_reason == "RECOVERY"
+            assert execution.revision == 4
+            assert execution.current_checkpoint_id == recovery_checkpoint_id
+            assert execution.bound_client_id == CLIENT
+            assert execution.bound_connection_id is None
+            assert 0.0 <= execution.remaining_active_budget_seconds <= 20.0
+
+            assert checkpoint is not None
+            assert checkpoint.execution_revision == 4
+            assert checkpoint.wait_reason == "RECOVERY"
+            assert checkpoint.parent_checkpoint_id == CHECKPOINT
+            assert checkpoint.origin_client_id == CLIENT
+            assert checkpoint.origin_connection_id == K2
+            assert len(pending) == 1
+            assert pending[0].invocation_id == INVOCATION
+            assert pending[0].tool_call_id == TOOL_CALL
+
+            assert budget_after.active_executions == 0
+            assert budget_after.used_executions == 1
+            assert release is not None
+            assert durable_claim.state == "CONSUMED"
+            assert durable_claim.consumed_execution_revision == 3
             await uow.commit()
     finally:
         await engine.dispose()
