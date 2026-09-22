@@ -35,7 +35,6 @@ from .contracts.events import (
     AgentEventPublisher,
     CorrelationContext,
 )
-from .contracts.continuation import ContinuationState
 from .contracts.resume import (
     ResumeClaimConsumeResult,
     ResumeInvocationAction,
@@ -84,7 +83,6 @@ class AgentRuntime:
         execution_policy: AgentExecutionPolicy,
         durable_store=None,
         event_publisher: AgentEventPublisher | None = None,
-        continuation_service=None,
         wait_policy: ExecutionWaitPolicy | None = None,
         task_budget_service=None,
     ) -> None:
@@ -94,7 +92,6 @@ class AgentRuntime:
         self._execution_policy = execution_policy
         self._durable_store = durable_store
         self._event_publisher = event_publisher
-        self._continuation_service = continuation_service
         self._task_budget_service = task_budget_service
         self._wait_policy = (
             wait_policy or ConfiguredExecutionWaitPolicy()
@@ -1317,7 +1314,6 @@ class AgentRuntime:
                             "Agent execution active budget exhausted "
                             "before WAITING."
                         ),
-                        "continuation_state": None,
                         "checkpoint_id": None,
                     }
                 )
@@ -1916,51 +1912,8 @@ class AgentRuntime:
                             error_message=(
                                 "Remote capability requires a new connection."
                             ),
-                            continuation_state=ContinuationState.WAITING,
                             checkpoint_id=None,
                         )
-
-                    if self._continuation_service is not None:
-                        checkpoint = await self._continuation_service.checkpoint_disconnect(
-                            execution_id=context.execution_id,
-                            session_id=context.session_id,
-                            owner_user_id=context.identity.user_id,
-                            connection_id=old_connection_id,
-                            invocation_id=(
-                                lost.metadata.get("invocation_id")
-                                or lost.invocation_id
-                            ),
-                            tool_call_id=lost.tool_call_id,
-                            capability_id=lost.capability_id,
-                            iteration=iteration_number,
-                            transcript=list(context.waiting_checkpoint_transcript),
-                            server_continuation_available=False,
-                            metadata={
-                                "origin_client_id": context.metadata.get("client_id"),
-                                "remote_error_code": lost.error_code,
-                            },
-                        )
-                        if checkpoint.state is ContinuationState.WAITING:
-                            record.close(
-                                AgentLoopState.FAILED,
-                                error_code="WAITING_FOR_CONNECTION",
-                            )
-                            await self._persist_iteration(record)
-                            return AgentExecutionResult(
-                                execution_id=context.execution_id,
-                                agent_id=context.agent_id,
-                                state=AgentLoopState.WAITING,
-                                wait_reason=AgentExecutionWaitReason.CONNECTION,
-                                iterations=tuple(iterations),
-                                last_tool_results=latest_tool_results,
-                                usage=context.usage,
-                                error_code="WAITING_FOR_CONNECTION",
-                                error_message=(
-                                    "Remote capability requires a new connection."
-                                ),
-                                continuation_state=checkpoint.state,
-                                checkpoint_id=checkpoint.checkpoint_id,
-                            )
 
                     raise ExecutionConflictError(
                         "PROVISIONAL tool result cannot enter model context "
