@@ -504,3 +504,56 @@ def test_lost_ack_same_request_remains_blocked_until_new_generation_capability_a
         assert second.calls[0][2] == request_id
     finally:
         runtime.stop()
+
+
+def test_consumed_claim_resume_conflict_preserves_same_request_id_until_settled():
+    runtime = _runtime()
+    calls = []
+
+    def behavior(execution_id, checkpoint_id, request_id):
+        calls.append(request_id)
+        if len(calls) == 1:
+            message = _rejected(
+                execution_id,
+                checkpoint_id,
+                request_id,
+                "RESUME_CONFLICT",
+                retryable=True,
+            )
+            message["payload"]["claim_id"] = "claim-consumed"
+            return message
+        return _accepted(execution_id, checkpoint_id, request_id)
+
+    fake = _FakeRealtime("conn-1", behavior)
+    _install_ready_transport(runtime, fake)
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        _wait(lambda: len(calls) >= 2)
+        assert calls[0] == calls[1]
+        _wait(lambda: runtime.pending_resume_tickets == ())
+    finally:
+        runtime.stop()
+
+
+def test_failed_without_recovery_revision_tombstones_old_checkpoint_by_authority_floor():
+    runtime = _runtime()
+
+    def fail_without_recovery(execution_id, checkpoint_id, request_id):
+        message = _failed(execution_id, checkpoint_id, request_id, revision=10)
+        message["payload"].pop("recovery_checkpoint_id", None)
+        message["payload"].pop("recovery_revision", None)
+        message["payload"]["state"] = "FAILED"
+        message["payload"].pop("wait_reason", None)
+        return message
+
+    fake = _FakeRealtime("conn-1", fail_without_recovery)
+    _install_ready_transport(runtime, fake)
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload(revision=8))
+        _wait(lambda: runtime.pending_resume_tickets == ())
+        assert runtime._execution_resume_watermarks["exec-1"] == 9
+        assert not runtime._ingest_waiting_payload(_ticket_payload(revision=8))
+        time.sleep(0.05)
+        assert len(fake.calls) == 1
+    finally:
+        runtime.stop()

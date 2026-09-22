@@ -573,17 +573,36 @@ class ClientRuntime:
             return
 
         if outcome.kind == "FAILED":
-            if outcome.recovery_revision is not None:
-                self._advance_resume_watermark_locked(
-                    ticket.execution_id,
-                    outcome.recovery_revision,
-                )
+            # FAILED is emitted only after resume authority was acquired. Even
+            # if recovery checkpointing itself failed and no recovery_revision
+            # is available, C1 is stale because WAITING@N already advanced at
+            # least to RUNNING@N+1.
+            authority_floor = (
+                outcome.recovery_revision
+                if outcome.recovery_revision is not None
+                else ticket.revision + 1
+            )
+            self._advance_resume_watermark_locked(
+                ticket.execution_id,
+                authority_floor,
+            )
             entry.last_outcome_code = outcome.code
             entry.state = ResumeTicketState.FAILED
             self._pending_resume_tickets.pop(key, None)
             return
 
         entry.last_outcome_code = outcome.code
+        if (
+            outcome.code == "RESUME_CONFLICT"
+            and outcome.retryable
+            and outcome.claim_id is not None
+        ):
+            # Same durable claim is already CONSUMED but its supervisor handoff
+            # outcome has not settled yet. This is ACK/settlement uncertainty,
+            # not a new logical attempt: preserve the exact request id.
+            entry.state = ResumeTicketState.RETRY_SAME_REQUEST
+            return
+
         entry.clear_resume_request_for_new_attempt()
         if outcome.code == "CLAIM_EXPIRED":
             # The old request is known not to own authority. A new request ID
