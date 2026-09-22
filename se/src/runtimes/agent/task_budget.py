@@ -64,10 +64,20 @@ class AgentDelegationCycleError(TaskBudgetError):
 class DelegationAdmission:
     task_id: str
     parent_execution_id: str | None
+    branch_id: str | None
     child_agent_id: str
     delegation_depth: int
     ancestor_execution_ids: tuple[str, ...]
     ancestor_agent_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class RootExecutionAdmission:
+    task_id: str
+    branch_id: str
+    branch_revision: int
+    execution_id: str
+    execution_revision: int
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -124,6 +134,11 @@ def _reservation_fingerprint(
         default=str,
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _root_branch_id(task_id: str) -> str:
+    digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:40]
+    return f"r8_root_{digest}"
 
 
 def _budget_from_record(record) -> TaskBudget:
@@ -324,6 +339,7 @@ class TaskBudgetService:
                 admission = DelegationAdmission(
                     task_id=task_id,
                     parent_execution_id=None,
+                    branch_id=None,
                     child_agent_id=child_agent_id,
                     delegation_depth=0,
                     ancestor_execution_ids=(),
@@ -335,6 +351,7 @@ class TaskBudgetService:
             ancestor_execution_ids: list[str] = []
             ancestor_agent_ids: list[str] = []
             seen_execution_ids: set[str] = set()
+            durable_branch_id: str | None = None
             current_execution_id: str | None = parent_execution_id
 
             while current_execution_id is not None:
@@ -356,6 +373,16 @@ class TaskBudgetService:
                 if execution.task_id != task_id:
                     raise TaskBudgetConflictError(
                         "Delegation parent belongs to a different AgentTask."
+                    )
+                if not execution.branch_id:
+                    raise TaskBudgetConflictError(
+                        "Delegation parent has no normalized TaskBranch."
+                    )
+                if durable_branch_id is None:
+                    durable_branch_id = str(execution.branch_id)
+                elif str(execution.branch_id) != durable_branch_id:
+                    raise TaskBudgetConflictError(
+                        "Delegation ancestry crosses TaskBranch boundaries."
                     )
 
                 ancestor_execution_ids.append(execution.id)
@@ -391,9 +418,25 @@ class TaskBudgetService:
                     "delegation ancestry."
                 )
 
+            if durable_branch_id is None:
+                raise TaskBudgetConflictError(
+                    "Delegated execution could not resolve durable branch."
+                )
+            branch = await uow.agents.get_task_branch(durable_branch_id)
+            if (
+                branch is None
+                or branch.task_id != task_id
+                or str(branch.resolution_state) != "OPEN"
+            ):
+                raise TaskBudgetConflictError(
+                    "Delegated execution requires an OPEN normalized "
+                    "TaskBranch."
+                )
+
             admission = DelegationAdmission(
                 task_id=task_id,
                 parent_execution_id=parent_execution_id,
+                branch_id=durable_branch_id,
                 child_agent_id=child_agent_id,
                 delegation_depth=delegation_depth,
                 ancestor_execution_ids=tuple(ancestor_execution_ids),
@@ -648,6 +691,301 @@ class TaskBudgetService:
             values=values,
         )
 
+    async def start_root_task_scoped_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        execution_values: dict[str, Any],
+    ) -> RootExecutionAdmission:
+        """Atomically admit the one first root Branch + RUNNING execution.
+
+        This is deliberately narrower than general Branch/FORK admission.
+        It is valid only for a pristine Task that won the R5-E RUNNING Task
+        transition and has no prior TaskBranch or execution history.
+        """
+        if execution_values.get("id") != execution_id:
+            raise ValueError("execution_values.id must match execution_id")
+        if execution_values.get("task_id") != task_id:
+            raise ValueError("execution_values.task_id must match task_id")
+        if execution_values.get("state") != "RUNNING":
+            raise ValueError(
+                "root execution admission must insert RUNNING state"
+            )
+        if execution_values.get("revision") != 1:
+            raise ValueError(
+                "root execution admission must insert revision=1"
+            )
+        for field in (
+            "parent_execution_id",
+            "retry_of_execution_id",
+            "base_execution_id",
+            "base_checkpoint_id",
+        ):
+            if execution_values.get(field) is not None:
+                raise TaskBudgetConflictError(
+                    f"first root execution requires {field}=NULL"
+                )
+        if execution_values.get("branch_id") is not None:
+            raise TaskBudgetConflictError(
+                "first root execution must not supply branch authority"
+            )
+
+        branch_id = _root_branch_id(task_id)
+        normalized_execution_values = _normalize_execution_store_values(
+            {
+                **execution_values,
+                "branch_id": branch_id,
+            }
+        )
+        reservation_execution_values = to_json_safe(
+            normalized_execution_values,
+            path="task_budget.execution_reservation",
+        )
+        execution_payload = {
+            "execution_id": execution_id,
+            "execution_values": reservation_execution_values,
+            "delegated": False,
+            "delegation_depth": 0,
+        }
+        execution_fingerprint = _reservation_fingerprint(
+            TaskBudgetReservationKind.NEW_EXECUTION,
+            execution_id,
+            execution_payload,
+        )
+        branch_fingerprint = _reservation_fingerprint(
+            TaskBudgetReservationKind.BRANCH,
+            branch_id,
+            {},
+        )
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    existing_branch = await uow.agents.get_task_branch(
+                        branch_id
+                    )
+                    existing_execution = await uow.agents.get_execution(
+                        execution_id
+                    )
+                    existing_branch_reservation = (
+                        await uow.agents.get_task_budget_reservation(
+                            task_id,
+                            TaskBudgetReservationKind.BRANCH.value,
+                            branch_id,
+                        )
+                    )
+                    existing_execution_reservation = (
+                        await uow.agents.get_task_budget_reservation(
+                            task_id,
+                            TaskBudgetReservationKind.NEW_EXECUTION.value,
+                            execution_id,
+                        )
+                    )
+                    any_existing = any(
+                        item is not None
+                        for item in (
+                            existing_branch,
+                            existing_execution,
+                            existing_branch_reservation,
+                            existing_execution_reservation,
+                        )
+                    )
+                    if any_existing:
+                        if not all(
+                            item is not None
+                            for item in (
+                                existing_branch,
+                                existing_execution,
+                                existing_branch_reservation,
+                                existing_execution_reservation,
+                            )
+                        ):
+                            raise TaskBudgetConflictError(
+                                "Partial root admission state already exists."
+                            )
+                        self._verify_reservation(
+                            existing_branch_reservation,
+                            branch_fingerprint,
+                        )
+                        self._verify_reservation(
+                            existing_execution_reservation,
+                            execution_fingerprint,
+                        )
+                        if (
+                            existing_branch.task_id != task_id
+                            or str(existing_branch.resolution_state) != "OPEN"
+                            or existing_branch.current_execution_id
+                            != execution_id
+                        ):
+                            raise TaskBudgetConflictError(
+                                "Root TaskBranch belongs to a different "
+                                "durable admission."
+                            )
+                        if (
+                            existing_execution.task_id != task_id
+                            or existing_execution.branch_id != branch_id
+                            or existing_execution.parent_execution_id
+                            is not None
+                            or int(existing_execution.revision) < 1
+                        ):
+                            raise TaskBudgetConflictError(
+                                "Root AgentExecution does not match the "
+                                "durable root admission."
+                            )
+                        await uow.commit()
+                        return RootExecutionAdmission(
+                            task_id=task_id,
+                            branch_id=branch_id,
+                            branch_revision=int(existing_branch.revision),
+                            execution_id=execution_id,
+                            execution_revision=int(
+                                existing_execution.revision
+                            ),
+                        )
+
+                    task = await uow.agents.get_task(task_id)
+                    if task is None:
+                        raise TaskBudgetRequiredError(
+                            f"Unknown AgentTask: {task_id}"
+                        )
+
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no "
+                                "TaskBudget."
+                            )
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    budget = _budget_from_record(budget_record)
+                    self._require_open(budget)
+
+                    if str(task.status) != "RUNNING":
+                        raise TaskBudgetConflictError(
+                            f"Root execution admission requires RUNNING Task, "
+                            f"got {task.status}"
+                        )
+
+                    branches = await uow.agents.list_task_branches(task_id)
+                    if branches:
+                        raise TaskBudgetConflictError(
+                            "Task already has a normalized TaskBranch; "
+                            "second top-level execution is not R8-B root "
+                            "admission."
+                        )
+                    if await uow.agents.has_execution_for_task(task_id):
+                        raise TaskBudgetConflictError(
+                            "Task already has AgentExecution history; "
+                            "first-root admission is no longer valid."
+                        )
+
+                    if (
+                        budget.active_branches
+                        >= budget.limits.max_active_branches
+                    ):
+                        raise TaskBudgetExceededError(
+                            "max_active_branches reached"
+                        )
+                    if (
+                        budget.used_executions
+                        >= budget.limits.max_total_executions
+                    ):
+                        raise TaskBudgetExceededError(
+                            "max_total_executions reached"
+                        )
+                    if (
+                        budget.active_executions
+                        >= budget.limits.max_active_executions
+                    ):
+                        raise TaskBudgetExceededError(
+                            "max_active_executions reached"
+                        )
+
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            task_id,
+                            budget.revision,
+                            {
+                                "active_branches":
+                                    budget.active_branches + 1,
+                                "used_executions":
+                                    budget.used_executions + 1,
+                                "active_executions":
+                                    budget.active_executions + 1,
+                            },
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.agents.save_execution(
+                        normalized_execution_values
+                    )
+                    branch = await uow.agents.save_task_branch(
+                        {
+                            "branch_id": branch_id,
+                            "task_id": task_id,
+                            "parent_branch_id": None,
+                            "base_execution_id": None,
+                            "base_checkpoint_id": None,
+                            "current_execution_id": execution_id,
+                            "resolution_state": "OPEN",
+                            "revision": 0,
+                            "created_by": str(task.created_by),
+                            "reason": "R8_ROOT_FIRST_EXECUTION",
+                        }
+                    )
+                    await uow.agents.save_task_branch_context(
+                        {
+                            "branch_id": branch_id,
+                            "revision": 0,
+                            "overlay_messages": [],
+                        }
+                    )
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": task_id,
+                            "kind": TaskBudgetReservationKind.BRANCH.value,
+                            "reservation_key": branch_id,
+                            "payload_fingerprint": branch_fingerprint,
+                        }
+                    )
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": task_id,
+                            "kind":
+                                TaskBudgetReservationKind.NEW_EXECUTION.value,
+                            "reservation_key": execution_id,
+                            "payload_fingerprint": execution_fingerprint,
+                        }
+                    )
+                    await uow.commit()
+                    return RootExecutionAdmission(
+                        task_id=task_id,
+                        branch_id=branch_id,
+                        branch_revision=int(branch.revision),
+                        execution_id=execution_id,
+                        execution_revision=1,
+                    )
+            except IntegrityError:
+                # Reservation/branch uniqueness is the durable race fence.
+                # Re-read on the next iteration to distinguish idempotent
+                # same-execution replay from a competing root winner.
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"Root execution admission conflicts exhausted for {task_id}"
+        )
+
     async def start_task_scoped_execution(
         self,
         task_id: str,
@@ -656,7 +994,12 @@ class TaskBudgetService:
         execution_values: dict[str, Any],
         delegation_depth: int = 0,
     ) -> int:
-        """Atomically admit and persist a task-scoped RUNNING execution."""
+        """Atomically admit one task-scoped RUNNING execution.
+
+        Top-level pristine executions are routed through the R8-B root
+        admission transaction. Delegated child executions stay in the same
+        normalized Branch and consume only NEW_EXECUTION capacity.
+        """
         if execution_values.get("state") != "RUNNING":
             raise ValueError(
                 "task-scoped execution admission must insert RUNNING state"
@@ -665,6 +1008,19 @@ class TaskBudgetService:
             raise ValueError(
                 "task-scoped execution admission must insert revision=1"
             )
+        if execution_values.get("parent_execution_id") is None:
+            if execution_values.get("branch_id") is not None:
+                raise TaskBudgetConflictError(
+                    "new top-level execution on an existing branch is outside "
+                    "R8-B; retry/fork authority is not implemented"
+                )
+            admission = await self.start_root_task_scoped_execution(
+                task_id,
+                execution_id=execution_id,
+                execution_values=execution_values,
+            )
+            return admission.execution_revision
+
         await self.reserve_new_execution(
             task_id,
             execution_id=execution_id,
@@ -1046,7 +1402,42 @@ class TaskBudgetService:
                 ),
             }
 
+        async def validate_delegated_branch(uow) -> None:
+            if not delegated:
+                return
+            branch_id = normalized_execution_values.get("branch_id")
+            parent_execution_id = normalized_execution_values.get(
+                "parent_execution_id"
+            )
+            if not branch_id:
+                raise TaskBudgetConflictError(
+                    "Delegated execution requires durable branch_id."
+                )
+            branch = await uow.agents.get_task_branch(str(branch_id))
+            if (
+                branch is None
+                or branch.task_id != task_id
+                or str(branch.resolution_state) != "OPEN"
+            ):
+                raise TaskBudgetConflictError(
+                    "Delegated execution requires an OPEN TaskBranch owned "
+                    "by the same AgentTask."
+                )
+            parent = await uow.agents.get_execution(
+                str(parent_execution_id)
+            )
+            if (
+                parent is None
+                or parent.task_id != task_id
+                or parent.branch_id != branch_id
+            ):
+                raise TaskBudgetConflictError(
+                    "Delegated execution parent must belong to the same "
+                    "TaskBranch."
+                )
+
         async def side_effect(uow):
+            await validate_delegated_branch(uow)
             existing = await uow.agents.get_execution(execution_id)
             if existing is not None:
                 raise TaskBudgetConflictError(
@@ -1055,8 +1446,17 @@ class TaskBudgetService:
             await uow.agents.save_execution(normalized_execution_values)
 
         async def verify_idempotent(uow):
+            await validate_delegated_branch(uow)
             existing = await uow.agents.get_execution(execution_id)
-            if existing is None or existing.task_id != task_id:
+            if (
+                existing is None
+                or existing.task_id != task_id
+                or (
+                    delegated
+                    and existing.branch_id
+                    != normalized_execution_values.get("branch_id")
+                )
+            ):
                 raise TaskBudgetConflictError(
                     "Idempotent execution reservation has no matching execution."
                 )
@@ -1685,6 +2085,7 @@ __all__ = [
     "AgentDelegationCycleError",
     "DelegationDepthExceededError",
     "DelegationAdmission",
+    "RootExecutionAdmission",
     "TaskBudgetClosedError",
     "TaskBudgetConflictError",
     "TaskBudgetError",
