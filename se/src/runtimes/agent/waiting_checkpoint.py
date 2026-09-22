@@ -39,9 +39,13 @@ async def verify_committed_waiting_checkpoint(
     if (
         checkpoint.execution_id != execution.id
         or checkpoint.execution_revision != expected_revision
+        or checkpoint.session_id != execution.session_id
+        or checkpoint.task_id != execution.task_id
+        or checkpoint.branch_id != execution.branch_id
     ):
         raise WaitingCheckpointConflictError(
-            "Committed checkpoint does not match execution transition."
+            "Committed checkpoint does not match execution "
+            "task/branch/session transition lineage."
         )
 
     persisted = await uow.agents.list_checkpoint_pending_invocations(
@@ -111,6 +115,15 @@ async def stage_waiting_checkpoint(
     if checkpoint.get("task_id") != execution.task_id:
         raise WaitingCheckpointConflictError(
             "Checkpoint task_id does not match AgentExecution."
+        )
+    if checkpoint.get("branch_id") != execution.branch_id:
+        raise WaitingCheckpointConflictError(
+            "Checkpoint branch_id does not match AgentExecution."
+        )
+    if execution.task_id is not None and execution.branch_id is None:
+        raise WaitingCheckpointConflictError(
+            "Task-scoped AgentExecution requires normalized branch_id "
+            "before WAITING checkpoint creation."
         )
 
     wait_reason = str(transition_values.get("wait_reason") or "")
