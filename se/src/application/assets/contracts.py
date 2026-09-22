@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import AsyncIterator, Optional
+from datetime import datetime
+from typing import Any, AsyncIterator, Optional
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,3 +25,25 @@ class AssetDescriptor:
 class AssetContent:
     descriptor: AssetDescriptor
     stream: AsyncIterator[bytes]
+
+
+@dataclass(frozen=True, slots=True)
+class AssetReferenceDescriptor:
+    reference_id: str
+    asset_id: str
+    reference_type: str
+    created_at: datetime
+    message_id: Optional[str] = None
+    session_id: Optional[str] = None
+    project_id: Optional[str] = None
+    content_part_index: Optional[int] = None
+    turn_id: Optional[str] = None
+    sequence: Optional[int] = None
+    role: Optional[str] = None
+    agent_tool_result_id: Optional[str] = None
+    execution_id: Optional[str] = None
+    tool_call_id: Optional[str] = None
+    invocation_id: Optional[str] = None
+    capability_id: Optional[str] = None
+    commit_state: Optional[str] = None
+    metadata: Optional[dict[str, Any]] = None

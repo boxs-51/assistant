@@ -2,11 +2,12 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.sql.agent.execution import AgentExecutionRecord
 from ..models.sql.agent.tool_result import AgentToolResultRecord
+from ..models.sql.chat_data.session import Message
 from ..models.sql.assets import (
     FileAssetRecord,
     FileBlobRecord,
@@ -58,6 +59,49 @@ class AssetRepository:
             statement = statement.where(FileAssetRecord.state.in_(tuple(states)))
         result = await self.session.execute(statement)
         return list(result.scalars().all())
+
+    async def list_owned_file_rows(
+        self,
+        owner_user_id: str,
+        *,
+        states: Optional[Sequence[str]] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> list[tuple[FileAssetRecord, FileBlobRecord]]:
+        statement = (
+            select(FileAssetRecord, FileBlobRecord)
+            .join(FileBlobRecord, FileAssetRecord.blob_id == FileBlobRecord.id)
+            .where(FileAssetRecord.owner_user_id == owner_user_id)
+            .order_by(
+                FileAssetRecord.created_at.desc(),
+                FileAssetRecord.id.desc(),
+            )
+            .offset(offset)
+            .limit(limit)
+        )
+        if states:
+            statement = statement.where(
+                FileAssetRecord.state.in_(tuple(states))
+            )
+        result = await self.session.execute(statement)
+        return list(result.all())
+
+    async def count_files_by_owner(
+        self,
+        owner_user_id: str,
+        *,
+        states: Optional[Sequence[str]] = None,
+    ) -> int:
+        statement = (
+            select(func.count(FileAssetRecord.id))
+            .where(FileAssetRecord.owner_user_id == owner_user_id)
+        )
+        if states:
+            statement = statement.where(
+                FileAssetRecord.state.in_(tuple(states))
+            )
+        result = await self.session.execute(statement)
+        return int(result.scalar_one())
 
     async def _insert_reference(
         self, values: Mapping[str, Any]
@@ -153,6 +197,57 @@ class AssetRepository:
             .order_by(FileReferenceRecord.created_at.asc())
         )
         return list(result.scalars().all())
+
+
+    async def list_reference_details(
+        self,
+        file_id: str,
+    ) -> list[dict[str, Any]]:
+        rows = await self.list_references_for_file(file_id)
+        result: list[dict[str, Any]] = []
+        for reference in rows:
+            item: dict[str, Any] = {
+                "reference_id": reference.id,
+                "asset_id": reference.file_id,
+                "reference_type": reference.reference_type,
+                "created_at": reference.created_at,
+                "message_id": reference.message_id,
+                "session_id": reference.session_id,
+                "project_id": reference.project_id,
+                "content_part_index": reference.content_part_index,
+                "agent_tool_result_id": reference.agent_tool_result_id,
+                "metadata": dict(reference.metadata_json or {}),
+            }
+            if reference.reference_type == "MESSAGE_CONTENT":
+                message = await self.session.get(Message, reference.message_id)
+                if message is not None:
+                    item.update(
+                        session_id=message.session_id,
+                        turn_id=message.turn_id,
+                        sequence=message.sequence,
+                        role=message.role,
+                    )
+            elif reference.reference_type == "AGENT_TOOL_RESULT":
+                tool_result = await self.session.get(
+                    AgentToolResultRecord,
+                    reference.agent_tool_result_id,
+                )
+                if tool_result is not None:
+                    item.update(
+                        execution_id=tool_result.execution_id,
+                        tool_call_id=tool_result.tool_call_id,
+                        invocation_id=tool_result.invocation_id,
+                        capability_id=tool_result.capability_id,
+                        commit_state=tool_result.commit_state,
+                    )
+                    execution = await self.session.get(
+                        AgentExecutionRecord,
+                        tool_result.execution_id,
+                    )
+                    if execution is not None:
+                        item["session_id"] = execution.session_id
+            result.append(item)
+        return result
 
     async def list_live_references(
         self,

@@ -28,3 +28,7 @@ class AssetInUseError(AssetStateError):
 
 class AssetMimeMismatchError(AssetStateError):
     pass
+
+
+class AssetTooLargeError(AssetError):
+    pass

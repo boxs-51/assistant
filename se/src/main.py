@@ -50,6 +50,7 @@ from .runtimes.context.runtime import ContextRuntime
 from .transport.gateway.api.v1 import (
     admin as admin_router,
     agent_router,
+    assets_router,
     auth_router,
     capability_router,
     chat_router,
@@ -572,6 +573,7 @@ def create_app(config: ConfigSchema | None = None) -> FastAPI:
 
     # Route Registrations: api/v1 is the sole HTTP router surface.
     app_instance.include_router(auth_router.router)
+    app_instance.include_router(assets_router.router)
     app_instance.include_router(files_router.router)
     app_instance.include_router(models_router.router)
     app_instance.include_router(chat_router.router)

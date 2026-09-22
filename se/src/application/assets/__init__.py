@@ -1,4 +1,4 @@
-from .contracts import AssetContent, AssetDescriptor
+from .contracts import AssetContent, AssetDescriptor, AssetReferenceDescriptor
 from .errors import (
     AssetAccessDeniedError,
     AssetError,
@@ -8,12 +8,14 @@ from .errors import (
     AssetNotFoundError,
     AssetStateError,
     AssetStorageError,
+    AssetTooLargeError,
 )
 from .service import AssetService
 
 __all__ = [
     "AssetContent",
     "AssetDescriptor",
+    "AssetReferenceDescriptor",
     "AssetError",
     "AssetAccessDeniedError",
     "AssetFinalizeError",
@@ -22,5 +24,6 @@ __all__ = [
     "AssetNotFoundError",
     "AssetStateError",
     "AssetStorageError",
+    "AssetTooLargeError",
     "AssetService",
 ]

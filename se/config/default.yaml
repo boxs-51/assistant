@@ -31,6 +31,10 @@ storage:
 
 assets:
   storage_driver: "object-local"
+  max_upload_bytes: 268435456
+  upload_chunk_bytes: 262144
+  list_default_limit: 50
+  list_max_limit: 100
 
 
 gateway:

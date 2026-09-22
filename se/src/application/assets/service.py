@@ -5,7 +5,7 @@ from typing import AsyncIterable, Optional
 import uuid
 
 from ...infrastructure.storage.interfaces.object import ObjectStorageDriver
-from .contracts import AssetContent, AssetDescriptor
+from .contracts import AssetContent, AssetDescriptor, AssetReferenceDescriptor
 from .errors import (
     AssetAccessDeniedError,
     AssetFinalizeError,
@@ -14,6 +14,7 @@ from .errors import (
     AssetNotFoundError,
     AssetStateError,
     AssetStorageError,
+    AssetTooLargeError,
 )
 from .mime import (
     canonical_mime_type,
@@ -24,6 +25,21 @@ from .mime import (
 
 
 _MIME_SAMPLE_LIMIT = 8192
+_LISTABLE_STATES = frozenset({
+    "STAGING",
+    "READY",
+    "QUARANTINED",
+    "DELETING",
+    "DELETED",
+    "ERROR",
+})
+_DEFAULT_LIST_STATES = (
+    "STAGING",
+    "READY",
+    "QUARANTINED",
+    "DELETING",
+    "ERROR",
+)
 
 
 class AssetService:
@@ -70,6 +86,7 @@ class AssetService:
         mime_type: str,
         stream: AsyncIterable[bytes],
         content_length: Optional[int] = None,
+        max_bytes: Optional[int] = None,
         organization_id: Optional[str] = None,
         origin_type: str = "USER_UPLOAD",
         origin_id: Optional[str] = None,
@@ -81,6 +98,16 @@ class AssetService:
             raise ValueError("filename is required")
         if not mime_type:
             raise ValueError("mime_type is required")
+        if max_bytes is not None and max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+        if (
+            max_bytes is not None
+            and content_length is not None
+            and content_length > max_bytes
+        ):
+            raise AssetTooLargeError(
+                f"Upload is {content_length} bytes; limit is {max_bytes}."
+            )
 
         declared_mime = normalize_mime_type(mime_type)
         asset_id = self._asset_id()
@@ -121,10 +148,17 @@ class AssetService:
             await uow.commit()
 
         sample = bytearray()
+        observed_bytes = 0
 
         async def observed_stream():
+            nonlocal observed_bytes
             async for chunk in stream:
                 payload = bytes(chunk)
+                observed_bytes += len(payload)
+                if max_bytes is not None and observed_bytes > max_bytes:
+                    raise AssetTooLargeError(
+                        f"Upload exceeded {max_bytes} bytes."
+                    )
                 if len(sample) < _MIME_SAMPLE_LIMIT:
                     remaining = _MIME_SAMPLE_LIMIT - len(sample)
                     sample.extend(payload[:remaining])
@@ -137,6 +171,9 @@ class AssetService:
                 content_length=content_length,
                 content_type=declared_mime,
             )
+        except AssetTooLargeError:
+            await self._best_effort_mark_error(asset_id, blob_id)
+            raise
         except Exception as exc:
             await self._best_effort_mark_error(asset_id, blob_id)
             raise AssetStorageError(
@@ -209,6 +246,58 @@ class AssetService:
             raise AssetFinalizeError(
                 f"Object stored but SQL finalize failed for asset {asset_id}"
             ) from exc
+
+    async def list_assets(
+        self,
+        *,
+        owner_user_id: str,
+        states: Optional[tuple[str, ...]] = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> tuple[tuple[AssetDescriptor, ...], int]:
+        if not owner_user_id:
+            raise ValueError("owner_user_id is required")
+        if limit <= 0 or offset < 0:
+            raise ValueError("Invalid asset pagination")
+        selected_states = states or _DEFAULT_LIST_STATES
+        unknown = set(selected_states) - _LISTABLE_STATES
+        if unknown:
+            raise ValueError(
+                "Unknown asset states: " + ", ".join(sorted(unknown))
+            )
+        async with self.uow_factory() as uow:
+            rows = await uow.assets.list_owned_file_rows(
+                owner_user_id,
+                states=selected_states,
+                limit=limit,
+                offset=offset,
+            )
+            total = await uow.assets.count_files_by_owner(
+                owner_user_id,
+                states=selected_states,
+            )
+            descriptors = tuple(
+                self._descriptor(file_record, blob_record)
+                for file_record, blob_record in rows
+            )
+            return descriptors, total
+
+    async def list_references(
+        self,
+        *,
+        owner_user_id: str,
+        asset_id: str,
+    ) -> tuple[AssetReferenceDescriptor, ...]:
+        async with self.uow_factory() as uow:
+            file_record = await uow.assets.get_file(asset_id)
+            if file_record is None:
+                raise AssetNotFoundError(asset_id)
+            self._authorize(file_record, owner_user_id)
+            rows = await uow.assets.list_reference_details(asset_id)
+            return tuple(
+                AssetReferenceDescriptor(**row)
+                for row in rows
+            )
 
     async def get_asset(
         self,

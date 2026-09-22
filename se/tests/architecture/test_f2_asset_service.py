@@ -11,6 +11,7 @@ from se.src.application.assets import (
     AssetService,
     AssetStateError,
     AssetStorageError,
+    AssetTooLargeError,
 )
 from se.src.infrastructure.config.schemas import DriverConfig
 from se.src.infrastructure.storage.drivers.object_local.driver import (
@@ -205,4 +206,38 @@ async def test_f2_failed_object_write_marks_staging_asset_error():
             assert blob.state == "ERROR"
             assert files[0].revision == 1
     finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f3_asset_service_enforces_actual_streamed_byte_limit(tmp_path):
+    engine, sessions = await _database()
+    driver = LocalObjectStorageDriver(
+        DriverConfig(options={"root": str(tmp_path / "objects")})
+    )
+    await driver.connect()
+    service = AssetService(lambda: _Uow(sessions), driver)
+    try:
+        with pytest.raises(AssetTooLargeError):
+            await service.ingest_stream(
+                owner_user_id="user-a",
+                filename="too-large.txt",
+                mime_type="text/plain",
+                stream=_chunks(b"123456789", split=2),
+                content_length=None,
+                max_bytes=8,
+            )
+
+        async with _Uow(sessions) as uow:
+            files = await uow.assets.list_files_by_owner(
+                "user-a",
+                states=["ERROR"],
+            )
+            assert len(files) == 1
+            blob = await uow.assets.get_blob(files[0].blob_id)
+            assert blob is not None
+            assert blob.state == "ERROR"
+            assert await driver.exists(blob.object_key) is False
+    finally:
+        await driver.disconnect()
         await engine.dispose()
