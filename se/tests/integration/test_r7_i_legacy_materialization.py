@@ -1,0 +1,306 @@
+from __future__ import annotations
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+from se.src.infrastructure.storage.models.sql.agent import (
+    AgentExecutionCheckpointRecord,
+    AgentExecutionRecord,
+    AgentIterationRecord,
+    AgentToolCallRecord,
+    AgentToolResultRecord,
+)
+from se.src.infrastructure.storage.models.sql.capability import (
+    CapabilityInvocationRecord,
+)
+from se.src.infrastructure.storage.models.sql.chat_data.session import (
+    Session as ChatSessionRecord,
+)
+from se.src.infrastructure.storage.models.sql.base import Base
+from se.src.infrastructure.storage.repositories.agent import AgentRepository
+from se.src.infrastructure.storage.repositories.capability_invocations import (
+    CapabilityInvocationRepository,
+)
+from se.src.runtimes.agent.persistence import DurableAgentStore
+
+
+class _Uow:
+    def __init__(self, sessions):
+        self._sessions = sessions
+        self._ctx = None
+
+    async def __aenter__(self):
+        self._ctx = self._sessions()
+        self.session = await self._ctx.__aenter__()
+        self.agents = AgentRepository(self.session)
+        self.capability_invocations = CapabilityInvocationRepository(self.session)
+        return self
+
+    async def __aexit__(self, exc_type, exc, tb):
+        try:
+            if exc_type is not None:
+                await self.session.rollback()
+        finally:
+            await self._ctx.__aexit__(exc_type, exc, tb)
+
+    async def commit(self):
+        await self.session.commit()
+
+    async def rollback(self):
+        await self.session.rollback()
+
+
+async def _seed_legacy_waiting(sessions):
+    checkpoint_id = "legacy-cp-1"
+    continuation = {
+        "current_checkpoint_id": checkpoint_id,
+        "checkpoints": {
+            checkpoint_id: {
+                "checkpoint_id": checkpoint_id,
+                "execution_id": "exec-legacy",
+                "session_id": "session-legacy",
+                "reason": "WAITING_FOR_CONNECTION",
+                "state": "WAITING",
+                "wait_reason": "CONNECTION",
+                "parent_checkpoint_id": None,
+                "origin_connection_id": "conn-k1",
+                "current_connection_id": None,
+                "pending_invocation_id": "inv-pending",
+                "pending_tool_call_id": "call-pending",
+                "pending_capability_id": "tool.remote",
+                "iteration": 2,
+                "transcript": [
+                    {"role": "user", "content": "run tools"},
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-committed",
+                        "content": "old committed projection",
+                    },
+                    {
+                        "role": "tool",
+                        "tool_call_id": "call-pending",
+                        "content": {
+                            "error_code": "REMOTE_OUTCOME_UNKNOWN"
+                        },
+                    },
+                ],
+                "metadata": {
+                    "owner_user_id": "user-1",
+                    "origin_client_id": "client-1",
+                    "server_continuation_available": True,
+                },
+            }
+        },
+        "branches": {},
+    }
+
+    async with sessions() as session:
+        session.add(
+            ChatSessionRecord(
+                id="session-legacy",
+                user_id="user-1",
+                organization_id=None,
+            )
+        )
+        session.add(
+            AgentExecutionRecord(
+                id="exec-legacy",
+                session_id="session-legacy",
+                agent_id="agent-1",
+                correlation_id="corr-1",
+                state="WAITING",
+                wait_reason="CONNECTION",
+                revision=4,
+                current_checkpoint_id=None,
+                bound_client_id=None,
+                bound_connection_id=None,
+                remaining_active_budget_seconds=30.0,
+                request={},
+                context_state={"continuation": continuation},
+            )
+        )
+        session.add(
+            AgentIterationRecord(
+                id="iter-2",
+                execution_id="exec-legacy",
+                iteration=2,
+                state="WAITING_TOOL",
+                tool_call_ids=["call-committed", "call-pending"],
+            )
+        )
+        session.add_all(
+            [
+                AgentToolCallRecord(
+                    id="tool-row-1",
+                    execution_id="exec-legacy",
+                    iteration_id="iter-2",
+                    invocation_id="inv-committed",
+                    tool_call_id="call-committed",
+                    capability_id="tool.local",
+                    arguments={},
+                    status="COMPLETED",
+                ),
+                AgentToolCallRecord(
+                    id="tool-row-2",
+                    execution_id="exec-legacy",
+                    iteration_id="iter-2",
+                    invocation_id="inv-pending",
+                    tool_call_id="call-pending",
+                    capability_id="tool.remote",
+                    arguments={"x": 1},
+                    status="PENDING",
+                ),
+            ]
+        )
+        session.add(
+            AgentToolResultRecord(
+                id="result-committed",
+                execution_id="exec-legacy",
+                iteration_id="iter-2",
+                tool_call_id="call-committed",
+                invocation_id="inv-committed",
+                capability_id="tool.local",
+                success=True,
+                output={"ok": True},
+                retryable=False,
+                commit_state="COMMITTED",
+                attempt=1,
+            )
+        )
+        session.add(
+            CapabilityInvocationRecord(
+                invocation_id="inv-pending",
+                capability_id="tool.remote",
+                capability_version="1.0",
+                kind="TOOL",
+                execution_mode="ONE_SHOT",
+                idempotency="IDEMPOTENT",
+                request_fingerprint="f" * 64,
+                owner_user_id="user-1",
+                origin_client_id="client-1",
+                remote_outcome_state="OUTCOME_UNKNOWN",
+                implementation_id="impl-remote",
+                driver_kind="REMOTE_CLIENT",
+                state="WAITING",
+                wait_reason="CONNECTION",
+                session_id="session-legacy",
+                execution_id="exec-legacy",
+                tool_call_id="call-pending",
+                connection_id="conn-k1",
+                attempt=1,
+                max_attempts=2,
+                arguments={"x": 1},
+                revision=3,
+            )
+        )
+        await session.commit()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-materialization.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(sessions)
+
+        checkpoint = await store.materialize_legacy_checkpoint(
+            "exec-legacy",
+            requested_checkpoint_id="legacy-cp-1",
+            target_user_id="user-1",
+            target_client_id="client-1",
+        )
+
+        assert checkpoint is not None
+        assert checkpoint.checkpoint_id == "legacy-cp-1"
+        assert checkpoint.execution_revision == 4
+        assert checkpoint.origin_client_id == "client-1"
+        assert checkpoint.origin_connection_id == "conn-k1"
+        assert checkpoint.transcript_snapshot == (
+            {"role": "user", "content": "run tools"},
+        )
+
+        execution = await store.load_execution("exec-legacy")
+        assert execution.state == "WAITING"
+        assert execution.revision == 4
+        assert execution.current_checkpoint_id == "legacy-cp-1"
+        assert execution.bound_client_id == "client-1"
+        assert execution.bound_connection_id is None
+
+        pending = await store.load_checkpoint_pending_invocations(
+            "legacy-cp-1"
+        )
+        assert len(pending) == 1
+        assert pending[0].ordinal == 1
+        assert pending[0].invocation_id == "inv-pending"
+        assert pending[0].tool_call_id == "call-pending"
+        assert pending[0].capability_id == "tool.remote"
+        assert pending[0].capability_version == "1.0"
+        assert pending[0].request_fingerprint == "f" * 64
+        assert pending[0].idempotency == "IDEMPOTENT"
+        assert pending[0].observed_remote_outcome_state == "OUTCOME_UNKNOWN"
+
+        again = await store.materialize_legacy_checkpoint(
+            "exec-legacy",
+            requested_checkpoint_id="legacy-cp-1",
+            target_user_id="user-1",
+            target_client_id="client-1",
+        )
+        assert again == checkpoint
+
+        async with sessions() as session:
+            checkpoint_count = len(
+                (
+                    await session.execute(
+                        select(AgentExecutionCheckpointRecord).where(
+                            AgentExecutionCheckpointRecord.execution_id
+                            == "exec-legacy"
+                        )
+                    )
+                ).scalars().all()
+            )
+        assert checkpoint_count == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-ticket-replay.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(sessions)
+        tickets = await store.load_pending_resume_tickets(
+            owner_user_id="user-1",
+            client_id="client-1",
+        )
+        assert tickets == (
+            {
+                "execution_id": "exec-legacy",
+                "checkpoint_id": "legacy-cp-1",
+                "revision": 4,
+                "wait_reason": "CONNECTION",
+                "wait_expires_at": None,
+                "origin_client_id": "client-1",
+                "pending_capability_ids": ["tool.remote"],
+                "auto_resume_allowed": True,
+            },
+        )
+    finally:
+        await engine.dispose()
