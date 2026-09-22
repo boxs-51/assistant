@@ -441,8 +441,9 @@ class AssetService:
                 return self._descriptor(winner, blob_winner)
 
         if state == "STAGING" and reclaim_staging:
-            if await self.object_store.exists(object_key):
-                await self.object_store.delete(object_key)
+            # Fence the uploader before touching bytes. If normal finalize won
+            # the race and changed STAGING, this CAS fails and reconciliation
+            # must not delete a now-READY object.
             async with self.uow_factory() as uow:
                 winner = await uow.assets.compare_and_set_file(
                     asset_id,
@@ -461,7 +462,15 @@ class AssetService:
                         f"Asset {asset_id} staging reconciliation lost its CAS"
                     )
                 await uow.commit()
-                return self._descriptor(winner, blob_winner)
+                descriptor = self._descriptor(winner, blob_winner)
+
+            # A writer that was already streaming may finish after this delete
+            # and leave an ERROR-state orphan. Re-running reconciliation is
+            # safe and will collect it. The important invariant is that READY
+            # bytes are never deleted by a stale STAGING reconciler.
+            if await self.object_store.exists(object_key):
+                await self.object_store.delete(object_key)
+            return descriptor
 
         if state == "ERROR" and cleanup_error_object:
             if await self.object_store.exists(object_key):

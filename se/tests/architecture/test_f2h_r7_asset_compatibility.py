@@ -272,3 +272,92 @@ def test_f2h_r7_checkpoint_json_round_trip_preserves_stable_asset_reference():
     assert restored.model_dump(mode="json") == original.model_dump(mode="json")
     assert restored.content["artifact"]["asset_id"] == "asset_stable"
     assert restored.content["artifact"]["uri"] == "asset://asset_stable"
+
+
+@pytest.mark.asyncio
+async def test_f2h_reconcile_staging_claims_sql_before_orphan_cleanup(tmp_path):
+    engine, sessions, driver, service = await _service(tmp_path)
+    try:
+        object_key = "blobs/blob-stale"
+        await driver.put_stream(
+            object_key,
+            _chunks(b"orphan"),
+            content_length=6,
+            content_type="application/octet-stream",
+        )
+        async with _Uow(sessions) as uow:
+            await uow.assets.create_blob(
+                {
+                    "id": "blob-stale",
+                    "storage_backend": "object-local",
+                    "object_key": object_key,
+                    "state": "STAGING",
+                    "declared_mime_type": "application/octet-stream",
+                }
+            )
+            await uow.assets.create_file(
+                {
+                    "id": "asset-stale",
+                    "owner_user_id": "user-a",
+                    "blob_id": "blob-stale",
+                    "filename": "stale.bin",
+                    "mime_type": "application/octet-stream",
+                    "origin_type": "USER_UPLOAD",
+                    "state": "STAGING",
+                    "revision": 0,
+                }
+            )
+            await uow.commit()
+
+        reconciled = await service.reconcile_asset(
+            "asset-stale",
+            reclaim_staging=True,
+        )
+        assert reconciled.state == "ERROR"
+        assert reconciled.revision == 1
+        assert await driver.exists(object_key) is False
+    finally:
+        await driver.disconnect()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_f2h_ready_missing_blob_fails_closed(tmp_path):
+    engine, sessions, driver, service = await _service(tmp_path)
+    try:
+        async with _Uow(sessions) as uow:
+            await uow.assets.create_blob(
+                {
+                    "id": "blob-missing",
+                    "storage_backend": "object-local",
+                    "object_key": "blobs/missing",
+                    "state": "READY",
+                    "size_bytes": 4,
+                    "sha256": "a" * 64,
+                    "declared_mime_type": "text/plain",
+                    "detected_mime_type": "text/plain",
+                }
+            )
+            await uow.assets.create_file(
+                {
+                    "id": "asset-missing",
+                    "owner_user_id": "user-a",
+                    "blob_id": "blob-missing",
+                    "filename": "missing.txt",
+                    "mime_type": "text/plain",
+                    "origin_type": "USER_UPLOAD",
+                    "state": "READY",
+                    "revision": 1,
+                }
+            )
+            await uow.commit()
+
+        reconciled = await service.reconcile_asset("asset-missing")
+        assert reconciled.state == "ERROR"
+        async with _Uow(sessions) as uow:
+            blob = await uow.assets.get_blob("blob-missing")
+            assert blob is not None
+            assert blob.state == "MISSING"
+    finally:
+        await driver.disconnect()
+        await engine.dispose()
