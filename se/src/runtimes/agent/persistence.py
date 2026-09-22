@@ -240,10 +240,18 @@ class DurableAgentStore:
 
             incoming_state = values.get("context_state")
             if incoming_state is not None:
+                if "continuation" in incoming_state:
+                    raise ExecutionConflictError(
+                        "LEGACY_CONTINUATION_READ_ONLY: "
+                        "context_state['continuation'] cannot be written after R7-I."
+                    )
                 current_state = to_json_safe(
                     getattr(execution, "context_state", None) or {},
                     path="agent_executions.context_state",
                 )
+                # Historical Phase 6.9 continuation JSON remains inert data.
+                # Ordinary context checkpoint updates preserve it without ever
+                # treating it as runtime authority.
                 values["context_state"] = {**current_state, **incoming_state}
 
             record = await uow.agents.update_execution(execution_id, values)
