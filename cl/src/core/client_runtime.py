@@ -265,12 +265,28 @@ class ClientRuntime:
         try:
             self.dispatcher.reset_principal()
             self.realtime.close()
-            self._ready = False
+            with self._lock:
+                self._ready = False
+                self._confirmed_capability_ids = frozenset()
+                self._invalidate_resume_state_locked()
         finally:
             self._suppress_reconnect = False
 
     def _handle_realtime_message(self, envelope, generation=None) -> None:
         if generation is not None and generation != self._generation:
+            return
+        message_type = envelope.get("type")
+        if message_type == "execution.waiting":
+            self._ingest_waiting_payload(envelope.get("payload") or {})
+            return
+        # Resume outcomes are consumed by the transport waiter owned by the
+        # ClientRuntime resume worker. The receiver thread must never block on
+        # them or start a second attempt.
+        if message_type in {
+            "execution.resume.accepted",
+            "execution.resume.rejected",
+            "execution.resume.failed",
+        }:
             return
         self.capabilities.handle_message(envelope)
 
@@ -279,12 +295,300 @@ class ClientRuntime:
             if generation is not None and generation != self._generation:
                 return
             self._ready = False
+            self._confirmed_capability_ids = frozenset()
             self._state = ClientRuntimeState.DISCONNECTED
+            for entry in self._pending_resume_tickets.values():
+                if entry.state is ResumeTicketState.IN_FLIGHT:
+                    entry.state = ResumeTicketState.RETRY_SAME_REQUEST
+            self._resume_condition.notify_all()
         # Do not cancel local work merely because its transport disappeared.
         # The dispatcher keeps the terminal outcome and replays it after the
         # next connection generation, avoiding duplicate side effects.
         if not self._suppress_reconnect and not self._stopping:
             self._schedule_reconnect()
+
+    @staticmethod
+    def _confirmed_from_registration_ack(message) -> frozenset[str]:
+        capabilities = (message.get("payload") or {}).get("capabilities") or ()
+        confirmed: set[str] = set()
+        for item in capabilities:
+            if not isinstance(item, dict):
+                continue
+            capability_id = item.get("capability_id")
+            if capability_id:
+                confirmed.add(str(capability_id))
+        return frozenset(confirmed)
+
+    def _invalidate_resume_state_locked(self) -> None:
+        self._pending_resume_tickets.clear()
+        self._execution_resume_watermarks.clear()
+        self._confirmed_capability_ids = frozenset()
+        self._resume_condition.notify_all()
+
+    def _ingest_waiting_payload(self, payload) -> bool:
+        try:
+            ticket = PendingResumeTicket.from_payload(payload)
+        except (TypeError, ValueError):
+            # Compatibility payloads that do not carry authoritative revision
+            # remain visible to callers but cannot enter auto-resume state.
+            return False
+
+        with self._lock:
+            watermark = self._execution_resume_watermarks.get(ticket.execution_id)
+            if watermark is not None and ticket.revision < watermark:
+                return False
+
+            same_revision = [
+                entry
+                for entry in self._pending_resume_tickets.values()
+                if (
+                    entry.ticket.execution_id == ticket.execution_id
+                    and entry.ticket.revision == ticket.revision
+                    and entry.ticket.checkpoint_id != ticket.checkpoint_id
+                    and not entry.terminal
+                )
+            ]
+            if same_revision:
+                for entry in same_revision:
+                    entry.state = ResumeTicketState.CONFLICT
+                self._resume_condition.notify_all()
+                return False
+
+            if watermark is None or ticket.revision > watermark:
+                self._advance_resume_watermark_locked(
+                    ticket.execution_id,
+                    ticket.revision,
+                )
+
+            existing = self._pending_resume_tickets.get(ticket.key)
+            if existing is not None:
+                if existing.ticket != ticket:
+                    existing.state = ResumeTicketState.CONFLICT
+                    self._resume_condition.notify_all()
+                    return False
+                existing.freshness_epoch += 1
+                if existing.state is ResumeTicketState.WAIT_REFRESH:
+                    existing.state = ResumeTicketState.OBSERVED
+                self._classify_resume_entry_locked(existing)
+                self._resume_condition.notify_all()
+                return True
+
+            entry = PendingResumeEntry(
+                ticket=ticket,
+                principal_id=self.owner_id,
+            )
+            self._pending_resume_tickets[ticket.key] = entry
+            self._classify_resume_entry_locked(entry)
+            self._ensure_resume_worker_locked()
+            self._resume_condition.notify_all()
+            return True
+
+    def _advance_resume_watermark_locked(
+        self,
+        execution_id: str,
+        revision: int,
+    ) -> None:
+        current = self._execution_resume_watermarks.get(execution_id)
+        if current is not None and revision <= current:
+            return
+        self._execution_resume_watermarks[execution_id] = revision
+        for entry in self._pending_resume_tickets.values():
+            if (
+                entry.ticket.execution_id == execution_id
+                and entry.ticket.revision < revision
+                and not entry.terminal
+            ):
+                entry.state = ResumeTicketState.SUPERSEDED
+
+    @staticmethod
+    def _ticket_expired(ticket: PendingResumeTicket) -> bool:
+        expires_at = ticket.wait_expires_at
+        if expires_at is None:
+            return False
+        return expires_at <= datetime.now(timezone.utc)
+
+    def _classify_resume_entry_locked(self, entry: PendingResumeEntry) -> None:
+        if entry.terminal:
+            return
+        ticket = entry.ticket
+        if self._ticket_expired(ticket):
+            entry.state = ResumeTicketState.EXPIRED
+            return
+        if (
+            ticket.revision
+            != self._execution_resume_watermarks.get(ticket.execution_id)
+            or entry.principal_id != self.owner_id
+            or ticket.origin_client_id != self.client_id
+            or ticket.wait_reason != "CONNECTION"
+            or not ticket.auto_resume_allowed
+            or not ticket.pending_capability_ids
+        ):
+            entry.state = ResumeTicketState.BLOCKED
+            return
+        if (
+            not self._ready
+            or self._state is not ClientRuntimeState.READY
+            or not set(ticket.pending_capability_ids).issubset(
+                self._confirmed_capability_ids
+            )
+        ):
+            if entry.state is not ResumeTicketState.RETRY_SAME_REQUEST:
+                entry.state = ResumeTicketState.BLOCKED
+            return
+        if entry.state not in {
+            ResumeTicketState.RETRY_SAME_REQUEST,
+            ResumeTicketState.WAIT_REFRESH,
+        }:
+            entry.state = ResumeTicketState.ELIGIBLE
+
+    def _ensure_resume_worker_locked(self) -> None:
+        if self._resume_worker_thread and self._resume_worker_thread.is_alive():
+            return
+        self._resume_worker_stop = False
+        self._resume_worker_thread = threading.Thread(
+            target=self._resume_worker_loop,
+            name="client-runtime-resume",
+            daemon=True,
+        )
+        self._resume_worker_thread.start()
+
+    def _next_resume_key_locked(self):
+        if not self._ready or self._state is not ClientRuntimeState.READY:
+            return None
+        for key in sorted(self._pending_resume_tickets):
+            entry = self._pending_resume_tickets[key]
+            self._classify_resume_entry_locked(entry)
+            if entry.state in {
+                ResumeTicketState.ELIGIBLE,
+                ResumeTicketState.RETRY_SAME_REQUEST,
+            }:
+                return key
+        return None
+
+    def _claim_resume_attempt_locked(self, key):
+        entry = self._pending_resume_tickets.get(key)
+        if entry is None:
+            return None
+        self._classify_resume_entry_locked(entry)
+        if entry.state not in {
+            ResumeTicketState.ELIGIBLE,
+            ResumeTicketState.RETRY_SAME_REQUEST,
+        }:
+            return None
+        resume_request_id = entry.ensure_resume_request_id()
+        entry.state = ResumeTicketState.IN_FLIGHT
+        entry.attempt_generation = self._generation
+        entry.attempt_connection_id = self.connection_id
+        return (
+            entry.ticket,
+            resume_request_id,
+            self._generation,
+            self.realtime,
+        )
+
+    def _resume_worker_loop(self) -> None:
+        while True:
+            with self._resume_condition:
+                while not self._resume_worker_stop:
+                    key = self._next_resume_key_locked()
+                    if key is not None:
+                        break
+                    self._resume_condition.wait(timeout=0.5)
+                if self._resume_worker_stop:
+                    return
+                attempt = self._claim_resume_attempt_locked(key)
+            if attempt is None:
+                continue
+            self._execute_resume_attempt(key, attempt, propagate=False)
+
+    def _execute_resume_attempt(self, key, attempt, *, propagate: bool):
+        ticket, resume_request_id, generation, realtime = attempt
+        try:
+            message = realtime.resume_execution(
+                ticket.execution_id,
+                ticket.checkpoint_id,
+                resume_request_id,
+            )
+            outcome = ResumeProtocolOutcome.from_envelope(message)
+        except Exception:
+            with self._lock:
+                entry = self._pending_resume_tickets.get(key)
+                if (
+                    entry is not None
+                    and not entry.terminal
+                    and entry.active_resume_request_id == resume_request_id
+                ):
+                    entry.state = ResumeTicketState.RETRY_SAME_REQUEST
+                    self._resume_condition.notify_all()
+            if propagate:
+                raise
+            # Avoid a hot loop when ACK timeout occurs without a disconnect.
+            time.sleep(0.25)
+            return None
+
+        with self._lock:
+            entry = self._pending_resume_tickets.get(key)
+            if (
+                entry is None
+                or entry.active_resume_request_id != resume_request_id
+            ):
+                return message
+            self._apply_resume_outcome_locked(entry, outcome)
+            self._resume_condition.notify_all()
+        return message
+
+    def _apply_resume_outcome_locked(
+        self,
+        entry: PendingResumeEntry,
+        outcome: ResumeProtocolOutcome,
+    ) -> None:
+        ticket = entry.ticket
+        if (
+            outcome.execution_id != ticket.execution_id
+            or outcome.checkpoint_id != ticket.checkpoint_id
+            or outcome.resume_request_id != entry.active_resume_request_id
+        ):
+            entry.state = ResumeTicketState.CONFLICT
+            return
+
+        key = ticket.key
+        if outcome.kind == "ACCEPTED":
+            if outcome.accepted_revision is None:
+                entry.state = ResumeTicketState.CONFLICT
+                return
+            self._advance_resume_watermark_locked(
+                ticket.execution_id,
+                outcome.accepted_revision,
+            )
+            entry.state = ResumeTicketState.ACCEPTED
+            self._pending_resume_tickets.pop(key, None)
+            return
+
+        if outcome.kind == "FAILED":
+            if outcome.recovery_revision is not None:
+                self._advance_resume_watermark_locked(
+                    ticket.execution_id,
+                    outcome.recovery_revision,
+                )
+            entry.last_outcome_code = outcome.code
+            entry.state = ResumeTicketState.FAILED
+            self._pending_resume_tickets.pop(key, None)
+            return
+
+        entry.last_outcome_code = outcome.code
+        entry.clear_resume_request_for_new_attempt()
+        if outcome.code == "CLAIM_EXPIRED":
+            self._classify_resume_entry_locked(entry)
+            if entry.state is ResumeTicketState.BLOCKED and self._ready:
+                # A current ticket may begin a new request once the old claim
+                # is known to have expired.
+                entry.state = ResumeTicketState.ELIGIBLE
+            return
+        if outcome.retryable:
+            entry.state = ResumeTicketState.WAIT_REFRESH
+            return
+        entry.state = ResumeTicketState.REJECTED
+        self._pending_resume_tickets.pop(key, None)
 
     def _schedule_reconnect(self) -> None:
         with self._lock:
