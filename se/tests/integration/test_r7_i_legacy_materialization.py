@@ -54,7 +54,12 @@ class _Uow:
         await self.session.rollback()
 
 
-async def _seed_legacy_waiting(sessions):
+async def _seed_legacy_waiting(
+    sessions,
+    *,
+    execution_state: str = "WAITING",
+    execution_wait_reason: str | None = "CONNECTION",
+):
     checkpoint_id = "legacy-cp-1"
     continuation = {
         "current_checkpoint_id": checkpoint_id,
@@ -112,8 +117,8 @@ async def _seed_legacy_waiting(sessions):
                 session_id="session-legacy",
                 agent_id="agent-1",
                 correlation_id="corr-1",
-                state="WAITING",
-                wait_reason="CONNECTION",
+                state=execution_state,
+                wait_reason=execution_wait_reason,
                 revision=4,
                 current_checkpoint_id=None,
                 bound_client_id=None,
@@ -354,5 +359,39 @@ async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(tmp_path
                 )
             ).scalars().all()
         assert rows == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_materializes_pre_normalized_waiting_spelling(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-old-spelling.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(
+            sessions,
+            execution_state="WAITING_FOR_CONNECTION",
+            execution_wait_reason=None,
+        )
+        checkpoint = await store.materialize_legacy_checkpoint(
+            "exec-legacy",
+            target_user_id="user-1",
+            target_client_id="client-1",
+        )
+        assert checkpoint is not None
+
+        execution = await store.load_execution("exec-legacy")
+        assert execution.state == "WAITING"
+        assert execution.wait_reason == "CONNECTION"
+        assert execution.revision == 4
+        assert execution.current_checkpoint_id == "legacy-cp-1"
     finally:
         await engine.dispose()
