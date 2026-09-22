@@ -1024,3 +1024,78 @@ async def test_r7_f3_provisional_no_action_active_slot_blocks_claim(
             await uow.commit()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_g_resume_handoff_outcome_is_durable_idempotent_and_immutable(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r7-g-handoff.sqlite",
+    )
+    try:
+        await _seed_non_task(sessions)
+        plan = _plan()
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r7g-handoff")
+        )
+        consumed = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+
+        accepted_payload = {
+            "execution_id": EXECUTION,
+            "checkpoint_id": CHECKPOINT,
+            "resume_request_id": claim.resume_request_id,
+            "claim_id": claim.claim_id,
+            "accepted_revision": consumed.consumed_execution_revision,
+            "state_at_accept": "RUNNING",
+        }
+        first = await store.record_resume_claim_handoff(
+            claim.claim_id,
+            status="ACCEPTED",
+            payload=accepted_payload,
+        )
+        second = await store.record_resume_claim_handoff(
+            claim.claim_id,
+            status="ACCEPTED",
+            payload=accepted_payload,
+        )
+
+        assert first.state.value == "CONSUMED"
+        assert second.state.value == "CONSUMED"
+        assert first.metadata["r7_g_handoff"] == {
+            "status": "ACCEPTED",
+            **accepted_payload,
+        }
+        assert second.metadata["r7_g_handoff"] == first.metadata["r7_g_handoff"]
+
+        reloaded = await store.load_resume_claim_by_request_id(
+            claim.resume_request_id
+        )
+        assert reloaded is not None
+        assert reloaded.metadata["r7_g_handoff"] == first.metadata["r7_g_handoff"]
+
+        with pytest.raises(ResumeClaimRejected) as raised:
+            await store.record_resume_claim_handoff(
+                claim.claim_id,
+                status="FAILED",
+                payload={
+                    "execution_id": EXECUTION,
+                    "checkpoint_id": CHECKPOINT,
+                    "resume_request_id": claim.resume_request_id,
+                    "claim_id": claim.claim_id,
+                    "code": "RUNTIME_HANDOFF_FAILED",
+                    "state": "WAITING",
+                },
+            )
+        assert raised.value.code == "RESUME_REQUEST_CONFLICT"
+    finally:
+        await engine.dispose()
