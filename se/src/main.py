@@ -63,6 +63,7 @@ from .transport.gateway.api.v1 import (
     tool_router,
 )
 from .application.container import ApplicationContainer
+from .application.assets import AssetService
 from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
@@ -250,6 +251,13 @@ async def bootstrap_runtime_kernel(
         default_policy=task_budget_policy,
     )
 
+    asset_service = None
+    if storage_engine.is_driver_available("object-local"):
+        asset_service = AssetService(
+            uow_factory,
+            storage_engine.get_object_storage_driver("object-local"),
+        )
+
     # 1. Tạo ApplicationContainer trước
     container = ApplicationContainer(
         config=config,
@@ -264,6 +272,7 @@ async def bootstrap_runtime_kernel(
         tool_registry=ToolRegistry(),
         capability_registry=capability_registry,
         authorization_service=authorization_service,
+        asset_service=asset_service,
         agent_execution_id_factory=agent_execution_id_factory,
         agent_execution_supervisor=agent_execution_supervisor,
         task_budget_service=task_budget_service,

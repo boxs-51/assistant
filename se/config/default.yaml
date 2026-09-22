@@ -22,6 +22,11 @@ storage:
     in-memory:
       enabled: true
       required: false
+    object-local:
+      enabled: true
+      required: true
+      options:
+        root: "data/assets"
 
 
 gateway:
