@@ -65,6 +65,7 @@ from .transport.gateway.api.v1 import (
 )
 from .application.container import ApplicationContainer
 from .application.assets import AssetService
+from .application.messages import CanonicalMessageService
 from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
@@ -266,6 +267,8 @@ async def bootstrap_runtime_kernel(
             driver=asset_storage_driver,
         )
 
+    message_service = CanonicalMessageService(uow_factory)
+
     # 1. Tạo ApplicationContainer trước
     container = ApplicationContainer(
         config=config,
@@ -281,6 +284,7 @@ async def bootstrap_runtime_kernel(
         capability_registry=capability_registry,
         authorization_service=authorization_service,
         asset_service=asset_service,
+        message_service=message_service,
         agent_execution_id_factory=agent_execution_id_factory,
         agent_execution_supervisor=agent_execution_supervisor,
         task_budget_service=task_budget_service,

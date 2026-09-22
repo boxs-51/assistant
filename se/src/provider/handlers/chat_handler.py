@@ -11,12 +11,36 @@ from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapabili
 logger = structlog.get_logger(__name__)
 tracer = trace.get_tracer(__name__)
 
+
+def _contains_unhydrated_asset(value: Any) -> bool:
+    if isinstance(value, dict):
+        source = value.get("source")
+        asset_id = value.get("asset_id")
+        uri = value.get("uri")
+        if source == "asset" or (
+            asset_id and isinstance(uri, str) and uri.startswith("asset://")
+        ):
+            return True
+        return any(_contains_unhydrated_asset(item) for item in value.values())
+    if isinstance(value, (list, tuple)):
+        return any(_contains_unhydrated_asset(item) for item in value)
+    return False
+
+
+def _reject_unhydrated_assets(body: Dict[str, Any]) -> None:
+    if _contains_unhydrated_asset(body.get("messages", [])):
+        raise ProviderError(
+            "Canonical asset hydration is not implemented in F4. "
+            "F5 must resolve asset:// references before provider execution."
+        )
+
 class ChatExecutionHandler(BaseExecutionHandler):
     """Xử lý thực thi Chat Sync và Streaming Chat với chế độ Fallback."""
 
     async def execute_with_fallback(
         self, http_client: httpx.AsyncClient, body: Dict[str, Any]
     ) -> GatewayResponse:
+        _reject_unhydrated_assets(body)
         model = body.get("model")
         
         # Lấy chuỗi thực thi hoàn chỉnh đã được RoutingPolicy sắp xếp & áp dụng mode
@@ -53,6 +77,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
     async def stream_with_fallback(
         self, http_client: httpx.AsyncClient, body: Dict[str, Any]
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
+        _reject_unhydrated_assets(body)
         model = body.get("model")
         
         execution_chain = self.routing_policy.get_fallback_chain(

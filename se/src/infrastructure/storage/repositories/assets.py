@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence
 
-from sqlalchemy import func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.sql.agent.execution import AgentExecutionRecord
@@ -114,12 +114,128 @@ class AssetRepository:
     async def create_reference(
         self, values: Mapping[str, Any]
     ) -> FileReferenceRecord:
-        if values.get("reference_type") == "AGENT_TOOL_RESULT":
+        protected = {"AGENT_TOOL_RESULT", "MESSAGE_CONTENT"}
+        if values.get("reference_type") in protected:
             raise ValueError(
-                "Use create_tool_result_reference() so R7 COMMITTED "
-                "authority is validated."
+                "Use the dedicated reference authority for "
+                f"{values.get('reference_type')}."
             )
         return await self._insert_reference(values)
+
+    async def get_owned_ready_file(
+        self,
+        *,
+        file_id: str,
+        owner_user_id: str,
+    ) -> tuple[FileAssetRecord, FileBlobRecord]:
+        file_record = await self.get_file(file_id)
+        if file_record is None:
+            raise KeyError(f"Unknown asset: {file_id}")
+        if file_record.owner_user_id != owner_user_id:
+            raise PermissionError(f"Asset {file_id} is not owned by this user.")
+        if file_record.state != "READY":
+            raise ValueError(f"Asset {file_id} is not READY.")
+        blob_record = await self.get_blob(file_record.blob_id)
+        if blob_record is None or blob_record.state != "READY":
+            raise ValueError(f"Asset {file_id} canonical blob is not READY.")
+        return file_record, blob_record
+
+    async def pin_owned_ready_file(
+        self,
+        *,
+        file_id: str,
+        owner_user_id: str,
+    ) -> tuple[FileAssetRecord, FileBlobRecord]:
+        file_record, blob_record = await self.get_owned_ready_file(
+            file_id=file_id,
+            owner_user_id=owner_user_id,
+        )
+        pinned = await self.compare_and_set_file(
+            file_id,
+            expected_revision=file_record.revision,
+            expected_state="READY",
+            values={"state": "READY"},
+        )
+        if pinned is None:
+            raise ValueError(
+                f"Asset {file_id} changed while creating a message reference."
+            )
+        return pinned, blob_record
+
+    @staticmethod
+    def _message_part_asset_id(content: Any, index: int) -> Optional[str]:
+        if not isinstance(content, list) or index < 0 or index >= len(content):
+            return None
+        part = content[index]
+        if not isinstance(part, dict):
+            return None
+        data = part.get("data")
+        if not isinstance(data, dict):
+            return None
+        attachment = (
+            data.get("attachment")
+            if isinstance(data.get("attachment"), dict)
+            else data
+        )
+        if not isinstance(attachment, dict):
+            return None
+        return attachment.get("asset_id")
+
+    async def create_message_references(
+        self,
+        *,
+        message_id: str,
+        owner_user_id: str,
+        occurrences: Sequence[tuple[int, str]],
+    ) -> list[FileReferenceRecord]:
+        if not occurrences:
+            return []
+        message = await self.session.get(Message, message_id)
+        if message is None:
+            raise KeyError(f"Unknown message: {message_id}")
+
+        from ..models.sql.chat_data.session import Session
+        session = await self.session.get(Session, message.session_id)
+        if session is None or session.user_id != owner_user_id:
+            raise PermissionError("Message session is not owned by this user.")
+
+        indexes = [index for index, _ in occurrences]
+        if len(indexes) != len(set(indexes)):
+            raise ValueError("A message content part can reference only one asset.")
+
+        unique_file_ids = list(dict.fromkeys(file_id for _, file_id in occurrences))
+        for file_id in unique_file_ids:
+            await self.pin_owned_ready_file(
+                file_id=file_id,
+                owner_user_id=owner_user_id,
+            )
+
+        records: list[FileReferenceRecord] = []
+        for index, file_id in occurrences:
+            if self._message_part_asset_id(message.content, index) != file_id:
+                raise ValueError(
+                    "MESSAGE_CONTENT reference does not match persisted message."
+                )
+            records.append(
+                await self._insert_reference(
+                    {
+                        "file_id": file_id,
+                        "reference_type": "MESSAGE_CONTENT",
+                        "message_id": message_id,
+                        "content_part_index": index,
+                    }
+                )
+            )
+        return records
+
+    async def delete_message_references(self, message_id: str) -> None:
+        await self.session.execute(
+            delete(FileReferenceRecord).where(
+                FileReferenceRecord.reference_type == "MESSAGE_CONTENT",
+                FileReferenceRecord.message_id == message_id,
+            )
+        )
+        await self.session.flush()
 
     async def create_tool_result_reference(
         self,
@@ -254,7 +370,7 @@ class AssetRepository:
         file_id: str,
     ) -> list[FileReferenceRecord]:
         """Return R7 references that still pin bytes for a live execution."""
-        result = await self.session.execute(
+        tool_result = await self.session.execute(
             select(FileReferenceRecord)
             .join(
                 AgentToolResultRecord,
@@ -272,13 +388,86 @@ class AssetRepository:
                 AgentToolResultRecord.commit_state == "COMMITTED",
                 AgentExecutionRecord.state.in_(self._LIVE_EXECUTION_STATES),
             )
-            .order_by(FileReferenceRecord.created_at.asc())
         )
-        return list(result.scalars().all())
+
+        message_result = await self.session.execute(
+            select(FileReferenceRecord)
+            .join(
+                Message,
+                FileReferenceRecord.message_id == Message.id,
+            )
+            .join(
+                AgentExecutionRecord,
+                Message.session_id == AgentExecutionRecord.session_id,
+            )
+            .where(
+                FileReferenceRecord.file_id == file_id,
+                FileReferenceRecord.reference_type == "MESSAGE_CONTENT",
+                AgentExecutionRecord.state.in_(self._LIVE_EXECUTION_STATES),
+            )
+        )
+
+        dedup: dict[str, FileReferenceRecord] = {}
+        for record in [
+            *tool_result.scalars().all(),
+            *message_result.scalars().all(),
+        ]:
+            dedup[record.id] = record
+        return sorted(
+            dedup.values(),
+            key=lambda item: (item.created_at, item.id),
+        )
 
     async def has_live_references(self, file_id: str) -> bool:
         rows = await self.list_live_references(file_id)
         return bool(rows)
+
+    async def list_context_file_rows(
+        self,
+        *,
+        session_id: str,
+        project_id: Optional[str] = None,
+    ) -> list[tuple[FileAssetRecord, FileBlobRecord]]:
+        message_ids = select(Message.id).where(Message.session_id == session_id)
+        predicates = [
+            (
+                (FileReferenceRecord.reference_type == "MESSAGE_CONTENT")
+                & FileReferenceRecord.message_id.in_(message_ids)
+            ),
+            (
+                (FileReferenceRecord.reference_type == "SESSION_RESOURCE")
+                & (FileReferenceRecord.session_id == session_id)
+            ),
+        ]
+        if project_id:
+            predicates.append(
+                (
+                    (FileReferenceRecord.reference_type == "PROJECT_RESOURCE")
+                    & (FileReferenceRecord.project_id == project_id)
+                )
+            )
+
+        result = await self.session.execute(
+            select(FileAssetRecord, FileBlobRecord)
+            .join(
+                FileReferenceRecord,
+                FileReferenceRecord.file_id == FileAssetRecord.id,
+            )
+            .join(
+                FileBlobRecord,
+                FileAssetRecord.blob_id == FileBlobRecord.id,
+            )
+            .where(
+                or_(*predicates),
+                FileAssetRecord.state == "READY",
+                FileBlobRecord.state == "READY",
+            )
+            .order_by(FileAssetRecord.created_at.asc(), FileAssetRecord.id.asc())
+        )
+        dedup: dict[str, tuple[FileAssetRecord, FileBlobRecord]] = {}
+        for file_record, blob_record in result.all():
+            dedup.setdefault(file_record.id, (file_record, blob_record))
+        return list(dedup.values())
 
     async def create_provider_binding(
         self, values: Mapping[str, Any]

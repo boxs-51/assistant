@@ -1,8 +1,9 @@
 """HTTP DTOs for the capability control plane."""
 
-from typing import Any, Dict, List, Literal
+from typing import Any, Dict, List, Literal, Union
 from pydantic import Field
 from .base import GatewayBaseModel
+from .message import MessageContentPart
 
 
 class SkillDefinition(GatewayBaseModel):
@@ -33,7 +34,7 @@ class CapabilityExecutionRequest(GatewayBaseModel):
 
 
 class SessionMessageEditRequest(GatewayBaseModel):
-    content: Any
+    content: Union[str, List[MessageContentPart]]
 
 
 class SessionRegenerateRequest(GatewayBaseModel):

@@ -1,40 +1,52 @@
-import uuid
-import time
-from typing import Optional, Callable
-import structlog
 import json
+from typing import Callable, Optional
+
+import structlog
 from sqlalchemy.orm import selectinload
 
-from ..domain.schemas.session import Session as SessionSchema
-from ..domain.schemas.context import ContextObject, Project, GatewayAttachment
-from ..domain.schemas.request import GatewayChatRequest, GatewayMessage
+from ..domain.schemas.attachment import GatewayAttachment
+from ..domain.schemas.context import ContextObject, Project
 from ..domain.schemas.identity import Identity
-
+from ..domain.schemas.message import (
+    GatewayMessage,
+    decode_persisted_message_content,
+)
+from ..domain.schemas.request import GatewayChatRequest
+from ..domain.schemas.session import Session as SessionSchema
 from ..infrastructure.storage.core.manager import StorageEngine
 from ..infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
-from ..infrastructure.storage.repositories.chat_data.sessions import SessionRepository
-from ..infrastructure.storage.models.sql.chat_data.session import Session as OrmSession
+from ..infrastructure.storage.models.sql.chat_data.session import (
+    Session as OrmSession,
+)
+from ..infrastructure.storage.repositories.chat_data.sessions import (
+    SessionRepository,
+)
 
 logger = structlog.get_logger(__name__)
 
+
 class ContextEngine:
-    """
-    Quản lý ngữ cảnh runtime.
-    Chịu trách nhiệm tải (load) Project, Session, và các tài nguyên liên quan
-    từ hệ thống lưu trữ dài hạn (StorageEngine) để tạo ra một ContextObject
-    cho Agent sử dụng tại thời điểm thực thi.
-    """
-    def __init__(self, storage_engine: StorageEngine, uow_factory: Callable[[], SqlAlchemyUnitOfWork]):
+    def __init__(
+        self,
+        storage_engine: StorageEngine,
+        uow_factory: Callable[[], SqlAlchemyUnitOfWork],
+    ):
         self._storage = storage_engine
         self.uow_factory = uow_factory
-        logger.info("ContextEngine initialized, using UoW for long-term persistence.")
+        logger.info(
+            "ContextEngine initialized, using UoW for long-term persistence."
+        )
 
     @staticmethod
     def _timestamp(value) -> float:
-        return value.timestamp() if hasattr(value, "timestamp") else float(value)
+        return (
+            value.timestamp()
+            if hasattr(value, "timestamp")
+            else float(value)
+        )
 
     @staticmethod
-    def _attachment_schema(attachment) -> GatewayAttachment:
+    def _legacy_attachment_schema(attachment) -> GatewayAttachment:
         metadata = attachment.metadata_json or {}
         return GatewayAttachment(
             id=attachment.id,
@@ -43,6 +55,22 @@ class ContextEngine:
             size=attachment.size_bytes,
             uri=attachment.storage_uri,
             source="local",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _asset_schema(file_record, blob_record) -> GatewayAttachment:
+        metadata = dict(file_record.metadata_json or {})
+        if blob_record.sha256:
+            metadata["sha256"] = blob_record.sha256
+        return GatewayAttachment(
+            asset_id=file_record.id,
+            filename=file_record.filename,
+            mime_type=file_record.mime_type,
+            size=blob_record.size_bytes,
+            extension=file_record.extension,
+            uri=f"asset://{file_record.id}",
+            source="asset",
             metadata=metadata,
         )
 
@@ -57,11 +85,15 @@ class ContextEngine:
             messages=[
                 GatewayMessage(
                     role=message.role,
-                    content=message.content.get("data", "")
-                    if isinstance(message.content, dict)
-                    else message.content,
+                    content=decode_persisted_message_content(
+                        message.content
+                    ),
                     turn_id=getattr(message, "turn_id", None),
-                    sequence=getattr(message, "sequence", None),
+                    sequence=(
+                        getattr(message, "sequence", None)
+                        if (getattr(message, "sequence", None) or 0) >= 1
+                        else None
+                    ),
                     created_at=getattr(message, "created_at", None),
                     completed_at=getattr(message, "completed_at", None),
                 )
@@ -71,95 +103,151 @@ class ContextEngine:
             updated_at=cls._timestamp(session_db.updated_at),
         )
 
-    async def load_context(self, session_id: str, identity: Identity) -> ContextObject:
-        """
-        Tải toàn bộ ngữ cảnh cho một session cụ thể.
-        Đây là hàm cốt lõi của Context Runtime.
-        """
+    async def load_context(
+        self,
+        session_id: str,
+        identity: Identity,
+    ) -> ContextObject:
         async with self.uow_factory() as uow:
-            # 1. Tải session từ DB, kèm theo các message và attachment liên quan
-            session_repo = uow.sessions
-            session_db = await session_repo.get_by_id(
-                session_id, 
-                options=[selectinload(OrmSession.messages), selectinload(OrmSession.attachments)]
+            session_db = await uow.sessions.get_by_id(
+                session_id,
+                options=[
+                    selectinload(OrmSession.messages),
+                    selectinload(OrmSession.attachments),
+                ],
             )
             if not session_db or session_db.user_id != identity.user_id:
-                raise ValueError(f"Session {session_id} not found or access denied.")
+                raise ValueError(
+                    f"Session {session_id} not found or access denied."
+                )
 
-            # 2. Tải project chứa session đó (nếu có)
             project_db = None
             if session_db.project_id:
-                project_repo = uow.projects
-                project_db = await project_repo.get_by_id(session_db.project_id, with_relations=True)
+                project_db = await uow.projects.get_by_id(
+                    session_db.project_id,
+                    with_relations=True,
+                )
 
-            # 3. Tập hợp các file có thể truy cập
-            accessible_files = []
+            central_rows = await uow.assets.list_context_file_rows(
+                session_id=session_id,
+                project_id=session_db.project_id,
+            )
+            accessible_files: list[GatewayAttachment] = []
+            seen: set[tuple[str, str]] = set()
+
+            for file_record, blob_record in central_rows:
+                item = self._asset_schema(file_record, blob_record)
+                key = ("asset", file_record.id)
+                if key not in seen:
+                    accessible_files.append(item)
+                    seen.add(key)
+
+            # Legacy Attachment remains a read-only compatibility source until F8.
+            legacy = []
             if project_db:
-                accessible_files.extend([self._attachment_schema(f) for f in project_db.attachments])
-            accessible_files.extend([self._attachment_schema(f) for f in session_db.attachments])
+                legacy.extend(project_db.attachments)
+            legacy.extend(session_db.attachments)
+            for attachment in legacy:
+                key = ("legacy", attachment.id)
+                if key in seen:
+                    continue
+                accessible_files.append(
+                    self._legacy_attachment_schema(attachment)
+                )
+                seen.add(key)
 
-            # 4. Chuyển đổi từ DB model sang Pydantic schema
             session_schema = self._session_schema(session_db)
-            project_schema = Project(
-                project_id=project_db.id,
-                user_id=project_db.user_id,
-                organization_id=project_db.organization_id,
-                name=project_db.name,
-                created_at=self._timestamp(project_db.created_at),
-                updated_at=self._timestamp(project_db.updated_at),
-                files=accessible_files,
-            ) if project_db else None
+            project_schema = (
+                Project(
+                    project_id=project_db.id,
+                    user_id=project_db.user_id,
+                    organization_id=project_db.organization_id,
+                    name=project_db.name,
+                    created_at=self._timestamp(project_db.created_at),
+                    updated_at=self._timestamp(project_db.updated_at),
+                    files=accessible_files,
+                )
+                if project_db
+                else None
+            )
+            return ContextObject(
+                project=project_schema,
+                session=session_schema,
+                accessible_files=accessible_files,
+            )
 
-            return ContextObject(project=project_schema, session=session_schema, accessible_files=accessible_files)
-
-    async def create_new_session(self, identity: Identity, project_id: Optional[str] = None) -> SessionSchema:
-        """Tạo một session mới và lưu vào DB."""
+    async def create_new_session(
+        self,
+        identity: Identity,
+        project_id: Optional[str] = None,
+    ) -> SessionSchema:
         async with self.uow_factory() as uow:
-            session_repo = uow.sessions
-            
-            # Xác thực project_id nếu có
             if project_id:
-                project_repo = uow.projects
-                project = await project_repo.get_by_id(project_id)
+                project = await uow.projects.get_by_id(project_id)
                 if not project or project.user_id != identity.user_id:
                     raise ValueError("Project not found or access denied.")
 
-            new_session_db = await session_repo.create_session(
+            new_session_db = await uow.sessions.create_session(
                 user_id=identity.user_id,
                 organization_id=identity.organization_id,
-                project_id=project_id
+                project_id=project_id,
             )
             await uow.commit()
             return self._session_schema(new_session_db)
 
-    async def summarize_session(self, session_id: str, model_router, http_client):
-        """
-        Thực hiện tóm tắt một session.
-        1. Lấy lịch sử chat từ DB.
-        2. Gọi LLM để tóm tắt.
-        3. Lưu bản tóm tắt vào metadata của session.
-        """
-        logger.info("Summarization process started for session", session_id=session_id)
-        
+    async def summarize_session(
+        self,
+        session_id: str,
+        model_router,
+        http_client,
+    ):
+        logger.info(
+            "Summarization process started for session",
+            session_id=session_id,
+        )
         async with self.uow_factory() as uow:
             session_repo: SessionRepository = uow.sessions
-            messages_db = await session_repo.get_messages_by_session_id(session_id, limit=100)
+            messages_db = await session_repo.get_messages_by_session_id(
+                session_id,
+                limit=100,
+            )
             if not messages_db:
-                logger.warning("No messages found to summarize", session_id=session_id)
+                logger.warning(
+                    "No messages found",
+                    session_id=session_id,
+                )
                 return
 
-            history_text = "\n".join([f"{msg.role}: {json.dumps(msg.content)}" for msg in messages_db])
-            
-            summary_prompt = f"Hãy tóm tắt ngắn gọn cuộc hội thoại sau đây trong khoảng 50 từ:\n\n{history_text}"
-            
+            history_text = "\n".join(
+                f"{msg.role}: {json.dumps(msg.content)}"
+                for msg in messages_db
+            )
+            summary_prompt = (
+                "Hãy tóm tắt ngắn gọn cuộc hội thoại sau đây "
+                "trong khoảng 50 từ:\n\n"
+                + history_text
+            )
             request_body = GatewayChatRequest(
-                model="gpt-4o-mini", # Hoặc một model nhỏ, rẻ tiền
-                messages=[GatewayMessage(role="user", content=summary_prompt)]
+                model="gpt-4o-mini",
+                messages=[
+                    GatewayMessage(
+                        role="user",
+                        content=summary_prompt,
+                    )
+                ],
             ).model_dump(exclude_none=True)
 
-            summary_response = await model_router.execute_with_fallback(http_client, request_body)
+            summary_response = await model_router.execute_with_fallback(
+                http_client,
+                request_body,
+            )
             summary_text = summary_response.choices[0].message.content
-
-            await session_repo.update_session_metadata(session_id, {"summary": summary_text})
+            await session_repo.update_session_metadata(
+                session_id,
+                {"summary": summary_text},
+            )
             await uow.commit()
-            logger.info("Session summary updated successfully", session_id=session_id, summary=summary_text)
+            logger.info(
+                "Session summary updated successfully",
+                session_id=session_id,
+            )

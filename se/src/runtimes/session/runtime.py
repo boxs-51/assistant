@@ -1,13 +1,17 @@
-# src/runtimes/session/runtime.py
-from typing import Dict, Any
+from typing import Any, Dict
 from datetime import datetime, timezone
 import uuid
 import structlog
 
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
-from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 from ...domain.schemas.identity import Identity
+from ...application.messages import (
+    CanonicalMessageService,
+    MessageAccessDeniedError,
+    MessagePersistenceError,
+    NonCanonicalAssetContentError,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -17,27 +21,42 @@ class SessionRuntime(BaseRuntime):
         manifest = RuntimeManifest(
             id="session_runtime",
             name="SessionRuntime",
-            version="1.0.0"
+            version="1.0.0",
         )
         super().__init__(manifest=manifest)
         self.event_bus = None
         self.uow_factory = None
+        self.message_service = None
         self._sessions: Dict[str, Dict[str, Any]] = {}
         self._stream_buffers: Dict[tuple[str, str], Dict[str, Any]] = {}
         self._subscribed = False
 
     async def initialize(self, context: RuntimeContext) -> None:
         await super().initialize(context)
-        # Subscribe các event theo chuẩn tên mới
         self.event_bus = context.event_bus
         self.uow_factory = context.uow_factory
+        self.message_service = getattr(context.container, "message_service", None) or CanonicalMessageService(context.uow_factory)
         if self.uow_factory is None:
             raise ValueError("SessionRuntime requires uow_factory.")
+        if self.message_service is None:
+            raise ValueError("SessionRuntime requires CanonicalMessageService.")
         if not self._subscribed:
-            self.event_bus.subscribe("transport.event.request_received", self._on_request_received)
-            self.event_bus.subscribe("provider.chat.responded", self._on_provider_responded)
-            self.event_bus.subscribe("provider.stream.chunk_emitted", self._on_stream_chunk)
-            self.event_bus.subscribe("provider.stream.completed", self._on_stream_completed)
+            self.event_bus.subscribe(
+                "transport.event.request_received",
+                self._on_request_received,
+            )
+            self.event_bus.subscribe(
+                "provider.chat.responded",
+                self._on_provider_responded,
+            )
+            self.event_bus.subscribe(
+                "provider.stream.chunk_emitted",
+                self._on_stream_chunk,
+            )
+            self.event_bus.subscribe(
+                "provider.stream.completed",
+                self._on_stream_completed,
+            )
             self._subscribed = True
         self._is_initialized = True
         logger.info("SessionRuntime initialized")
@@ -48,54 +67,79 @@ class SessionRuntime(BaseRuntime):
     async def stop(self) -> None:
         self._is_running = False
         if self.event_bus is not None and self._subscribed:
-            self.event_bus.unsubscribe("transport.event.request_received", self._on_request_received)
-            self.event_bus.unsubscribe("provider.chat.responded", self._on_provider_responded)
-            self.event_bus.unsubscribe("provider.stream.chunk_emitted", self._on_stream_chunk)
-            self.event_bus.unsubscribe("provider.stream.completed", self._on_stream_completed)
+            self.event_bus.unsubscribe(
+                "transport.event.request_received",
+                self._on_request_received,
+            )
+            self.event_bus.unsubscribe(
+                "provider.chat.responded",
+                self._on_provider_responded,
+            )
+            self.event_bus.unsubscribe(
+                "provider.stream.chunk_emitted",
+                self._on_stream_chunk,
+            )
+            self.event_bus.unsubscribe(
+                "provider.stream.completed",
+                self._on_stream_completed,
+            )
             self._stream_buffers.clear()
             self._subscribed = False
 
+    def _message_authority(self):
+        if self.message_service is None:
+            if self.uow_factory is None:
+                raise RuntimeError("SessionRuntime message authority is unavailable.")
+            self.message_service = CanonicalMessageService(self.uow_factory)
+        return self.message_service
+
     async def _on_request_received(self, event: BaseEvent):
-        """Xử lý khi có request HTTP/WS mới vào hệ thống."""
         session_id = event.session_id
-        logger.debug("Handling request received, loading session", session_id=session_id)
-        
         identity_data = event.payload.get("identity")
         if not session_id or not identity_data:
             return
 
-        identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
-        turn_id = event.turn_id or event.payload.get("turn_id") or f"turn_{uuid.uuid4().hex}"
+        identity = (
+            identity_data
+            if isinstance(identity_data, Identity)
+            else Identity.model_validate(identity_data)
+        )
+        turn_id = (
+            event.turn_id
+            or event.payload.get("turn_id")
+            or f"turn_{uuid.uuid4().hex}"
+        )
+        request_body = event.payload.get("request_body", {})
+        messages = request_body.get("messages", [])
+
+        try:
+            await self._message_authority().persist_request_messages(
+                session_id=session_id,
+                owner_user_id=identity.user_id,
+                organization_id=identity.organization_id,
+                messages=messages,
+                turn_id=turn_id,
+            )
+        except MessageAccessDeniedError as exc:
+            await self._publish_persistence_failure(
+                event,
+                exc,
+                status_code=403,
+            )
+            return
+        except (MessagePersistenceError, ValueError) as exc:
+            await self._publish_persistence_failure(
+                event,
+                exc,
+                status_code=400,
+            )
+            return
 
         async with self.uow_factory() as uow:
             session = await uow.sessions.get_by_id(session_id)
-            is_new_session = session is None
-            if is_new_session:
-                session = await uow.sessions.create_session(
-                    user_id=identity.user_id,
-                    organization_id=identity.organization_id,
-                    session_id=session_id,
-                )
-                logger.info("Session created for request", session_id=session_id)
-            elif session.user_id != identity.user_id:
-                logger.warning("Session access denied", session_id=session_id)
-                return
-
-            request_body = event.payload.get("request_body", {})
-            messages = request_body.get("messages", [])
-            messages_to_persist = messages if is_new_session else messages[-1:]
-            for message in messages_to_persist:
-                await uow.sessions.add_message(
-                    session_id=session_id,
-                    role=message.get("role", "user"),
-                    content={"type": "text", "data": message.get("content", "")},
-                    turn_id=turn_id,
-                    completed_at=datetime.now(timezone.utc),
-                )
-            await uow.commit()
-
-            session = await uow.sessions.get_by_id(session_id)
-            messages = await uow.sessions.get_messages_by_session_id(session_id)
+            messages_db = await uow.sessions.get_messages_by_session_id(
+                session_id
+            )
             session_payload = {
                 "session": {
                     "session_id": session.id,
@@ -110,22 +154,52 @@ class SessionRuntime(BaseRuntime):
                             "created_at": message.created_at,
                             "completed_at": message.completed_at,
                         }
-                        for message in messages
+                        for message in messages_db
                     ],
                 }
             }
-        
-        # Bắn Event báo hiệu Session đã load xong
-        await self.event_bus.publish(BaseEvent(
-            event_name="session.event.loaded",
-            session_id=session_id,
-            turn_id=turn_id,
-            payload={**event.payload, "session_id": session_id, **session_payload}
-        ))
+
+        await self.event_bus.publish(
+            BaseEvent(
+                event_name="session.event.loaded",
+                session_id=session_id,
+                turn_id=turn_id,
+                payload={
+                    **event.payload,
+                    "session_id": session_id,
+                    **session_payload,
+                },
+            )
+        )
+
+    async def _publish_persistence_failure(
+        self,
+        event: BaseEvent,
+        exc: Exception,
+        *,
+        status_code: int,
+    ) -> None:
+        logger.warning(
+            "Canonical message persistence rejected request",
+            session_id=event.session_id,
+            error=str(exc),
+        )
+        await self.event_bus.publish(
+            BaseEvent(
+                event_name="provider.failed",
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                payload={
+                    "error": str(exc),
+                    "error_code": type(exc).__name__,
+                    "failure_domain": "MESSAGE_PERSISTENCE",
+                    "retryable": False,
+                    "status_code": status_code,
+                },
+            )
+        )
 
     async def _on_provider_responded(self, event: BaseEvent):
-        """Lưu câu trả lời/lịch sử mới của LLM vào Memory hoặc Storage Engine."""
-        logger.debug("Saving provider response to session memory", session_id=event.session_id)
         response = event.payload.get("response", {})
         choices = response.get("choices", [])
         if not event.session_id or not choices:
@@ -181,8 +255,6 @@ class SessionRuntime(BaseRuntime):
                 created_at=buffer["created_at"],
                 completed_at=datetime.now(timezone.utc),
             )
-        # Remove only after content assembly/persistence succeeded. If either
-        # fails, retain the buffer so a retry cannot silently lose the turn.
         self._stream_buffers.pop(key, None)
 
     async def _persist_assistant_message(
@@ -196,17 +268,33 @@ class SessionRuntime(BaseRuntime):
         completed_at: datetime | None = None,
     ):
         if not turn_id:
-            logger.warning("Ignoring assistant message without turn correlation", session_id=session_id)
+            logger.warning(
+                "Ignoring assistant message without turn correlation",
+                session_id=session_id,
+            )
             return
-        logger.debug("Persisting assistant message", session_id=session_id)
 
-        async with self.uow_factory() as uow:
-            await uow.sessions.add_message(
+        try:
+            await self._message_authority().persist_message(
                 session_id=session_id,
                 role=role,
-                content={"type": "text", "data": content},
+                content=content,
                 turn_id=turn_id,
                 created_at=created_at,
                 completed_at=completed_at,
             )
-            await uow.commit()
+        except NonCanonicalAssetContentError as exc:
+            # F4 persists only canonical asset media. Provider-generated media
+            # remains an F7 ingest concern; never store provider/base64/path
+            # descriptors as durable conversation state.
+            logger.warning(
+                "Skipping non-canonical assistant media persistence",
+                session_id=session_id,
+                error=str(exc),
+            )
+        except MessagePersistenceError as exc:
+            logger.error(
+                "Assistant message persistence failed",
+                session_id=session_id,
+                error=str(exc),
+            )

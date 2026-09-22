@@ -37,7 +37,7 @@ class Message(Base):
     id: Mapped[str] = mapped_column(String(255), primary_key=True, default=default_uuid_str)
     session_id: Mapped[str] = mapped_column(ForeignKey('sessions.id', ondelete='CASCADE'), nullable=False, index=True)
     role: Mapped[str] = mapped_column(String(50), nullable=False) # 'user', 'assistant'
-    content: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, comment="Lưu toàn bộ object GatewayMessage Pydantic")
+    content: Mapped[Any] = mapped_column(JSON, nullable=False, comment="Canonical GatewayMessage.content: str or list[MessageContentPart]; legacy text envelopes remain readable.")
     turn_id: Mapped[str] = mapped_column(
         String(255),
         nullable=False,

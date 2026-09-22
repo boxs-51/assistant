@@ -1,42 +1,41 @@
-from .base import GatewayBaseModel
-from typing import Literal, Optional, Dict, Union, List, Any
 from datetime import datetime
-from pydantic import Field, model_validator
-from .attachment import GatewayAttachment, ImageContent, AudioContent, UrlContent, VideoContent, DocumentContent
-from .tool import GatewayToolCall, GatewayToolResult
-from .enums import MessageContentType
+from typing import Any, Dict, List, Literal, Optional, Union
 
-# =================================================================
-# 5. GATEWAY MESSAGE (Hỗ trợ Multimodal & Tool)
-# =================================================================
+from pydantic import Field, model_validator
+
+from .attachment import (
+    AudioContent,
+    DocumentContent,
+    GatewayAttachment,
+    ImageContent,
+    UrlContent,
+    VideoContent,
+)
+from .base import GatewayBaseModel
+from .enums import MessageContentType
+from .tool import GatewayToolCall, GatewayToolResult
+
+
 class MessageContentPart(GatewayBaseModel):
-    """
-    Một phần của nội dung message, hỗ trợ đa phương tiện.
-    Thiết kế lại để sử dụng GatewayAttachment.
-    """
+    """One canonical multimodal content part."""
+
     type: MessageContentType
     text: Optional[str] = None
-
-    data: Optional[Union[
-        ImageContent,
-        AudioContent,
-        VideoContent,
-        DocumentContent,
-        GatewayAttachment,
-        UrlContent,
-    ]] = None
+    data: Optional[
+        Union[
+            ImageContent,
+            AudioContent,
+            VideoContent,
+            DocumentContent,
+            GatewayAttachment,
+            UrlContent,
+        ]
+    ] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="before")
     @classmethod
     def _migrate_legacy_text_content(cls, value):
-        """Accept pre-migration TextContent payloads without keeping TextContent.
-
-        Legacy wire/storage shape:
-            {"type": "text", "data": {"data": "...", "format": "code", ...}}
-
-        Canonical shape:
-            {"type": "text", "text": "...", "data": None}
-        """
         if not isinstance(value, dict):
             return value
 
@@ -53,7 +52,7 @@ class MessageContentPart(GatewayBaseModel):
             text = legacy["data"]
             if legacy.get("format") == "code":
                 language = legacy.get("language") or "text"
-                text = f"```{language}\n{text}\n```"
+                text = f"~~~{language}\n{text}\n~~~"
 
         if text is None:
             return value
@@ -63,17 +62,10 @@ class MessageContentPart(GatewayBaseModel):
         migrated["data"] = None
         return migrated
 
+
 class GatewayMessage(GatewayBaseModel):
-    """
-    Cấu trúc message được thiết kế lại:
-    - `content` là một list các `MessageContentPart` để hỗ trợ multimodal.
-    - `tool_calls` chứa các yêu cầu gọi tool từ assistant.
-    - `tool_results` chứa kết quả thực thi tool từ client.
-    """
     role: Literal["system", "user", "assistant", "tool"]
     content: Union[List[MessageContentPart], str]
-
-    # Dành cho assistant và tool
     tool_calls: Optional[List[GatewayToolCall]] = None
     tool_results: Optional[List[GatewayToolResult]] = None
     turn_id: Optional[str] = None
@@ -81,3 +73,14 @@ class GatewayMessage(GatewayBaseModel):
     created_at: Optional[datetime] = None
     completed_at: Optional[datetime] = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+def decode_persisted_message_content(value: Any) -> Any:
+    """Read the legacy text envelope without flattening canonical JSON."""
+    if (
+        isinstance(value, dict)
+        and value.get("type") == "text"
+        and "data" in value
+    ):
+        return value.get("data", "")
+    return value

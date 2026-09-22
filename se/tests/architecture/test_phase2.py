@@ -16,10 +16,16 @@ from se.src.infrastructure.storage.repositories.chat_data.sessions import Sessio
 import se.src.infrastructure.storage.core.unit_of_work  # noqa: F401 - load all mapped tables
 
 
+class FakeAssetRepository:
+    async def list_context_file_rows(self, **kwargs):
+        return []
+
+
 class FakeUow:
     def __init__(self, sessions, projects=None):
         self.sessions = sessions
         self.projects = projects
+        self.assets = FakeAssetRepository()
         self.committed = False
 
     async def __aenter__(self):
@@ -30,6 +36,9 @@ class FakeUow:
 
     async def commit(self):
         self.committed = True
+
+    async def rollback(self):
+        return None
 
 
 class FakeSessionRepository:
@@ -141,7 +150,7 @@ async def test_session_runtime_creates_session_and_persists_latest_message():
     ))
 
     assert repository.created_args["session_id"] == "session-1"
-    assert repository.added_messages[0].content["data"] == "Hello"
+    assert repository.added_messages[0].content == "Hello"
     assert bus.published[0].event_name == "session.event.loaded"
     assert bus.published[0].payload["session"]["messages"]
 
@@ -183,7 +192,7 @@ async def test_session_runtime_persists_completed_stream_answer():
     ))
 
     assert repository.added_messages[-1].role == "assistant"
-    assert repository.added_messages[-1].content["data"] == "Hello world"
+    assert repository.added_messages[-1].content == "Hello world"
 
 
 @pytest.mark.asyncio
@@ -216,8 +225,8 @@ async def test_session_runtime_isolates_interleaved_streams_by_turn_id():
         ))
 
     by_turn = {message.turn_id: message for message in repository.added_messages}
-    assert by_turn["turn-a"].content["data"] == "A1A2"
-    assert by_turn["turn-b"].content["data"] == "B1B2"
+    assert by_turn["turn-a"].content == "A1A2"
+    assert by_turn["turn-b"].content == "B1B2"
     assert by_turn["turn-a"].created_at <= by_turn["turn-a"].completed_at
     assert by_turn["turn-b"].created_at <= by_turn["turn-b"].completed_at
 
@@ -265,7 +274,9 @@ async def test_session_runtime_rejects_session_owned_by_another_user():
         payload={"identity": identity().model_dump(), "request_body": {}},
     ))
 
-    assert bus.published == []
+    assert bus.published
+    assert bus.published[0].event_name == "provider.failed"
+    assert bus.published[0].payload["status_code"] == 403
 
 
 @pytest.mark.asyncio
