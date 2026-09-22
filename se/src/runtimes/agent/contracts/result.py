@@ -7,7 +7,6 @@ from pydantic import BaseModel, ConfigDict, Field
 from .inference import InferenceMessage, InferenceUsage
 from .loop import AgentIteration, AgentLoopState
 from .tool import ToolExecutionResult
-from .continuation import ContinuationState
 from ....domain.schemas.agent_execution import AgentExecutionWaitReason
 
 
@@ -29,5 +28,4 @@ class AgentExecutionResult(BaseModel):
     error_message: str | None = None
     failure_domain: str | None = None
     retryable: bool = False
-    continuation_state: ContinuationState | None = None
     checkpoint_id: str | None = None
