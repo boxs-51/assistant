@@ -156,11 +156,15 @@ def _reservation(connection, task_id: str, branch_id: str, fingerprint: str):
     )
 
 
-def test_r8_b_has_single_14b_migration_head(tmp_path: Path):
+def test_r8_b_remains_on_single_linear_migration_chain(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
-    assert ScriptDirectory.from_config(config).get_heads() == [
-        "14b_r8_root_branch_accounting"
-    ]
+    script = ScriptDirectory.from_config(config)
+    assert script.get_heads() == ["14c_r8_fork_admission"]
+    assert script.get_revision("14b_r8_root_branch_accounting") is not None
+    assert (
+        script.get_revision("14c_r8_fork_admission").down_revision
+        == "14b_r8_root_branch_accounting"
+    )
 
 
 def test_r8_b_reconciles_historical_root_branch_accounting_and_downgrades(
