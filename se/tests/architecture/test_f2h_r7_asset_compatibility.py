@@ -133,6 +133,9 @@ async def test_f2h_provisional_tool_result_cannot_pin_asset_but_committed_can(tm
             )
             assert reference.id == duplicate.id
             assert reference.reference_type == "AGENT_TOOL_RESULT"
+            pinned_asset = await uow.assets.get_file(asset.asset_id)
+            assert pinned_asset is not None
+            assert pinned_asset.revision == 2
             assert await uow.assets.has_live_references(asset.asset_id) is True
             await uow.commit()
     finally:

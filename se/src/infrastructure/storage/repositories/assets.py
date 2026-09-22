@@ -119,6 +119,22 @@ class AssetRepository:
         if record is not None:
             return record
 
+        # Fence deletion against a concurrent R7 pin. The READY -> READY CAS
+        # intentionally advances the asset revision in the same transaction as
+        # the reference insert. A concurrent delete using the old revision
+        # loses; a delete that wins first changes state away from READY so this
+        # pin fails closed.
+        pinned = await self.compare_and_set_file(
+            file_id,
+            expected_revision=file_record.revision,
+            expected_state="READY",
+            values={"state": "READY"},
+        )
+        if pinned is None:
+            raise ValueError(
+                f"Asset {file_id} changed while creating an R7 reference."
+            )
+
         return await self._insert_reference(
             {
                 "file_id": file_id,
