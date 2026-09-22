@@ -24,6 +24,7 @@ from se.src.infrastructure.storage.repositories.capability_invocations import (
 )
 from se.src.runtimes.agent.legacy_materialization import (
     LegacyCheckpointMaterializationError,
+    parse_legacy_checkpoint_source,
 )
 from se.src.runtimes.agent.persistence import (
     DurableAgentStore,
@@ -497,5 +498,63 @@ async def test_r7_i_legacy_continuation_json_is_read_only(tmp_path):
             execution.context_state["continuation"]["current_checkpoint_id"]
             == "legacy-cp-1"
         )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_existing_checkpoint_semantic_collision_fails_closed(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-collision.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(sessions)
+        execution = await store.load_execution("exec-legacy")
+        source = parse_legacy_checkpoint_source(
+            execution,
+            target_user_id="user-1",
+            target_client_id="client-1",
+        )
+
+        async with sessions() as session:
+            session.add(
+                AgentExecutionCheckpointRecord(
+                    checkpoint_id="legacy-cp-1",
+                    execution_id="exec-legacy",
+                    execution_revision=4,
+                    session_id="session-legacy",
+                    iteration=2,
+                    wait_reason="CONNECTION",
+                    remaining_active_budget_seconds=30.0,
+                    origin_client_id="client-1",
+                    origin_connection_id="conn-k1",
+                    transcript_snapshot=[
+                        {"role": "user", "content": "DIFFERENT"}
+                    ],
+                    legacy_source_key=source.legacy_source_key,
+                    metadata_json={},
+                )
+            )
+            await session.commit()
+
+        with pytest.raises(LegacyCheckpointMaterializationError) as exc:
+            await store.materialize_legacy_checkpoint(
+                "exec-legacy",
+                requested_checkpoint_id="legacy-cp-1",
+                target_user_id="user-1",
+                target_client_id="client-1",
+            )
+        assert exc.value.code == "LEGACY_CHECKPOINT_UNSAFE"
+
+        execution = await store.load_execution("exec-legacy")
+        assert execution.revision == 4
+        assert execution.current_checkpoint_id is None
     finally:
         await engine.dispose()
