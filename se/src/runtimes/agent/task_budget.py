@@ -792,6 +792,16 @@ class TaskBudgetService:
                         )
                     )
                     if any_existing:
+                        if (
+                            existing_branch is not None
+                            and existing_branch.current_execution_id
+                            not in (None, execution_id)
+                        ):
+                            raise TaskBudgetConflictError(
+                                "Task already has a normalized TaskBranch; "
+                                "second top-level execution is not R8-B root "
+                                "admission."
+                            )
                         if not all(
                             item is not None
                             for item in (
