@@ -1,3 +1,35 @@
+# CURRENT STATUS UPDATE — FINAL R7 SYNC COMPLETE
+
+> This file remains the historical F1→F4 pause checkpoint at code baseline `f60b8d22`.
+>
+> The previously pending final-R7 sync is now complete.
+>
+> Current combined runtime baseline:
+>
+> ```text
+> 4b99f679e1ea7026215939901a47858b9cc9aae3
+> ```
+>
+> Combined exit gate on that baseline:
+>
+> ```text
+> Phase 5 consolidated: 40 passed
+> Linux full suite:     830 passed, 1 skipped
+> Windows client:       68 passed
+> ```
+>
+> F5-0 has been re-frozen and remains **NOT IMPLEMENTED**.
+>
+> Current authoritative F5-0 contract:
+>
+> ```text
+> docs/CENTRAL_ASSET_STORAGE_F5_0_CONTRACT_FREEZE_4B99F679.md
+> ```
+>
+> Any older section below that says "final R7 sync pending" or "re-freeze F5-0 before implementation" is historical context and is superseded by this update.
+
+---
+
 # CENTRAL ASSET STORAGE — HEAD CHECKPOINT & PAUSE DOCUMENT
 
 **Repository:** `boxs-51/assistant`  
