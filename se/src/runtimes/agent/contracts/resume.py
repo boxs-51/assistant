@@ -64,8 +64,8 @@ class DurableExecutionCheckpoint:
     """Immutable normalized R7 safe-point representation.
 
     This coexists with the Phase 6.9 ``ExecutionCheckpoint`` during the
-    R7 migration.  R7-H removes the legacy branch/merge representation after
-    all canonical writers/readers have moved to this normalized contract.
+    R7 migration.  R7-I owns removal of the legacy branch/merge representation
+    after R7-H client resume orchestration is proven on the normalized path.
     """
 
     checkpoint_id: str
