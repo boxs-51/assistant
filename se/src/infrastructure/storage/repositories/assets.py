@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Mapping, Optional, Sequence
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.sql.assets import (
@@ -101,3 +101,28 @@ class AssetRepository:
             .limit(1)
         )
         return result.scalar_one_or_none()
+
+
+    async def compare_and_set_file(
+        self,
+        file_id: str,
+        *,
+        expected_revision: int,
+        expected_state: str,
+        values: Mapping[str, Any],
+    ) -> Optional[FileAssetRecord]:
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(FileAssetRecord)
+            .where(
+                FileAssetRecord.id == file_id,
+                FileAssetRecord.revision == expected_revision,
+                FileAssetRecord.state == expected_state,
+            )
+            .values(**next_values)
+            .returning(FileAssetRecord)
+        )
+        record = result.scalar_one_or_none()
+        await self.session.flush()
+        return record

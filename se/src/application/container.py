@@ -30,6 +30,7 @@ class ApplicationContainer:
     authorization_service: Optional[Any] = None
     provider_runtime: Optional[Any] = None
     direct_chat_runtime: Optional[Any] = None
+    asset_service: Optional[Any] = None
 
     api_key_service: Optional[Any] = None
     guest_session_service: Optional[Any] = None
