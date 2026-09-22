@@ -1586,6 +1586,12 @@ class DurableAgentStore:
                             "Legacy checkpoint iteration has no canonical tool-call order.",
                         )
 
+                    if source.pending_tool_call_id not in ordered_tool_call_ids:
+                        raise LegacyCheckpointMaterializationError(
+                            "LEGACY_CHECKPOINT_UNSAFE",
+                            "Legacy pending tool call is outside the canonical active batch.",
+                        )
+
                     invocation_repo = getattr(uow, "capability_invocations", None)
                     if invocation_repo is None:
                         raise LegacyCheckpointMaterializationError(
@@ -1608,10 +1614,16 @@ class DurableAgentStore:
                             execution_id,
                             tool_call_id,
                         )
+                        was_legacy_pending = (
+                            tool_call_id == source.pending_tool_call_id
+                            or tool_call.invocation_id
+                            == source.pending_invocation_id
+                        )
                         if (
                             result_row is not None
                             and getattr(result_row, "commit_state", "PROVISIONAL")
                             == "COMMITTED"
+                            and not was_legacy_pending
                         ):
                             continue
 
@@ -1622,6 +1634,17 @@ class DurableAgentStore:
                             raise LegacyCheckpointMaterializationError(
                                 "CHECKPOINT_INCOMPLETE",
                                 f"Missing R6 invocation for {tool_call_id!r}.",
+                            )
+                        if was_legacy_pending and (
+                            tool_call.invocation_id
+                            != source.pending_invocation_id
+                            or tool_call_id != source.pending_tool_call_id
+                            or tool_call.capability_id
+                            != source.pending_capability_id
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Legacy pending identity conflicts with canonical active batch.",
                             )
                         if (
                             invocation.execution_id != execution_id
