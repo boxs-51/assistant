@@ -43,6 +43,11 @@ from .waiting_checkpoint import (
     verify_committed_waiting_checkpoint,
 )
 from .waiting_ticket import build_waiting_ticket_payload
+from .legacy_materialization import (
+    LegacyCheckpointMaterializationError,
+    parse_legacy_checkpoint_source,
+    sanitize_legacy_transcript,
+)
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -1536,17 +1541,340 @@ class DurableAgentStore:
             retryable=True,
         )
 
+    async def materialize_legacy_checkpoint(
+        self,
+        execution_id: str,
+        *,
+        requested_checkpoint_id: str | None = None,
+        target_user_id: str | None = None,
+        target_client_id: str | None = None,
+    ) -> DurableExecutionCheckpoint | None:
+        """Materialize one Phase 6.9 WAITING safe point into normalized R7 rows.
+
+        The conversion is read-only with respect to legacy JSON and does not
+        advance AgentExecution.revision. R6 CapabilityInvocation rows are the
+        only replay-safety authority for unresolved active-batch calls.
+        """
+
+        for attempt in range(3):
+            try:
+                async with self.uow_factory() as uow:
+                    execution = await uow.agents.get_execution(execution_id)
+                    if execution is None:
+                        await uow.commit()
+                        return None
+
+                    current_id = getattr(execution, "current_checkpoint_id", None)
+                    if current_id:
+                        if requested_checkpoint_id and current_id != requested_checkpoint_id:
+                            raise LegacyCheckpointMaterializationError(
+                                "STALE_CHECKPOINT",
+                                "Requested checkpoint differs from normalized current checkpoint.",
+                            )
+                        checkpoint = await uow.agents.get_execution_checkpoint(current_id)
+                        if (
+                            checkpoint is None
+                            or checkpoint.execution_id != execution.id
+                            or checkpoint.execution_revision != execution.revision
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "CHECKPOINT_INCOMPLETE",
+                                "Normalized current checkpoint is missing or stale.",
+                            )
+                        result = self._checkpoint_contract(checkpoint)
+                        await uow.commit()
+                        return result
+
+                    source = parse_legacy_checkpoint_source(
+                        execution,
+                        requested_checkpoint_id=requested_checkpoint_id,
+                        target_user_id=target_user_id,
+                        target_client_id=target_client_id,
+                    )
+                    if not source.origin_client_id:
+                        raise LegacyCheckpointMaterializationError(
+                            "RESUME_ORIGIN_CLIENT_MISSING",
+                            "Legacy CONNECTION checkpoint has no stable origin client.",
+                        )
+                    if (
+                        getattr(execution, "bound_client_id", None)
+                        and execution.bound_client_id != source.origin_client_id
+                    ):
+                        raise LegacyCheckpointMaterializationError(
+                            "FOREIGN_CLIENT",
+                            "Durable execution binding conflicts with legacy origin client.",
+                        )
+
+                    iterations = await uow.agents.list_iterations(execution_id)
+                    iteration = next(
+                        (
+                            item
+                            for item in iterations
+                            if item.iteration == source.iteration
+                        ),
+                        None,
+                    )
+                    if iteration is None:
+                        raise LegacyCheckpointMaterializationError(
+                            "CHECKPOINT_INCOMPLETE",
+                            "Legacy checkpoint iteration is absent from durable history.",
+                        )
+                    ordered_tool_call_ids = tuple(
+                        getattr(iteration, "tool_call_ids", None) or ()
+                    )
+                    if not ordered_tool_call_ids:
+                        raise LegacyCheckpointMaterializationError(
+                            "CHECKPOINT_INCOMPLETE",
+                            "Legacy checkpoint iteration has no canonical tool-call order.",
+                        )
+
+                    invocation_repo = getattr(uow, "capability_invocations", None)
+                    if invocation_repo is None:
+                        raise LegacyCheckpointMaterializationError(
+                            "LEGACY_CHECKPOINT_UNSAFE",
+                            "R6 CapabilityInvocation authority is unavailable.",
+                        )
+
+                    pending_values: list[dict[str, Any]] = []
+                    for ordinal, tool_call_id in enumerate(ordered_tool_call_ids):
+                        tool_call = await uow.agents.get_tool_call(
+                            execution_id,
+                            tool_call_id,
+                        )
+                        if tool_call is None:
+                            raise LegacyCheckpointMaterializationError(
+                                "CHECKPOINT_INCOMPLETE",
+                                f"Missing durable tool call {tool_call_id!r}.",
+                            )
+                        result_row = await uow.agents.get_tool_result(
+                            execution_id,
+                            tool_call_id,
+                        )
+                        if (
+                            result_row is not None
+                            and getattr(result_row, "commit_state", "PROVISIONAL")
+                            == "COMMITTED"
+                        ):
+                            continue
+
+                        invocation = await invocation_repo.get_record(
+                            tool_call.invocation_id
+                        )
+                        if invocation is None:
+                            raise LegacyCheckpointMaterializationError(
+                                "CHECKPOINT_INCOMPLETE",
+                                f"Missing R6 invocation for {tool_call_id!r}.",
+                            )
+                        if (
+                            invocation.execution_id != execution_id
+                            or invocation.tool_call_id != tool_call_id
+                            or invocation.capability_id != tool_call.capability_id
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Legacy tool call conflicts with R6 invocation identity.",
+                            )
+                        if (
+                            target_user_id
+                            and invocation.owner_user_id != target_user_id
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "FOREIGN_PRINCIPAL",
+                                "Pending R6 invocation belongs to another principal.",
+                            )
+                        if (
+                            not invocation.origin_client_id
+                            or invocation.origin_client_id != source.origin_client_id
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "FOREIGN_CLIENT",
+                                "Pending R6 invocation lacks matching stable client authority.",
+                            )
+                        if invocation.remote_outcome_state is None:
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Unresolved legacy call has no R6 remote outcome authority.",
+                            )
+                        if (
+                            not invocation.capability_version
+                            or not invocation.request_fingerprint
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "CHECKPOINT_INCOMPLETE",
+                                "Pending R6 invocation lacks version/fingerprint watermark.",
+                            )
+
+                        pending_values.append(
+                            {
+                                "checkpoint_id": source.checkpoint_id,
+                                "ordinal": ordinal,
+                                "invocation_id": invocation.invocation_id,
+                                "invocation_revision": invocation.revision,
+                                "tool_call_id": tool_call_id,
+                                "capability_id": invocation.capability_id,
+                                "capability_version": invocation.capability_version,
+                                "request_fingerprint": invocation.request_fingerprint,
+                                "idempotency": invocation.idempotency,
+                                "observed_remote_outcome_state": (
+                                    invocation.remote_outcome_state
+                                ),
+                                "origin_client_id": invocation.origin_client_id,
+                                "origin_connection_id": source.origin_connection_id,
+                            }
+                        )
+
+                    if not pending_values:
+                        raise LegacyCheckpointMaterializationError(
+                            "CHECKPOINT_INCOMPLETE",
+                            "Legacy CONNECTION checkpoint has no unresolved R6 invocation.",
+                        )
+
+                    transcript_snapshot = sanitize_legacy_transcript(
+                        source.transcript,
+                        active_tool_call_ids=ordered_tool_call_ids,
+                    )
+                    checkpoint_values = {
+                        "checkpoint_id": source.checkpoint_id,
+                        "execution_id": execution.id,
+                        "execution_revision": execution.revision,
+                        "session_id": execution.session_id,
+                        "task_id": execution.task_id,
+                        "branch_id": execution.branch_id,
+                        "parent_checkpoint_id": source.parent_checkpoint_id,
+                        "iteration": source.iteration,
+                        "wait_reason": "CONNECTION",
+                        "remaining_active_budget_seconds": (
+                            execution.remaining_active_budget_seconds
+                        ),
+                        "wait_expires_at": execution.wait_expires_at,
+                        "origin_client_id": source.origin_client_id,
+                        "origin_connection_id": source.origin_connection_id,
+                        "transcript_snapshot": list(transcript_snapshot),
+                        "legacy_source_key": source.legacy_source_key,
+                        "metadata_json": {
+                            "legacy_materialized": True,
+                            "legacy_owner_user_id": source.owner_user_id,
+                        },
+                    }
+                    existing = await uow.agents.get_execution_checkpoint(
+                        source.checkpoint_id
+                    )
+                    if existing is not None:
+                        if (
+                            existing.execution_id != execution.id
+                            or existing.execution_revision != execution.revision
+                            or existing.legacy_source_key != source.legacy_source_key
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Legacy checkpoint id collides with different normalized semantics.",
+                            )
+                    else:
+                        await uow.agents.save_execution_checkpoint(
+                            checkpoint_values
+                        )
+                        for values in pending_values:
+                            await uow.agents.save_checkpoint_pending_invocation(
+                                values
+                            )
+
+                    bound = await uow.agents.bind_legacy_checkpoint_pointer(
+                        execution.id,
+                        expected_revision=execution.revision,
+                        checkpoint_id=source.checkpoint_id,
+                        bound_client_id=source.origin_client_id,
+                    )
+                    if bound is None:
+                        await uow.rollback()
+                        raise ExecutionConflictError(
+                            "Legacy checkpoint materialization lost the WAITING pointer race."
+                        )
+                    if bound.revision != execution.revision:
+                        await uow.rollback()
+                        raise ExecutionConflictError(
+                            "Legacy materialization must not advance execution revision."
+                        )
+                    checkpoint = await uow.agents.get_execution_checkpoint(
+                        source.checkpoint_id
+                    )
+                    result = self._checkpoint_contract(checkpoint)
+                    await uow.commit()
+                    return result
+            except LegacyCheckpointMaterializationError:
+                raise
+            except IntegrityError:
+                current = await self.load_current_checkpoint(execution_id)
+                if (
+                    current is not None
+                    and (
+                        requested_checkpoint_id is None
+                        or current.checkpoint_id == requested_checkpoint_id
+                    )
+                ):
+                    return current
+                raise LegacyCheckpointMaterializationError(
+                    "LEGACY_CHECKPOINT_UNSAFE",
+                    "Concurrent legacy materialization produced conflicting rows.",
+                )
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if attempt < 2 and ("locked" in message or "busy" in message):
+                    continue
+                raise
+
+        raise ExecutionConflictError(
+            "Legacy checkpoint materialization conflicts exhausted."
+        )
+
+    async def materialize_legacy_waiting_for_client(
+        self,
+        *,
+        owner_user_id: str,
+        client_id: str,
+    ) -> tuple[DurableExecutionCheckpoint, ...]:
+        """Best-effort read-only legacy ingestion before R7-H ticket replay."""
+
+        async with self.uow_factory() as uow:
+            executions = await uow.agents.list_legacy_waiting_executions_for_owner(
+                owner_user_id=owner_user_id,
+            )
+            execution_ids = tuple(item.id for item in executions)
+            await uow.commit()
+
+        materialized: list[DurableExecutionCheckpoint] = []
+        for execution_id in execution_ids:
+            try:
+                checkpoint = await self.materialize_legacy_checkpoint(
+                    execution_id,
+                    target_user_id=owner_user_id,
+                    target_client_id=client_id,
+                )
+            except LegacyCheckpointMaterializationError:
+                # One unsafe or foreign legacy row must not suppress canonical
+                # ticket replay for other executions. Explicit resume surfaces
+                # the stable rejection code.
+                continue
+            if checkpoint is not None:
+                materialized.append(checkpoint)
+        return tuple(materialized)
+
     async def load_pending_resume_tickets(
         self,
         *,
         owner_user_id: str,
         client_id: str,
     ) -> tuple[dict[str, Any], ...]:
-        """Read canonical WAITING(CONNECTION) tickets for one principal/client.
+        """Read canonical WAITING tickets for one principal/client.
 
-        This is a publication query only: it never builds a ResumePlan, creates
-        a ResumeClaim, or mutates AgentExecution lifecycle state.
+        R7-I may first materialize a legacy Phase 6.9 safe point. Materializing
+        representation is not a WAITING -> RUNNING lifecycle transition and
+        never creates/consumes a ResumeClaim.
         """
+
+        await self.materialize_legacy_waiting_for_client(
+            owner_user_id=owner_user_id,
+            client_id=client_id,
+        )
 
         async with self.uow_factory() as uow:
             executions = await uow.agents.list_waiting_executions_for_client(
