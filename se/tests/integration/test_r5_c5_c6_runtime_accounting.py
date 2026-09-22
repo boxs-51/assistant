@@ -149,6 +149,15 @@ class _Allow:
         return PolicyDecision.ALLOW
 
 
+async def _mark_running(service: TaskBudgetService, task_id: str):
+    await service.transition_task(
+        task_id,
+        allowed_source_states=("ASSIGNED",),
+        target_state="RUNNING",
+        values={},
+    )
+
+
 async def _setup(tmp_path):
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{(tmp_path / 'r5c-runtime.sqlite').as_posix()}",
@@ -196,6 +205,7 @@ async def test_r5_c5_c6_runtime_charges_logical_inference_tool_and_usage(
                 "input": {"prompt": "hello"},
             }
         )
+        await _mark_running(service, "task-runtime")
         runtime = AgentRuntime(
             context_builder=_Builder(),
             inference=_Inference(service, "task-runtime"),
@@ -267,6 +277,7 @@ async def test_r5_c5_failed_provider_dispatch_keeps_inference_reservation(
                 "input": {"prompt": "hello"},
             }
         )
+        await _mark_running(service, "task-failed-inf")
         runtime = AgentRuntime(
             context_builder=_Builder(),
             inference=FailingInference(service),
