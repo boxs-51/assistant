@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any, Callable, Sequence
+from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError, OperationalError
 
@@ -17,6 +18,12 @@ from ...domain.schemas.task_budget import (
     TaskBudgetState,
     normalize_task_budget_cost,
     task_budget_policy_fingerprint,
+)
+from .contracts.fork import ForkAdmission, ForkPlan, fork_plan_fingerprint
+from .fork_planning import (
+    ForkPlanDeferred,
+    ForkPlanRejected,
+    revalidate_fork_plan_in_uow,
 )
 from .serialization import to_json_safe
 from .waiting_checkpoint import (
@@ -58,6 +65,24 @@ class DelegationDepthExceededError(TaskBudgetError):
 
 class AgentDelegationCycleError(TaskBudgetError):
     code = "AGENT_DELEGATION_CYCLE"
+
+
+class ForkConsumeError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
+class ForkConsumeRejected(ForkConsumeError):
+    pass
+
+
+class ForkConsumeDeferred(ForkConsumeError):
+    pass
+
+
+class ForkConsumeConflict(ForkConsumeError):
+    pass
 
 
 @dataclass(frozen=True, slots=True)
@@ -689,6 +714,370 @@ class TaskBudgetService:
             allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
             target_state="CANCELLED",
             values=values,
+        )
+
+    @staticmethod
+    def _fork_consume_error(exc: Exception) -> ForkConsumeError:
+        code = str(getattr(exc, "code", "FORK_CONSUME_CONFLICT"))
+        message = str(exc)
+        if isinstance(exc, ForkPlanDeferred):
+            return ForkConsumeDeferred(code, message)
+        if code == "FORK_PLAN_FINGERPRINT_INVALID":
+            return ForkConsumeRejected(code, message)
+        if any(
+            token in code
+            for token in (
+                "CONFLICT",
+                "STALE",
+                "CHANGED",
+            )
+        ):
+            return ForkConsumeConflict(code, message)
+        return ForkConsumeRejected(code, message)
+
+    async def _replay_fork_admission_in_uow(
+        self,
+        uow,
+        *,
+        plan: ForkPlan,
+        receipt,
+    ) -> ForkAdmission:
+        if (
+            receipt.plan_fingerprint != plan.plan_fingerprint
+            or receipt.source_branch_id != plan.source_branch_id
+            or receipt.source_execution_id != plan.source_execution_id
+            or receipt.source_checkpoint_id != plan.source_checkpoint_id
+            or receipt.created_by != plan.target_user_id
+        ):
+            raise ForkConsumeConflict(
+                "FORK_REQUEST_SEMANTIC_CONFLICT",
+                "fork_request_id already committed with different semantics.",
+            )
+
+        branch = await uow.agents.get_task_branch(receipt.branch_id)
+        context = await uow.agents.get_task_branch_context(receipt.branch_id)
+        execution = await uow.agents.get_execution(receipt.execution_id)
+        branch_reservation = await uow.agents.get_task_budget_reservation(
+            plan.task_id,
+            TaskBudgetReservationKind.BRANCH.value,
+            receipt.branch_id,
+        )
+        execution_reservation = await uow.agents.get_task_budget_reservation(
+            plan.task_id,
+            TaskBudgetReservationKind.NEW_EXECUTION.value,
+            receipt.execution_id,
+        )
+        task = await uow.agents.get_task(plan.task_id)
+        budget = await uow.agents.get_task_budget(plan.task_id)
+
+        corrupt = (
+            branch is None
+            or context is None
+            or execution is None
+            or branch_reservation is None
+            or execution_reservation is None
+            or task is None
+            or budget is None
+            or branch.task_id != plan.task_id
+            or branch.parent_branch_id != receipt.source_branch_id
+            or branch.base_execution_id != receipt.source_execution_id
+            or branch.base_checkpoint_id != receipt.source_checkpoint_id
+            or branch.current_execution_id != receipt.execution_id
+            or execution.task_id != plan.task_id
+            or execution.branch_id != receipt.branch_id
+            or execution.base_execution_id != receipt.source_execution_id
+            or execution.base_checkpoint_id != receipt.source_checkpoint_id
+            or execution.retry_of_execution_id is not None
+        )
+        if corrupt:
+            raise ForkConsumeConflict(
+                "FORK_ADMISSION_CORRUPT",
+                "Committed ForkAdmission no longer matches durable outputs.",
+            )
+
+        return ForkAdmission(
+            task_id=plan.task_id,
+            fork_request_id=plan.fork_request_id,
+            plan_fingerprint=plan.plan_fingerprint,
+            branch_id=receipt.branch_id,
+            branch_revision=int(branch.revision),
+            execution_id=receipt.execution_id,
+            execution_revision=int(execution.revision),
+            task_revision=int(task.revision),
+            task_budget_revision=int(budget.revision),
+        )
+
+    async def _probe_fork_replay(
+        self,
+        plan: ForkPlan,
+    ) -> ForkAdmission | None:
+        async with self._uow_factory() as uow:
+            receipt = await uow.agents.get_task_fork_admission(
+                plan.task_id,
+                plan.fork_request_id,
+            )
+            if receipt is None:
+                await uow.commit()
+                return None
+            admission = await self._replay_fork_admission_in_uow(
+                uow,
+                plan=plan,
+                receipt=receipt,
+            )
+            await uow.commit()
+            return admission
+
+    async def consume_fork_plan(
+        self,
+        plan: ForkPlan,
+    ) -> ForkAdmission:
+        """Atomically consume one R8-C ForkPlan into durable R8-D authority.
+
+        This method creates persistence only. It does not start AgentRuntime,
+        expose transport/API state, or seed R8-E branch runtime context.
+        """
+
+        if fork_plan_fingerprint(plan) != plan.plan_fingerprint:
+            raise ForkConsumeRejected(
+                "FORK_PLAN_FINGERPRINT_INVALID",
+                "ForkPlan semantic fingerprint no longer matches its payload.",
+            )
+
+        branch_id = f"r8_fork_{uuid4().hex}"
+        execution_id = f"r8_exec_{uuid4().hex}"
+        started_at = datetime.now(timezone.utc)
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    receipt = await uow.agents.get_task_fork_admission(
+                        plan.task_id,
+                        plan.fork_request_id,
+                    )
+                    if receipt is not None:
+                        admission = await self._replay_fork_admission_in_uow(
+                            uow,
+                            plan=plan,
+                            receipt=receipt,
+                        )
+                        await uow.commit()
+                        return admission
+
+                    try:
+                        snapshot = await revalidate_fork_plan_in_uow(
+                            uow,
+                            plan,
+                        )
+                    except (ForkPlanRejected, ForkPlanDeferred) as exc:
+                        await uow.rollback()
+                        replay = await self._probe_fork_replay(plan)
+                        if replay is not None:
+                            return replay
+                        raise self._fork_consume_error(exc) from exc
+
+                    source = snapshot.execution
+                    delegated = snapshot.delegated
+
+                    normalized_execution_values = (
+                        _normalize_execution_store_values(
+                            {
+                                "id": execution_id,
+                                "session_id": plan.session_id,
+                                "agent_id": plan.source_agent_id,
+                                "task_id": plan.task_id,
+                                "branch_id": branch_id,
+                                "parent_execution_id":
+                                    source.parent_execution_id,
+                                "retry_of_execution_id": None,
+                                "base_execution_id":
+                                    plan.source_execution_id,
+                                "base_checkpoint_id":
+                                    plan.source_checkpoint_id,
+                                "correlation_id": plan.correlation_id,
+                                "state": "RUNNING",
+                                "wait_reason": None,
+                                "revision": 1,
+                                "current_checkpoint_id": None,
+                                "bound_client_id": None,
+                                "bound_connection_id": None,
+                                "remaining_active_budget_seconds":
+                                    source.remaining_active_budget_seconds,
+                                "wait_expires_at": None,
+                                "request": dict(source.request or {}),
+                                "result": None,
+                                "error": None,
+                                "started_at": started_at,
+                            }
+                        )
+                    )
+                    reservation_execution_values = to_json_safe(
+                        normalized_execution_values,
+                        path="task_budget.fork_execution_reservation",
+                    )
+
+                    branch_payload = {
+                        "fork_request_id": plan.fork_request_id,
+                        "plan_fingerprint": plan.plan_fingerprint,
+                        "parent_branch_id": plan.source_branch_id,
+                        "base_execution_id": plan.source_execution_id,
+                        "base_checkpoint_id": plan.source_checkpoint_id,
+                    }
+                    branch_fingerprint = _reservation_fingerprint(
+                        TaskBudgetReservationKind.BRANCH,
+                        branch_id,
+                        branch_payload,
+                    )
+
+                    execution_payload = {
+                        "fork_request_id": plan.fork_request_id,
+                        "plan_fingerprint": plan.plan_fingerprint,
+                        "execution_id": execution_id,
+                        "execution_values": reservation_execution_values,
+                        "delegated": delegated,
+                    }
+                    execution_fingerprint = _reservation_fingerprint(
+                        TaskBudgetReservationKind.NEW_EXECUTION,
+                        execution_id,
+                        execution_payload,
+                    )
+
+                    task_revision = int(snapshot.task.revision)
+                    if str(snapshot.task.status) == "WAITING":
+                        updated_task = await uow.agents.compare_and_set_task(
+                            plan.task_id,
+                            plan.expected_task_revision,
+                            {
+                                "status": "RUNNING",
+                                "wait_reasons": [],
+                            },
+                        )
+                        if updated_task is None:
+                            await uow.rollback()
+                            continue
+                        task_revision = int(updated_task.revision)
+
+                    budget = snapshot.budget
+                    budget_updates = {
+                        "active_branches":
+                            int(budget.active_branches) + 1,
+                        "used_executions":
+                            int(budget.used_executions) + 1,
+                        "active_executions":
+                            int(budget.active_executions) + 1,
+                    }
+                    if delegated:
+                        budget_updates["active_parallel_agents"] = (
+                            int(budget.active_parallel_agents) + 1
+                        )
+
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            plan.task_id,
+                            plan.expected_task_budget_revision,
+                            budget_updates,
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.agents.save_execution(
+                        normalized_execution_values
+                    )
+                    branch = await uow.agents.save_task_branch(
+                        {
+                            "branch_id": branch_id,
+                            "task_id": plan.task_id,
+                            "parent_branch_id": plan.source_branch_id,
+                            "base_execution_id":
+                                plan.source_execution_id,
+                            "base_checkpoint_id":
+                                plan.source_checkpoint_id,
+                            "current_execution_id": execution_id,
+                            "resolution_state": "OPEN",
+                            "revision": 0,
+                            "created_by": plan.target_user_id,
+                            "reason": "R8_FORK",
+                        }
+                    )
+                    await uow.agents.save_task_branch_context(
+                        {
+                            "branch_id": branch_id,
+                            "revision": 0,
+                            "overlay_messages": [
+                                dict(item)
+                                for item in plan.overlay_messages
+                            ],
+                        }
+                    )
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": plan.task_id,
+                            "kind":
+                                TaskBudgetReservationKind.BRANCH.value,
+                            "reservation_key": branch_id,
+                            "payload_fingerprint": branch_fingerprint,
+                        }
+                    )
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": plan.task_id,
+                            "kind":
+                                TaskBudgetReservationKind.NEW_EXECUTION.value,
+                            "reservation_key": execution_id,
+                            "payload_fingerprint": execution_fingerprint,
+                        }
+                    )
+                    await uow.agents.save_task_fork_admission(
+                        {
+                            "task_id": plan.task_id,
+                            "fork_request_id": plan.fork_request_id,
+                            "plan_fingerprint":
+                                plan.plan_fingerprint,
+                            "source_branch_id":
+                                plan.source_branch_id,
+                            "source_execution_id":
+                                plan.source_execution_id,
+                            "source_checkpoint_id":
+                                plan.source_checkpoint_id,
+                            "branch_id": branch_id,
+                            "execution_id": execution_id,
+                            "created_by": plan.target_user_id,
+                        }
+                    )
+
+                    await uow.commit()
+                    return ForkAdmission(
+                        task_id=plan.task_id,
+                        fork_request_id=plan.fork_request_id,
+                        plan_fingerprint=plan.plan_fingerprint,
+                        branch_id=branch_id,
+                        branch_revision=int(branch.revision),
+                        execution_id=execution_id,
+                        execution_revision=1,
+                        task_revision=task_revision,
+                        task_budget_revision=int(updated_budget.revision),
+                    )
+            except IntegrityError:
+                replay = await self._probe_fork_replay(plan)
+                if replay is not None:
+                    return replay
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    replay = await self._probe_fork_replay(plan)
+                    if replay is not None:
+                        return replay
+                    continue
+                raise
+
+        replay = await self._probe_fork_replay(plan)
+        if replay is not None:
+            return replay
+        raise ForkConsumeConflict(
+            "FORK_CONSUME_CONFLICT",
+            f"Atomic FORK consume conflicts exhausted for {plan.task_id}.",
         )
 
     async def start_root_task_scoped_execution(
@@ -2096,6 +2485,10 @@ __all__ = [
     "DelegationDepthExceededError",
     "DelegationAdmission",
     "RootExecutionAdmission",
+    "ForkConsumeError",
+    "ForkConsumeRejected",
+    "ForkConsumeDeferred",
+    "ForkConsumeConflict",
     "TaskBudgetClosedError",
     "TaskBudgetConflictError",
     "TaskBudgetError",
