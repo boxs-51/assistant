@@ -49,6 +49,7 @@ async def _seed_waiting(
     execution_id: str,
     checkpoint_id: str,
     capability_id: str,
+    wait_reason: str = "CONNECTION",
 ):
     async with sessions() as session:
         session.add(
@@ -65,7 +66,7 @@ async def _seed_waiting(
                 agent_id="agent-r7h",
                 correlation_id=f"corr-{execution_id}",
                 state="WAITING",
-                wait_reason="CONNECTION",
+                wait_reason=wait_reason,
                 revision=4,
                 current_checkpoint_id=checkpoint_id,
                 bound_client_id=client_id,
@@ -81,7 +82,7 @@ async def _seed_waiting(
                 execution_revision=4,
                 session_id=session_id,
                 iteration=1,
-                wait_reason="CONNECTION",
+                wait_reason=wait_reason,
                 remaining_active_budget_seconds=30.0,
                 origin_client_id=client_id,
                 origin_connection_id=f"{client_id}-k1",
@@ -173,5 +174,23 @@ async def test_r7_h_waiting_ticket_query_is_principal_and_client_scoped(tmp_path
             owner_user_id="user-b",
             client_id="client-b",
         ) == ()
+
+        await _seed_waiting(
+            sessions,
+            user_id="user-a",
+            client_id="client-a",
+            session_id="session-recovery",
+            execution_id="exec-recovery",
+            checkpoint_id="cp-recovery",
+            capability_id="tool.recovery",
+            wait_reason="RECOVERY",
+        )
+        tickets = await store.load_pending_resume_tickets(
+            owner_user_id="user-a",
+            client_id="client-a",
+        )
+        by_execution = {item["execution_id"]: item for item in tickets}
+        assert by_execution["exec-recovery"]["wait_reason"] == "RECOVERY"
+        assert by_execution["exec-recovery"]["auto_resume_allowed"] is False
     finally:
         await engine.dispose()
