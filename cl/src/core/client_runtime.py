@@ -621,8 +621,18 @@ class ClientRuntime:
             self._ready = False
             self._started = False
             self._state = ClientRuntimeState.STOPPED
-        self.capabilities.shutdown()
+            self._confirmed_capability_ids = frozenset()
+            self._resume_worker_stop = True
+            self._resume_condition.notify_all()
+            worker = self._resume_worker_thread
+        # Closing the transport wakes a worker blocked on resume ACK.
         self.realtime.close()
+        if worker and worker is not threading.current_thread():
+            worker.join(timeout=2.0)
+        with self._lock:
+            if self._resume_worker_thread is worker:
+                self._resume_worker_thread = None
+        self.capabilities.shutdown()
 
     def chat(self, payload):
         if self._ready:
@@ -630,7 +640,21 @@ class ClientRuntime:
                 payload = payload.model_copy(update={"connection_id": self.connection_id})
             elif isinstance(payload, dict):
                 payload = {**payload, "connection_id": self.connection_id}
-        return self.gateway.send_request(payload)
+        result = self.gateway.send_request(payload)
+        if isinstance(result, dict):
+            self._ingest_waiting_payload(result)
+            return result
+        if isinstance(result, GeneratorType):
+            upstream = result
+
+            def _wrapped():
+                for item in upstream:
+                    if isinstance(item, dict):
+                        self._ingest_waiting_payload(item)
+                    yield item
+
+            return _wrapped()
+        return result
 
     def health(self):
         return self.gateway.health()
@@ -639,9 +663,22 @@ class ClientRuntime:
         return self.gateway.readiness()
 
     def resume_execution(self, execution_id: str, checkpoint_id: str):
-        if not self._ready:
-            raise RuntimeError("Client runtime is not READY.")
-        return self.realtime.resume_execution(execution_id, checkpoint_id)
+        """Manually trigger the same ticket state machine used by auto-resume."""
+
+        key = (execution_id, checkpoint_id)
+        with self._lock:
+            if not self._ready:
+                raise RuntimeError("Client runtime is not READY.")
+            entry = self._pending_resume_tickets.get(key)
+            if entry is None or entry.terminal:
+                raise KeyError(f"Unknown pending resume ticket: {key!r}")
+            self._classify_resume_entry_locked(entry)
+            if entry.state is ResumeTicketState.WAIT_REFRESH:
+                entry.state = ResumeTicketState.ELIGIBLE
+            attempt = self._claim_resume_attempt_locked(key)
+            if attempt is None:
+                raise RuntimeError("Pending resume ticket is not eligible.")
+        return self._execute_resume_attempt(key, attempt, propagate=True)
 
     def login(self, payload: dict) -> dict:
         return self._activate_authenticated_identity(self.gateway.login(payload))
