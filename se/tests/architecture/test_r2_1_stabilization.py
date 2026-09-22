@@ -12,6 +12,7 @@ from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.event import BaseEvent
 from se.src.domain.schemas.identity import Identity
 from se.src.infrastructure.storage.models.sql.base import Base
+from se.src.infrastructure.storage.models.sql.agent import AgentExecutionRecord
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.runtimes.agent.contracts import (
     AgentContextSnapshot,
@@ -185,19 +186,25 @@ async def test_checkpoint_update_preserves_existing_legacy_continuation_member()
     store = DurableAgentStore(lambda: _SqliteUow(sessions))
 
     try:
-        await store.save_execution({
-            "id": "exec-continuation",
-            "session_id": "session-1",
-            "agent_id": "agent-1",
-            "correlation_id": "corr-1",
-            "state": "RUNNING",
-            "revision": 1,
-            "request": {},
-            "context_state": {
-                "continuation": {"current_checkpoint_id": "legacy-c1"},
-                "metadata": {"old": True},
-            },
-        })
+        async with sessions() as session:
+            session.add(
+                AgentExecutionRecord(
+                    id="exec-continuation",
+                    session_id="session-1",
+                    agent_id="agent-1",
+                    correlation_id="corr-1",
+                    state="RUNNING",
+                    revision=1,
+                    request={},
+                    context_state={
+                        "continuation": {
+                            "current_checkpoint_id": "legacy-c1"
+                        },
+                        "metadata": {"old": True},
+                    },
+                )
+            )
+            await session.commit()
 
         await store.update_checkpoint(
             "exec-continuation",
