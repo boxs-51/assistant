@@ -667,3 +667,254 @@ async def test_r7_j_real_tcp_k1_disconnect_k2_auto_resume_same_execution(
         await server_state.supervisor.shutdown()
         await _stop_gateway(server, server_task)
         await server_state.engine.dispose()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_r7_j_server_restart_while_waiting_resumes_from_sql_only(
+    tmp_path,
+):
+    db_path = tmp_path / "r7-j-server-restart.sqlite3"
+    ledger_path = tmp_path / "r7-j-restart-client-ledger.sqlite3"
+
+    first_state = await _build_server(
+        tmp_path,
+        db_path=db_path,
+    )
+    first_server, first_server_task, first_port = await _start_gateway(
+        first_state.app
+    )
+
+    k1_started = threading.Event()
+    k1_release = threading.Event()
+    k1 = None
+    k2 = None
+    restarted_state = None
+    restarted_server = None
+    restarted_server_task = None
+    external_effects = []
+
+    def k1_tool(value: str, **kwargs):
+        k1_started.set()
+        k1_release.wait(timeout=15.0)
+        return {"source": "k1-late", "value": value}
+
+    def k2_tool(value: str, **kwargs):
+        external_effects.append(value)
+        return {
+            "source": "k2-after-server-restart",
+            "value": value,
+            "effect_count": len(external_effects),
+        }
+
+    try:
+        k1 = await _connect_k1(
+            first_port,
+            _client_registry(k1_tool),
+            ledger_path,
+        )
+
+        context = AgentExecutionContext.create(
+            execution_id=EXECUTION_ID,
+            agent_id=AGENT_ID,
+            session_id=SESSION_ID,
+            correlation_id="r7j-restart-correlation",
+            identity=first_state.identity,
+            limits=AgentExecutionLimits(
+                max_iterations=4,
+                max_tool_calls=4,
+                timeout_seconds=30,
+            ),
+            connection_id=K1,
+            agent=first_state.agent,
+            metadata={
+                "client_id": CLIENT_ID,
+                "model": "r7j-test",
+            },
+        )
+
+        first_run = asyncio.create_task(
+            first_state.supervisor.run(
+                context,
+                lambda: first_state.agent_runtime.execute(context),
+            ),
+            name="r7-j-restart-initial",
+        )
+        assert await asyncio.to_thread(k1_started.wait, 5.0)
+        await asyncio.to_thread(k1.realtime.close)
+
+        waiting_result = await asyncio.wait_for(first_run, timeout=10.0)
+        assert waiting_result.state.value == "WAITING"
+        assert waiting_result.checkpoint_id
+
+        waiting_execution = await first_state.durable_store.load_execution(
+            EXECUTION_ID
+        )
+        waiting_checkpoint = (
+            await first_state.durable_store.load_current_checkpoint(
+                EXECUTION_ID
+            )
+        )
+        pending = (
+            await first_state.durable_store.load_checkpoint_pending_invocations(
+                waiting_checkpoint.checkpoint_id
+            )
+        )
+        assert len(pending) == 1
+        invocation_id = pending[0].invocation_id
+        before = await first_state.invocation_store.get(invocation_id)
+        assert before is not None
+        original_fingerprint = before.request_fingerprint
+        assert waiting_execution.state == "WAITING"
+        assert waiting_checkpoint.execution_revision == waiting_execution.revision
+
+        # Tear down K1 and the entire server process-local runtime. The client
+        # ledger intentionally remains RUNNING so K2 reconciliation sees
+        # durable UNKNOWN and may choose REPLAY_SAFE for IDEMPOTENT work.
+        await _close_k1(k1)
+        k1 = None
+        k1_release.set()
+
+        await first_state.supervisor.shutdown()
+        await _stop_gateway(first_server, first_server_task)
+        await first_state.engine.dispose()
+
+        # New process-local runtime objects, same durable SQL database.
+        restarted_state = await _build_server(
+            tmp_path,
+            db_path=db_path,
+            initialize_schema=False,
+            seed_session=False,
+        )
+        assert restarted_state.supervisor is not first_state.supervisor
+        assert restarted_state.connections is not first_state.connections
+        assert restarted_state.capability_runtime is not first_state.capability_runtime
+
+        restarted_server, restarted_server_task, restarted_port = (
+            await _start_gateway(restarted_state.app)
+        )
+
+        restarted_waiting = (
+            await restarted_state.durable_store.load_execution(EXECUTION_ID)
+        )
+        restarted_checkpoint = (
+            await restarted_state.durable_store.load_current_checkpoint(
+                EXECUTION_ID
+            )
+        )
+        assert restarted_waiting.state == "WAITING"
+        assert restarted_waiting.revision == waiting_execution.revision
+        assert restarted_checkpoint.checkpoint_id == waiting_checkpoint.checkpoint_id
+        assert restarted_checkpoint.execution_revision == restarted_waiting.revision
+
+        k2 = ClientRuntime(
+            f"http://127.0.0.1:{restarted_port}",
+            _client_registry(k2_tool),
+            api_key="r7-j",
+            client_id=CLIENT_ID,
+            owner_id=USER_ID,
+            invocation_ledger=ClientInvocationLedger(ledger_path),
+        )
+        await asyncio.to_thread(k2.start)
+        k2_connection_id = k2.connection_id
+        assert k2_connection_id != K1
+
+        async def _completed_after_restart():
+            record = await restarted_state.durable_store.load_execution(
+                EXECUTION_ID
+            )
+            return record if record.state == "COMPLETED" else None
+
+        completed = await _wait_async(
+            _completed_after_restart,
+            timeout=15.0,
+        )
+        assert completed.id == EXECUTION_ID
+        assert completed.bound_client_id == CLIENT_ID
+        assert completed.bound_connection_id == k2_connection_id
+
+        after = await restarted_state.invocation_store.get(invocation_id)
+        attempts = await restarted_state.invocation_store.list_attempts(
+            invocation_id
+        )
+        assert after is not None
+        assert after.invocation_id == invocation_id
+        assert after.request_fingerprint == original_fingerprint
+        assert after.state.value == "COMPLETED"
+        assert [item.attempt_number for item in attempts] == [1, 2]
+        assert attempts[0].connection_id == K1
+        assert attempts[1].connection_id == k2_connection_id
+        assert external_effects == ["r7-j"]
+
+        committed = (
+            await restarted_state.durable_store.load_committed_tool_result(
+                EXECUTION_ID,
+                "call-r7j-1",
+            )
+        )
+        assert committed is not None
+        assert committed.commit_state == "COMMITTED"
+        assert committed.invocation_id == invocation_id
+        assert committed.output["effect_count"] == 1
+
+        # The restarted inference service has no in-memory history from K1.
+        # It receives only the resumed iteration and must still finish E1.
+        assert len(first_state.inference.requests) == 1
+        assert len(restarted_state.inference.requests) == 1
+        resumed_request = restarted_state.inference.requests[0]
+        assert resumed_request.iteration == 2
+        serialized = repr(resumed_request.messages)
+        assert "k2-after-server-restart" in serialized
+        assert "REMOTE_OUTCOME_UNKNOWN" not in serialized
+
+        async with restarted_state.sessions() as session:
+            claims = (
+                await session.execute(
+                    select(AgentResumeClaimRecord).where(
+                        AgentResumeClaimRecord.execution_id
+                        == EXECUTION_ID
+                    )
+                )
+            ).scalars().all()
+        assert len(claims) == 1
+        assert claims[0].state == "CONSUMED"
+        assert claims[0].connection_id == k2_connection_id
+
+        assert restarted_state.supervisor.active_execution_ids() == ()
+        assert (
+            await restarted_state.connections.realtime.multiplexer.pending_count()
+            == 0
+        )
+        assert (
+            await restarted_state.connections.realtime.reconciliation_multiplexer.pending_count()
+            == 0
+        )
+    finally:
+        k1_release.set()
+        if k2 is not None:
+            await asyncio.to_thread(k2.stop)
+        if k1 is not None:
+            await _close_k1(k1)
+
+        # Only clean up first process resources if restart did not already do so.
+        try:
+            await first_state.supervisor.shutdown()
+        except Exception:
+            pass
+        try:
+            await _stop_gateway(first_server, first_server_task)
+        except Exception:
+            pass
+        try:
+            await first_state.engine.dispose()
+        except Exception:
+            pass
+
+        if restarted_state is not None:
+            await restarted_state.supervisor.shutdown()
+            await restarted_state.engine.dispose()
+        if restarted_server is not None:
+            await _stop_gateway(
+                restarted_server,
+                restarted_server_task,
+            )
