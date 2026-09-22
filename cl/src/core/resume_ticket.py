@@ -56,16 +56,21 @@ class PendingResumeTicket:
         cls,
         payload: Mapping[str, Any],
     ) -> "PendingResumeTicket":
-        execution_id = str(payload.get("execution_id") or "")
-        checkpoint_id = str(payload.get("checkpoint_id") or "")
+        execution_id = payload.get("execution_id")
+        checkpoint_id = payload.get("checkpoint_id")
         revision = payload.get("revision")
-        wait_reason = str(payload.get("wait_reason") or "")
-        if not execution_id or not checkpoint_id:
-            raise ValueError("PendingResumeTicket requires execution_id/checkpoint_id")
+        wait_reason = payload.get("wait_reason")
+        if (
+            not isinstance(execution_id, str)
+            or not execution_id.strip()
+            or not isinstance(checkpoint_id, str)
+            or not checkpoint_id.strip()
+        ):
+            raise ValueError("PendingResumeTicket requires string execution_id/checkpoint_id")
         if not isinstance(revision, int) or isinstance(revision, bool) or revision < 0:
             raise ValueError("PendingResumeTicket requires authoritative revision")
-        if not wait_reason:
-            raise ValueError("PendingResumeTicket requires wait_reason")
+        if not isinstance(wait_reason, str) or not wait_reason.strip():
+            raise ValueError("PendingResumeTicket requires string wait_reason")
 
         pending_raw = payload.get("pending_capability_ids") or ()
         if not isinstance(pending_raw, (list, tuple)):
@@ -73,25 +78,33 @@ class PendingResumeTicket:
         pending: list[str] = []
         seen: set[str] = set()
         for item in pending_raw:
-            capability_id = str(item or "")
-            if capability_id and capability_id not in seen:
+            if not isinstance(item, str) or not item.strip():
+                raise ValueError("pending_capability_ids must contain non-empty strings")
+            capability_id = item.strip()
+            if capability_id not in seen:
                 seen.add(capability_id)
                 pending.append(capability_id)
 
         wait_expires_at = _parse_datetime(payload.get("wait_expires_at"))
         origin_client_id = payload.get("origin_client_id")
         if origin_client_id is not None:
-            origin_client_id = str(origin_client_id)
+            if not isinstance(origin_client_id, str) or not origin_client_id.strip():
+                raise ValueError("origin_client_id must be a non-empty string or null")
+            origin_client_id = origin_client_id.strip()
+
+        auto_resume_allowed = payload.get("auto_resume_allowed", False)
+        if not isinstance(auto_resume_allowed, bool):
+            raise ValueError("auto_resume_allowed must be boolean")
 
         return cls(
-            execution_id=execution_id,
-            checkpoint_id=checkpoint_id,
+            execution_id=execution_id.strip(),
+            checkpoint_id=checkpoint_id.strip(),
             revision=revision,
-            wait_reason=wait_reason,
+            wait_reason=wait_reason.strip(),
             pending_capability_ids=tuple(pending),
             origin_client_id=origin_client_id,
             wait_expires_at=wait_expires_at,
-            auto_resume_allowed=bool(payload.get("auto_resume_allowed", False)),
+            auto_resume_allowed=auto_resume_allowed,
         )
 
 
@@ -164,19 +177,31 @@ class ResumeProtocolOutcome:
         if message_type not in kinds:
             raise ValueError(f"Unsupported resume outcome type: {message_type}")
         payload = dict(envelope.get("payload") or {})
-        execution_id = str(payload.get("execution_id") or envelope.get("execution_id") or "")
-        checkpoint_id = str(payload.get("checkpoint_id") or "")
-        resume_request_id = str(payload.get("resume_request_id") or "")
-        if not execution_id or not checkpoint_id or not resume_request_id:
-            raise ValueError("Resume outcome lacks canonical correlation fields")
+        execution_id = payload.get("execution_id") or envelope.get("execution_id")
+        checkpoint_id = payload.get("checkpoint_id")
+        resume_request_id = payload.get("resume_request_id")
+        if not all(
+            isinstance(value, str) and value.strip()
+            for value in (execution_id, checkpoint_id, resume_request_id)
+        ):
+            raise ValueError("Resume outcome lacks canonical string correlation fields")
+        retryable = payload.get("retryable", False)
+        if not isinstance(retryable, bool):
+            raise ValueError("Resume outcome retryable must be boolean")
+        code = payload.get("code")
+        if code is not None and not isinstance(code, str):
+            raise ValueError("Resume outcome code must be string or null")
+        claim_id = payload.get("claim_id")
+        if claim_id is not None and not isinstance(claim_id, str):
+            raise ValueError("Resume outcome claim_id must be string or null")
         return cls(
             kind=kinds[message_type],
-            execution_id=execution_id,
-            checkpoint_id=checkpoint_id,
-            resume_request_id=resume_request_id,
-            code=(str(payload["code"]) if payload.get("code") is not None else None),
-            retryable=bool(payload.get("retryable", False)),
-            claim_id=(str(payload["claim_id"]) if payload.get("claim_id") is not None else None),
+            execution_id=execution_id.strip(),
+            checkpoint_id=checkpoint_id.strip(),
+            resume_request_id=resume_request_id.strip(),
+            code=code,
+            retryable=retryable,
+            claim_id=claim_id,
             accepted_revision=_optional_int(payload.get("accepted_revision")),
             recovery_checkpoint_id=(
                 str(payload["recovery_checkpoint_id"])
