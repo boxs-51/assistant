@@ -787,6 +787,87 @@ class DurableAgentStore:
             await uow.commit()
             return result
 
+    async def record_resume_claim_handoff(
+        self,
+        claim_id: str,
+        *,
+        status: str,
+        payload: Mapping[str, Any],
+    ) -> ResumeClaim:
+        """Durably record the R7-G process-local handoff outcome.
+
+        ResumeClaim state deliberately remains CONSUMED.  The metadata marker
+        is the durable ACK-loss replay authority: ACCEPTED means supervisor
+        ownership was established before the wire ACK; FAILED means authority
+        was acquired but activation was recovered/terminalized without ACK.
+        """
+
+        normalized_status = str(status).upper()
+        if normalized_status not in {"ACCEPTED", "FAILED"}:
+            raise ValueError("handoff status must be ACCEPTED or FAILED")
+        handoff = {
+            "status": normalized_status,
+            **to_json_safe(
+                dict(payload),
+                path="agent_resume_claims.metadata.r7_g_handoff",
+            ),
+        }
+
+        for _ in range(8):
+            try:
+                async with self.uow_factory() as uow:
+                    record = await uow.agents.get_resume_claim(claim_id)
+                    if record is None:
+                        await uow.commit()
+                        raise ResumeClaimRejected(
+                            "STALE_RESUME_CLAIM",
+                            "ResumeClaim does not exist.",
+                        )
+                    if record.state != ResumeClaimState.CONSUMED.value:
+                        await uow.commit()
+                        raise ResumeClaimRejected(
+                            "STALE_RESUME_CLAIM",
+                            "ResumeClaim handoff requires CONSUMED authority.",
+                        )
+
+                    metadata = dict(record.metadata_json or {})
+                    existing = metadata.get("r7_g_handoff")
+                    if existing is not None:
+                        if existing != handoff:
+                            await uow.commit()
+                            raise ResumeClaimRejected(
+                                "RESUME_REQUEST_CONFLICT",
+                                "ResumeClaim already has a different handoff outcome.",
+                            )
+                        result = self._resume_claim_contract(record)
+                        await uow.commit()
+                        return result
+
+                    metadata["r7_g_handoff"] = handoff
+                    updated = await uow.agents.compare_and_set_resume_claim(
+                        claim_id,
+                        record.revision,
+                        ResumeClaimState.CONSUMED.value,
+                        {"metadata_json": metadata},
+                    )
+                    if updated is None:
+                        await uow.rollback()
+                        continue
+                    result = self._resume_claim_contract(updated)
+                    await uow.commit()
+                    return result
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise ResumeClaimDeferred(
+            "RESUME_CONFLICT",
+            "ResumeClaim handoff recording conflicts exhausted.",
+            retryable=True,
+        )
+
     async def get_or_create_resume_claim(
         self,
         intent: ResumeClaimIntent,
