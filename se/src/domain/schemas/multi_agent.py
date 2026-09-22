@@ -29,6 +29,14 @@ class AgentMessageType(str, Enum):
     AGENT_MESSAGE = "agent.message"
 
 
+class BranchResolutionState(str, Enum):
+    OPEN = "OPEN"
+    ADOPTED = "ADOPTED"
+    SUPERSEDED = "SUPERSEDED"
+    DISCARDED = "DISCARDED"
+    CANCELLED = "CANCELLED"
+
+
 class AgentSession(GatewayBaseModel):
     session_id: str
     owner_user_id: str
@@ -75,6 +83,29 @@ class AgentTask(GatewayBaseModel):
             values["status"] = AgentTaskStatus.WAITING
             values.setdefault("wait_reasons", ["CONNECTION"])
         return values
+
+
+class TaskBranch(GatewayBaseModel):
+    branch_id: str
+    task_id: str
+    parent_branch_id: Optional[str] = None
+    base_execution_id: Optional[str] = None
+    base_checkpoint_id: Optional[str] = None
+    current_execution_id: Optional[str] = None
+    resolution_state: BranchResolutionState = BranchResolutionState.OPEN
+    revision: int = Field(default=0, ge=0)
+    created_by: str
+    reason: Optional[str] = None
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+
+class TaskBranchContext(GatewayBaseModel):
+    branch_id: str
+    revision: int = Field(default=0, ge=0)
+    overlay_messages: List[Dict[str, Any]] = Field(default_factory=list)
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
 
 
 class AgentSessionCreateRequest(GatewayBaseModel):

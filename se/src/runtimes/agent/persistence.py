@@ -59,6 +59,7 @@ _EXECUTION_JSON_FIELDS = frozenset({
     "inference_response",
 })
 _TASK_JSON_FIELDS = frozenset({"wait_reasons", "input", "output"})
+_BRANCH_CONTEXT_JSON_FIELDS = frozenset({"overlay_messages"})
 _MESSAGE_JSON_FIELDS = frozenset({"payload"})
 _ITERATION_JSON_FIELDS = frozenset({
     "tool_call_ids",
@@ -96,6 +97,10 @@ class TaskConflictError(RuntimeError):
 
 class TaskBudgetConflictError(RuntimeError):
     """A durable TaskBudget revision compare-and-set lost a race."""
+
+
+class BranchConflictError(RuntimeError):
+    """A durable TaskBranch or BranchContext revision CAS lost a race."""
 
 
 def _utc_datetime(value: datetime | None) -> datetime | None:
@@ -163,6 +168,86 @@ class DurableAgentStore:
             if record is None:
                 raise TaskConflictError(
                     f"Stale AgentTask revision: {task_id}@{expected_revision}"
+                )
+            await uow.commit()
+            return record
+
+    async def save_task_branch(self, values: Dict[str, Any]):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.save_task_branch(dict(values))
+            await uow.commit()
+            return record
+
+    async def load_task_branch(self, branch_id: str):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_task_branch(branch_id)
+            await uow.commit()
+            return record
+
+    async def list_task_branches(self, task_id: str):
+        async with self.uow_factory() as uow:
+            records = await uow.agents.list_task_branches(task_id)
+            await uow.commit()
+            return records
+
+    async def compare_and_set_task_branch(
+        self,
+        branch_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.compare_and_set_task_branch(
+                branch_id,
+                expected_revision,
+                dict(values),
+            )
+            if record is None:
+                raise BranchConflictError(
+                    f"Stale TaskBranch revision: "
+                    f"{branch_id}@{expected_revision}"
+                )
+            await uow.commit()
+            return record
+
+    async def save_task_branch_context(self, values: Dict[str, Any]):
+        normalized = _normalize_json_fields(
+            values,
+            _BRANCH_CONTEXT_JSON_FIELDS,
+            path="agent_task_branch_contexts",
+        )
+        async with self.uow_factory() as uow:
+            record = await uow.agents.save_task_branch_context(normalized)
+            await uow.commit()
+            return record
+
+    async def load_task_branch_context(self, branch_id: str):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_task_branch_context(branch_id)
+            await uow.commit()
+            return record
+
+    async def compare_and_set_task_branch_context(
+        self,
+        branch_id: str,
+        expected_revision: int,
+        overlay_messages: List[Dict[str, Any]],
+    ):
+        normalized = _normalize_json_fields(
+            {"overlay_messages": overlay_messages},
+            _BRANCH_CONTEXT_JSON_FIELDS,
+            path="agent_task_branch_contexts",
+        )
+        async with self.uow_factory() as uow:
+            record = await uow.agents.compare_and_set_task_branch_context(
+                branch_id,
+                expected_revision,
+                normalized["overlay_messages"],
+            )
+            if record is None:
+                raise BranchConflictError(
+                    f"Stale TaskBranchContext revision: "
+                    f"{branch_id}@{expected_revision}"
                 )
             await uow.commit()
             return record

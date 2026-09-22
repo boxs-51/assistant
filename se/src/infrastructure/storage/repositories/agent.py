@@ -14,11 +14,19 @@ from ..models.sql.agent import (
     AgentSessionMemberRecord,
     AgentSessionRecord,
     AgentTaskRecord,
+    AgentTaskBranchContextRecord,
+    AgentTaskBranchRecord,
     TaskBudgetRecord,
     TaskBudgetReservationRecord,
     AgentToolCallRecord,
     AgentToolResultRecord,
 )
+
+
+_TASK_BRANCH_MUTABLE_FIELDS = frozenset({
+    "current_execution_id",
+    "resolution_state",
+})
 
 
 class AgentRepository(BaseRepository):
@@ -99,6 +107,94 @@ class AgentRepository(BaseRepository):
             return None
         await self.session.flush()
         return await self.get_task(task_id)
+
+    async def save_task_branch(self, values: Dict[str, Any]):
+        record = AgentTaskBranchRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_branch(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchRecord).where(
+                AgentTaskBranchRecord.branch_id == branch_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_task_branches(self, task_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchRecord)
+            .where(AgentTaskBranchRecord.task_id == task_id)
+            .order_by(
+                AgentTaskBranchRecord.created_at.asc(),
+                AgentTaskBranchRecord.branch_id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def compare_and_set_task_branch(
+        self,
+        branch_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        unexpected = set(values) - _TASK_BRANCH_MUTABLE_FIELDS
+        if unexpected:
+            raise ValueError(
+                "TaskBranch immutable fields cannot be changed by CAS: "
+                + ", ".join(sorted(unexpected))
+            )
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(AgentTaskBranchRecord)
+            .where(
+                AgentTaskBranchRecord.branch_id == branch_id,
+                AgentTaskBranchRecord.revision == expected_revision,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task_branch(branch_id)
+
+    async def save_task_branch_context(self, values: Dict[str, Any]):
+        record = AgentTaskBranchContextRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_branch_context(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchContextRecord).where(
+                AgentTaskBranchContextRecord.branch_id == branch_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def compare_and_set_task_branch_context(
+        self,
+        branch_id: str,
+        expected_revision: int,
+        overlay_messages: List[Dict[str, Any]],
+    ):
+        result = await self.session.execute(
+            update(AgentTaskBranchContextRecord)
+            .where(
+                AgentTaskBranchContextRecord.branch_id == branch_id,
+                AgentTaskBranchContextRecord.revision == expected_revision,
+            )
+            .values(
+                overlay_messages=overlay_messages,
+                revision=expected_revision + 1,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task_branch_context(branch_id)
 
     async def save_task_budget(self, values: Dict[str, Any]):
         record = TaskBudgetRecord(**values)
