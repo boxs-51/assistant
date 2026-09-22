@@ -912,9 +912,10 @@ async def test_r7_j_server_restart_while_waiting_resumes_from_sql_only(
 
         if restarted_state is not None:
             await restarted_state.supervisor.shutdown()
-            await restarted_state.engine.dispose()
         if restarted_server is not None:
             await _stop_gateway(
                 restarted_server,
                 restarted_server_task,
             )
+        if restarted_state is not None:
+            await restarted_state.engine.dispose()
