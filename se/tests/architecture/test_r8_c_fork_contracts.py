@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 
 from se.src.runtimes.agent.contracts.fork import (
     ForkPlan,
@@ -74,9 +74,9 @@ def test_r8_c_fork_request_id_is_not_semantic_fingerprint_input():
 def test_r8_c_mapping_key_order_does_not_change_fingerprint():
     first = _plan()
     mapping = {
-        key: value
-        for key, value in reversed(list(first.__dict__.items()))
-        if key not in {"plan_fingerprint", "fork_request_id"}
+        item.name: getattr(first, item.name)
+        for item in reversed(fields(ForkPlan))
+        if item.name not in {"plan_fingerprint", "fork_request_id"}
     }
     assert fork_plan_fingerprint(first) == fork_plan_fingerprint(mapping)
 
