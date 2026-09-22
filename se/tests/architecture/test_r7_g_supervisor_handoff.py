@@ -162,6 +162,22 @@ class _Store:
         return self.claim
 
 
+class _BlockingHandoffStore(_Store):
+    def __init__(self, plan):
+        super().__init__(plan)
+        self.handoff_started = asyncio.Event()
+        self.release_handoff = asyncio.Event()
+
+    async def record_resume_claim_handoff(self, claim_id, *, status, payload):
+        self.handoff_started.set()
+        await self.release_handoff.wait()
+        return await super().record_resume_claim_handoff(
+            claim_id,
+            status=status,
+            payload=payload,
+        )
+
+
 class _Runtime:
     def __init__(self, *, activation_error=None):
         self.activation_error = activation_error
@@ -461,4 +477,72 @@ async def test_r7_g_request_cancellation_after_claim_recovers_and_does_not_leak_
         item["type"] == "execution.resume.accepted"
         for item in socket.messages
     )
+    await supervisor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_r7_g_cancellation_during_accepted_handoff_drains_commit_then_replays():
+    plan = _plan()
+    store = _BlockingHandoffStore(plan)
+    runtime = _Runtime()
+    supervisor = AgentExecutionSupervisor()
+    planner = _Planner(plan, fail_after_first=True)
+    socket = _Socket(supervisor=supervisor, runtime=runtime)
+    container = _container(
+        plan,
+        store,
+        runtime,
+        supervisor,
+        planner=planner,
+    )
+
+    request_task = asyncio.create_task(
+        _resume_execution(
+            socket,
+            _identity(),
+            container,
+            K2,
+            _envelope(),
+        )
+    )
+    await store.handoff_started.wait()
+    assert supervisor.is_running(EXECUTION) is True
+    assert runtime.activation_calls == 1
+    assert runtime.execute_calls == 0
+
+    request_task.cancel()
+    await asyncio.sleep(0)
+    store.release_handoff.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+    await _drain_owned_task()
+
+    assert store.claim.metadata["r7_g_handoff"]["status"] == "ACCEPTED"
+    assert runtime.recover_calls == 0
+    assert runtime.execute_calls == 1
+    assert not any(
+        item["type"] == "execution.resume.accepted"
+        for item in socket.messages
+    )
+
+    retry_socket = _Socket(supervisor=supervisor, runtime=runtime)
+    await _resume_execution(
+        retry_socket,
+        _identity(),
+        container,
+        K2,
+        _envelope(),
+    )
+    replayed = [
+        item
+        for item in retry_socket.messages
+        if item["type"] == "execution.resume.accepted"
+    ]
+    assert len(replayed) == 1
+    assert replayed[0]["payload"]["claim_id"] == "claim-r7g"
+    assert store.consume_calls == 1
+    assert runtime.activation_calls == 1
+    assert runtime.execute_calls == 1
+    assert planner.calls == 1
     await supervisor.shutdown()
