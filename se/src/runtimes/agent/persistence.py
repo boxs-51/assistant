@@ -1758,14 +1758,79 @@ class DurableAgentStore:
                         source.checkpoint_id
                     )
                     if existing is not None:
-                        if (
-                            existing.execution_id != execution.id
-                            or existing.execution_revision != execution.revision
-                            or existing.legacy_source_key != source.legacy_source_key
+                        comparable_checkpoint = {
+                            "execution_id": execution.id,
+                            "execution_revision": execution.revision,
+                            "session_id": execution.session_id,
+                            "task_id": execution.task_id,
+                            "branch_id": execution.branch_id,
+                            "parent_checkpoint_id": source.parent_checkpoint_id,
+                            "iteration": source.iteration,
+                            "wait_reason": "CONNECTION",
+                            "origin_client_id": source.origin_client_id,
+                            "origin_connection_id": source.origin_connection_id,
+                            "legacy_source_key": source.legacy_source_key,
+                        }
+                        for field, expected in comparable_checkpoint.items():
+                            if getattr(existing, field) != expected:
+                                raise LegacyCheckpointMaterializationError(
+                                    "LEGACY_CHECKPOINT_UNSAFE",
+                                    "Legacy checkpoint id collides with different "
+                                    f"normalized {field} semantics.",
+                                )
+                        if tuple(existing.transcript_snapshot or ()) != tuple(
+                            checkpoint_values["transcript_snapshot"] or ()
                         ):
                             raise LegacyCheckpointMaterializationError(
                                 "LEGACY_CHECKPOINT_UNSAFE",
-                                "Legacy checkpoint id collides with different normalized semantics.",
+                                "Legacy checkpoint transcript snapshot differs.",
+                            )
+
+                        persisted_pending = (
+                            await uow.agents.list_checkpoint_pending_invocations(
+                                source.checkpoint_id
+                            )
+                        )
+                        expected_pending = tuple(
+                            (
+                                int(item["ordinal"]),
+                                str(item["invocation_id"]),
+                                int(item["invocation_revision"]),
+                                str(item["tool_call_id"]),
+                                str(item["capability_id"]),
+                                item["capability_version"],
+                                item["request_fingerprint"],
+                                str(item["idempotency"]),
+                                (
+                                    str(item["observed_remote_outcome_state"])
+                                    if item["observed_remote_outcome_state"] is not None
+                                    else None
+                                ),
+                                item["origin_client_id"],
+                                item["origin_connection_id"],
+                            )
+                            for item in pending_values
+                        )
+                        actual_pending = tuple(
+                            (
+                                item.ordinal,
+                                item.invocation_id,
+                                item.invocation_revision,
+                                item.tool_call_id,
+                                item.capability_id,
+                                item.capability_version,
+                                item.request_fingerprint,
+                                item.idempotency,
+                                item.observed_remote_outcome_state,
+                                item.origin_client_id,
+                                item.origin_connection_id,
+                            )
+                            for item in persisted_pending
+                        )
+                        if actual_pending != expected_pending:
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Legacy checkpoint pending invocation snapshot differs.",
                             )
                     else:
                         await uow.agents.save_execution_checkpoint(
