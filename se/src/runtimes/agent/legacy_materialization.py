@@ -24,6 +24,9 @@ class LegacyCheckpointSource:
     origin_connection_id: str | None
     origin_client_id: str | None
     owner_user_id: str | None
+    pending_invocation_id: str
+    pending_tool_call_id: str
+    pending_capability_id: str
     transcript: tuple[dict[str, Any], ...]
     metadata: Mapping[str, Any]
 
@@ -154,6 +157,22 @@ def parse_legacy_checkpoint_source(
             "CHECKPOINT_INCOMPLETE",
             "Legacy checkpoint iteration is invalid.",
         )
+    pending_invocation_id = raw.get("pending_invocation_id")
+    pending_tool_call_id = raw.get("pending_tool_call_id")
+    pending_capability_id = raw.get("pending_capability_id")
+    if not all(
+        isinstance(value, str) and value
+        for value in (
+            pending_invocation_id,
+            pending_tool_call_id,
+            pending_capability_id,
+        )
+    ):
+        raise LegacyCheckpointMaterializationError(
+            "CHECKPOINT_INCOMPLETE",
+            "Legacy CONNECTION checkpoint lacks its pending invocation identity.",
+        )
+
     transcript_raw = raw.get("transcript")
     if not isinstance(transcript_raw, (list, tuple)):
         raise LegacyCheckpointMaterializationError(
@@ -189,6 +208,9 @@ def parse_legacy_checkpoint_source(
             str(origin_client_id) if origin_client_id else None
         ),
         owner_user_id=(str(owner_user_id) if owner_user_id else None),
+        pending_invocation_id=pending_invocation_id,
+        pending_tool_call_id=pending_tool_call_id,
+        pending_capability_id=pending_capability_id,
         transcript=tuple(transcript),
         metadata=metadata,
     )
