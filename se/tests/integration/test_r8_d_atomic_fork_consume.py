@@ -605,6 +605,77 @@ async def test_r8_d_delegated_source_preserves_parent_and_parallel_charge(
             assert forked.base_checkpoint_id == checkpoint_id
             assert forked.branch_id == admission.branch_id
             assert forked.remaining_active_budget_seconds == 18.0
+
+        # Prove the preserved delegation edge remains valid after it has
+        # crossed a FORK boundary: E2 is in B2 while its parent stays in B1.
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentIterationRecord(
+                    id="iter-delegated-forked",
+                    execution_id=admission.execution_id,
+                    iteration=1,
+                    state="WAITING",
+                    tool_call_ids=[],
+                )
+            )
+            await uow.commit()
+
+        second_checkpoint_id = "cp-delegated-forked"
+        assert await service.finish_task_scoped_execution(
+            task_id,
+            execution_id=admission.execution_id,
+            source_revision=1,
+            transition_values={
+                "state": "WAITING",
+                "wait_reason": "RESOURCE",
+                "remaining_active_budget_seconds": 18.0,
+                "completed_at": None,
+            },
+            delegated=True,
+            checkpoint_values={
+                "checkpoint_id": second_checkpoint_id,
+                "execution_id": admission.execution_id,
+                "execution_revision": 2,
+                "session_id": session_id,
+                "task_id": task_id,
+                "branch_id": admission.branch_id,
+                "iteration": 1,
+                "wait_reason": "RESOURCE",
+                "remaining_active_budget_seconds": 18.0,
+                "transcript_snapshot": [
+                    {"role": "user", "content": "delegated-forked-base"}
+                ],
+                "metadata_json": {},
+            },
+        ) == 2
+
+        second_plan = await planner.build_fork_plan(
+            fork_request_id="fork-delegated-second-hop",
+            task_id=task_id,
+            source_branch_id=admission.branch_id,
+            source_execution_id=admission.execution_id,
+            source_checkpoint_id=second_checkpoint_id,
+            target_user_id="user-r8-d",
+            overlay_messages=(),
+        )
+        before_second = await service.get_budget(task_id)
+        assert before_second.active_parallel_agents == 0
+        second = await service.consume_fork_plan(second_plan)
+        after_second = await service.get_budget(task_id)
+        assert after_second.active_parallel_agents == 1
+
+        async with _Uow(sessions) as uow:
+            second_branch = await uow.agents.get_task_branch(
+                second.branch_id
+            )
+            second_execution = await uow.agents.get_execution(
+                second.execution_id
+            )
+            assert second_branch.parent_branch_id == admission.branch_id
+            assert second_execution.parent_execution_id == root_execution_id
+            assert second_execution.parent_execution_id != admission.execution_id
+            assert second_execution.base_execution_id == admission.execution_id
+            assert second_execution.base_checkpoint_id == second_checkpoint_id
     finally:
         await engine.dispose()
 
