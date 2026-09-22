@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import select, update
+from sqlalchemy import or_, select, update
 
 from ..interfaces.repository import BaseRepository
 from ..models.sql.agent import (
@@ -197,8 +197,13 @@ class AgentRepository(BaseRepository):
             )
             .where(
                 ChatSessionRecord.user_id == owner_user_id,
-                AgentExecutionRecord.state == "WAITING",
-                AgentExecutionRecord.wait_reason == "CONNECTION",
+                AgentExecutionRecord.state.in_(
+                    ("WAITING", "WAITING_FOR_CONNECTION")
+                ),
+                or_(
+                    AgentExecutionRecord.wait_reason == "CONNECTION",
+                    AgentExecutionRecord.wait_reason.is_(None),
+                ),
                 AgentExecutionRecord.current_checkpoint_id.is_(None),
             )
             .order_by(
@@ -223,11 +228,18 @@ class AgentRepository(BaseRepository):
             .where(
                 AgentExecutionRecord.id == execution_id,
                 AgentExecutionRecord.revision == expected_revision,
-                AgentExecutionRecord.state == "WAITING",
-                AgentExecutionRecord.wait_reason == "CONNECTION",
+                AgentExecutionRecord.state.in_(
+                    ("WAITING", "WAITING_FOR_CONNECTION")
+                ),
+                or_(
+                    AgentExecutionRecord.wait_reason == "CONNECTION",
+                    AgentExecutionRecord.wait_reason.is_(None),
+                ),
                 AgentExecutionRecord.current_checkpoint_id.is_(None),
             )
             .values(
+                state="WAITING",
+                wait_reason="CONNECTION",
                 current_checkpoint_id=checkpoint_id,
                 bound_client_id=bound_client_id,
                 bound_connection_id=None,
