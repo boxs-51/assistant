@@ -1308,7 +1308,8 @@ async def test_r7_j_real_tcp_two_resume_requests_have_one_authority_winner(
             plans_ready.append(
                 (
                     plan.target_connection_id,
-                    plan.plan_fingerprint,
+                    plan.checkpoint_id,
+                    plan.expected_execution_revision,
                 )
             )
             if len(plans_ready) >= 2:
@@ -1353,8 +1354,13 @@ async def test_r7_j_real_tcp_two_resume_requests_have_one_authority_winner(
         assert rejected[0]["payload"]["code"] == "RESUME_CONFLICT"
         assert rejected[0]["payload"]["retryable"] is True
         assert len(plans_ready) == 2
-        assert plans_ready[0][1] != ""
-        assert plans_ready[0][1] == plans_ready[1][1]
+        assert plans_ready[0][0] != plans_ready[1][0]
+        assert plans_ready[0][1] == plans_ready[1][1] == checkpoint.checkpoint_id
+        assert (
+            plans_ready[0][2]
+            == plans_ready[1][2]
+            == waiting_execution.revision
+        )
 
         winner_connection = accepted[0]["connection_id"]
         winner_request_id = accepted[0]["payload"]["resume_request_id"]
