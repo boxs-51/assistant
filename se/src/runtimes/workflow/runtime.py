@@ -11,6 +11,7 @@ from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ..agent.contracts.context import AgentExecutionContext
 from ..agent.adapters.messages import jsonable
 from ..agent.ids import AgentExecutionIdFactory
+from ..agent.waiting_ticket import build_waiting_ticket_payload
 
 logger = structlog.get_logger(__name__)
 
@@ -304,23 +305,55 @@ class WorkflowRuntime(BaseRuntime):
                     if not pending_capability_ids
                     else None
                 )
-                waiting = {
-                    "status": "WAITING_FOR_CONNECTION",
-                    "wait_reason": "CONNECTION",
-                    "execution_id": result.execution_id,
-                    "checkpoint_id": (
-                        checkpoint.checkpoint_id
-                        if checkpoint is not None
-                        else result.checkpoint_id
-                    ),
-                    "pending_capability_id": (
-                        pending_capability_ids[0]
-                        if pending_capability_ids
-                        else legacy_pending
-                    ),
-                    "pending_capability_ids": pending_capability_ids,
-                    "retry_policy": "USER_CONFIRM",
-                }
+                waiting = None
+                execution = None
+                execution_loader = getattr(
+                    durable_store,
+                    "load_execution",
+                    None,
+                )
+                if checkpoint is not None and callable(execution_loader):
+                    execution = await execution_loader(result.execution_id)
+                if execution is not None and checkpoint is not None:
+                    waiting = build_waiting_ticket_payload(
+                        execution,
+                        checkpoint,
+                        pending,
+                    )
+                    waiting.update(
+                        {
+                            "status": "WAITING_FOR_CONNECTION",
+                            "retry_policy": "AUTO"
+                            if waiting["auto_resume_allowed"]
+                            else "USER_CONFIRM",
+                            "pending_capability_id": (
+                                pending_capability_ids[0]
+                                if pending_capability_ids
+                                else legacy_pending
+                            ),
+                        }
+                    )
+                else:
+                    # Compatibility-only fallback. Missing normalized revision
+                    # is intentionally insufficient for automatic client resume.
+                    waiting = {
+                        "status": "WAITING_FOR_CONNECTION",
+                        "wait_reason": "CONNECTION",
+                        "execution_id": result.execution_id,
+                        "checkpoint_id": (
+                            checkpoint.checkpoint_id
+                            if checkpoint is not None
+                            else result.checkpoint_id
+                        ),
+                        "pending_capability_id": (
+                            pending_capability_ids[0]
+                            if pending_capability_ids
+                            else legacy_pending
+                        ),
+                        "pending_capability_ids": pending_capability_ids,
+                        "retry_policy": "USER_CONFIRM",
+                        "auto_resume_allowed": False,
+                    }
                 if body.get("config", {}).get("stream"):
                     await self.event_bus.publish(BaseEvent(
                         event_name="provider.stream.chunk_emitted",
