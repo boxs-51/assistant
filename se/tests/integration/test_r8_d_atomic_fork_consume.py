@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timezone
 
@@ -12,7 +13,14 @@ from se.src.domain.schemas.task_budget import (
     TaskBudgetLimits,
     TaskBudgetPolicy,
 )
-from se.src.infrastructure.storage.models.sql.agent import AgentIterationRecord
+from se.src.infrastructure.storage.models.sql.agent import (
+    AgentCheckpointPendingInvocationRecord,
+    AgentIterationRecord,
+    AgentToolResultRecord,
+)
+from se.src.infrastructure.storage.models.sql.capability import (
+    CapabilityInvocationRecord,
+)
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.capability_invocations import (
@@ -627,6 +635,193 @@ async def test_r8_d_different_requests_at_final_capacity_have_one_winner(
         assert budget.active_branches == 2
         assert budget.used_executions == 2
         assert budget.active_executions == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "task",
+        "branch",
+        "execution",
+        "checkpoint",
+        "transcript",
+        "pending",
+        "side-effect",
+        "budget",
+    ],
+)
+async def test_r8_d_revalidates_plan_inside_consume_transaction(
+    tmp_path,
+    mutation,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name=f"r8_d_stale_{mutation}.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id=f"task-stale-{mutation}",
+        )
+
+        async with _Uow(sessions) as uow:
+            if mutation == "task":
+                await uow.session.execute(
+                    text(
+                        """
+                        UPDATE agent_tasks
+                        SET revision = revision + 1
+                        WHERE id = :task_id
+                        """
+                    ),
+                    {"task_id": source["task_id"]},
+                )
+            elif mutation == "branch":
+                await uow.session.execute(
+                    text(
+                        """
+                        UPDATE agent_task_branches
+                        SET revision = revision + 1
+                        WHERE branch_id = :branch_id
+                        """
+                    ),
+                    {"branch_id": source["source_branch_id"]},
+                )
+            elif mutation == "execution":
+                await uow.session.execute(
+                    text(
+                        """
+                        UPDATE agent_executions
+                        SET revision = revision + 1
+                        WHERE id = :execution_id
+                        """
+                    ),
+                    {"execution_id": source["source_execution_id"]},
+                )
+            elif mutation == "checkpoint":
+                await uow.session.execute(
+                    text(
+                        """
+                        UPDATE agent_execution_checkpoints
+                        SET iteration = iteration + 1
+                        WHERE checkpoint_id = :checkpoint_id
+                        """
+                    ),
+                    {"checkpoint_id": source["checkpoint_id"]},
+                )
+            elif mutation == "transcript":
+                await uow.session.execute(
+                    text(
+                        """
+                        UPDATE agent_execution_checkpoints
+                        SET transcript_snapshot = :snapshot
+                        WHERE checkpoint_id = :checkpoint_id
+                        """
+                    ),
+                    {
+                        "checkpoint_id": source["checkpoint_id"],
+                        "snapshot": json.dumps(
+                            [{"role": "user", "content": "changed"}]
+                        ),
+                    },
+                )
+            elif mutation == "pending":
+                uow.session.add(
+                    AgentCheckpointPendingInvocationRecord(
+                        checkpoint_id=source["checkpoint_id"],
+                        ordinal=0,
+                        invocation_id="inv-stale",
+                        invocation_revision=1,
+                        tool_call_id="call-stale",
+                        capability_id="tool.stale",
+                        capability_version="1",
+                        request_fingerprint="s" * 64,
+                        idempotency="IDEMPOTENT",
+                        observed_remote_outcome_state="TERMINAL_COMMITTED",
+                    )
+                )
+            elif mutation == "side-effect":
+                uow.session.add(
+                    CapabilityInvocationRecord(
+                        invocation_id="inv-late-effect",
+                        capability_id="tool.late",
+                        capability_version="1",
+                        kind="TOOL",
+                        execution_mode="ONE_SHOT",
+                        idempotency="IDEMPOTENT",
+                        request_fingerprint="e" * 64,
+                        remote_outcome_state="TERMINAL_COMMITTED",
+                        driver_kind="LOCAL",
+                        state="COMPLETED",
+                        execution_id=source["source_execution_id"],
+                        tool_call_id="call-late-effect",
+                        attempt=1,
+                        max_attempts=1,
+                        arguments={},
+                        output={"late": True},
+                        revision=1,
+                    )
+                )
+                uow.session.add(
+                    AgentToolResultRecord(
+                        id="result-late-effect",
+                        execution_id=source["source_execution_id"],
+                        iteration_id=f"iter-{source['task_id']}",
+                        tool_call_id="call-late-effect",
+                        invocation_id="inv-late-effect",
+                        capability_id="tool.late",
+                        success=True,
+                        output={"late": True},
+                        retryable=False,
+                        commit_state="COMMITTED",
+                        attempt=1,
+                    )
+                )
+            elif mutation == "budget":
+                await uow.session.execute(
+                    text(
+                        """
+                        UPDATE agent_task_budgets
+                        SET revision = revision + 1
+                        WHERE task_id = :task_id
+                        """
+                    ),
+                    {"task_id": source["task_id"]},
+                )
+            await uow.commit()
+
+        with pytest.raises(ForkConsumeError):
+            await service.consume_fork_plan(source["plan"])
+
+        async with _Uow(sessions) as uow:
+            assert await uow.session.scalar(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM agent_task_fork_admissions
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {"task_id": source["task_id"]},
+            ) == 0
+            assert len(
+                await uow.agents.list_task_branches(source["task_id"])
+            ) == 1
+            assert await uow.session.scalar(
+                text(
+                    """
+                    SELECT COUNT(*)
+                    FROM agent_executions
+                    WHERE task_id = :task_id
+                    """
+                ),
+                {"task_id": source["task_id"]},
+            ) == 1
     finally:
         await engine.dispose()
 
