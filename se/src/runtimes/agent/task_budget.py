@@ -782,7 +782,6 @@ class TaskBudgetService:
             or branch.parent_branch_id != receipt.source_branch_id
             or branch.base_execution_id != receipt.source_execution_id
             or branch.base_checkpoint_id != receipt.source_checkpoint_id
-            or branch.current_execution_id != receipt.execution_id
             or execution.task_id != plan.task_id
             or execution.branch_id != receipt.branch_id
             or execution.base_execution_id != receipt.source_execution_id
