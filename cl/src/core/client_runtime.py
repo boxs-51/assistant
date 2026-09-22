@@ -617,12 +617,21 @@ class ClientRuntime:
 
         key = ticket.key
         if outcome.kind == "ACCEPTED":
+            authority_floor = ticket.revision + 1
             if outcome.accepted_revision is None:
+                # The frame type says authority was acquired, even though the
+                # revision field is malformed. Tombstone C1 at N+1 and fail
+                # closed rather than allowing a duplicate WAITING@N revival.
+                self._advance_resume_watermark_locked(
+                    ticket.execution_id,
+                    authority_floor,
+                )
+                entry.last_outcome_code = "RESUME_PROTOCOL_CONFLICT"
                 entry.state = ResumeTicketState.CONFLICT
                 return
             self._advance_resume_watermark_locked(
                 ticket.execution_id,
-                outcome.accepted_revision,
+                max(authority_floor, outcome.accepted_revision),
             )
             entry.state = ResumeTicketState.ACCEPTED
             self._pending_resume_tickets.pop(key, None)
@@ -633,11 +642,12 @@ class ClientRuntime:
             # if recovery checkpointing itself failed and no recovery_revision
             # is available, C1 is stale because WAITING@N already advanced at
             # least to RUNNING@N+1.
-            authority_floor = (
-                outcome.recovery_revision
-                if outcome.recovery_revision is not None
-                else ticket.revision + 1
-            )
+            authority_floor = ticket.revision + 1
+            if outcome.recovery_revision is not None:
+                authority_floor = max(
+                    authority_floor,
+                    outcome.recovery_revision,
+                )
             self._advance_resume_watermark_locked(
                 ticket.execution_id,
                 authority_floor,
