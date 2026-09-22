@@ -22,6 +22,7 @@ from ..connection.contracts import ConnectionNotFoundError
 from ..capability.contracts.reconciliation import RemoteReconciliationStatus
 from ..connection.multiplexer import RemoteConnectionLost
 from .contracts.inference import InferenceMessage
+from .legacy_materialization import LegacyCheckpointMaterializationError
 from .contracts.resume import (
     CheckpointPendingInvocation,
     ResumeInvocationAction,
@@ -136,6 +137,22 @@ class AgentResumePlanningService:
             target_client_id=target_client_id,
             target_connection_id=target_connection_id,
         )
+
+        materializer = getattr(
+            self._store,
+            "materialize_legacy_checkpoint",
+            None,
+        )
+        if callable(materializer):
+            try:
+                await materializer(
+                    execution_id,
+                    requested_checkpoint_id=checkpoint_id,
+                    target_user_id=target_user_id,
+                    target_client_id=target_client_id,
+                )
+            except LegacyCheckpointMaterializationError as exc:
+                raise ResumePlanRejected(exc.code, str(exc)) from exc
 
         execution = await self._store.load_execution(execution_id)
         if execution is None:
