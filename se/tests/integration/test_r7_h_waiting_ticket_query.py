@@ -6,7 +6,9 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
-    AgentSessionRecord,
+)
+from se.src.infrastructure.storage.models.sql.chat_data.session import (
+    Session as ChatSessionRecord,
 )
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
@@ -50,9 +52,10 @@ async def _seed_waiting(
 ):
     async with sessions() as session:
         session.add(
-            AgentSessionRecord(
+            ChatSessionRecord(
                 id=session_id,
-                owner_user_id=user_id,
+                user_id=user_id,
+                organization_id=None,
             )
         )
         session.add(

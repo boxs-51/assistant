@@ -4,6 +4,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select, update
 
 from ..interfaces.repository import BaseRepository
+from ..models.sql.chat_data.session import Session as ChatSessionRecord
 from ..models.sql.agent import (
     AgentCheckpointPendingInvocationRecord,
     AgentExecutionCheckpointRecord,
@@ -191,11 +192,11 @@ class AgentRepository(BaseRepository):
         result = await self.session.execute(
             select(AgentExecutionRecord)
             .join(
-                AgentSessionRecord,
-                AgentSessionRecord.id == AgentExecutionRecord.session_id,
+                ChatSessionRecord,
+                ChatSessionRecord.id == AgentExecutionRecord.session_id,
             )
             .where(
-                AgentSessionRecord.owner_user_id == owner_user_id,
+                ChatSessionRecord.user_id == owner_user_id,
                 AgentExecutionRecord.state == "WAITING",
                 AgentExecutionRecord.wait_reason == "CONNECTION",
                 AgentExecutionRecord.bound_client_id == client_id,
