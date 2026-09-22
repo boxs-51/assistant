@@ -88,6 +88,23 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def get_task_for_update(
+        self,
+        task_id: str,
+    ) -> Optional[AgentTaskRecord]:
+        """Lock one AgentTask revision for an atomic multi-row admission.
+
+        PostgreSQL/MySQL honor FOR UPDATE. SQLite safely compiles this as its
+        dialect permits while the existing CAS/transaction fences remain the
+        test/runtime backstop.
+        """
+        result = await self.session.execute(
+            select(AgentTaskRecord)
+            .where(AgentTaskRecord.id == task_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def compare_and_set_task(
         self,
         task_id: str,
