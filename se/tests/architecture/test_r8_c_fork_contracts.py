@@ -36,7 +36,6 @@ def _plan(**updates):
     effects = updates.pop("side_effects", (_effect(),))
     values = {
         "fork_request_id": "fork-request-a",
-        "plan_fingerprint": "",
         "task_id": "task-1",
         "expected_task_revision": 3,
         "session_id": "session-1",
