@@ -614,3 +614,34 @@ def test_duplicate_waiting_event_cannot_reopen_in_flight_ticket():
             assert runtime._claim_resume_attempt_locked(ticket.key) is None
     finally:
         runtime.stop()
+
+
+def test_malformed_resume_outcome_fails_closed_without_replay_loop():
+    runtime = _runtime()
+
+    def malformed(execution_id, checkpoint_id, request_id):
+        return {
+            "type": "execution.resume.accepted",
+            "connection_id": "conn-1",
+            "execution_id": execution_id,
+            "payload": {
+                "execution_id": execution_id,
+                "checkpoint_id": checkpoint_id,
+                # Missing resume_request_id is a semantic protocol violation.
+                "accepted_revision": 9,
+            },
+        }
+
+    fake = _FakeRealtime("conn-1", malformed)
+    _install_ready_transport(runtime, fake)
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        _wait(lambda: len(fake.calls) == 1)
+        time.sleep(0.1)
+        assert len(fake.calls) == 1
+        with runtime._lock:
+            entry = runtime._pending_resume_tickets[("exec-1", "cp-1")]
+            assert entry.state is ResumeTicketState.CONFLICT
+            assert entry.last_outcome_code == "RESUME_PROTOCOL_CONFLICT"
+    finally:
+        runtime.stop()
