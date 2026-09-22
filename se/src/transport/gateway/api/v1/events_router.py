@@ -78,6 +78,41 @@ async def _ensure_connection(websocket, identity, connection_runtime, envelope):
 _R7_G_CLAIM_TTL = timedelta(minutes=1)
 
 
+async def _publish_waiting_tickets(
+    websocket: WebSocket,
+    identity: Identity,
+    container: ApplicationContainer,
+    *,
+    connection_id: str,
+    client_id: str,
+) -> None:
+    """Replay current normalized WAITING(CONNECTION) tickets after capability ACK.
+
+    Publication is read-only and deliberately does not build ResumePlan,
+    create/consume ResumeClaim, or mutate AgentExecution lifecycle state.
+    """
+
+    durable_store = getattr(container, "agent_durable_store", None)
+    loader = getattr(durable_store, "load_pending_resume_tickets", None)
+    if not callable(loader):
+        return
+    tickets = await loader(
+        owner_user_id=identity.user_id or "",
+        client_id=client_id,
+    )
+    for payload in tickets:
+        await _send_realtime(
+            websocket,
+            RealtimeEnvelope(
+                type="execution.waiting",
+                message_id=f"waiting-{uuid.uuid4().hex}",
+                connection_id=connection_id,
+                execution_id=payload.get("execution_id"),
+                payload=dict(payload),
+            ),
+        )
+
+
 def _resume_exception_code(exc: BaseException, fallback: str) -> str:
     code = getattr(exc, "code", None)
     if code:
@@ -1128,6 +1163,13 @@ async def websocket_endpoint(
                                     ]
                                 },
                             ),
+                        )
+                        await _publish_waiting_tickets(
+                            websocket,
+                            identity,
+                            container,
+                            connection_id=active_connection_id,
+                            client_id=request.client_id,
                         )
                     elif envelope.type == "execution.resume":
                         await _resume_execution(
