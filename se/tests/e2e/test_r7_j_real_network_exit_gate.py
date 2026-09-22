@@ -327,28 +327,36 @@ async def _close_k1(generation):
     generation.dispatcher.shutdown()
 
 
-async def _build_server(tmp_path):
-    db_path = tmp_path / "r7-j-server.sqlite3"
+async def _build_server(
+    tmp_path,
+    *,
+    db_path: Path | None = None,
+    initialize_schema: bool = True,
+    seed_session: bool = True,
+):
+    db_path = db_path or (tmp_path / "r7-j-server.sqlite3")
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{db_path.as_posix()}",
         connect_args={"timeout": 5},
     )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
+    if initialize_schema:
+        async with engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     uow_factory = lambda: _SqliteUow(sessions)
     durable_store = DurableAgentStore(uow_factory)
 
-    async with sessions() as session:
-        session.add(
-            ChatSessionRecord(
-                id=SESSION_ID,
-                user_id=USER_ID,
-                organization_id=None,
-                status="active",
+    if seed_session:
+        async with sessions() as session:
+            session.add(
+                ChatSessionRecord(
+                    id=SESSION_ID,
+                    user_id=USER_ID,
+                    organization_id=None,
+                    status="active",
+                )
             )
-        )
-        await session.commit()
+            await session.commit()
 
     catalog = CapabilityCatalog()
     registration = ClientCapabilityRegistrationService(catalog, None)
@@ -427,6 +435,7 @@ async def _build_server(tmp_path):
     app.dependency_overrides[get_websocket_identity] = lambda: identity
 
     return SimpleNamespace(
+        db_path=db_path,
         engine=engine,
         sessions=sessions,
         durable_store=durable_store,
