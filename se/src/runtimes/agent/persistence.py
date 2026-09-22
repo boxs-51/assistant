@@ -1879,6 +1879,19 @@ class DurableAgentStore:
                     "LEGACY_CHECKPOINT_UNSAFE",
                     "Concurrent legacy materialization produced conflicting rows.",
                 )
+            except ExecutionConflictError:
+                current = await self.load_current_checkpoint(execution_id)
+                if (
+                    current is not None
+                    and (
+                        requested_checkpoint_id is None
+                        or current.checkpoint_id == requested_checkpoint_id
+                    )
+                ):
+                    return current
+                if attempt < 2:
+                    continue
+                raise
             except OperationalError as exc:
                 message = str(exc).lower()
                 if attempt < 2 and ("locked" in message or "busy" in message):
