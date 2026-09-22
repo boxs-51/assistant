@@ -12,7 +12,6 @@ from .contracts.fork import (
     fork_transcript_fingerprint,
 )
 from .contracts.inference import InferenceMessage
-from .persistence import ExecutionConflictError
 from .serialization import to_json_safe
 
 
@@ -128,6 +127,10 @@ class AgentForkPlanningService:
                 "FORK_STALE_CHECKPOINT",
                 "Requested checkpoint is not AgentExecution.current_checkpoint_id.",
             )
+
+        # Lazy import avoids persistence -> task_budget -> fork_planning
+        # module-cycle after R8-D adds transaction-scoped consume helpers.
+        from .persistence import ExecutionConflictError
 
         try:
             checkpoint = await self._store.load_current_checkpoint(
