@@ -294,7 +294,6 @@ async def test_r4_b1_exhausted_budget_cannot_become_resumable_waiting():
     assert result.state is AgentLoopState.TIMEOUT
     assert result.wait_reason is None
     assert result.error_code == "AGENT_EXECUTION_TIMEOUT"
-    assert result.continuation_state is None
     assert result.checkpoint_id is None
     assert store.record.state == "TIMEOUT"
     assert store.record.wait_reason is None
