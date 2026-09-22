@@ -47,15 +47,24 @@ def parse_legacy_checkpoint_source(
     shape and identity of the legacy source before R6-backed materialization.
     """
 
-    if str(getattr(execution, "state", "")) != "WAITING":
+    raw_execution_state = getattr(execution, "state", "")
+    execution_state = getattr(raw_execution_state, "value", raw_execution_state)
+    raw_wait_reason = getattr(execution, "wait_reason", None)
+    execution_wait_reason = getattr(raw_wait_reason, "value", raw_wait_reason)
+    if str(execution_state) not in {"WAITING", "WAITING_FOR_CONNECTION"}:
         raise LegacyCheckpointMaterializationError(
             "EXECUTION_NOT_WAITING",
             "Legacy materialization requires a WAITING AgentExecution.",
         )
-    if str(getattr(execution, "wait_reason", "")) != "CONNECTION":
+    if execution_wait_reason not in {None, "", "CONNECTION"}:
         raise LegacyCheckpointMaterializationError(
             "WAIT_REASON_MISMATCH",
             "Only legacy WAITING(CONNECTION) can be materialized by R7-I.",
+        )
+    if str(execution_state) == "WAITING" and execution_wait_reason != "CONNECTION":
+        raise LegacyCheckpointMaterializationError(
+            "WAIT_REASON_MISMATCH",
+            "Normalized WAITING legacy input requires CONNECTION wait_reason.",
         )
 
     context_state = dict(getattr(execution, "context_state", None) or {})
