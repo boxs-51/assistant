@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
@@ -224,7 +225,7 @@ async def test_r8_c_valid_plan_is_read_only_and_stable():
         (lambda s: setattr(s.branch, "current_execution_id", "exec-old"), "FORK_BRANCH_CURRENT_EXECUTION_CONFLICT"),
         (lambda s: setattr(s.execution, "state", "RUNNING"), "FORK_SOURCE_NOT_WAITING"),
         (lambda s: setattr(s.execution, "branch_id", "branch-other"), "FORK_EXECUTION_LINEAGE_CONFLICT"),
-        (lambda s: setattr(s.checkpoint, "branch_id", "branch-other"), "FORK_CHECKPOINT_LINEAGE_CONFLICT"),
+        (lambda s: setattr(s, "checkpoint", replace(s.checkpoint, branch_id="branch-other")), "FORK_CHECKPOINT_LINEAGE_CONFLICT"),
     ],
 )
 async def test_r8_c_rejects_source_lineage_conflicts(mutation, code):
