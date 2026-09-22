@@ -27,7 +27,8 @@ from se.src.runtimes.agent.runtime import AgentRuntime
 ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_9_EXIT_GATE.md"
 LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "legacy" / "phase5" / "Agent_Execution_System.md"
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-9-exit-gate.yml"
+ARCHITECTURE_WORKFLOW = ROOT / ".github" / "workflows" / "architecture-baseline.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-exit-gates.yml"
 
 def test_E1_execution_plane_models_persist_expected_links():
     engine = create_engine("sqlite:///:memory:")
@@ -306,8 +307,9 @@ async def test_E4_resumed_committed_tool_result_is_not_dispatched_again():
 
 def test_E5_ci_declares_full_suite_and_phase_5_9_gate():
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    assert "python -m pytest -q" in workflow
-    assert "python -m pytest -q se/tests/architecture/test_phase5_9_exit_gate.py" in workflow
+    baseline = ARCHITECTURE_WORKFLOW.read_text(encoding="utf-8")
+    assert "python -m pytest -q" in baseline
+    assert "se/tests/architecture/test_phase5_9_exit_gate.py" in workflow
     assert "pull_request:" in workflow
 
 

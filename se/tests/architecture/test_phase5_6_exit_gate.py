@@ -19,7 +19,8 @@ from se.src.runtimes.agent.tool_execution import AgentToolExecutionCoordinator
 ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_6_EXIT_GATE.md"
 LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "legacy" / "phase5" / "Agent_Execution_System.md"
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-6-exit-gate.yml"
+ARCHITECTURE_WORKFLOW = ROOT / ".github" / "workflows" / "architecture-baseline.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-exit-gates.yml"
 
 
 def make_context(
@@ -298,12 +299,10 @@ def test_E5_ci_declares_full_suite_and_exit_gate_as_blocking_checks():
     final E5 release decision; this test verifies the CI contract is present.
     """
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    baseline = ARCHITECTURE_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "python -m pytest -q" in workflow
-    assert (
-        "python -m pytest -q se/tests/architecture/test_phase5_6_exit_gate.py"
-        in workflow
-    )
+    assert "python -m pytest -q" in baseline
+    assert "se/tests/architecture/test_phase5_6_exit_gate.py" in workflow
     assert "exit 1" not in workflow
     assert "on:" in workflow
     assert "pull_request:" in workflow
