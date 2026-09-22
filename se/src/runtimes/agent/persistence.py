@@ -865,6 +865,31 @@ class DurableAgentStore:
                         "FORK_COMMITTED_RESULT_CONFLICT: tool-result identity "
                         "does not match source execution."
                     )
+
+                invocation_repository = getattr(
+                    uow,
+                    "capability_invocations",
+                    None,
+                )
+                if invocation_repository is None:
+                    raise ExecutionConflictError(
+                        "FORK_INVOCATION_STORE_UNAVAILABLE: shared UoW has "
+                        "no capability invocation repository."
+                    )
+                invocation = await invocation_repository.get_record(
+                    record.invocation_id
+                )
+                if (
+                    invocation is None
+                    or invocation.execution_id != execution_id
+                    or invocation.tool_call_id != tool_call_id
+                    or invocation.capability_id != record.capability_id
+                ):
+                    raise ExecutionConflictError(
+                        "FORK_COMMITTED_RESULT_CONFLICT: COMMITTED tool result "
+                        "has no matching CapabilityInvocation authority."
+                    )
+
                 committed[tool_call_id] = record
                 return record
 
@@ -905,6 +930,11 @@ class DurableAgentStore:
 
             for tool_call_id in ordered_tool_call_ids:
                 durable = await require_committed(tool_call_id)
+                if durable.iteration_id != iteration.id:
+                    raise ExecutionConflictError(
+                        "FORK_COMMITTED_RESULT_CONFLICT: active-batch tool "
+                        "result belongs to another iteration."
+                    )
                 result.append(self._fork_tool_result_message(durable))
 
             await uow.commit()
