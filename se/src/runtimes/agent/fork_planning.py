@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Mapping, Sequence
 
 from .contracts.fork import (
@@ -436,9 +437,529 @@ class AgentForkPlanningService:
         return str(getattr(value, "value", value))
 
 
+
+@dataclass(frozen=True, slots=True)
+class ForkRevalidationSnapshot:
+    task: Any
+    branch: Any
+    execution: Any
+    checkpoint: Any
+    budget: Any
+    base_transcript: tuple[InferenceMessage, ...]
+    side_effects: tuple[ForkSideEffectSnapshot, ...]
+    delegated: bool
+    delegation_depth: int
+
+
+def _fork_tool_result_message(record) -> InferenceMessage:
+    return InferenceMessage(
+        role="tool",
+        name=record.capability_id,
+        tool_call_id=record.tool_call_id,
+        content=(
+            record.output
+            if record.success
+            else {
+                "error_code": record.error_code,
+                "error_message": record.error_message,
+            }
+        ),
+        metadata={
+            "success": record.success,
+            "retryable": record.retryable,
+        },
+    )
+
+
+async def _load_safe_side_effects_in_uow(
+    uow,
+    execution_id: str,
+) -> tuple[ForkSideEffectSnapshot, ...]:
+    repository = getattr(uow, "capability_invocations", None)
+    if repository is None:
+        raise ForkPlanRejected(
+            "FORK_INVOCATION_STORE_UNAVAILABLE",
+            "Shared UoW has no capability invocation repository.",
+        )
+    invocations = await repository.list_records_for_execution(execution_id)
+    snapshots: list[ForkSideEffectSnapshot] = []
+
+    for invocation in invocations:
+        state = AgentForkPlanningService._value(invocation.state)
+        if state not in AgentForkPlanningService._TERMINAL_INVOCATION_STATES:
+            raise ForkPlanRejected(
+                "FORK_SIDE_EFFECT_UNRESOLVED",
+                f"CapabilityInvocation {invocation.invocation_id} "
+                f"is still {state}.",
+            )
+
+        outcome = AgentForkPlanningService._value(
+            invocation.remote_outcome_state
+        )
+        if str(invocation.driver_kind or "") == "REMOTE_CLIENT":
+            if outcome != "TERMINAL_COMMITTED":
+                raise ForkPlanRejected(
+                    "FORK_REMOTE_OUTCOME_UNSAFE",
+                    f"Remote invocation {invocation.invocation_id} "
+                    "has no TERMINAL_COMMITTED authority.",
+                )
+        elif outcome in AgentForkPlanningService._UNSAFE_REMOTE_OUTCOMES:
+            raise ForkPlanRejected(
+                "FORK_REMOTE_OUTCOME_UNSAFE",
+                f"Invocation {invocation.invocation_id} retains "
+                f"unsafe remote outcome {outcome}.",
+            )
+
+        tool_call_id = str(invocation.tool_call_id or "")
+        if not tool_call_id:
+            raise ForkPlanRejected(
+                "FORK_SIDE_EFFECT_PROJECTION_MISSING",
+                f"Invocation {invocation.invocation_id} has no "
+                "model-visible tool projection identity.",
+            )
+        result = await uow.agents.get_tool_result(
+            execution_id,
+            tool_call_id,
+        )
+        if (
+            result is None
+            or getattr(result, "commit_state", "PROVISIONAL")
+            != "COMMITTED"
+        ):
+            raise ForkPlanRejected(
+                "FORK_COMMITTED_RESULT_MISSING",
+                f"Invocation {invocation.invocation_id} has no "
+                "already-COMMITTED AgentToolResult.",
+            )
+
+        expected_identity = {
+            "execution_id": execution_id,
+            "invocation_id": invocation.invocation_id,
+            "tool_call_id": tool_call_id,
+            "capability_id": invocation.capability_id,
+        }
+        for field, expected in expected_identity.items():
+            if getattr(result, field, None) != expected:
+                raise ForkPlanRejected(
+                    "FORK_COMMITTED_RESULT_CONFLICT",
+                    f"AgentToolResult {field} differs from "
+                    "CapabilityInvocation authority.",
+                )
+
+        if str(invocation.driver_kind or "") == "REMOTE_CLIENT":
+            AgentForkPlanningService._validate_remote_projection(
+                invocation,
+                result,
+            )
+
+        snapshots.append(
+            ForkSideEffectSnapshot(
+                invocation_id=str(invocation.invocation_id),
+                invocation_revision=int(invocation.revision),
+                capability_id=str(invocation.capability_id),
+                capability_version=(
+                    str(invocation.capability_version)
+                    if invocation.capability_version is not None
+                    else None
+                ),
+                request_fingerprint=(
+                    str(invocation.request_fingerprint)
+                    if invocation.request_fingerprint is not None
+                    else None
+                ),
+                idempotency=AgentForkPlanningService._value(
+                    invocation.idempotency
+                ),
+                state=state,
+                remote_outcome_state=outcome,
+                tool_call_id=tool_call_id,
+                committed_result_fingerprint=(
+                    committed_result_fingerprint(result)
+                ),
+            )
+        )
+
+    snapshots.sort(key=lambda item: item.invocation_id)
+    return tuple(snapshots)
+
+
+async def _load_fork_safe_transcript_in_uow(
+    uow,
+    execution_id: str,
+    checkpoint,
+) -> tuple[InferenceMessage, ...]:
+    if checkpoint.transcript_snapshot is None:
+        raise ForkPlanRejected(
+            "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE",
+            "Inline transcript snapshot is required.",
+        )
+
+    pending = await uow.agents.list_checkpoint_pending_invocations(
+        checkpoint.checkpoint_id
+    )
+    if pending:
+        raise ForkPlanRejected(
+            "FORK_PENDING_INVOCATIONS",
+            "Source checkpoint was cut with pending invocation snapshots.",
+        )
+
+    iterations = await uow.agents.list_iterations(execution_id)
+    iteration = next(
+        (
+            item
+            for item in iterations
+            if int(item.iteration) == int(checkpoint.iteration)
+        ),
+        None,
+    )
+    if iteration is None:
+        raise ForkPlanRejected(
+            "FORK_TRANSCRIPT_UNSAFE",
+            "Checkpoint iteration is missing.",
+        )
+
+    ordered_tool_call_ids = tuple(
+        str(item) for item in (iteration.tool_call_ids or ())
+    )
+    active_ids = set(ordered_tool_call_ids)
+    committed: dict[str, Any] = {}
+
+    async def require_committed(tool_call_id: str):
+        cached = committed.get(tool_call_id)
+        if cached is not None:
+            return cached
+        record = await uow.agents.get_tool_result(
+            execution_id,
+            tool_call_id,
+        )
+        if (
+            record is None
+            or getattr(record, "commit_state", "PROVISIONAL")
+            != "COMMITTED"
+        ):
+            raise ForkPlanRejected(
+                "FORK_TRANSCRIPT_UNSAFE",
+                f"Tool result {tool_call_id!r} is not durably COMMITTED.",
+            )
+        repository = getattr(uow, "capability_invocations", None)
+        if repository is None:
+            raise ForkPlanRejected(
+                "FORK_INVOCATION_STORE_UNAVAILABLE",
+                "Shared UoW has no capability invocation repository.",
+            )
+        invocation = await repository.get_record(record.invocation_id)
+        if (
+            invocation is None
+            or invocation.execution_id != execution_id
+            or invocation.tool_call_id != tool_call_id
+            or invocation.capability_id != record.capability_id
+        ):
+            raise ForkPlanRejected(
+                "FORK_COMMITTED_RESULT_CONFLICT",
+                "COMMITTED tool result has no matching "
+                "CapabilityInvocation authority.",
+            )
+        committed[tool_call_id] = record
+        return record
+
+    result: list[InferenceMessage] = []
+    seen_active: set[str] = set()
+    for raw in checkpoint.transcript_snapshot:
+        message = InferenceMessage.model_validate(raw)
+        if message.role != "tool":
+            result.append(message)
+            continue
+
+        tool_call_id = message.tool_call_id
+        if not tool_call_id:
+            raise ForkPlanRejected(
+                "FORK_TRANSCRIPT_UNSAFE",
+                "Tool message has no tool_call_id.",
+            )
+        durable = await require_committed(tool_call_id)
+        canonical = _fork_tool_result_message(durable)
+        if (
+            message.model_dump(mode="json")
+            != canonical.model_dump(mode="json")
+        ):
+            raise ForkPlanRejected(
+                "FORK_TRANSCRIPT_UNSAFE",
+                "Raw tool message differs from durable COMMITTED projection.",
+            )
+        if tool_call_id in active_ids:
+            if tool_call_id in seen_active:
+                raise ForkPlanRejected(
+                    "FORK_TRANSCRIPT_UNSAFE",
+                    "Active tool projection appears more than once.",
+                )
+            seen_active.add(tool_call_id)
+            continue
+        result.append(canonical)
+
+    for tool_call_id in ordered_tool_call_ids:
+        durable = await require_committed(tool_call_id)
+        if durable.iteration_id != iteration.id:
+            raise ForkPlanRejected(
+                "FORK_COMMITTED_RESULT_CONFLICT",
+                "Active-batch tool result belongs to another iteration.",
+            )
+        result.append(_fork_tool_result_message(durable))
+
+    return tuple(result)
+
+
+async def _delegation_depth_in_uow(
+    uow,
+    execution,
+) -> int:
+    parent_execution_id = execution.parent_execution_id
+    if parent_execution_id is None:
+        return 0
+
+    depth = 0
+    seen: set[str] = {str(execution.id)}
+    while parent_execution_id is not None:
+        parent_id = str(parent_execution_id)
+        if parent_id in seen:
+            raise ForkPlanRejected(
+                "FORK_EXECUTION_LINEAGE_CONFLICT",
+                "Delegation ancestry contains a cycle.",
+            )
+        seen.add(parent_id)
+        parent = await uow.agents.get_execution(parent_id)
+        if parent is None or parent.task_id != execution.task_id:
+            raise ForkPlanRejected(
+                "FORK_EXECUTION_LINEAGE_CONFLICT",
+                "Delegation ancestry is missing or crosses AgentTask.",
+            )
+        if parent.branch_id != execution.branch_id:
+            raise ForkPlanRejected(
+                "FORK_EXECUTION_LINEAGE_CONFLICT",
+                "Source delegation ancestry crosses TaskBranch boundaries.",
+            )
+        depth += 1
+        parent_execution_id = parent.parent_execution_id
+    return depth
+
+
+async def revalidate_fork_plan_in_uow(
+    uow,
+    plan: ForkPlan,
+) -> ForkRevalidationSnapshot:
+    """Re-prove every R8-C fence inside the future consume transaction."""
+
+    if fork_plan_fingerprint(plan) != plan.plan_fingerprint:
+        raise ForkPlanRejected(
+            "FORK_PLAN_FINGERPRINT_INVALID",
+            "ForkPlan semantic fingerprint no longer matches its payload.",
+        )
+
+    task = await uow.agents.get_task(plan.task_id)
+    if task is None:
+        raise ForkPlanRejected(
+            "FORK_TASK_NOT_FOUND",
+            f"Unknown AgentTask: {plan.task_id}",
+        )
+    if (
+        int(task.revision) != int(plan.expected_task_revision)
+        or str(task.created_by) != plan.target_user_id
+        or str(task.session_id) != plan.session_id
+    ):
+        raise ForkPlanRejected(
+            "FORK_TASK_CONFLICT",
+            "AgentTask changed after FORK planning.",
+        )
+    task_status = AgentForkPlanningService._value(task.status)
+    if task_status not in AgentForkPlanningService._TASK_SOURCE_STATES:
+        raise ForkPlanRejected(
+            "FORK_TASK_CONFLICT",
+            f"AgentTask is no longer RUNNING/WAITING: {task_status}.",
+        )
+
+    branch = await uow.agents.get_task_branch(plan.source_branch_id)
+    if (
+        branch is None
+        or branch.task_id != plan.task_id
+        or int(branch.revision) != int(plan.expected_branch_revision)
+        or AgentForkPlanningService._value(branch.resolution_state) != "OPEN"
+        or branch.current_execution_id != plan.source_execution_id
+    ):
+        raise ForkPlanRejected(
+            "FORK_BRANCH_CONFLICT",
+            "Source TaskBranch changed after FORK planning.",
+        )
+
+    execution = await uow.agents.get_execution(plan.source_execution_id)
+    if (
+        execution is None
+        or execution.task_id != plan.task_id
+        or execution.branch_id != plan.source_branch_id
+        or execution.session_id != plan.session_id
+        or execution.agent_id != plan.source_agent_id
+        or execution.correlation_id != plan.correlation_id
+        or int(execution.revision)
+        != int(plan.expected_execution_revision)
+        or AgentForkPlanningService._value(execution.state) != "WAITING"
+        or execution.current_checkpoint_id != plan.source_checkpoint_id
+    ):
+        raise ForkPlanRejected(
+            "FORK_EXECUTION_CONFLICT",
+            "Source AgentExecution changed after FORK planning.",
+        )
+    if (
+        execution.parent_execution_id is None
+        and str(task.assigned_agent_id) != plan.source_agent_id
+    ):
+        raise ForkPlanRejected(
+            "FORK_EXECUTION_LINEAGE_CONFLICT",
+            "Root source AgentExecution differs from Task assigned agent.",
+        )
+
+    checkpoint = await uow.agents.get_execution_checkpoint(
+        plan.source_checkpoint_id
+    )
+    if (
+        checkpoint is None
+        or checkpoint.execution_id != plan.source_execution_id
+        or int(checkpoint.execution_revision)
+        != int(plan.expected_execution_revision)
+        or checkpoint.session_id != plan.session_id
+        or checkpoint.task_id != plan.task_id
+        or checkpoint.branch_id != plan.source_branch_id
+        or int(checkpoint.iteration) != int(plan.checkpoint_iteration)
+        or checkpoint.transcript_snapshot is None
+    ):
+        raise ForkPlanRejected(
+            "FORK_CHECKPOINT_CONFLICT",
+            "Source checkpoint changed after FORK planning.",
+        )
+
+    pending = await uow.agents.list_checkpoint_pending_invocations(
+        plan.source_checkpoint_id
+    )
+    if pending:
+        raise ForkPlanRejected(
+            "FORK_PENDING_INVOCATIONS",
+            "Source checkpoint now contains pending invocation snapshots.",
+        )
+
+    side_effects = await _load_safe_side_effects_in_uow(
+        uow,
+        plan.source_execution_id,
+    )
+    if (
+        side_effects != tuple(plan.side_effects)
+        or fork_side_effect_fingerprint(side_effects)
+        != plan.side_effect_fingerprint
+    ):
+        raise ForkPlanRejected(
+            "FORK_SIDE_EFFECT_CHANGED",
+            "Source capability side-effect authority changed after planning.",
+        )
+
+    base_transcript = await _load_fork_safe_transcript_in_uow(
+        uow,
+        plan.source_execution_id,
+        checkpoint,
+    )
+    if (
+        fork_transcript_fingerprint(base_transcript)
+        != plan.base_transcript_fingerprint
+        or tuple(
+            item.model_dump(mode="json") for item in base_transcript
+        )
+        != tuple(
+            item.model_dump(mode="json") for item in plan.base_transcript
+        )
+    ):
+        raise ForkPlanRejected(
+            "FORK_TRANSCRIPT_CHANGED",
+            "Committed source transcript changed after FORK planning.",
+        )
+
+    transcript_tool_ids = [
+        item.tool_call_id
+        for item in base_transcript
+        if item.role == "tool"
+    ]
+    for effect in side_effects:
+        if transcript_tool_ids.count(effect.tool_call_id) != 1:
+            raise ForkPlanRejected(
+                "FORK_TRANSCRIPT_CHANGED",
+                "Terminal source side effect is no longer represented exactly "
+                "once in the committed transcript.",
+            )
+
+    budget = await uow.agents.get_task_budget(plan.task_id)
+    if budget is None:
+        raise ForkPlanRejected(
+            "FORK_TASK_BUDGET_REQUIRED",
+            "Task has no durable TaskBudget.",
+        )
+    if AgentForkPlanningService._value(budget.state) != "OPEN":
+        raise ForkPlanRejected(
+            "FORK_TASK_BUDGET_CLOSED",
+            "TaskBudget is CLOSED.",
+        )
+    if int(budget.revision) != int(plan.expected_task_budget_revision):
+        raise ForkPlanRejected(
+            "FORK_TASK_BUDGET_STALE",
+            "TaskBudget revision changed after FORK planning.",
+        )
+    if str(budget.policy_fingerprint) != plan.budget_policy_fingerprint:
+        raise ForkPlanRejected(
+            "FORK_TASK_BUDGET_POLICY_CHANGED",
+            "TaskBudget policy changed after FORK planning.",
+        )
+    if int(budget.active_branches) >= int(budget.max_active_branches):
+        raise ForkPlanDeferred(
+            "FORK_BRANCH_CAPACITY_UNAVAILABLE",
+            "TaskBudget max_active_branches is exhausted.",
+        )
+    if (
+        int(budget.used_executions) >= int(budget.max_total_executions)
+        or int(budget.active_executions)
+        >= int(budget.max_active_executions)
+    ):
+        raise ForkPlanDeferred(
+            "FORK_EXECUTION_CAPACITY_UNAVAILABLE",
+            "TaskBudget execution capacity is exhausted.",
+        )
+
+    delegated = execution.parent_execution_id is not None
+    delegation_depth = await _delegation_depth_in_uow(uow, execution)
+    if delegated and (
+        int(budget.active_parallel_agents)
+        >= int(budget.max_parallel_agents)
+    ):
+        raise ForkPlanDeferred(
+            "FORK_PARALLEL_AGENT_CAPACITY_UNAVAILABLE",
+            "TaskBudget max_parallel_agents is exhausted.",
+        )
+    if delegation_depth > int(budget.max_delegation_depth):
+        raise ForkPlanRejected(
+            "FORK_EXECUTION_LINEAGE_CONFLICT",
+            "Source delegation depth exceeds TaskBudget policy.",
+        )
+
+    return ForkRevalidationSnapshot(
+        task=task,
+        branch=branch,
+        execution=execution,
+        checkpoint=checkpoint,
+        budget=budget,
+        base_transcript=base_transcript,
+        side_effects=side_effects,
+        delegated=delegated,
+        delegation_depth=delegation_depth,
+    )
+
+
 __all__ = [
     "AgentForkPlanningService",
     "ForkPlanDeferred",
     "ForkPlanError",
     "ForkPlanRejected",
+    "ForkRevalidationSnapshot",
+    "revalidate_fork_plan_in_uow",
 ]
