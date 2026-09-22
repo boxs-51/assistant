@@ -802,6 +802,8 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
                     plan.execution_id,
                     cascade=False,
                 )
+                if activation_ready.done() and not activation_ready.cancelled():
+                    activation_ready.exception()
                 recovery = asyncio.create_task(
                     _recover_r7_g_handoff_failure(
                         websocket,
@@ -849,12 +851,57 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
                 "state_at_accept": "RUNNING",
             }
 
-            try:
-                await durable_store.record_resume_claim_handoff(
+            handoff_task = asyncio.create_task(
+                durable_store.record_resume_claim_handoff(
                     consumed.claim_id,
                     status="ACCEPTED",
                     payload=accepted_payload,
-                )
+                ),
+                name=f"r7-g-handoff:{plan.execution_id}",
+            )
+            try:
+                await asyncio.shield(handoff_task)
+            except asyncio.CancelledError as request_cancel:
+                # The ACCEPTED metadata write is itself a durable authority
+                # boundary.  Caller cancellation must not make its commit
+                # outcome ambiguous: drain the shielded write before choosing
+                # between accepted continuation and RECOVERY.
+                try:
+                    await asyncio.shield(handoff_task)
+                except BaseException as handoff_error:
+                    await supervisor.cancel_execution(
+                        plan.execution_id,
+                        cascade=False,
+                    )
+                    recovery = asyncio.create_task(
+                        _recover_r7_g_handoff_failure(
+                            websocket,
+                            container=container,
+                            supervisor=supervisor,
+                            context=context,
+                            plan=plan,
+                            consumed=consumed,
+                            connection_id=connection_id,
+                            error=handoff_error,
+                            send_wire=False,
+                        ),
+                        name=f"r7-g-recovery:{plan.execution_id}",
+                    )
+                    try:
+                        await asyncio.shield(recovery)
+                    except BaseException:
+                        logger.exception(
+                            "R7-G handoff cancellation recovery failed",
+                            execution_id=plan.execution_id,
+                            claim_id=consumed.claim_id,
+                        )
+                    raise request_cancel
+
+                # ACCEPTED is durably known.  The request may disappear, but
+                # the owned runtime must continue; a retry replays the stored
+                # semantic ACK without another claim/CAS/task.
+                continue_after_ack.set()
+                raise request_cancel
             except BaseException as exc:
                 await supervisor.cancel_execution(
                     plan.execution_id,
