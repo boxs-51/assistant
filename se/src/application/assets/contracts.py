@@ -16,6 +16,8 @@ class AssetDescriptor:
     uri: str
     origin_type: str
     revision: int
+    declared_mime_type: Optional[str] = None
+    detected_mime_type: Optional[str] = None
 
 
 @dataclass(frozen=True, slots=True)

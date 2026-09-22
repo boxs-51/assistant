@@ -9,10 +9,21 @@ from .contracts import AssetContent, AssetDescriptor
 from .errors import (
     AssetAccessDeniedError,
     AssetFinalizeError,
+    AssetInUseError,
+    AssetMimeMismatchError,
     AssetNotFoundError,
     AssetStateError,
     AssetStorageError,
 )
+from .mime import (
+    canonical_mime_type,
+    detect_mime_type,
+    mime_types_compatible,
+    normalize_mime_type,
+)
+
+
+_MIME_SAMPLE_LIMIT = 8192
 
 
 class AssetService:
@@ -47,6 +58,8 @@ class AssetService:
             uri=f"asset://{file_record.id}",
             origin_type=file_record.origin_type,
             revision=file_record.revision,
+            declared_mime_type=blob_record.declared_mime_type,
+            detected_mime_type=blob_record.detected_mime_type,
         )
 
     async def ingest_stream(
@@ -69,6 +82,7 @@ class AssetService:
         if not mime_type:
             raise ValueError("mime_type is required")
 
+        declared_mime = normalize_mime_type(mime_type)
         asset_id = self._asset_id()
         blob_id = self._blob_id()
         object_key = self._object_key(blob_id)
@@ -85,6 +99,7 @@ class AssetService:
                     "bucket": None,
                     "object_key": object_key,
                     "state": "STAGING",
+                    "declared_mime_type": declared_mime,
                     "metadata_json": {},
                 }
             )
@@ -95,7 +110,7 @@ class AssetService:
                     "organization_id": organization_id,
                     "blob_id": blob_id,
                     "filename": filename,
-                    "mime_type": mime_type,
+                    "mime_type": declared_mime,
                     "origin_type": origin_type,
                     "origin_id": origin_id,
                     "state": "STAGING",
@@ -105,12 +120,22 @@ class AssetService:
             )
             await uow.commit()
 
+        sample = bytearray()
+
+        async def observed_stream():
+            async for chunk in stream:
+                payload = bytes(chunk)
+                if len(sample) < _MIME_SAMPLE_LIMIT:
+                    remaining = _MIME_SAMPLE_LIMIT - len(sample)
+                    sample.extend(payload[:remaining])
+                yield payload
+
         try:
             result = await self.object_store.put_stream(
                 object_key,
-                stream,
+                observed_stream(),
                 content_length=content_length,
-                content_type=mime_type,
+                content_type=declared_mime,
             )
         except Exception as exc:
             await self._best_effort_mark_error(asset_id, blob_id)
@@ -118,6 +143,28 @@ class AssetService:
                 f"Failed to persist object for asset {asset_id}"
             ) from exc
 
+        detected_mime = detect_mime_type(bytes(sample))
+        if not mime_types_compatible(declared_mime, detected_mime):
+            try:
+                await self.object_store.delete(object_key)
+            except Exception:
+                # Reconciliation can collect the orphan later. The semantic
+                # failure remains a MIME mismatch rather than an SDK error.
+                pass
+            await self._best_effort_mark_error(
+                asset_id,
+                blob_id,
+                detected_mime_type=detected_mime,
+            )
+            raise AssetMimeMismatchError(
+                f"Declared MIME {declared_mime!r} conflicts with "
+                f"detected MIME {detected_mime!r}."
+            )
+
+        canonical_mime = canonical_mime_type(
+            declared_mime,
+            detected_mime,
+        )
         try:
             async with self.uow_factory() as uow:
                 file_record = await uow.assets.get_file(asset_id)
@@ -138,7 +185,8 @@ class AssetService:
                 blob_record.state = "READY"
                 blob_record.size_bytes = result.size_bytes
                 blob_record.sha256 = result.sha256
-                blob_record.detected_mime_type = mime_type
+                blob_record.declared_mime_type = declared_mime
+                blob_record.detected_mime_type = detected_mime
                 blob_record.etag = result.etag
                 blob_record.verified_at = datetime.now(timezone.utc)
 
@@ -146,7 +194,10 @@ class AssetService:
                     asset_id,
                     expected_revision=0,
                     expected_state="STAGING",
-                    values={"state": "READY"},
+                    values={
+                        "state": "READY",
+                        "mime_type": canonical_mime,
+                    },
                 )
                 if winner is None:
                     raise AssetStateError(
@@ -218,32 +269,37 @@ class AssetService:
         owner_user_id: str,
         asset_id: str,
     ) -> AssetDescriptor:
+        """Request logical deletion without deleting canonical bytes inline.
+
+        Physical GC is intentionally separated so an R7 WAITING/RUNNING
+        execution cannot lose bytes between checkpoint reconstruction and
+        provider hydration.
+        """
         async with self.uow_factory() as uow:
             file_record = await uow.assets.get_file(asset_id)
             if file_record is None:
                 raise AssetNotFoundError(asset_id)
             self._authorize(file_record, owner_user_id)
-            if file_record.state == "DELETED":
-                blob_record = await uow.assets.get_blob(file_record.blob_id)
-                if blob_record is None:
-                    raise AssetStateError(
-                        f"Deleted asset {asset_id} has no tombstone blob"
-                    )
+            blob_record = await uow.assets.get_blob(file_record.blob_id)
+            if blob_record is None:
+                raise AssetStateError(
+                    f"Asset {asset_id} has no blob"
+                )
+            if file_record.state in {"DELETING", "DELETED"}:
                 return self._descriptor(file_record, blob_record)
             if file_record.state != "READY":
                 raise AssetStateError(
                     f"Asset {asset_id} cannot be deleted from "
                     f"state {file_record.state}"
                 )
-            blob_record = await uow.assets.get_blob(file_record.blob_id)
-            if blob_record is None:
-                raise AssetStateError(
-                    f"Asset {asset_id} has no blob"
+            if await uow.assets.has_live_references(asset_id):
+                raise AssetInUseError(
+                    f"Asset {asset_id} is pinned by an active R7 execution."
                 )
-            expected_revision = file_record.revision
+
             winner = await uow.assets.compare_and_set_file(
                 asset_id,
-                expected_revision=expected_revision,
+                expected_revision=file_record.revision,
                 expected_state="READY",
                 values={"state": "DELETING"},
             )
@@ -251,17 +307,52 @@ class AssetService:
                 raise AssetStateError(
                     f"Asset {asset_id} delete lost its CAS"
                 )
-            blob_record.state = "DELETING"
+            blob_winner = await uow.assets.compare_and_set_blob_state(
+                blob_record.id,
+                expected_state="READY",
+                values={"state": "DELETING"},
+            )
+            if blob_winner is None:
+                await uow.rollback()
+                raise AssetStateError(
+                    f"Asset {asset_id} blob is not READY for deletion."
+                )
+            await uow.commit()
+            return self._descriptor(winner, blob_winner)
+
+    async def collect_deleting_asset(
+        self,
+        asset_id: str,
+    ) -> AssetDescriptor:
+        """Physically collect one already-fenced DELETING asset."""
+        async with self.uow_factory() as uow:
+            file_record = await uow.assets.get_file(asset_id)
+            if file_record is None:
+                raise AssetNotFoundError(asset_id)
+            blob_record = await uow.assets.get_blob(file_record.blob_id)
+            if blob_record is None:
+                raise AssetStateError(
+                    f"Asset {asset_id} has no blob"
+                )
+            if file_record.state == "DELETED":
+                return self._descriptor(file_record, blob_record)
+            if file_record.state != "DELETING":
+                raise AssetStateError(
+                    f"Asset {asset_id} is not DELETING"
+                )
+            if await uow.assets.has_live_references(asset_id):
+                raise AssetInUseError(
+                    f"Asset {asset_id} regained a live R7 reference."
+                )
             object_key = blob_record.object_key
             blob_id = blob_record.id
-            deleting_revision = winner.revision
-            await uow.commit()
+            expected_revision = file_record.revision
 
         try:
             await self.object_store.delete(object_key)
         except Exception as exc:
             raise AssetStorageError(
-                f"Failed to delete object for asset {asset_id}"
+                f"Failed to collect object for asset {asset_id}"
             ) from exc
 
         async with self.uow_factory() as uow:
@@ -269,11 +360,11 @@ class AssetService:
             blob_record = await uow.assets.get_blob(blob_id)
             if file_record is None or blob_record is None:
                 raise AssetFinalizeError(
-                    f"Asset {asset_id} disappeared during delete finalize"
+                    f"Asset {asset_id} disappeared during GC finalize"
                 )
             winner = await uow.assets.compare_and_set_file(
                 asset_id,
-                expected_revision=deleting_revision,
+                expected_revision=expected_revision,
                 expected_state="DELETING",
                 values={
                     "state": "DELETED",
@@ -282,12 +373,102 @@ class AssetService:
             )
             if winner is None:
                 raise AssetStateError(
-                    f"Asset {asset_id} delete finalize lost its CAS"
+                    f"Asset {asset_id} GC finalize lost its CAS"
                 )
-            blob_record.state = "DELETED"
-            blob_record.deleted_at = datetime.now(timezone.utc)
+            blob_winner = await uow.assets.compare_and_set_blob_state(
+                blob_id,
+                expected_state="DELETING",
+                values={
+                    "state": "DELETED",
+                    "deleted_at": datetime.now(timezone.utc),
+                },
+            )
+            if blob_winner is None:
+                await uow.rollback()
+                raise AssetStateError(
+                    f"Asset {asset_id} blob GC finalize lost its CAS"
+                )
             await uow.commit()
-            return self._descriptor(winner, blob_record)
+            return self._descriptor(winner, blob_winner)
+
+    async def reconcile_asset(
+        self,
+        asset_id: str,
+        *,
+        reclaim_staging: bool = False,
+        cleanup_error_object: bool = True,
+    ) -> AssetDescriptor:
+        """Reconcile one known asset after a partial SQL/object-store failure."""
+        async with self.uow_factory() as uow:
+            file_record = await uow.assets.get_file(asset_id)
+            if file_record is None:
+                raise AssetNotFoundError(asset_id)
+            blob_record = await uow.assets.get_blob(file_record.blob_id)
+            if blob_record is None:
+                raise AssetStateError(
+                    f"Asset {asset_id} has no blob"
+                )
+            descriptor = self._descriptor(file_record, blob_record)
+            state = file_record.state
+            object_key = blob_record.object_key
+            blob_id = blob_record.id
+            revision = file_record.revision
+
+        if state == "DELETING":
+            return await self.collect_deleting_asset(asset_id)
+
+        if state == "READY":
+            if await self.object_store.exists(object_key):
+                return descriptor
+            async with self.uow_factory() as uow:
+                winner = await uow.assets.compare_and_set_file(
+                    asset_id,
+                    expected_revision=revision,
+                    expected_state="READY",
+                    values={"state": "ERROR"},
+                )
+                blob_winner = await uow.assets.compare_and_set_blob_state(
+                    blob_id,
+                    expected_state="READY",
+                    values={"state": "MISSING"},
+                )
+                if winner is None or blob_winner is None:
+                    await uow.rollback()
+                    raise AssetStateError(
+                        f"Asset {asset_id} missing-blob reconciliation lost its CAS"
+                    )
+                await uow.commit()
+                return self._descriptor(winner, blob_winner)
+
+        if state == "STAGING" and reclaim_staging:
+            if await self.object_store.exists(object_key):
+                await self.object_store.delete(object_key)
+            async with self.uow_factory() as uow:
+                winner = await uow.assets.compare_and_set_file(
+                    asset_id,
+                    expected_revision=revision,
+                    expected_state="STAGING",
+                    values={"state": "ERROR"},
+                )
+                blob_winner = await uow.assets.compare_and_set_blob_state(
+                    blob_id,
+                    expected_state="STAGING",
+                    values={"state": "ERROR"},
+                )
+                if winner is None or blob_winner is None:
+                    await uow.rollback()
+                    raise AssetStateError(
+                        f"Asset {asset_id} staging reconciliation lost its CAS"
+                    )
+                await uow.commit()
+                return self._descriptor(winner, blob_winner)
+
+        if state == "ERROR" and cleanup_error_object:
+            if await self.object_store.exists(object_key):
+                await self.object_store.delete(object_key)
+            return descriptor
+
+        return descriptor
 
     @staticmethod
     def _authorize(file_record, owner_user_id: str) -> None:
@@ -298,6 +479,8 @@ class AssetService:
         self,
         asset_id: str,
         blob_id: str,
+        *,
+        detected_mime_type: Optional[str] = None,
     ) -> None:
         try:
             async with self.uow_factory() as uow:
@@ -311,7 +494,14 @@ class AssetService:
                         values={"state": "ERROR"},
                     )
                 if blob_record is not None and blob_record.state == "STAGING":
-                    blob_record.state = "ERROR"
+                    values = {"state": "ERROR"}
+                    if detected_mime_type is not None:
+                        values["detected_mime_type"] = detected_mime_type
+                    await uow.assets.compare_and_set_blob_state(
+                        blob_id,
+                        expected_state="STAGING",
+                        values=values,
+                    )
                 await uow.commit()
         except Exception:
             return

@@ -61,6 +61,9 @@ class FileBlobRecord(Base):
     )
     size_bytes: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
     sha256: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    declared_mime_type: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
     detected_mime_type: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True
     )

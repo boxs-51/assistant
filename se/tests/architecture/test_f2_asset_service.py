@@ -59,7 +59,7 @@ async def _database():
 
 
 @pytest.mark.asyncio
-async def test_f2_asset_service_ingest_authorize_range_and_delete(tmp_path):
+async def test_f2_asset_service_ingest_authorize_range_and_deferred_delete(tmp_path):
     engine, sessions = await _database()
     driver = LocalObjectStorageDriver(
         DriverConfig(options={"root": str(tmp_path / "objects")})
@@ -79,6 +79,8 @@ async def test_f2_asset_service_ingest_authorize_range_and_delete(tmp_path):
         assert created.uri == f"asset://{created.asset_id}"
         assert created.size_bytes == len(payload)
         assert created.sha256 == hashlib.sha256(payload).hexdigest()
+        assert created.declared_mime_type == "text/plain"
+        assert created.detected_mime_type == "text/plain"
         assert created.revision == 1
 
         loaded = await service.get_asset(
@@ -100,10 +102,18 @@ async def test_f2_asset_service_ingest_authorize_range_and_delete(tmp_path):
         )
         assert b"".join([chunk async for chunk in content.stream]) == payload[8:13]
 
-        deleted = await service.delete_asset(
+        deleting = await service.delete_asset(
             owner_user_id="user-a",
             asset_id=created.asset_id,
         )
+        assert deleting.state == "DELETING"
+        assert deleting.revision == 2
+        async with _Uow(sessions) as uow:
+            file_record = await uow.assets.get_file(created.asset_id)
+            blob = await uow.assets.get_blob(file_record.blob_id)
+            assert await driver.exists(blob.object_key) is True
+
+        deleted = await service.collect_deleting_asset(created.asset_id)
         assert deleted.state == "DELETED"
         assert deleted.revision == 3
 

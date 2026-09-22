@@ -29,6 +29,10 @@ storage:
         root: "data/assets"
 
 
+assets:
+  storage_driver: "object-local"
+
+
 gateway:
   name: "AI Gateway"
   host: "0.0.0.0"

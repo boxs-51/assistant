@@ -20,3 +20,11 @@ class AssetStorageError(AssetError):
 
 class AssetFinalizeError(AssetError):
     pass
+
+
+class AssetInUseError(AssetStateError):
+    pass
+
+
+class AssetMimeMismatchError(AssetStateError):
+    pass

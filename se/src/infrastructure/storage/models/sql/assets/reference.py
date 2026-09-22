@@ -31,6 +31,7 @@ class FileReferenceRecord(Base):
             "AND message_id IS NOT NULL "
             "AND session_id IS NULL "
             "AND project_id IS NULL "
+            "AND agent_tool_result_id IS NULL "
             "AND content_part_index IS NOT NULL "
             "AND content_part_index >= 0"
             ") OR ("
@@ -38,12 +39,21 @@ class FileReferenceRecord(Base):
             "AND message_id IS NULL "
             "AND session_id IS NOT NULL "
             "AND project_id IS NULL "
+            "AND agent_tool_result_id IS NULL "
             "AND content_part_index IS NULL"
             ") OR ("
             "reference_type = 'PROJECT_RESOURCE' "
             "AND message_id IS NULL "
             "AND session_id IS NULL "
             "AND project_id IS NOT NULL "
+            "AND agent_tool_result_id IS NULL "
+            "AND content_part_index IS NULL"
+            ") OR ("
+            "reference_type = 'AGENT_TOOL_RESULT' "
+            "AND message_id IS NULL "
+            "AND session_id IS NULL "
+            "AND project_id IS NULL "
+            "AND agent_tool_result_id IS NOT NULL "
             "AND content_part_index IS NULL"
             ")",
             name="ck_file_references_exact_locator",
@@ -53,10 +63,16 @@ class FileReferenceRecord(Base):
             "content_part_index",
             name="uq_file_references_message_part",
         ),
+        UniqueConstraint(
+            "agent_tool_result_id",
+            "file_id",
+            name="uq_file_references_tool_result_file",
+        ),
         Index("ix_file_references_file_id", "file_id"),
         Index("ix_file_references_message_id", "message_id"),
         Index("ix_file_references_session_id", "session_id"),
         Index("ix_file_references_project_id", "project_id"),
+        Index("ix_file_references_agent_tool_result_id", "agent_tool_result_id"),
     )
 
     id: Mapped[str] = mapped_column(
@@ -77,6 +93,10 @@ class FileReferenceRecord(Base):
     )
     project_id: Mapped[Optional[str]] = mapped_column(
         ForeignKey("projects.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    agent_tool_result_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("agent_tool_results.id", ondelete="CASCADE"),
         nullable=True,
     )
     content_part_index: Mapped[Optional[int]] = mapped_column(

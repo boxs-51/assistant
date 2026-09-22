@@ -252,10 +252,17 @@ async def bootstrap_runtime_kernel(
     )
 
     asset_service = None
-    if storage_engine.is_driver_available("object-local"):
+    asset_storage_driver = config.assets.storage_driver
+    if storage_engine.is_driver_available(asset_storage_driver):
         asset_service = AssetService(
             uow_factory,
-            storage_engine.get_object_storage_driver("object-local"),
+            storage_engine.get_object_storage_driver(asset_storage_driver),
+        )
+    else:
+        logger.warning(
+            "Configured asset storage driver is unavailable; "
+            "Central Asset Storage remains disabled",
+            driver=asset_storage_driver,
         )
 
     # 1. Tạo ApplicationContainer trước

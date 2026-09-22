@@ -111,6 +111,12 @@ class DriverConfig(BaseModel):
 class StorageSettings(BaseModel):
     drivers: Dict[str, DriverConfig] = Field(default_factory=dict)
 
+
+class AssetStorageSettings(BaseModel):
+    storage_driver: str = Field(default="object-local", min_length=1)
+
+    model_config = ConfigDict(frozen=True)
+
 class CircuitBreakerProviderSettings(BaseModel):
     """Cấu hình ngưỡng cho một Circuit Breaker cụ thể."""
     failure_threshold: int = 3
@@ -213,6 +219,7 @@ class ConfigSchema(BaseModel):
     semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    assets: AssetStorageSettings = Field(default_factory=AssetStorageSettings)
     auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     frontend: FrontendSettings = Field(default_factory=FrontendSettings)
