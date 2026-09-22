@@ -12,6 +12,7 @@ from .checkpoint import (
     AgentExecutionCheckpointRecord,
 )
 from .resume_claim import AgentResumeClaimRecord
+from .fork_admission import AgentTaskForkAdmissionRecord
 
 __all__ = [
     "AgentExecutionRecord",
@@ -29,4 +30,5 @@ __all__ = [
     "AgentExecutionCheckpointRecord",
     "AgentCheckpointPendingInvocationRecord",
     "AgentResumeClaimRecord",
+    "AgentTaskForkAdmissionRecord",
 ]
