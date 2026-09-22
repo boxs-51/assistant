@@ -190,6 +190,19 @@ class AgentForkPlanningService:
                 code = "FORK_TRANSCRIPT_UNSAFE"
             raise ForkPlanRejected(code, str(exc)) from exc
 
+        transcript_tool_ids = [
+            item.tool_call_id
+            for item in base_transcript
+            if item.role == "tool"
+        ]
+        for effect in side_effects:
+            if transcript_tool_ids.count(effect.tool_call_id) != 1:
+                raise ForkPlanRejected(
+                    "FORK_TRANSCRIPT_UNSAFE",
+                    "Every terminal source side effect must appear exactly "
+                    "once in the fork base transcript.",
+                )
+
         budget = await self._store.load_task_budget(task_id)
         if budget is None:
             raise ForkPlanRejected(
