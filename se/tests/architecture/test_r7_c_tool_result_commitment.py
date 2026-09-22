@@ -954,7 +954,6 @@ async def test_r7_c_terminal_committed_reserved_error_code_does_not_enter_waitin
         tool_execution=Executor(),
         execution_policy=Policy(),
         durable_store=Store(),
-        continuation_service=None,
     )
 
     result = await runtime._execute_loop(context)
