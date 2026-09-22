@@ -42,6 +42,7 @@ from .waiting_checkpoint import (
     stage_waiting_checkpoint,
     verify_committed_waiting_checkpoint,
 )
+from .waiting_ticket import build_waiting_ticket_payload
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -1534,6 +1535,50 @@ class DurableAgentStore:
             "ResumeClaim SQL conflicts exhausted.",
             retryable=True,
         )
+
+    async def load_pending_resume_tickets(
+        self,
+        *,
+        owner_user_id: str,
+        client_id: str,
+    ) -> tuple[dict[str, Any], ...]:
+        """Read canonical WAITING(CONNECTION) tickets for one principal/client.
+
+        This is a publication query only: it never builds a ResumePlan, creates
+        a ResumeClaim, or mutates AgentExecution lifecycle state.
+        """
+
+        async with self.uow_factory() as uow:
+            executions = await uow.agents.list_waiting_executions_for_client(
+                owner_user_id=owner_user_id,
+                client_id=client_id,
+            )
+            tickets: list[dict[str, Any]] = []
+            for execution in executions:
+                checkpoint_id = getattr(execution, "current_checkpoint_id", None)
+                if not checkpoint_id:
+                    continue
+                checkpoint = await uow.agents.get_execution_checkpoint(checkpoint_id)
+                if (
+                    checkpoint is None
+                    or checkpoint.execution_id != execution.id
+                    or checkpoint.execution_revision != execution.revision
+                ):
+                    raise ExecutionConflictError(
+                        "AgentExecution current normalized checkpoint is missing or stale."
+                    )
+                pending = await uow.agents.list_checkpoint_pending_invocations(
+                    checkpoint_id
+                )
+                tickets.append(
+                    build_waiting_ticket_payload(
+                        execution,
+                        checkpoint,
+                        pending,
+                    )
+                )
+            await uow.commit()
+            return tuple(tickets)
 
     async def load_current_checkpoint(
         self,
