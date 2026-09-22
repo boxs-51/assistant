@@ -65,12 +65,17 @@ def _envelope():
 
 
 class _Planner:
-    def __init__(self, plan):
+    def __init__(self, plan, *, fail_after_first=False):
         self.plan = plan
         self.calls = 0
+        self.fail_after_first = fail_after_first
 
     async def build_resume_plan(self, *args, **kwargs):
         self.calls += 1
+        if self.fail_after_first and self.calls > 1:
+            raise AssertionError(
+                "lost-ACK replay must not rebuild ResumePlan"
+            )
         return self.plan
 
 
@@ -245,7 +250,7 @@ class _Socket:
         self.messages.append(message)
 
 
-def _container(plan, store, runtime, supervisor):
+def _container(plan, store, runtime, supervisor, *, planner=None):
     snapshot = SimpleNamespace(
         is_usable=True,
         user_id=USER,
@@ -255,7 +260,7 @@ def _container(plan, store, runtime, supervisor):
         connection_runtime=SimpleNamespace(
             registry=SimpleNamespace(get=lambda _: snapshot)
         ),
-        resume_planning_service=_Planner(plan),
+        resume_planning_service=planner or _Planner(plan),
         agent_durable_store=store,
         agent_runtime=runtime,
         agent_execution_supervisor=supervisor,
@@ -364,7 +369,14 @@ async def test_r7_g_lost_accepted_ack_replays_durable_outcome_without_second_cla
     store = _Store(plan)
     runtime = _Runtime()
     supervisor = AgentExecutionSupervisor()
-    container = _container(plan, store, runtime, supervisor)
+    planner = _Planner(plan, fail_after_first=True)
+    container = _container(
+        plan,
+        store,
+        runtime,
+        supervisor,
+        planner=planner,
+    )
 
     first_socket = _Socket(
         supervisor=supervisor,
@@ -411,6 +423,7 @@ async def test_r7_g_lost_accepted_ack_replays_durable_outcome_without_second_cla
     assert runtime.activation_calls == 1
     assert runtime.execute_calls == 1
     assert len(store.handoff_calls) == 1
+    assert planner.calls == 1
     await supervisor.shutdown()
 
 
