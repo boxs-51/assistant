@@ -36,6 +36,24 @@ class ForkSideEffectSnapshot:
 
 
 @dataclass(frozen=True, slots=True)
+class ForkAdmission:
+    """Committed R8-D FORK result returned by atomic consume."""
+
+    task_id: str
+    fork_request_id: str
+    plan_fingerprint: str
+
+    branch_id: str
+    branch_revision: int
+
+    execution_id: str
+    execution_revision: int
+
+    task_revision: int
+    task_budget_revision: int
+
+
+@dataclass(frozen=True, slots=True)
 class ForkPlan:
     """Immutable R8-C read-only proof for one future R8-D FORK consume."""
 
@@ -197,6 +215,7 @@ def fork_plan_fingerprint(values: ForkPlan | Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "ForkAdmission",
     "ForkPlan",
     "ForkSideEffectSnapshot",
     "committed_result_fingerprint",
