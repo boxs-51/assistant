@@ -1036,6 +1036,55 @@ async def websocket_endpoint(
     connection_runtime = getattr(container, "connection_runtime", None)
     await ws_manager.connect(websocket)
     logger.info("WebSocket client connected", client_host=websocket.client.host, user_id=identity.user_id)
+    resume_tasks: set[asyncio.Task] = set()
+
+    async def run_resume_request(
+        connection_id: str,
+        envelope: RealtimeEnvelope,
+    ) -> None:
+        try:
+            await _resume_execution(
+                websocket,
+                identity,
+                container,
+                connection_id,
+                envelope,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Resume is intentionally detached from the socket receive loop so
+            # R6 reconciliation can return on the same WebSocket. Unexpected
+            # request-local failures are logged here instead of killing the
+            # receiver that owns transport correlation.
+            logger.exception(
+                "R7-J detached resume request failed",
+                execution_id=envelope.execution_id,
+                connection_id=connection_id,
+                error=str(error),
+            )
+            try:
+                await websocket.send_text(
+                    json.dumps(
+                        {
+                            "status": "error",
+                            "message": str(error),
+                        }
+                    )
+                )
+            except Exception:
+                pass
+
+    def resume_done(task: asyncio.Task) -> None:
+        resume_tasks.discard(task)
+        if task.cancelled():
+            return
+        try:
+            task.exception()
+        except Exception:
+            # run_resume_request already logs request-local exceptions.
+            pass
+
     try:
         active_connection_id = None
         # Vòng lặp để nhận tin nhắn từ client (ví dụ: yêu cầu subscribe)
@@ -1097,13 +1146,21 @@ async def websocket_endpoint(
                             client_id=request.client_id,
                         )
                     elif envelope.type == "execution.resume":
-                        await _resume_execution(
-                            websocket,
-                            identity,
-                            container,
-                            active_connection_id,
-                            envelope,
+                        # Do not await inline. Resume planning may send
+                        # capability.reconcile over this same socket and must
+                        # allow the receive loop to ingest capability.reconciliation.
+                        task = asyncio.create_task(
+                            run_resume_request(
+                                active_connection_id,
+                                envelope,
+                            ),
+                            name=(
+                                "r7-resume-request:"
+                                f"{envelope.execution_id or 'unknown'}"
+                            ),
                         )
+                        resume_tasks.add(task)
+                        task.add_done_callback(resume_done)
                     else:
                         await connection_runtime.handle_realtime_message(
                             active_connection_id,
@@ -1118,6 +1175,17 @@ async def websocket_endpoint(
 
     except WebSocketDisconnect:
         if active_connection_id and connection_runtime is not None:
+            # Fail connection-bound invocation/reconciliation futures first;
+            # detached resume planners then observe transport loss rather than
+            # hanging behind a dead socket.
             await connection_runtime.disconnect_connection(active_connection_id)
+        for task in tuple(resume_tasks):
+            if not task.done():
+                task.cancel()
+        if resume_tasks:
+            await asyncio.gather(
+                *tuple(resume_tasks),
+                return_exceptions=True,
+            )
         ws_manager.disconnect(websocket)
         logger.info("WebSocket client disconnected", client_host=websocket.client.host, user_id=identity.user_id)

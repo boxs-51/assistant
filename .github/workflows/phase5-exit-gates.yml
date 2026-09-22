@@ -1,0 +1,36 @@
+name: Phase 5 Exit Gates
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  phase-5-exit-gates:
+    name: Phase 5.6-5.11 exit gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-test.txt
+
+      - name: Run Phase 5 exit gates
+        run: >
+          python -m pytest -q
+          se/tests/architecture/test_phase5_6_exit_gate.py
+          se/tests/architecture/test_phase5_7_exit_gate.py
+          se/tests/architecture/test_phase5_8_exit_gate.py
+          se/tests/architecture/test_phase5_9_exit_gate.py
+          se/tests/architecture/test_phase5_10_exit_gate.py
+          se/tests/architecture/test_phase5_11_exit_gate.py

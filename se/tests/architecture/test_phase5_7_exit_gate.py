@@ -23,7 +23,8 @@ from se.src.domain.schemas.identity import Identity
 ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_7_EXIT_GATE.md"
 LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "legacy" /"phase5" / "PHASE_5_AGENT_RUNTIME_SPEC.md"
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-7-exit-gate.yml"
+ARCHITECTURE_WORKFLOW = ROOT / ".github" / "workflows" / "architecture-baseline.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-exit-gates.yml"
 
 
 def make_context() -> AgentExecutionContext:
@@ -155,9 +156,10 @@ def test_E4_capability_error_codes_and_retryability_are_preserved_verbatim():
 def test_E5_ci_declares_full_suite_and_phase_5_7_exit_gate_as_blocking_checks():
     """E5: CI must run the full suite plus the Phase 5.7 gate."""
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    baseline = ARCHITECTURE_WORKFLOW.read_text(encoding="utf-8")
 
-    assert "python -m pytest -q" in workflow
-    assert "python -m pytest -q se/tests/architecture/test_phase5_7_exit_gate.py" in workflow
+    assert "python -m pytest -q" in baseline
+    assert "se/tests/architecture/test_phase5_7_exit_gate.py" in workflow
     assert "exit 1" not in workflow
     assert "on:" in workflow
     assert "pull_request:" in workflow

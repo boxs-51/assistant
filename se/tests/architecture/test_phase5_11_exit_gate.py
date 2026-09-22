@@ -29,7 +29,8 @@ ROOT = Path(__file__).resolve().parents[3]
 EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_11_EXIT_GATE.md"
 CHECKLIST = ROOT / "se" / "docs" /  "legacy" / "phase5" / "phase5_11" / "PHASE5_11_TASK_CHECKLIST.md"
 LEGACY_STATUS_DOC = ROOT / "se" / "docs" /  "legacy" / "phase5" / "Agent_Execution_System.md"
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-11-exit-gate.yml"
+ARCHITECTURE_WORKFLOW = ROOT / ".github" / "workflows" / "architecture-baseline.yml"
+CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-exit-gates.yml"
 MAIN_MODULE = ROOT / "se" / "src" / "main.py"
 
 
@@ -187,13 +188,14 @@ def test_E6_E7_E8_E9_wiring_docs_and_ci_are_present():
     checklist = CHECKLIST.read_text(encoding="utf-8")
     legacy = LEGACY_STATUS_DOC.read_text(encoding="utf-8")
     workflow = CI_WORKFLOW.read_text(encoding="utf-8")
+    baseline = ARCHITECTURE_WORKFLOW.read_text(encoding="utf-8")
     main_source = MAIN_MODULE.read_text(encoding="utf-8")
 
     for criterion in ("E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"):
         assert f"**{criterion}:**" in gate_doc
     assert "[x]" in checklist
     assert "phase5_11/PHASE5_11_EXIT_GATE.md" in legacy
-    assert "python -m pytest -q" in workflow
-    assert "python -m pytest -q se/tests/architecture/test_phase5_11_exit_gate.py" in workflow
+    assert "python -m pytest -q" in baseline
+    assert "se/tests/architecture/test_phase5_11_exit_gate.py" in workflow
     assert "container.context_builder_port = ContextBuilderAdapter(" in main_source
     assert "context_builder=container.context_builder_port" in main_source
