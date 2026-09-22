@@ -579,8 +579,9 @@ async def test_r7_d_execution_resume_is_preflight_only_no_claim_or_runtime_start
             registry=SimpleNamespace(get=lambda _: snapshot)
         ),
         resume_planning_service=Planner(),
+        agent_durable_store=SimpleNamespace(),
+        agent_execution_supervisor=SimpleNamespace(),
         agent_runtime=ForbiddenRuntime(),
-        continuation_service=SimpleNamespace(),
     )
     socket = Socket()
     envelope = RealtimeEnvelope(
