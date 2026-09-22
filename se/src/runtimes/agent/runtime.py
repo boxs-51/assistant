@@ -720,18 +720,18 @@ class AgentRuntime:
             for tool_call_id in ordered_ids
         )
 
-    async def execute_claimed_resume(
+    async def prepare_claimed_resume_activation(
         self,
         context: AgentExecutionContext,
         *,
         plan: ResumePlan,
         consumed: ResumeClaimConsumeResult,
-    ) -> AgentExecutionResult:
-        """Activate one F3-consumed claim and continue its Agent execution.
+    ) -> tuple[ToolExecutionResult, ...]:
+        """Finish the R7-F4 activation stage under supervisor ownership.
 
-        No supervisor reservation, transport ACK, recovery checkpoint, or wire
-        decision is performed here. Those post-claim ownership semantics are
-        deliberately reserved for R7-G.
+        R7-G uses this as the pre-ACK readiness barrier. The caller MUST run
+        it inside the task returned by AgentExecutionSupervisor.start_reserved.
+        No accepted ACK is safe until this method has returned successfully.
         """
 
         await self._activate_claimed_resume_context(
@@ -759,9 +759,187 @@ class AgentRuntime:
                 context,
                 transcript,
             )
+            return resumed_results
         finally:
             context.clear_iteration_budget()
 
+    async def recover_claimed_resume(
+        self,
+        context: AgentExecutionContext,
+        *,
+        plan: ResumePlan,
+        consumed: ResumeClaimConsumeResult,
+        error_message: str,
+    ) -> tuple[str, int]:
+        """Return a post-claim handoff failure to a fresh RECOVERY safe point.
+
+        The consumed claim remains CONSUMED. This transition owns the same
+        RUNNING revision acquired by F3 and, for task-scoped executions,
+        releases active capacity in the same UoW as the recovery checkpoint.
+        """
+
+        if self._durable_store is None:
+            raise ResumeActivationError(
+                "RESUME_AUTHORITY_UNAVAILABLE",
+                "Recovery requires durable AgentExecution storage.",
+            )
+
+        execution = await self._durable_store.load_execution(plan.execution_id)
+        if execution is None:
+            raise ResumeActivationError(
+                "RESUME_AUTHORITY_UNAVAILABLE",
+                "Consumed AgentExecution is missing during recovery.",
+            )
+        if (
+            str(execution.state) != AgentExecutionState.RUNNING.value
+            or execution.revision != consumed.consumed_execution_revision
+            or execution.current_checkpoint_id != plan.checkpoint_id
+            or execution.bound_client_id != consumed.bound_client_id
+            or execution.bound_connection_id != consumed.bound_connection_id
+        ):
+            raise ResumeActivationError(
+                "STALE_RESUME_AUTHORITY",
+                "Recovery no longer owns the consumed RUNNING revision.",
+            )
+
+        remaining = context.freeze_active_budget()
+        if remaining is None:
+            remaining = consumed.remaining_active_budget_seconds
+            context.remaining_active_budget_seconds = remaining
+        remaining = max(0.0, float(remaining))
+
+        target_revision = consumed.consumed_execution_revision + 1
+        checkpoint_id = (
+            f"{context.execution_id}:checkpoint:{target_revision}"
+        )
+        recovery_reason = AgentExecutionWaitReason.RECOVERY
+        ttl_seconds = self._wait_policy.wait_ttl_seconds(
+            reason=recovery_reason,
+            context=context,
+        )
+        context.wait_expires_at = (
+            None
+            if ttl_seconds is None
+            else context.clock.now_utc()
+            + timedelta(seconds=ttl_seconds)
+        )
+
+        transcript_snapshot = (
+            list(context.resume_transcript)
+            if context.resume_transcript
+            else [
+                item.model_dump(mode="json")
+                for item in plan.transcript_snapshot
+            ]
+        )
+        pending_invocations = tuple(
+            {
+                "ordinal": action.ordinal,
+                "invocation_id": action.invocation_id,
+                "tool_call_id": action.tool_call_id,
+                "capability_id": action.capability_id,
+            }
+            for action in plan.invocation_actions
+            if action.action is not ResumeInvocationActionKind.REUSE_COMMITTED
+        )
+        checkpoint_values = {
+            "checkpoint_id": checkpoint_id,
+            "execution_id": context.execution_id,
+            "execution_revision": target_revision,
+            "session_id": context.session_id,
+            "task_id": context.task_id,
+            "branch_id": context.branch_id,
+            "iteration": context.iteration,
+            "wait_reason": recovery_reason.value,
+            "remaining_active_budget_seconds": remaining,
+            "wait_expires_at": context.wait_expires_at,
+            "origin_client_id": plan.target_client_id,
+            "origin_connection_id": plan.target_connection_id,
+            "transcript_snapshot": transcript_snapshot,
+            "metadata_json": {
+                "request_id": context.request_id,
+                "correlation_id": context.correlation_id,
+                "trace_id": context.trace_id,
+                "resume_request_id": consumed.resume_request_id,
+                "claim_id": consumed.claim_id,
+                "recovery_error": error_message,
+            },
+        }
+        await self._transition_running_durable(
+            context,
+            consumed.consumed_execution_revision,
+            {
+                "state": AgentExecutionState.WAITING.value,
+                "wait_reason": recovery_reason.value,
+                "wait_expires_at": context.wait_expires_at,
+                "remaining_active_budget_seconds": remaining,
+                "bound_client_id": plan.target_client_id,
+                "bound_connection_id": None,
+                "error": error_message,
+                "completed_at": None,
+            },
+            checkpoint_values=checkpoint_values,
+            pending_invocations=pending_invocations,
+        )
+        context.resume_revision = target_revision
+        context.connection_id = None
+        context.remaining_active_budget_seconds = remaining
+        return checkpoint_id, target_revision
+
+    async def fail_claimed_resume(
+        self,
+        context: AgentExecutionContext,
+        *,
+        plan: ResumePlan,
+        consumed: ResumeClaimConsumeResult,
+        error_message: str,
+    ) -> bool:
+        """Fail closed if RECOVERY checkpointing itself cannot be established."""
+
+        if self._durable_store is None:
+            return False
+        execution = await self._durable_store.load_execution(plan.execution_id)
+        if (
+            execution is None
+            or str(execution.state) != AgentExecutionState.RUNNING.value
+            or execution.revision != consumed.consumed_execution_revision
+        ):
+            return False
+
+        context.freeze_active_budget()
+        await self._transition_running_durable(
+            context,
+            consumed.consumed_execution_revision,
+            {
+                "state": AgentExecutionState.FAILED.value,
+                "wait_reason": None,
+                "wait_expires_at": None,
+                "bound_connection_id": None,
+                "error": error_message,
+                "completed_at": context.clock.now_utc(),
+            },
+        )
+        return True
+
+    async def execute_claimed_resume(
+        self,
+        context: AgentExecutionContext,
+        *,
+        plan: ResumePlan,
+        consumed: ResumeClaimConsumeResult,
+    ) -> AgentExecutionResult:
+        """Activate one F3-consumed claim and continue its Agent execution.
+
+        Direct callers retain the R7-F4 behavior. The canonical R7-G wire
+        path runs prepare_claimed_resume_activation inside a supervisor-owned
+        task and waits for that readiness barrier before ACK.
+        """
+
+        resumed_results = await self.prepare_claimed_resume_activation(
+            context,
+            plan=plan,
+            consumed=consumed,
+        )
         return await self.execute(
             context,
             durable_revision=consumed.consumed_execution_revision,
