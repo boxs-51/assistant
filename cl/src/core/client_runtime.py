@@ -669,8 +669,11 @@ class ClientRuntime:
         if outcome.retryable:
             entry.state = ResumeTicketState.WAIT_REFRESH
             return
+        # Keep the terminal entry as an in-memory tombstone. Rejection
+        # acquires no new execution revision, so removing it would allow a
+        # duplicate execution.waiting(C@N) publication to resurrect the same
+        # non-retryable attempt as a fresh ticket.
         entry.state = ResumeTicketState.REJECTED
-        self._pending_resume_tickets.pop(key, None)
 
     def _schedule_reconnect(self) -> None:
         with self._lock:
