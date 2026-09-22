@@ -238,12 +238,19 @@ async def test_r8_c_rejects_source_lineage_conflicts(mutation, code):
 
 
 @pytest.mark.asyncio
-async def test_r8_c_any_checkpoint_pending_snapshot_rejects_even_terminal():
+@pytest.mark.parametrize(
+    "observed",
+    [
+        "NOT_DISPATCHED",
+        "IN_FLIGHT",
+        "OUTCOME_UNKNOWN",
+        "TERMINAL_COMMITTED",
+    ],
+)
+async def test_r8_c_any_checkpoint_pending_snapshot_rejects(observed):
     store, planner = _planner()
     store.pending = (
-        SimpleNamespace(
-            observed_remote_outcome_state="TERMINAL_COMMITTED"
-        ),
+        SimpleNamespace(observed_remote_outcome_state=observed),
     )
     with pytest.raises(ForkPlanRejected) as exc:
         await _build(planner)
@@ -295,9 +302,56 @@ async def test_r8_c_remote_terminal_effect_requires_matching_committed_projectio
     assert exc.value.code == "FORK_COMMITTED_RESULT_CONFLICT"
 
     store.results["call-1"] = _committed_result()
+    store.transcript = (
+        InferenceMessage(role="user", content="base"),
+        InferenceMessage(
+            role="tool",
+            name="tool.echo",
+            tool_call_id="call-1",
+            content={"ok": True},
+            metadata={"success": True, "retryable": False},
+        ),
+    )
     plan = await _build(planner)
     assert len(plan.side_effects) == 1
     assert plan.side_effects[0].remote_outcome_state == "TERMINAL_COMMITTED"
+
+
+@pytest.mark.asyncio
+async def test_r8_c_terminal_effect_must_be_visible_in_base_transcript():
+    store, planner = _planner()
+    store.invocations = (_remote_invocation(),)
+    store.results["call-1"] = _committed_result()
+
+    with pytest.raises(ForkPlanRejected) as exc:
+        await _build(planner)
+    assert exc.value.code == "FORK_TRANSCRIPT_UNSAFE"
+
+
+@pytest.mark.asyncio
+async def test_r8_c_terminal_non_remote_effect_with_committed_projection_is_safe():
+    store, planner = _planner()
+    store.invocations = (
+        _remote_invocation(
+            driver_kind="LOCAL",
+            remote_outcome_state=None,
+        ),
+    )
+    store.results["call-1"] = _committed_result()
+    store.transcript = (
+        InferenceMessage(role="user", content="base"),
+        InferenceMessage(
+            role="tool",
+            name="tool.echo",
+            tool_call_id="call-1",
+            content={"ok": True},
+            metadata={"success": True, "retryable": False},
+        ),
+    )
+
+    plan = await _build(planner)
+    assert len(plan.side_effects) == 1
+    assert plan.side_effects[0].remote_outcome_state is None
 
 
 @pytest.mark.asyncio
