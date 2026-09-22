@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib
 import inspect
 from types import SimpleNamespace
 
@@ -13,7 +14,9 @@ from se.src.runtimes.agent.legacy_materialization import (
     parse_legacy_checkpoint_source,
     sanitize_legacy_transcript,
 )
+from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.workflow.runtime import WorkflowRuntime
 from se.src.transport.gateway.api.v1 import events_router
 
 
@@ -121,3 +124,15 @@ def test_r7_i_removes_phase6_9_runtime_authority_surface():
     assert "confirm_merge" not in source
     assert "service.reconnect" not in source
     assert "continuation_service" not in source
+
+    workflow_source = inspect.getsource(WorkflowRuntime._execute_agent)
+    assert "continuation_service" not in workflow_source
+    assert "current_checkpoint(" not in workflow_source
+
+    assert not hasattr(DurableAgentStore, "save_continuation_state")
+    assert not hasattr(DurableAgentStore, "load_continuation_state")
+
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("se.src.runtimes.agent.continuation")
+    with pytest.raises(ModuleNotFoundError):
+        importlib.import_module("se.src.runtimes.agent.contracts.continuation")
