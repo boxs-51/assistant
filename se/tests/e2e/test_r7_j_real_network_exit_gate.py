@@ -558,6 +558,14 @@ async def test_r7_j_real_tcp_k1_disconnect_k2_auto_resume_same_execution(
         assert invocation_before.state.value == "WAITING"
         assert invocation_before.remote_outcome_state.value == "OUTCOME_UNKNOWN"
 
+        # Finish the K1 process-death simulation deterministically. Resetting
+        # the dispatcher bumps its epoch before the blocked local worker is
+        # released, so that late completion cannot mutate the durable client
+        # ledger from RUNNING to TERMINAL after the socket is already gone.
+        await _close_k1(k1)
+        k1 = None
+        k1_release.set()
+
         # K2 is a fresh process-style ClientRuntime generation using the same
         # stable installation identity and durable client invocation ledger.
         k2 = ClientRuntime(
