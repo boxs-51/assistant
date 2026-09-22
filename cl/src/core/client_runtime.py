@@ -114,6 +114,7 @@ class ClientRuntime:
             tuple[str, str], PendingResumeEntry
         ] = {}
         self._execution_resume_watermarks: dict[str, int] = {}
+        self._execution_resume_conflicts: dict[str, int] = {}
         self._confirmed_capability_ids: frozenset[str] = frozenset()
         self._resume_condition = threading.Condition(self._lock)
         self._resume_worker_thread: Optional[threading.Thread] = None
@@ -331,6 +332,7 @@ class ClientRuntime:
     def _invalidate_resume_state_locked(self) -> None:
         self._pending_resume_tickets.clear()
         self._execution_resume_watermarks.clear()
+        self._execution_resume_conflicts.clear()
         self._confirmed_capability_ids = frozenset()
         self._resume_condition.notify_all()
 
@@ -346,6 +348,14 @@ class ClientRuntime:
             watermark = self._execution_resume_watermarks.get(ticket.execution_id)
             if watermark is not None and ticket.revision < watermark:
                 return False
+            conflict_revision = self._execution_resume_conflicts.get(
+                ticket.execution_id
+            )
+            if (
+                conflict_revision is not None
+                and ticket.revision <= conflict_revision
+            ):
+                return False
 
             same_revision = [
                 entry
@@ -360,6 +370,9 @@ class ClientRuntime:
             if same_revision:
                 for entry in same_revision:
                     entry.state = ResumeTicketState.CONFLICT
+                self._execution_resume_conflicts[
+                    ticket.execution_id
+                ] = ticket.revision
                 self._resume_condition.notify_all()
                 return False
 
@@ -401,6 +414,9 @@ class ClientRuntime:
         if current is not None and revision <= current:
             return
         self._execution_resume_watermarks[execution_id] = revision
+        conflict_revision = self._execution_resume_conflicts.get(execution_id)
+        if conflict_revision is not None and revision > conflict_revision:
+            self._execution_resume_conflicts.pop(execution_id, None)
         for entry in self._pending_resume_tickets.values():
             if (
                 entry.ticket.execution_id == execution_id
