@@ -454,6 +454,162 @@ async def test_r8_d_waiting_task_returns_to_running_in_same_consume(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r8_d_delegated_source_preserves_parent_and_parallel_charge(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_d_delegated.sqlite",
+    )
+    try:
+        task_id = "task-delegated-fork"
+        session_id = f"session-{task_id}"
+        root_execution_id = "exec-delegated-root"
+        child_execution_id = "exec-delegated-child"
+        checkpoint_id = "cp-delegated-child"
+
+        await service.create_task_with_budget(
+            {
+                "id": task_id,
+                "session_id": session_id,
+                "created_by": "user-r8-d",
+                "assigned_agent_id": "agent-r8-d",
+                "revision": 0,
+                "status": "ASSIGNED",
+                "wait_reasons": [],
+                "input": {},
+            }
+        )
+        await service.transition_task(
+            task_id,
+            allowed_source_states=("ASSIGNED",),
+            target_state="RUNNING",
+            values={},
+        )
+        root = await service.start_root_task_scoped_execution(
+            task_id,
+            execution_id=root_execution_id,
+            execution_values={
+                "id": root_execution_id,
+                "session_id": session_id,
+                "agent_id": "agent-r8-d",
+                "task_id": task_id,
+                "correlation_id": "corr-delegated",
+                "state": "RUNNING",
+                "revision": 1,
+                "request": {"prompt": "root"},
+            },
+        )
+
+        await service.start_task_scoped_execution(
+            task_id,
+            execution_id=child_execution_id,
+            execution_values={
+                "id": child_execution_id,
+                "session_id": session_id,
+                "agent_id": "agent-r8-d",
+                "task_id": task_id,
+                "branch_id": root.branch_id,
+                "parent_execution_id": root_execution_id,
+                "correlation_id": "corr-delegated",
+                "state": "RUNNING",
+                "revision": 1,
+                "remaining_active_budget_seconds": 18.0,
+                "request": {"prompt": "delegated-source"},
+            },
+            delegation_depth=1,
+        )
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentIterationRecord(
+                    id="iter-delegated-child",
+                    execution_id=child_execution_id,
+                    iteration=1,
+                    state="WAITING",
+                    tool_call_ids=[],
+                )
+            )
+            await uow.commit()
+
+        assert await service.finish_task_scoped_execution(
+            task_id,
+            execution_id=child_execution_id,
+            source_revision=1,
+            transition_values={
+                "state": "WAITING",
+                "wait_reason": "RESOURCE",
+                "remaining_active_budget_seconds": 18.0,
+                "completed_at": None,
+            },
+            delegated=True,
+            checkpoint_values={
+                "checkpoint_id": checkpoint_id,
+                "execution_id": child_execution_id,
+                "execution_revision": 2,
+                "session_id": session_id,
+                "task_id": task_id,
+                "branch_id": root.branch_id,
+                "iteration": 1,
+                "wait_reason": "RESOURCE",
+                "remaining_active_budget_seconds": 18.0,
+                "transcript_snapshot": [
+                    {"role": "user", "content": "delegated-base"}
+                ],
+                "metadata_json": {},
+            },
+        ) == 2
+
+        async with _Uow(sessions) as uow:
+            promoted = await uow.agents.compare_and_set_task_branch(
+                root.branch_id,
+                0,
+                {"current_execution_id": child_execution_id},
+            )
+            assert promoted is not None
+            await uow.commit()
+
+        plan = await planner.build_fork_plan(
+            fork_request_id="fork-delegated",
+            task_id=task_id,
+            source_branch_id=root.branch_id,
+            source_execution_id=child_execution_id,
+            source_checkpoint_id=checkpoint_id,
+            target_user_id="user-r8-d",
+            overlay_messages=(),
+        )
+
+        before = await service.get_budget(task_id)
+        assert before.active_parallel_agents == 0
+        admission = await service.consume_fork_plan(plan)
+        after = await service.get_budget(task_id)
+
+        assert after.active_branches == before.active_branches + 1
+        assert after.used_executions == before.used_executions + 1
+        assert after.active_executions == before.active_executions + 1
+        assert after.active_parallel_agents == 1
+
+        async with _Uow(sessions) as uow:
+            branch = await uow.agents.get_task_branch(admission.branch_id)
+            forked = await uow.agents.get_execution(admission.execution_id)
+            source = await uow.agents.get_execution(child_execution_id)
+
+            assert branch.parent_branch_id == root.branch_id
+            assert branch.base_execution_id == child_execution_id
+            assert branch.base_checkpoint_id == checkpoint_id
+
+            assert source.parent_execution_id == root_execution_id
+            assert forked.parent_execution_id == root_execution_id
+            assert forked.parent_execution_id != child_execution_id
+            assert forked.retry_of_execution_id is None
+            assert forked.base_execution_id == child_execution_id
+            assert forked.base_checkpoint_id == checkpoint_id
+            assert forked.branch_id == admission.branch_id
+            assert forked.remaining_active_budget_seconds == 18.0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r8_d_same_request_replays_after_source_is_no_longer_forkable(
     tmp_path,
 ):
