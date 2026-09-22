@@ -24,12 +24,6 @@ from .events import (
     CorrelationContext,
 )
 from .result import AgentExecutionResult
-from .continuation import (
-    CheckpointReason,
-    ContinuationBranch,
-    ContinuationState,
-    ExecutionCheckpoint,
-)
 from .resume import (
     CheckpointPendingInvocation,
     DurableExecutionCheckpoint,
@@ -86,10 +80,6 @@ __all__ = [
     "AgentEventPublisher",
     "CorrelationContext",
     "AgentExecutionResult",
-    "CheckpointReason",
-    "ContinuationBranch",
-    "ContinuationState",
-    "ExecutionCheckpoint",
     "CheckpointPendingInvocation",
     "DurableExecutionCheckpoint",
     "ResumeInvocationAction",
