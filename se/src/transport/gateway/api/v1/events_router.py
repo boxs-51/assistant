@@ -96,10 +96,22 @@ async def _publish_waiting_tickets(
     loader = getattr(durable_store, "load_pending_resume_tickets", None)
     if not callable(loader):
         return
-    tickets = await loader(
-        owner_user_id=identity.user_id or "",
-        client_id=client_id,
-    )
+    try:
+        tickets = await loader(
+            owner_user_id=identity.user_id or "",
+            client_id=client_id,
+        )
+    except Exception:
+        # Ticket replay is read-only publication after capability ACK. A
+        # malformed/stale durable row must fail closed for auto-resume without
+        # retroactively invalidating the successful registration handshake.
+        logger.exception(
+            "Failed to replay R7-H waiting tickets",
+            user_id=identity.user_id,
+            client_id=client_id,
+            connection_id=connection_id,
+        )
+        return
     for payload in tickets:
         await _send_realtime(
             websocket,
