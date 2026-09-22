@@ -130,13 +130,20 @@ class _AllowToolPolicy:
 
 class _ContextBuilder:
     async def build(self, context, request):
-        return SimpleNamespace(
-            messages=(
+        if request.prior_messages:
+            messages = tuple(
+                InferenceMessage.model_validate(item)
+                for item in request.prior_messages
+            )
+        else:
+            messages = (
                 InferenceMessage(
                     role="user",
                     content="Run the durable R7-J remote tool.",
                 ),
-            ),
+            )
+        return SimpleNamespace(
+            messages=messages,
             tools=(),
             metadata={},
         )
