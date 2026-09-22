@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.models.sql.agent import (
@@ -21,6 +21,9 @@ from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.capability_invocations import (
     CapabilityInvocationRepository,
+)
+from se.src.runtimes.agent.legacy_materialization import (
+    LegacyCheckpointMaterializationError,
 )
 from se.src.runtimes.agent.persistence import DurableAgentStore
 
@@ -302,5 +305,54 @@ async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(tmp_path):
                 "auto_resume_allowed": True,
             },
         )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-unsafe.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(sessions)
+        async with sessions() as session:
+            await session.execute(
+                delete(CapabilityInvocationRecord).where(
+                    CapabilityInvocationRecord.invocation_id == "inv-pending"
+                )
+            )
+            await session.commit()
+
+        with pytest.raises(LegacyCheckpointMaterializationError) as exc:
+            await store.materialize_legacy_checkpoint(
+                "exec-legacy",
+                requested_checkpoint_id="legacy-cp-1",
+                target_user_id="user-1",
+                target_client_id="client-1",
+            )
+        assert exc.value.code == "CHECKPOINT_INCOMPLETE"
+
+        execution = await store.load_execution("exec-legacy")
+        assert execution.revision == 4
+        assert execution.current_checkpoint_id is None
+
+        async with sessions() as session:
+            rows = (
+                await session.execute(
+                    select(AgentExecutionCheckpointRecord).where(
+                        AgentExecutionCheckpointRecord.execution_id
+                        == "exec-legacy"
+                    )
+                )
+            ).scalars().all()
+        assert rows == []
     finally:
         await engine.dispose()
