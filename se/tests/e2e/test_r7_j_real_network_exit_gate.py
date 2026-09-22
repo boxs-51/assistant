@@ -274,12 +274,17 @@ def _client_registry(tool):
     )
 
 
-async def _connect_k1(port: int, registry, ledger_path: Path):
+async def _connect_generation(
+    port: int,
+    connection_id: str,
+    registry,
+    ledger_path: Path,
+):
     holder = {}
     realtime = GatewayRealtimeClient(
         f"http://127.0.0.1:{port}",
         {"Authorization": "Bearer r7-j"},
-        connection_id=K1,
+        connection_id=connection_id,
         session_id=SESSION_ID,
         client_id=CLIENT_ID,
         heartbeat_interval=60.0,
@@ -316,7 +321,16 @@ async def _connect_k1(port: int, registry, ledger_path: Path):
         realtime=realtime,
         dispatcher=dispatcher,
         capabilities=capabilities,
-        connection_id=K1,
+        connection_id=connection_id,
+    )
+
+
+async def _connect_k1(port: int, registry, ledger_path: Path):
+    return await _connect_generation(
+        port,
+        K1,
+        registry,
+        ledger_path,
     )
 
 
