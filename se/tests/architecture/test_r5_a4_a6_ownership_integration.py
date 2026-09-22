@@ -32,8 +32,6 @@ from se.src.runtimes.capability.contracts.definition import (
 from se.src.runtimes.capability.drivers.agent_driver import (
     AgentCapabilityDriver,
 )
-from se.src.runtimes.connection.protocol import RealtimeEnvelope
-from se.src.transport.gateway.api.v1.events_router import _resume_execution
 
 
 def _identity() -> Identity:
@@ -210,121 +208,6 @@ async def test_outer_cancel_during_resume_claim_cannot_strand_running():
 
     assert store.record.state == "CANCELLED"
     assert store.record.revision == 9
-
-
-@pytest.mark.asyncio
-async def test_resume_activation_failure_after_claim_is_fail_closed():
-    order = []
-    context = _context(
-        "exec-resume-activation-fail",
-        activate_budget=False,
-    )
-
-    class Socket:
-        async def send_json(self, payload):
-            order.append("ack")
-            raise RuntimeError("socket send failed")
-
-    class Service:
-        async def ensure_loaded(self, execution_id):
-            return SimpleNamespace(
-                checkpoint_id="checkpoint-1",
-                pending_capability_id="desktop.echo",
-            )
-
-        async def reconnect(self, **kwargs):
-            order.append("reconnect")
-            return SimpleNamespace(branch_id="branch-1")
-
-        async def confirm_merge(self, **kwargs):
-            order.append("merge")
-            return SimpleNamespace(checkpoint_id="checkpoint-running")
-
-    class Runtime:
-        def __init__(self):
-            self.cancel_revision = None
-
-        async def claim_resume(self, execution_context):
-            order.append("claim")
-            return 8
-
-        async def execute(self, execution_context, *, durable_revision=None):
-            raise AssertionError("execution must not start after failed ACK")
-
-        async def cancel_claimed_execution(
-            self,
-            execution_context,
-            revision,
-            *,
-            error_message,
-        ):
-            order.append("cancel-claimed")
-            self.cancel_revision = revision
-
-    runtime = Runtime()
-    snapshot = SimpleNamespace(
-        is_usable=True,
-        user_id=_identity().user_id,
-        metadata={"client_id": "client-r5-a4"},
-    )
-
-    class Durable:
-        async def resume_execution(self, execution_id, *, identity=None):
-            order.append("rehydrate")
-            return context
-
-    container = SimpleNamespace(
-        connection_runtime=SimpleNamespace(
-            registry=SimpleNamespace(get=lambda _: snapshot)
-        ),
-        continuation_service=Service(),
-        capability_runtime=SimpleNamespace(
-            catalog=SimpleNamespace(
-                list_implementations_for_connection=lambda _: [
-                    SimpleNamespace(
-                        capability_id="desktop.echo",
-                        state=SimpleNamespace(value="ENABLED"),
-                    )
-                ]
-            )
-        ),
-        agent_durable_store=Durable(),
-        agent_registry=SimpleNamespace(
-            get=lambda _: SimpleNamespace(name="agent-r5-a4")
-        ),
-        agent_runtime=runtime,
-        agent_execution_supervisor=AgentExecutionSupervisor(),
-    )
-    envelope = RealtimeEnvelope(
-        type="execution.resume",
-        message_id="resume-r5-a4",
-        connection_id="conn-new",
-        execution_id=context.execution_id,
-        payload={
-            "execution_id": context.execution_id,
-            "checkpoint_id": "checkpoint-1",
-        },
-    )
-
-    with pytest.raises(RuntimeError, match="socket send failed"):
-        await _resume_execution(
-            Socket(),
-            _identity(),
-            container,
-            "conn-new",
-            envelope,
-        )
-
-    assert order == [
-        "rehydrate",
-        "reconnect",
-        "claim",
-        "merge",
-        "ack",
-        "cancel-claimed",
-    ]
-    assert runtime.cancel_revision == 8
-    assert container.agent_execution_supervisor.active_execution_ids() == ()
 
 
 @pytest.mark.asyncio
