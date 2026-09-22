@@ -1688,6 +1688,16 @@ class DurableAgentStore:
                                 "FOREIGN_CLIENT",
                                 "Pending R6 invocation lacks matching stable client authority.",
                             )
+                        if (
+                            source.origin_connection_id
+                            and invocation.connection_id
+                            and invocation.connection_id
+                            != source.origin_connection_id
+                        ):
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Legacy checkpoint connection differs from R6 invocation authority.",
+                            )
                         if invocation.remote_outcome_state is None:
                             raise LegacyCheckpointMaterializationError(
                                 "LEGACY_CHECKPOINT_UNSAFE",
@@ -1717,7 +1727,7 @@ class DurableAgentStore:
                                     invocation.remote_outcome_state
                                 ),
                                 "origin_client_id": invocation.origin_client_id,
-                                "origin_connection_id": source.origin_connection_id,
+                                "origin_connection_id": invocation.connection_id,
                             }
                         )
 
