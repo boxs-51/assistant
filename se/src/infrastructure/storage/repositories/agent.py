@@ -198,7 +198,6 @@ class AgentRepository(BaseRepository):
             .where(
                 ChatSessionRecord.user_id == owner_user_id,
                 AgentExecutionRecord.state == "WAITING",
-                AgentExecutionRecord.wait_reason == "CONNECTION",
                 AgentExecutionRecord.bound_client_id == client_id,
                 AgentExecutionRecord.current_checkpoint_id.is_not(None),
             )
