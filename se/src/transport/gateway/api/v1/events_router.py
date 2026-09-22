@@ -16,10 +16,7 @@ from .....runtimes.agent.contracts.resume import (
     ResumeTriggerType,
 )
 from .....runtimes.agent.resume_claim import ResumeClaimError
-from .....runtimes.agent.supervisor import (
-    AgentExecutionOwnershipError,
-    AgentExecutionSupervisor,
-)
+from .....runtimes.agent.supervisor import AgentExecutionOwnershipError
 from .....runtimes.agent.resume_planning import (
     ResumePlanDeferred,
     ResumePlanRejected,
@@ -440,6 +437,16 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
     durable_store = getattr(container, "agent_durable_store", None)
     supervisor = getattr(container, "agent_execution_supervisor", None)
     client_id = str(snapshot.metadata.get("client_id") or "")
+
+    if (
+        planning_service is None
+        or durable_store is None
+        or supervisor is None
+    ):
+        raise RuntimeError(
+            "R7_CANONICAL_RESUME_AUTHORITY_UNAVAILABLE: "
+            "resume planning, durable store and supervisor are required."
+        )
 
     # Lost-ACK replay must precede planning. The original accepted execution
     # may already be RUNNING or terminal, in which case rebuilding a WAITING
@@ -1012,104 +1019,6 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
                 return
             raise
 
-    # Compatibility-only Phase 6.9 path. Production bootstrap always binds
-    # resume_planning_service, so R7-D never reaches reconnect/claim/merge.
-    service = container.continuation_service
-    checkpoint = await service.ensure_loaded(execution_id)
-    if checkpoint is None or checkpoint.checkpoint_id != checkpoint_id:
-        raise ValueError("STALE_CONTINUATION_CHECKPOINT")
-
-    implementations = container.capability_runtime.catalog.list_implementations_for_connection(
-        connection_id
-    )
-    if not any(
-        item.capability_id == checkpoint.pending_capability_id
-        and item.state.value == "ENABLED"
-        for item in implementations
-    ):
-        raise ValueError("PENDING_CAPABILITY_NOT_READY")
-
-    # Rehydrate and validate the durable execution before advancing the
-    # continuation transaction.  A missing/corrupt durable record must not
-    # leave the checkpoint marked RUNNING.
-    context = await container.agent_durable_store.resume_execution(
-        execution_id,
-        identity=identity,
-    )
-    if context is None:
-        raise LookupError(f"Unknown agent execution: {execution_id}")
-    context.agent = container.agent_registry.get(context.agent_id)
-    if context.agent is None:
-        raise LookupError(f"Agent '{context.agent_id}' is not registered")
-
-    # Branch creation does not advance the immutable checkpoint.  The durable
-    # WAITING -> RUNNING claim must win before confirm_merge() and before ACK.
-    branch = await service.reconnect(
-        execution_id=execution_id,
-        connection_id=connection_id,
-        user_id=identity.user_id,
-        metadata={"client_id": snapshot.metadata.get("client_id")},
-    )
-    supervisor = getattr(
-        container,
-        "agent_execution_supervisor",
-        None,
-    ) or AgentExecutionSupervisor()
-    token = await supervisor.reserve(context)
-    durable_revision = None
-    started = False
-    try:
-        durable_revision = await container.agent_runtime.claim_resume(context)
-        merged = await service.confirm_merge(
-            execution_id=execution_id,
-            branch_id=branch.branch_id,
-            user_id=identity.user_id,
-        )
-        context.connection_id = connection_id
-        context.metadata["client_id"] = snapshot.metadata.get("client_id")
-
-        await _send_realtime(
-            websocket,
-            RealtimeEnvelope(
-                type="execution.resume.accepted",
-                message_id=f"resume-{uuid.uuid4().hex}",
-                connection_id=connection_id,
-                execution_id=execution_id,
-                payload={
-                    "execution_id": execution_id,
-                    "checkpoint_id": merged.checkpoint_id,
-                    "state": "RUNNING",
-                },
-            ),
-        )
-        await supervisor.start_reserved(
-            token,
-            context,
-            lambda: container.agent_runtime.execute(
-                context,
-                durable_revision=durable_revision,
-            ),
-        )
-        started = True
-    except BaseException as exc:
-        if not started:
-            await supervisor.release_reserved(token)
-            if durable_revision is not None:
-                cancel_claim = getattr(
-                    container.agent_runtime,
-                    "cancel_claimed_execution",
-                    None,
-                )
-                if callable(cancel_claim):
-                    await cancel_claim(
-                        context,
-                        durable_revision,
-                        error_message=(
-                            "RESUME_ACTIVATION_FAILED: "
-                            f"{type(exc).__name__}"
-                        ),
-                    )
-        raise
 
 
 @router.websocket("/ws")
