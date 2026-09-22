@@ -277,6 +277,7 @@ async def _recover_r7_g_handoff_failure(
     consumed,
     connection_id: str,
     error: BaseException,
+    send_wire: bool = True,
 ) -> None:
     message = f"{type(error).__name__}: {error}"
     recovery_checkpoint_id = None
@@ -340,12 +341,13 @@ async def _recover_r7_g_handoff_failure(
             claim_id=consumed.claim_id,
         )
 
-    await _send_resume_failed(
-        websocket,
-        connection_id=connection_id,
-        execution_id=plan.execution_id,
-        payload=failed_payload,
-    )
+    if send_wire:
+        await _send_resume_failed(
+            websocket,
+            connection_id=connection_id,
+            execution_id=plan.execution_id,
+            payload=failed_payload,
+        )
 
 
 async def _resume_execution(websocket, identity, container, connection_id, envelope):
@@ -719,6 +721,36 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
 
             try:
                 await asyncio.shield(activation_ready)
+            except asyncio.CancelledError as exc:
+                # Request/socket cancellation after claim consumption is a
+                # post-claim handoff failure, not permission to abandon a
+                # supervisor-owned task at RUNNING.
+                await supervisor.cancel_execution(
+                    plan.execution_id,
+                    cascade=False,
+                )
+                recovery = asyncio.create_task(
+                    _recover_r7_g_handoff_failure(
+                        websocket,
+                        container=container,
+                        supervisor=supervisor,
+                        context=context,
+                        plan=plan,
+                        consumed=consumed,
+                        connection_id=connection_id,
+                        error=exc,
+                        send_wire=False,
+                    )
+                )
+                try:
+                    await asyncio.shield(recovery)
+                except BaseException:
+                    logger.exception(
+                        "R7-G cancellation recovery failed",
+                        execution_id=plan.execution_id,
+                        claim_id=consumed.claim_id,
+                    )
+                raise
             except BaseException as exc:
                 await asyncio.gather(owned_task, return_exceptions=True)
                 await _recover_r7_g_handoff_failure(
@@ -796,7 +828,7 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
                 retryable=bool(exc.retryable),
             )
             return
-        except BaseException:
+        except BaseException as exc:
             if consumed is None:
                 await supervisor.release_reserved(token)
             elif owned_task is None:
@@ -808,9 +840,7 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
                     plan=plan,
                     consumed=consumed,
                     connection_id=connection_id,
-                    error=RuntimeError(
-                        "Post-claim failure occurred before supervisor start."
-                    ),
+                    error=exc,
                 )
                 return
             raise
