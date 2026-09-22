@@ -1,6 +1,6 @@
 # R7-G Completion — Supervisor Handoff + ACK/Recovery Semantics
 
-- Verified code HEAD: `fcbeddd0715a9113fca1f3d2b39c273d58b89bf5`
+- Verified code + regression HEAD: `150a0fee20fe5736b6deda521133d7d5bc069495`
 - Branch: `r7-g-supervisor-handoff`
 - Baseline audited: `edf3489239d2c66f6ebe85955b8bdc3f425ec43f`
 - Depends on: R7-F/F4 atomic ResumeClaim + claimed continuation
@@ -220,7 +220,10 @@ It proves:
 3. post-claim activation failure creates recovery/no accepted ACK;
 4. lost accepted ACK replays durable outcome without a second planner/claim/task;
 5. request cancellation during activation recovers and leaves no owned task;
-6. cancellation during ACCEPTED commit drains the commit and replays later.
+6. cancellation during ACCEPTED commit drains the commit and replays later;
+7. lost ACK can replay on a replacement WebSocket connection generation for
+   the same authenticated principal/stable client without rebuilding the plan,
+   consuming a second claim, or creating a second runtime task.
 
 Extended:
 
@@ -228,14 +231,22 @@ Extended:
 se/tests/integration/test_r7_f_resume_claim_atomicity.py
 ```
 
-with durable R7-G handoff idempotency/immutability coverage.
+with durable R7-G handoff idempotency/immutability coverage and a real
+SQLite/UoW recovery regression proving:
+
+- RUNNING@N+1 -> WAITING(RECOVERY)@N+2;
+- a fresh normalized recovery checkpoint with the previous checkpoint as parent;
+- K2 is cleared from active execution binding while retained as checkpoint origin;
+- TaskBudget active capacity is released exactly once;
+- RELEASE_EXECUTION reservation is durable;
+- the winning ResumeClaim remains CONSUMED.
 
 ## 10. Final CI evidence
 
-Verified code HEAD:
+Verified code + regression HEAD:
 
 ```text
-fcbeddd0715a9113fca1f3d2b39c273d58b89bf5
+150a0fee20fe5736b6deda521133d7d5bc069495
 ```
 
 All workflows present on the branch completed successfully:
@@ -253,16 +264,23 @@ Phase 5.11 Exit Gate    SUCCESS
 Architecture Baseline includes the Linux full repository suite and Windows
 client contracts.
 
-Relevant run IDs:
+Architecture Baseline results:
 
 ```text
-Architecture Baseline   35686924680
-Phase 5.6               35686924510
-Phase 5.7               35686924494
-Phase 5.8               35686924574
-Phase 5.9               35686924554
-Phase 5.10              35686924512
-Phase 5.11              35686924657
+Linux full repository suite: 752 passed, 1 skipped, 14 warnings
+Windows client contracts:    40 passed
+```
+
+Relevant final run IDs:
+
+```text
+Architecture Baseline   35693631826
+Phase 5.6               35693631800
+Phase 5.7               35693631863
+Phase 5.8               35693631778
+Phase 5.9               35693631785
+Phase 5.10              35693631858
+Phase 5.11              35693631845
 ```
 
 ## 11. Blast radius
@@ -288,12 +306,14 @@ The R7-G frozen exit conditions are satisfied:
 [x] activation failure -> fresh recovery/no accepted ACK
 [x] claim remains CONSUMED after post-claim failure
 [x] lost ACK retry replays durable accepted outcome
+[x] lost ACK replay works across a replacement connection generation for the same stable client
 [x] replay occurs before ResumePlan reconstruction
 [x] no second execution CAS on accepted replay
 [x] no second runtime task on accepted replay
 [x] cancellation after claim leaves no unowned task
 [x] durable ACCEPTED write has no uncertain-cancellation rollback window
 [x] durable handoff is idempotent/immutable
+[x] real SQLite RECOVERY checkpoint + TaskBudget release is green
 [x] broad repository regression is green
 [x] Windows client contracts are green
 ```
