@@ -107,15 +107,33 @@ def test_r8_c_semantic_revision_transcript_effect_and_overlay_changes_rehash():
         ),
     )
 
+    task_revision = replace(base, expected_task_revision=4)
+    checkpoint_plan = replace(base, source_checkpoint_id="cp-8")
     budget_plan = replace(base, expected_task_budget_revision=6)
+    policy_plan = replace(base, budget_policy_fingerprint="d" * 64)
+
+    changed_effect_result = (
+        _effect(result_fingerprint="e" * 64),
+    )
+    effect_result_plan = replace(
+        base,
+        side_effects=changed_effect_result,
+        side_effect_fingerprint=fork_side_effect_fingerprint(
+            changed_effect_result
+        ),
+    )
 
     for changed in (
+        task_revision,
         branch_revision,
         execution_revision,
+        checkpoint_plan,
         transcript_plan,
         effect_plan,
+        effect_result_plan,
         overlay_plan,
         budget_plan,
+        policy_plan,
     ):
         assert fork_plan_fingerprint(changed) != base.plan_fingerprint
 
