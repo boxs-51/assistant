@@ -207,6 +207,17 @@ class _Runtime:
         return True
 
 
+class _BlockingRuntime(_Runtime):
+    def __init__(self):
+        super().__init__()
+        self.activation_started = asyncio.Event()
+
+    async def prepare_claimed_resume_activation(self, context, *, plan, consumed):
+        self.activation_calls += 1
+        self.activation_started.set()
+        await asyncio.Event().wait()
+
+
 class _Socket:
     def __init__(
         self,
@@ -400,4 +411,41 @@ async def test_r7_g_lost_accepted_ack_replays_durable_outcome_without_second_cla
     assert runtime.activation_calls == 1
     assert runtime.execute_calls == 1
     assert len(store.handoff_calls) == 1
+    await supervisor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_r7_g_request_cancellation_after_claim_recovers_and_does_not_leak_owned_task():
+    plan = _plan()
+    store = _Store(plan)
+    runtime = _BlockingRuntime()
+    supervisor = AgentExecutionSupervisor()
+    socket = _Socket(supervisor=supervisor, runtime=runtime)
+    container = _container(plan, store, runtime, supervisor)
+
+    request_task = asyncio.create_task(
+        _resume_execution(
+            socket,
+            _identity(),
+            container,
+            K2,
+            _envelope(),
+        )
+    )
+    await runtime.activation_started.wait()
+    assert store.claim.state is ResumeClaimState.CONSUMED
+    assert supervisor.is_running(EXECUTION) is True
+
+    request_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await request_task
+
+    assert runtime.recover_calls == 1
+    assert [item[0] for item in store.handoff_calls] == ["FAILED"]
+    assert store.claim.metadata["r7_g_handoff"]["status"] == "FAILED"
+    assert supervisor.is_running(EXECUTION) is False
+    assert not any(
+        item["type"] == "execution.resume.accepted"
+        for item in socket.messages
+    )
     await supervisor.shutdown()
