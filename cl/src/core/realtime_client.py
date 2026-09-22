@@ -437,10 +437,11 @@ class GatewayRealtimeClient:
 
                 message = json.loads(raw)
 
-                # execution.waiting is unsolicited ticket publication rather
-                # than a request/ACK correlation frame. Keeping it forever in
-                # the waiter deque would leak one item per replay/reconnect.
-                if message.get("type") != "execution.waiting":
+                # Only synchronous handshake/resume waiters own deque
+                # entries. Capability invoke/cancel/reconcile and
+                # execution.waiting are callback-owned unsolicited frames;
+                # retaining them here would leak one deque item per event.
+                if self._is_waiter_message(message):
                     self._push_inbound(message)
 
                 if self._on_message is not None:
@@ -470,6 +471,19 @@ class GatewayRealtimeClient:
                 )
             except Exception:
                 return
+
+    @staticmethod
+    def _is_waiter_message(message: Dict[str, Any]) -> bool:
+        if message.get("status") == "error" or message.get("type") == "error":
+            return True
+        return message.get("type") in {
+            "connection.registered",
+            "capability.registered",
+            "execution.resume.preflight",
+            "execution.resume.accepted",
+            "execution.resume.rejected",
+            "execution.resume.failed",
+        }
 
     def _push_inbound(
         self,
