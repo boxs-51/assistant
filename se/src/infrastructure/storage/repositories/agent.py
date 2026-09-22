@@ -180,6 +180,64 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_legacy_waiting_executions_for_owner(
+        self,
+        *,
+        owner_user_id: str,
+    ):
+        """Read legacy WAITING rows that still lack a normalized checkpoint."""
+
+        from ..models.sql.chat_data.session import Session as ChatSessionRecord
+
+        result = await self.session.execute(
+            select(AgentExecutionRecord)
+            .join(
+                ChatSessionRecord,
+                ChatSessionRecord.id == AgentExecutionRecord.session_id,
+            )
+            .where(
+                ChatSessionRecord.user_id == owner_user_id,
+                AgentExecutionRecord.state == "WAITING",
+                AgentExecutionRecord.wait_reason == "CONNECTION",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+            )
+            .order_by(
+                AgentExecutionRecord.updated_at.asc(),
+                AgentExecutionRecord.id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def bind_legacy_checkpoint_pointer(
+        self,
+        execution_id: str,
+        *,
+        expected_revision: int,
+        checkpoint_id: str,
+        bound_client_id: str | None,
+    ):
+        """Bind one materialized checkpoint without changing lifecycle revision."""
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == expected_revision,
+                AgentExecutionRecord.state == "WAITING",
+                AgentExecutionRecord.wait_reason == "CONNECTION",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+            )
+            .values(
+                current_checkpoint_id=checkpoint_id,
+                bound_client_id=bound_client_id,
+                bound_connection_id=None,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
     async def list_waiting_executions_for_client(
         self,
         *,
