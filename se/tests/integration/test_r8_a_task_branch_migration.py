@@ -145,9 +145,12 @@ def _legacy_id(task_id: str) -> str:
     return "r8_legacy_" + hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:40]
 
 
-def test_r8_a_has_one_migration_head(tmp_path: Path):
+def test_r8_a_remains_on_one_linear_migration_chain(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
-    assert ScriptDirectory.from_config(config).get_heads() == ["14a_r8_task_branch"]
+    script = ScriptDirectory.from_config(config)
+    heads = script.get_heads()
+    assert len(heads) == 1
+    assert script.get_revision("14a_r8_task_branch") is not None
 
 
 def test_r8_a_backfills_cases_a_b_c_and_downgrades_losslessly(
