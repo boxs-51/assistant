@@ -17,6 +17,7 @@ from ..capability.contracts.invocation import (
 )
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
+from .contracts.inference import InferenceUsage
 from .contracts.resume import (
     CheckpointPendingInvocation,
     DurableExecutionCheckpoint,
@@ -1710,10 +1711,46 @@ class DurableAgentStore:
                 activate_budget=False,
             )
             context.iteration = plan.iteration
+
+            # Execution-scoped budgets/accounting survive process restart.
+            # A reconnect must not mint fresh retry capacity or discard model
+            # usage accumulated before the WAITING checkpoint.
+            durable_iterations = await uow.agents.list_iterations(
+                plan.execution_id
+            )
+            usage_totals: dict[str, int | float] = {}
+            for iteration in durable_iterations:
+                response = getattr(iteration, "inference_response", None)
+                raw_usage = (
+                    dict(response.get("usage") or {})
+                    if isinstance(response, dict)
+                    else {}
+                )
+                for key, value in raw_usage.items():
+                    if isinstance(value, bool) or not isinstance(
+                        value, (int, float)
+                    ):
+                        continue
+                    usage_totals[key] = usage_totals.get(key, 0) + value
+            context.usage = InferenceUsage.model_validate(usage_totals)
+
             durable_tool_calls = await uow.agents.list_tool_calls(
                 plan.execution_id
             )
             context.tool_calls_used = len(durable_tool_calls)
+            retry_attempts_used = 0
+            for tool_call in durable_tool_calls:
+                result = await uow.agents.get_tool_result(
+                    plan.execution_id,
+                    tool_call.tool_call_id,
+                )
+                if result is None:
+                    continue
+                attempt = getattr(result, "attempt", 1)
+                if isinstance(attempt, int) and not isinstance(attempt, bool):
+                    retry_attempts_used += max(0, attempt - 1)
+            context.retry_attempts_used = retry_attempts_used
+
             context.resume_transcript = [
                 item.model_dump(mode="json")
                 for item in plan.transcript_snapshot
