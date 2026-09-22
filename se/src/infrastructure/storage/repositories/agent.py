@@ -16,6 +16,7 @@ from ..models.sql.agent import (
     AgentTaskRecord,
     AgentTaskBranchContextRecord,
     AgentTaskBranchRecord,
+    AgentTaskForkAdmissionRecord,
     TaskBudgetRecord,
     TaskBudgetReservationRecord,
     AgentToolCallRecord,
@@ -195,6 +196,29 @@ class AgentRepository(BaseRepository):
             return None
         await self.session.flush()
         return await self.get_task_branch_context(branch_id)
+
+    async def save_task_fork_admission(
+        self,
+        values: Dict[str, Any],
+    ):
+        record = AgentTaskForkAdmissionRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_fork_admission(
+        self,
+        task_id: str,
+        fork_request_id: str,
+    ):
+        result = await self.session.execute(
+            select(AgentTaskForkAdmissionRecord).where(
+                AgentTaskForkAdmissionRecord.task_id == task_id,
+                AgentTaskForkAdmissionRecord.fork_request_id
+                == fork_request_id,
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def save_task_budget(self, values: Dict[str, Any]):
         record = TaskBudgetRecord(**values)
