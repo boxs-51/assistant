@@ -801,3 +801,32 @@ def test_single_resume_worker_round_robins_past_unsettled_ticket():
         assert any(execution_id == "exec-b" for execution_id, _ in calls)
     finally:
         runtime.stop()
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("execution_id", 123),
+        ("checkpoint_id", 456),
+        ("auto_resume_allowed", "false"),
+        ("pending_capability_ids", ["tool.echo", 7]),
+    ],
+)
+def test_pending_resume_ticket_rejects_malformed_canonical_types(field, value):
+    payload = _ticket_payload()
+    payload[field] = value
+    with pytest.raises((TypeError, ValueError)):
+        PendingResumeTicket.from_payload(payload)
+
+
+def test_resume_outcome_rejects_string_retryable_flag():
+    message = _rejected(
+        "exec-1",
+        "cp-1",
+        "rr-1",
+        "RESUME_CONFLICT",
+        retryable=True,
+    )
+    message["payload"]["retryable"] = "false"
+    with pytest.raises((TypeError, ValueError)):
+        ResumeProtocolOutcome.from_envelope(message)
