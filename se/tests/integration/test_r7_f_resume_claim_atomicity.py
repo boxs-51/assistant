@@ -744,6 +744,72 @@ async def test_r7_f4_prepare_resume_plan_context_is_read_only_and_checkpoint_dir
     engine, sessions, factory, store = await _setup(tmp_path, "f4-context.sqlite")
     try:
         await _seed_non_task(sessions)
+        async with factory() as uow:
+            iteration_id = f"{EXECUTION}:iteration:1"
+            uow.session.add(
+                AgentIterationRecord(
+                    id=iteration_id,
+                    execution_id=EXECUTION,
+                    iteration=1,
+                    state="WAITING",
+                    tool_call_ids=[TOOL_CALL],
+                    inference_response={
+                        "request_id": "inf-r7f4",
+                        "execution_id": EXECUTION,
+                        "iteration": 1,
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [],
+                            "metadata": {},
+                        },
+                        "finish_reason": "tool_calls",
+                        "usage": {
+                            "prompt_tokens": 11,
+                            "completion_tokens": 7,
+                            "total_tokens": 18,
+                            "tool_invocations": 1,
+                            "estimated_cost_usd": 0.25,
+                        },
+                        "provider": "test",
+                        "model": "test",
+                        "metadata": {},
+                    },
+                )
+            )
+            uow.session.add(
+                AgentToolCallRecord(
+                    id=TOOL_CALL,
+                    execution_id=EXECUTION,
+                    iteration_id=iteration_id,
+                    invocation_id=INVOCATION,
+                    tool_call_id=TOOL_CALL,
+                    capability_id=CAPABILITY,
+                    arguments={"value": "r7f"},
+                    status="PENDING",
+                    extra_metadata={},
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id=f"{EXECUTION}:{TOOL_CALL}",
+                    execution_id=EXECUTION,
+                    iteration_id=iteration_id,
+                    invocation_id=INVOCATION,
+                    tool_call_id=TOOL_CALL,
+                    capability_id=CAPABILITY,
+                    success=False,
+                    output=None,
+                    error_code="REMOTE_OUTCOME_UNKNOWN",
+                    error_message="disconnect",
+                    retryable=True,
+                    extra_metadata={"attempt": 3},
+                    commit_state="PROVISIONAL",
+                    attempt=3,
+                )
+            )
+            await uow.commit()
+
         plan = _plan()
         identity = Identity(
             user_id=USER,
@@ -764,6 +830,13 @@ async def test_r7_f4_prepare_resume_plan_context_is_read_only_and_checkpoint_dir
         assert context.resume_pending_tool_calls == []
         assert context.active_budget_running is False
         assert context.remaining_active_budget_seconds == 20.0
+        assert context.tool_calls_used == 1
+        assert context.retry_attempts_used == 2
+        assert context.usage.prompt_tokens == 11
+        assert context.usage.completion_tokens == 7
+        assert context.usage.total_tokens == 18
+        assert context.usage.tool_invocations == 1
+        assert context.usage.estimated_cost_usd == 0.25
         assert context.metadata["client_id"] == CLIENT
         assert context.metadata["r7_resume_plan_fingerprint"] == plan.plan_fingerprint
         assert tuple(
