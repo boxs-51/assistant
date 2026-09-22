@@ -586,3 +586,31 @@ def test_wait_ttl_does_not_abort_same_request_ack_recovery():
         assert entry.active_resume_request_id == "rr-issued-before-expiry"
     finally:
         runtime.stop()
+
+
+def test_duplicate_waiting_event_cannot_reopen_in_flight_ticket():
+    runtime = _runtime()
+    ticket = PendingResumeTicket.from_payload(_ticket_payload())
+    entry = PendingResumeEntry(
+        ticket=ticket,
+        principal_id="user-1",
+        state=ResumeTicketState.IN_FLIGHT,
+        active_resume_request_id="rr-in-flight",
+    )
+
+    try:
+        with runtime._lock:
+            runtime._pending_resume_tickets[ticket.key] = entry
+            runtime._execution_resume_watermarks[ticket.execution_id] = ticket.revision
+            runtime._confirmed_capability_ids = frozenset({"tool.echo"})
+            runtime._ready = True
+            runtime._state = ClientRuntimeState.READY
+
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        with runtime._lock:
+            current = runtime._pending_resume_tickets[ticket.key]
+            assert current.state is ResumeTicketState.IN_FLIGHT
+            assert current.active_resume_request_id == "rr-in-flight"
+            assert runtime._claim_resume_attempt_locked(ticket.key) is None
+    finally:
+        runtime.stop()

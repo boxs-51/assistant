@@ -453,11 +453,13 @@ class ClientRuntime:
             # becoming eligible later still retries the same request id.
             entry.state = ResumeTicketState.BLOCKED
             return
-        if entry.state not in {
+        if entry.state in {
+            ResumeTicketState.IN_FLIGHT,
             ResumeTicketState.RETRY_SAME_REQUEST,
             ResumeTicketState.WAIT_REFRESH,
         }:
-            entry.state = ResumeTicketState.ELIGIBLE
+            return
+        entry.state = ResumeTicketState.ELIGIBLE
 
     def _ensure_resume_worker_locked(self) -> None:
         if self._resume_worker_thread and self._resume_worker_thread.is_alive():
