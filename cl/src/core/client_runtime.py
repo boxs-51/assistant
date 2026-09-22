@@ -119,6 +119,7 @@ class ClientRuntime:
         self._resume_condition = threading.Condition(self._lock)
         self._resume_worker_thread: Optional[threading.Thread] = None
         self._resume_worker_stop = False
+        self._resume_last_key: tuple[str, str] | None = None
 
     @property
     def ready(self) -> bool:
@@ -334,6 +335,7 @@ class ClientRuntime:
         self._execution_resume_watermarks.clear()
         self._execution_resume_conflicts.clear()
         self._confirmed_capability_ids = frozenset()
+        self._resume_last_key = None
         self._resume_condition.notify_all()
 
     def _ingest_waiting_payload(self, payload) -> bool:
@@ -491,6 +493,7 @@ class ClientRuntime:
     def _next_resume_key_locked(self):
         if not self._ready or self._state is not ClientRuntimeState.READY:
             return None
+        eligible = []
         for key in sorted(self._pending_resume_tickets):
             entry = self._pending_resume_tickets[key]
             self._classify_resume_entry_locked(entry)
@@ -498,8 +501,15 @@ class ClientRuntime:
                 ResumeTicketState.ELIGIBLE,
                 ResumeTicketState.RETRY_SAME_REQUEST,
             }:
+                eligible.append(key)
+        if not eligible:
+            return None
+        if self._resume_last_key is None:
+            return eligible[0]
+        for key in eligible:
+            if key > self._resume_last_key:
                 return key
-        return None
+        return eligible[0]
 
     def _claim_resume_attempt_locked(self, key):
         entry = self._pending_resume_tickets.get(key)
@@ -513,6 +523,7 @@ class ClientRuntime:
             return None
         resume_request_id = entry.ensure_resume_request_id()
         entry.state = ResumeTicketState.IN_FLIGHT
+        self._resume_last_key = key
         entry.attempt_generation = self._generation
         entry.attempt_connection_id = self.connection_id
         return (
