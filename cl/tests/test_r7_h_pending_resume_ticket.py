@@ -760,3 +760,44 @@ def test_realtime_waiter_queue_excludes_unsolicited_dispatch_frames():
     assert not client._is_waiter_message({"type": "capability.invoke"})
     assert not client._is_waiter_message({"type": "capability.cancel"})
     assert not client._is_waiter_message({"type": "capability.reconcile"})
+
+
+def test_single_resume_worker_round_robins_past_unsettled_ticket():
+    runtime = _runtime()
+    calls = []
+
+    def behavior(execution_id, checkpoint_id, request_id):
+        calls.append((execution_id, request_id))
+        if execution_id == "exec-a":
+            raise RealtimeHandshakeError("exec-a ACK still unknown")
+        return _accepted(execution_id, checkpoint_id, request_id)
+
+    fake = _FakeRealtime("conn-1", behavior)
+    _install_ready_transport(runtime, fake)
+    try:
+        assert runtime._ingest_waiting_payload(
+            _ticket_payload(
+                execution_id="exec-a",
+                checkpoint_id="cp-a",
+                revision=8,
+            )
+        )
+        assert runtime._ingest_waiting_payload(
+            _ticket_payload(
+                execution_id="exec-b",
+                checkpoint_id="cp-b",
+                revision=8,
+            )
+        )
+
+        _wait(lambda: any(execution_id == "exec-b" for execution_id, _ in calls))
+        _wait(
+            lambda: all(
+                ticket.execution_id != "exec-b"
+                for ticket in runtime.pending_resume_tickets
+            )
+        )
+        assert calls[0][0] == "exec-a"
+        assert any(execution_id == "exec-b" for execution_id, _ in calls)
+    finally:
+        runtime.stop()
