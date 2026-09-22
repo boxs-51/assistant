@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import pytest
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -556,5 +557,57 @@ async def test_r7_i_existing_checkpoint_semantic_collision_fails_closed(tmp_path
         execution = await store.load_execution("exec-legacy")
         assert execution.revision == 4
         assert execution.current_checkpoint_id is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_concurrent_materialization_converges_to_one_checkpoint(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-race.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(sessions)
+
+        outcomes = await asyncio.gather(
+            store.materialize_legacy_checkpoint(
+                "exec-legacy",
+                requested_checkpoint_id="legacy-cp-1",
+                target_user_id="user-1",
+                target_client_id="client-1",
+            ),
+            store.materialize_legacy_checkpoint(
+                "exec-legacy",
+                requested_checkpoint_id="legacy-cp-1",
+                target_user_id="user-1",
+                target_client_id="client-1",
+            ),
+        )
+
+        assert [item.checkpoint_id for item in outcomes] == [
+            "legacy-cp-1",
+            "legacy-cp-1",
+        ]
+        execution = await store.load_execution("exec-legacy")
+        assert execution.revision == 4
+        assert execution.current_checkpoint_id == "legacy-cp-1"
+
+        async with sessions() as session:
+            rows = (
+                await session.execute(
+                    select(AgentExecutionCheckpointRecord).where(
+                        AgentExecutionCheckpointRecord.execution_id
+                        == "exec-legacy"
+                    )
+                )
+            ).scalars().all()
+        assert len(rows) == 1
     finally:
         await engine.dispose()
