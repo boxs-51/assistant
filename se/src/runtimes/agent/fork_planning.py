@@ -742,11 +742,11 @@ async def _delegation_depth_in_uow(
                 "FORK_EXECUTION_LINEAGE_CONFLICT",
                 "Delegation ancestry is missing or crosses AgentTask.",
             )
-        if parent.branch_id != execution.branch_id:
-            raise ForkPlanRejected(
-                "FORK_EXECUTION_LINEAGE_CONFLICT",
-                "Source delegation ancestry crosses TaskBranch boundaries.",
-            )
+        # A FORK preserves an existing delegation edge while moving the
+        # new execution to a sibling Branch.  Therefore a durable parent may
+        # legitimately live in an ancestor Branch.  Delegation authority is
+        # the immutable execution-id chain; require same Task + no cycle, but
+        # never reinterpret branch equality as delegation ownership.
         depth += 1
         parent_execution_id = parent.parent_execution_id
     return depth
