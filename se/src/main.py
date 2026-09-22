@@ -78,7 +78,6 @@ from .runtimes.agent.persistence import DurableAgentStore
 from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.supervisor import AgentExecutionSupervisor
 from .runtimes.agent.task_budget import TaskBudgetService
-from .runtimes.agent.continuation import AgentContinuationService
 from .runtimes.agent.resume_planning import AgentResumePlanningService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
@@ -393,9 +392,6 @@ async def bootstrap_runtime_kernel(
         container.tool_execution_port,
     )
     container.agent_durable_store = DurableAgentStore(eventing_manager.uow_factory)
-    container.continuation_service = AgentContinuationService(
-        container.agent_durable_store
-    )
     container.resume_planning_service = AgentResumePlanningService(
         container.agent_durable_store,
         container.capability_runtime,
@@ -407,7 +403,6 @@ async def bootstrap_runtime_kernel(
         execution_policy=container.agent_execution_policy,
         durable_store=container.agent_durable_store,
         event_publisher=EventBusAgentEventPublisher(container.event_bus),
-        continuation_service=container.continuation_service,
         task_budget_service=container.task_budget_service,
     )
     builtin_support = register_builtin_support(container)
