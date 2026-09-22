@@ -111,11 +111,18 @@ class AgentForkPlanningService:
             execution.task_id != task_id
             or execution.branch_id != source_branch_id
             or execution.session_id != task.session_id
-            or execution.agent_id != task.assigned_agent_id
         ):
             raise ForkPlanRejected(
                 "FORK_EXECUTION_LINEAGE_CONFLICT",
                 "Source AgentExecution task/branch/session lineage conflicts.",
+            )
+        if (
+            execution.parent_execution_id is None
+            and execution.agent_id != task.assigned_agent_id
+        ):
+            raise ForkPlanRejected(
+                "FORK_EXECUTION_LINEAGE_CONFLICT",
+                "Root source AgentExecution differs from Task assigned agent.",
             )
         if self._value(execution.state) != "WAITING":
             raise ForkPlanRejected(
