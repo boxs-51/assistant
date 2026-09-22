@@ -1,3 +1,24 @@
+# DEFERRED IMPLEMENTATION NOTICE — ROADMAP R8→R14+ TAKES PRIORITY
+
+> **F5-0 remains contract-frozen but implementation is now intentionally PAUSED.**
+>
+> Do not implement F5-0/F5-1+ until the Agent Execution / Continuation / Branching roadmap
+> `docs/AGENT_EXECUTION_CONTINUATION_BRANCHING_ROADMAP_V2.md` has completed the remaining
+> R8→R14+ implementation and exit gates.
+>
+> The F5-0 persistence contract below remains the frozen resumption baseline. It must be
+> re-audited against the final post-R14+ repository HEAD before any F5 code is written.
+>
+> Priority workstream:
+>
+> ```text
+> R8 → R9 → R10 → R11 → R12 → R13 → R14 → post-R14+ gates
+> ```
+>
+> Central Asset Storage remains parked at completed F4 + audited/frozen F5-0.
+
+---
+
 # CENTRAL ASSET STORAGE — F5-0 CONTRACT FREEZE
 
 **Repository:** `boxs-51/assistant`  
