@@ -320,6 +320,9 @@ class ClientRuntime:
         for item in capabilities:
             if not isinstance(item, dict):
                 continue
+            state = str(item.get("state") or "")
+            if state not in {"ENABLED", "DEGRADED"}:
+                continue
             capability_id = item.get("capability_id")
             if capability_id:
                 confirmed.add(str(capability_id))
@@ -534,6 +537,7 @@ class ClientRuntime:
             time.sleep(0.25)
             return None
 
+        settlement_retry = False
         with self._lock:
             entry = self._pending_resume_tickets.get(key)
             if (
@@ -542,7 +546,16 @@ class ClientRuntime:
             ):
                 return message
             self._apply_resume_outcome_locked(entry, outcome)
+            settlement_retry = (
+                entry.state is ResumeTicketState.RETRY_SAME_REQUEST
+                and outcome.code == "RESUME_CONFLICT"
+                and outcome.claim_id is not None
+            )
             self._resume_condition.notify_all()
+        if settlement_retry and not propagate:
+            # The same consumed claim is still settling its durable handoff.
+            # Back off instead of hammering the server while preserving rr.
+            time.sleep(0.25)
         return message
 
     def _apply_resume_outcome_locked(
