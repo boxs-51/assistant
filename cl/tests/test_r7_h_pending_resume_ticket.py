@@ -662,3 +662,37 @@ def test_malformed_resume_outcome_fails_closed_without_replay_loop():
             assert entry.last_outcome_code == "RESUME_PROTOCOL_CONFLICT"
     finally:
         runtime.stop()
+
+
+def test_nonretryable_rejection_tombstones_duplicate_waiting_ticket():
+    runtime = _runtime()
+    calls = []
+
+    def reject(execution_id, checkpoint_id, request_id):
+        calls.append(request_id)
+        return _rejected(
+            execution_id,
+            checkpoint_id,
+            request_id,
+            "STALE_CHECKPOINT",
+            retryable=False,
+        )
+
+    fake = _FakeRealtime("conn-1", reject)
+    _install_ready_transport(runtime, fake)
+    try:
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        _wait(lambda: len(calls) == 1)
+        time.sleep(0.05)
+
+        # A duplicate publication for the exact same durable checkpoint must
+        # not turn a terminal rejection into a new logical resume attempt.
+        assert runtime._ingest_waiting_payload(_ticket_payload())
+        time.sleep(0.1)
+        assert len(calls) == 1
+        with runtime._lock:
+            entry = runtime._pending_resume_tickets[("exec-1", "cp-1")]
+            assert entry.state is ResumeTicketState.REJECTED
+            assert entry.active_resume_request_id is None
+    finally:
+        runtime.stop()
