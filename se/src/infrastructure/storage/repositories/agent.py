@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import select, update
 
 from ..interfaces.repository import BaseRepository
-from ..models.sql.chat_data.session import Session as ChatSessionRecord
 from ..models.sql.agent import (
     AgentCheckpointPendingInvocationRecord,
     AgentExecutionCheckpointRecord,
@@ -188,6 +187,12 @@ class AgentRepository(BaseRepository):
         client_id: str,
     ):
         """Read current normalized WAITING executions owned by one principal/client."""
+
+        # Keep the conversation ORM import local to this R7-H-only query.
+        # Importing it at repository module load time registers the sessions
+        # table (and its users FK) into shared Base.metadata, breaking isolated
+        # legacy/Phase 5.9 model tests that intentionally load only agent tables.
+        from ..models.sql.chat_data.session import Session as ChatSessionRecord
 
         result = await self.session.execute(
             select(AgentExecutionRecord)
