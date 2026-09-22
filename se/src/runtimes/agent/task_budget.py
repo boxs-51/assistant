@@ -20,11 +20,6 @@ from ...domain.schemas.task_budget import (
     task_budget_policy_fingerprint,
 )
 from .contracts.fork import ForkAdmission, ForkPlan, fork_plan_fingerprint
-from .fork_planning import (
-    ForkPlanDeferred,
-    ForkPlanRejected,
-    revalidate_fork_plan_in_uow,
-)
 from .serialization import to_json_safe
 from .waiting_checkpoint import (
     stage_waiting_checkpoint,
@@ -718,6 +713,8 @@ class TaskBudgetService:
 
     @staticmethod
     def _fork_consume_error(exc: Exception) -> ForkConsumeError:
+        from .fork_planning import ForkPlanDeferred
+
         code = str(getattr(exc, "code", "FORK_CONSUME_CONFLICT"))
         message = str(exc)
         if isinstance(exc, ForkPlanDeferred):
@@ -835,6 +832,11 @@ class TaskBudgetService:
         This method creates persistence only. It does not start AgentRuntime,
         expose transport/API state, or seed R8-E branch runtime context.
         """
+        from .fork_planning import (
+            ForkPlanDeferred,
+            ForkPlanRejected,
+            revalidate_fork_plan_in_uow,
+        )
 
         if fork_plan_fingerprint(plan) != plan.plan_fingerprint:
             raise ForkConsumeRejected(
