@@ -25,6 +25,7 @@ from .events import (
 )
 from .result import AgentExecutionResult
 from .fork import (
+    ForkAdmission,
     ForkPlan,
     ForkSideEffectSnapshot,
     committed_result_fingerprint,
@@ -88,6 +89,7 @@ __all__ = [
     "AgentEventPublisher",
     "CorrelationContext",
     "AgentExecutionResult",
+    "ForkAdmission",
     "ForkPlan",
     "ForkSideEffectSnapshot",
     "committed_result_fingerprint",
