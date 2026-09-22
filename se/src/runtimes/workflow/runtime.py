@@ -270,8 +270,6 @@ class WorkflowRuntime(BaseRuntime):
                     lambda: self.container.agent_runtime.execute(context),
                 )
             if result.error_code == "WAITING_FOR_CONNECTION":
-                checkpoint = None
-                pending = ()
                 durable_store = getattr(
                     self.container,
                     "agent_durable_store",
@@ -287,73 +285,57 @@ class WorkflowRuntime(BaseRuntime):
                     "load_checkpoint_pending_invocations",
                     None,
                 )
-                if callable(current_loader):
-                    checkpoint = await current_loader(result.execution_id)
-                    if checkpoint is not None and callable(pending_loader):
-                        pending = await pending_loader(checkpoint.checkpoint_id)
-                elif getattr(self.container, "continuation_service", None) is not None:
-                    checkpoint = self.container.continuation_service.current_checkpoint(
-                        result.execution_id
+                execution_loader = getattr(
+                    durable_store,
+                    "load_execution",
+                    None,
+                )
+                if not (
+                    callable(current_loader)
+                    and callable(pending_loader)
+                    and callable(execution_loader)
+                ):
+                    raise RuntimeError(
+                        "NORMALIZED_WAITING_AUTHORITY_UNAVAILABLE: "
+                        "workflow WAITING projection requires the canonical R7 store."
+                    )
+
+                checkpoint = await current_loader(result.execution_id)
+                if checkpoint is None:
+                    raise RuntimeError(
+                        "NORMALIZED_WAITING_AUTHORITY_UNAVAILABLE: "
+                        "WAITING execution has no normalized current checkpoint."
+                    )
+                pending = await pending_loader(checkpoint.checkpoint_id)
+                execution = await execution_loader(result.execution_id)
+                if execution is None:
+                    raise RuntimeError(
+                        "NORMALIZED_WAITING_AUTHORITY_UNAVAILABLE: "
+                        "WAITING execution disappeared before projection."
                     )
 
                 pending_capability_ids = [
                     item.capability_id
                     for item in pending
                 ]
-                legacy_pending = (
-                    getattr(checkpoint, "pending_capability_id", None)
-                    if not pending_capability_ids
-                    else None
+                waiting = build_waiting_ticket_payload(
+                    execution,
+                    checkpoint,
+                    pending,
                 )
-                waiting = None
-                execution = None
-                execution_loader = getattr(
-                    durable_store,
-                    "load_execution",
-                    None,
-                )
-                if checkpoint is not None and callable(execution_loader):
-                    execution = await execution_loader(result.execution_id)
-                if execution is not None and checkpoint is not None:
-                    waiting = build_waiting_ticket_payload(
-                        execution,
-                        checkpoint,
-                        pending,
-                    )
-                    waiting.update(
-                        {
-                            "status": "WAITING_FOR_CONNECTION",
-                            "retry_policy": "AUTO"
-                            if waiting["auto_resume_allowed"]
-                            else "USER_CONFIRM",
-                            "pending_capability_id": (
-                                pending_capability_ids[0]
-                                if pending_capability_ids
-                                else legacy_pending
-                            ),
-                        }
-                    )
-                else:
-                    # Compatibility-only fallback. Missing normalized revision
-                    # is intentionally insufficient for automatic client resume.
-                    waiting = {
+                waiting.update(
+                    {
                         "status": "WAITING_FOR_CONNECTION",
-                        "wait_reason": "CONNECTION",
-                        "execution_id": result.execution_id,
-                        "checkpoint_id": (
-                            checkpoint.checkpoint_id
-                            if checkpoint is not None
-                            else result.checkpoint_id
-                        ),
+                        "retry_policy": "AUTO"
+                        if waiting["auto_resume_allowed"]
+                        else "USER_CONFIRM",
                         "pending_capability_id": (
                             pending_capability_ids[0]
                             if pending_capability_ids
-                            else legacy_pending
+                            else None
                         ),
-                        "pending_capability_ids": pending_capability_ids,
-                        "retry_policy": "USER_CONFIRM",
-                        "auto_resume_allowed": False,
                     }
+                )
                 if body.get("config", {}).get("stream"):
                     await self.event_bus.publish(BaseEvent(
                         event_name="provider.stream.chunk_emitted",
