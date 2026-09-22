@@ -82,7 +82,6 @@ async def test_agent_stream_chunk_payload_is_json_serializable():
         authorization_service=_Authorization(),
         agent_registry=_AgentRegistry(),
         agent_runtime=_AgentRuntime(),
-        continuation_service=None,
     )
 
     identity = Identity(auth_type="guest", user_id="user-1")
