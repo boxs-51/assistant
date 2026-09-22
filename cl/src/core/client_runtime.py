@@ -529,7 +529,6 @@ class ClientRuntime:
                 ticket.checkpoint_id,
                 resume_request_id,
             )
-            outcome = ResumeProtocolOutcome.from_envelope(message)
         except Exception:
             with self._lock:
                 entry = self._pending_resume_tickets.get(key)
@@ -545,6 +544,25 @@ class ClientRuntime:
             # Avoid a hot loop when ACK timeout occurs without a disconnect.
             time.sleep(0.25)
             return None
+
+        try:
+            outcome = ResumeProtocolOutcome.from_envelope(message)
+        except (TypeError, ValueError):
+            # A malformed semantic ACK is not transport uncertainty. Retrying
+            # the same request cannot repair an invalid wire contract, so fail
+            # closed locally instead of issuing an unbounded replay loop.
+            with self._lock:
+                entry = self._pending_resume_tickets.get(key)
+                if (
+                    entry is not None
+                    and entry.active_resume_request_id == resume_request_id
+                ):
+                    entry.last_outcome_code = "RESUME_PROTOCOL_CONFLICT"
+                    entry.state = ResumeTicketState.CONFLICT
+                    self._resume_condition.notify_all()
+            if propagate:
+                raise
+            return message
 
         settlement_retry = False
         with self._lock:
