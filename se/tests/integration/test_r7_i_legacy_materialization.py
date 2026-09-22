@@ -25,7 +25,10 @@ from se.src.infrastructure.storage.repositories.capability_invocations import (
 from se.src.runtimes.agent.legacy_materialization import (
     LegacyCheckpointMaterializationError,
 )
-from se.src.runtimes.agent.persistence import DurableAgentStore
+from se.src.runtimes.agent.persistence import (
+    DurableAgentStore,
+    ExecutionConflictError,
+)
 
 
 class _Uow:
@@ -455,6 +458,44 @@ async def test_r7_i_preserves_checkpoint_time_pending_slot_after_late_commit(tmp
         assert (
             pending[0].observed_remote_outcome_state
             == "TERMINAL_COMMITTED"
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7_i_legacy_continuation_json_is_read_only(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-read-only.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+
+    try:
+        await _seed_legacy_waiting(sessions)
+        with pytest.raises(
+            ExecutionConflictError,
+            match="LEGACY_CONTINUATION_READ_ONLY",
+        ):
+            await store.update_checkpoint(
+                "exec-legacy",
+                {
+                    "context_state": {
+                        "continuation": {
+                            "current_checkpoint_id": "forged"
+                        }
+                    }
+                },
+            )
+
+        execution = await store.load_execution("exec-legacy")
+        assert (
+            execution.context_state["continuation"]["current_checkpoint_id"]
+            == "legacy-cp-1"
         )
     finally:
         await engine.dispose()
