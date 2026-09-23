@@ -242,35 +242,72 @@ No Branch or TaskBudget counter changes occur in activation.
 
 ---
 
-# 5. Row-lock / TOCTOU rule
+# 5. P0-R8F-2 — real SQL serialization / TOCTOU rule
 
 The activation check cannot be:
 
 ```text
 read Task
+read Budget
 read Branch
 read BranchContext
-COMMIT
-later CAS E2
+later CAS only E2
 ```
 
-That creates a TOCTOU window.
+even when those reads and the E2 CAS occur inside one transaction.
 
-Mutable activation inputs should be loaded with transaction-scoped lock/CAS
-semantics where supported.
+A concurrent Task cancellation mutates Task + TaskBudget, not E2. Without a
+cross-row serialization fence, activation could validate OPEN authority and
+then still commit E2@2 after cancellation commits.
 
-Repository support may add:
+R8-F therefore requires a real SQL concurrency fence.
+
+Preferred lock order for activation:
 
 ```text
+1. AgentTask FOR UPDATE
+2. TaskBudget FOR UPDATE
+3. TaskBranch FOR UPDATE
+4. TaskBranchContext FOR UPDATE
+5. ForkAdmission read
+6. AgentExecution specialized activation CAS
+```
+
+Repository support should add:
+
+```text
+get_task_budget_for_update()
 get_task_branch_for_update()
 get_task_branch_context_for_update()
 ```
 
 `get_task_for_update()` already exists.
 
-The final execution revision CAS remains the distributed winner fence.
+The specialized activation CAS predicate must additionally require at minimum:
 
-SQLite tests must still prove loser behavior under its dialect semantics.
+```text
+execution_id == E2
+revision == 1
+state == RUNNING
+current_checkpoint_id IS NULL
+task_id == expected task
+branch_id == expected branch
+base_execution_id == expected source execution
+base_checkpoint_id == expected source checkpoint
+retry_of_execution_id IS NULL
+```
+
+Activation remains TaskBudget-accounting neutral. Do not bump TaskBudget
+revision/counters merely to manufacture a fence.
+
+Task cancellation of an unactivated fork must use the same Task/Budget
+serialization order and race against activation on E2 revision 1.
+
+PostgreSQL/MySQL rely on row locking plus the specialized CAS. SQLite does not
+provide equivalent row-level FOR UPDATE semantics, so SQLite regression tests
+must prove the equivalent one-winner behavior through transaction/CAS conflict
+handling and must never be treated as proof that unlocked cross-row reads are
+safe on other databases.
 
 ---
 
@@ -731,19 +768,53 @@ If a view exposes current execution state, it must derive it from
 
 ---
 
-# 20. Task cancellation ordering
+# 20. P0-R8F-8 — Task cancellation ordering + dormant RUNNING@1 cleanup
 
-R8-F keeps the safer existing R5 durable-first cancellation fence.
+R8-F keeps the safer existing R5 durable-first cancellation fence, but R8 adds
+a special durable case: a fork may already have consumed execution capacity as
+E2 RUNNING@1 while no local supervisor handle exists yet.
 
-Canonical ordering:
+Canonical durable cancellation transaction:
 
 ```text
-1. Task terminal cancellation CAS
-2. TaskBudget -> CLOSED in same durable authority transaction
-3. cancel/gather root compatibility runner if any
-4. AgentExecutionSupervisor.cancel_task(task_id)
-5. drain local execution tasks
+1. lock AgentTask
+2. lock TaskBudget
+3. Task -> CANCELLED
+4. TaskBudget -> CLOSED
+5. find exact preactivation fork executions for this Task:
+       backed by ForkAdmission
+       state == RUNNING
+       revision == 1
+       current_checkpoint_id IS NULL
+       exact fork lineage
+6. for each exact preactivation fork:
+       CAS RUNNING@1 -> CANCELLED@2
+       decrement active_executions exactly once
+       decrement active_parallel_agents exactly once when delegated
+7. COMMIT
 ```
+
+Activation and cancellation therefore race on the same E2 revision:
+
+```text
+activation:   RUNNING@1 -> RUNNING@2
+cancellation: RUNNING@1 -> CANCELLED@2
+```
+
+Exactly one wins.
+
+After the durable cancellation transaction:
+
+```text
+8. cancel/gather root compatibility runner if any
+9. AgentExecutionSupervisor.cancel_task(task_id)
+10. drain all local execution tasks
+```
+
+Do not blindly cancel arbitrary RUNNING@1 executions. The discriminator is an
+immutable ForkAdmission plus the exact R8 preactivation shape.
+
+Do not release active_branches here. Branch resolution/accounting remains R9.
 
 Why durable-first:
 
@@ -753,6 +824,10 @@ Task terminal + budget CLOSED
 => R7 resume fails
 => new task-scoped work fails
 ```
+
+If activation won before cancellation, E2 is RUNNING@2 and is no longer part
+of dormant preactivation cleanup. Local supervisor cancellation applies on the
+owning process; remote stale RUNNING ownership remains the R12 boundary.
 
 Do not reverse this into local-cancel-first.
 
@@ -1055,9 +1130,10 @@ Tests:
 
 ```text
 Task cancel closes durable budget before local drain
+Task cancel settles dormant exact fork E2 RUNNING@1 and releases active execution capacity
 Task cancel blocks preactivation E2
 Task cancel cancels two local branch runners
-cancel vs activation race has one durable authority order
+cancel vs activation RUNNING@1 race has exactly one durable winner
 no branch runner survives local supervisor drain
 R7 resume source branch still works
 full targeted R8 A-F regressions
@@ -1124,6 +1200,15 @@ R12, not R8-F, owns stale RUNNING crash recovery.
 
 R8F-I18
 R9, not R8-F, owns branch result resolution.
+
+R8F-I19
+Activation and Task cancellation serialize over Task/TaskBudget authority and race on E2 revision 1.
+
+R8F-I20
+Task cancellation settles exact dormant ForkAdmission-backed RUNNING@1 executions and releases their active execution capacity exactly once.
+
+R8F-I21
+Task cancellation does not release active branch capacity or invent branch resolution.
 ```
 
 ---
@@ -1133,7 +1218,8 @@ R9, not R8-F, owns branch result resolution.
 At minimum:
 
 ```text
-activation task-cancel race
+activation task-cancel SQL serialization race
+dormant RUNNING@1 fork cancellation/accounting
 activation two-worker race
 activation loser zero-mutation
 activation start failure accounting
@@ -1198,6 +1284,10 @@ auto-starting an already RUNNING@2 execution after restart
 reusing ResumeClaim for FORK
 
 releasing branch capacity because local activation/start failed
+
+leaving a ForkAdmission-backed dormant RUNNING@1 execution active after Task cancellation
+
+claiming same-UoW validation is sufficient without a real cross-row SQL serialization fence
 ```
 
 ---
