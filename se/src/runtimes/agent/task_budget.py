@@ -959,13 +959,23 @@ class TaskBudgetService:
                     cancelled_forks = 0
                     cancelled_retries = 0
                     cancelled_delegated = 0
+
+                    # Lock every TaskBranch once, in the repository's canonical
+                    # branch_id order, before inspecting admission receipts.
+                    # FORK/RETRY receipts are ordered by creation/request id and
+                    # therefore must never drive branch-row lock acquisition.
+                    locked_branches = (
+                        await uow.agents.list_task_branches_for_update(task_id)
+                    )
+                    branch_map = {
+                        item.branch_id: item for item in locked_branches
+                    }
+
                     receipts = await uow.agents.list_task_fork_admissions(
                         task_id
                     )
                     for receipt in receipts:
-                        branch = await uow.agents.get_task_branch_for_update(
-                            receipt.branch_id
-                        )
+                        branch = branch_map.get(receipt.branch_id)
                         execution = await uow.agents.get_execution(
                             receipt.execution_id
                         )
@@ -1024,9 +1034,7 @@ class TaskBudgetService:
                         await uow.agents.list_task_retry_admissions(task_id)
                     )
                     for receipt in retry_receipts:
-                        branch = await uow.agents.get_task_branch_for_update(
-                            receipt.branch_id
-                        )
+                        branch = branch_map.get(receipt.branch_id)
                         execution = await uow.agents.get_execution(
                             receipt.execution_id
                         )
@@ -1855,6 +1863,11 @@ class TaskBudgetService:
             receipt.execution_id,
         )
 
+        expected_base_checkpoint_id = (
+            plan.source_checkpoint_id
+            if plan.source_checkpoint_id is not None
+            else plan.base_checkpoint_id
+        )
         corrupt = (
             task is None
             or budget is None
@@ -1870,7 +1883,7 @@ class TaskBudgetService:
             or execution.retry_of_execution_id != plan.source_execution_id
             or execution.parent_execution_id != plan.parent_execution_id
             or execution.base_execution_id != plan.base_execution_id
-            or execution.base_checkpoint_id != plan.base_checkpoint_id
+            or execution.base_checkpoint_id != expected_base_checkpoint_id
             or retry_value_fingerprint(
                 dict(execution.request or {})
             ) != plan.request_fingerprint
@@ -1966,6 +1979,11 @@ class TaskBudgetService:
 
                     source = snapshot.execution
                     delegated = snapshot.delegated
+                    retry_base_checkpoint_id = (
+                        plan.source_checkpoint_id
+                        if plan.source_checkpoint_id is not None
+                        else plan.base_checkpoint_id
+                    )
                     normalized_execution_values = (
                         _normalize_execution_store_values(
                             {
@@ -1981,7 +1999,7 @@ class TaskBudgetService:
                                 "base_execution_id":
                                     plan.base_execution_id,
                                 "base_checkpoint_id":
-                                    plan.base_checkpoint_id,
+                                    retry_base_checkpoint_id,
                                 "correlation_id": plan.correlation_id,
                                 "state": "RUNNING",
                                 "wait_reason": None,
