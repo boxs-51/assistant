@@ -6,6 +6,8 @@ from ...domain.schemas import ModelCapability
 from ..exceptions import (
     NoAvailableProviderError,
     ProviderDeadlineExceededError,
+    ProviderError,
+    wrap_provider_exception,
 )
 from .base import BaseExecutionHandler
 
@@ -33,6 +35,8 @@ class EmbeddingExecutionHandler(BaseExecutionHandler):
             )
 
         last_error: Exception | None = None
+        last_detail: ProviderError | None = None
+        last_provider_name: str | None = None
 
         for provider in healthy_chain:
             try:
@@ -63,8 +67,22 @@ class EmbeddingExecutionHandler(BaseExecutionHandler):
                 )
             except ProviderDeadlineExceededError:
                 raise
+            except (
+                ProviderError,
+                httpx.RequestError,
+                httpx.HTTPStatusError,
+            ) as exc:
+                last_error = exc
+                last_provider_name = provider.name
+                last_detail = wrap_provider_exception(
+                    exc,
+                    provider.name,
+                )
+                continue
             except Exception as exc:
                 last_error = exc
+                last_provider_name = provider.name
+                last_detail = None
                 continue
 
         try:
@@ -74,11 +92,19 @@ class EmbeddingExecutionHandler(BaseExecutionHandler):
                 "Provider call deadline exhausted during embedding fallback."
             ) from last_error
 
+        detail = last_detail or (
+            last_error
+            if isinstance(last_error, ProviderError)
+            else None
+        )
         final_error = NoAvailableProviderError(
             "All embedding providers are unavailable or unsupported.",
-            provider_name=getattr(last_error, "provider_name", None),
-            status_code=getattr(last_error, "status_code", None),
-            error_code=getattr(last_error, "error_code", None),
+            provider_name=(
+                getattr(detail, "provider_name", None)
+                or last_provider_name
+            ),
+            status_code=getattr(detail, "status_code", None),
+            error_code=getattr(detail, "error_code", None),
         )
         if last_error is None:
             raise final_error
