@@ -138,3 +138,13 @@ class AgentTaskForkRequest(GatewayBaseModel):
     source_execution_id: str
     source_checkpoint_id: str
     overlay_messages: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentTaskForkResponse(GatewayBaseModel):
+    task_id: str
+    fork_request_id: str
+    branch_id: str
+    execution_id: str
+    execution_state: str
+    execution_revision: int = Field(ge=0)
+    started: bool = False
