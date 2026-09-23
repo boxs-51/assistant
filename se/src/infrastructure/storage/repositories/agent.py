@@ -140,6 +140,14 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def get_task_branch_for_update(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchRecord)
+            .where(AgentTaskBranchRecord.branch_id == branch_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def list_task_branches(self, task_id: str):
         result = await self.session.execute(
             select(AgentTaskBranchRecord)
@@ -189,6 +197,14 @@ class AgentRepository(BaseRepository):
             select(AgentTaskBranchContextRecord).where(
                 AgentTaskBranchContextRecord.branch_id == branch_id
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_branch_context_for_update(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchContextRecord)
+            .where(AgentTaskBranchContextRecord.branch_id == branch_id)
+            .with_for_update()
         )
         return result.scalar_one_or_none()
 
@@ -248,6 +264,17 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_task_fork_admissions(self, task_id: str):
+        result = await self.session.execute(
+            select(AgentTaskForkAdmissionRecord)
+            .where(AgentTaskForkAdmissionRecord.task_id == task_id)
+            .order_by(
+                AgentTaskForkAdmissionRecord.created_at.asc(),
+                AgentTaskForkAdmissionRecord.fork_request_id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
     async def save_task_budget(self, values: Dict[str, Any]):
         record = TaskBudgetRecord(**values)
         self.session.add(record)
@@ -259,6 +286,14 @@ class AgentRepository(BaseRepository):
             select(TaskBudgetRecord).where(
                 TaskBudgetRecord.task_id == task_id
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_budget_for_update(self, task_id: str):
+        result = await self.session.execute(
+            select(TaskBudgetRecord)
+            .where(TaskBudgetRecord.task_id == task_id)
+            .with_for_update()
         )
         return result.scalar_one_or_none()
 
@@ -327,6 +362,42 @@ class AgentRepository(BaseRepository):
             select(AgentExecutionRecord).where(AgentExecutionRecord.id == execution_id)
         )
         return result.scalar_one_or_none()
+
+    async def compare_and_set_fork_activation(
+        self,
+        execution_id: str,
+        *,
+        task_id: str,
+        branch_id: str,
+        base_execution_id: str,
+        base_checkpoint_id: str,
+        values: Dict[str, Any],
+    ):
+        """Specialized R8-F RUNNING@1 -> RUNNING@2 activation CAS."""
+
+        next_values = dict(values)
+        next_values["revision"] = 2
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == 1,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+                AgentExecutionRecord.task_id == task_id,
+                AgentExecutionRecord.branch_id == branch_id,
+                AgentExecutionRecord.base_execution_id == base_execution_id,
+                AgentExecutionRecord.base_checkpoint_id == base_checkpoint_id,
+                AgentExecutionRecord.retry_of_execution_id.is_(None),
+                AgentExecutionRecord.bound_client_id.is_(None),
+                AgentExecutionRecord.bound_connection_id.is_(None),
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
 
     async def list_legacy_waiting_executions_for_owner(
         self,
