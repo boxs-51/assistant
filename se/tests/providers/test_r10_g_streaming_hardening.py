@@ -351,6 +351,47 @@ async def test_r10_g_executor_bounds_provider_stream_timeout_by_remaining():
 
 
 @pytest.mark.asyncio
+async def test_r10_g_downstream_pause_is_not_cancelled_inside_provider_timer():
+    class _TwoChunkChat:
+        def __init__(self):
+            self.second_read_started = 0
+
+        async def chat_stream(self, **kwargs):
+            yield "first"
+            self.second_read_started += 1
+            yield "second"
+
+    manager = _BreakerManager()
+    executor = ProviderExecutor(manager, max_retries=0)
+    chat = _TwoChunkChat()
+    provider = SimpleNamespace(name="p1", chat=chat)
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=0.02,
+        max_retries=0,
+    )
+    stream = executor.execute_stream(
+        provider=provider,
+        http_client=object(),
+        body={"model": "logical-model"},
+        timeout=60.0,
+        call_budget=budget,
+    )
+
+    assert await stream.__anext__() == "first"
+
+    # Simulate downstream publication/backpressure after the visible chunk.
+    # The executor must not keep a task-level timeout armed across this pause.
+    await asyncio.sleep(0.03)
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await stream.__anext__()
+
+    assert chat.second_read_started == 0
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_r10_g_provider_internal_timeout_is_not_logical_deadline():
     class _InternalTimeoutChat:
         async def chat_stream(self, **kwargs):
