@@ -273,6 +273,73 @@ async def test_r8_f_all_open_branch_heads_terminal_preserves_nonterminal_task(
 
 
 @pytest.mark.asyncio
+async def test_r8_f_completed_open_branch_does_not_implicitly_resolve_task(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_activity_completed_open_unresolved.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-activity-completed-open-unresolved",
+        )
+        admission = await service.consume_fork_plan(source["plan"])
+        store = _store(sessions)
+        activation = await _activate(store, admission)
+
+        await service.finish_task_scoped_execution(
+            source["task_id"],
+            execution_id=admission.execution_id,
+            source_revision=activation.activated_execution_revision,
+            transition_values={
+                "state": "COMPLETED",
+                "wait_reason": None,
+                "result": {"branch": "completed-but-unresolved"},
+            },
+            delegated=False,
+        )
+
+        async with _Uow(sessions) as uow:
+            source_execution = await uow.agents.get_execution(
+                source["source_execution_id"]
+            )
+            terminal_source = await uow.agents.compare_and_set_execution(
+                source["source_execution_id"],
+                int(source_execution.revision),
+                {
+                    "state": "FAILED",
+                    "wait_reason": None,
+                    "error": "source failed",
+                },
+            )
+            assert terminal_source is not None
+            await uow.commit()
+
+        task = await service.reconcile_multibranch_task_activity(
+            source["task_id"]
+        )
+        budget = await service.get_budget(source["task_id"])
+
+        async with _Uow(sessions) as uow:
+            durable_task = await uow.agents.get_task(source["task_id"])
+            branches = await uow.agents.list_task_branches(source["task_id"])
+            await uow.commit()
+
+        assert str(task.status) in {"RUNNING", "WAITING"}
+        assert str(durable_task.status) in {"RUNNING", "WAITING"}
+        assert durable_task.output is None
+        assert durable_task.error is None
+        assert str(budget.state.value) == "OPEN"
+        assert all(str(branch.resolution_state) == "OPEN" for branch in branches)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r8_f_legacy_waiting_write_cannot_override_running_sibling(
     tmp_path,
 ):
