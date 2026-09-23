@@ -82,6 +82,15 @@ No other transition is execution authority.
 
 A process-local supervisor reservation is necessary but is not durable authority.
 
+
+After `AgentExecutionSupervisor.reserve(E2)` succeeds, every exit before a
+durable activation WIN must execute idempotent `release_reserved(token)` in a
+guaranteed error/finally path. This includes Task/Budget/Branch/seed rejection,
+deadlock/retry exhaustion, and activation CAS loss.
+
+After activation wins, durable cleanup responsibility transfers to the winner
+path. `start_reserved()` consumes the token on success.
+
 ---
 
 # 3. Canonical ordering
@@ -602,8 +611,18 @@ existing = load ForkAdmission(task_id, fork_request_id)
 
 if existing:
     verify replay semantics from immutable durable evidence
-    return same branch/execution
-    never plan/consume/activate a second execution
+
+    if exact E2 is RUNNING@1 preactivation:
+        reuse SAME admission / SAME E2
+        -> prepare ForkExecutionBootstrap(E2)
+        -> reserve
+        -> activation CAS
+        -> restore budget
+        -> start runtime
+
+    else:
+        return same branch/execution identity + current status
+        do not bootstrap/start again
 
 else:
     build_fork_plan()
@@ -613,6 +632,9 @@ else:
 
 A race where another worker commits admission after the first replay read is
 handled by R8-D consume idempotency.
+
+This replay state machine is the supported recovery for crash-after-consume
+but before activation. It never creates a second Branch or Execution.
 
 ---
 
@@ -1057,7 +1079,8 @@ Tests:
 inference cannot start before activation
 active budget is running when inference begins
 local reserve conflict starts no second runner
-activation loser starts no runner
+activation validation failure releases local reservation
+activation loser releases local reservation and starts no runner
 start_reserved failure cancels/fails E2 and releases execution capacity once
 branch capacity remains charged after activation failure
 ```
@@ -1201,6 +1224,12 @@ R12, not R8-F, owns stale RUNNING crash recovery.
 R8F-I18
 R9, not R8-F, owns branch result resolution.
 
+R8F-I18A
+Committed replay with exact E2 RUNNING@1 continues activation of the SAME E2; RUNNING@2+/WAITING/terminal replay is identity-only.
+
+R8F-I18B
+Every pre-activation failure after local reserve releases the supervisor reservation.
+
 R8F-I19
 Activation and Task cancellation serialize over Task/TaskBudget authority and race on E2 revision 1.
 
@@ -1225,6 +1254,7 @@ activation loser zero-mutation
 activation start failure accounting
 active budget restore
 replay after source movement
+restart/retry after consume-before-activation activates the SAME E2 exactly once
 replay after activation
 two branch runners same Task
 branch completion does not complete Task
