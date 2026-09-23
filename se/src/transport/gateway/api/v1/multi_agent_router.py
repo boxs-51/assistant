@@ -22,8 +22,11 @@ from .....runtimes.agent.fork_planning import (
     ForkPlanDeferred,
     ForkPlanError,
 )
-from .....runtimes.agent.persistence import ForkControlError
-from .....runtimes.agent.persistence import RetryControlError
+from .....runtimes.agent.persistence import (
+    AggregateControlError,
+    ForkControlError,
+    RetryControlError,
+)
 from .....runtimes.agent.retry_planning import RetryPlanError, RetryPlanDeferred
 from .....runtimes.agent.task_budget import (
     AggregateAdmissionError,
@@ -105,6 +108,7 @@ def map_error(error: Exception) -> HTTPException:
             RetryPlanError,
             RetryConsumeError,
             RetryControlError,
+            AggregateControlError,
             BranchResolutionError,
             AggregateAdmissionError,
         ),
