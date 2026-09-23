@@ -37,7 +37,6 @@ class RetryPlan:
     expected_execution_revision: int
     source_execution_state: str
     source_agent_id: str
-
     source_checkpoint_id: str | None
 
     expected_task_budget_revision: int
@@ -47,6 +46,11 @@ class RetryPlan:
     base_execution_id: str | None
     base_checkpoint_id: str | None
     correlation_id: str
+
+    request_fingerprint: str
+    source_context_fingerprint: str
+    fresh_active_budget_seconds: float
+
     target_user_id: str
 
 
@@ -69,6 +73,12 @@ class RetryAdmission:
 
     task_revision: int
     task_budget_revision: int
+
+
+def retry_value_fingerprint(value: Any) -> str:
+    """Fingerprint one JSON-compatible RETRY planning value."""
+
+    return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
 def retry_plan_fingerprint(values: RetryPlan | Mapping[str, Any]) -> str:
@@ -99,6 +109,13 @@ def retry_plan_fingerprint(values: RetryPlan | Mapping[str, Any]) -> str:
         "base_execution_id": _get(values, "base_execution_id"),
         "base_checkpoint_id": _get(values, "base_checkpoint_id"),
         "correlation_id": _get(values, "correlation_id"),
+        "request_fingerprint": _get(values, "request_fingerprint"),
+        "source_context_fingerprint": _get(
+            values, "source_context_fingerprint"
+        ),
+        "fresh_active_budget_seconds": float(
+            _get(values, "fresh_active_budget_seconds")
+        ),
         "target_user_id": _get(values, "target_user_id"),
     }
     return hashlib.sha256(_canonical_json(payload)).hexdigest()
@@ -108,4 +125,5 @@ __all__ = [
     "RetryAdmission",
     "RetryPlan",
     "retry_plan_fingerprint",
+    "retry_value_fingerprint",
 ]
