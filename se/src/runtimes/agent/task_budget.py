@@ -1147,43 +1147,43 @@ class TaskBudgetService:
 
                     updated_task = task
                     if current_state != "CANCELLED":
-                            updated_task = await uow.agents.compare_and_set_task(
-                                task_id,
-                                task.revision,
-                                normalized,
-                            )
-                            if updated_task is None:
-                                await uow.rollback()
-                                continue
-
-                        budget_values = {
-                            "state": TaskBudgetState.CLOSED.value,
-                            "closed_at": (
-                                budget.closed_at
-                                if budget.closed_at is not None
-                                else now_utc
-                            ),
-                            "active_executions": (
-                                budget.active_executions - cancelled_dormant
-                            ),
-                            "active_parallel_agents": (
-                                budget.active_parallel_agents
-                                - cancelled_delegated
-                            ),
-                        }
-                        updated_budget = (
-                            await uow.agents.compare_and_set_task_budget(
-                                task_id,
-                                budget.revision,
-                                budget_values,
-                            )
+                        updated_task = await uow.agents.compare_and_set_task(
+                            task_id,
+                            task.revision,
+                            normalized,
                         )
-                        if updated_budget is None:
+                        if updated_task is None:
                             await uow.rollback()
                             continue
 
-                        await uow.commit()
-                        return updated_task
+                    budget_values = {
+                        "state": TaskBudgetState.CLOSED.value,
+                        "closed_at": (
+                            budget.closed_at
+                            if budget.closed_at is not None
+                            else now_utc
+                        ),
+                        "active_executions": (
+                            budget.active_executions - cancelled_dormant
+                        ),
+                        "active_parallel_agents": (
+                            budget.active_parallel_agents
+                            - cancelled_delegated
+                        ),
+                    }
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            task_id,
+                            budget.revision,
+                            budget_values,
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.commit()
+                    return updated_task
             except OperationalError as exc:
                 message = str(exc).lower()
                 if "locked" in message or "busy" in message:
