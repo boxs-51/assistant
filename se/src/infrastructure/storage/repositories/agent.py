@@ -126,6 +126,81 @@ class AgentRepository(BaseRepository):
         await self.session.flush()
         return await self.get_task(task_id)
 
+    async def compare_and_set_task_activity(
+        self,
+        task_id: str,
+        expected_revision: int,
+        *,
+        target_state: str,
+        wait_reasons: List[str],
+    ):
+        """CAS derived R8 Task activity against the live branch-head graph.
+
+        Task row locks serialize row-locking databases. These EXISTS predicates
+        are the SQLite/dialect backstop so a FORK/resume that commits a RUNNING
+        current branch between snapshot and UPDATE makes a stale WAITING write
+        lose instead of committing split-brain state.
+        """
+
+        target = str(target_state)
+        if target not in {"RUNNING", "WAITING"}:
+            raise ValueError(
+                "Task activity target must be RUNNING or WAITING."
+            )
+
+        active_heads = (
+            select(AgentTaskBranchRecord.branch_id)
+            .join(
+                AgentExecutionRecord,
+                AgentExecutionRecord.id
+                == AgentTaskBranchRecord.current_execution_id,
+            )
+            .where(
+                AgentTaskBranchRecord.task_id == task_id,
+                AgentTaskBranchRecord.resolution_state == "OPEN",
+                AgentExecutionRecord.state.in_(("CREATED", "RUNNING")),
+            )
+        )
+        waiting_heads = (
+            select(AgentTaskBranchRecord.branch_id)
+            .join(
+                AgentExecutionRecord,
+                AgentExecutionRecord.id
+                == AgentTaskBranchRecord.current_execution_id,
+            )
+            .where(
+                AgentTaskBranchRecord.task_id == task_id,
+                AgentTaskBranchRecord.resolution_state == "OPEN",
+                AgentExecutionRecord.state.in_(
+                    ("WAITING", "WAITING_FOR_CONNECTION")
+                ),
+            )
+        )
+
+        statement = update(AgentTaskRecord).where(
+            AgentTaskRecord.id == task_id,
+            AgentTaskRecord.revision == expected_revision,
+        )
+        if target == "RUNNING":
+            statement = statement.where(active_heads.exists())
+        else:
+            statement = statement.where(
+                ~active_heads.exists(),
+                waiting_heads.exists(),
+            )
+
+        result = await self.session.execute(
+            statement.values(
+                status=target,
+                wait_reasons=list(wait_reasons),
+                revision=expected_revision + 1,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task(task_id)
+
     async def save_task_branch(self, values: Dict[str, Any]):
         record = AgentTaskBranchRecord(**values)
         self.session.add(record)
