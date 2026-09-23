@@ -1747,48 +1747,25 @@ class AgentRuntime:
                 request_id = f"inf_{uuid.uuid4().hex}"
                 record.inference_request_id = request_id
                 await self._persist_iteration(record)
-                inference_now = context.clock.monotonic()
-                inference_limit = getattr(
-                    context.limits,
-                    "inference_timeout_seconds",
-                    None,
-                )
-                inference_deadlines: list[float] = []
-                if context.active_deadline_monotonic is not None:
-                    inference_deadlines.append(
-                        context.active_deadline_monotonic
+                inference_timeout = context.remaining_for_operation(
+                    getattr(
+                        context.limits,
+                        "inference_timeout_seconds",
+                        None,
                     )
-                elif context.remaining_active_budget_seconds is not None:
-                    inference_deadlines.append(
-                        inference_now
-                        + max(
-                            0.0,
-                            float(context.remaining_active_budget_seconds),
-                        )
-                    )
-                if context.iteration_deadline_monotonic is not None:
-                    inference_deadlines.append(
-                        context.iteration_deadline_monotonic
-                    )
-                if inference_limit is not None:
-                    inference_deadlines.append(
-                        inference_now + max(0.0, float(inference_limit))
-                    )
-
-                if not inference_deadlines:
-                    raise TimeoutError(
-                        "Agent inference deadline authority is unavailable."
-                    )
-
-                inference_deadline_monotonic = min(inference_deadlines)
-                inference_timeout = max(
-                    0.0,
-                    inference_deadline_monotonic - inference_now,
                 )
                 if inference_timeout <= 0:
                     raise TimeoutError(
                         "Agent execution deadline exceeded before inference."
                     )
+
+                # Freeze the already-clamped Agent/iteration/inference
+                # remaining time into the process monotonic clock domain
+                # before any awaited publication/accounting work.  The same
+                # absolute deadline is then shared by the adapter and provider.
+                inference_deadline_monotonic = (
+                    time.monotonic() + inference_timeout
+                )
 
                 await self._publish(
                     AgentEventName.INFERENCE_REQUESTED,
