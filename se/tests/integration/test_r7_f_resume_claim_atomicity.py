@@ -1245,6 +1245,21 @@ async def test_r8_f_activity_reconcile_race_with_r7_resume_finishes_task_running
         sibling_branch_id = "branch-r8-f-terminal-sibling"
         sibling_execution_id = "exec-r8-f-terminal-sibling"
         async with factory() as uow:
+            sibling_branch = await uow.agents.save_task_branch(
+                {
+                    "branch_id": sibling_branch_id,
+                    "task_id": "task-r7f",
+                    "parent_branch_id": branch_id,
+                    "base_execution_id": EXECUTION,
+                    "base_checkpoint_id": CHECKPOINT,
+                    "current_execution_id": None,
+                    "resolution_state": "OPEN",
+                    "revision": 0,
+                    "created_by": USER,
+                    "reason": "R8_FORK",
+                }
+            )
+            assert sibling_branch is not None
             sibling_execution = await uow.agents.save_execution(
                 {
                     "id": sibling_execution_id,
@@ -1265,19 +1280,10 @@ async def test_r8_f_activity_reconcile_race_with_r7_resume_finishes_task_running
                 }
             )
             assert sibling_execution is not None
-            sibling_branch = await uow.agents.save_task_branch(
-                {
-                    "branch_id": sibling_branch_id,
-                    "task_id": "task-r7f",
-                    "parent_branch_id": branch_id,
-                    "base_execution_id": EXECUTION,
-                    "base_checkpoint_id": CHECKPOINT,
-                    "current_execution_id": sibling_execution_id,
-                    "resolution_state": "OPEN",
-                    "revision": 0,
-                    "created_by": USER,
-                    "reason": "R8_FORK",
-                }
+            sibling_branch = await uow.agents.compare_and_set_task_branch(
+                sibling_branch_id,
+                0,
+                {"current_execution_id": sibling_execution_id},
             )
             assert sibling_branch is not None
             budget = await uow.agents.get_task_budget("task-r7f")
