@@ -210,7 +210,6 @@ class ProviderExecutor:
             elif timeout is not None:
                 attempt_kwargs["timeout"] = timeout
 
-            provider_attempted = True
             logger.info(
                 "Starting streaming from provider",
                 provider=provider.name,
@@ -224,12 +223,14 @@ class ProviderExecutor:
                 while True:
                     try:
                         if call_budget is None:
+                            provider_attempted = True
                             chunk = await stream_iterator.__anext__()
                         else:
                             remaining = self._remaining_or_raise(
                                 call_budget,
                                 provider.name,
                             )
+                            provider_attempted = True
                             next_chunk_task = asyncio.create_task(
                                 stream_iterator.__anext__()
                             )
