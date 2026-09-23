@@ -66,10 +66,11 @@ Because the Gateway authority is JSON Schema, PTC-3A uses
 JSON-Schema semantics in their canonical representation instead of partially
 coercing only the root.
 
-PTC-3A also fails closed if an explicit root `type` is not `object`, because
-function parameters must describe an object. If the canonical schema omits a
-root type, the provider copy is bounded to `type: object` without mutating the
-source request.
+The shared PTC normalizer also enforces the Gateway invocation invariant that
+tool arguments are a JSON object for all providers. An explicit non-object root
+fails closed. A missing root type or an explicitly empty parameter schema is
+bounded to `type: object` with empty/default `properties` on the provider
+copy without mutating the source request.
 
 ## 4. Provider compatibility matrix
 
@@ -100,8 +101,10 @@ New PTC-3A regressions prove:
 2. top-level `$schema` is transport-normalized while nested semantic
    constraints remain unchanged;
 3. Gemini uses `parametersJsonSchema`, not `parameters`;
-4. an explicit non-object Gemini parameter root fails closed;
-5. a missing root type is bounded on the provider copy only;
+4. explicit non-object parameter roots fail closed consistently for all three
+   provider adapters;
+5. missing-root and empty parameter schemas are bounded to object schemas on
+   provider copies only;
 6. legacy uppercase JSON-Schema type tokens normalize recursively for all three
    provider adapters without rewriting instance data;
 7. canonical source request/schema remains unchanged.
