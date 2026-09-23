@@ -2006,6 +2006,13 @@ class TaskBudgetService:
             or execution.parent_execution_id != plan.parent_execution_id
             or execution.base_execution_id != plan.base_execution_id
             or execution.base_checkpoint_id != expected_base_checkpoint_id
+            or (
+                plan.source_checkpoint_id is not None
+                and retry_value_fingerprint(
+                    list(execution.transcript or [])
+                )
+                != plan.source_checkpoint_transcript_fingerprint
+            )
             or retry_value_fingerprint(
                 dict(execution.request or {})
             ) != plan.request_fingerprint
@@ -2142,7 +2149,12 @@ class TaskBudgetService:
                                     snapshot.runtime_context_state
                                 ),
                                 "transcript": (
-                                    list(snapshot.checkpoint.transcript_snapshot)
+                                    [
+                                        item.model_dump(mode="json")
+                                        for item in (
+                                            snapshot.checkpoint_transcript or ()
+                                        )
+                                    ]
                                     if snapshot.checkpoint is not None
                                     else list(source.transcript or [])
                                 ),
