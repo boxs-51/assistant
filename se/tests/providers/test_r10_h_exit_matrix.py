@@ -433,3 +433,120 @@ async def test_r10_h_runtime_cancellation_closes_nested_provider_stream_before_r
 
     assert closed.is_set()
     assert bus.events == ["provider.stream.chunk_emitted"]
+
+
+
+class _CleanupFailingRuntimeStream:
+    def __init__(self):
+        self.yielded = False
+        self.close_calls = 0
+
+    def __aiter__(self):
+        return self
+
+    async def __anext__(self):
+        if self.yielded:
+            raise StopAsyncIteration
+        self.yielded = True
+        return _Chunk()
+
+    async def aclose(self):
+        self.close_calls += 1
+        raise RuntimeError("runtime stream cleanup noise")
+
+
+class _RuntimeStreamHandler:
+    def __init__(self, stream):
+        self.stream = stream
+
+    def stream_with_fallback(self, http_client, body):
+        return self.stream
+
+
+class _CaptureFailingChunkBus:
+    def __init__(self):
+        self.events = []
+
+    async def publish(self, event):
+        self.events.append(event)
+        if event.event_name == "provider.stream.chunk_emitted":
+            raise ValueError("publication authority")
+
+
+@pytest.mark.asyncio
+async def test_r10_h_runtime_cleanup_failure_does_not_mask_publication_error():
+    stream = _CleanupFailingRuntimeStream()
+    bus = _CaptureFailingChunkBus()
+    runtime = ProviderRuntime(circuit_breaker_manager=object())
+    runtime.chat_handler = _RuntimeStreamHandler(stream)
+    runtime._http_client = object()
+    runtime.event_bus = bus
+
+    await runtime._handle_execute_chat(
+        BaseEvent(
+            event_name="provider.chat.execute",
+            session_id="session-r10-h-cleanup-error",
+            turn_id="turn-r10-h-cleanup-error",
+            payload={
+                "request_body": {
+                    "model": "logical-model",
+                    "config": {"stream": True},
+                }
+            },
+        )
+    )
+
+    assert stream.close_calls == 1
+    assert [event.event_name for event in bus.events] == [
+        "provider.stream.chunk_emitted",
+        "provider.failed",
+    ]
+    assert bus.events[-1].payload["error"] == "publication authority"
+
+
+class _BlockingCancellationBus:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.events = []
+
+    async def publish(self, event):
+        self.events.append(event)
+        if event.event_name == "provider.stream.chunk_emitted":
+            self.started.set()
+            await asyncio.Event().wait()
+
+
+@pytest.mark.asyncio
+async def test_r10_h_runtime_cleanup_failure_does_not_mask_cancellation():
+    stream = _CleanupFailingRuntimeStream()
+    bus = _BlockingCancellationBus()
+    runtime = ProviderRuntime(circuit_breaker_manager=object())
+    runtime.chat_handler = _RuntimeStreamHandler(stream)
+    runtime._http_client = object()
+    runtime.event_bus = bus
+
+    task = asyncio.create_task(
+        runtime._handle_execute_chat(
+            BaseEvent(
+                event_name="provider.chat.execute",
+                session_id="session-r10-h-cleanup-cancel",
+                turn_id="turn-r10-h-cleanup-cancel",
+                payload={
+                    "request_body": {
+                        "model": "logical-model",
+                        "config": {"stream": True},
+                    }
+                },
+            )
+        )
+    )
+    await bus.started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert stream.close_calls == 1
+    assert [event.event_name for event in bus.events] == [
+        "provider.stream.chunk_emitted",
+    ]
