@@ -222,17 +222,20 @@ class ProviderExecutor:
                 ):
                     yield chunk
             else:
+                stream_timeout = asyncio.timeout(stream_remaining)
                 try:
-                    async with asyncio.timeout(stream_remaining):
+                    async with stream_timeout:
                         async for chunk in provider.chat.chat_stream(
                             **attempt_kwargs
                         ):
                             yield chunk
                 except TimeoutError as exc:
-                    raise ProviderDeadlineExceededError(
-                        "Provider stream deadline exceeded.",
-                        provider_name=provider.name,
-                    ) from exc
+                    if stream_timeout.expired():
+                        raise ProviderDeadlineExceededError(
+                            "Provider stream deadline exceeded.",
+                            provider_name=provider.name,
+                        ) from exc
+                    raise
 
             await breaker.on_success()
 
