@@ -686,10 +686,33 @@ R7 resume must preserve the same order:
 
 ```text
 Task FOR UPDATE
+-> semantic no-op Task revision/activity-epoch CAS
 -> prepare_resume_capacity_in_uow()
 -> WAITING execution -> RUNNING CAS
 -> aggregate activity rederive under the already-held Task lock
 ```
+
+FORK admission similarly changes the durable branch-head activity graph and
+therefore MUST advance the Task activity epoch in the same transaction even
+when visible Task state is already RUNNING:
+
+```text
+fresh FORK consume:
+    expected Task revision N
+    -> Task RUNNING @ N+1, wait_reasons=[]
+    -> TaskBudget/Execution/Branch/ForkAdmission writes
+    -> commit
+```
+
+The R7 pre-resume epoch bump is deliberately **semantic no-op**: it preserves
+the current Task status/wait_reasons. It exists only to invalidate stale
+activity snapshots. Task RUNNING is exposed only after the WAITING->RUNNING
+execution authority CAS succeeds and aggregate activity is rederived.
+
+This activity epoch is required in addition to row locks/live predicates
+because SQLite cannot provide the same row-level FOR UPDATE serialization.
+A transaction that changes current branch activity but does not advance Task
+revision can otherwise commit after a stale reconciler snapshot.
 
 Do not acquire Task FOR UPDATE only after TaskBudget/execution writes; that
 would invert the R8 activation/cancellation order and create a deadlock risk.
@@ -1401,6 +1424,12 @@ Aggregate Task activity CAS is guarded by live branch-head SQL predicates so SQL
 R8F-I11F
 Task WAITING wait_reasons equal the deterministic normalized union of CURRENT OPEN WAITING branch heads at the successful activity CAS; stale missing/extra reasons make the CAS lose and retry.
 
+R8F-I11G
+Every fresh FORK admission advances the AgentTask revision/activity epoch in the same transaction even when Task remains visibly RUNNING.
+
+R8F-I11H
+R7 task-scoped resume advances a semantic no-op AgentTask revision/activity epoch before TaskBudget/execution authority writes; visible RUNNING is derived only after the execution CAS succeeds.
+
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
 
@@ -1469,7 +1498,9 @@ legacy root/source completion does not terminalize a forked Task
 legacy root/source WAITING does not mask a RUNNING sibling
 FORK consume vs legacy terminalization has no split-brain outcome
 FORK consume vs standalone activity reconciliation has no RUNNING-branch/WAITING-Task split
+FORK admission advances Task activity epoch even when Task was already RUNNING
 R7 resume vs standalone activity reconciliation preserves final Task RUNNING
+R7 pre-resume epoch bump is rolled back/semantically neutral when resume does not commit
 WAITING activity derivation
 Task cancellation with two branch runners
 restart-safe branch reads
