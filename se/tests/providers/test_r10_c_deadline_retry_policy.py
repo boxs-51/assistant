@@ -493,7 +493,7 @@ async def test_r10_c_expired_budget_before_first_attempt_does_not_penalize_break
 
 
 @pytest.mark.asyncio
-async def test_r10_c_execute_generic_uses_same_shared_retry_budget(
+async def test_r10_c_execute_generic_bounds_embedding_like_attempt_timeout(
     monkeypatch,
 ):
     clock = {"now": 100.0}
@@ -508,11 +508,13 @@ async def test_r10_c_execute_generic_uses_same_shared_retry_budget(
         retry_policy=RetryPolicy(max_retries=99),
     )
     calls = 0
+    timeouts = []
     error = _rate_limit_error()
 
-    async def operation():
+    async def operation(attempt_timeout):
         nonlocal calls
         calls += 1
+        timeouts.append(attempt_timeout)
         if calls == 1:
             raise error
         return "generic-ok"
@@ -541,10 +543,13 @@ async def test_r10_c_execute_generic_uses_same_shared_retry_budget(
         provider,
         operation,
         call_budget=budget,
+        timeout=60.0,
     )
 
     assert result == "generic-ok"
     assert calls == 2
+    assert timeouts == [10.0, 9.0]
+    assert all(0 < value <= 10.0 for value in timeouts)
     assert budget.retries_used == 1
     assert breaker.before_calls == 1
     assert breaker.success_calls == 1
