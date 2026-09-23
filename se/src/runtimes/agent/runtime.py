@@ -1199,12 +1199,20 @@ class AgentRuntime:
                     and self._task_budget_service is not None
                 ):
                     assert context.task_id is not None
-                    await self._task_budget_service.expire_task_scoped_waiting_execution(
-                        context.task_id,
-                        execution_id=context.execution_id,
-                        source_revision=expected_revision,
-                        transition_values=timeout_values,
+                    timeout_revision = (
+                        await self._task_budget_service.expire_task_scoped_waiting_execution(
+                            context.task_id,
+                            execution_id=context.execution_id,
+                            source_revision=expected_revision,
+                            transition_values=timeout_values,
+                        )
                     )
+                    if timeout_revision is None:
+                        raise ExecutionConflictError(
+                            "Stale AgentExecution revision/state while applying "
+                            f"task-scoped timeout: {context.execution_id}@"
+                            f"{expected_revision}"
+                        )
                 else:
                     await self._durable_store.compare_and_set_execution(
                         context.execution_id,
@@ -1229,12 +1237,20 @@ class AgentRuntime:
                     and self._task_budget_service is not None
                 ):
                     assert context.task_id is not None
-                    await self._task_budget_service.expire_task_scoped_waiting_execution(
-                        context.task_id,
-                        execution_id=context.execution_id,
-                        source_revision=expected_revision,
-                        transition_values=timeout_values,
+                    timeout_revision = (
+                        await self._task_budget_service.expire_task_scoped_waiting_execution(
+                            context.task_id,
+                            execution_id=context.execution_id,
+                            source_revision=expected_revision,
+                            transition_values=timeout_values,
+                        )
                     )
+                    if timeout_revision is None:
+                        raise ExecutionConflictError(
+                            "Stale AgentExecution revision/state while applying "
+                            f"task-scoped timeout: {context.execution_id}@"
+                            f"{expected_revision}"
+                        )
                 else:
                     await self._durable_store.compare_and_set_execution(
                         context.execution_id,
