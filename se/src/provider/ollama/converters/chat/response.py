@@ -9,6 +9,7 @@ import structlog
 logger = structlog.get_logger(__name__)
 
 from ....exceptions import ResponseValidationError
+from ....core.tool_contract import ProviderToolNameMap
 from .....domain.schemas import (
     GatewayResponse,
     GatewayChoice,
@@ -25,7 +26,12 @@ from .....domain.schemas import (
 
 class ResponseChats:
 
-    async def adapt_chat(self, response: httpx.Response) -> GatewayResponse:
+    async def adapt_chat(
+        self,
+        response: httpx.Response,
+        *,
+        tool_names: ProviderToolNameMap | None = None,
+    ) -> GatewayResponse:
         """Chuyển đổi response JSON từ Ollama về GatewayResponse và bóc tách <think>."""
         try:
             response_data = response.json()
@@ -50,12 +56,18 @@ class ResponseChats:
                     args = func.get("arguments", {})
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args)
 
+                    provider_name = func.get("name", "")
+                    logical_name = (
+                        tool_names.logical_name(provider_name)
+                        if tool_names is not None and provider_name
+                        else provider_name
+                    )
                     tool_calls.append(
                         GatewayToolCall(
                             id=f"call_{uuid.uuid4().hex[:8]}",
                             type="function",
                             function=FunctionCall(
-                                name=func.get("name", ""),
+                                name=logical_name,
                                 arguments=args_str
                             )
                         )
@@ -106,7 +118,12 @@ class ResponseChats:
                 provider_name="ollama"
             ) from e
 
-    async def adapt_chat_stream(self, response: httpx.Response) -> AsyncGenerator[GatewayStreamChunk, None]:
+    async def adapt_chat_stream(
+        self,
+        response: httpx.Response,
+        *,
+        tool_names: ProviderToolNameMap | None = None,
+    ) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Chuyển đổi stream của Ollama sang GatewayStreamChunk và bóc tách <think> thời gian thực."""
         stream_id = f"chatcmpl-{uuid.uuid4()}"
         is_thinking = False
@@ -137,12 +154,18 @@ class ResponseChats:
                         args = func.get("arguments", {})
                         args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, (dict, list)) else str(args)
 
+                        provider_name = func.get("name", "")
+                        logical_name = (
+                            tool_names.logical_name(provider_name)
+                            if tool_names is not None and provider_name
+                            else provider_name
+                        )
                         tool_calls.append(
                             GatewayToolCall(
                                 id=f"call_{uuid.uuid4().hex[:8]}",
                                 type="function",
                                 function=FunctionCall(
-                                    name=func.get("name", ""),
+                                    name=logical_name,
                                     arguments=args_str
                                 )
                             )
