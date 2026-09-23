@@ -18,6 +18,12 @@ from ..capability.contracts.invocation import (
 )
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
+from .contracts.aggregate import (
+    AggregateActivationResult,
+    AggregateExecutionBootstrap,
+    aggregate_fingerprint,
+    aggregate_plan_fingerprint,
+)
 from .contracts.fork import (
     ForkActivationResult,
     ForkAdmission,
@@ -154,6 +160,21 @@ class RetryControlError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+class AggregateControlError(RuntimeError):
+    """R9-F durable replay/activation authority error."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+    ) -> None:
+        self.code = code
+        self.retryable = retryable
+        super().__init__(f"{code}: {message}")
+
+
 def _utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
@@ -180,6 +201,91 @@ async def _retry_source_context_state_in_uow(uow, execution) -> dict[str, Any]:
         "trace_id": seed.get("trace_id"),
         "limits": dict(seed.get("limits") or {}),
     }
+
+
+async def _load_aggregate_source_executions_in_uow(
+    uow,
+    receipt,
+    *,
+    task_id: str,
+    for_update: bool,
+):
+    """Re-prove immutable AGGREGATE source/result provenance."""
+
+    branch_snapshots = list(receipt.source_branch_snapshots or [])
+    execution_snapshots = list(receipt.source_execution_snapshots or [])
+    result_fingerprints = list(receipt.result_fingerprints or [])
+    if (
+        len(branch_snapshots) < 2
+        or len(branch_snapshots) != len(execution_snapshots)
+        or len(branch_snapshots) != len(result_fingerprints)
+    ):
+        raise AggregateControlError(
+            "AGGREGATE_ADMISSION_CORRUPT",
+            "Aggregate provenance arrays are missing or misaligned.",
+        )
+
+    try:
+        execution_ids = [
+            str(item["execution_id"]) for item in execution_snapshots
+        ]
+        branch_ids = [
+            str(item["branch_id"]) for item in branch_snapshots
+        ]
+    except Exception as exc:
+        raise AggregateControlError(
+            "AGGREGATE_ADMISSION_CORRUPT",
+            "Aggregate provenance snapshot shape is invalid.",
+        ) from exc
+
+    loader = (
+        uow.agents.get_execution_for_update
+        if for_update
+        else uow.agents.get_execution
+    )
+    execution_map = {}
+    for execution_id in sorted(execution_ids):
+        execution_map[execution_id] = await loader(execution_id)
+
+    ordered = []
+    for index, (
+        branch_snapshot,
+        execution_snapshot,
+        result_fingerprint,
+    ) in enumerate(
+        zip(
+            branch_snapshots,
+            execution_snapshots,
+            result_fingerprints,
+        )
+    ):
+        execution_id = execution_ids[index]
+        branch_id = branch_ids[index]
+        execution = execution_map.get(execution_id)
+        snapshot_state = str(execution_snapshot.get("state", ""))
+        snapshot_result_fingerprint = str(
+            execution_snapshot.get("result_fingerprint", "")
+        )
+        if (
+            execution is None
+            or execution.task_id != task_id
+            or execution.branch_id != branch_id
+            or snapshot_state != "COMPLETED"
+            or str(execution.state) != "COMPLETED"
+            or int(execution.revision)
+            != int(execution_snapshot.get("revision", -1))
+            or execution.result is None
+            or snapshot_result_fingerprint != str(result_fingerprint)
+            or aggregate_fingerprint(dict(execution.result))
+            != str(result_fingerprint)
+        ):
+            raise AggregateControlError(
+                "AGGREGATE_PROVENANCE_CHANGED",
+                "Aggregate source execution/result differs from immutable "
+                "admission provenance.",
+            )
+        ordered.append(execution)
+    return tuple(ordered)
 
 
 _TASK_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
