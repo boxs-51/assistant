@@ -555,6 +555,494 @@ class DurableAgentStore:
             await uow.commit()
             return result
 
+    async def prepare_aggregate_execution_context(
+        self,
+        execution_id: str,
+        *,
+        identity: Identity,
+        agent,
+        clock: ExecutionClock | None = None,
+    ) -> AggregateExecutionBootstrap:
+        """Reconstruct one admitted AGGREGATE without acquiring runtime authority."""
+
+        def fail(code: str, message: str):
+            raise AggregateControlError(code, message)
+
+        principal = str(identity.user_id or "")
+        if not principal:
+            fail(
+                "AGGREGATE_FOREIGN_PRINCIPAL",
+                "Authenticated principal is required.",
+            )
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                fail(
+                    "AGGREGATE_EXECUTION_NOT_FOUND",
+                    "Aggregate execution does not exist.",
+                )
+            if (
+                str(execution.state) != "RUNNING"
+                or int(execution.revision) != 1
+                or execution.current_checkpoint_id is not None
+                or execution.task_id is None
+                or execution.branch_id is None
+                or execution.base_execution_id is None
+                or execution.retry_of_execution_id is not None
+                or execution.bound_client_id is not None
+                or execution.bound_connection_id is not None
+            ):
+                fail(
+                    "AGGREGATE_EXECUTION_LINEAGE_CONFLICT",
+                    "Execution is not an unactivated R9-F aggregate output.",
+                )
+
+            receipt = await uow.agents.get_task_aggregate_admission_by_execution(
+                execution_id
+            )
+            task = await uow.agents.get_task(execution.task_id)
+            branch = await uow.agents.get_task_branch(execution.branch_id)
+            if any(item is None for item in (receipt, task, branch)):
+                fail(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate durable graph is incomplete.",
+                )
+            if (
+                str(task.created_by) != principal
+                or receipt.created_by != principal
+            ):
+                fail(
+                    "AGGREGATE_FOREIGN_PRINCIPAL",
+                    "Authenticated principal does not own this aggregate Task.",
+                )
+            if str(task.status) in _TASK_TERMINAL_STATES:
+                fail(
+                    "AGGREGATE_TASK_TERMINAL",
+                    "Terminal AgentTask cannot activate AGGREGATE.",
+                )
+            if (
+                receipt.task_id != execution.task_id
+                or receipt.target_branch_id != execution.branch_id
+                or receipt.execution_id != execution.id
+                or branch.task_id != execution.task_id
+                or str(branch.resolution_state) != "OPEN"
+                or branch.current_execution_id != execution.id
+            ):
+                fail(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate receipt, TaskBranch and execution disagree.",
+                )
+
+            source_executions = (
+                await _load_aggregate_source_executions_in_uow(
+                    uow,
+                    receipt,
+                    task_id=execution.task_id,
+                    for_update=False,
+                )
+            )
+            branch_snapshots = list(receipt.source_branch_snapshots or [])
+            execution_snapshots = list(
+                receipt.source_execution_snapshots or []
+            )
+            result_fingerprints = list(receipt.result_fingerprints or [])
+            target_index = next(
+                (
+                    index
+                    for index, item in enumerate(branch_snapshots)
+                    if str(item.get("branch_id"))
+                    == receipt.target_branch_id
+                ),
+                None,
+            )
+            if target_index is None:
+                fail(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate target is absent from source provenance.",
+                )
+            target_source = source_executions[target_index]
+            if (
+                execution.base_execution_id != target_source.id
+                or execution.base_checkpoint_id
+                != target_source.current_checkpoint_id
+                or execution.parent_execution_id
+                != target_source.parent_execution_id
+                or execution.agent_id != target_source.agent_id
+                or execution.session_id != target_source.session_id
+                or execution.correlation_id != target_source.correlation_id
+                or list(execution.transcript or [])
+                != list(target_source.transcript or [])
+            ):
+                fail(
+                    "AGGREGATE_PROVENANCE_CHANGED",
+                    "Aggregate target lineage differs from admitted source.",
+                )
+
+            expected_request = {
+                "aggregate_request_id": receipt.aggregate_request_id,
+                "target_branch_id": receipt.target_branch_id,
+                "source_results": [
+                    {
+                        "branch_id": str(branch_snapshot["branch_id"]),
+                        "execution_id": source_execution.id,
+                        "result": dict(source_execution.result),
+                    }
+                    for branch_snapshot, source_execution in zip(
+                        branch_snapshots,
+                        source_executions,
+                    )
+                ],
+            }
+            if aggregate_fingerprint(dict(execution.request or {})) != (
+                aggregate_fingerprint(expected_request)
+            ):
+                fail(
+                    "AGGREGATE_PROVENANCE_CHANGED",
+                    "Aggregate execution request differs from immutable provenance.",
+                )
+
+            state = dict(execution.context_state or {})
+            try:
+                limits = AgentExecutionLimits.model_validate(state["limits"])
+                fresh_budget = float(limits.timeout_seconds)
+            except Exception as exc:
+                raise AggregateControlError(
+                    "AGGREGATE_RUNTIME_CONTEXT_INCOMPLETE",
+                    "Aggregate execution has no valid durable limits.",
+                ) from exc
+            remaining = execution.remaining_active_budget_seconds
+            if (
+                remaining is None
+                or not math.isfinite(float(remaining))
+                or float(remaining) <= 0
+                or float(remaining) != fresh_budget
+            ):
+                fail(
+                    "AGGREGATE_RUNTIME_CONTEXT_INCOMPLETE",
+                    "Aggregate execution has invalid active budget.",
+                )
+
+            runtime_seed_fingerprint = aggregate_fingerprint(
+                {
+                    "context_state": state,
+                    "request": expected_request,
+                    "fresh_active_budget_seconds": fresh_budget,
+                }
+            )
+            plan_fingerprint = aggregate_plan_fingerprint(
+                task_id=execution.task_id,
+                target_branch_id=receipt.target_branch_id,
+                source_branch_snapshots=branch_snapshots,
+                source_execution_snapshots=execution_snapshots,
+                result_fingerprints=result_fingerprints,
+                runtime_seed_fingerprint=runtime_seed_fingerprint,
+                created_by=receipt.created_by,
+            )
+            if (
+                runtime_seed_fingerprint
+                != receipt.runtime_seed_fingerprint
+                or plan_fingerprint != receipt.plan_fingerprint
+            ):
+                fail(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate immutable fingerprints no longer match provenance.",
+                )
+
+            if (
+                agent is None
+                or getattr(agent, "name", None) != execution.agent_id
+            ):
+                fail(
+                    "AGGREGATE_EXECUTION_LINEAGE_CONFLICT",
+                    "Current AgentDefinition does not match aggregate execution.",
+                )
+
+            metadata = dict(state.get("metadata") or {})
+            for key in (
+                "client_id",
+                "connection_id",
+                "origin_client_id",
+                "origin_connection_id",
+                "routing_connection_id",
+            ):
+                metadata.pop(key, None)
+
+            context = AgentExecutionContext.create(
+                execution_id=execution.id,
+                agent_id=execution.agent_id,
+                session_id=execution.session_id,
+                correlation_id=execution.correlation_id,
+                identity=identity,
+                limits=limits,
+                request_id=state.get("request_id"),
+                task_id=execution.task_id,
+                branch_id=execution.branch_id,
+                parent_execution_id=execution.parent_execution_id,
+                retry_of_execution_id=None,
+                base_execution_id=execution.base_execution_id,
+                base_checkpoint_id=execution.base_checkpoint_id,
+                workflow_id=state.get("workflow_id"),
+                connection_id=None,
+                agent=agent,
+                input=expected_request,
+                metadata=metadata,
+                causation_id=state.get("causation_id"),
+                trace_id=state.get("trace_id"),
+                branch_base_transcript=[
+                    dict(item) for item in (execution.transcript or [])
+                ],
+                branch_runtime_seed_fingerprint=(
+                    receipt.runtime_seed_fingerprint
+                ),
+                remaining_active_budget_seconds=float(remaining),
+                wait_expires_at=None,
+                clock=clock,
+                activate_budget=False,
+            )
+            context.validate_context_seed()
+            result = AggregateExecutionBootstrap(
+                execution_id=execution.id,
+                expected_execution_revision=1,
+                task_id=execution.task_id,
+                target_branch_id=execution.branch_id,
+                aggregate_request_id=receipt.aggregate_request_id,
+                plan_fingerprint=receipt.plan_fingerprint,
+                runtime_seed_fingerprint=receipt.runtime_seed_fingerprint,
+                context=context,
+            )
+            await uow.commit()
+            return result
+
+    async def activate_aggregate_execution(
+        self,
+        bootstrap: AggregateExecutionBootstrap,
+        *,
+        identity: Identity,
+        now_utc: datetime | None = None,
+    ) -> AggregateActivationResult:
+        """Atomically acquire the single R9-F aggregate activation winner."""
+
+        if int(bootstrap.expected_execution_revision) != 1:
+            raise AggregateControlError(
+                "AGGREGATE_ACTIVATION_CONFLICT",
+                "Aggregate bootstrap is not preactivation revision 1.",
+            )
+        principal = str(identity.user_id or "")
+        context = bootstrap.context
+        if (
+            not principal
+            or context.execution_id != bootstrap.execution_id
+            or context.task_id != bootstrap.task_id
+            or context.branch_id != bootstrap.target_branch_id
+            or context.retry_of_execution_id is not None
+            or context.base_execution_id is None
+            or context.branch_runtime_seed_fingerprint
+            != bootstrap.runtime_seed_fingerprint
+            or context.connection_id is not None
+            or context.active_budget_running
+        ):
+            raise AggregateControlError(
+                "AGGREGATE_ACTIVATION_CONTEXT_CONFLICT",
+                "Aggregate bootstrap differs from immutable handoff identity.",
+            )
+
+        activated_at = _utc_datetime(now_utc) or datetime.now(timezone.utc)
+        async with self.uow_factory() as uow:
+            # Frozen R9 order:
+            # Task -> TaskBudget -> target Branch -> source Executions(sorted)
+            # -> immutable receipt -> aggregate Execution CAS.
+            task = await uow.agents.get_task_for_update(bootstrap.task_id)
+            budget = await uow.agents.get_task_budget_for_update(
+                bootstrap.task_id
+            )
+            branch = await uow.agents.get_task_branch_for_update(
+                bootstrap.target_branch_id
+            )
+            receipt = await uow.agents.get_task_aggregate_admission_by_execution(
+                bootstrap.execution_id
+            )
+            if any(item is None for item in (task, budget, branch, receipt)):
+                raise AggregateControlError(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate activation durable graph is incomplete.",
+                )
+            if (
+                str(task.created_by) != principal
+                or receipt.created_by != principal
+            ):
+                raise AggregateControlError(
+                    "AGGREGATE_FOREIGN_PRINCIPAL",
+                    "Authenticated principal does not own aggregate Task.",
+                )
+            if str(task.status) in _TASK_TERMINAL_STATES:
+                raise AggregateControlError(
+                    "AGGREGATE_TASK_TERMINAL",
+                    "Terminal AgentTask cannot activate AGGREGATE.",
+                )
+            if str(task.status) != "RUNNING":
+                raise AggregateControlError(
+                    "AGGREGATE_TASK_CONFLICT",
+                    "AGGREGATE activation requires RUNNING Task authority.",
+                    retryable=True,
+                )
+            if str(budget.state) != "OPEN":
+                raise AggregateControlError(
+                    "AGGREGATE_TASK_TERMINAL",
+                    "CLOSED TaskBudget cannot activate AGGREGATE.",
+                )
+            if (
+                receipt.task_id != bootstrap.task_id
+                or receipt.target_branch_id != bootstrap.target_branch_id
+                or receipt.execution_id != bootstrap.execution_id
+                or receipt.aggregate_request_id
+                != bootstrap.aggregate_request_id
+                or receipt.plan_fingerprint != bootstrap.plan_fingerprint
+                or receipt.runtime_seed_fingerprint
+                != bootstrap.runtime_seed_fingerprint
+                or branch.task_id != bootstrap.task_id
+                or str(branch.resolution_state) != "OPEN"
+                or branch.current_execution_id != bootstrap.execution_id
+            ):
+                raise AggregateControlError(
+                    "AGGREGATE_ACTIVATION_CONFLICT",
+                    "Aggregate authority changed before activation.",
+                    retryable=True,
+                )
+
+            source_executions = (
+                await _load_aggregate_source_executions_in_uow(
+                    uow,
+                    receipt,
+                    task_id=bootstrap.task_id,
+                    for_update=True,
+                )
+            )
+            branch_snapshots = list(receipt.source_branch_snapshots or [])
+            execution_snapshots = list(
+                receipt.source_execution_snapshots or []
+            )
+            result_fingerprints = list(receipt.result_fingerprints or [])
+            target_index = next(
+                (
+                    index
+                    for index, item in enumerate(branch_snapshots)
+                    if str(item.get("branch_id"))
+                    == bootstrap.target_branch_id
+                ),
+                None,
+            )
+            if target_index is None:
+                raise AggregateControlError(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate target is absent from source provenance.",
+                )
+            target_source = source_executions[target_index]
+            execution = await uow.agents.get_execution(
+                bootstrap.execution_id
+            )
+            if execution is None:
+                raise AggregateControlError(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate execution disappeared before activation.",
+                )
+
+            expected_request = {
+                "aggregate_request_id": receipt.aggregate_request_id,
+                "target_branch_id": receipt.target_branch_id,
+                "source_results": [
+                    {
+                        "branch_id": str(branch_snapshot["branch_id"]),
+                        "execution_id": source_execution.id,
+                        "result": dict(source_execution.result),
+                    }
+                    for branch_snapshot, source_execution in zip(
+                        branch_snapshots,
+                        source_executions,
+                    )
+                ],
+            }
+            state = dict(execution.context_state or {})
+            try:
+                limits = AgentExecutionLimits.model_validate(state["limits"])
+                fresh_budget = float(limits.timeout_seconds)
+            except Exception as exc:
+                raise AggregateControlError(
+                    "AGGREGATE_RUNTIME_CONTEXT_INCOMPLETE",
+                    "Aggregate execution has no valid durable limits.",
+                ) from exc
+            remaining = execution.remaining_active_budget_seconds
+            runtime_seed_fingerprint = aggregate_fingerprint(
+                {
+                    "context_state": state,
+                    "request": expected_request,
+                    "fresh_active_budget_seconds": fresh_budget,
+                }
+            )
+            plan_fingerprint = aggregate_plan_fingerprint(
+                task_id=bootstrap.task_id,
+                target_branch_id=receipt.target_branch_id,
+                source_branch_snapshots=branch_snapshots,
+                source_execution_snapshots=execution_snapshots,
+                result_fingerprints=result_fingerprints,
+                runtime_seed_fingerprint=runtime_seed_fingerprint,
+                created_by=receipt.created_by,
+            )
+            if (
+                str(execution.state) != "RUNNING"
+                or int(execution.revision) != 1
+                or execution.task_id != bootstrap.task_id
+                or execution.branch_id != bootstrap.target_branch_id
+                or execution.base_execution_id != target_source.id
+                or execution.base_checkpoint_id
+                != target_source.current_checkpoint_id
+                or execution.parent_execution_id
+                != target_source.parent_execution_id
+                or execution.retry_of_execution_id is not None
+                or execution.current_checkpoint_id is not None
+                or execution.bound_client_id is not None
+                or execution.bound_connection_id is not None
+                or remaining is None
+                or float(remaining)
+                != float(context.remaining_active_budget_seconds)
+                or float(remaining) != fresh_budget
+                or aggregate_fingerprint(dict(execution.request or {}))
+                != aggregate_fingerprint(expected_request)
+                or runtime_seed_fingerprint
+                != receipt.runtime_seed_fingerprint
+                or plan_fingerprint != receipt.plan_fingerprint
+            ):
+                raise AggregateControlError(
+                    "AGGREGATE_ACTIVATION_CONTEXT_CONFLICT",
+                    "Aggregate execution/context no longer matches admission.",
+                )
+
+            activated = await uow.agents.compare_and_set_aggregate_activation(
+                bootstrap.execution_id,
+                task_id=bootstrap.task_id,
+                branch_id=bootstrap.target_branch_id,
+                base_execution_id=target_source.id,
+                base_checkpoint_id=target_source.current_checkpoint_id,
+                started_at=activated_at,
+            )
+            if activated is None:
+                await uow.rollback()
+                raise AggregateControlError(
+                    "AGGREGATE_ACTIVATION_CONFLICT",
+                    "Aggregate activation CAS lost.",
+                    retryable=True,
+                )
+            result = AggregateActivationResult(
+                task_id=bootstrap.task_id,
+                target_branch_id=bootstrap.target_branch_id,
+                execution_id=bootstrap.execution_id,
+                source_execution_revision=1,
+                activated_execution_revision=2,
+                remaining_active_budget_seconds=float(remaining),
+            )
+            await uow.commit()
+            return result
+
     async def load_retry_replay(
         self,
         *,
