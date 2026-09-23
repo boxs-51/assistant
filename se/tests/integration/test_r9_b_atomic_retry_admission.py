@@ -55,6 +55,7 @@ async def _seed_failed_source(
     *,
     task_id: str,
     retry_request_id: str = "retry-r9-b",
+    source_checkpoint_id: str | None = None,
 ):
     session_id = f"session-{task_id}"
     execution_id = f"exec-{task_id}"
@@ -103,12 +104,41 @@ async def _seed_failed_source(
         },
         delegated=False,
     ) == 2
+    if source_checkpoint_id is not None:
+        checkpoint_transcript = [
+            {"role": "user", "content": "explicit retry checkpoint"}
+        ]
+        async with _Uow(sessions) as uow:
+            await uow.agents.save_execution_checkpoint(
+                {
+                    "checkpoint_id": source_checkpoint_id,
+                    "execution_id": execution_id,
+                    "execution_revision": 3,
+                    "session_id": session_id,
+                    "task_id": task_id,
+                    "branch_id": root.branch_id,
+                    "parent_checkpoint_id": None,
+                    "iteration": 1,
+                    "wait_reason": "CONNECTION",
+                    "remaining_active_budget_seconds": 30.0,
+                    "transcript_snapshot": checkpoint_transcript,
+                    "metadata_json": {},
+                }
+            )
+            updated = await uow.agents.compare_and_set_execution(
+                execution_id,
+                2,
+                {"current_checkpoint_id": source_checkpoint_id},
+            )
+            assert updated is not None
+            await uow.commit()
     plan = await planner.build_retry_plan(
         retry_request_id=retry_request_id,
         task_id=task_id,
         branch_id=root.branch_id,
         source_execution_id=execution_id,
         target_user_id="user-r9",
+        source_checkpoint_id=source_checkpoint_id,
     )
     return root, plan
 
@@ -161,6 +191,36 @@ async def test_r9_b_retry_is_new_execution_in_same_branch_and_one_transaction(
         assert receipt.execution_id == admission.execution_id
         assert reservation is not None
         assert task.status == "RUNNING"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_b_explicit_checkpoint_becomes_retry_base_lineage(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_b_explicit_checkpoint.sqlite"
+    )
+    try:
+        checkpoint_id = "checkpoint-r9-b-explicit"
+        _root, plan = await _seed_failed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-b-explicit-checkpoint",
+            source_checkpoint_id=checkpoint_id,
+        )
+
+        admission = await service.consume_retry_plan(plan)
+        replay = await service.consume_retry_plan(plan)
+
+        async with _Uow(sessions) as uow:
+            retry = await uow.agents.get_execution(admission.execution_id)
+
+        assert replay.execution_id == admission.execution_id
+        assert retry.base_checkpoint_id == checkpoint_id
+        assert retry.transcript == [
+            {"role": "user", "content": "explicit retry checkpoint"}
+        ]
     finally:
         await engine.dispose()
 
