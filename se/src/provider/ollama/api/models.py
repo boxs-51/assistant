@@ -71,7 +71,23 @@ class OllamaModels(ModelProvider):
                 raw_response=getattr(response, "text", None),
             ) from exc
 
-        if not isinstance(data, dict) or not data:
+        show_payload_keys = {
+            "details",
+            "model_info",
+            "template",
+            "modelfile",
+            "parameters",
+            "capabilities",
+            "system",
+            "license",
+            "messages",
+        }
+        if (
+            not isinstance(data, dict)
+            or not data
+            or data.get("error")
+            or not show_payload_keys.intersection(data)
+        ):
             raise ResponseValidationError(
                 "Ollama /api/show returned an invalid response shape.",
                 provider_name=self.provider.name,
@@ -79,12 +95,6 @@ class OllamaModels(ModelProvider):
                 raw_response=data,
             )
 
-        if data.get("error"):
-            raise self._model_unavailable_error(
-                model_id,
-                status_code=getattr(response, "status_code", None),
-                raw_response=data,
-            )
         return data
 
     async def _resolve_full_capabilities(
