@@ -67,10 +67,9 @@ class EmbeddingExecutionHandler(BaseExecutionHandler):
                 last_error = exc
                 continue
 
-        remaining = call_budget.remaining_seconds(
-            now_monotonic=__import__("time").monotonic()
-        )
-        if remaining <= 0:
+        try:
+            self._remaining_timeout(call_budget)
+        except ProviderDeadlineExceededError as deadline_error:
             raise ProviderDeadlineExceededError(
                 "Provider call deadline exhausted during embedding fallback."
             ) from last_error
