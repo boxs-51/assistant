@@ -102,6 +102,77 @@ from .domain.schemas.event import BaseEvent
 from .version import __version__
 logger = structlog.get_logger(__name__)
 
+def _classify_fork_replay_execution(execution) -> str:
+    """Classify only durable R8-F lifecycle shapes that may be replayed."""
+
+    state = str(getattr(execution, "state", ""))
+    try:
+        revision = int(getattr(execution, "revision"))
+    except (TypeError, ValueError) as exc:
+        raise ForkControlError(
+            "FORK_ADMISSION_CORRUPT",
+            "Fork execution has an invalid durable revision.",
+        ) from exc
+
+    if state == "RUNNING" and revision == 1:
+        return "PREACTIVATION"
+    if state == "RUNNING" and revision >= 2:
+        return "IDENTITY_REPLAY"
+    if state == "WAITING" and revision >= 3:
+        return "IDENTITY_REPLAY"
+    if state in {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"} and revision >= 2:
+        return "IDENTITY_REPLAY"
+
+    raise ForkControlError(
+        "FORK_ADMISSION_CORRUPT",
+        (
+            "ForkAdmission execution has an invalid lifecycle shape: "
+            f"{state}@{revision}."
+        ),
+    )
+
+
+async def _activate_fork_owned(
+    *,
+    store,
+    runtime,
+    supervisor,
+    token,
+    bootstrap,
+    identity,
+):
+    """Resolve durable activation to a known outcome across caller cancellation."""
+
+    activation_task = asyncio.create_task(
+        store.activate_fork_execution(
+            bootstrap,
+            identity=identity,
+        ),
+        name=f"fork-activation:{bootstrap.execution_id}",
+    )
+    try:
+        return await asyncio.shield(activation_task)
+    except asyncio.CancelledError:
+        outcome = (
+            await asyncio.gather(
+                activation_task,
+                return_exceptions=True,
+            )
+        )[0]
+        if not isinstance(outcome, BaseException):
+            try:
+                await runtime.cancel_activated_fork_execution(
+                    bootstrap.context,
+                    outcome.activated_execution_revision,
+                    error_message="FORK_ACTIVATION_CALLER_CANCELLED",
+                )
+            finally:
+                await supervisor.release_reserved(token)
+        else:
+            await supervisor.release_reserved(token)
+        raise
+
+
 async def execute_forked_agent_task_control_plane(
     container,
     task_id,
@@ -149,12 +220,8 @@ async def execute_forked_agent_task_control_plane(
             "ForkAdmission execution is missing.",
         )
 
-    # RUNNING@1 is the one replay state that must continue activation of
-    # the SAME E2. Every later state is identity/status replay only.
-    if not (
-        str(current.state) == "RUNNING"
-        and int(current.revision) == 1
-    ):
+    lifecycle = _classify_fork_replay_execution(current)
+    if lifecycle == "IDENTITY_REPLAY":
         return {
             "task_id": task_id,
             "fork_request_id": request.fork_request_id,
@@ -181,21 +248,27 @@ async def execute_forked_agent_task_control_plane(
     activation = None
     try:
         try:
-            activation = await store.activate_fork_execution(
-                bootstrap,
+            activation = await _activate_fork_owned(
+                store=store,
+                runtime=runtime,
+                supervisor=supervisor,
+                token=token,
+                bootstrap=bootstrap,
                 identity=identity,
             )
+        except asyncio.CancelledError:
+            raise
         except BaseException:
-            # Every pre-WIN exit releases process-local ownership.
+            # Every ordinary pre-WIN exit releases process-local ownership.
             await supervisor.release_reserved(token)
             latest = await store.load_execution(admission.execution_id)
-            if (
-                latest is not None
-                and not (
-                    str(latest.state) == "RUNNING"
-                    and int(latest.revision) == 1
+            if latest is None:
+                raise ForkControlError(
+                    "FORK_ADMISSION_CORRUPT",
+                    "ForkAdmission execution disappeared during activation.",
                 )
-            ):
+            latest_lifecycle = _classify_fork_replay_execution(latest)
+            if latest_lifecycle == "IDENTITY_REPLAY":
                 return {
                     "task_id": task_id,
                     "fork_request_id": request.fork_request_id,
@@ -244,28 +317,26 @@ async def execute_forked_agent_task_control_plane(
 
         owned_task.add_done_callback(observe_fork_runner)
     except BaseException:
-        # If activation never won, release_reserved above is authoritative.
-        # If it won, the handoff failure path owns durable cleanup.
+        # Pre-WIN cancellation/failure and post-WIN handoff cleanup are
+        # explicitly owned above.
         raise
 
     latest = await store.load_execution(admission.execution_id)
+    if latest is None:
+        raise ForkControlError(
+            "FORK_ADMISSION_CORRUPT",
+            "ForkAdmission execution disappeared after activation.",
+        )
+    _classify_fork_replay_execution(latest)
     return {
         "task_id": task_id,
         "fork_request_id": request.fork_request_id,
         "branch_id": admission.branch_id,
         "execution_id": admission.execution_id,
-        "execution_state": (
-            str(latest.state) if latest is not None else "RUNNING"
-        ),
-        "execution_revision": (
-            int(latest.revision)
-            if latest is not None
-            else activation.activated_execution_revision
-        ),
+        "execution_state": str(latest.state),
+        "execution_revision": int(latest.revision),
         "started": True,
     }
-
-
 
 
 # ==============================================================================
