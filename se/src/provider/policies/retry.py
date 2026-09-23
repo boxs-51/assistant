@@ -1,17 +1,20 @@
 import asyncio
 import random
+import time
 
 import httpx
 import structlog
 
 from ..exceptions import (
     ProviderAuthenticationError,
+    ProviderDeadlineExceededError,
     ProviderError,
     ProviderRateLimitError,
     ProviderUnavailableError,
     ResponseValidationError,
     wrap_provider_exception,
 )
+from ..retry_contracts import ProviderCallBudget
 from ...circuit_breaker import CircuitBreakerOpenError
 from ...infrastructure.config.schemas import ProviderSettings
 
@@ -51,52 +54,64 @@ class RetryPolicy:
             return False
         return False
 
-    async def apply(self, execution_func, provider_name: str):
-        """Execute with existing local backoff after pre-scheduling normalization."""
+    @staticmethod
+    def _normalize_error(
+        raw_error: Exception,
+        provider_name: str,
+    ) -> Exception:
+        if isinstance(
+            raw_error,
+            (ProviderError, httpx.HTTPStatusError, httpx.RequestError),
+        ):
+            return wrap_provider_exception(raw_error, provider_name)
+        return raw_error
+
+    def _legacy_retryable(
+        self,
+        raw_error: Exception,
+        normalized_error: Exception,
+    ) -> bool:
+        """Preserve the pre-R10 raw retry set.
+
+        R10-C changes scheduling/accounting only. Raw HTTP 408 and generic
+        RequestError remain non-retryable unless a later stage explicitly
+        re-freezes that taxonomy.
+        """
+
+        if isinstance(raw_error, httpx.HTTPStatusError):
+            raw_status = raw_error.response.status_code
+            return raw_status == 429 or 500 <= raw_status < 600
+        if isinstance(raw_error, httpx.RequestError):
+            return isinstance(
+                raw_error,
+                (httpx.TimeoutException, httpx.ConnectError),
+            )
+        return self._is_retryable(normalized_error)
+
+    @staticmethod
+    def _raise_current(
+        raw_error: Exception,
+        normalized_error: Exception,
+    ) -> None:
+        if normalized_error is raw_error:
+            raise raw_error
+        raise normalized_error from raw_error
+
+    async def _apply_legacy(self, execution_func, provider_name: str):
+        """R10-B-compatible behavior when no logical call budget is supplied."""
 
         for attempt in range(self.max_retries + 1):
             try:
                 return await execution_func()
             except Exception as raw_error:
-                if isinstance(
-                    raw_error,
-                    (ProviderError, httpx.HTTPStatusError, httpx.RequestError),
-                ):
-                    error = wrap_provider_exception(
-                        raw_error,
-                        provider_name,
-                    )
-                else:
-                    error = raw_error
+                error = self._normalize_error(raw_error, provider_name)
                 status_code = getattr(error, "status_code", None)
                 error_code = getattr(error, "error_code", None)
-
-                # R10-B normalizes raw evidence before classification, but it
-                # must not broaden the legacy retry set. Raw HTTP and transport
-                # failures keep their pre-R10 retryability until R10-C owns the
-                # scheduling policy.
-                if isinstance(raw_error, httpx.HTTPStatusError):
-                    raw_status = raw_error.response.status_code
-                    retryable = (
-                        raw_status == 429
-                        or 500 <= raw_status < 600
-                    )
-                elif isinstance(raw_error, httpx.RequestError):
-                    retryable = isinstance(
-                        raw_error,
-                        (httpx.TimeoutException, httpx.ConnectError),
-                    )
-                else:
-                    retryable = self._is_retryable(error)
+                retryable = self._legacy_retryable(raw_error, error)
 
                 if not retryable or attempt >= self.max_retries:
-                    if error is raw_error:
-                        raise
-                    raise error from raw_error
+                    self._raise_current(raw_error, error)
 
-                # AE-R10-B intentionally preserves the existing local
-                # exponential+jitter scheduling. Provider retry hints are
-                # normalized here for R10-C, but are not consumed yet.
                 delay = (2 ** attempt) + random.uniform(0, 1)
 
                 logger.warning(
@@ -116,3 +131,106 @@ class RetryPolicy:
                 )
 
                 await asyncio.sleep(delay)
+
+    async def _apply_budgeted(
+        self,
+        execution_func,
+        provider_name: str,
+        call_budget: ProviderCallBudget,
+    ):
+        """Execute using one externally-owned logical provider call budget."""
+
+        provider_retry_index = 0
+
+        while True:
+            remaining = call_budget.remaining_seconds(
+                now_monotonic=time.monotonic()
+            )
+            if remaining <= 0:
+                raise ProviderDeadlineExceededError(
+                    "Provider call deadline exceeded before attempt.",
+                    provider_name=provider_name,
+                )
+
+            try:
+                return await execution_func()
+            except Exception as raw_error:
+                error = self._normalize_error(raw_error, provider_name)
+                retryable = self._legacy_retryable(raw_error, error)
+
+                if not retryable:
+                    self._raise_current(raw_error, error)
+
+                if call_budget.retries_remaining <= 0:
+                    self._raise_current(raw_error, error)
+
+                local_delay = (
+                    2 ** provider_retry_index
+                ) + random.uniform(0, 1)
+                retry_after = getattr(
+                    error,
+                    "retry_after_seconds",
+                    None,
+                )
+                effective_delay = max(
+                    local_delay,
+                    0.0 if retry_after is None else retry_after,
+                )
+
+                remaining = call_budget.remaining_seconds(
+                    now_monotonic=time.monotonic()
+                )
+                if remaining <= 0 or effective_delay >= remaining:
+                    self._raise_current(raw_error, error)
+
+                logger.warning(
+                    "Retrying provider execution within logical call budget.",
+                    provider=provider_name,
+                    retry_index=provider_retry_index + 1,
+                    retries_used=call_budget.retries_used,
+                    retries_remaining=call_budget.retries_remaining,
+                    delay=round(effective_delay, 2),
+                    remaining=round(remaining, 2),
+                    error_type=error.__class__.__name__,
+                    status_code=getattr(error, "status_code", None),
+                    error_code=getattr(error, "error_code", None),
+                    retry_after_seconds=retry_after,
+                )
+
+                # Cancellation here propagates as CancelledError and therefore
+                # consumes no retry token and starts no additional attempt.
+                await asyncio.sleep(effective_delay)
+
+                remaining = call_budget.remaining_seconds(
+                    now_monotonic=time.monotonic()
+                )
+                if remaining <= 0:
+                    raise ProviderDeadlineExceededError(
+                        "Provider call deadline exceeded before retry attempt.",
+                        provider_name=provider_name,
+                    ) from error
+
+                if not call_budget.try_consume_retry():
+                    self._raise_current(raw_error, error)
+
+                provider_retry_index += 1
+
+    async def apply(
+        self,
+        execution_func,
+        provider_name: str,
+        *,
+        call_budget: ProviderCallBudget | None = None,
+    ):
+        """Execute with legacy or injected logical-call retry accounting."""
+
+        if call_budget is None:
+            return await self._apply_legacy(
+                execution_func,
+                provider_name,
+            )
+        return await self._apply_budgeted(
+            execution_func,
+            provider_name,
+            call_budget,
+        )
