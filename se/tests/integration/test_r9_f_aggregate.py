@@ -15,6 +15,7 @@ from se.src.runtimes.agent.persistence import (
     AggregateControlError,
     DurableAgentStore,
 )
+from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.task_budget import AggregateAdmissionError
 from se.tests.integration.test_r8_d_atomic_fork_consume import _Uow, _setup
 from se.tests.integration.test_r9_de_branch_resolution import (
@@ -340,6 +341,74 @@ async def test_r9_f_activated_aggregate_can_complete_then_be_adopted(tmp_path):
         assert task.status == "COMPLETED"
         assert task.output == aggregate_result
         assert target.resolution_state == "ADOPTED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_f_post_activation_cleanup_releases_real_task_capacity(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, name="r9_f_handoff_cleanup.sqlite"
+    )
+    try:
+        source, fork = await _seed_two_completed_branches(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-f-handoff-cleanup",
+        )
+        ordered = (source["source_branch_id"], fork.branch_id)
+        admission = await service.aggregate_branches(
+            source["task_id"],
+            aggregate_request_id="aggregate-r9-f-handoff-cleanup",
+            target_branch_id=fork.branch_id,
+            source_branch_ids=ordered,
+            target_user_id="user-r8-d",
+        )
+
+        store = _store(sessions)
+        bootstrap = await store.prepare_aggregate_execution_context(
+            admission.execution_id,
+            identity=_identity(),
+            agent=_agent(),
+        )
+        activation = await store.activate_aggregate_execution(
+            bootstrap,
+            identity=_identity(),
+        )
+        before = await service.get_budget(source["task_id"])
+        bootstrap.context.restore_active_budget(
+            activation.remaining_active_budget_seconds
+        )
+
+        runtime = AgentRuntime(
+            context_builder=None,
+            inference=None,
+            tool_execution=None,
+            execution_policy=None,
+            durable_store=store,
+            task_budget_service=service,
+        )
+        await runtime.cancel_activated_aggregate_execution(
+            bootstrap.context,
+            activation.activated_execution_revision,
+            error_message="AGGREGATE_RUNTIME_HANDOFF_FAILED: injected",
+        )
+
+        after = await service.get_budget(source["task_id"])
+        execution = await store.load_execution(admission.execution_id)
+        assert execution.state == "CANCELLED"
+        assert execution.revision == 3
+        assert execution.error == (
+            "AGGREGATE_RUNTIME_HANDOFF_FAILED: injected"
+        )
+        assert after.active_executions == before.active_executions - 1
+        expected_parallel_release = (
+            1 if bootstrap.context.parent_execution_id is not None else 0
+        )
+        assert after.active_parallel_agents == (
+            before.active_parallel_agents - expected_parallel_release
+        )
     finally:
         await engine.dispose()
 
