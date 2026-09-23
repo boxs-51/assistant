@@ -131,6 +131,7 @@ class BaseExecutionHandler(ABC):
             timeout_message=(
                 "Provider capability probe deadline exceeded."
             ),
+            now_monotonic=monotonic,
         )
 
     async def _get_healthy_fallback_chain(self, initial_chain: list) -> list:
