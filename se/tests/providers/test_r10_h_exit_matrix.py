@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import asyncio
 import time
 
 import pytest
@@ -298,3 +299,132 @@ async def test_r10_h_public_stream_visible_failure_sequence_is_terminal_no_repla
     assert failure["failure_domain"] == "PROVIDER"
     assert failure["retryable"] is True
     assert failure["provider"] == "p1"
+
+
+
+class _FailingChunkBus:
+    def __init__(self):
+        self.events = []
+
+    async def publish(self, event):
+        self.events.append(event.event_name)
+        if event.event_name == "provider.stream.chunk_emitted":
+            raise RuntimeError("downstream chunk publication failed")
+
+
+class _BlockingChunkBus:
+    def __init__(self):
+        self.events = []
+        self.chunk_publish_started = asyncio.Event()
+
+    async def publish(self, event):
+        self.events.append(event.event_name)
+        if event.event_name == "provider.stream.chunk_emitted":
+            self.chunk_publish_started.set()
+            await asyncio.Event().wait()
+
+
+class _CloseAwareStreamChat:
+    def __init__(self, closed: asyncio.Event):
+        self.closed = closed
+
+    async def chat_stream(self, **kwargs):
+        try:
+            yield _Chunk()
+            await asyncio.Event().wait()
+        finally:
+            self.closed.set()
+
+
+class _CloseAwareProvider:
+    def __init__(self, name: str, closed: asyncio.Event):
+        self.name = name
+        self.chat = _CloseAwareStreamChat(closed)
+
+    async def has_capability(
+        self,
+        model,
+        capability,
+        http_client,
+        timeout,
+    ):
+        return True
+
+
+def _runtime_with_real_stream(closed: asyncio.Event, event_bus):
+    manager = _BreakerManager()
+    provider = _CloseAwareProvider("p1", closed)
+    executor = ProviderExecutor(
+        manager,
+        retry_policy=RetryPolicy(max_retries=0),
+    )
+    handler = ChatExecutionHandler(
+        providers={"p1": provider},
+        routing_policy=_Routing([provider]),
+        executor=executor,
+        circuit_breaker_manager=manager,
+        timeout=30.0,
+    )
+    runtime = ProviderRuntime(circuit_breaker_manager=manager)
+    runtime.chat_handler = handler
+    runtime._http_client = object()
+    runtime.event_bus = event_bus
+    return runtime
+
+
+@pytest.mark.asyncio
+async def test_r10_h_runtime_closes_nested_provider_stream_when_chunk_publish_fails():
+    closed = asyncio.Event()
+    bus = _FailingChunkBus()
+    runtime = _runtime_with_real_stream(closed, bus)
+
+    await runtime._handle_execute_chat(
+        BaseEvent(
+            event_name="provider.chat.execute",
+            session_id="session-r10-h-publish-fail",
+            turn_id="turn-r10-h-publish-fail",
+            payload={
+                "request_body": {
+                    "model": "logical-model",
+                    "config": {"stream": True},
+                }
+            },
+        )
+    )
+
+    assert closed.is_set()
+    assert bus.events == [
+        "provider.stream.chunk_emitted",
+        "provider.failed",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_r10_h_runtime_cancellation_closes_nested_provider_stream_before_return():
+    closed = asyncio.Event()
+    bus = _BlockingChunkBus()
+    runtime = _runtime_with_real_stream(closed, bus)
+    task = asyncio.create_task(
+        runtime._handle_execute_chat(
+            BaseEvent(
+                event_name="provider.chat.execute",
+                session_id="session-r10-h-cancel",
+                turn_id="turn-r10-h-cancel",
+                payload={
+                    "request_body": {
+                        "model": "logical-model",
+                        "config": {"stream": True},
+                    }
+                },
+            )
+        )
+    )
+
+    await bus.chunk_publish_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert closed.is_set()
+    assert bus.events == ["provider.stream.chunk_emitted"]
