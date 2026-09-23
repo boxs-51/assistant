@@ -7,6 +7,7 @@ from .....domain.schemas.multi_agent import (
     AgentMessageRequest,
     AgentSessionCreateRequest,
     AgentTaskCreateRequest,
+    AgentTaskForkRequest,
 )
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
@@ -14,6 +15,7 @@ from .....application.connection_affinity import (
     ConnectionAffinityError,
     validate_connection_affinity,
 )
+from .....runtimes.agent.persistence import ForkControlError
 
 router = APIRouter(prefix="/v1/multi-agent", tags=["Multi-Agent"])
 
@@ -34,6 +36,25 @@ def map_error(error: Exception) -> HTTPException:
         return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error))
     if isinstance(error, LookupError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+    if isinstance(error, ForkControlError):
+        code = error.code
+        if code == "FORK_FOREIGN_PRINCIPAL":
+            status_code = status.HTTP_403_FORBIDDEN
+        elif any(
+            token in code
+            for token in ("CONFLICT", "TERMINAL", "CLOSED", "CHANGED")
+        ):
+            status_code = status.HTTP_409_CONFLICT
+        else:
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        return HTTPException(
+            status_code=status_code,
+            detail={
+                "code": code,
+                "message": str(error),
+                "retryable": bool(error.retryable),
+            },
+        )
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error))
 
 
@@ -138,6 +159,49 @@ async def get_agent_task(
 ):
     try:
         return coordinator.get_task(task_id, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/fork")
+async def fork_agent_task(
+    task_id: str,
+    body: AgentTaskForkRequest,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.fork_task(task_id, body, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.get("/tasks/{task_id}/branches")
+async def list_agent_task_branches(
+    task_id: str,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.list_task_branches_durable(
+            task_id,
+            identity,
+        )
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.get("/branches/{branch_id}")
+async def get_agent_task_branch(
+    branch_id: str,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.get_task_branch_durable(
+            branch_id,
+            identity,
+        )
     except Exception as error:
         raise map_error(error) from error
 
