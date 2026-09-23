@@ -204,6 +204,7 @@ async def reconcile_multibranch_task_activity_in_uow(
     uow,
     *,
     task_id: str,
+    locked_task=None,
 ):
     """Derive only nonterminal R8 activity from OPEN branch heads.
 
@@ -211,9 +212,15 @@ async def reconcile_multibranch_task_activity_in_uow(
     or roll back its surrounding authority transaction.
     """
 
-    task = await uow.agents.get_task(task_id)
+    task = locked_task
+    if task is None:
+        task = await uow.agents.get_task_for_update(task_id)
     if task is None:
         raise TaskBudgetRequiredError(f"Unknown AgentTask: {task_id}")
+    if str(task.id) != str(task_id):
+        raise TaskBudgetConflictError(
+            "Locked AgentTask does not match activity task_id."
+        )
     current_task_state = str(task.status)
     if current_task_state in _TASK_TERMINAL_STATES:
         return task
@@ -664,6 +671,7 @@ class TaskBudgetService:
                                 await reconcile_multibranch_task_activity_in_uow(
                                     uow,
                                     task_id=task_id,
+                                    locked_task=task,
                                 )
                             )
                             if aggregate is None:
@@ -773,6 +781,7 @@ class TaskBudgetService:
                             await reconcile_multibranch_task_activity_in_uow(
                                 uow,
                                 task_id=task_id,
+                                locked_task=task,
                             )
                         )
                         if aggregate is None:
@@ -2010,9 +2019,15 @@ class TaskBudgetService:
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
+                    task = await uow.agents.get_task_for_update(task_id)
+                    if task is None:
+                        raise TaskBudgetRequiredError(
+                            f"Unknown AgentTask: {task_id}"
+                        )
                     updated = await reconcile_multibranch_task_activity_in_uow(
                         uow,
                         task_id=task_id,
+                        locked_task=task,
                     )
                     if updated is None:
                         await uow.rollback()
