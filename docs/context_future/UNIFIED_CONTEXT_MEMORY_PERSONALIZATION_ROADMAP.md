@@ -101,6 +101,36 @@ DefaultChatAgent migration
 
 No runtime wiring in this future branch.
 
+### Central Asset cross-roadmap audit
+
+The detailed F1→F8 dependency matrix is frozen in:
+
+```text
+docs/context_future/CENTRAL_ASSET_F1_F8_CTX_F_DEPENDENCY_AUDIT.md
+```
+
+Important scheduling refinement:
+
+```text
+post-R14
+-> safely integrate/replay Central Asset F1-F4
+-> re-freeze F5-0 against final R10/R11/R12 semantics
+-> create/activate a dedicated Central Asset issue
+```
+
+After that gate, Central Asset F5-F8 and CTX-F may advance according to explicit
+HARD/SOFT/EXIT dependencies. Full F5-F8 completion is not automatically a
+prerequisite for CTX-F0/CTX-F1. A CTX phase may proceed only when every HARD
+dependency assigned to that phase in the matrix is closed.
+
+Two cross-roadmap rules are already frozen for the future re-audit:
+
+- one canonical Central Asset read-lease authority must fence provider hydration,
+  Context derivation/read, DELETE and GC; CTX must not invent a second lease authority;
+- `FileAsset.revision` is lifecycle/CAS state, not immutable content version evidence.
+  Context snapshots use canonical content evidence such as `blob_id + sha256`.
+
+
 ---
 
 ## 3. Context is pull-first, not push-all
