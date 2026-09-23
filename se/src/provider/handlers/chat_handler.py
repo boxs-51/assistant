@@ -218,7 +218,15 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 if provider_stream is not None:
                     aclose = getattr(provider_stream, "aclose", None)
                     if callable(aclose):
-                        await aclose()
+                        try:
+                            await aclose()
+                        except Exception as cleanup_error:
+                            logger.warning(
+                                "Provider stream cleanup failed in handler.",
+                                provider=provider.name,
+                                error=str(cleanup_error),
+                                error_type=type(cleanup_error).__name__,
+                            )
 
         try:
             self._remaining_timeout(call_budget)
