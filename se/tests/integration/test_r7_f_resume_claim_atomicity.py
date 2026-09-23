@@ -1741,24 +1741,38 @@ async def test_r8_f_created_resume_claim_rebind_rejects_semantic_change(
             _intent(plan_k2, "rr-r8-f-rebind-conflict")
         )
 
-        foreign = replace(
-            plan_k2,
-            target_client_id="client-r7f-foreign",
-            target_connection_id="conn-r7f-k3",
-            plan_fingerprint="",
-        )
-        foreign = replace(
-            foreign,
-            plan_fingerprint=resume_plan_fingerprint(foreign),
-        )
-
-        with pytest.raises(ResumeClaimRejected) as raised:
-            await store.rebind_created_resume_claim(
-                claim_k2.claim_id,
-                plan=foreign,
-                resume_request_id=claim_k2.resume_request_id,
+        conflicts = [
+            replace(
+                plan_k2,
+                target_client_id="client-r7f-foreign",
+                target_connection_id="conn-r7f-k3",
+                plan_fingerprint="",
+            ),
+            replace(
+                plan_k2,
+                target_user_id="user-r7f-foreign",
+                target_connection_id="conn-r7f-k3",
+                plan_fingerprint="",
+            ),
+            replace(
+                plan_k2,
+                correlation_id="corr-r7f-changed",
+                target_connection_id="conn-r7f-k3",
+                plan_fingerprint="",
+            ),
+        ]
+        for conflict in conflicts:
+            conflict = replace(
+                conflict,
+                plan_fingerprint=resume_plan_fingerprint(conflict),
             )
-        assert raised.value.code == "RESUME_REQUEST_CONFLICT"
+            with pytest.raises(ResumeClaimRejected) as raised:
+                await store.rebind_created_resume_claim(
+                    claim_k2.claim_id,
+                    plan=conflict,
+                    resume_request_id=claim_k2.resume_request_id,
+                )
+            assert raised.value.code == "RESUME_REQUEST_CONFLICT"
 
         current = await store.load_resume_claim_by_request_id(
             claim_k2.resume_request_id
