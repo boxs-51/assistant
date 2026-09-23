@@ -77,27 +77,6 @@ class AggregateExecutionBootstrap:
     execution_id: str
     expected_execution_revision: int
     task_id: str
-    branch_id: str
-    aggregate_request_id: str
-    plan_fingerprint: str
-    runtime_seed_fingerprint: str
-    context: "AgentExecutionContext"
-
-
-@dataclass(frozen=True, slots=True)
-class AggregateActivationResult:
-    task_id: str
-    branch_id: str
-    execution_id: str
-    activated_execution_revision: int
-    remaining_active_budget_seconds: float
-
-
-@dataclass(frozen=True, slots=True)
-class AggregateExecutionBootstrap:
-    execution_id: str
-    expected_execution_revision: int
-    task_id: str
     target_branch_id: str
     aggregate_request_id: str
     plan_fingerprint: str
@@ -119,6 +98,7 @@ __all__ = [
     "AggregateActivationResult",
     "AggregateAdmission",
     "AggregateExecutionBootstrap",
+    "AggregateReplayResult",
     "aggregate_fingerprint",
     "aggregate_plan_fingerprint",
 ]
