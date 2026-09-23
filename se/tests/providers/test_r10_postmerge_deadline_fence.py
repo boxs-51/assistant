@@ -8,6 +8,8 @@ import pytest
 
 from se.src.provider.exceptions import ProviderDeadlineExceededError
 from se.src.provider.executor import ProviderExecutor
+from se.src.provider.handlers.chat_handler import ChatExecutionHandler
+from se.src.provider.handlers.embedding_handler import EmbeddingExecutionHandler
 from se.src.provider.policies.retry import RetryPolicy
 from se.src.provider.retry_contracts import ProviderCallBudget
 
@@ -213,3 +215,212 @@ async def test_postmerge_r10_caller_cancellation_remains_cancelled_error():
     assert breaker.success_calls == 0
     assert breaker.failure_calls == 0
     assert budget.retries_used == 0
+
+
+
+class _Routing:
+    def __init__(self, providers):
+        self.providers = list(providers)
+
+    def get_fallback_chain(self, model=None, metadata=None):
+        return list(self.providers)
+
+
+class _ProbeProvider:
+    def __init__(self, name: str, *, capability_result=True, block=False):
+        self.name = name
+        self.capability_result = capability_result
+        self.block = block
+        self.probe_calls = 0
+        self.probe_started = asyncio.Event()
+        self.probe_cancelled = asyncio.Event()
+        self.chat = SimpleNamespace()
+        self.embeddings = SimpleNamespace()
+
+    async def has_capability(
+        self,
+        model,
+        capability,
+        http_client,
+        timeout,
+    ):
+        self.probe_calls += 1
+        self.probe_started.set()
+        if self.block:
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                self.probe_cancelled.set()
+                raise
+        return self.capability_result
+
+
+class _NoAttemptExecutor:
+    def __init__(self, *, result="ok", max_retries=2):
+        self.retry_policy = SimpleNamespace(max_retries=max_retries)
+        self.result = result
+        self.execute_calls = 0
+        self.generic_calls = 0
+
+    async def is_provider_healthy(self, provider_name):
+        return True
+
+    async def execute(self, **kwargs):
+        self.execute_calls += 1
+        return self.result
+
+    async def execute_generic(self, *args, **kwargs):
+        self.generic_calls += 1
+        return self.result
+
+
+def _chat_handler(providers, executor, *, timeout=0.03):
+    return ChatExecutionHandler(
+        providers={p.name: p for p in providers},
+        routing_policy=_Routing(providers),
+        executor=executor,
+        circuit_breaker_manager=SimpleNamespace(),
+        timeout=timeout,
+    )
+
+
+def _embedding_handler(providers, executor, *, timeout=0.03):
+    return EmbeddingExecutionHandler(
+        providers={p.name: p for p in providers},
+        routing_policy=_Routing(providers),
+        executor=executor,
+        circuit_breaker_manager=SimpleNamespace(),
+        timeout=timeout,
+    )
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_chat_probe_is_hard_fenced_before_executor_attempt():
+    p1 = _ProbeProvider("p1", block=True)
+    p2 = _ProbeProvider("p2")
+    executor = _NoAttemptExecutor(max_retries=2)
+    handler = _chat_handler([p1, p2], executor, timeout=0.03)
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=0.03,
+        max_retries=2,
+    )
+    handler._new_call_budget = lambda *_args, **_kwargs: budget
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await asyncio.wait_for(
+            handler.execute_with_fallback(
+                object(),
+                {"model": "logical-model"},
+            ),
+            timeout=0.20,
+        )
+
+    assert p1.probe_calls == 1
+    assert p1.probe_cancelled.is_set()
+    assert p2.probe_calls == 0
+    assert executor.execute_calls == 0
+    assert budget.retries_used == 0
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_chat_stream_probe_is_hard_fenced_before_stream_attempt():
+    p1 = _ProbeProvider("p1", block=True)
+    p2 = _ProbeProvider("p2")
+    executor = _NoAttemptExecutor(max_retries=2)
+    handler = _chat_handler([p1, p2], executor, timeout=0.03)
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=0.03,
+        max_retries=2,
+    )
+    handler._new_call_budget = lambda *_args, **_kwargs: budget
+
+    stream = handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+    )
+    with pytest.raises(ProviderDeadlineExceededError):
+        await asyncio.wait_for(stream.__anext__(), timeout=0.20)
+
+    assert p1.probe_calls == 1
+    assert p1.probe_cancelled.is_set()
+    assert p2.probe_calls == 0
+    assert executor.execute_calls == 0
+    assert budget.retries_used == 0
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_embedding_probe_is_hard_fenced_before_generic_attempt():
+    p1 = _ProbeProvider("p1", block=True)
+    p2 = _ProbeProvider("p2")
+    executor = _NoAttemptExecutor(max_retries=2)
+    handler = _embedding_handler([p1, p2], executor, timeout=0.03)
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=0.03,
+        max_retries=2,
+    )
+    handler._new_call_budget = lambda *_args, **_kwargs: budget
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await asyncio.wait_for(
+            handler.execute(
+                object(),
+                {"model": "logical-model"},
+            ),
+            timeout=0.20,
+        )
+
+    assert p1.probe_calls == 1
+    assert p1.probe_cancelled.is_set()
+    assert p2.probe_calls == 0
+    assert executor.generic_calls == 0
+    assert budget.retries_used == 0
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_probe_caller_cancellation_remains_authoritative():
+    p1 = _ProbeProvider("p1", block=True)
+    executor = _NoAttemptExecutor(max_retries=2)
+    handler = _chat_handler([p1], executor, timeout=10.0)
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=10.0,
+        max_retries=2,
+    )
+    handler._new_call_budget = lambda *_args, **_kwargs: budget
+
+    task = asyncio.create_task(
+        handler.execute_with_fallback(
+            object(),
+            {"model": "logical-model"},
+        )
+    )
+    await p1.probe_started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert p1.probe_cancelled.is_set()
+    assert executor.execute_calls == 0
+    assert budget.retries_used == 0
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_successful_bounded_probe_preserves_fallback():
+    p1 = _ProbeProvider("p1", capability_result=False)
+    p2 = _ProbeProvider("p2", capability_result=True)
+    executor = _NoAttemptExecutor(result="p2-ok", max_retries=2)
+    handler = _chat_handler([p1, p2], executor, timeout=1.0)
+
+    result = await handler.execute_with_fallback(
+        object(),
+        {"model": "logical-model"},
+    )
+
+    assert result == "p2-ok"
+    assert p1.probe_calls == 1
+    assert p2.probe_calls == 1
+    assert executor.execute_calls == 1
