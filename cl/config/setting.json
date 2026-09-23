@@ -4,7 +4,37 @@
     "temperature": 0.2
   },
   "tools_config": {
-    "allowed_local_tools": ["*"],
-    "blocked_local_tools": ["delete_path"]
+    "allowed_local_tools": [
+      "*"
+    ],
+    "blocked_local_tools": [
+      "delete_path"
+    ],
+    "enabled_v2_capabilities": [
+      "file.read",
+      "file.search",
+      "file.write",
+      "file.append",
+      "file.replace",
+      "glob.find",
+      "terminal.run",
+      "terminal.launch",
+      "window.list",
+      "window.find",
+      "window.geometry",
+      "window.focus",
+      "window.close",
+      "window.minimize",
+      "window.maximize",
+      "window.restore",
+      "desktop.screen_info",
+      "desktop.mouse_move",
+      "desktop.mouse_click",
+      "desktop.mouse_drag",
+      "desktop.mouse_scroll",
+      "desktop.type_text",
+      "desktop.press_key",
+      "desktop.hotkey"
+    ]
   }
 }
