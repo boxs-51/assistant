@@ -120,6 +120,38 @@ async def test_r9_c_simultaneous_activation_has_one_cas_winner(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r9_c_activation_rejects_cancelled_source_without_policy(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_c_cancelled_source.sqlite"
+    )
+    try:
+        _root, plan = await _seed_failed_source(
+            sessions, service, planner, task_id="task-r9-c-cancelled-source"
+        )
+        admission = await service.consume_retry_plan(plan)
+
+        async with _Uow(sessions) as uow:
+            changed = await uow.agents.compare_and_set_execution(
+                plan.source_execution_id,
+                plan.expected_execution_revision,
+                {"state": "CANCELLED"},
+            )
+            assert changed is not None
+            await uow.commit()
+
+        store = _store(sessions)
+        with pytest.raises(RetryControlError) as raised:
+            await store.prepare_retry_execution_context(
+                admission.execution_id,
+                identity=_identity(),
+                agent=_agent(),
+            )
+        assert raised.value.code == "RETRY_ADMISSION_CORRUPT"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r9_c_task_cancel_settles_dormant_retry_once(tmp_path):
     engine, sessions, service, planner = await _setup(
         tmp_path, "r9_c_cancel.sqlite"
