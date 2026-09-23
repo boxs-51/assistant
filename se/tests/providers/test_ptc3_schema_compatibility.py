@@ -168,6 +168,64 @@ def test_legacy_subschema_keywords_normalize_without_touching_instance_values(pr
     assert schema == original
 
 
+def test_legacy_subschema_keywords_are_normalized_without_touching_instance_values():
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "xs": {
+                "type": "ARRAY",
+                "prefixItems": [{"type": "STRING"}],
+                "unevaluatedItems": {"type": "INTEGER"},
+                "additionalItems": {"type": "BOOLEAN"},
+            }
+        },
+        "dependencies": {
+            "xs": {
+                "type": "OBJECT",
+                "properties": {
+                    "mode": {"type": "STRING"},
+                },
+            },
+            "mode": ["xs"],
+        },
+        "default": {"type": "OBJECT"},
+        "const": {"type": "INTEGER"},
+        "enum": [{"type": "STRING"}],
+    }
+    body = _body(schema)
+    original = deepcopy(body)
+
+    openai = OpenAIRequestChats().adapt_chat_request(body)
+    gemini = GeminiRequestChats().adapt_chat(body)
+    ollama = OllamaRequestChats().adapt_chat_request(body)
+
+    provider_schemas = [
+        openai["tools"][0]["function"]["parameters"],
+        gemini["tools"][0]["function_declarations"][0]["parametersJsonSchema"],
+        ollama["tools"][0]["function"]["parameters"],
+    ]
+    for lowered in provider_schemas:
+        xs = lowered["properties"]["xs"]
+        assert xs["type"] == "array"
+        assert xs["prefixItems"][0]["type"] == "string"
+        assert xs["unevaluatedItems"]["type"] == "integer"
+        assert xs["additionalItems"]["type"] == "boolean"
+
+        assert lowered["dependencies"]["xs"]["type"] == "object"
+        assert (
+            lowered["dependencies"]["xs"]["properties"]["mode"]["type"]
+            == "string"
+        )
+        assert lowered["dependencies"]["mode"] == ["xs"]
+
+        # Instance-valued JSON Schema keywords are data, not subschemas.
+        assert lowered["default"] == {"type": "OBJECT"}
+        assert lowered["const"] == {"type": "INTEGER"}
+        assert lowered["enum"] == [{"type": "STRING"}]
+
+    assert body == original
+
+
 def test_non_object_parameter_roots_fail_closed_for_all_providers():
     body = _body(
         {
