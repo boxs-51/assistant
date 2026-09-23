@@ -2404,19 +2404,23 @@ class DurableAgentStore:
                         await uow.commit()
                         return error
 
+            locked_task = None
             if plan.task_id is not None:
-                task = await uow.agents.get_task(plan.task_id)
+                # Preserve the canonical R8-F lock order for any path that
+                # may later write aggregate Task activity:
+                # Task -> TaskBudget / execution -> Task activity.
+                locked_task = await uow.agents.get_task_for_update(plan.task_id)
                 if (
-                    task is None
-                    or task.session_id != plan.session_id
-                    or task.created_by != plan.target_user_id
+                    locked_task is None
+                    or locked_task.session_id != plan.session_id
+                    or locked_task.created_by != plan.target_user_id
                 ):
                     error = await self._reject_created_claim_in_uow(
                         uow, claim, code="TASK_TERMINAL", now_utc=now_utc
                     )
                     await uow.commit()
                     return error
-                if str(task.status) in _TASK_TERMINAL_STATES:
+                if str(locked_task.status) in _TASK_TERMINAL_STATES:
                     error = await self._reject_created_claim_in_uow(
                         uow, claim, code="TASK_TERMINAL", now_utc=now_utc
                     )
@@ -2456,6 +2460,7 @@ class DurableAgentStore:
                 activity = await reconcile_multibranch_task_activity_in_uow(
                     uow,
                     task_id=plan.task_id,
+                    locked_task=locked_task,
                 )
                 if activity is None:
                     await uow.rollback()
