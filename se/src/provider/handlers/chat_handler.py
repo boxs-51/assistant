@@ -160,6 +160,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
 
         for provider in healthy_execution_chain:
             stream_started = False
+            provider_stream = None
             try:
                 probe_timeout = self._remaining_timeout(
                     call_budget,
@@ -173,13 +174,14 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 ):
                     continue
 
-                async for chunk in self.executor.execute_stream(
+                provider_stream = self.executor.execute_stream(
                     provider=provider,
                     http_client=http_client,
                     body=body,
                     timeout=self.timeout,
                     call_budget=call_budget,
-                ):
+                )
+                async for chunk in provider_stream:
                     stream_started = True
                     yield chunk
                 return
@@ -211,6 +213,12 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 last_detail = detail
                 last_provider_name = provider.name
                 continue
+
+            finally:
+                if provider_stream is not None:
+                    aclose = getattr(provider_stream, "aclose", None)
+                    if callable(aclose):
+                        await aclose()
 
         try:
             self._remaining_timeout(call_budget)
