@@ -1,7 +1,9 @@
-from typing import AsyncGenerator, Dict, Any
+from typing import Any, AsyncGenerator, Dict
 
 from ...core.interfaces.chat import ChatProvider
 from ...core import ApiType, BaseProvider
+from ...core.tool_contract import ProviderToolNameMap
+from ...core.tool_request_context import build_request_tool_name_map
 from ....domain.schemas import GatewayResponse, GatewayStreamChunk
 
 from ..converters.chat.request import RequestChats
@@ -14,36 +16,65 @@ class OllamaChats(ChatProvider):
         self.response = ResponseChats()
         self.provider = provider
 
-    def prepare_request(self, body: Dict[str, Any], stream: bool = False) -> Dict[str, Any]:
-        """
-        Chuẩn bị body cho request: dịch tên model và adapt body sang Ollama API specification.
-        """
+    def _prepare_request_with_names(
+        self,
+        body: Dict[str, Any],
+        *,
+        stream: bool,
+    ) -> tuple[Dict[str, Any], ProviderToolNameMap]:
         prepared = body.copy()
-        model = body.get("model")
+        prepared["model"] = self.provider.mapper.translate(body.get("model"))
+        names = build_request_tool_name_map("ollama", prepared)
+        return (
+            self.request.adapt_chat_request(
+                request=prepared,
+                stream=stream,
+                tool_names=names,
+            ),
+            names,
+        )
 
-        translated_model = self.provider.mapper.translate(model)
-        prepared["model"] = translated_model
-
-        return self.request.adapt_chat_request(request=prepared, stream=stream)
+    def prepare_request(
+        self,
+        body: Dict[str, Any],
+        stream: bool = False,
+    ) -> Dict[str, Any]:
+        prepared, _ = self._prepare_request_with_names(body, stream=stream)
+        return prepared
 
     async def chat(self, **kwargs) -> GatewayResponse:
-        prepared_body = self.prepare_request(kwargs.get("body"), stream=False)
+        prepared_body, names = self._prepare_request_with_names(
+            kwargs.get("body"),
+            stream=False,
+        )
         response = await self.provider.send(
             client=kwargs.get("http_client"),
             api_type=ApiType.CHAT_COMPLETIONS,
             json=prepared_body,
-            timeout=kwargs.get("timeout")
+            timeout=kwargs.get("timeout"),
         )
-        return await self.response.adapt_chat(response=response)
+        return await self.response.adapt_chat(
+            response=response,
+            tool_names=names,
+        )
 
-    async def chat_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
-        prepared_body = self.prepare_request(kwargs.get("body"), stream=True)
-        
+    async def chat_stream(
+        self,
+        **kwargs,
+    ) -> AsyncGenerator[GatewayStreamChunk, None]:
+        prepared_body, names = self._prepare_request_with_names(
+            kwargs.get("body"),
+            stream=True,
+        )
+
         async with self.provider.send_stream(
             client=kwargs.get("http_client"),
             api_type=ApiType.CHAT_COMPLETIONS,
             json=prepared_body,
-            timeout=kwargs.get("timeout")
+            timeout=kwargs.get("timeout"),
         ) as response:
-            async for chunk in self.response.adapt_chat_stream(response=response):
+            async for chunk in self.response.adapt_chat_stream(
+                response=response,
+                tool_names=names,
+            ):
                 yield chunk

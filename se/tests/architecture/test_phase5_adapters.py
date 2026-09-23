@@ -202,9 +202,11 @@ def test_provider_adapter_serialization_is_gemini_compatible_with_tools():
     gemini_body = RequestChats().adapt_chat(body)
     contents = gemini_body["contents"]
     assert contents[0]["role"] == "model"
-    assert contents[0]["parts"][0]["functionCall"]["name"] == "vision.inspect"
-    assert contents[1]["parts"][0]["functionResponse"]["name"] == "vision.inspect"
-    assert gemini_body["tools"][0]["function_declarations"][0]["name"] == "vision.inspect"
+    provider_name = gemini_body["tools"][0]["function_declarations"][0]["name"]
+    assert provider_name != "vision.inspect"
+    assert "." not in provider_name
+    assert contents[0]["parts"][0]["functionCall"]["name"] == provider_name
+    assert contents[1]["parts"][0]["functionResponse"]["name"] == provider_name
 
 
 @pytest.mark.asyncio
