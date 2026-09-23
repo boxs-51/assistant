@@ -230,13 +230,20 @@ async def test_r10_b_retry_policy_normalizes_hint_before_retry_decision(
         sleeps.append(delay)
 
     policy = RetryPolicy(max_retries=1)
-    original_is_retryable = policy._is_retryable
+    from se.src.provider.policies import retry as retry_module
 
-    def inspect_retryable(error):
-        seen_errors.append(error)
-        return original_is_retryable(error)
+    original_wrap = retry_module.wrap_provider_exception
 
-    monkeypatch.setattr(policy, "_is_retryable", inspect_retryable)
+    def inspect_normalization(error, provider_name):
+        normalized = original_wrap(error, provider_name)
+        seen_errors.append(normalized)
+        return normalized
+
+    monkeypatch.setattr(
+        retry_module,
+        "wrap_provider_exception",
+        inspect_normalization,
+    )
     monkeypatch.setattr(
         "se.src.provider.policies.retry.asyncio.sleep",
         fake_sleep,
