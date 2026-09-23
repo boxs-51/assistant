@@ -7,7 +7,10 @@ import httpx
 from ...core import BaseProvider, ApiType
 from ...core.interfaces.model import ModelProvider
 from ....domain.schemas import ModelInfo, ModelList
-from ...exceptions import ProviderModelUnavailableError
+from ...exceptions import (
+    ProviderModelUnavailableError,
+    ResponseValidationError,
+)
 from ..converters.model.adapter import OllamaModelAdapter
 from ..converters.model.capabilities import OllamaCapabilityResolver
 
@@ -58,8 +61,25 @@ class OllamaModels(ModelProvider):
                 raw_response=raw_response,
             ) from exc
 
-        data = response.json()
-        if isinstance(data, dict) and data.get("error"):
+        try:
+            data = response.json()
+        except (TypeError, ValueError) as exc:
+            raise ResponseValidationError(
+                "Ollama /api/show returned invalid JSON.",
+                provider_name=self.provider.name,
+                status_code=getattr(response, "status_code", None),
+                raw_response=getattr(response, "text", None),
+            ) from exc
+
+        if not isinstance(data, dict) or not data:
+            raise ResponseValidationError(
+                "Ollama /api/show returned an invalid response shape.",
+                provider_name=self.provider.name,
+                status_code=getattr(response, "status_code", None),
+                raw_response=data,
+            )
+
+        if data.get("error"):
             raise self._model_unavailable_error(
                 model_id,
                 status_code=getattr(response, "status_code", None),
