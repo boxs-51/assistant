@@ -84,6 +84,45 @@ async def test_r9_c_restart_reconstructs_same_retry_without_resurrecting_source(
 
 
 @pytest.mark.asyncio
+async def test_r9_c_restart_reproves_safe_checkpoint_tool_projection(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_c_safe_checkpoint_restart.sqlite"
+    )
+    try:
+        checkpoint_id = "checkpoint-r9-c-safe-restart"
+        _root, plan = await _seed_failed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-c-safe-checkpoint-restart",
+            source_checkpoint_id=checkpoint_id,
+            checkpoint_tool_order=("call-b", "call-a"),
+        )
+        admission = await service.consume_retry_plan(plan)
+
+        restarted = _store(sessions)
+        bootstrap = await restarted.prepare_retry_execution_context(
+            admission.execution_id,
+            identity=_identity(),
+            agent=_agent(),
+        )
+        tool_ids = [
+            item.get("tool_call_id")
+            for item in bootstrap.context.branch_base_transcript
+            if item.get("role") == "tool"
+        ]
+        assert tool_ids == ["call-b", "call-a"]
+
+        activation = await restarted.activate_retry_execution(
+            bootstrap,
+            identity=_identity(),
+        )
+        assert activation.activated_execution_revision == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r9_c_simultaneous_activation_has_one_cas_winner(tmp_path):
     engine, sessions, service, planner = await _setup(
         tmp_path, "r9_c_activation_race.sqlite"
