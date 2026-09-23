@@ -1666,3 +1666,108 @@ async def test_r8_f_resume_consume_retries_transient_activity_deferred_same_clai
             await uow.commit()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_created_resume_claim_rebinds_across_connection_generation(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-claim-rebind.sqlite",
+    )
+    try:
+        await _seed_non_task(sessions)
+        plan_k2 = _plan()
+        claim_k2 = await store.get_or_create_resume_claim(
+            _intent(plan_k2, "rr-r8-f-rebind")
+        )
+        original_expiry = claim_k2.claim_expires_at
+
+        plan_k3 = replace(
+            plan_k2,
+            target_connection_id="conn-r7f-k3",
+            plan_fingerprint="",
+        )
+        plan_k3 = replace(
+            plan_k3,
+            plan_fingerprint=resume_plan_fingerprint(plan_k3),
+        )
+
+        rebound = await store.rebind_created_resume_claim(
+            claim_k2.claim_id,
+            plan=plan_k3,
+            resume_request_id=claim_k2.resume_request_id,
+        )
+
+        assert rebound.claim_id == claim_k2.claim_id
+        assert rebound.resume_request_id == claim_k2.resume_request_id
+        assert rebound.state.value == "CREATED"
+        assert rebound.revision == claim_k2.revision + 1
+        assert rebound.connection_id == "conn-r7f-k3"
+        assert rebound.plan_fingerprint == plan_k3.plan_fingerprint
+        assert rebound.claim_expires_at == original_expiry
+
+        consumed = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan_k3,
+                claim_id=rebound.claim_id,
+                resume_request_id=rebound.resume_request_id,
+                expected_claim_revision=rebound.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+        assert consumed.claim_id == claim_k2.claim_id
+        assert consumed.resume_request_id == claim_k2.resume_request_id
+        assert consumed.bound_client_id == CLIENT
+        assert consumed.bound_connection_id == "conn-r7f-k3"
+        assert consumed.consumed_execution_revision == 3
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_created_resume_claim_rebind_rejects_semantic_change(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-claim-rebind-conflict.sqlite",
+    )
+    try:
+        await _seed_non_task(sessions)
+        plan_k2 = _plan()
+        claim_k2 = await store.get_or_create_resume_claim(
+            _intent(plan_k2, "rr-r8-f-rebind-conflict")
+        )
+
+        foreign = replace(
+            plan_k2,
+            target_client_id="client-r7f-foreign",
+            target_connection_id="conn-r7f-k3",
+            plan_fingerprint="",
+        )
+        foreign = replace(
+            foreign,
+            plan_fingerprint=resume_plan_fingerprint(foreign),
+        )
+
+        with pytest.raises(ResumeClaimRejected) as raised:
+            await store.rebind_created_resume_claim(
+                claim_k2.claim_id,
+                plan=foreign,
+                resume_request_id=claim_k2.resume_request_id,
+            )
+        assert raised.value.code == "RESUME_REQUEST_CONFLICT"
+
+        current = await store.load_resume_claim_by_request_id(
+            claim_k2.resume_request_id
+        )
+        assert current.claim_id == claim_k2.claim_id
+        assert current.state.value == "CREATED"
+        assert current.revision == claim_k2.revision
+        assert current.client_id == CLIENT
+        assert current.connection_id == K2
+        assert current.plan_fingerprint == plan_k2.plan_fingerprint
+    finally:
+        await engine.dispose()
