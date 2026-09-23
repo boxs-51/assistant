@@ -663,10 +663,51 @@ fork execution lifecycle changes
 
 This avoids a fork-specific UI patch that leaves the source R7 branch stale.
 
-Reconciliation may use a separate retrying CAS transaction because it is
-derived Task activity, not execution authority.
+Reconciliation may use a separate retrying transaction because it is
+derived Task activity, not execution authority, but any transaction that may
+write aggregate Task activity MUST serialize on the AgentTask row first.
 
-It must always re-read current branch/execution state before writing.
+Canonical lock order:
+
+```text
+AgentTask FOR UPDATE
+-> TaskBudget / execution authority work when applicable
+-> read current OPEN branch heads
+-> derive aggregate activity
+-> Task CAS if a write is needed
+```
+
+This is required because R8-D FORK consume can add a new RUNNING branch while
+Task is already RUNNING without bumping Task revision. A stale activity
+snapshot must therefore conflict on the Task row, not rely only on revision
+CAS.
+
+R7 resume must preserve the same order:
+
+```text
+Task FOR UPDATE
+-> prepare_resume_capacity_in_uow()
+-> WAITING execution -> RUNNING CAS
+-> aggregate activity rederive under the already-held Task lock
+```
+
+Do not acquire Task FOR UPDATE only after TaskBudget/execution writes; that
+would invert the R8 activation/cancellation order and create a deadlock risk.
+
+Required race outcomes:
+
+```text
+FORK vs standalone reconcile:
+    reconcile first -> Task WAITING revision advances; stale ForkPlan cannot commit
+    FORK first      -> reconcile sees new RUNNING branch; final Task RUNNING
+
+R7 resume vs standalone reconcile:
+    regardless of ordering, a resumed current branch RUNNING cannot coexist
+    with final Task WAITING
+```
+
+It must always re-read current branch/execution state while holding this Task
+serialization authority before writing.
 
 ---
 
@@ -1314,6 +1355,12 @@ Legacy/source task wrappers cannot overwrite aggregate multi-branch activity aft
 R8F-I11B
 FORK consume and legacy terminalization serialize on the Task row; a committed ForkAdmission and a one-branch terminal Task outcome cannot coexist from that race.
 
+R8F-I11C
+Every aggregate Task activity writer serializes on AgentTask before taking its branch snapshot; a committed RUNNING branch cannot coexist with a stale aggregate Task WAITING write.
+
+R8F-I11D
+R7 task-scoped resume preserves Task -> TaskBudget/execution -> activity lock order and cannot leave Task WAITING after the current branch resumes RUNNING.
+
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
 
@@ -1381,6 +1428,8 @@ branch failure does not fail Task
 legacy root/source completion does not terminalize a forked Task
 legacy root/source WAITING does not mask a RUNNING sibling
 FORK consume vs legacy terminalization has no split-brain outcome
+FORK consume vs standalone activity reconciliation has no RUNNING-branch/WAITING-Task split
+R7 resume vs standalone activity reconciliation preserves final Task RUNNING
 WAITING activity derivation
 Task cancellation with two branch runners
 restart-safe branch reads
