@@ -116,6 +116,18 @@ class ProviderInferenceAdapter(InferencePort):
             if cancellation_task is not None:
                 wait_set.add(cancellation_task)
 
+            if caller_deadline is not None:
+                wait_timeout = caller_deadline - monotonic()
+                if wait_timeout <= 0:
+                    provider_task.cancel()
+                    await asyncio.gather(
+                        provider_task,
+                        return_exceptions=True,
+                    )
+                    raise asyncio.TimeoutError(
+                        "Inference execution exceeded its timeout."
+                    )
+
             done, _ = await asyncio.wait(
                 wait_set,
                 timeout=wait_timeout,
