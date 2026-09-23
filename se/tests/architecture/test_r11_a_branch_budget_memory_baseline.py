@@ -464,7 +464,35 @@ async def test_r11_a_branch_budget_memory_probe_report(tmp_path):
         "memory": _measure_active_execution_memory(),
     }
 
-    pytest.fail(
-        "R11_A_BRANCH_MEMORY_PROBE="
-        + json.dumps(report, sort_keys=True, separators=(",", ":"))
-    )
+    branch = report["branch_create"]
+    assert branch["begins"] == 1
+    assert branch["commits"] == 1
+    assert branch["rollbacks"] == 0
+    assert branch["delete"] == 0
+    assert branch["branch_rows"] == 2
+    assert branch["created_execution"] == 1
+    assert branch["created_context"] == 1
+    assert branch["sql"] > 0
+    assert branch["select"] > 0
+    assert branch["insert"] > 0
+    assert branch["update"] > 0
+    assert branch["flushes"] > 0
+    assert branch["elapsed_ns"] > 0
+
+    contention = report["task_budget_contention"]
+    assert contention["attempts"] == 2
+    assert contention["winners"] == 1
+    assert contention["conflicts"] == 1
+    assert contention["final_active_branches"] == 2
+    assert contention["final_budget_revision"] >= 1
+    assert contention["sql"] > 0
+    assert contention["select"] > 0
+    assert contention["insert"] > 0
+    assert contention["update"] > 0
+    assert contention["flushes"] > 0
+    assert contention["elapsed_ns"] > 0
+
+    memory = report["memory"]
+    assert memory["contexts"] == 128
+    assert memory["allocated_bytes"] > 0
+    assert memory["approx_bytes_per_execution"] > 0
