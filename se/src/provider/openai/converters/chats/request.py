@@ -123,5 +123,8 @@ class RequestChats:
                 # tool_call_id; neutral Gateway name is not a wire field.
                 message.pop("name", None)
                 message.pop("tool_name", None)
+                content = message.get("content")
+                if content is not None and not isinstance(content, (str, list)):
+                    message["content"] = json.dumps(content, ensure_ascii=False)
 
         return adapted_request
