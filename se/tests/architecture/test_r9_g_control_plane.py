@@ -74,6 +74,21 @@ def test_r9_g_routes_and_stable_error_envelope_are_public():
         assert mapped.detail["retryable"] is False
 
 
+def test_r9_g_active_branch_discard_conflict_maps_to_409():
+    mapped = map_error(
+        BranchResolutionError(
+            "BRANCH_EXECUTION_ACTIVE",
+            "branch execution still owns runtime authority",
+        )
+    )
+    assert mapped.status_code == 409
+    assert mapped.detail == {
+        "code": "BRANCH_EXECUTION_ACTIVE",
+        "message": "branch execution still owns runtime authority",
+        "retryable": False,
+    }
+
+
 def test_r9_g_aggregate_structural_input_is_rejected_before_control_plane():
     invalid_payloads = (
         {
