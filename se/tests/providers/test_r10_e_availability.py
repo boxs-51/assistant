@@ -71,6 +71,17 @@ def test_r10_e_strict_direct_remains_single_provider_when_fallback_enabled():
     assert [provider.name for provider in chain] == ["p2"]
 
 
+def test_r10_e_strict_without_preference_uses_only_first_resolved_provider():
+    policy = _policy(enable_fallback=True)
+
+    chain = policy.get_fallback_chain(
+        "logical-model",
+        metadata={"routing": {"type": "strict"}},
+    )
+
+    assert [provider.name for provider in chain] == ["p1"]
+
+
 @pytest.mark.asyncio
 async def test_r10_e_ollama_404_is_stable_model_unavailable():
     request = httpx.Request("POST", "http://ollama.test/api/show")
