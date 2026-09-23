@@ -49,6 +49,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
 
         last_exception: Exception | None = None
         last_detail: ProviderError | None = None
+        last_provider_name: str | None = None
 
         for provider in healthy_execution_chain:
             with tracer.start_as_current_span(
@@ -84,6 +85,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 ) as error:
                     span.record_exception(error)
                     last_exception = error
+                    last_provider_name = provider.name
                     last_detail = wrap_provider_exception(
                         error,
                         provider.name,
@@ -104,10 +106,9 @@ class ChatExecutionHandler(BaseExecutionHandler):
         )
         final_error = NoAvailableProviderError(
             "All providers in fallback chain failed.",
-            provider_name=getattr(
-                detail,
-                "provider_name",
-                None,
+            provider_name=(
+                getattr(detail, "provider_name", None)
+                or last_provider_name
             ),
             status_code=getattr(
                 detail,
