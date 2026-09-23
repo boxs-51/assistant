@@ -616,3 +616,51 @@ async def test_r8_f_activation_wins_then_task_cancel_forces_handoff_fail_close(
     finally:
         await supervisor.shutdown()
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_fork_from_waiting_task_reactivates_task_before_e2_activation(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_waiting_source_activation.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-waiting-source",
+            fork_request_id="fork-r8-f-waiting-source",
+            task_waiting=True,
+        )
+        async with _Uow(sessions) as uow:
+            before = await uow.agents.get_task(source["task_id"])
+            assert str(before.status) == "WAITING"
+            await uow.commit()
+
+        admission = await service.consume_fork_plan(source["plan"])
+        async with _Uow(sessions) as uow:
+            after_consume = await uow.agents.get_task(source["task_id"])
+            assert str(after_consume.status) == "RUNNING"
+            assert list(after_consume.wait_reasons or []) == []
+            await uow.commit()
+
+        store = _store(sessions)
+        bootstrap = await store.prepare_fork_execution_context(
+            admission.execution_id,
+            identity=_identity(),
+            agent=_agent(),
+        )
+        activation = await store.activate_fork_execution(
+            bootstrap,
+            identity=_identity(),
+        )
+
+        assert activation.activated_execution_revision == 2
+        execution = await store.load_execution(admission.execution_id)
+        assert execution.state == "RUNNING"
+        assert execution.revision == 2
+    finally:
+        await engine.dispose()
