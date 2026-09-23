@@ -2,7 +2,10 @@ from copy import deepcopy
 
 import pytest
 
-from se.src.provider.core.tool_contract import ProviderToolContractError
+from se.src.provider.core.tool_contract import (
+    ProviderToolContractError,
+    normalize_provider_tool_schema,
+)
 from se.src.provider.gemini.converters.chats.request import (
     RequestChats as GeminiRequestChats,
 )
@@ -118,6 +121,51 @@ def test_legacy_uppercase_type_tokens_normalize_recursively_on_provider_copy():
         assert items["items"]["properties"]["label"]["type"] == "string"
 
     assert body == original
+
+
+@pytest.mark.parametrize("provider", ["openai", "gemini", "ollama"])
+def test_legacy_subschema_keywords_normalize_without_touching_instance_values(provider):
+    schema = {
+        "type": "OBJECT",
+        "properties": {
+            "xs": {
+                "type": "ARRAY",
+                "prefixItems": [{"type": "STRING"}],
+                "unevaluatedItems": {"type": "INTEGER"},
+                "additionalItems": {"type": "NUMBER"},
+            }
+        },
+        "dependencies": {
+            "xs": {
+                "type": "OBJECT",
+                "properties": {"flag": {"type": "BOOLEAN"}},
+            },
+            "legacy_names": ["first", "second"],
+        },
+        "default": {"type": "OBJECT"},
+        "const": {"type": "INTEGER"},
+        "enum": [{"type": "STRING"}],
+    }
+    original = deepcopy(schema)
+
+    normalized = normalize_provider_tool_schema(provider, schema)
+
+    assert normalized["type"] == "object"
+    xs = normalized["properties"]["xs"]
+    assert xs["type"] == "array"
+    assert xs["prefixItems"][0]["type"] == "string"
+    assert xs["unevaluatedItems"]["type"] == "integer"
+    assert xs["additionalItems"]["type"] == "number"
+    dependency_schema = normalized["dependencies"]["xs"]
+    assert dependency_schema["type"] == "object"
+    assert dependency_schema["properties"]["flag"]["type"] == "boolean"
+    assert normalized["dependencies"]["legacy_names"] == ["first", "second"]
+
+    # These are JSON instance values, not schema-bearing positions.
+    assert normalized["default"] == {"type": "OBJECT"}
+    assert normalized["const"] == {"type": "INTEGER"}
+    assert normalized["enum"] == [{"type": "STRING"}]
+    assert schema == original
 
 
 def test_non_object_parameter_roots_fail_closed_for_all_providers():
