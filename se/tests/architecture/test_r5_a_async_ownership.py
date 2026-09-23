@@ -52,7 +52,7 @@ async def test_provider_outer_cancellation_drains_provider_task_and_retrieves_la
     child_tasks: list[asyncio.Task] = []
 
     class SlowHandler:
-        async def execute_with_fallback(self, http_client, body):
+        async def execute_with_fallback(self, http_client, body, *, deadline_monotonic=None):
             child = asyncio.current_task()
             assert child is not None
             child_tasks.append(child)

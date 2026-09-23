@@ -9,7 +9,7 @@ from ...provider.registry import ProviderRegistry
 from ...provider.discovery import ProviderDiscovery
 from ...provider.policies.routing_policy import RoutingPolicy
 from ...provider.executor import ProviderExecutor
-from ...provider.exceptions import NoAvailableProviderError
+from ...provider.exceptions import NoAvailableProviderError, ProviderError
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 
@@ -20,6 +20,28 @@ from ...provider.handlers.model_handler import ModelOperationHandler
 from ...provider.handlers.file_handler import FileOperationHandler
 
 logger = structlog.get_logger(__name__)
+
+
+def _provider_failure_payload(
+    error: Exception,
+    *,
+    status_code: int,
+) -> Dict[str, Any]:
+    """Preserve legacy transport status while exposing stable provider metadata."""
+
+    payload: Dict[str, Any] = {
+        "error": str(error),
+        "status_code": status_code,
+    }
+    if isinstance(error, ProviderError):
+        payload.update(
+            error_code=error.code,
+            failure_domain=error.failure_domain,
+            retryable=bool(error.retryable),
+        )
+        if error.provider_name:
+            payload["provider"] = error.provider_name
+    return payload
 
 class ProviderRuntime(BaseRuntime):
     """
@@ -141,14 +163,33 @@ class ProviderRuntime(BaseRuntime):
                     }
                 ))
             else:
-                async for chunk in self.chat_handler.stream_with_fallback(self._http_client, body):
-                    await self.event_bus.publish(BaseEvent(
-                        event_name="provider.stream.chunk_emitted",
-                        session_id=session_id,
-                        turn_id=event.turn_id,
-                        payload={"chunk": chunk.model_dump(), "sse": chunk.to_sse()}
-                    ))
-                
+                stream = self.chat_handler.stream_with_fallback(
+                    self._http_client,
+                    body,
+                )
+                try:
+                    async for chunk in stream:
+                        await self.event_bus.publish(BaseEvent(
+                            event_name="provider.stream.chunk_emitted",
+                            session_id=session_id,
+                            turn_id=event.turn_id,
+                            payload={
+                                "chunk": chunk.model_dump(),
+                                "sse": chunk.to_sse(),
+                            },
+                        ))
+                finally:
+                    aclose = getattr(stream, "aclose", None)
+                    if callable(aclose):
+                        try:
+                            await aclose()
+                        except Exception as cleanup_error:
+                            logger.warning(
+                                "Provider runtime stream cleanup failed.",
+                                error=str(cleanup_error),
+                                error_type=type(cleanup_error).__name__,
+                            )
+
                 await self.event_bus.publish(BaseEvent(
                     event_name="provider.stream.completed",
                     session_id=session_id,
@@ -162,7 +203,10 @@ class ProviderRuntime(BaseRuntime):
                 event_name="provider.failed",
                 session_id=session_id,
                 turn_id=event.turn_id,
-                payload={"error": str(e), "status_code": 503}
+                payload=_provider_failure_payload(
+                    e,
+                    status_code=503,
+                )
             ))
         except Exception as e:
             logger.error("Unhandled error in ProviderRuntime", error=str(e))
@@ -170,7 +214,10 @@ class ProviderRuntime(BaseRuntime):
                 event_name="provider.failed",
                 session_id=session_id,
                 turn_id=event.turn_id,
-                payload={"error": str(e), "status_code": 500}
+                payload=_provider_failure_payload(
+                    e,
+                    status_code=500,
+                )
             ))
 
     async def _handle_execute_embeddings(self, event: BaseEvent) -> None:

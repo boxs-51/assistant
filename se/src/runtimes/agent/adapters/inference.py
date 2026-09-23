@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import math
+from time import monotonic
 from typing import Any
 
 from ..contracts.context import AgentExecutionContext
@@ -66,8 +68,36 @@ class ProviderInferenceAdapter(InferencePort):
             raise RuntimeError("ProviderRuntime chat handler is not initialized.")
 
         body = self.serialize_request(request)
+
+        caller_deadline = request.deadline_monotonic
+        if caller_deadline is None and request.timeout_seconds is not None:
+            timeout_value = float(request.timeout_seconds)
+            if not math.isfinite(timeout_value) or timeout_value <= 0:
+                raise asyncio.TimeoutError(
+                    "Inference execution exceeded its timeout."
+                )
+            caller_deadline = monotonic() + timeout_value
+
+        wait_timeout = None
+        if caller_deadline is not None:
+            deadline_value = float(caller_deadline)
+            if not math.isfinite(deadline_value):
+                raise asyncio.TimeoutError(
+                    "Inference execution exceeded its timeout."
+                )
+            wait_timeout = deadline_value - monotonic()
+            if wait_timeout <= 0:
+                raise asyncio.TimeoutError(
+                    "Inference execution exceeded its timeout."
+                )
+            caller_deadline = deadline_value
+
         provider_task = asyncio.create_task(
-            handler.execute_with_fallback(self._http_client, body),
+            handler.execute_with_fallback(
+                self._http_client,
+                body,
+                deadline_monotonic=caller_deadline,
+            ),
             name=f"inference:{request.execution_id}:{request.request_id}",
         )
         cancellation_task = None
@@ -86,9 +116,21 @@ class ProviderInferenceAdapter(InferencePort):
             if cancellation_task is not None:
                 wait_set.add(cancellation_task)
 
+            if caller_deadline is not None:
+                wait_timeout = caller_deadline - monotonic()
+                if wait_timeout <= 0:
+                    provider_task.cancel()
+                    await asyncio.gather(
+                        provider_task,
+                        return_exceptions=True,
+                    )
+                    raise asyncio.TimeoutError(
+                        "Inference execution exceeded its timeout."
+                    )
+
             done, _ = await asyncio.wait(
                 wait_set,
-                timeout=request.timeout_seconds,
+                timeout=wait_timeout,
                 return_when=asyncio.FIRST_COMPLETED,
             )
 

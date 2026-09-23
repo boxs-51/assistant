@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import time
+from time import monotonic
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
@@ -1759,6 +1759,14 @@ class AgentRuntime:
                         "Agent execution deadline exceeded before inference."
                     )
 
+                # Freeze the already-clamped Agent/iteration/inference
+                # remaining time into the process monotonic clock domain
+                # before any awaited publication/accounting work.  The same
+                # absolute deadline is then shared by the adapter and provider.
+                inference_deadline_monotonic = (
+                    monotonic() + inference_timeout
+                )
+
                 await self._publish(
                     AgentEventName.INFERENCE_REQUESTED,
                     context,
@@ -1789,6 +1797,7 @@ class AgentRuntime:
                             or context.metadata.get("model")
                         ),
                         timeout_seconds=inference_timeout,
+                        deadline_monotonic=inference_deadline_monotonic,
                         cancellation_event=context.cancellation_event,
                         metadata=dict(snapshot.metadata),
                     )

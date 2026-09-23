@@ -124,6 +124,10 @@ class InferenceRequest(BaseModel):
     temperature: float | None = None
     max_output_tokens: int | None = None
     timeout_seconds: float | None = None
+    deadline_monotonic: float | None = Field(
+        default=None,
+        exclude=True,
+    )
     cancellation_event: Any = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
