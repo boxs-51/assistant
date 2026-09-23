@@ -130,3 +130,11 @@ class AgentTaskCreateRequest(GatewayBaseModel):
     input: Dict[str, Any] = Field(default_factory=dict)
     parent_task_id: Optional[str] = None
     connection_id: Optional[str] = None
+
+
+class AgentTaskForkRequest(GatewayBaseModel):
+    fork_request_id: str
+    source_branch_id: str
+    source_execution_id: str
+    source_checkpoint_id: str
+    overlay_messages: List[Dict[str, Any]] = Field(default_factory=list)
