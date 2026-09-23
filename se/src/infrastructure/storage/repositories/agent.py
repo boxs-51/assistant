@@ -541,6 +541,14 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def get_execution_for_update(self, execution_id: str):
+        result = await self.session.execute(
+            select(AgentExecutionRecord)
+            .where(AgentExecutionRecord.id == execution_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def compare_and_set_fork_activation(
         self,
         execution_id: str,
