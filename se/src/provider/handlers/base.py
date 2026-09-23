@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import time
+from time import monotonic
 from abc import ABC
 from typing import Any, Dict, Optional
 
@@ -51,7 +51,7 @@ class BaseExecutionHandler(ABC):
             max_retries = 0
 
         return ProviderCallBudget.from_timeout(
-            now_monotonic=time.monotonic(),
+            now_monotonic=monotonic(),
             timeout_seconds=self.timeout,
             max_retries=max_retries,
         )
@@ -63,7 +63,7 @@ class BaseExecutionHandler(ABC):
         provider_name: str | None = None,
     ) -> float:
         remaining = call_budget.remaining_seconds(
-            now_monotonic=time.monotonic()
+            now_monotonic=monotonic()
         )
         if remaining <= 0:
             raise ProviderDeadlineExceededError(
