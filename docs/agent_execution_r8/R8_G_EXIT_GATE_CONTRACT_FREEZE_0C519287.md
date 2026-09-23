@@ -368,6 +368,120 @@ No tests or production files are changed in G0.
 
 ---
 
+## 12A. Cross-audit P1 re-freeze before G1
+
+Cross-audit comment `5789587695` found two control-plane composition gaps on
+the frozen R8-F production baseline. They are part of R8-G hardening and must
+be closed before the proof-only G1→G5 path can be considered sufficient.
+
+### R8G-P1-01 — public FORK error taxonomy
+
+The public FORK facade may receive three frozen error families:
+
+~~~text
+ForkPlanError
+    ForkPlanRejected
+    ForkPlanDeferred
+
+ForkConsumeError
+    ForkConsumeRejected
+    ForkConsumeDeferred
+    ForkConsumeConflict
+
+ForkControlError
+~~~
+
+The HTTP boundary must preserve one structured envelope:
+
+~~~text
+detail.code
+detail.message
+detail.retryable
+~~~
+
+Frozen semantics:
+
+~~~text
+ForkPlanDeferred / ForkConsumeDeferred
+    retryable = true
+    HTTP 409
+
+ForkConsumeConflict
+    retryable = false
+    HTTP 409
+
+ForkPlanRejected / ForkConsumeRejected
+    retryable = false
+    HTTP 422 by default
+
+FORK_FOREIGN_PRINCIPAL
+    HTTP 403
+
+ForkControlError
+    preserves its explicit retryable flag and existing conflict mapping
+~~~
+
+A stable FORK code must never be flattened into a generic string-only 422.
+
+Allowed production blast radius for this P1:
+
+~~~text
+se/src/transport/gateway/api/v1/multi_agent_router.py
+~~~
+
+### R8G-P1-02 — restart-safe durable Task cancellation facade
+
+When TaskBudget/durable execution authority is enabled, public Task
+cancellation must not depend on process-local `_tasks` / `_sessions` caches
+for authorization or reachability.
+
+Canonical facade order:
+
+~~~text
+load durable AgentTask
+verify task.created_by == authenticated user
+materialize/sync an AgentTask response view
+call TaskBudgetService.cancel_task()
+commit durable Task/TaskBudget authority
+then drain process-local root runner if present
+then AgentExecutionSupervisor.cancel_task(task_id)
+~~~
+
+A fresh coordinator with empty process-local caches must therefore still be
+able to cancel an owned durable Task.
+
+This does not add:
+
+~~~text
+owner_instance_id
+lease
+stale RUNNING takeover
+cross-worker immediate cancellation
+~~~
+
+Those remain R12.
+
+Allowed production blast radius for this P1:
+
+~~~text
+se/src/runtimes/agent/coordinator.py
+~~~
+
+Required regressions before P1 closure:
+
+~~~text
+public ForkPlanDeferred keeps code + retryable=true
+public semantic ForkConsumeConflict keeps code + retryable=false
+fresh coordinator / empty caches can cancel owned durable Task
+foreign principal cannot durable-cancel Task
+durable cancellation still calls local supervisor drain
+~~~
+
+After these two narrowly-scoped P1s are green, G1→G5 returns to the default
+tests/docs-only implementation shape.
+
+---
+
 ## 13. G1 — full durable fork happy-path proof
 
 Add a vertical integration test using real persistence components:
@@ -565,11 +679,16 @@ OPTIONAL ADD se/tests/e2e/test_r8_g_fork_exit_gate.py
 LATER ADD docs/agent_execution_r8/R8_G_COMPLETION.md
 ~~~
 
-Production diff should remain:
+Production diff after the G0 cross-audit is limited to the two frozen P1
+hardening seams:
 
 ~~~text
-NONE
+se/src/transport/gateway/api/v1/multi_agent_router.py
+se/src/runtimes/agent/coordinator.py
 ~~~
+
+Outside those two files, production diff should remain NONE unless a new
+P0/P1 is posted and re-frozen.
 
 Existing production files may be read/imported by tests but should not be
 edited during the proof-only path.
