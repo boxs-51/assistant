@@ -118,9 +118,14 @@ class RoutingPolicy:
         preferred_name = routing_info.get("prefer_provider")
         routing_type = str(routing_info.get("type", "fallback")).lower()
 
-        # Nếu không chỉ định provider ưu tiên, trả về chuỗi mặc định
+        fallback_enabled = bool(
+            getattr(self._config, "enable_fallback", True)
+        )
+
+        # Không có provider ưu tiên: tôn trọng thứ tự deterministic đã resolve.
+        # Khi fallback bị tắt, chỉ provider đầu tiên được phép thực thi.
         if not preferred_name:
-            return base_chain
+            return base_chain if fallback_enabled else base_chain[:1]
 
         # Kiểm tra xem provider được yêu cầu có tồn tại/được đăng ký không
         if preferred_name not in self.providers:
@@ -132,7 +137,7 @@ class RoutingPolicy:
             # Chế độ strict mà provider không khả dụng -> Trả về danh sách rỗng để chặn request ngay
             if routing_type in ("strict", "direct"):
                 return []
-            return base_chain
+            return base_chain if fallback_enabled else base_chain[:1]
 
         target_provider = self.providers[preferred_name]
 
@@ -143,7 +148,12 @@ class RoutingPolicy:
 
         # Chế độ Fallback: Đưa target_provider lên đầu, giữ các provider còn lại phía sau
         others = [p for p in base_chain if p.name != preferred_name]
-        return [target_provider] + others
+        resolved_chain = [target_provider] + others
+        return (
+            resolved_chain
+            if fallback_enabled
+            else resolved_chain[:1]
+        )
 
     def _get_base_chain_for_model(self, model: str) -> List[BaseProvider]:
         """Hàm phụ trợ tìm chuỗi mặc định dựa trên file rules YAML."""
