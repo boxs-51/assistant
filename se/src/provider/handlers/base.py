@@ -34,11 +34,11 @@ class BaseExecutionHandler(ABC):
         self.circuit_breaker_manager = circuit_breaker_manager
         self.timeout = 60.0 if timeout is None else float(timeout)
 
-    def _effective_call_timeout(
+    def _new_call_budget(
         self,
-        caller_timeout: float | None = None,
-    ) -> float:
-        """Clamp one logical provider call by caller and provider limits."""
+        caller_deadline_monotonic: float | None = None,
+    ) -> ProviderCallBudget:
+        """Create one logical budget bounded by caller and provider deadlines."""
 
         configured_timeout = float(self.timeout)
         if (
@@ -49,34 +49,33 @@ class BaseExecutionHandler(ABC):
                 "Provider call deadline is already exhausted."
             )
 
-        if caller_timeout is None:
-            return configured_timeout
-        if isinstance(caller_timeout, bool):
-            raise ProviderDeadlineExceededError(
-                "Caller provider deadline is invalid or exhausted."
+        now = monotonic()
+        effective_deadline = now + configured_timeout
+
+        if caller_deadline_monotonic is not None:
+            if isinstance(caller_deadline_monotonic, bool):
+                raise ProviderDeadlineExceededError(
+                    "Caller provider deadline is invalid or exhausted."
+                )
+            try:
+                caller_deadline = float(caller_deadline_monotonic)
+            except (TypeError, ValueError) as exc:
+                raise ProviderDeadlineExceededError(
+                    "Caller provider deadline is invalid or exhausted."
+                ) from exc
+            if not math.isfinite(caller_deadline):
+                raise ProviderDeadlineExceededError(
+                    "Caller provider deadline is invalid or exhausted."
+                )
+            effective_deadline = min(
+                effective_deadline,
+                caller_deadline,
             )
 
-        try:
-            caller_value = float(caller_timeout)
-        except (TypeError, ValueError) as exc:
+        if effective_deadline <= now:
             raise ProviderDeadlineExceededError(
-                "Caller provider deadline is invalid or exhausted."
-            ) from exc
-
-        if not math.isfinite(caller_value) or caller_value <= 0:
-            raise ProviderDeadlineExceededError(
-                "Caller provider deadline is invalid or exhausted."
+                "Provider call deadline is already exhausted."
             )
-
-        return min(configured_timeout, caller_value)
-
-    def _new_call_budget(
-        self,
-        caller_timeout: float | None = None,
-    ) -> ProviderCallBudget:
-        """Create exactly one process-local budget for one logical handler call."""
-
-        effective_timeout = self._effective_call_timeout(caller_timeout)
 
         retry_policy = getattr(self.executor, "retry_policy", None)
         max_retries = getattr(retry_policy, "max_retries", 0)
@@ -87,9 +86,8 @@ class BaseExecutionHandler(ABC):
         ):
             max_retries = 0
 
-        return ProviderCallBudget.from_timeout(
-            now_monotonic=monotonic(),
-            timeout_seconds=effective_timeout,
+        return ProviderCallBudget(
+            deadline_monotonic=effective_deadline,
             max_retries=max_retries,
         )
 
