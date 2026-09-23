@@ -85,6 +85,34 @@ class MultiAgentCoordinator:
         )
         return task
 
+    @staticmethod
+    def _task_from_record(record) -> AgentTask:
+        """Materialize a response view from durable AgentTask authority."""
+        now = time.time()
+        return AgentTask(
+            task_id=str(record.id),
+            session_id=str(record.session_id),
+            created_by=str(record.created_by),
+            assigned_agent_id=str(record.assigned_agent_id),
+            revision=int(getattr(record, "revision", 0)),
+            parent_task_id=getattr(record, "parent_task_id", None),
+            connection_id=getattr(record, "connection_id", None),
+            client_id=getattr(record, "client_id", None),
+            status=AgentTaskStatus(str(record.status)),
+            wait_reasons=list(getattr(record, "wait_reasons", None) or []),
+            input=dict(getattr(record, "input", None) or {}),
+            output=getattr(record, "output", None),
+            error=getattr(record, "error", None),
+            created_at=MultiAgentCoordinator._record_timestamp(
+                getattr(record, "created_at", None),
+                now,
+            ),
+            updated_at=MultiAgentCoordinator._record_timestamp(
+                getattr(record, "updated_at", None),
+                now,
+            ),
+        )
+
     async def _persist(self, method: str, values: dict):
         if self.durable_store is not None:
             await getattr(self.durable_store, method)(values)
@@ -345,16 +373,24 @@ class MultiAgentCoordinator:
         task_id: str,
         identity: Identity,
     ) -> AgentTask:
-        task = self.get_task(task_id, identity)
         runner = self._running_tasks.get(task_id)
 
         if self.task_budget_service is not None:
+            source = await self._load_owned_task_record(task_id, identity)
+            task = self._tasks.get(task_id)
+            if task is None:
+                task = self._task_from_record(source)
+            else:
+                self._sync_task_from_record(task, source)
+
             durable = await self.task_budget_service.cancel_task(
                 task_id,
                 values={
-                    "wait_reasons": task.wait_reasons,
-                    "output": task.output,
-                    "error": task.error,
+                    "wait_reasons": list(
+                        getattr(source, "wait_reasons", None) or []
+                    ),
+                    "output": getattr(source, "output", None),
+                    "error": getattr(source, "error", None),
                 },
             )
             self._sync_task_from_record(task, durable)
@@ -362,6 +398,7 @@ class MultiAgentCoordinator:
             if task.status is not AgentTaskStatus.CANCELLED:
                 return task
         else:
+            task = self.get_task(task_id, identity)
             task.status = AgentTaskStatus.CANCELLED
             task.updated_at = time.time()
 
