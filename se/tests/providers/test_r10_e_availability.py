@@ -16,6 +16,7 @@ from se.src.provider.exceptions import (
 from se.src.provider.handlers.chat_handler import ChatExecutionHandler
 from se.src.provider.ollama.api.models import OllamaModels
 from se.src.provider.policies.routing_policy import RoutingPolicy
+from se.src.provider.retry_contracts import ProviderCallBudget
 
 
 def _provider(name: str):
@@ -270,6 +271,12 @@ async def test_r10_e_model_unavailable_probe_skips_without_retry_charge():
         [p1, p2],
         enable_fallback=True,
     )
+    call_budget = ProviderCallBudget.from_timeout(
+        now_monotonic=0.0,
+        timeout_seconds=1_000_000_000.0,
+        max_retries=2,
+    )
+    handler._new_call_budget = lambda: call_budget
 
     result = await handler.execute_with_fallback(
         object(),
@@ -281,6 +288,7 @@ async def test_r10_e_model_unavailable_probe_skips_without_retry_charge():
     assert p2.probe_calls == 1
     assert executor.provider_calls == ["p2"]
     assert len(executor.budgets) == 1
+    assert executor.budgets[0] is call_budget
     assert executor.budgets[0].retries_used == 0
 
 
@@ -384,3 +392,33 @@ async def test_r10_e_ollama_non_404_http_failure_is_not_model_unavailable():
         )
 
     assert raised.value is raw_error
+
+
+@pytest.mark.asyncio
+async def test_r10_e_ollama_representative_show_payload_is_accepted():
+    payload = {
+        "details": {
+            "family": "llama",
+            "families": ["llama"],
+        },
+        "model_info": {
+            "llama.context_length": 8192,
+        },
+        "template": "{{ .Prompt }}",
+    }
+    response = SimpleNamespace(
+        status_code=200,
+        json=lambda: payload,
+    )
+    provider = SimpleNamespace(
+        name="ollama",
+        send=AsyncMock(return_value=response),
+    )
+
+    result = await OllamaModels(provider)._fetch_show_data(
+        "llama-test",
+        object(),
+        1.0,
+    )
+
+    assert result == payload
