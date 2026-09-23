@@ -330,25 +330,15 @@ class RequestChats:
                         "name": names.provider_name(tool.name),
                         "description": tool.description
                     }
-                    if tool.parameters:
+                    if tool.parameters is not None:
                         param_schema = normalize_provider_tool_schema(
                             "gemini", tool.parameters
                         )
 
                         # Gateway tool parameters are canonical JSON Schema.
                         # Gemini GenerateContent exposes parametersJsonSchema
-                        # specifically for this representation; using it avoids
-                        # partially coercing nested JSON Schema into the
-                        # provider's OpenAPI Schema enum representation.
-                        root_type = param_schema.get("type")
-                        if root_type is None:
-                            param_schema["type"] = "object"
-                        elif root_type != "object":
-                            raise ProviderToolContractError(
-                                "Gemini tool parameter JSON Schema root must be type 'object'"
-                            )
-                        param_schema.setdefault("properties", {})
-
+                        # specifically for this representation; the shared PTC
+                        # normalizer already enforces the object-root invariant.
                         decl["parametersJsonSchema"] = param_schema
                         
                     function_declarations.append(decl)
