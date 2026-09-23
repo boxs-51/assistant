@@ -226,9 +226,10 @@ class ProviderExecutor:
     async def execute_generic(
         self,
         provider: BaseProvider,
-        execution_callable: Callable[[], Awaitable[Any]],
+        execution_callable: Callable[..., Awaitable[Any]],
         *,
         call_budget: ProviderCallBudget | None = None,
+        timeout: float | None = None,
     ) -> Any:
         """Execute a generic provider operation with the same retry budget."""
 
@@ -238,7 +239,17 @@ class ProviderExecutor:
         async def execution_func():
             nonlocal provider_attempted
             if call_budget is not None:
-                self._remaining_or_raise(call_budget, provider.name)
+                remaining = self._remaining_or_raise(
+                    call_budget,
+                    provider.name,
+                )
+                attempt_timeout = self._bounded_attempt_timeout(
+                    timeout,
+                    remaining,
+                )
+                provider_attempted = True
+                return await execution_callable(attempt_timeout)
+
             provider_attempted = True
             return await execution_callable()
 
