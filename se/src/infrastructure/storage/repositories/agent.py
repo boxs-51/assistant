@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, case, or_, select, update
 
 from ..interfaces.repository import BaseRepository
 from ..models.sql.agent import (
@@ -184,10 +184,62 @@ class AgentRepository(BaseRepository):
         if target == "RUNNING":
             statement = statement.where(active_heads.exists())
         else:
+            expected_reasons = tuple(sorted({str(item) for item in wait_reasons}))
+            if not expected_reasons:
+                raise ValueError(
+                    "WAITING Task activity requires at least one wait reason."
+                )
+
+            normalized_reason = case(
+                (
+                    and_(
+                        AgentExecutionRecord.wait_reason.is_not(None),
+                        AgentExecutionRecord.wait_reason != "",
+                    ),
+                    AgentExecutionRecord.wait_reason,
+                ),
+                (
+                    AgentExecutionRecord.state == "WAITING_FOR_CONNECTION",
+                    "CONNECTION",
+                ),
+                else_=None,
+            )
+            live_waiting_reason_rows = (
+                select(normalized_reason.label("normalized_wait_reason"))
+                .select_from(AgentTaskBranchRecord)
+                .join(
+                    AgentExecutionRecord,
+                    AgentExecutionRecord.id
+                    == AgentTaskBranchRecord.current_execution_id,
+                )
+                .where(
+                    AgentTaskBranchRecord.task_id == task_id,
+                    AgentTaskBranchRecord.resolution_state == "OPEN",
+                    AgentExecutionRecord.state.in_(
+                        ("WAITING", "WAITING_FOR_CONNECTION")
+                    ),
+                    normalized_reason.is_not(None),
+                )
+            )
+
+            # Exact-set proof: no live normalized reason may fall outside the
+            # derived snapshot, and every expected reason must still be
+            # represented by at least one current OPEN WAITING branch head.
+            unexpected_reason = live_waiting_reason_rows.where(
+                ~normalized_reason.in_(expected_reasons)
+            )
             statement = statement.where(
                 ~active_heads.exists(),
                 waiting_heads.exists(),
+                ~unexpected_reason.exists(),
             )
+            for reason in expected_reasons:
+                expected_reason_exists = live_waiting_reason_rows.where(
+                    normalized_reason == reason
+                )
+                statement = statement.where(
+                    expected_reason_exists.exists()
+                )
 
         result = await self.session.execute(
             statement.values(
