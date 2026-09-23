@@ -263,6 +263,100 @@ async def test_r8_g_g2_sibling_runners_have_isolated_branch_contexts(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r8_g_g2_root_compat_runner_does_not_block_fork_ownership(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_g_g2_root_compat.sqlite",
+    )
+    supervisor = AgentExecutionSupervisor()
+    runtime = _RuntimeProbe(block=True)
+    root_release = asyncio.Event()
+    root_started = asyncio.Event()
+    root_runner = None
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-g-g2-root-compat",
+            fork_request_id="unused-r8-g-g2-root-plan",
+        )
+        store = _store(sessions)
+        container = _container(
+            store,
+            planner,
+            service,
+            supervisor,
+            runtime,
+        )
+
+        async def root_compat_runner():
+            root_started.set()
+            await root_release.wait()
+
+        root_runner = asyncio.create_task(
+            root_compat_runner(),
+            name=f"agent-task:{source['task_id']}",
+        )
+
+        async def fork_executor(task_id, request, identity):
+            return await execute_forked_agent_task_control_plane(
+                container,
+                task_id,
+                request,
+                identity,
+            )
+
+        coordinator = MultiAgentCoordinator(
+            AgentRegistry(),
+            durable_store=store,
+            fork_executor=fork_executor,
+            execution_supervisor=supervisor,
+            task_budget_service=service,
+        )
+        coordinator._running_tasks[source["task_id"]] = root_runner
+
+        await asyncio.wait_for(root_started.wait(), timeout=1)
+        assert not root_runner.done()
+
+        response = await coordinator.fork_task(
+            source["task_id"],
+            _request(
+                source,
+                "fork-r8-g-g2-root-compat",
+                "overlay-root-compat",
+            ),
+            _identity(),
+        )
+        await asyncio.wait_for(runtime.started.wait(), timeout=1)
+
+        assert response.started is True
+        assert coordinator._running_tasks[source["task_id"]] is root_runner
+        assert not root_runner.done()
+        assert response.execution_id in supervisor.active_execution_ids()
+
+        # Execution-scoped fork ownership can drain independently without
+        # treating the legacy/root task_id wrapper as fork exclusivity.
+        await supervisor.cancel_execution(response.execution_id)
+        assert not root_runner.done()
+        assert coordinator._running_tasks[source["task_id"]] is root_runner
+
+        async with _Uow(sessions) as uow:
+            task = await uow.agents.get_task(source["task_id"])
+            await uow.commit()
+        assert task.output is None
+    finally:
+        runtime.release.set()
+        root_release.set()
+        if root_runner is not None:
+            await asyncio.gather(root_runner, return_exceptions=True)
+        await supervisor.shutdown()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r8_g_g3_capacity_rejection_has_zero_partial_fork_state(tmp_path):
     engine, sessions, service, planner = await _setup(
         tmp_path,
