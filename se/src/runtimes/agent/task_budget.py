@@ -281,13 +281,11 @@ async def reconcile_multibranch_task_activity_in_uow(
     ):
         return task
 
-    updated = await uow.agents.compare_and_set_task(
+    updated = await uow.agents.compare_and_set_task_activity(
         task_id,
         int(task.revision),
-        {
-            "status": target_state,
-            "wait_reasons": wait_reasons,
-        },
+        target_state=target_state,
+        wait_reasons=wait_reasons,
     )
     return updated
 
