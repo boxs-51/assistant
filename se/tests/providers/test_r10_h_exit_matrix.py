@@ -303,13 +303,17 @@ async def test_r10_h_public_stream_visible_failure_sequence_is_terminal_no_repla
 
 
 class _FailingChunkBus:
-    def __init__(self):
+    def __init__(self, closed: asyncio.Event):
         self.events = []
+        self.closed = closed
+        self.closed_before_failure_event = None
 
     async def publish(self, event):
         self.events.append(event.event_name)
         if event.event_name == "provider.stream.chunk_emitted":
             raise RuntimeError("downstream chunk publication failed")
+        if event.event_name == "provider.failed":
+            self.closed_before_failure_event = self.closed.is_set()
 
 
 class _BlockingChunkBus:
@@ -375,7 +379,7 @@ def _runtime_with_real_stream(closed: asyncio.Event, event_bus):
 @pytest.mark.asyncio
 async def test_r10_h_runtime_closes_nested_provider_stream_when_chunk_publish_fails():
     closed = asyncio.Event()
-    bus = _FailingChunkBus()
+    bus = _FailingChunkBus(closed)
     runtime = _runtime_with_real_stream(closed, bus)
 
     await runtime._handle_execute_chat(
@@ -393,6 +397,7 @@ async def test_r10_h_runtime_closes_nested_provider_stream_when_chunk_publish_fa
     )
 
     assert closed.is_set()
+    assert bus.closed_before_failure_event is True
     assert bus.events == [
         "provider.stream.chunk_emitted",
         "provider.failed",
