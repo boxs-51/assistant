@@ -8,6 +8,7 @@ import pytest
 from se.src.domain.schemas import ModelCapability
 from se.src.provider.exceptions import (
     NoAvailableProviderError,
+    ProviderDeadlineExceededError,
     ProviderUnavailableError,
 )
 from se.src.provider.handlers.chat_handler import ChatExecutionHandler
@@ -694,3 +695,141 @@ async def test_ptc3b_cross_provider_tool_ineligible_never_enters_native_adapter(
         ModelCapability.TOOL_CALLING,
     ]
     assert executor.adapter_calls == []
+
+
+
+@pytest.mark.asyncio
+async def test_ptc3b_deadline_expiry_between_chat_and_tool_probe_starts_no_executor(
+    monkeypatch,
+):
+    times = iter([100.0, 101.0, 111.0])
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.monotonic",
+        lambda: next(times),
+    )
+    provider = _Provider("p1")
+    handler, executor = _handler([provider], timeout=10.0)
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await handler.execute_with_fallback(object(), _tool_body())
+
+    assert _caps(provider) == [ModelCapability.CHAT]
+    assert executor.provider_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ptc3b_strict_tool_probe_error_preserves_error_and_never_falls_back():
+    tool_error = ProviderUnavailableError(
+        "tool capability probe failed",
+        provider_name="p1",
+    )
+    p1 = _Provider(
+        "p1",
+        {
+            ModelCapability.CHAT: True,
+            ModelCapability.TOOL_CALLING: tool_error,
+        },
+    )
+    p2 = _Provider("p2")
+    config = SimpleNamespace(
+        priority=["p1", "p2"],
+        routing_rules_path="__ptc3b_missing_rules__.yaml",
+        enable_fallback=True,
+    )
+    routing = RoutingPolicy(
+        providers={"p1": p1, "p2": p2},
+        config=config,
+    )
+    handler, executor = _handler([p1, p2], routing=routing)
+
+    with pytest.raises(NoAvailableProviderError) as raised:
+        await handler.execute_with_fallback(
+            object(),
+            _tool_body(
+                metadata={
+                    "routing": {
+                        "type": "strict",
+                        "prefer_provider": "p1",
+                    }
+                }
+            ),
+        )
+
+    assert p2.calls == []
+    assert executor.provider_calls == []
+    assert raised.value.provider_name == "p1"
+    assert raised.value.__cause__ is tool_error
+
+
+@pytest.mark.asyncio
+async def test_ptc3b_stream_tool_probe_error_falls_back_before_stream_creation():
+    tool_error = ProviderUnavailableError(
+        "stream tool probe failed",
+        provider_name="p1",
+    )
+    p1 = _Provider(
+        "p1",
+        {
+            ModelCapability.CHAT_STREAM: True,
+            ModelCapability.TOOL_CALLING: tool_error,
+        },
+    )
+    p2 = _Provider("p2")
+    handler, executor = _handler([p1, p2])
+
+    chunks = [
+        chunk
+        async for chunk in handler.stream_with_fallback(
+            object(),
+            _tool_body(),
+        )
+    ]
+
+    assert chunks == ["p2-chunk"]
+    assert executor.stream_calls == ["p2"]
+    assert executor.budgets[0].retries_used == 0
+
+
+@pytest.mark.asyncio
+async def test_ptc3b_stream_cancellation_during_tool_probe_never_starts_stream_or_fallback():
+    p1 = _BlockingToolProvider("p1")
+    p2 = _Provider("p2")
+    handler, executor = _handler([p1, p2])
+    stream = handler.stream_with_fallback(object(), _tool_body())
+
+    read_task = asyncio.create_task(stream.__anext__())
+    await p1.tool_probe_started.wait()
+    read_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_task
+
+    assert executor.stream_calls == []
+    assert p2.calls == []
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
+async def test_ptc3b_stream_second_probe_recomputes_remaining_deadline(monkeypatch):
+    times = iter([100.0, 101.0, 103.0])
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.monotonic",
+        lambda: next(times),
+    )
+    provider = _Provider("p1")
+    handler, executor = _handler([provider], timeout=10.0)
+
+    chunks = [
+        chunk
+        async for chunk in handler.stream_with_fallback(
+            object(),
+            _tool_body(),
+        )
+    ]
+
+    assert chunks == ["p1-chunk"]
+    assert [timeout for _, _, timeout in provider.calls] == [
+        pytest.approx(9.0),
+        pytest.approx(7.0),
+    ]
+    assert executor.budgets[0].deadline_monotonic == pytest.approx(110.0)
