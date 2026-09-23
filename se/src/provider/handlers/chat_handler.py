@@ -20,6 +20,38 @@ tracer = trace.get_tracer(__name__)
 class ChatExecutionHandler(BaseExecutionHandler):
     """Execute chat requests with deterministic provider fallback."""
 
+    async def _has_required_capabilities(
+        self,
+        provider: Any,
+        *,
+        model: Any,
+        http_client: httpx.AsyncClient,
+        call_budget: Any,
+        base_capability: ModelCapability,
+        tools_present: bool,
+    ) -> bool:
+        """Evaluate request-scoped capability conjunction on one R10 budget."""
+
+        if not await self._probe_capability_with_budget(
+            provider=provider,
+            model=model,
+            capability=base_capability,
+            http_client=http_client,
+            call_budget=call_budget,
+        ):
+            return False
+
+        if not tools_present:
+            return True
+
+        return await self._probe_capability_with_budget(
+            provider=provider,
+            model=model,
+            capability=ModelCapability.TOOL_CALLING,
+            http_client=http_client,
+            call_budget=call_budget,
+        )
+
     async def execute_with_fallback(
         self,
         http_client: httpx.AsyncClient,
@@ -28,6 +60,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         deadline_monotonic: float | None = None,
     ) -> GatewayResponse:
         model = body.get("model")
+        tools_present = bool(body.get("tools"))
 
         execution_chain = self.routing_policy.get_fallback_chain(
             model=model,
@@ -58,12 +91,13 @@ class ChatExecutionHandler(BaseExecutionHandler):
             ) as span:
                 span.set_attribute("provider.name", provider.name)
                 try:
-                    if not await self._probe_capability_with_budget(
-                        provider=provider,
+                    if not await self._has_required_capabilities(
+                        provider,
                         model=model,
-                        capability=ModelCapability.CHAT,
                         http_client=http_client,
                         call_budget=call_budget,
+                        base_capability=ModelCapability.CHAT,
+                        tools_present=tools_present,
                     ):
                         continue
 
@@ -133,6 +167,8 @@ class ChatExecutionHandler(BaseExecutionHandler):
         """Stream with fallback allowed only before the first visible chunk."""
 
         model = body.get("model")
+        tools_present = bool(body.get("tools"))
+
         execution_chain = self.routing_policy.get_fallback_chain(
             model=model,
             metadata=body.get("metadata"),
@@ -159,12 +195,13 @@ class ChatExecutionHandler(BaseExecutionHandler):
             stream_started = False
             provider_stream = None
             try:
-                if not await self._probe_capability_with_budget(
-                    provider=provider,
+                if not await self._has_required_capabilities(
+                    provider,
                     model=model,
-                    capability=ModelCapability.CHAT_STREAM,
                     http_client=http_client,
                     call_budget=call_budget,
+                    base_capability=ModelCapability.CHAT_STREAM,
+                    tools_present=tools_present,
                 ):
                     continue
 
