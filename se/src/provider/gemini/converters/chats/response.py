@@ -28,6 +28,7 @@ from .....domain.schemas import (
 )
 from ...file_extension import FileHelper
 from ....exceptions import ResponseValidationError
+from ....core.tool_contract import ProviderToolNameMap
 
 import structlog
 logger = structlog.get_logger(__name__)
@@ -171,7 +172,8 @@ class ResponseChats:
     def _parse_gemini_parts_to_content(
         self, 
         parts: List[Dict[str, Any]], 
-        citations: Optional[List[Dict[str, Any]]] = None
+        citations: Optional[List[Dict[str, Any]]] = None,
+        tool_names: ProviderToolNameMap | None = None,
     ) -> Tuple[List[MessageContentPart], List[GatewayToolCall], str]:
         """
         Chuyển đổi danh sách các 'parts' thô từ Gemini thành MessageContentPart chuẩn, 
@@ -186,6 +188,8 @@ class ResponseChats:
             if "functionCall" in part:
                 fc = part["functionCall"]
                 tool_name = fc.get("name", "")
+                if tool_names is not None and tool_name:
+                    tool_name = tool_names.logical_name(tool_name)
                 tool_args = fc.get("args", {})
 
                 if isinstance(tool_args, (dict, list)):
@@ -319,7 +323,12 @@ class ResponseChats:
 
         return content_parts, tool_calls, reasoning_delta
 
-    async def adapt_chat(self, response: httpx.Response) -> GatewayResponse:
+    async def adapt_chat(
+        self,
+        response: httpx.Response,
+        *,
+        tool_names: ProviderToolNameMap | None = None,
+    ) -> GatewayResponse:
         """Chuyển đổi response JSON từ Gemini về GatewayResponse kèm Thinking Parts, Citations và Tool Calls."""
         try:
             response_data = response.json()
@@ -333,7 +342,11 @@ class ResponseChats:
                 citations_data = self._extract_citations(candidate)
 
                 # Khai phá mảng parts thành ContentParts DTO, GatewayToolCall và suy nghĩ
-                parsed_content, tool_calls, _ = self._parse_gemini_parts_to_content(parts, citations=citations_data)
+                parsed_content, tool_calls, _ = self._parse_gemini_parts_to_content(
+                    parts,
+                    citations=citations_data,
+                    tool_names=tool_names,
+                )
                 
                 # Chuẩn hóa finish_reason
                 gemini_finish_reason = candidate.get("finishReason", "STOP").upper()
@@ -386,6 +399,8 @@ class ResponseChats:
     async def adapt_chat_stream(
         self,
         response: httpx.Response,
+        *,
+        tool_names: ProviderToolNameMap | None = None,
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
         """
         Chuẩn hóa Gemini streaming response.
@@ -442,6 +457,7 @@ class ResponseChats:
                     ) = self._parse_gemini_parts_to_content(
                         parts,
                         citations=citations_data,
+                        tool_names=tool_names,
                     )
 
                     if tool_calls and finish_reason == "stop":
