@@ -643,6 +643,44 @@ class AgentRepository(BaseRepository):
         await self.session.flush()
         return await self.get_execution(execution_id)
 
+    async def compare_and_set_aggregate_activation(
+        self,
+        execution_id: str,
+        *,
+        task_id: str,
+        branch_id: str,
+        base_execution_id: str,
+        base_checkpoint_id: str | None,
+        started_at: datetime,
+    ):
+        """Specialized R9-F RUNNING@1 -> RUNNING@2 aggregate activation CAS."""
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == 1,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+                AgentExecutionRecord.task_id == task_id,
+                AgentExecutionRecord.branch_id == branch_id,
+                AgentExecutionRecord.base_execution_id == base_execution_id,
+                AgentExecutionRecord.base_checkpoint_id == base_checkpoint_id,
+                AgentExecutionRecord.retry_of_execution_id.is_(None),
+                AgentExecutionRecord.bound_client_id.is_(None),
+                AgentExecutionRecord.bound_connection_id.is_(None),
+            )
+            .values(
+                revision=2,
+                state="RUNNING",
+                started_at=started_at,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
     async def compare_and_set_retry_activation(
         self,
         execution_id: str,
