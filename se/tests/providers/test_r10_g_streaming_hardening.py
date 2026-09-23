@@ -733,3 +733,116 @@ async def test_r10_g_consumer_close_ignores_cleanup_error_without_fallback(
     assert executor.provider_calls == ["p1"]
     assert p2.probe_calls == 0
     assert p1_stream.close_calls == 1
+
+
+
+@pytest.mark.asyncio
+async def test_r10_g_executor_cancellation_survives_failing_cleanup():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class _BlockingCloseFailIterator:
+        def __init__(self):
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            raise StopAsyncIteration
+
+        async def aclose(self):
+            self.close_calls += 1
+            raise RuntimeError("cleanup failed after cancellation")
+
+    iterator = _BlockingCloseFailIterator()
+
+    class _Chat:
+        def chat_stream(self, **kwargs):
+            return iterator
+
+    manager = _BreakerManager()
+    executor = ProviderExecutor(manager, max_retries=0)
+    provider = SimpleNamespace(name="p1", chat=_Chat())
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=10.0,
+        max_retries=0,
+    )
+    stream = executor.execute_stream(
+        provider=provider,
+        http_client=object(),
+        body={"model": "logical-model"},
+        timeout=60.0,
+        call_budget=budget,
+    )
+
+    read_task = asyncio.create_task(stream.__anext__())
+    await started.wait()
+    read_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_task
+
+    assert cancelled.is_set()
+    assert iterator.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_r10_g_handler_cancellation_survives_failing_cleanup_without_fallback(
+    monkeypatch,
+):
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.monotonic",
+        lambda: 100.0,
+    )
+    started = asyncio.Event()
+
+    class _BlockingCloseFailIterator:
+        def __init__(self):
+            self.close_calls = 0
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            started.set()
+            await asyncio.Event().wait()
+            raise StopAsyncIteration
+
+        async def aclose(self):
+            self.close_calls += 1
+            raise RuntimeError("handler cleanup failed after cancellation")
+
+    p1 = _Provider("p1")
+    p2 = _Provider("p2")
+    p1_stream = _BlockingCloseFailIterator()
+    p2_stream = _CloseFailingIterator(["must-not-run"])
+    executor = _CleanupFailingStreamExecutor(
+        {"p1": p1_stream, "p2": p2_stream}
+    )
+    stream = _handler(
+        [p1, p2],
+        executor,
+        timeout=10.0,
+    ).stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+    )
+
+    read_task = asyncio.create_task(stream.__anext__())
+    await started.wait()
+    read_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_task
+
+    assert p1_stream.close_calls == 1
+    assert executor.provider_calls == ["p1"]
+    assert p2.probe_calls == 0
