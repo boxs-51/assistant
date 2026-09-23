@@ -78,13 +78,14 @@ async def test_r8_f_activity_running_branch_overrides_stale_task_waiting(tmp_pat
         )
         await service.consume_fork_plan(source["plan"])
 
-        stale = await service.transition_task(
+        guarded = await service.transition_task(
             source["task_id"],
             allowed_source_states=("RUNNING",),
             target_state="WAITING",
             values={"wait_reasons": ["RESOURCE"]},
         )
-        assert str(stale.status) == "WAITING"
+        assert str(guarded.status) == "RUNNING"
+        assert list(guarded.wait_reasons or []) == []
 
         first, second = await asyncio.gather(
             service.reconcile_multibranch_task_activity(source["task_id"]),
