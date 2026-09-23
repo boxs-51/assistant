@@ -709,11 +709,212 @@ class TaskBudgetService:
         *,
         values: dict[str, Any] | None = None,
     ):
-        return await self.terminalize_task(
-            task_id,
-            allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
-            target_state="CANCELLED",
-            values=values,
+        """Cancel Task authority and settle exact dormant R8 FORK executions.
+
+        Fork consume precharges active execution capacity before a process-local
+        runner exists. Cancellation therefore races activation on E2 revision 1
+        and releases capacity only for the exact ForkAdmission-backed
+        preactivation rows it wins.
+        """
+
+        normalized = _normalize_task_store_values(values or {})
+        normalized["status"] = "CANCELLED"
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    # Frozen R8-F serialization order:
+                    # Task -> TaskBudget -> Branch(es) -> E2 revision CAS.
+                    task = await uow.agents.get_task_for_update(task_id)
+                    if task is None:
+                        raise TaskBudgetRequiredError(
+                            f"Unknown AgentTask: {task_id}"
+                        )
+                    budget_record = await uow.agents.get_task_budget_for_update(
+                        task_id
+                    )
+                    if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no "
+                                "TaskBudget."
+                            )
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    budget = _budget_from_record(budget_record)
+                    current_state = str(task.status)
+
+                    # A different terminal winner remains authoritative.
+                    if (
+                        current_state in _TASK_TERMINAL_STATES
+                        and current_state != "CANCELLED"
+                    ):
+                        if budget.state is TaskBudgetState.OPEN:
+                            closed = await uow.agents.compare_and_set_task_budget(
+                                task_id,
+                                budget.revision,
+                                {
+                                    "state": TaskBudgetState.CLOSED.value,
+                                    "closed_at": datetime.now(timezone.utc),
+                                },
+                            )
+                            if closed is None:
+                                await uow.rollback()
+                                continue
+                        await uow.commit()
+                        return task
+
+                    if (
+                        current_state not in _TASK_TERMINAL_STATES
+                        and current_state
+                        not in {"ASSIGNED", "RUNNING", "WAITING"}
+                    ):
+                        raise TaskBudgetConflictError(
+                            f"AgentTask {task_id} is {current_state}, "
+                            "expected ASSIGNED/RUNNING/WAITING."
+                        )
+                    if (
+                        current_state != "CANCELLED"
+                        and budget.state is not TaskBudgetState.OPEN
+                    ):
+                        raise TaskBudgetConflictError(
+                            "Nonterminal AgentTask has CLOSED TaskBudget."
+                        )
+
+                    now_utc = datetime.now(timezone.utc)
+                    cancelled_forks = 0
+                    cancelled_delegated = 0
+                    receipts = await uow.agents.list_task_fork_admissions(
+                        task_id
+                    )
+                    for receipt in receipts:
+                        branch = await uow.agents.get_task_branch_for_update(
+                            receipt.branch_id
+                        )
+                        execution = await uow.agents.get_execution(
+                            receipt.execution_id
+                        )
+                        if branch is None or execution is None:
+                            raise TaskBudgetConflictError(
+                                "ForkAdmission durable graph is incomplete "
+                                f"for {receipt.execution_id}."
+                            )
+
+                        exact_preactivation = (
+                            branch.task_id == task_id
+                            and branch.current_execution_id
+                            == receipt.execution_id
+                            and receipt.source_branch_id
+                            == branch.parent_branch_id
+                            and receipt.source_execution_id
+                            == branch.base_execution_id
+                            and receipt.source_checkpoint_id
+                            == branch.base_checkpoint_id
+                            and execution.task_id == task_id
+                            and execution.branch_id == receipt.branch_id
+                            and execution.base_execution_id
+                            == receipt.source_execution_id
+                            and execution.base_checkpoint_id
+                            == receipt.source_checkpoint_id
+                            and execution.retry_of_execution_id is None
+                            and str(execution.state) == "RUNNING"
+                            and int(execution.revision) == 1
+                            and execution.current_checkpoint_id is None
+                            and execution.bound_client_id is None
+                            and execution.bound_connection_id is None
+                        )
+                        if not exact_preactivation:
+                            continue
+
+                        cancelled = (
+                            await uow.agents
+                            .compare_and_set_fork_preactivation_cancel(
+                                execution.id,
+                                task_id=task_id,
+                                branch_id=receipt.branch_id,
+                                base_execution_id=receipt.source_execution_id,
+                                base_checkpoint_id=receipt.source_checkpoint_id,
+                                values={
+                                    "state": "CANCELLED",
+                                    "wait_reason": None,
+                                    "wait_expires_at": None,
+                                    "error": (
+                                        "TASK_CANCELLED_BEFORE_FORK_ACTIVATION"
+                                    ),
+                                    "completed_at": now_utc,
+                                },
+                            )
+                        )
+                        if cancelled is None:
+                            # Activation won revision 1. Do not mutate or
+                            # account the durable winner here.
+                            continue
+                        cancelled_forks += 1
+                        if execution.parent_execution_id is not None:
+                            cancelled_delegated += 1
+
+                    if budget.active_executions < cancelled_forks:
+                        raise TaskBudgetConflictError(
+                            "Fork cancellation would underflow "
+                            "active_executions."
+                        )
+                    if (
+                        budget.active_parallel_agents
+                        < cancelled_delegated
+                    ):
+                        raise TaskBudgetConflictError(
+                            "Fork cancellation would underflow "
+                            "active_parallel_agents."
+                        )
+
+                    updated_task = task
+                    if current_state != "CANCELLED":
+                        updated_task = await uow.agents.compare_and_set_task(
+                            task_id,
+                            task.revision,
+                            normalized,
+                        )
+                        if updated_task is None:
+                            await uow.rollback()
+                            continue
+
+                    budget_values = {
+                        "state": TaskBudgetState.CLOSED.value,
+                        "closed_at": (
+                            budget.closed_at
+                            if budget.closed_at is not None
+                            else now_utc
+                        ),
+                        "active_executions": (
+                            budget.active_executions - cancelled_forks
+                        ),
+                        "active_parallel_agents": (
+                            budget.active_parallel_agents
+                            - cancelled_delegated
+                        ),
+                    }
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            task_id,
+                            budget.revision,
+                            budget_values,
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.commit()
+                    return updated_task
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"AgentTask cancellation conflicts exhausted for {task_id}"
         )
 
     @staticmethod
