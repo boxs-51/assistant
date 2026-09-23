@@ -428,10 +428,46 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         "growth": growth,
     }
 
-    # Intentional first-run probe. The red CI output becomes immutable baseline
-    # evidence on Issue #31; the follow-up commit replaces this sentinel with
-    # structural assertions over the observed report.
-    pytest.fail(
-        "R11_A_BASELINE_PROBE="
-        + json.dumps(report, sort_keys=True, separators=(",", ":"))
-    )
+    expected_pending = {
+        0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
+            "insert": 1, "rollbacks": 0, "select": 2, "sql": 4, "update": 1},
+        1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
+            "insert": 2, "rollbacks": 0, "select": 3, "sql": 6, "update": 1},
+        8: {"begins": 1, "commits": 1, "delete": 0, "flushes": 9,
+            "insert": 9, "rollbacks": 0, "select": 10, "sql": 20, "update": 1},
+        32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
+             "insert": 33, "rollbacks": 0, "select": 34, "sql": 68, "update": 1},
+    }
+    assert pending == expected_pending
+
+    assert growth == {
+        10: {
+            "iterations": 10,
+            "final_transcript_bytes": 2261,
+            "cumulative_snapshot_bytes": 12440,
+            "copy_amplification": 5.502,
+        },
+        100: {
+            "iterations": 100,
+            "final_transcript_bytes": 22601,
+            "cumulative_snapshot_bytes": 1141400,
+            "copy_amplification": 50.502,
+        },
+        1000: {
+            "iterations": 1000,
+            "final_transcript_bytes": 226001,
+            "cumulative_snapshot_bytes": 113114000,
+            "copy_amplification": 500.502,
+        },
+    }
+
+    for count, sample in reconstruction.items():
+        assert sample["begins"] == 1
+        assert sample["commits"] == 1
+        assert sample["rollbacks"] == 0
+        assert sample["select"] == sample["sql"] == 3
+        assert sample["insert"] == sample["update"] == sample["delete"] == 0
+        assert sample["flushes"] == 0
+        assert sample["messages"] == count
+        assert sample["logical_bytes"] == growth[count]["final_transcript_bytes"]
+        assert sample["elapsed_ns"] > 0
