@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from types import SimpleNamespace
+import inspect
 
 import pytest
 from pydantic import ValidationError
 
 from se.src.domain.schemas.identity import Identity
+from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.domain.schemas.multi_agent import (
     AgentTaskAggregateRequest,
     AgentTaskBranchResolutionRequest,
@@ -42,6 +44,17 @@ EXECUTION = "retry-r9-g"
 
 def _identity() -> Identity:
     return Identity(user_id=USER, auth_type="api_key", scopes={"*"})
+
+
+def test_r9_g_aggregate_activation_repository_has_one_strict_cas():
+    source = inspect.getsource(AgentRepository)
+    assert source.count(
+        "async def compare_and_set_aggregate_activation("
+    ) == 1
+    signature = inspect.signature(
+        AgentRepository.compare_and_set_aggregate_activation
+    )
+    assert "base_checkpoint_id" in signature.parameters
 
 
 def test_r9_g_routes_and_stable_error_envelope_are_public():
