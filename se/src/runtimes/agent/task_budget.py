@@ -25,6 +25,12 @@ from .contracts.fork import (
     fork_plan_fingerprint,
     fork_runtime_seed_payload,
 )
+from .contracts.retry import (
+    RetryAdmission,
+    RetryPlan,
+    retry_plan_fingerprint,
+    retry_value_fingerprint,
+)
 from .serialization import to_json_safe
 from .waiting_checkpoint import (
     stage_waiting_checkpoint,
@@ -82,6 +88,24 @@ class ForkConsumeDeferred(ForkConsumeError):
 
 
 class ForkConsumeConflict(ForkConsumeError):
+    pass
+
+
+class RetryConsumeError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
+class RetryConsumeRejected(RetryConsumeError):
+    pass
+
+
+class RetryConsumeDeferred(RetryConsumeError):
+    pass
+
+
+class RetryConsumeConflict(RetryConsumeError):
     pass
 
 
@@ -1034,6 +1058,333 @@ class TaskBudgetService:
 
         raise TaskBudgetConflictError(
             f"AgentTask cancellation conflicts exhausted for {task_id}"
+        )
+
+    @staticmethod
+    def _retry_consume_error(exc: Exception) -> RetryConsumeError:
+        from .retry_planning import RetryPlanDeferred
+
+        code = str(getattr(exc, "code", "RETRY_CONSUME_CONFLICT"))
+        message = str(exc)
+        if isinstance(exc, RetryPlanDeferred):
+            return RetryConsumeDeferred(code, message)
+        if code == "RETRY_PLAN_FINGERPRINT_INVALID":
+            return RetryConsumeRejected(code, message)
+        if any(
+            token in code
+            for token in (
+                "CONFLICT",
+                "STALE",
+                "CHANGED",
+                "NOT_CURRENT",
+            )
+        ):
+            return RetryConsumeConflict(code, message)
+        return RetryConsumeRejected(code, message)
+
+    async def _replay_retry_admission_in_uow(
+        self,
+        uow,
+        *,
+        plan: RetryPlan,
+        receipt,
+    ) -> RetryAdmission:
+        if (
+            receipt.plan_fingerprint != plan.plan_fingerprint
+            or receipt.branch_id != plan.branch_id
+            or receipt.source_execution_id != plan.source_execution_id
+            or receipt.source_checkpoint_id != plan.source_checkpoint_id
+            or receipt.created_by != plan.target_user_id
+        ):
+            raise RetryConsumeConflict(
+                "RETRY_REQUEST_CONFLICT",
+                "retry_request_id already committed with different semantics.",
+            )
+
+        task = await uow.agents.get_task(plan.task_id)
+        budget = await uow.agents.get_task_budget(plan.task_id)
+        branch = await uow.agents.get_task_branch(receipt.branch_id)
+        source = await uow.agents.get_execution(receipt.source_execution_id)
+        execution = await uow.agents.get_execution(receipt.execution_id)
+        reservation = await uow.agents.get_task_budget_reservation(
+            plan.task_id,
+            TaskBudgetReservationKind.NEW_EXECUTION.value,
+            receipt.execution_id,
+        )
+
+        corrupt = (
+            task is None
+            or budget is None
+            or branch is None
+            or source is None
+            or execution is None
+            or reservation is None
+            or branch.task_id != plan.task_id
+            or source.task_id != plan.task_id
+            or source.branch_id != plan.branch_id
+            or execution.task_id != plan.task_id
+            or execution.branch_id != plan.branch_id
+            or execution.retry_of_execution_id != plan.source_execution_id
+            or execution.parent_execution_id != plan.parent_execution_id
+            or execution.base_execution_id != plan.base_execution_id
+            or execution.base_checkpoint_id != plan.base_checkpoint_id
+            or retry_value_fingerprint(
+                dict(execution.request or {})
+            ) != plan.request_fingerprint
+        )
+        if corrupt:
+            raise RetryConsumeConflict(
+                "RETRY_ADMISSION_CORRUPT",
+                "Committed RetryAdmission no longer matches durable outputs.",
+            )
+
+        return RetryAdmission(
+            task_id=plan.task_id,
+            retry_request_id=plan.retry_request_id,
+            plan_fingerprint=plan.plan_fingerprint,
+            branch_id=receipt.branch_id,
+            branch_revision=int(branch.revision),
+            source_execution_id=receipt.source_execution_id,
+            source_checkpoint_id=receipt.source_checkpoint_id,
+            execution_id=receipt.execution_id,
+            execution_revision=int(execution.revision),
+            task_revision=int(task.revision),
+            task_budget_revision=int(budget.revision),
+        )
+
+    async def _probe_retry_replay(
+        self,
+        plan: RetryPlan,
+    ) -> RetryAdmission | None:
+        async with self._uow_factory() as uow:
+            receipt = await uow.agents.get_task_retry_admission(
+                plan.task_id,
+                plan.retry_request_id,
+            )
+            if receipt is None:
+                await uow.commit()
+                return None
+            admission = await self._replay_retry_admission_in_uow(
+                uow,
+                plan=plan,
+                receipt=receipt,
+            )
+            await uow.commit()
+            return admission
+
+    async def consume_retry_plan(
+        self,
+        plan: RetryPlan,
+    ) -> RetryAdmission:
+        """Atomically admit one same-Branch retry without starting runtime."""
+
+        from .retry_planning import (
+            RetryPlanDeferred,
+            RetryPlanRejected,
+            revalidate_retry_plan_in_uow,
+        )
+
+        if retry_plan_fingerprint(plan) != plan.plan_fingerprint:
+            raise RetryConsumeRejected(
+                "RETRY_PLAN_FINGERPRINT_INVALID",
+                "RetryPlan semantic fingerprint no longer matches its payload.",
+            )
+
+        execution_id = f"r9_retry_{uuid4().hex}"
+        started_at = datetime.now(timezone.utc)
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    receipt = await uow.agents.get_task_retry_admission(
+                        plan.task_id,
+                        plan.retry_request_id,
+                    )
+                    if receipt is not None:
+                        admission = await self._replay_retry_admission_in_uow(
+                            uow,
+                            plan=plan,
+                            receipt=receipt,
+                        )
+                        await uow.commit()
+                        return admission
+
+                    try:
+                        snapshot = await revalidate_retry_plan_in_uow(
+                            uow,
+                            plan,
+                        )
+                    except (RetryPlanRejected, RetryPlanDeferred) as exc:
+                        await uow.rollback()
+                        replay = await self._probe_retry_replay(plan)
+                        if replay is not None:
+                            return replay
+                        raise self._retry_consume_error(exc) from exc
+
+                    source = snapshot.execution
+                    delegated = snapshot.delegated
+                    normalized_execution_values = (
+                        _normalize_execution_store_values(
+                            {
+                                "id": execution_id,
+                                "session_id": plan.session_id,
+                                "agent_id": plan.source_agent_id,
+                                "task_id": plan.task_id,
+                                "branch_id": plan.branch_id,
+                                "parent_execution_id":
+                                    plan.parent_execution_id,
+                                "retry_of_execution_id":
+                                    plan.source_execution_id,
+                                "base_execution_id":
+                                    plan.base_execution_id,
+                                "base_checkpoint_id":
+                                    plan.base_checkpoint_id,
+                                "correlation_id": plan.correlation_id,
+                                "state": "RUNNING",
+                                "wait_reason": None,
+                                "revision": 1,
+                                "current_checkpoint_id": None,
+                                "bound_client_id": None,
+                                "bound_connection_id": None,
+                                "remaining_active_budget_seconds":
+                                    plan.fresh_active_budget_seconds,
+                                "wait_expires_at": None,
+                                "request": dict(source.request or {}),
+                                "result": None,
+                                "context_state": None,
+                                "transcript": None,
+                                "inference_request": None,
+                                "inference_response": None,
+                                "error": None,
+                                "started_at": started_at,
+                                "completed_at": None,
+                            }
+                        )
+                    )
+                    reservation_execution_values = to_json_safe(
+                        normalized_execution_values,
+                        path="task_budget.retry_execution_reservation",
+                    )
+                    execution_payload = {
+                        "retry_request_id": plan.retry_request_id,
+                        "plan_fingerprint": plan.plan_fingerprint,
+                        "source_execution_id": plan.source_execution_id,
+                        "execution_id": execution_id,
+                        "execution_values": reservation_execution_values,
+                        "delegated": delegated,
+                    }
+                    execution_fingerprint = _reservation_fingerprint(
+                        TaskBudgetReservationKind.NEW_EXECUTION,
+                        execution_id,
+                        execution_payload,
+                    )
+
+                    # Same-Branch RETRY changes the branch-head activity graph.
+                    # Bump Task revision even if visible status stays RUNNING.
+                    updated_task = await uow.agents.compare_and_set_task(
+                        plan.task_id,
+                        plan.expected_task_revision,
+                        {
+                            "status": "RUNNING",
+                            "wait_reasons": [],
+                        },
+                    )
+                    if updated_task is None:
+                        await uow.rollback()
+                        continue
+
+                    budget = snapshot.budget
+                    budget_updates = {
+                        "used_executions":
+                            int(budget.used_executions) + 1,
+                        "active_executions":
+                            int(budget.active_executions) + 1,
+                    }
+                    if delegated:
+                        budget_updates["active_parallel_agents"] = (
+                            int(budget.active_parallel_agents) + 1
+                        )
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            plan.task_id,
+                            plan.expected_task_budget_revision,
+                            budget_updates,
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.agents.save_execution(
+                        normalized_execution_values
+                    )
+                    branch = await uow.agents.compare_and_set_task_branch(
+                        plan.branch_id,
+                        plan.expected_branch_revision,
+                        {"current_execution_id": execution_id},
+                    )
+                    if branch is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": plan.task_id,
+                            "kind":
+                                TaskBudgetReservationKind.NEW_EXECUTION.value,
+                            "reservation_key": execution_id,
+                            "payload_fingerprint": execution_fingerprint,
+                        }
+                    )
+                    await uow.agents.save_task_retry_admission(
+                        {
+                            "task_id": plan.task_id,
+                            "retry_request_id": plan.retry_request_id,
+                            "plan_fingerprint": plan.plan_fingerprint,
+                            "branch_id": plan.branch_id,
+                            "source_execution_id":
+                                plan.source_execution_id,
+                            "source_checkpoint_id":
+                                plan.source_checkpoint_id,
+                            "execution_id": execution_id,
+                            "created_by": plan.target_user_id,
+                        }
+                    )
+
+                    await uow.commit()
+                    return RetryAdmission(
+                        task_id=plan.task_id,
+                        retry_request_id=plan.retry_request_id,
+                        plan_fingerprint=plan.plan_fingerprint,
+                        branch_id=plan.branch_id,
+                        branch_revision=int(branch.revision),
+                        source_execution_id=plan.source_execution_id,
+                        source_checkpoint_id=plan.source_checkpoint_id,
+                        execution_id=execution_id,
+                        execution_revision=1,
+                        task_revision=int(updated_task.revision),
+                        task_budget_revision=int(updated_budget.revision),
+                    )
+            except IntegrityError:
+                replay = await self._probe_retry_replay(plan)
+                if replay is not None:
+                    return replay
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    replay = await self._probe_retry_replay(plan)
+                    if replay is not None:
+                        return replay
+                    continue
+                raise
+
+        replay = await self._probe_retry_replay(plan)
+        if replay is not None:
+            return replay
+        raise RetryConsumeConflict(
+            "RETRY_CONSUME_CONFLICT",
+            f"Atomic RETRY consume conflicts exhausted for {plan.task_id}.",
         )
 
     @staticmethod
@@ -2940,6 +3291,10 @@ __all__ = [
     "ForkConsumeRejected",
     "ForkConsumeDeferred",
     "ForkConsumeConflict",
+    "RetryConsumeError",
+    "RetryConsumeRejected",
+    "RetryConsumeDeferred",
+    "RetryConsumeConflict",
     "TaskBudgetClosedError",
     "TaskBudgetConflictError",
     "TaskBudgetError",
