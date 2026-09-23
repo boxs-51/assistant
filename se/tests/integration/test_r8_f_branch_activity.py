@@ -5,6 +5,7 @@ import asyncio
 import pytest
 
 from se.src.infrastructure.storage.models.sql.agent import AgentIterationRecord
+from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.runtimes.agent.task_budget import ForkConsumeError
 
 from se.src.domain.schemas.agent import AgentDefinition
@@ -716,5 +717,126 @@ async def test_r8_f_waiting_activity_cas_requires_exact_live_reason_set(tmp_path
             "CONNECTION",
             "RESOURCE",
         ]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_task_wait_timeout_rolls_back_with_activity_cas_loss(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_atomic_wait_timeout_activity.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-atomic-wait-timeout",
+        )
+        admission = await service.consume_fork_plan(source["plan"])
+        store = _store(sessions)
+        activation = await _activate(store, admission)
+
+        # Put the fork sibling into WAITING so expiring the source branch must
+        # remove only RESOURCE from the aggregate reason set and keep
+        # CONNECTION projected.
+        assert await service.finish_task_scoped_execution(
+            source["task_id"],
+            execution_id=admission.execution_id,
+            source_revision=activation.activated_execution_revision,
+            transition_values={
+                "state": "WAITING",
+                "wait_reason": "CONNECTION",
+                "remaining_active_budget_seconds": 30.0,
+                "wait_expires_at": None,
+                "completed_at": None,
+            },
+            delegated=False,
+        ) == 3
+        aggregated = await service.reconcile_multibranch_task_activity(
+            source["task_id"]
+        )
+        assert str(aggregated.status) == "WAITING"
+        assert list(aggregated.wait_reasons or []) == [
+            "CONNECTION",
+            "RESOURCE",
+        ]
+
+        before_budget = await service.get_budget(source["task_id"])
+        original = AgentRepository.compare_and_set_task_activity
+        losses = 0
+
+        async def lose_first_activity(
+            self,
+            task_id,
+            expected_revision,
+            *,
+            target_state,
+            wait_reasons,
+        ):
+            nonlocal losses
+            if task_id == source["task_id"] and losses == 0:
+                losses += 1
+                staged = await self.get_execution(
+                    source["source_execution_id"]
+                )
+                # Prove TIMEOUT is staged before aggregate activity and must
+                # therefore be rolled back with this lost activity CAS.
+                assert str(staged.state) == "TIMEOUT"
+                assert int(staged.revision) == 3
+                return None
+            return await original(
+                self,
+                task_id,
+                expected_revision,
+                target_state=target_state,
+                wait_reasons=wait_reasons,
+            )
+
+        monkeypatch.setattr(
+            AgentRepository,
+            "compare_and_set_task_activity",
+            lose_first_activity,
+        )
+
+        revision = await service.expire_task_scoped_waiting_execution(
+            source["task_id"],
+            execution_id=source["source_execution_id"],
+            source_revision=2,
+            transition_values={
+                "state": "TIMEOUT",
+                "wait_reason": None,
+                "wait_expires_at": None,
+                "remaining_active_budget_seconds": 30.0,
+                "error": "WAIT_TTL_EXPIRED",
+            },
+        )
+
+        assert revision == 3
+        assert losses == 1
+
+        async with _Uow(sessions) as uow:
+            source_execution = await uow.agents.get_execution(
+                source["source_execution_id"]
+            )
+            sibling_execution = await uow.agents.get_execution(
+                admission.execution_id
+            )
+            task = await uow.agents.get_task(source["task_id"])
+            await uow.commit()
+
+        after_budget = await service.get_budget(source["task_id"])
+        assert str(source_execution.state) == "TIMEOUT"
+        assert int(source_execution.revision) == 3
+        assert str(sibling_execution.state) == "WAITING"
+        assert int(sibling_execution.revision) == 3
+        assert str(task.status) == "WAITING"
+        assert list(task.wait_reasons or []) == ["CONNECTION"]
+        assert after_budget.active_executions == before_budget.active_executions
+        assert after_budget.active_branches == before_budget.active_branches
     finally:
         await engine.dispose()
