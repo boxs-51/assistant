@@ -61,7 +61,16 @@ async def await_with_provider_deadline(
                 provider_name=provider_name,
             )
 
-        result = await child
+        result: Any = None
+        terminal_error: Exception | None = None
+        terminal_cancel: asyncio.CancelledError | None = None
+        try:
+            result = child.result()
+        except asyncio.CancelledError as error:
+            terminal_cancel = error
+        except Exception as error:
+            terminal_error = error
+
         if call_budget.remaining_seconds(
             now_monotonic=clock()
         ) <= 0:
@@ -69,6 +78,11 @@ async def await_with_provider_deadline(
                 timeout_message,
                 provider_name=provider_name,
             )
+
+        if terminal_cancel is not None:
+            raise terminal_cancel
+        if terminal_error is not None:
+            raise terminal_error
         return result
     except asyncio.CancelledError:
         if not child.done():
