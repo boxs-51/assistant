@@ -8,12 +8,23 @@ import pytest
 from sqlalchemy import text
 
 from se.src.domain.schemas.task_budget import TaskBudgetPolicy
+from se.src.infrastructure.storage.models.sql.agent import (
+    AgentCheckpointPendingInvocationRecord,
+    AgentIterationRecord,
+    AgentToolResultRecord,
+)
+from se.src.infrastructure.storage.models.sql.capability import (
+    CapabilityInvocationRecord,
+)
 from se.src.runtimes.agent.contracts.retry import (
     RetryAdmission,
     retry_plan_fingerprint,
 )
 from se.src.runtimes.agent.persistence import DurableAgentStore
-from se.src.runtimes.agent.retry_planning import AgentRetryPlanningService
+from se.src.runtimes.agent.retry_planning import (
+    AgentRetryPlanningService,
+    RetryPlanRejected,
+)
 from se.src.runtimes.agent.task_budget import (
     RetryConsumeConflict,
     TaskBudgetService,
@@ -56,6 +67,10 @@ async def _seed_failed_source(
     task_id: str,
     retry_request_id: str = "retry-r9-b",
     source_checkpoint_id: str | None = None,
+    checkpoint_tool_order: tuple[str, ...] = (),
+    provisional_tool_call_id: str | None = None,
+    pending_checkpoint_invocation: bool = False,
+    remote_outcome_state: str = "TERMINAL_COMMITTED",
 ):
     session_id = f"session-{task_id}"
     execution_id = f"exec-{task_id}"
@@ -108,7 +123,61 @@ async def _seed_failed_source(
         checkpoint_transcript = [
             {"role": "user", "content": "explicit retry checkpoint"}
         ]
+        iteration_id = f"iter-retry-{task_id}"
         async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentIterationRecord(
+                    id=iteration_id,
+                    execution_id=execution_id,
+                    iteration=1,
+                    state="COMPLETED",
+                    tool_call_ids=list(checkpoint_tool_order),
+                )
+            )
+            for tool_call_id in checkpoint_tool_order:
+                suffix = tool_call_id.removeprefix("call-")
+                output = {"value": suffix.upper()}
+                uow.session.add(
+                    CapabilityInvocationRecord(
+                        invocation_id=f"inv-{suffix}-{task_id}",
+                        capability_id=f"tool.{suffix}",
+                        capability_version="1",
+                        kind="TOOL",
+                        execution_mode="SYNC",
+                        idempotency="IDEMPOTENT",
+                        request_fingerprint=f"fp-{suffix}-{task_id}",
+                        remote_outcome_state=remote_outcome_state,
+                        implementation_id=f"impl-{suffix}",
+                        driver_kind="REMOTE_CLIENT",
+                        state="COMPLETED",
+                        execution_id=execution_id,
+                        tool_call_id=tool_call_id,
+                        attempt=1,
+                        max_attempts=1,
+                        arguments={},
+                        output=output,
+                        revision=3,
+                    )
+                )
+                uow.session.add(
+                    AgentToolResultRecord(
+                        id=f"result-{suffix}-{task_id}",
+                        execution_id=execution_id,
+                        iteration_id=iteration_id,
+                        tool_call_id=tool_call_id,
+                        invocation_id=f"inv-{suffix}-{task_id}",
+                        capability_id=f"tool.{suffix}",
+                        success=True,
+                        output=output,
+                        retryable=False,
+                        commit_state=(
+                            "PROVISIONAL"
+                            if tool_call_id == provisional_tool_call_id
+                            else "COMMITTED"
+                        ),
+                        attempt=1,
+                    )
+                )
             await uow.agents.save_execution_checkpoint(
                 {
                     "checkpoint_id": source_checkpoint_id,
@@ -125,6 +194,21 @@ async def _seed_failed_source(
                     "metadata_json": {},
                 }
             )
+            if pending_checkpoint_invocation:
+                uow.session.add(
+                    AgentCheckpointPendingInvocationRecord(
+                        checkpoint_id=source_checkpoint_id,
+                        ordinal=0,
+                        invocation_id=f"pending-{task_id}",
+                        invocation_revision=1,
+                        tool_call_id=f"pending-call-{task_id}",
+                        capability_id="tool.pending",
+                        capability_version="1",
+                        request_fingerprint=f"pending-fp-{task_id}",
+                        idempotency="IDEMPOTENT",
+                        observed_remote_outcome_state="TERMINAL_COMMITTED",
+                    )
+                )
             updated = await uow.agents.compare_and_set_execution(
                 execution_id,
                 2,
@@ -221,6 +305,105 @@ async def test_r9_b_explicit_checkpoint_becomes_retry_base_lineage(tmp_path):
         assert retry.transcript == [
             {"role": "user", "content": "explicit retry checkpoint"}
         ]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_b_checkpoint_retry_accepts_safe_committed_tool_history_in_order(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_b_safe_checkpoint_tools.sqlite"
+    )
+    try:
+        checkpoint_id = "checkpoint-r9-b-safe-tools"
+        _root, plan = await _seed_failed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-b-safe-tools",
+            source_checkpoint_id=checkpoint_id,
+            checkpoint_tool_order=("call-b", "call-a"),
+        )
+        assert plan.source_checkpoint_transcript_fingerprint is not None
+
+        admission = await service.consume_retry_plan(plan)
+        async with _Uow(sessions) as uow:
+            retry = await uow.agents.get_execution(admission.execution_id)
+
+        assert [item["role"] for item in retry.transcript] == [
+            "user",
+            "tool",
+            "tool",
+        ]
+        assert [
+            item["tool_call_id"]
+            for item in retry.transcript
+            if item["role"] == "tool"
+        ] == ["call-b", "call-a"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_b_checkpoint_retry_rejects_provisional_tool_projection(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_b_provisional_checkpoint.sqlite"
+    )
+    try:
+        with pytest.raises(RetryPlanRejected) as raised:
+            await _seed_failed_source(
+                sessions,
+                service,
+                planner,
+                task_id="task-r9-b-provisional",
+                source_checkpoint_id="checkpoint-r9-b-provisional",
+                checkpoint_tool_order=("call-a",),
+                provisional_tool_call_id="call-a",
+            )
+        assert raised.value.code == "RETRY_CHECKPOINT_UNSAFE"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_b_checkpoint_retry_rejects_pending_invocation_snapshot(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_b_pending_checkpoint.sqlite"
+    )
+    try:
+        with pytest.raises(RetryPlanRejected) as raised:
+            await _seed_failed_source(
+                sessions,
+                service,
+                planner,
+                task_id="task-r9-b-pending",
+                source_checkpoint_id="checkpoint-r9-b-pending",
+                pending_checkpoint_invocation=True,
+            )
+        assert raised.value.code == "RETRY_CHECKPOINT_CONFLICT"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_b_checkpoint_retry_rejects_unsafe_remote_outcome(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_b_unsafe_remote_checkpoint.sqlite"
+    )
+    try:
+        with pytest.raises(RetryPlanRejected) as raised:
+            await _seed_failed_source(
+                sessions,
+                service,
+                planner,
+                task_id="task-r9-b-unsafe-remote",
+                source_checkpoint_id="checkpoint-r9-b-unsafe-remote",
+                checkpoint_tool_order=("call-a",),
+                remote_outcome_state="OUTCOME_UNKNOWN",
+            )
+        assert raised.value.code == "RETRY_CHECKPOINT_UNSAFE"
     finally:
         await engine.dispose()
 
