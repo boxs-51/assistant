@@ -21,6 +21,7 @@ from se.src.runtimes.agent.contracts.retry import (
     RetryReplayResult,
 )
 from se.src.runtimes.agent.coordinator import MultiAgentCoordinator
+from se.src.runtimes.agent.persistence import AggregateControlError
 from se.src.runtimes.agent.task_budget import (
     AggregateAdmissionError,
     BranchResolutionError,
@@ -90,6 +91,22 @@ def test_r9_g_active_branch_discard_conflict_maps_to_409():
         "code": "BRANCH_EXECUTION_ACTIVE",
         "message": "branch execution still owns runtime authority",
         "retryable": False,
+    }
+
+
+def test_r9_g_aggregate_control_conflict_keeps_public_envelope():
+    mapped = map_error(
+        AggregateControlError(
+            "AGGREGATE_ACTIVATION_CONFLICT",
+            "another activation won",
+            retryable=True,
+        )
+    )
+    assert mapped.status_code == 409
+    assert mapped.detail == {
+        "code": "AGGREGATE_ACTIVATION_CONFLICT",
+        "message": "another activation won",
+        "retryable": True,
     }
 
 
@@ -188,6 +205,74 @@ async def test_r9_g_retry_committed_replay_is_identity_only():
         "retry_request_id": "request-r9-g",
         "branch_id": BRANCH,
         "execution_id": EXECUTION,
+        "execution_state": "RUNNING",
+        "execution_revision": 2,
+        "started": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_r9_g_aggregate_activated_replay_is_identity_only():
+    aggregate_execution = "aggregate-r9-g-replay"
+    admission = AggregateAdmission(
+        task_id=TASK,
+        aggregate_request_id="aggregate-g-replay",
+        plan_fingerprint="e" * 64,
+        runtime_seed_fingerprint="f" * 64,
+        target_branch_id=BRANCH,
+        branch_revision=2,
+        execution_id=aggregate_execution,
+        execution_revision=2,
+        source_branch_ids=(BRANCH, "branch-2"),
+        task_revision=3,
+        task_budget_revision=4,
+    )
+
+    class Store:
+        async def load_execution(self, execution_id):
+            assert execution_id == aggregate_execution
+            return SimpleNamespace(
+                id=execution_id,
+                agent_id="agent-r9-g",
+                state="RUNNING",
+                revision=2,
+            )
+
+        async def prepare_aggregate_execution_context(self, *args, **kwargs):
+            raise AssertionError("activated replay must not bootstrap again")
+
+    async def aggregate_branches(*args, **kwargs):
+        return admission
+
+    container = SimpleNamespace(
+        agent_durable_store=Store(),
+        task_budget_service=SimpleNamespace(
+            aggregate_branches=aggregate_branches
+        ),
+        agent_registry=SimpleNamespace(
+            get=lambda *_: (_ for _ in ()).throw(
+                AssertionError("identity replay must not resolve agent")
+            )
+        ),
+        agent_execution_supervisor=SimpleNamespace(),
+        agent_runtime=SimpleNamespace(),
+    )
+    response = await execute_aggregated_agent_task_control_plane(
+        container,
+        TASK,
+        AgentTaskAggregateRequest(
+            aggregate_request_id="aggregate-g-replay",
+            target_branch_id=BRANCH,
+            source_branch_ids=[BRANCH, "branch-2"],
+        ),
+        _identity(),
+    )
+    assert response == {
+        "task_id": TASK,
+        "aggregate_request_id": "aggregate-g-replay",
+        "target_branch_id": BRANCH,
+        "source_branch_ids": [BRANCH, "branch-2"],
+        "execution_id": aggregate_execution,
         "execution_state": "RUNNING",
         "execution_revision": 2,
         "started": False,
