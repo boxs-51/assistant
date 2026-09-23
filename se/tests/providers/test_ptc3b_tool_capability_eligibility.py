@@ -158,6 +158,20 @@ async def test_ptc3b_empty_tools_nonstream_behaves_like_no_tools():
 
 
 @pytest.mark.asyncio
+async def test_ptc3b_null_tools_nonstream_behaves_like_no_tools():
+    provider = _Provider("p1")
+    handler, executor = _handler([provider])
+    body = _tool_body(tools=None)
+    body["tools"] = None
+
+    result = await handler.execute_with_fallback(object(), body)
+
+    assert result == "p1-ok"
+    assert _caps(provider) == [ModelCapability.CHAT]
+    assert executor.provider_calls == ["p1"]
+
+
+@pytest.mark.asyncio
 async def test_ptc3b_tools_nonstream_requires_chat_then_tool_calling():
     provider = _Provider("p1")
     handler, executor = _handler([provider])
@@ -274,7 +288,10 @@ async def test_ptc3b_chat_false_short_circuits_tool_probe_before_fallback():
 
 
 @pytest.mark.asyncio
-async def test_ptc3b_strict_tool_ineligible_fails_closed_without_second_provider():
+@pytest.mark.parametrize("routing_type", ["strict", "direct"])
+async def test_ptc3b_strict_direct_tool_ineligible_fails_closed_without_second_provider(
+    routing_type,
+):
     p1 = _Provider(
         "p1",
         {
@@ -303,7 +320,7 @@ async def test_ptc3b_strict_tool_ineligible_fails_closed_without_second_provider
             _tool_body(
                 metadata={
                     "routing": {
-                        "type": "strict",
+                        "type": routing_type,
                         "prefer_provider": "p1",
                     }
                 }
@@ -718,7 +735,10 @@ async def test_ptc3b_deadline_expiry_between_chat_and_tool_probe_starts_no_execu
 
 
 @pytest.mark.asyncio
-async def test_ptc3b_strict_tool_probe_error_preserves_error_and_never_falls_back():
+@pytest.mark.parametrize("routing_type", ["strict", "direct"])
+async def test_ptc3b_strict_direct_tool_probe_error_preserves_error_and_never_falls_back(
+    routing_type,
+):
     tool_error = ProviderUnavailableError(
         "tool capability probe failed",
         provider_name="p1",
@@ -748,7 +768,7 @@ async def test_ptc3b_strict_tool_probe_error_preserves_error_and_never_falls_bac
             _tool_body(
                 metadata={
                     "routing": {
-                        "type": "strict",
+                        "type": routing_type,
                         "prefer_provider": "p1",
                     }
                 }
@@ -759,6 +779,42 @@ async def test_ptc3b_strict_tool_probe_error_preserves_error_and_never_falls_bac
     assert executor.provider_calls == []
     assert raised.value.provider_name == "p1"
     assert raised.value.__cause__ is tool_error
+
+
+@pytest.mark.asyncio
+async def test_ptc3b_stream_enable_fallback_false_tool_ineligible_stays_single_provider():
+    p1 = _Provider(
+        "p1",
+        {
+            ModelCapability.CHAT_STREAM: True,
+            ModelCapability.TOOL_CALLING: False,
+        },
+    )
+    p2 = _Provider("p2")
+    config = SimpleNamespace(
+        priority=["p1", "p2"],
+        routing_rules_path="__ptc3b_missing_rules__.yaml",
+        enable_fallback=False,
+    )
+    routing = RoutingPolicy(
+        providers={"p1": p1, "p2": p2},
+        config=config,
+    )
+    handler, executor = _handler([p1, p2], routing=routing)
+
+    with pytest.raises(NoAvailableProviderError):
+        async for _ in handler.stream_with_fallback(
+            object(),
+            _tool_body(),
+        ):
+            pass
+
+    assert _caps(p1) == [
+        ModelCapability.CHAT_STREAM,
+        ModelCapability.TOOL_CALLING,
+    ]
+    assert p2.calls == []
+    assert executor.stream_calls == []
 
 
 @pytest.mark.asyncio
