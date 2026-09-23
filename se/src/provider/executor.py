@@ -219,6 +219,7 @@ class ProviderExecutor:
             stream_iterator = provider.chat.chat_stream(
                 **attempt_kwargs
             ).__aiter__()
+            next_chunk_task: asyncio.Task | None = None
             try:
                 while True:
                     try:
@@ -243,16 +244,26 @@ class ProviderExecutor:
                                     next_chunk_task,
                                     return_exceptions=True,
                                 )
+                                next_chunk_task = None
                                 raise ProviderDeadlineExceededError(
                                     "Provider stream deadline exceeded.",
                                     provider_name=provider.name,
                                 )
                             chunk = await next_chunk_task
+                            next_chunk_task = None
                     except StopAsyncIteration:
+                        next_chunk_task = None
                         break
 
                     yield chunk
             finally:
+                if next_chunk_task is not None:
+                    if not next_chunk_task.done():
+                        next_chunk_task.cancel()
+                    await asyncio.gather(
+                        next_chunk_task,
+                        return_exceptions=True,
+                    )
                 aclose = getattr(stream_iterator, "aclose", None)
                 if callable(aclose):
                     await aclose()
