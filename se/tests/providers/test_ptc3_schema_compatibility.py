@@ -120,7 +120,7 @@ def test_legacy_uppercase_type_tokens_normalize_recursively_on_provider_copy():
     assert body == original
 
 
-def test_gemini_json_schema_root_must_describe_an_object():
+def test_non_object_parameter_roots_fail_closed_for_all_providers():
     body = _body(
         {
             "type": "array",
@@ -128,14 +128,20 @@ def test_gemini_json_schema_root_must_describe_an_object():
         }
     )
 
-    with pytest.raises(
-        ProviderToolContractError,
-        match="root must be type 'object'",
-    ):
-        GeminiRequestChats().adapt_chat(body)
+    adapters = [
+        ("openai", lambda: OpenAIRequestChats().adapt_chat_request(body)),
+        ("gemini", lambda: GeminiRequestChats().adapt_chat(body)),
+        ("ollama", lambda: OllamaRequestChats().adapt_chat_request(body)),
+    ]
+    for provider, lower in adapters:
+        with pytest.raises(
+            ProviderToolContractError,
+            match=rf"{provider} .*root must be type 'object'",
+        ):
+            lower()
 
 
-def test_gemini_missing_root_type_is_provider_normalized_without_source_mutation():
+def test_missing_root_type_is_normalized_for_all_providers_without_source_mutation():
     body = _body(
         {
             "properties": {
@@ -147,12 +153,39 @@ def test_gemini_missing_root_type_is_provider_normalized_without_source_mutation
     )
     original = deepcopy(body)
 
-    prepared = GeminiRequestChats().adapt_chat(body)
-    schema = prepared["tools"][0]["function_declarations"][0][
-        "parametersJsonSchema"
-    ]
+    openai = OpenAIRequestChats().adapt_chat_request(body)
+    gemini = GeminiRequestChats().adapt_chat(body)
+    ollama = OllamaRequestChats().adapt_chat_request(body)
 
-    assert schema["type"] == "object"
-    assert schema["properties"]["query"]["type"] == "string"
-    assert schema["additionalProperties"] is False
+    schemas = [
+        openai["tools"][0]["function"]["parameters"],
+        gemini["tools"][0]["function_declarations"][0]["parametersJsonSchema"],
+        ollama["tools"][0]["function"]["parameters"],
+    ]
+    for schema in schemas:
+        assert schema["type"] == "object"
+        assert schema["properties"]["query"]["type"] == "string"
+        assert schema["additionalProperties"] is False
+
+    assert body == original
+
+
+def test_empty_parameter_schema_is_bounded_to_empty_object_for_all_providers():
+    body = _body({})
+    original = deepcopy(body)
+
+    openai = OpenAIRequestChats().adapt_chat_request(body)
+    gemini = GeminiRequestChats().adapt_chat(body)
+    ollama = OllamaRequestChats().adapt_chat_request(body)
+
+    schemas = [
+        openai["tools"][0]["function"]["parameters"],
+        gemini["tools"][0]["function_declarations"][0]["parametersJsonSchema"],
+        ollama["tools"][0]["function"]["parameters"],
+    ]
+    assert schemas == [
+        {"type": "object", "properties": {}},
+        {"type": "object", "properties": {}},
+        {"type": "object", "properties": {}},
+    ]
     assert body == original
