@@ -153,6 +153,89 @@ def build_provider_tool_name_map(
     )
 
 
+_JSON_SCHEMA_TYPES = frozenset(
+    {"null", "boolean", "object", "array", "number", "string", "integer"}
+)
+_SCHEMA_MAP_KEYWORDS = frozenset(
+    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+)
+_SCHEMA_SINGLE_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "unevaluatedProperties",
+        "propertyNames",
+        "contains",
+        "items",
+        "not",
+        "if",
+        "then",
+        "else",
+        "contentSchema",
+    }
+)
+_SCHEMA_LIST_KEYWORDS = frozenset(
+    {"prefixItems", "allOf", "anyOf", "oneOf"}
+)
+
+
+def _normalize_json_schema_type_tokens(schema: Any) -> Any:
+    """Normalize legacy uppercase JSON-Schema type tokens on a provider copy.
+
+    Older Gateway/provider-adapter fixtures used OpenAPI-style uppercase type
+    values. Provider tool schemas are JSON Schema at the PTC boundary, so
+    recognized primitive type tokens are canonicalized to lowercase recursively
+    through schema-bearing keywords. Instance values under default/const/enum
+    are intentionally not traversed.
+    """
+
+    if isinstance(schema, bool):
+        return schema
+    if not isinstance(schema, Mapping):
+        return schema
+
+    normalized = dict(schema)
+    schema_type = normalized.get("type")
+    if isinstance(schema_type, str):
+        lowered = schema_type.lower()
+        if lowered in _JSON_SCHEMA_TYPES:
+            normalized["type"] = lowered
+    elif isinstance(schema_type, list):
+        normalized["type"] = [
+            (
+                item.lower()
+                if isinstance(item, str) and item.lower() in _JSON_SCHEMA_TYPES
+                else item
+            )
+            for item in schema_type
+        ]
+
+    for keyword in _SCHEMA_MAP_KEYWORDS:
+        child_map = normalized.get(keyword)
+        if isinstance(child_map, Mapping):
+            normalized[keyword] = {
+                key: _normalize_json_schema_type_tokens(value)
+                for key, value in child_map.items()
+            }
+
+    for keyword in _SCHEMA_SINGLE_KEYWORDS:
+        child = normalized.get(keyword)
+        if isinstance(child, (Mapping, bool)):
+            normalized[keyword] = _normalize_json_schema_type_tokens(child)
+        elif keyword == "items" and isinstance(child, list):
+            normalized[keyword] = [
+                _normalize_json_schema_type_tokens(value) for value in child
+            ]
+
+    for keyword in _SCHEMA_LIST_KEYWORDS:
+        children = normalized.get(keyword)
+        if isinstance(children, list):
+            normalized[keyword] = [
+                _normalize_json_schema_type_tokens(value) for value in children
+            ]
+
+    return normalized
+
+
 def normalize_provider_tool_schema(
     provider: str,
     schema: Mapping[str, Any] | None,
@@ -173,7 +256,7 @@ def normalize_provider_tool_schema(
     normalized = deepcopy(dict(schema))
     # $schema selects a meta-schema/dialect rather than constraining instances.
     normalized.pop("$schema", None)
-    return normalized
+    return _normalize_json_schema_type_tokens(normalized)
 
 
 @dataclass(frozen=True, slots=True)
