@@ -709,6 +709,22 @@ R7 resume vs standalone reconcile:
 It must always re-read current branch/execution state while holding this Task
 serialization authority before writing.
 
+Because SQLite does not provide the same row-level `FOR UPDATE` semantics,
+the final Task activity UPDATE must also carry a live branch-head predicate:
+
+```text
+target RUNNING:
+    EXISTS OPEN current branch head in CREATED/RUNNING
+
+target WAITING:
+    NOT EXISTS OPEN current branch head in CREATED/RUNNING
+    AND EXISTS OPEN current branch head in WAITING/WAITING_FOR_CONNECTION
+```
+
+This conditional activity CAS is a dialect backstop, not a replacement for the
+Task-first lock order on row-locking databases. If the live predicate loses,
+the reconciliation transaction retries from a fresh branch snapshot.
+
 ---
 
 # 14. P0-R8F-7 — public FORK must be durable replay-first
@@ -1360,6 +1376,9 @@ Every aggregate Task activity writer serializes on AgentTask before taking its b
 
 R8F-I11D
 R7 task-scoped resume preserves Task -> TaskBudget/execution -> activity lock order and cannot leave Task WAITING after the current branch resumes RUNNING.
+
+R8F-I11E
+Aggregate Task activity CAS is guarded by live branch-head SQL predicates so SQLite/non-row-locking execution cannot commit a stale WAITING state beside a current RUNNING branch.
 
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
