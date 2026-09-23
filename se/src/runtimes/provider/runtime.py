@@ -9,7 +9,7 @@ from ...provider.registry import ProviderRegistry
 from ...provider.discovery import ProviderDiscovery
 from ...provider.policies.routing_policy import RoutingPolicy
 from ...provider.executor import ProviderExecutor
-from ...provider.exceptions import NoAvailableProviderError
+from ...provider.exceptions import NoAvailableProviderError, ProviderError
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 
@@ -20,6 +20,28 @@ from ...provider.handlers.model_handler import ModelOperationHandler
 from ...provider.handlers.file_handler import FileOperationHandler
 
 logger = structlog.get_logger(__name__)
+
+
+def _provider_failure_payload(
+    error: Exception,
+    *,
+    status_code: int,
+) -> Dict[str, Any]:
+    """Preserve legacy transport status while exposing stable provider metadata."""
+
+    payload: Dict[str, Any] = {
+        "error": str(error),
+        "status_code": status_code,
+    }
+    if isinstance(error, ProviderError):
+        payload.update(
+            error_code=error.code,
+            failure_domain=error.failure_domain,
+            retryable=bool(error.retryable),
+        )
+        if error.provider_name:
+            payload["provider"] = error.provider_name
+    return payload
 
 class ProviderRuntime(BaseRuntime):
     """
@@ -162,7 +184,10 @@ class ProviderRuntime(BaseRuntime):
                 event_name="provider.failed",
                 session_id=session_id,
                 turn_id=event.turn_id,
-                payload={"error": str(e), "status_code": 503}
+                payload=_provider_failure_payload(
+                    e,
+                    status_code=503,
+                )
             ))
         except Exception as e:
             logger.error("Unhandled error in ProviderRuntime", error=str(e))
@@ -170,7 +195,10 @@ class ProviderRuntime(BaseRuntime):
                 event_name="provider.failed",
                 session_id=session_id,
                 turn_id=event.turn_id,
-                payload={"error": str(e), "status_code": 500}
+                payload=_provider_failure_payload(
+                    e,
+                    status_code=500,
+                )
             ))
 
     async def _handle_execute_embeddings(self, event: BaseEvent) -> None:
