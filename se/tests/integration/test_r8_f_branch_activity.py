@@ -619,3 +619,102 @@ async def test_r8_f_fork_consume_vs_standalone_reconcile_has_no_waiting_running_
         assert not isinstance(reconcile_outcome, BaseException)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_waiting_activity_cas_requires_exact_live_reason_set(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_waiting_reason_exact_set.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-wait-reason-exact",
+        )
+        first_admission = await service.consume_fork_plan(source["plan"])
+        second_admission = await _second_fork(
+            planner,
+            service,
+            source,
+            suffix="r8-f-wait-reason-exact-2",
+        )
+        store = _store(sessions)
+        first_activation = await _activate(store, first_admission)
+        second_activation = await _activate(store, second_admission)
+
+        async with _Uow(sessions) as uow:
+            first = await uow.agents.compare_and_set_execution(
+                first_admission.execution_id,
+                first_activation.activated_execution_revision,
+                {
+                    "state": "WAITING",
+                    "wait_reason": "HUMAN_APPROVAL",
+                },
+            )
+            second = await uow.agents.compare_and_set_execution(
+                second_admission.execution_id,
+                second_activation.activated_execution_revision,
+                {
+                    "state": "WAITING",
+                    "wait_reason": "CONNECTION",
+                },
+            )
+            assert first is not None
+            assert second is not None
+            task = await uow.agents.get_task(source["task_id"])
+            snapshot_revision = int(task.revision)
+
+            # Missing one currently live reason must fail closed.
+            missing_live_reason = await uow.agents.compare_and_set_task_activity(
+                source["task_id"],
+                snapshot_revision,
+                target_state="WAITING",
+                wait_reasons=["CONNECTION", "RESOURCE"],
+            )
+            assert missing_live_reason is None
+            await uow.commit()
+
+        # Snapshot now contains all three reasons. Remove HUMAN_APPROVAL before
+        # attempting the stale Task WAITING projection.
+        async with _Uow(sessions) as uow:
+            task = await uow.agents.get_task(source["task_id"])
+            snapshot_revision = int(task.revision)
+            first = await uow.agents.get_execution(first_admission.execution_id)
+            terminal = await uow.agents.compare_and_set_execution(
+                first_admission.execution_id,
+                int(first.revision),
+                {
+                    "state": "COMPLETED",
+                    "wait_reason": None,
+                },
+            )
+            assert terminal is not None
+            await uow.commit()
+
+        async with _Uow(sessions) as uow:
+            stale = await uow.agents.compare_and_set_task_activity(
+                source["task_id"],
+                snapshot_revision,
+                target_state="WAITING",
+                wait_reasons=[
+                    "CONNECTION",
+                    "HUMAN_APPROVAL",
+                    "RESOURCE",
+                ],
+            )
+            assert stale is None
+            await uow.commit()
+
+        final = await service.reconcile_multibranch_task_activity(
+            source["task_id"]
+        )
+        assert str(final.status) == "WAITING"
+        assert list(final.wait_reasons or []) == [
+            "CONNECTION",
+            "RESOURCE",
+        ]
+    finally:
+        await engine.dispose()
