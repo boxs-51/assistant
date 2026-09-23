@@ -590,3 +590,180 @@ NONE FOUND
 ```
 
 AE-R10 Provider Retry / Fallback Hardening is frozen at this boundary.
+
+
+---
+
+## 12. Post-merge deadline re-freeze — superseding authority
+
+> **Superseding notice:** this section was added after PR #23 merged into
+> `main@beadd3a48818daec137dcf69647d6f83c09c1a6b`. The original R10-H
+> runtime baseline `dc4e9c10` remains historical stage evidence, but it is no
+> longer the final R10 deadline authority. The post-merge hotfix baseline below
+> supersedes earlier "FINAL RUNTIME/TEST BASELINE" statements in this document.
+
+### 12.1 Post-merge findings
+
+Independent review after PR #23 merge reopened three coupled deadline gaps:
+
+1. **P1-A — non-stream provider/generic attempt hard fence**
+   - passing remaining time as a scalar provider timeout was insufficient;
+   - the whole owned provider/generic await must be bounded by the logical
+     monotonic deadline.
+
+2. **P1-B — capability probe hard fence**
+   - CHAT, CHAT_STREAM and EMBEDDINGS probes must consume the same logical
+     deadline authority;
+   - probe child work must be cancelled/drained on logical timeout.
+
+3. **P1-C — late-error deadline dominance**
+   - a child completing after the deadline with an exception must not allow
+     that provider/probe error to outrank the already-expired logical deadline.
+
+### 12.2 Superseding hard-deadline contract
+
+The final bounded-await contract is:
+
+```text
+remaining = ProviderCallBudget.deadline_monotonic - authoritative_monotonic_now
+
+if remaining <= 0:
+    fail before starting owned child
+
+start owned child
+wait no longer than remaining
+
+if logical timeout:
+    cancel child
+    retrieve/drain child
+    raise PROVIDER_DEADLINE_EXCEEDED
+
+if caller cancellation:
+    cancel child
+    retrieve/drain child
+    re-raise CancelledError
+
+if child completes:
+    retrieve terminal result/error without releasing it
+    re-check the same authoritative monotonic clock
+
+    if logical deadline is now exhausted:
+        PROVIDER_DEADLINE_EXCEEDED wins
+    else:
+        return result or re-raise original child error unchanged
+```
+
+This primitive:
+
+- consumes no retry token itself;
+- does not change provider error taxonomy;
+- preserves caller cancellation;
+- prevents retry/fallback progression after logical deadline exhaustion;
+- gives a started timed-out provider attempt exactly one breaker failure;
+- gives a pre-attempt-expired call zero breaker failure.
+
+Capability probes use the same bounded-await semantics and the same
+handler-owned monotonic clock authority that created/read their
+`ProviderCallBudget`.
+
+### 12.3 Red-first evidence
+
+#### P1-A + P1-B clean RED
+
+```text
+test-only HEAD:
+55ae03726e18dc6998efea08e164cddb3e6b1091
+
+Architecture #913:
+Linux:
+  6 failed
+  1136 passed
+  1 skipped
+Windows:
+  SUCCESS
+```
+
+All six failures were the new R10 deadline tests:
+
+- blocking chat provider attempt lacked a hard fence;
+- blocking generic attempt lacked a hard fence;
+- late success escaped;
+- CHAT capability probe lacked a hard fence;
+- CHAT_STREAM capability probe lacked a hard fence;
+- EMBEDDINGS capability probe lacked a hard fence.
+
+#### P1-C clean RED
+
+```text
+test-only HEAD:
+547ff8105f006f7edc1ad509d2fcb108cc191872
+
+Architecture #923:
+Linux:
+  3 failed
+  1142 passed
+  1 skipped
+Windows:
+  SUCCESS
+```
+
+The three failures proved late provider, generic and capability errors could
+escape instead of yielding logical deadline authority.
+
+### 12.4 Superseding fixed runtime/test baseline
+
+```text
+POST-MERGE R10 HOTFIX RUNTIME/TEST BASELINE:
+bd6107014cd486cd8ab43010304d074ff74a1a0c
+
+Architecture #924:
+Linux:
+  1145 passed
+  1 skipped
+  49 warnings
+Windows:
+  68 passed
+```
+
+Production hotfix ownership is limited to:
+
+```text
+se/src/provider/executor.py
+se/src/provider/handlers/base.py
+se/src/provider/handlers/chat_handler.py
+se/src/provider/handlers/embedding_handler.py
+```
+
+Regression ownership:
+
+```text
+se/tests/providers/test_r10_postmerge_deadline_fence.py
+se/tests/providers/test_r10_d_fallback_budget.py   # deterministic clock fixture only
+```
+
+No TOOL_CALLING/PTC implementation, R11/R12 persistence/lease work, or
+CTX/Central Asset production behavior was added.
+
+### 12.5 Final re-freeze rule
+
+After this post-merge hotfix is integrated:
+
+- `bd6107014cd486cd8ab43010304d074ff74a1a0c` is the immutable R10
+  runtime/test semantic baseline;
+- the eventual main merge commit is the integration wrapper around that
+  baseline;
+- PTC-3B must reuse this bounded capability-probe/deadline primitive rather
+  than implement an independent timeout policy;
+- any runtime edit after this baseline reopens the affected R10 invariant and
+  requires red-first regression plus exact-head Linux/Windows CI evidence.
+
+Post-merge blocking status at this re-freeze candidate:
+
+```text
+P1-A hard provider/generic attempt fence: CLOSED BY TEST + FIX
+P1-B hard capability probe fence:         CLOSED BY TEST + FIX
+P1-C late-error deadline dominance:       CLOSED BY TEST + FIX
+
+BLOCKING P0: NONE FOUND
+BLOCKING P1: NONE FOUND AT bd610701
+```
