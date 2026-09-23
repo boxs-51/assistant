@@ -14,7 +14,7 @@ from typing import Any, Callable, Dict, Optional
 
 import psutil
 
-from tools.v1._shared.contracts import failure_result, success_result
+from tools.v1._shared.contracts import failure_result, success_result, tool_result_schema
 from tools.v1._shared.limits import IntLimitSpec, resolve_int_limit
 
 
@@ -54,12 +54,93 @@ DEFAULT_DANGER_PATTERNS = (
 
 
 TOOL_METADATA = {
+    "manifest_version": "2.0",
     "name": "terminal_tool",
+    "version": TERMINAL_TOOL_VERSION,
     "description": (
-        "Thực thi shell command dạng có quản lý bằng action='run' với stdout/stderr "
-        "có giới hạn, timeout và cleanup process tree; hoặc action='launch' để khởi "
-        "chạy tiến trình tách rời và trả PID process leader. Shell execution có rủi ro cao."
+        "Thực thi shell command dạng có quản lý bằng run hoặc khởi chạy tiến trình "
+        "tách rời bằng launch. Shell execution có rủi ro cao."
     ),
+    "expose_root": False,
+    "exports": [
+        {
+            "id": "terminal.run",
+            "version": "1.0",
+            "name": "terminal.run",
+            "description": "Thực thi shell command đồng bộ với timeout và output có giới hạn.",
+            "bind": {"action": "run"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_COMMAND_CHARS,
+                    },
+                    "timeout": {
+                        "type": "integer",
+                        "minimum": RUN_TIMEOUT.minimum,
+                        "maximum": RUN_TIMEOUT.maximum,
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_CWD_CHARS,
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ENCODING_CHARS,
+                    },
+                },
+                "required": ["command"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["EXECUTE", "EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
+        },
+        {
+            "id": "terminal.launch",
+            "version": "1.0",
+            "name": "terminal.launch",
+            "description": "Khởi chạy một shell command tách rời và trả PID process leader.",
+            "bind": {"action": "launch"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "command": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_COMMAND_CHARS,
+                    },
+                    "cwd": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_CWD_CHARS,
+                    },
+                },
+                "required": ["command"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "NON_IDEMPOTENT",
+            "effects": ["EXECUTE", "EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
+        },
+    ],
+    # Legacy physical description remains for direct Python consumers only.
     "base_risk": "HIGH",
     "effects": ["EXECUTE", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
@@ -96,7 +177,6 @@ TOOL_METADATA = {
         "required": ["action", "command"],
     },
 }
-
 
 class _TerminalToolError(Exception):
     def __init__(

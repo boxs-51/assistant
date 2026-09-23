@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Union
 
-from tools.v1._shared.contracts import failure_result, success_result
+from tools.v1._shared.contracts import failure_result, success_result, tool_result_schema
 from tools.v1._shared.limits import IntLimitSpec, resolve_int_limit
 
 FILE_TOOL_VERSION = "2.0.0"
@@ -63,11 +63,291 @@ def _string_or_string_array_schema(*, item_max_length: int) -> dict[str, Any]:
 
 
 TOOL_METADATA = {
+    "manifest_version": "2.0",
     "name": "file_tool",
+    "version": FILE_TOOL_VERSION,
     "description": (
         "Thao tác tệp văn bản local: read, write/append, search và replace. "
         "Kết quả trả về theo ToolResult có cấu trúc."
     ),
+    "expose_root": False,
+    "exports": [
+        {
+            "id": "file.read",
+            "version": "1.0",
+            "name": "file.read",
+            "description": "Đọc một tệp văn bản local có phân trang và giới hạn đầu ra.",
+            "bind": {"action": "read"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_paths": {
+                        "anyOf": [
+                            {"type": "string", "minLength": 1, "maxLength": MAX_PATH_CHARS},
+                            {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 1,
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": MAX_PATH_CHARS,
+                                },
+                            },
+                        ]
+                    },
+                    "start_line": {
+                        "type": "integer",
+                        "minimum": START_LINE.minimum,
+                        "maximum": START_LINE.maximum,
+                    },
+                    "num_lines": {
+                        "type": "integer",
+                        "minimum": NUM_LINES.minimum,
+                        "maximum": NUM_LINES.maximum,
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ENCODING_CHARS,
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "minimum": READ_MAX_CHARS.minimum,
+                        "maximum": READ_MAX_CHARS.maximum,
+                    },
+                },
+                "required": ["file_paths"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "IDEMPOTENT",
+            "effects": ["READ"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
+        },
+        {
+            "id": "file.search",
+            "version": "1.0",
+            "name": "file.search",
+            "description": "Tìm chuỗi hoặc biểu thức chính quy trong một hay nhiều tệp văn bản.",
+            "bind": {"action": "search"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_paths": _string_or_string_array_schema(
+                        item_max_length=MAX_PATH_CHARS
+                    ),
+                    "queries": {
+                        "anyOf": [
+                            {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": MAX_QUERY_CHARS,
+                            },
+                            {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": MAX_QUERY_COUNT,
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": MAX_QUERY_CHARS,
+                                },
+                            },
+                        ]
+                    },
+                    "use_regex": {"type": "boolean"},
+                    "case_sensitive": {"type": "boolean"},
+                    "max_results_per_file": {
+                        "type": "integer",
+                        "minimum": MAX_RESULTS_PER_FILE.minimum,
+                        "maximum": MAX_RESULTS_PER_FILE.maximum,
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ENCODING_CHARS,
+                    },
+                },
+                "required": ["file_paths", "queries"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "IDEMPOTENT",
+            "effects": ["READ"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
+        },
+        {
+            "id": "file.write",
+            "version": "1.0",
+            "name": "file.write",
+            "description": "Ghi đè nội dung một tệp văn bản local.",
+            "bind": {"action": "write", "mode": "w"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_paths": {
+                        "anyOf": [
+                            {"type": "string", "minLength": 1, "maxLength": MAX_PATH_CHARS},
+                            {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 1,
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": MAX_PATH_CHARS,
+                                },
+                            },
+                        ]
+                    },
+                    "content": {"type": "string"},
+                    "encoding": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ENCODING_CHARS,
+                    },
+                },
+                "required": ["file_paths", "content"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "IDEMPOTENT",
+            "effects": ["WRITE"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
+        },
+        {
+            "id": "file.append",
+            "version": "1.0",
+            "name": "file.append",
+            "description": "Nối thêm nội dung vào cuối một tệp văn bản local.",
+            "bind": {"action": "write", "mode": "a"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_paths": {
+                        "anyOf": [
+                            {"type": "string", "minLength": 1, "maxLength": MAX_PATH_CHARS},
+                            {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": 1,
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": MAX_PATH_CHARS,
+                                },
+                            },
+                        ]
+                    },
+                    "content": {"type": "string"},
+                    "encoding": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ENCODING_CHARS,
+                    },
+                },
+                "required": ["file_paths", "content"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "NON_IDEMPOTENT",
+            "effects": ["WRITE"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
+        },
+        {
+            "id": "file.replace",
+            "version": "1.0",
+            "name": "file.replace",
+            "description": "Thay thế nội dung trong một hay nhiều tệp văn bản local.",
+            "bind": {"action": "replace"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "file_paths": _string_or_string_array_schema(
+                        item_max_length=MAX_PATH_CHARS
+                    ),
+                    "queries": {
+                        "anyOf": [
+                            {
+                                "type": "string",
+                                "minLength": 1,
+                                "maxLength": MAX_QUERY_CHARS,
+                            },
+                            {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": MAX_QUERY_COUNT,
+                                "items": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "maxLength": MAX_QUERY_CHARS,
+                                },
+                            },
+                        ]
+                    },
+                    "replacements": {
+                        "anyOf": [
+                            {"type": "string", "maxLength": MAX_REPLACEMENT_CHARS},
+                            {
+                                "type": "array",
+                                "minItems": 1,
+                                "maxItems": MAX_QUERY_COUNT,
+                                "items": {
+                                    "type": "string",
+                                    "maxLength": MAX_REPLACEMENT_CHARS,
+                                },
+                            },
+                        ]
+                    },
+                    "use_regex": {"type": "boolean"},
+                    "case_sensitive": {"type": "boolean"},
+                    "max_results_per_file": {
+                        "type": "integer",
+                        "minimum": MAX_RESULTS_PER_FILE.minimum,
+                        "maximum": MAX_RESULTS_PER_FILE.maximum,
+                    },
+                    "encoding": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_ENCODING_CHARS,
+                    },
+                },
+                "required": ["file_paths", "queries", "replacements"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["WRITE"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
+        },
+    ],
+    # Legacy physical description remains for direct Python consumers only.
     "base_risk": "HIGH",
     "effects": ["READ", "WRITE"],
     "danger_patterns": list(DEFAULT_DANGER_PATTERNS),
@@ -137,7 +417,6 @@ TOOL_METADATA = {
         "required": ["action"],
     },
 }
-
 
 class _FileToolError(Exception):
     def __init__(

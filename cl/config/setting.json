@@ -10,6 +10,15 @@
     "blocked_local_tools": [
       "delete_path"
     ],
-    "enabled_v2_capabilities": []
+    "enabled_v2_capabilities": [
+      "file.read",
+      "file.search",
+      "file.write",
+      "file.append",
+      "file.replace",
+      "glob.find",
+      "terminal.run",
+      "terminal.launch"
+    ]
   }
 }

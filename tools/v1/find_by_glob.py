@@ -6,7 +6,7 @@ import re
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any, Optional
 
-from tools.v1._shared.contracts import failure_result, success_result
+from tools.v1._shared.contracts import failure_result, success_result, tool_result_schema
 from tools.v1._shared.limits import IntLimitSpec, resolve_int_limit
 
 GLOB_TOOL_VERSION = "2.0.0"
@@ -17,11 +17,56 @@ GLOB_DEFAULT_MAX_RESULTS = 500
 
 
 TOOL_METADATA = {
+    "manifest_version": "2.0",
     "name": "find_by_glob",
+    "version": GLOB_TOOL_VERSION,
     "description": (
         "Tìm file/thư mục theo glob pattern trong một root_dir có boundary rõ ràng. "
         "Kết quả trả về theo ToolResult có cấu trúc."
     ),
+    "expose_root": False,
+    "exports": [
+        {
+            "id": "glob.find",
+            "version": "1.0",
+            "name": "glob.find",
+            "description": "Tìm file hoặc thư mục theo glob pattern trong một root_dir.",
+            "bind": {},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "pattern": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_GLOB_PATTERN_CHARS,
+                    },
+                    "root_dir": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_GLOB_ROOT_CHARS,
+                    },
+                    "recursive": {"type": "boolean"},
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": GLOB_MAX_RESULTS_HARD,
+                    },
+                },
+                "required": ["pattern"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "IDEMPOTENT",
+            "effects": ["READ"],
+            "base_risk": "LOW",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        }
+    ],
+    # Legacy physical description remains for direct Python consumers only.
     "base_risk": "LOW",
     "effects": ["READ"],
     "danger_patterns": [],
@@ -48,7 +93,6 @@ TOOL_METADATA = {
         "required": ["pattern"],
     },
 }
-
 
 class _GlobToolError(Exception):
     def __init__(
