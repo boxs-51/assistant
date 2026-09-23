@@ -302,7 +302,7 @@ async def test_r9_d_resolved_branch_cannot_create_resume_claim(tmp_path):
                     client_id=None,
                     connection_id=None,
                     wait_reason="RESOURCE",
-                    trigger_type=ResumeTriggerType.EXPLICIT,
+                    trigger_type=ResumeTriggerType.RESOURCE_READY,
                     claim_expires_at=(
                         datetime.now(timezone.utc) + timedelta(hours=1)
                     ),
