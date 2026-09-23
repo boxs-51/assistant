@@ -371,12 +371,15 @@ class AgentRepository(BaseRepository):
         branch_id: str,
         base_execution_id: str,
         base_checkpoint_id: str,
-        values: Dict[str, Any],
+        started_at: datetime,
     ):
-        """Specialized R8-F RUNNING@1 -> RUNNING@2 activation CAS."""
+        """Specialized R8-F RUNNING@1 -> RUNNING@2 activation CAS.
 
-        next_values = dict(values)
-        next_values["revision"] = 2
+        The mutation surface is intentionally closed: callers can supply only
+        the activation timestamp. State/lineage/budget/affinity cannot be
+        rewritten through this authority primitive.
+        """
+
         result = await self.session.execute(
             update(AgentExecutionRecord)
             .where(
@@ -392,7 +395,11 @@ class AgentRepository(BaseRepository):
                 AgentExecutionRecord.bound_client_id.is_(None),
                 AgentExecutionRecord.bound_connection_id.is_(None),
             )
-            .values(**next_values)
+            .values(
+                revision=2,
+                state="RUNNING",
+                started_at=started_at,
+            )
         )
         if result.rowcount != 1:
             return None
@@ -407,12 +414,11 @@ class AgentRepository(BaseRepository):
         branch_id: str,
         base_execution_id: str,
         base_checkpoint_id: str,
-        values: Dict[str, Any],
+        completed_at: datetime,
+        error: str = "TASK_CANCELLED_BEFORE_FORK_ACTIVATION",
     ):
         """Race Task cancellation against R8-F activation on revision 1."""
 
-        next_values = dict(values)
-        next_values["revision"] = 2
         result = await self.session.execute(
             update(AgentExecutionRecord)
             .where(
@@ -428,7 +434,14 @@ class AgentRepository(BaseRepository):
                 AgentExecutionRecord.bound_client_id.is_(None),
                 AgentExecutionRecord.bound_connection_id.is_(None),
             )
-            .values(**next_values)
+            .values(
+                revision=2,
+                state="CANCELLED",
+                wait_reason=None,
+                wait_expires_at=None,
+                error=error,
+                completed_at=completed_at,
+            )
         )
         if result.rowcount != 1:
             return None
