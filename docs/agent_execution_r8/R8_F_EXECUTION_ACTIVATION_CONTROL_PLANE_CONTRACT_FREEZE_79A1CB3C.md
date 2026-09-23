@@ -398,9 +398,9 @@ preserves this exact accounting.
 
 ---
 
-# 8. Crash window after activation
+# 8. Crash window vs live caller cancellation
 
-The unavoidable R8-F crash window is:
+The unavoidable R8-F process-crash window is:
 
 ```text
 durable E2@2 commit
@@ -415,11 +415,40 @@ E2 revision > 1
 => never auto-start as a fresh fork
 ```
 
-Do not invent a second activation.
+Do not invent a second activation. Stale RUNNING lease/recovery belongs R12.
 
-Stale RUNNING lease/recovery belongs R12.
+However ordinary coroutine/request/shutdown cancellation while the process is
+still alive is **not** this R12 crash boundary.
 
-This is a deliberate phase boundary, not permission to replay E2.
+Durable activation must therefore be awaited through explicit owned-task
+semantics:
+
+```text
+create activation child task
+await asyncio.shield(child)
+
+if outer caller is cancelled:
+    gather child to a known outcome
+
+    if THIS child won E2@1 -> E2@2:
+        fail-close E2@2 through normal task-scoped execution release
+        release any still-held local reservation
+        re-raise CancelledError
+
+    else:
+        release only local reservation
+        re-raise CancelledError
+```
+
+The caller cancellation must never be converted into a normal identity replay
+response merely because a reload observes E2@2.
+
+This separates:
+
+```text
+hard process death after commit -> R12 recovery boundary
+live caller cancellation        -> R8-F must deterministically resolve ownership
+```
 
 ---
 
@@ -670,19 +699,40 @@ If same `fork_request_id` is reused with different semantics:
 FORK_REQUEST_SEMANTIC_CONFLICT
 ```
 
-If the fork execution is already:
+Replay lifecycle classification is fail-closed.
+
+Valid shapes are exactly:
 
 ```text
-RUNNING@2+
-WAITING
-COMPLETED
-FAILED
-CANCELLED
-TIMEOUT
+PREACTIVATION
+    RUNNING@1
+    -> continue bootstrap/activation of SAME E2
+
+IDENTITY_REPLAY
+    RUNNING@2+
+    WAITING@3+
+    COMPLETED@2+
+    FAILED@2+
+    CANCELLED@2+
+    TIMEOUT@2+
+    -> return same durable identity/status only
 ```
 
-replay returns the same durable fork identity and does not call
-`prepare_fork_execution_context()`.
+The terminal `@2` case includes Task cancellation winning against dormant
+preactivation E2.
+
+Unexpected shapes such as:
+
+```text
+CREATED@1
+WAITING@1
+RUNNING@0
+negative/invalid revision
+unknown lifecycle state
+```
+
+must fail closed as `FORK_ADMISSION_CORRUPT` (or an equivalent frozen
+activation conflict), not surface a successful replay.
 
 ---
 
@@ -1081,6 +1131,8 @@ active budget is running when inference begins
 local reserve conflict starts no second runner
 activation validation failure releases local reservation
 activation loser releases local reservation and starts no runner
+outer cancellation around activation commit deterministically resolves activation ownership
+invalid replay lifecycle shape fails closed
 start_reserved failure cancels/fails E2 and releases execution capacity once
 branch capacity remains charged after activation failure
 ```
@@ -1230,6 +1282,12 @@ Committed replay with exact E2 RUNNING@1 continues activation of the SAME E2; RU
 R8F-I18B
 Every pre-activation failure after local reserve releases the supervisor reservation.
 
+R8F-I18C
+Live caller cancellation cannot strand this process's activation winner at RUNNING@2; activation is shielded/observed and a local WIN is fail-closed before CancelledError propagates.
+
+R8F-I18D
+Replay lifecycle classification is fail-closed; only RUNNING@1, RUNNING@2+, WAITING@3+, and terminal@2+ are valid R8-F shapes.
+
 R8F-I19
 Activation and Task cancellation serialize over Task/TaskBudget authority and race on E2 revision 1.
 
@@ -1252,6 +1310,8 @@ dormant RUNNING@1 fork cancellation/accounting
 activation two-worker race
 activation loser zero-mutation
 activation start failure accounting
+outer-cancellation-around-activation ownership
+invalid replay lifecycle rejection
 active budget restore
 replay after source movement
 restart/retry after consume-before-activation activates the SAME E2 exactly once
@@ -1318,6 +1378,10 @@ releasing branch capacity because local activation/start failed
 leaving a ForkAdmission-backed dormant RUNNING@1 execution active after Task cancellation
 
 claiming same-UoW validation is sufficient without a real cross-row SQL serialization fence
+
+swallowing caller CancelledError into identity replay after an interrupted activation await
+
+accepting arbitrary/invalid ForkAdmission execution state+revision shapes as successful replay
 ```
 
 ---
