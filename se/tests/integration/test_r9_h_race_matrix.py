@@ -169,11 +169,27 @@ async def test_r9_h_retry_vs_discard_never_reopens_branch(tmp_path):
         async with _Uow(sessions) as uow:
             branch = await uow.agents.get_task_branch(fork.branch_id)
             budget = await uow.agents.get_task_budget(source["task_id"])
+            current = await uow.agents.get_execution(
+                branch.current_execution_id
+            )
         assert branch.resolution_state in {"OPEN", "DISCARDED"}
-        assert branch.resolution_state != "OPEN" or branch.current_execution_id != fork.execution_id
+        assert (
+            branch.resolution_state != "OPEN"
+            or branch.current_execution_id != fork.execution_id
+        )
         assert budget.active_branches in {1, 2}
         assert budget.active_branches >= 0
-        for error in (item for item in outcomes if isinstance(item, BaseException)):
+        assert budget.active_executions >= 0
+        if branch.resolution_state == "DISCARDED":
+            # A DISCARD winner may observe either the original terminal fork
+            # or a just-admitted retry. If RETRY admission won first, DISCARD
+            # must settle its dormant RUNNING@1 authority and release capacity.
+            assert current.state in {"FAILED", "CANCELLED"}
+            assert current.state != "RUNNING"
+            assert budget.active_executions == 0
+        for error in (
+            item for item in outcomes if isinstance(item, BaseException)
+        ):
             assert isinstance(error, (RetryConsumeError, BranchResolutionError))
     finally:
         await engine.dispose()
