@@ -2427,6 +2427,26 @@ class DurableAgentStore:
                     await uow.commit()
                     return error
 
+                # R7 resume changes current branch activity WAITING -> RUNNING.
+                # Advance the Task activity epoch before TaskBudget/execution
+                # writes so SQLite cannot commit a stale WAITING reconciler
+                # snapshot after this resume authority wins.
+                activity_task = await uow.agents.compare_and_set_task(
+                    plan.task_id,
+                    int(locked_task.revision),
+                    {
+                        "status": "RUNNING",
+                        "wait_reasons": [],
+                    },
+                )
+                if activity_task is None:
+                    await uow.rollback()
+                    return ResumeClaimRejected(
+                        "RESUME_CONFLICT",
+                        "AgentTask activity epoch changed during resume.",
+                    )
+                locked_task = activity_task
+
                 await prepare_resume_capacity_in_uow(
                     uow,
                     task_id=plan.task_id,
