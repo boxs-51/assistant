@@ -130,7 +130,7 @@ async def test_r10_d_chat_reuses_one_budget_and_preserves_consumed_retry(
     executor = _Executor([consume_then_fail, "ok"], max_retries=2)
     clock = _Clock([100.0, 100.5, 101.0])
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         clock,
     )
 
@@ -166,7 +166,7 @@ async def test_r10_d_provider_transition_does_not_charge_retry_token(
     )
     executor = _Executor([first_error, "fallback-ok"], max_retries=1)
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         _Clock([100.0, 100.2, 100.4]),
     )
 
@@ -204,7 +204,7 @@ async def test_r10_d_fallback_exhaustion_preserves_last_provider_cause_and_detai
     )
     executor = _Executor([first, last], max_retries=2)
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         _Clock([100.0, 100.1, 100.2, 100.3]),
     )
 
@@ -234,7 +234,7 @@ async def test_r10_d_deadline_exhaustion_is_not_rewritten_as_fallback_exhaustion
     first = ProviderError("p1 failed", provider_name="p1")
     executor = _Executor([first, "should-not-run"], max_retries=2)
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         _Clock([100.0, 100.5, 110.0]),
     )
 
@@ -265,7 +265,7 @@ async def test_r10_d_embedding_reuses_same_budget_across_fallback(
 
     executor = _Executor([consume_then_fail, "embedding-ok"], max_retries=2)
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         _Clock([50.0, 50.25, 50.5]),
     )
 
@@ -297,7 +297,7 @@ async def test_r10_d_embedding_deadline_remains_deadline_error(
         max_retries=1,
     )
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         _Clock([10.0, 10.5, 15.0]),
     )
 
@@ -368,7 +368,7 @@ async def test_r10_d_retry_delay_that_cannot_fit_falls_back_immediately(
         sleeps.append(delay)
 
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         lambda: 100.0,
     )
     monkeypatch.setattr(
@@ -438,7 +438,7 @@ async def test_r10_d_chat_raw_probe_failure_keeps_last_provider_and_raw_cause(
         max_retries=1,
     )
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         _Clock([100.0, 100.1, 100.2, 100.3]),
     )
 
@@ -492,7 +492,7 @@ async def test_r10_d_embedding_raw_http_probe_failure_keeps_structured_detail(
         max_retries=1,
     )
     monkeypatch.setattr(
-        "se.src.provider.handlers.base.time.monotonic",
+        "se.src.provider.handlers.base.monotonic",
         _Clock([50.0, 50.1, 50.2, 50.3]),
     )
 
