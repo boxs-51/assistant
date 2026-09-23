@@ -58,7 +58,16 @@ class RetryPolicy:
             try:
                 return await execution_func()
             except Exception as raw_error:
-                error = wrap_provider_exception(raw_error, provider_name)
+                if isinstance(
+                    raw_error,
+                    (ProviderError, httpx.HTTPStatusError, httpx.RequestError),
+                ):
+                    error = wrap_provider_exception(
+                        raw_error,
+                        provider_name,
+                    )
+                else:
+                    error = raw_error
                 status_code = getattr(error, "status_code", None)
                 error_code = getattr(error, "error_code", None)
 
