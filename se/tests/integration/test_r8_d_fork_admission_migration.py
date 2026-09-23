@@ -32,10 +32,14 @@ def _upgrade_to_14b(database: Path, monkeypatch) -> Config:
     return config
 
 
-def test_r8_d_has_single_14c_migration_head(tmp_path: Path):
+def test_r8_d_14c_remains_parent_of_single_r8_e_head(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["14c_r8_fork_admission"]
+    assert script.get_heads() == ["14d_r8_fork_runtime_seed"]
+    assert (
+        script.get_revision("14d_r8_fork_runtime_seed").down_revision
+        == "14c_r8_fork_admission"
+    )
     assert (
         script.get_revision("14c_r8_fork_admission").down_revision
         == "14b_r8_root_branch_accounting"
@@ -71,6 +75,8 @@ def test_r8_d_fork_admission_migration_is_empty_and_reversible(
             "task_id",
             "fork_request_id",
             "plan_fingerprint",
+            "runtime_seed_json",
+            "runtime_seed_fingerprint",
             "source_branch_id",
             "source_execution_id",
             "source_checkpoint_id",

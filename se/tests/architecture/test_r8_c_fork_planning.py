@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.runtimes.agent.contracts.inference import InferenceMessage
 from se.src.runtimes.agent.contracts.resume import DurableExecutionCheckpoint
 from se.src.runtimes.agent.fork_planning import (
@@ -48,6 +49,16 @@ class _Store:
             retry_of_execution_id=None,
             base_execution_id=None,
             base_checkpoint_id=None,
+            remaining_active_budget_seconds=30.0,
+            request={"prompt": "source"},
+            context_state={
+                "limits": AgentExecutionLimits().model_dump(mode="json"),
+                "metadata": {
+                    "safe": "r8-c",
+                    "client_id": "source-client",
+                    "connection_id": "source-connection",
+                },
+            },
         )
         self.checkpoint = DurableExecutionCheckpoint(
             checkpoint_id="cp-7",
@@ -58,6 +69,7 @@ class _Store:
             branch_id="branch-1",
             iteration=4,
             wait_reason="RESOURCE",
+            remaining_active_budget_seconds=30.0,
             transcript_snapshot=(
                 {
                     "role": "user",
@@ -419,3 +431,11 @@ async def test_r8_c_overlay_is_validated_and_semantic():
     with pytest.raises(ForkPlanRejected) as exc:
         await _build(planner, overlay_messages=({"content": "missing-role"},))
     assert exc.value.code == "FORK_OVERLAY_INVALID"
+
+    for role in ("system", "assistant", "tool"):
+        payload = {"role": role, "content": "unsafe"}
+        if role == "tool":
+            payload["tool_call_id"] = "fake-call"
+        with pytest.raises(ForkPlanRejected) as exc:
+            await _build(planner, overlay_messages=(payload,))
+        assert exc.value.code == "FORK_OVERLAY_ROLE_INVALID"

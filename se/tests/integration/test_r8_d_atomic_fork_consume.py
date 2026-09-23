@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.task_budget import (
     TaskBudgetLimits,
     TaskBudgetPolicy,
@@ -89,6 +90,22 @@ def _limits(**updates):
     return TaskBudgetLimits(**values)
 
 
+def _runtime_context_state(tag: str):
+    return {
+        "request_id": f"req-{tag}",
+        "workflow_id": "wf-r8",
+        "metadata": {
+            "safe": tag,
+            "client_id": f"client-{tag}",
+            "connection_id": f"connection-{tag}",
+            "origin_connection_id": f"origin-{tag}",
+        },
+        "causation_id": f"cause-{tag}",
+        "trace_id": f"trace-{tag}",
+        "limits": AgentExecutionLimits().model_dump(mode="json"),
+    }
+
+
 async def _setup(tmp_path, *, name="r8_d.sqlite", limits=None):
     database = tmp_path / name
     engine = create_async_engine(
@@ -159,6 +176,7 @@ async def _seed_source(
             "revision": 1,
             "remaining_active_budget_seconds": 30.0,
             "request": {"prompt": "source"},
+            "context_state": _runtime_context_state(task_id),
             "started_at": datetime.now(timezone.utc),
         },
     )
@@ -412,6 +430,11 @@ async def test_r8_d_fresh_consume_is_one_atomic_fork(tmp_path):
             assert receipt.plan_fingerprint == source[
                 "plan"
             ].plan_fingerprint
+            assert (
+                receipt.runtime_seed_fingerprint
+                == source["plan"].runtime_seed_fingerprint
+            )
+            assert receipt.runtime_seed_json is not None
             assert branch_ledger is not None
             assert execution_ledger is not None
     finally:
@@ -516,6 +539,9 @@ async def test_r8_d_delegated_source_preserves_parent_and_parallel_charge(
                 "revision": 1,
                 "remaining_active_budget_seconds": 18.0,
                 "request": {"prompt": "delegated-source"},
+                "context_state": _runtime_context_state(
+                    "delegated-child"
+                ),
             },
             delegation_depth=1,
         )
@@ -608,7 +634,18 @@ async def test_r8_d_delegated_source_preserves_parent_and_parallel_charge(
 
         # Prove the preserved delegation edge remains valid after it has
         # crossed a FORK boundary: E2 is in B2 while its parent stays in B1.
+        # A real R8-F start would persist E2's reconstructed context before a
+        # later checkpoint. This D-only test supplies that durable state
+        # explicitly before exercising a second-hop FORK.
         async with _Uow(sessions) as uow:
+            await uow.agents.update_execution(
+                admission.execution_id,
+                {
+                    "context_state": _runtime_context_state(
+                        "delegated-forked"
+                    )
+                },
+            )
             uow.session.add(
                 AgentIterationRecord(
                     id="iter-delegated-forked",
