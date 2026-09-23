@@ -1272,20 +1272,23 @@ class TaskBudgetService:
                         execution_payload,
                     )
 
-                    task_revision = int(snapshot.task.revision)
-                    if str(snapshot.task.status) == "WAITING":
-                        updated_task = await uow.agents.compare_and_set_task(
-                            plan.task_id,
-                            plan.expected_task_revision,
-                            {
-                                "status": "RUNNING",
-                                "wait_reasons": [],
-                            },
-                        )
-                        if updated_task is None:
-                            await uow.rollback()
-                            continue
-                        task_revision = int(updated_task.revision)
+                    # FORK changes the durable branch-head activity graph.
+                    # Always advance the Task activity epoch, even when the
+                    # visible state remains RUNNING. This is the dialect-
+                    # independent serialization backstop for SQLite, where
+                    # SELECT FOR UPDATE does not provide row-level fencing.
+                    updated_task = await uow.agents.compare_and_set_task(
+                        plan.task_id,
+                        plan.expected_task_revision,
+                        {
+                            "status": "RUNNING",
+                            "wait_reasons": [],
+                        },
+                    )
+                    if updated_task is None:
+                        await uow.rollback()
+                        continue
+                    task_revision = int(updated_task.revision)
 
                     budget = snapshot.budget
                     budget_updates = {
