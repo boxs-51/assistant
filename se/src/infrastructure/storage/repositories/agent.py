@@ -493,6 +493,17 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_task_aggregate_admissions(self, task_id: str):
+        result = await self.session.execute(
+            select(AgentTaskAggregateAdmissionRecord)
+            .where(AgentTaskAggregateAdmissionRecord.task_id == task_id)
+            .order_by(
+                AgentTaskAggregateAdmissionRecord.created_at.asc(),
+                AgentTaskAggregateAdmissionRecord.aggregate_request_id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
     async def list_task_branches_for_update(self, task_id: str):
         """Lock all Task branches in the frozen deterministic branch_id order."""
 
