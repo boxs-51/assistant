@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Mapping, Sequence
+from typing import TYPE_CHECKING, Any, Mapping, Sequence
+
+if TYPE_CHECKING:
+    from .context import AgentExecutionContext
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -58,8 +61,32 @@ class AggregateAdmission:
     task_budget_revision: int
 
 
+@dataclass(frozen=True, slots=True)
+class AggregateExecutionBootstrap:
+    execution_id: str
+    expected_execution_revision: int
+    task_id: str
+    target_branch_id: str
+    aggregate_request_id: str
+    plan_fingerprint: str
+    runtime_seed_fingerprint: str
+    context: "AgentExecutionContext"
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateActivationResult:
+    task_id: str
+    target_branch_id: str
+    execution_id: str
+    source_execution_revision: int
+    activated_execution_revision: int
+    remaining_active_budget_seconds: float
+
+
 __all__ = [
+    "AggregateActivationResult",
     "AggregateAdmission",
+    "AggregateExecutionBootstrap",
     "aggregate_fingerprint",
     "aggregate_plan_fingerprint",
 ]
