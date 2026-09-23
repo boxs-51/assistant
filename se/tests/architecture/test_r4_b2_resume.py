@@ -122,12 +122,25 @@ def _record(
 
 
 class _ActivityBudget:
-    def __init__(self) -> None:
+    def __init__(self, store) -> None:
+        self.store = store
         self.reconciled: list[str] = []
 
-    async def reconcile_multibranch_task_activity(self, task_id: str):
+    async def expire_task_scoped_waiting_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        source_revision: int,
+        transition_values,
+    ):
+        updated = await self.store.compare_and_set_execution(
+            execution_id,
+            source_revision,
+            transition_values,
+        )
         self.reconciled.append(task_id)
-        return SimpleNamespace(id=task_id, status="WAITING")
+        return updated.revision if updated is not None else None
 
 
 def _runtime(store) -> AgentRuntime:
@@ -241,7 +254,7 @@ async def test_r8_f_task_scoped_direct_wait_expiry_reconciles_activity():
     clock = _FakeClock()
     expiry = clock.now_utc()
     store = _MemoryStore(_record(clock, expiry=expiry))
-    budget = _ActivityBudget()
+    budget = _ActivityBudget(store)
     context = _context(
         clock,
         expiry=expiry,
