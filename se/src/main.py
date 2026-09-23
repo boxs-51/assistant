@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 from typing import Dict, Any, Tuple
 import uuid
 from fastapi import FastAPI
@@ -74,11 +75,12 @@ from .runtimes.capability.local_tool_loader import register_local_tools
 from .runtimes.capability.builtins import register_builtin_support
 from .runtimes.capability.invocation import CapabilityInvocationLifecycle
 from .runtimes.agent.coordinator import MultiAgentCoordinator
-from .runtimes.agent.persistence import DurableAgentStore
+from .runtimes.agent.persistence import DurableAgentStore, ForkControlError
 from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.supervisor import AgentExecutionSupervisor
 from .runtimes.agent.task_budget import TaskBudgetService
 from .runtimes.agent.resume_planning import AgentResumePlanningService
+from .runtimes.agent.fork_planning import AgentForkPlanningService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
 from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
@@ -395,6 +397,9 @@ async def bootstrap_runtime_kernel(
     container.resume_planning_service = AgentResumePlanningService(
         container.agent_durable_store,
         container.capability_runtime,
+    )
+    container.fork_planning_service = AgentForkPlanningService(
+        container.agent_durable_store
     )
     container.agent_runtime = AgentRuntime(
         context_builder=container.context_builder_port,
