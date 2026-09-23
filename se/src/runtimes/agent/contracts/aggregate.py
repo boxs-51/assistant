@@ -62,6 +62,38 @@ class AggregateAdmission:
 
 
 @dataclass(frozen=True, slots=True)
+class AggregateReplayResult:
+    admission: AggregateAdmission
+    execution_state: str
+    execution_revision: int
+
+    @property
+    def preactivation(self) -> bool:
+        return self.execution_state == "RUNNING" and self.execution_revision == 1
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateExecutionBootstrap:
+    execution_id: str
+    expected_execution_revision: int
+    task_id: str
+    branch_id: str
+    aggregate_request_id: str
+    plan_fingerprint: str
+    runtime_seed_fingerprint: str
+    context: "AgentExecutionContext"
+
+
+@dataclass(frozen=True, slots=True)
+class AggregateActivationResult:
+    task_id: str
+    branch_id: str
+    execution_id: str
+    activated_execution_revision: int
+    remaining_active_budget_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
 class AggregateExecutionBootstrap:
     execution_id: str
     expected_execution_revision: int
