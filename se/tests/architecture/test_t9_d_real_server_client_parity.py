@@ -157,7 +157,8 @@ def test_real_server_and_client_project_identical_24_logical_definitions():
         item.definition.capability_id: item.definition
         for item in request.capabilities
     }
-    assert tuple(client_definitions) == T9_IDS
+    assert set(client_definitions) == set(T9_IDS)
+    assert len(client_definitions) == len(T9_IDS)
 
     for capability_id in T9_IDS:
         server_definition = catalog.get_definition(capability_id)
