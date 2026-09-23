@@ -1183,7 +1183,6 @@ R8-F should not require changes to:
 
 ```text
 cl/
-se/src/transport/gateway/api/v1/events_router.py
 se/src/runtimes/capability/drivers/agent_driver.py
 provider runtime
 R9 resolution models
@@ -1191,10 +1190,21 @@ R9 resolution models
 
 If implementation requires those, stop and re-audit the boundary.
 
-Exception:
+Narrow R7 compatibility exceptions are allowed only when required by the R8-F
+Task-activity fence and must not change R7 logical resume authority:
 
-A tiny R7 resume call-site hook is allowed only if needed to invoke the generic
-multi-branch Task activity reconciler; it must not alter R7 resume authority.
+```text
+se/src/transport/gateway/api/v1/events_router.py
+    - preserve existing CREATED claim_id on retryable RESUME_CONFLICT only
+    - no new claim, no new resume_request_id, no ACK/handoff authority change
+
+R7 resume persistence/runtime call sites
+    - Task-first activity epoch/reconciliation hooks
+    - WAIT expiry activity rederive
+```
+
+No `cl/` change is required because ClientRuntime already understands
+`RESUME_CONFLICT + retryable=true + claim_id` as retry-same-request.
 
 ---
 
