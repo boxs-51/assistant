@@ -302,3 +302,18 @@ async def test_r10_b_normalization_does_not_broaden_legacy_retry_set(
 
     assert calls == 1
     assert sleeps == []
+
+
+@pytest.mark.asyncio
+async def test_r10_b_non_provider_exception_identity_is_preserved():
+    original = ValueError("provider adapter bug")
+
+    async def execute():
+        raise original
+
+    policy = RetryPolicy(max_retries=2)
+
+    with pytest.raises(ValueError) as raised:
+        await policy.apply(execute, "test-provider")
+
+    assert raised.value is original
