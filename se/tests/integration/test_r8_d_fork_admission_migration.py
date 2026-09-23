@@ -35,7 +35,11 @@ def _upgrade_to_14b(database: Path, monkeypatch) -> Config:
 def test_r8_d_14c_remains_parent_of_single_r8_e_head(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["14d_r8_fork_runtime_seed"]
+    assert script.get_heads() == ["15a_r9_retry_admission"]
+    assert (
+        script.get_revision("15a_r9_retry_admission").down_revision
+        == "14d_r8_fork_runtime_seed"
+    )
     assert (
         script.get_revision("14d_r8_fork_runtime_seed").down_revision
         == "14c_r8_fork_admission"
