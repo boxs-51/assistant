@@ -1,137 +1,216 @@
+import json
 import os
-import shutil
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-# Import class và entrypoint chuẩn
-from tools.v1.find_by_glob import GlobSearchTool, run, TOOL_METADATA
+from tools.v1._shared.errors import ToolLimitConfigError
+from tools.v1.find_by_glob import (
+    GLOB_MAX_RESULTS_HARD,
+    MAX_GLOB_PATTERN_CHARS,
+    GlobSearchTool,
+    run,
+)
 
 
-class TestGlobSearchTool(unittest.TestCase):
-
+class TestGlobSearchToolV2(unittest.TestCase):
     def setUp(self):
-        """Khởi tạo cây thư mục giả lập trước mỗi test case."""
-        self.test_dir = tempfile.mkdtemp()
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self.tmp.name)
+        (self.root / "sub_a").mkdir()
+        (self.root / "sub_b" / "deep").mkdir(parents=True)
+        (self.root / "file1.py").write_text("x", encoding="utf-8")
+        (self.root / "file2.json").write_text("x", encoding="utf-8")
+        (self.root / "README.md").write_text("x", encoding="utf-8")
+        (self.root / "sub_a" / "sub_file1.py").write_text("x", encoding="utf-8")
+        (self.root / "sub_a" / "sub_file2.txt").write_text("x", encoding="utf-8")
+        (self.root / "sub_b" / "deep" / "deep_file.py").write_text("x", encoding="utf-8")
         self.tool = GlobSearchTool(default_max_results=10)
 
-        # Cấu trúc thư mục thử nghiệm:
-        # test_dir/
-        # ├── file1.py
-        # ├── file2.json
-        # ├── README.md
-        # ├── sub_a/
-        # │   ├── sub_file1.py
-        # │   └── sub_file2.txt
-        # └── sub_b/
-        #     └── deep/
-        #         └── deep_file.py
-
-        self.file1 = os.path.join(self.test_dir, "file1.py")
-        self.file2 = os.path.join(self.test_dir, "file2.json")
-        self.readme = os.path.join(self.test_dir, "README.md")
-        
-        self.sub_a = os.path.join(self.test_dir, "sub_a")
-        self.sub_a_file1 = os.path.join(self.sub_a, "sub_file1.py")
-        self.sub_a_file2 = os.path.join(self.sub_a, "sub_file2.txt")
-
-        self.sub_b_deep = os.path.join(self.test_dir, "sub_b", "deep")
-        self.deep_file = os.path.join(self.sub_b_deep, "deep_file.py")
-
-        os.makedirs(self.sub_a, exist_ok=True)
-        os.makedirs(self.sub_b_deep, exist_ok=True)
-
-        for filepath in [self.file1, self.file2, self.readme, self.sub_a_file1, self.sub_a_file2, self.deep_file]:
-            with open(filepath, "w", encoding="utf-8") as f:
-                f.write("test content")
-
     def tearDown(self):
-        """Dọn dẹp thư mục tạm."""
-        shutil.rmtree(self.test_dir)
+        self.tmp.cleanup()
 
-    # ==================== 1. TEST TÌM KIẾM CƠ BẢN & ĐỆ QUY ====================
+    def assert_ok(self, result):
+        self.assertTrue(result["ok"], result)
+        self.assertEqual(result["tool"], "find_by_glob")
+        self.assertEqual(result["action"], "find")
+        self.assertEqual(result["meta"]["version"], "2.0.0")
+        json.dumps(result)
+        return result["data"]
 
-    def test_find_recursive_default(self):
-        """Kiểm tra tìm kiếm đệ quy tất cả file .py."""
-        results = self.tool.find(pattern="*.py", root_dir=self.test_dir, recursive=True)
-        self.assertIsInstance(results, list)
-        
-        # Loại bỏ cảnh báo nếu có để so sánh
-        clean_results = [r for r in results if not r.startswith("...")]
-        self.assertEqual(len(clean_results), 3)
-        self.assertTrue(any("file1.py" in p for p in clean_results))
-        self.assertTrue(any("sub_file1.py" in p for p in clean_results))
-        self.assertTrue(any("deep_file.py" in p for p in clean_results))
+    def assert_error(self, result, code):
+        self.assertFalse(result["ok"], result)
+        self.assertEqual(result["error"]["code"], code)
+        self.assertIsNone(result["data"])
+        json.dumps(result)
 
-    def test_find_non_recursive(self):
-        """Kiểm tra tìm kiếm không đệ quy (chỉ tìm tại thư mục gốc)."""
-        results = self.tool.find(pattern="*.py", root_dir=self.test_dir, recursive=False)
-        self.assertIsInstance(results, list)
-        self.assertEqual(len(results), 1)
-        self.assertTrue(results[0].endswith("file1.py"))
+    def test_recursive_and_non_recursive(self):
+        data = self.assert_ok(self.tool.find("*.py", str(self.root), recursive=True))
+        self.assertEqual(data["returned_count"], 3)
+        names = [Path(item["path"]).name for item in data["matches"]]
+        self.assertEqual(set(names), {"file1.py", "sub_file1.py", "deep_file.py"})
 
-    def test_find_specific_subfolder_pattern(self):
-        """Kiểm tra truyền pattern có tiền tố thư mục sẵn."""
-        results = self.tool.find(pattern="**/*.txt", root_dir=self.test_dir, recursive=True)
-        self.assertIsInstance(results, list)
-        self.assertEqual(len(results), 1)
-        self.assertTrue(results[0].endswith("sub_file2.txt"))
+        data = self.assert_ok(self.tool.find("*.py", str(self.root), recursive=False))
+        self.assertEqual(data["returned_count"], 1)
+        self.assertEqual(Path(data["matches"][0]["path"]).name, "file1.py")
 
-    # ==================== 2. TEST GIỚI HẠN KẾT QUẢ (MAX RESULTS) ====================
+    def test_explicit_recursive_pattern_and_empty_success(self):
+        data = self.assert_ok(self.tool.find("**/*.txt", str(self.root), recursive=True))
+        self.assertEqual(data["returned_count"], 1)
+        self.assertEqual(Path(data["matches"][0]["path"]).name, "sub_file2.txt")
 
-    def test_max_results_limit_reached(self):
-        """Kiểm tra khi số lượng file vượt quá giới hạn max_results."""
-        results = self.tool.find(pattern="*", root_dir=self.test_dir, recursive=True, max_results=3)
-        self.assertIsInstance(results, list)
-        self.assertEqual(len(results), 4)  # 3 kết quả + 1 chuỗi cảnh báo
-        self.assertTrue(results[-1].startswith("... [CẢNH BÁO:"))
+        result = self.tool.find("*.cpp", str(self.root), recursive=True)
+        data = self.assert_ok(result)
+        self.assertEqual(data["matches"], [])
+        self.assertEqual(data["returned_count"], 0)
+        self.assertFalse(result["meta"]["truncated"])
 
-    def test_alphabetical_sorting(self):
-        """Kiểm tra danh sách kết quả trả về được sắp xếp theo bảng chữ cái."""
-        results = self.tool.find(pattern="*.*", root_dir=self.test_dir, recursive=False)
-        paths_only = [p for p in results if not p.startswith("...")]
-        self.assertEqual(paths_only, sorted(paths_only))
+    def test_root_errors_and_empty_pattern(self):
+        self.assert_error(self.tool.find("", str(self.root)), "INVALID_ARGUMENT")
+        self.assert_error(
+            self.tool.find("*.py", str(self.root / "missing")),
+            "GLOB_ROOT_NOT_FOUND",
+        )
+        self.assert_error(
+            self.tool.find("*.py", str(self.root / "file1.py")),
+            "GLOB_ROOT_NOT_DIRECTORY",
+        )
 
-    # ==================== 3. TEST XỬ LÝ LỖI VÀ EDGE CASES ====================
+    def test_absolute_and_parent_escape_patterns_rejected(self):
+        outside = self.root.parent / "outside-tools-v1-test.txt"
+        outside.write_text("outside", encoding="utf-8")
+        try:
+            self.assert_error(
+                self.tool.find("../*.txt", str(self.root)),
+                "GLOB_PATTERN_OUTSIDE_ROOT",
+            )
+            self.assert_error(
+                self.tool.find("a/../../*.txt", str(self.root)),
+                "GLOB_PATTERN_OUTSIDE_ROOT",
+            )
+            self.assert_error(
+                self.tool.find("/tmp/*.txt", str(self.root)),
+                "GLOB_PATTERN_OUTSIDE_ROOT",
+            )
+            self.assert_error(
+                self.tool.find(r"C:\temp\*.txt", str(self.root)),
+                "GLOB_PATTERN_OUTSIDE_ROOT",
+            )
+        finally:
+            outside.unlink(missing_ok=True)
 
-    def test_empty_pattern_error(self):
-        """Kiểm tra báo lỗi khi pattern trống hoặc chỉ chứa khoảng trắng."""
-        res1 = self.tool.find(pattern="", root_dir=self.test_dir)
-        res2 = self.tool.find(pattern="   ", root_dir=self.test_dir)
-        self.assertTrue(res1.startswith("Lỗi:"))
-        self.assertTrue(res2.startswith("Lỗi:"))
+    def test_recursive_and_max_results_are_strict_types(self):
+        self.assert_error(
+            self.tool.find("*.py", str(self.root), recursive=1),
+            "INVALID_ARGUMENT",
+        )
+        for value in (0, -1, True, GLOB_MAX_RESULTS_HARD + 1):
+            with self.subTest(value=value):
+                self.assert_error(
+                    self.tool.find("*", str(self.root), max_results=value),
+                    "INVALID_ARGUMENT",
+                )
 
-    def test_non_existent_root_dir(self):
-        """Kiểm tra báo lỗi khi root_dir không tồn tại."""
-        fake_dir = os.path.join(self.test_dir, "invalid_dir")
-        result = self.tool.find(pattern="*.py", root_dir=fake_dir)
-        self.assertTrue(result.startswith("Lỗi: Thư mục gốc"))
+    def test_constructor_default_is_hard_bounded(self):
+        with self.assertRaises(ToolLimitConfigError):
+            GlobSearchTool(default_max_results=0)
+        with self.assertRaises(ToolLimitConfigError):
+            GlobSearchTool(default_max_results=GLOB_MAX_RESULTS_HARD + 1)
 
-    def test_root_dir_is_file(self):
-        """Kiểm tra báo lỗi khi root_dir truyền vào là một file thay vì thư mục."""
-        result = self.tool.find(pattern="*.py", root_dir=self.file1)
-        self.assertTrue(result.startswith("Lỗi:"))
-        self.assertIn("không phải là thư mục", result)
+    def test_exact_truncation_detection(self):
+        root = self.root / "exact"
+        root.mkdir()
+        for name in ("a.txt", "b.txt", "c.txt"):
+            (root / name).write_text("x", encoding="utf-8")
 
-    def test_no_matches_found(self):
-        """Kiểm tra thông báo khi không tìm thấy kết quả phù hợp."""
-        result = self.tool.find(pattern="*.cpp", root_dir=self.test_dir)
-        self.assertIsInstance(result, str)
-        self.assertTrue(result.startswith("Thông báo: Không tìm thấy"))
+        result = self.tool.find("*.txt", str(root), recursive=False, max_results=3)
+        data = self.assert_ok(result)
+        self.assertEqual(data["returned_count"], 3)
+        self.assertFalse(result["meta"]["truncated"])
 
-    # ==================== 4. TEST EXECUTE & RUN ENTRYPOINT ====================
+        (root / "d.txt").write_text("x", encoding="utf-8")
+        result = self.tool.find("*.txt", str(root), recursive=False, max_results=3)
+        data = self.assert_ok(result)
+        self.assertEqual(data["returned_count"], 3)
+        self.assertTrue(result["meta"]["truncated"])
 
-    def test_execute_method(self):
-        """Kiểm tra phương thức execute điều hướng tham số chuẩn."""
-        results = self.tool.execute(pattern="README.md", root_dir=self.test_dir, unused_param="ignore")
-        self.assertIsInstance(results, list)
-        self.assertEqual(len(results), 1)
+    def test_deterministic_lexical_first_n_even_when_generator_shuffled(self):
+        fake_root = self.root / "shuffle"
+        fake_root.mkdir()
+        paths = []
+        for name in ("c.txt", "a.txt", "b.txt"):
+            path = fake_root / name
+            path.write_text("x", encoding="utf-8")
+            paths.append(path)
 
-    def test_global_run_function(self):
-        """Kiểm tra hàm run() tương thích với ToolExecutor."""
-        results = run(pattern="*.json", root_dir=self.test_dir)
-        self.assertIsInstance(results, list)
-        self.assertTrue(results[0].endswith("file2.json"))
+        original_glob = Path.glob
+
+        def shuffled(path_obj, pattern):
+            if path_obj == fake_root:
+                return iter(paths)
+            return original_glob(path_obj, pattern)
+
+        with patch("tools.v1.find_by_glob.Path.glob", new=shuffled):
+            result = self.tool.find(
+                "*.txt",
+                str(fake_root),
+                recursive=False,
+                max_results=2,
+            )
+
+        data = self.assert_ok(result)
+        names = [Path(item["path"]).name for item in data["matches"]]
+        self.assertEqual(names, ["a.txt", "b.txt"])
+        self.assertTrue(result["meta"]["truncated"])
+
+    def test_paths_are_absolute_posix_and_classified(self):
+        data = self.assert_ok(self.tool.find("*", str(self.root), recursive=False))
+        self.assertGreater(data["returned_count"], 0)
+        for item in data["matches"]:
+            self.assertTrue(Path(item["path"]).is_absolute())
+            self.assertNotIn("\\", item["path"])
+            self.assertIn(item["kind"], {"file", "directory", "other"})
+            self.assertIs(type(item["is_symlink"]), bool)
+
+    def test_symlink_descriptor_and_recursive_behavior_when_supported(self):
+        target_dir = self.root / "real_dir"
+        target_dir.mkdir()
+        (target_dir / "inside.txt").write_text("x", encoding="utf-8")
+        link_dir = self.root / "link_dir"
+        try:
+            link_dir.symlink_to(target_dir, target_is_directory=True)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlink creation unavailable")
+
+        data = self.assert_ok(
+            self.tool.find("link_dir", str(self.root), recursive=False)
+        )
+        self.assertEqual(data["returned_count"], 1)
+        self.assertTrue(data["matches"][0]["is_symlink"])
+
+        data = self.assert_ok(self.tool.find("*.txt", str(self.root), recursive=True))
+        returned = [item["path"] for item in data["matches"]]
+        self.assertFalse(any("/link_dir/" in path for path in returned))
+
+    def test_global_run_returns_toolresult(self):
+        result = run("*.json", root_dir=str(self.root))
+        data = self.assert_ok(result)
+        self.assertEqual(data["returned_count"], 1)
+
+
+    def test_pattern_length_hard_cap(self):
+        self.assert_error(
+            self.tool.find("a" * (MAX_GLOB_PATTERN_CHARS + 1), str(self.root)),
+            "INVALID_ARGUMENT",
+        )
+
+    def test_match_payload_never_contains_warning_strings(self):
+        result = self.tool.find("*", str(self.root), recursive=True, max_results=2)
+        data = self.assert_ok(result)
+        self.assertTrue(result["meta"]["truncated"])
+        self.assertTrue(all(isinstance(item, dict) for item in data["matches"]))
+        self.assertTrue(all("path" in item for item in data["matches"]))
 
 
 if __name__ == "__main__":
