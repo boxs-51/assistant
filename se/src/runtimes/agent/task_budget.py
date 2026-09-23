@@ -1548,6 +1548,7 @@ class TaskBudgetService:
                     now_utc = datetime.now(timezone.utc)
                     release_active = 0
                     release_parallel = 0
+                    preactivation_conflict = False
                     for loser in open_branches:
                         if loser.branch_id == branch_id:
                             continue
@@ -1639,33 +1640,35 @@ class TaskBudgetService:
                             },
                         )
                         if cancelled is None:
-                            await uow.rollback()
+                            preactivation_conflict = True
                             break
                         release_active += 1
                         if loser_execution.parent_execution_id is not None:
                             release_parallel += 1
-                    else:
-                        if int(budget.active_executions) < release_active:
-                            raise BranchResolutionError(
-                                "TASK_RESOLUTION_CONFLICT",
-                                "ADOPT would underflow active_executions.",
-                            )
-                        if (
-                            int(budget.active_parallel_agents)
-                            < release_parallel
-                        ):
-                            raise BranchResolutionError(
-                                "TASK_RESOLUTION_CONFLICT",
-                                "ADOPT would underflow active_parallel_agents.",
-                            )
-
-                        claims = (
-                            await uow.agents
-                            .list_created_resume_claims_for_task_for_update(
-                                task_id
-                            )
+                    if preactivation_conflict:
+                        await uow.rollback()
+                        continue
+                    if int(budget.active_executions) < release_active:
+                        raise BranchResolutionError(
+                            "TASK_RESOLUTION_CONFLICT",
+                            "ADOPT would underflow active_executions.",
                         )
-                        updated_task = await uow.agents.compare_and_set_task(
+                    if (
+                        int(budget.active_parallel_agents)
+                        < release_parallel
+                    ):
+                        raise BranchResolutionError(
+                            "TASK_RESOLUTION_CONFLICT",
+                            "ADOPT would underflow active_parallel_agents.",
+                        )
+
+                    claims = (
+                        await uow.agents
+                        .list_created_resume_claims_for_task_for_update(
+                            task_id
+                        )
+                    )
+                    updated_task = await uow.agents.compare_and_set_task(
                         task_id,
                         int(task.revision),
                         {
