@@ -10,7 +10,10 @@ from se.src.runtimes.agent.contracts.resume import (
     ResumeClaimConsumeResult,
     ResumeClaimState,
 )
-from se.src.runtimes.agent.resume_claim import ResumeActivationError
+from se.src.runtimes.agent.resume_claim import (
+    ResumeActivationError,
+    ResumeClaimDeferred,
+)
 from se.src.runtimes.agent.supervisor import AgentExecutionSupervisor
 from se.src.runtimes.connection.protocol import RealtimeEnvelope
 from se.src.transport.gateway.api.v1.events_router import _resume_execution
@@ -160,6 +163,17 @@ class _Store:
             self.claim.metadata["r7_g_handoff"] = handoff
         self.handoff_calls.append((status, dict(payload)))
         return self.claim
+
+
+class _DeferredConsumeStore(_Store):
+    async def consume_resume_claim(self, spec):
+        self.consume_calls += 1
+        assert self.claim is not None
+        raise ResumeClaimDeferred(
+            "RESUME_CONFLICT",
+            "transient Task activity epoch conflict",
+            retryable=True,
+        )
 
 
 class _BlockingHandoffStore(_Store):
@@ -610,4 +624,39 @@ async def test_r7_g_cancellation_during_accepted_handoff_drains_commit_then_repl
     assert runtime.activation_calls == 1
     assert runtime.execute_calls == 1
     assert planner.calls == 1
+    await supervisor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_retryable_resume_conflict_preserves_same_claim_id_on_wire():
+    plan = _plan()
+    store = _DeferredConsumeStore(plan)
+    runtime = _Runtime()
+    supervisor = AgentExecutionSupervisor()
+    socket = _Socket(supervisor=supervisor, runtime=runtime)
+    container = _container(plan, store, runtime, supervisor)
+
+    await _resume_execution(
+        socket,
+        _identity(),
+        container,
+        K2,
+        _envelope(),
+    )
+
+    rejected = [
+        item
+        for item in socket.messages
+        if item["type"] == "execution.resume.rejected"
+    ]
+    assert len(rejected) == 1
+    assert rejected[0]["payload"]["code"] == "RESUME_CONFLICT"
+    assert rejected[0]["payload"]["retryable"] is True
+    assert rejected[0]["payload"]["claim_id"] == "claim-r7g"
+    assert rejected[0]["payload"]["resume_request_id"] == REQUEST
+    assert store.claim.state is ResumeClaimState.CREATED
+    assert store.consume_calls == 1
+    assert runtime.activation_calls == 0
+    assert runtime.execute_calls == 0
+    assert supervisor.is_running(EXECUTION) is False
     await supervisor.shutdown()
