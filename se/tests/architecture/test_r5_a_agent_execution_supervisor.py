@@ -319,6 +319,55 @@ async def test_task_cancellation_targets_only_matching_task_and_descendants():
 
 
 @pytest.mark.asyncio
+async def test_r8_f_task_cancellation_drains_independent_branch_runners():
+    supervisor = AgentExecutionSupervisor()
+
+    first = _context("exec-r8-f-branch-1", task_id="task-r8-f")
+    second = _context("exec-r8-f-branch-2", task_id="task-r8-f")
+    assert first.parent_execution_id is None
+    assert second.parent_execution_id is None
+
+    contexts = [first, second]
+    started = [asyncio.Event(), asyncio.Event()]
+    cleaned = [asyncio.Event(), asyncio.Event()]
+    outers: list[asyncio.Task] = []
+
+    for context, start_event, clean_event in zip(
+        contexts,
+        started,
+        cleaned,
+        strict=True,
+    ):
+        outers.append(
+            asyncio.create_task(
+                supervisor.run(
+                    context,
+                    _blocking_runner(
+                        context,
+                        start_event,
+                        clean_event,
+                    ),
+                )
+            )
+        )
+        await asyncio.wait_for(start_event.wait(), timeout=1)
+
+    assert set(supervisor.active_execution_ids()) == {
+        first.execution_id,
+        second.execution_id,
+    }
+
+    await supervisor.cancel_task("task-r8-f")
+    await asyncio.gather(*outers, return_exceptions=True)
+
+    assert first.cancellation_event.is_set()
+    assert second.cancellation_event.is_set()
+    for event in cleaned:
+        await asyncio.wait_for(event.wait(), timeout=1)
+    assert supervisor.active_execution_ids() == ()
+
+
+@pytest.mark.asyncio
 async def test_caller_cancellation_drains_supervised_runtime_task():
     supervisor = AgentExecutionSupervisor()
     context = _context("exec-caller-cancel")
