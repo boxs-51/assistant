@@ -1,23 +1,28 @@
+import math
+import time
+from typing import Any, AsyncGenerator, Awaitable, Callable
+
 import httpx
 import structlog
 
-from typing import Callable, Awaitable, AsyncGenerator, Any
-
-from ..infrastructure.config.schemas import ProviderSettings
-from .exceptions import ProviderError, wrap_provider_exception
-from .core.provider import BaseProvider
-from ..domain.schemas import GatewayResponse, GatewayStreamChunk # Import schema chuẩn
-
-from .policies.retry import RetryPolicy
 from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ..domain.schemas import GatewayResponse, GatewayStreamChunk
+from ..infrastructure.config.schemas import ProviderSettings
+from .core.provider import BaseProvider
+from .exceptions import (
+    ProviderDeadlineExceededError,
+    ProviderError,
+    wrap_provider_exception,
+)
+from .policies.retry import RetryPolicy
+from .retry_contracts import ProviderCallBudget
 
 logger = structlog.get_logger(__name__)
 
+
 class ProviderExecutor:
-    """
-    REFACTORED (v2): Lớp điều phối việc thực thi một request đến một provider duy nhất.
-    Nó điều phối các policy theo đúng kiến trúc resilience (Polly, Resilience4j).
-    """
+    """Execute one provider request under resilience policies."""
+
     def __init__(
         self,
         circuit_breaker_manager: CircuitBreakerManager,
@@ -26,7 +31,6 @@ class ProviderExecutor:
         max_retries: int | None = None,
         config: ProviderSettings = None,
     ):
-        """Create an executor from explicit resilience dependencies."""
         self.breaker_manager = circuit_breaker_manager
         self.retry_policy = retry_policy or RetryPolicy(
             max_retries=max_retries,
@@ -34,12 +38,10 @@ class ProviderExecutor:
         )
 
     async def is_provider_healthy(self, provider_name: str) -> bool:
-        """Kiểm tra xem circuit breaker của provider có đang mở hay không."""
         breaker = await self.breaker_manager.get_breaker(provider_name)
         return not await breaker.is_open()
 
     def _get_error_metric_label(self, error: httpx.RequestError) -> str:
-        """Phân loại lỗi httpx để ghi nhận metric chính xác."""
         if isinstance(error, httpx.ConnectError):
             return "connect_error"
         if isinstance(error, httpx.ReadTimeout):
@@ -50,80 +52,149 @@ class ProviderExecutor:
             return "pool_timeout"
         return "request_error"
 
-    async def execute(self, **kwargs) -> GatewayResponse:
-        """
-        Điều phối việc thực thi request với các policy Circuit Breaker và Retry.
-        Luồng thực thi: before_request -> retry(request -> normalize) -> on_success/on_failure.
-        """
+    @staticmethod
+    def _remaining_or_raise(
+        call_budget: ProviderCallBudget,
+        provider_name: str,
+    ) -> float:
+        remaining = call_budget.remaining_seconds(
+            now_monotonic=time.monotonic()
+        )
+        if remaining <= 0:
+            raise ProviderDeadlineExceededError(
+                "Provider call deadline exceeded before attempt.",
+                provider_name=provider_name,
+            )
+        return remaining
+
+    @staticmethod
+    def _bounded_attempt_timeout(
+        configured_timeout: Any,
+        remaining: float,
+    ) -> float:
+        """Return a positive attempt timeout bounded by logical remaining time."""
+
+        if isinstance(configured_timeout, bool) or configured_timeout is None:
+            return remaining
+        if isinstance(configured_timeout, (int, float)):
+            configured = float(configured_timeout)
+            if math.isfinite(configured) and configured > 0:
+                return min(configured, remaining)
+        # Budget-aware execution must remain bounded even when a caller
+        # supplied a non-scalar timeout object or invalid value.
+        return remaining
+
+    async def execute(
+        self,
+        *,
+        call_budget: ProviderCallBudget | None = None,
+        **kwargs,
+    ) -> GatewayResponse:
+        """Execute chat with circuit-breaker and optional logical-call budget."""
+
         provider = kwargs.get("provider")
         breaker = await self.breaker_manager.get_breaker(provider.name)
+        provider_attempted = False
 
         async def execution_func():
-            """Hàm thực thi lõi, chỉ gọi provider và kiểm tra status."""
-            # Gọi thẳng vào phương thức API cấp cao của provider
-            normalized_response = await provider.chat.chat(**kwargs)
-            return normalized_response
+            nonlocal provider_attempted
+            attempt_kwargs = dict(kwargs)
+            if call_budget is not None:
+                remaining = self._remaining_or_raise(
+                    call_budget,
+                    provider.name,
+                )
+                attempt_kwargs["timeout"] = self._bounded_attempt_timeout(
+                    attempt_kwargs.get("timeout"),
+                    remaining,
+                )
+            provider_attempted = True
+            return await provider.chat.chat(**attempt_kwargs)
 
         try:
-            # Bước 1 & 3: Kiểm tra breaker trước, sau đó thực thi logic retry.
-            # Toàn bộ logic on_success/on_failure nằm ngoài RetryPolicy.
+            if call_budget is not None:
+                self._remaining_or_raise(call_budget, provider.name)
+
             await breaker.before_request()
 
-            # Bước 2: RetryPolicy chỉ bọc hàm thực thi lõi.
-            response = await self.retry_policy.apply(execution_func, provider.name)
+            response = await self.retry_policy.apply(
+                execution_func,
+                provider.name,
+                call_budget=call_budget,
+            )
 
-            # Bước 4 (Success): Nếu retry thành công, ghi nhận success cho breaker.
             await breaker.on_success()
             return response
 
+        except ProviderDeadlineExceededError:
+            # An expired caller budget is not a provider failure when no
+            # request reached the provider. If an earlier attempt did run,
+            # retain the existing one-failure-per-executor-call accounting.
+            if provider_attempted:
+                await breaker.on_failure()
+            raise
+
         except CircuitBreakerOpenError as e:
-            # Bước 5: Chuyển đổi CircuitBreakerOpenError thành ProviderError để Router có thể fallback.
-            logger.warning("Skipping provider call, circuit breaker is open.", provider=provider.name)
-            raise ProviderError(f"Circuit breaker is open for {provider.name}", provider_name=provider.name) from e
+            logger.warning(
+                "Skipping provider call, circuit breaker is open.",
+                provider=provider.name,
+            )
+            raise ProviderError(
+                f"Circuit breaker is open for {provider.name}",
+                provider_name=provider.name,
+            ) from e
 
         except Exception as e:
-            # Bước 4 (Failure): Nếu retry thất bại (hết số lần thử), ghi nhận failure cho breaker.
             await breaker.on_failure()
 
-            # Bước 8 & 9: Ghi nhận metrics và log sau khi đã retry thất bại.
             if isinstance(e, httpx.HTTPStatusError):
                 error_label = str(e.response.status_code)
             elif isinstance(e, httpx.RequestError):
                 error_label = self._get_error_metric_label(e)
             else:
                 error_label = "unexpected_error"
-            
+
             logger.warning(
                 "Provider execution failed after all retries.",
-                provider=provider.name, error=str(e), error_type=type(e).__name__
+                provider=provider.name,
+                error=str(e),
+                error_type=type(e).__name__,
+                error_label=error_label,
             )
-            # Preserve structured provider errors and normalize raw httpx errors.
             normalized = wrap_provider_exception(e, provider.name)
             if normalized is e:
                 raise
             raise normalized from e
 
-    async def execute_stream(self, **kwargs) -> AsyncGenerator[GatewayStreamChunk, None]:
-        """
-        Điều phối việc thực thi một request streaming.
-        Luồng này không hỗ trợ retry cho từng chunk.
-        """
+    async def execute_stream(
+        self,
+        **kwargs,
+    ) -> AsyncGenerator[GatewayStreamChunk, None]:
+        """Execute a streaming request without per-chunk retry."""
+
         provider = kwargs.get("provider")
         breaker = await self.breaker_manager.get_breaker(provider.name)
 
         try:
             await breaker.before_request()
 
-            # Bắt đầu stream và chuẩn hóa
-            logger.info(f"Starting streaming from provider {provider.name} " )
+            logger.info(
+                f"Starting streaming from provider {provider.name}"
+            )
             async for chunk in provider.chat.chat_stream(**kwargs):
                 yield chunk
 
             await breaker.on_success()
 
         except CircuitBreakerOpenError as e:
-            logger.warning("Skipping provider stream, circuit breaker is open.", provider=provider.name)
-            raise ProviderError(f"Circuit breaker is open for {provider.name}", provider_name=provider.name) from e
+            logger.warning(
+                "Skipping provider stream, circuit breaker is open.",
+                provider=provider.name,
+            )
+            raise ProviderError(
+                f"Circuit breaker is open for {provider.name}",
+                provider_name=provider.name,
+            ) from e
 
         except Exception as e:
             await breaker.on_failure()
@@ -133,9 +204,13 @@ class ProviderExecutor:
                 error_label = self._get_error_metric_label(e)
             else:
                 error_label = "unexpected_error"
-            
+
             logger.warning(
-                "Provider stream execution failed.", provider=provider.name, error=str(e), error_type=type(e).__name__
+                "Provider stream execution failed.",
+                provider=provider.name,
+                error=str(e),
+                error_type=type(e).__name__,
+                error_label=error_label,
             )
             normalized = wrap_provider_exception(e, provider.name)
             if normalized is e:
@@ -146,25 +221,50 @@ class ProviderExecutor:
         self,
         provider: BaseProvider,
         execution_callable: Callable[[], Awaitable[Any]],
+        *,
+        call_budget: ProviderCallBudget | None = None,
     ) -> Any:
-        """
-        Thực thi một hàm bất đồng bộ bất kỳ với các policy Circuit Breaker và Retry.
-        Hàm này tổng quát hóa `execute` để dùng cho models, embeddings, etc.
-        """
+        """Execute a generic provider operation with the same retry budget."""
+
         breaker = await self.breaker_manager.get_breaker(provider.name)
+        provider_attempted = False
+
+        async def execution_func():
+            nonlocal provider_attempted
+            if call_budget is not None:
+                self._remaining_or_raise(call_budget, provider.name)
+            provider_attempted = True
+            return await execution_callable()
 
         try:
+            if call_budget is not None:
+                self._remaining_or_raise(call_budget, provider.name)
+
             await breaker.before_request()
 
-            # RetryPolicy bọc hàm thực thi được truyền vào.
-            response = await self.retry_policy.apply(execution_callable, provider.name)
+            response = await self.retry_policy.apply(
+                execution_func,
+                provider.name,
+                call_budget=call_budget,
+            )
 
             await breaker.on_success()
             return response
 
+        except ProviderDeadlineExceededError:
+            if provider_attempted:
+                await breaker.on_failure()
+            raise
+
         except CircuitBreakerOpenError as e:
-            logger.warning("Skipping provider call, circuit breaker is open.", provider=provider.name)
-            raise ProviderError(f"Circuit breaker is open for {provider.name}", provider_name=provider.name) from e
+            logger.warning(
+                "Skipping provider call, circuit breaker is open.",
+                provider=provider.name,
+            )
+            raise ProviderError(
+                f"Circuit breaker is open for {provider.name}",
+                provider_name=provider.name,
+            ) from e
 
         except Exception as e:
             await breaker.on_failure()
@@ -178,7 +278,10 @@ class ProviderExecutor:
 
             logger.warning(
                 "Provider generic execution failed after all retries.",
-                provider=provider.name, error=str(e), error_type=type(e).__name__
+                provider=provider.name,
+                error=str(e),
+                error_type=type(e).__name__,
+                error_label=error_label,
             )
             normalized = wrap_provider_exception(e, provider.name)
             if normalized is e:
