@@ -266,7 +266,15 @@ class ProviderExecutor:
                     )
                 aclose = getattr(stream_iterator, "aclose", None)
                 if callable(aclose):
-                    await aclose()
+                    try:
+                        await aclose()
+                    except Exception as cleanup_error:
+                        logger.warning(
+                            "Provider stream cleanup failed.",
+                            provider=provider.name,
+                            error=str(cleanup_error),
+                            error_type=type(cleanup_error).__name__,
+                        )
 
             await breaker.on_success()
 
