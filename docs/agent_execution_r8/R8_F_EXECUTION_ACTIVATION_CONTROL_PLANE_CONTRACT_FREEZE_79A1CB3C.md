@@ -1196,11 +1196,17 @@ Task-activity fence and must not change R7 logical resume authority:
 ```text
 se/src/transport/gateway/api/v1/events_router.py
     - preserve existing CREATED claim_id on retryable RESUME_CONFLICT only
+    - allow the SAME CREATED claim/request to move to a newer connection
+      generation only after the new ResumePlan validates the same user/client
+      and durable resume semantics
     - no new claim, no new resume_request_id, no ACK/handoff authority change
 
 R7 resume persistence/runtime call sites
     - Task-first activity epoch/reconciliation hooks
     - WAIT expiry activity rederive
+    - CREATED-claim connection-generation rebind CAS updates only
+      connection_id + plan_fingerprint; claim TTL and logical identity remain
+      unchanged
 ```
 
 No `cl/` change is required because ClientRuntime already understands
@@ -1456,6 +1462,9 @@ Transient Task activity epoch/reconciliation conflicts are ResumeClaimDeferred a
 R8F-I11L
 AgentExecution claim CAS loss remains a rejection rather than blind internal retry because another execution authority may have won.
 
+R8F-I11M
+A retryable CREATED ResumeClaim may migrate across connection generations for the same authenticated user + stable client_id and same resume_request_id only after a fresh ResumePlan for the new connection is valid and the durable old plan_fingerprint equals that new plan with the old claim connection substituted back in. Rebind CAS updates only connection_id + plan_fingerprint, preserves claim_id/request/TTL, and acquires no execution or budget authority.
+
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
 
@@ -1530,6 +1539,7 @@ R7 pre-resume epoch bump is rolled back/semantically neutral when resume does no
 task-scoped WAIT expiry removes the expired branch reason from aggregate Task activity
 transient activity-epoch resume conflicts retry the same CREATED claim internally
 retryable RESUME_CONFLICT wire payload preserves the exact claim_id/resume_request_id
+same retryable CREATED claim/request rebinds K2 -> K3 for the same user/client and rejects semantic/client drift
 WAITING activity derivation
 Task cancellation with two branch runners
 restart-safe branch reads
