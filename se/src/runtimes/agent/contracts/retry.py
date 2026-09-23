@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
+
+if TYPE_CHECKING:
+    from .context import AgentExecutionContext
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -75,6 +78,44 @@ class RetryAdmission:
     task_budget_revision: int
 
 
+@dataclass(frozen=True, slots=True)
+class RetryReplayResult:
+    """Durable same-request replay view independent of process lifetime."""
+
+    admission: RetryAdmission
+    execution_state: str
+    execution_revision: int
+
+    @property
+    def preactivation(self) -> bool:
+        return self.execution_state == "RUNNING" and self.execution_revision == 1
+
+
+@dataclass(frozen=True, slots=True)
+class RetryExecutionBootstrap:
+    """Restart-safe R9-C handoff; activation authority is acquired separately."""
+
+    execution_id: str
+    expected_execution_revision: int
+    task_id: str
+    branch_id: str
+    retry_request_id: str
+    plan_fingerprint: str
+    context: "AgentExecutionContext"
+
+
+@dataclass(frozen=True, slots=True)
+class RetryActivationResult:
+    """Durable R9-C activation winner for one admitted retry execution."""
+
+    task_id: str
+    branch_id: str
+    execution_id: str
+    source_execution_revision: int
+    activated_execution_revision: int
+    remaining_active_budget_seconds: float
+
+
 def retry_value_fingerprint(value: Any) -> str:
     """Fingerprint one JSON-compatible RETRY planning value."""
 
@@ -122,8 +163,11 @@ def retry_plan_fingerprint(values: RetryPlan | Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "RetryActivationResult",
     "RetryAdmission",
+    "RetryExecutionBootstrap",
     "RetryPlan",
+    "RetryReplayResult",
     "retry_plan_fingerprint",
     "retry_value_fingerprint",
 ]

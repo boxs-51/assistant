@@ -36,6 +36,7 @@ class RetryRevalidationSnapshot:
     checkpoint: Any | None
     delegated: bool
     fresh_active_budget_seconds: float
+    runtime_context_state: dict[str, Any]
 
 
 def _value(value: Any) -> str | None:
@@ -52,12 +53,33 @@ def _require_identifier(name: str, value: str) -> None:
         )
 
 
-def _runtime_proof(execution) -> tuple[str, str, float]:
+def _fork_seed_context_state(receipt) -> dict[str, Any] | None:
+    seed = dict(getattr(receipt, "runtime_seed_json", None) or {})
+    if not seed:
+        return None
+    return {
+        "request_id": seed.get("request_id"),
+        "workflow_id": seed.get("workflow_id"),
+        "metadata": dict(seed.get("metadata") or {}),
+        "causation_id": seed.get("causation_id"),
+        "trace_id": seed.get("trace_id"),
+        "limits": dict(seed.get("limits") or {}),
+    }
+
+
+def _runtime_proof(
+    execution,
+    context_state: Mapping[str, Any] | None = None,
+) -> tuple[str, str, float]:
     request = to_json_safe(
         dict(getattr(execution, "request", None) or {}),
         path="retry_plan.request",
     )
-    state = getattr(execution, "context_state", None)
+    state = (
+        context_state
+        if context_state is not None
+        else getattr(execution, "context_state", None)
+    )
     if not isinstance(state, Mapping):
         raise RetryPlanRejected(
             "RETRY_RUNTIME_CONTEXT_INCOMPLETE",
@@ -313,11 +335,22 @@ class AgentRetryPlanningService:
                 "TaskBudget parallel-Agent capacity is exhausted.",
             )
 
+        runtime_context_state = getattr(execution, "context_state", None)
+        if not isinstance(runtime_context_state, Mapping):
+            loader = getattr(
+                self._store, "load_fork_admission_by_execution", None
+            )
+            receipt = (
+                await loader(source_execution_id)
+                if callable(loader)
+                else None
+            )
+            runtime_context_state = _fork_seed_context_state(receipt)
         (
             request_fingerprint,
             source_context_fingerprint,
             fresh_active_budget_seconds,
-        ) = _runtime_proof(execution)
+        ) = _runtime_proof(execution, runtime_context_state)
 
         plan_values = {
             "task_id": task_id,
@@ -456,11 +489,17 @@ async def revalidate_retry_plan_in_uow(
             "Source execution is no longer retryable.",
         )
 
+    runtime_context_state = getattr(execution, "context_state", None)
+    if not isinstance(runtime_context_state, Mapping):
+        receipt = await uow.agents.get_task_fork_admission_by_execution(
+            execution.id
+        )
+        runtime_context_state = _fork_seed_context_state(receipt)
     (
         request_fingerprint,
         source_context_fingerprint,
         fresh_active_budget_seconds,
-    ) = _runtime_proof(execution)
+    ) = _runtime_proof(execution, runtime_context_state)
     if (
         request_fingerprint != plan.request_fingerprint
         or source_context_fingerprint != plan.source_context_fingerprint
@@ -526,6 +565,7 @@ async def revalidate_retry_plan_in_uow(
         checkpoint=checkpoint,
         delegated=delegated,
         fresh_active_budget_seconds=fresh_active_budget_seconds,
+        runtime_context_state=dict(runtime_context_state),
     )
 
 

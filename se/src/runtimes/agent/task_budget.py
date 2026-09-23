@@ -10,6 +10,7 @@ from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError, OperationalError
 
+from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ...domain.schemas.task_budget import (
     TaskBudget,
     TaskBudgetLimits,
@@ -24,6 +25,15 @@ from .contracts.fork import (
     ForkPlan,
     fork_plan_fingerprint,
     fork_runtime_seed_payload,
+)
+from .contracts.branch_resolution import (
+    BranchDiscardResult,
+    TaskAdoptionResult,
+)
+from .contracts.aggregate import (
+    AggregateAdmission,
+    aggregate_fingerprint,
+    aggregate_plan_fingerprint,
 )
 from .contracts.retry import (
     RetryAdmission,
@@ -107,6 +117,18 @@ class RetryConsumeDeferred(RetryConsumeError):
 
 class RetryConsumeConflict(RetryConsumeError):
     pass
+
+
+class BranchResolutionError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
+class AggregateAdmissionError(RuntimeError):
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -935,6 +957,7 @@ class TaskBudgetService:
 
                     now_utc = datetime.now(timezone.utc)
                     cancelled_forks = 0
+                    cancelled_retries = 0
                     cancelled_delegated = 0
                     receipts = await uow.agents.list_task_fork_admissions(
                         task_id
@@ -997,9 +1020,59 @@ class TaskBudgetService:
                         if execution.parent_execution_id is not None:
                             cancelled_delegated += 1
 
-                    if budget.active_executions < cancelled_forks:
+                    retry_receipts = (
+                        await uow.agents.list_task_retry_admissions(task_id)
+                    )
+                    for receipt in retry_receipts:
+                        branch = await uow.agents.get_task_branch_for_update(
+                            receipt.branch_id
+                        )
+                        execution = await uow.agents.get_execution(
+                            receipt.execution_id
+                        )
+                        if branch is None or execution is None:
+                            raise TaskBudgetConflictError(
+                                "RetryAdmission durable graph is incomplete "
+                                f"for {receipt.execution_id}."
+                            )
+                        exact_preactivation = (
+                            branch.task_id == task_id
+                            and branch.current_execution_id
+                            == receipt.execution_id
+                            and execution.task_id == task_id
+                            and execution.branch_id == receipt.branch_id
+                            and execution.retry_of_execution_id
+                            == receipt.source_execution_id
+                            and str(execution.state) == "RUNNING"
+                            and int(execution.revision) == 1
+                            and execution.current_checkpoint_id is None
+                            and execution.bound_client_id is None
+                            and execution.bound_connection_id is None
+                        )
+                        if not exact_preactivation:
+                            continue
+                        cancelled = (
+                            await uow.agents
+                            .compare_and_set_retry_preactivation_cancel(
+                                execution.id,
+                                task_id=task_id,
+                                branch_id=receipt.branch_id,
+                                source_execution_id=(
+                                    receipt.source_execution_id
+                                ),
+                                completed_at=now_utc,
+                            )
+                        )
+                        if cancelled is None:
+                            continue
+                        cancelled_retries += 1
+                        if execution.parent_execution_id is not None:
+                            cancelled_delegated += 1
+
+                    cancelled_dormant = cancelled_forks + cancelled_retries
+                    if budget.active_executions < cancelled_dormant:
                         raise TaskBudgetConflictError(
-                            "Fork cancellation would underflow "
+                            "Dormant execution cancellation would underflow "
                             "active_executions."
                         )
                     if (
@@ -1030,7 +1103,7 @@ class TaskBudgetService:
                             else now_utc
                         ),
                         "active_executions": (
-                            budget.active_executions - cancelled_forks
+                            budget.active_executions - cancelled_dormant
                         ),
                         "active_parallel_agents": (
                             budget.active_parallel_agents
@@ -1058,6 +1131,676 @@ class TaskBudgetService:
 
         raise TaskBudgetConflictError(
             f"AgentTask cancellation conflicts exhausted for {task_id}"
+        )
+
+    async def discard_branch(
+        self,
+        task_id: str,
+        branch_id: str,
+        *,
+        target_user_id: str,
+    ) -> BranchDiscardResult:
+        """Atomically resolve one non-final OPEN branch as DISCARDED."""
+
+        if not task_id or not branch_id or not target_user_id:
+            raise BranchResolutionError(
+                "BRANCH_RESOLUTION_CONFLICT",
+                "Task, branch and principal identifiers are required.",
+            )
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    task = await uow.agents.get_task_for_update(task_id)
+                    budget = await uow.agents.get_task_budget_for_update(task_id)
+                    branches = await uow.agents.list_task_branches_for_update(
+                        task_id
+                    )
+                    selected = next(
+                        (item for item in branches if item.branch_id == branch_id),
+                        None,
+                    )
+                    if task is None or budget is None or selected is None:
+                        raise BranchResolutionError(
+                            "BRANCH_RESOLUTION_CONFLICT",
+                            "Task, budget or selected branch is missing.",
+                        )
+                    if str(task.created_by) != target_user_id:
+                        raise BranchResolutionError(
+                            "BRANCH_RESOLUTION_CONFLICT",
+                            "Authenticated principal does not own the Task.",
+                        )
+                    state = str(selected.resolution_state)
+                    if state == "DISCARDED":
+                        result = BranchDiscardResult(
+                            task_id=task_id,
+                            branch_id=branch_id,
+                            branch_revision=int(selected.revision),
+                            task_budget_revision=int(budget.revision),
+                        )
+                        await uow.commit()
+                        return result
+                    if state != "OPEN":
+                        raise BranchResolutionError(
+                            "BRANCH_NOT_OPEN",
+                            f"TaskBranch is already {state}.",
+                        )
+                    if str(task.status) in _TASK_TERMINAL_STATES or str(budget.state) != "OPEN":
+                        raise BranchResolutionError(
+                            "TASK_ALREADY_RESOLVED",
+                            "Terminal Task authority forbids branch DISCARD.",
+                        )
+                    open_branches = [
+                        item
+                        for item in branches
+                        if str(item.resolution_state) == "OPEN"
+                    ]
+                    if len(open_branches) <= 1:
+                        raise BranchResolutionError(
+                            "BRANCH_DISCARD_LAST_OPEN_FORBIDDEN",
+                            "The final OPEN branch cannot be discarded.",
+                        )
+                    if int(budget.active_branches) != len(open_branches):
+                        raise BranchResolutionError(
+                            "BRANCH_RESOLUTION_CONFLICT",
+                            "TaskBudget active_branches differs from branch authority.",
+                        )
+                    changed = await uow.agents.compare_and_set_task_branch(
+                        branch_id,
+                        int(selected.revision),
+                        {"resolution_state": "DISCARDED"},
+                    )
+                    if changed is None:
+                        await uow.rollback()
+                        continue
+                    updated_budget = await uow.agents.compare_and_set_task_budget(
+                        task_id,
+                        int(budget.revision),
+                        {"active_branches": int(budget.active_branches) - 1},
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+                    result = BranchDiscardResult(
+                        task_id=task_id,
+                        branch_id=branch_id,
+                        branch_revision=int(changed.revision),
+                        task_budget_revision=int(updated_budget.revision),
+                    )
+                    await uow.commit()
+                    return result
+            except OperationalError as exc:
+                if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                    continue
+                raise
+        raise BranchResolutionError(
+            "BRANCH_RESOLUTION_CONFLICT",
+            f"DISCARD conflicts exhausted for {task_id}/{branch_id}.",
+        )
+
+    async def adopt_branch(
+        self,
+        task_id: str,
+        branch_id: str,
+        *,
+        target_user_id: str,
+    ) -> TaskAdoptionResult:
+        """Commit the sole Task result authority and invalidate resumability."""
+
+        if not task_id or not branch_id or not target_user_id:
+            raise BranchResolutionError(
+                "TASK_RESOLUTION_CONFLICT",
+                "Task, branch and principal identifiers are required.",
+            )
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    # Frozen R9 order: Task -> Budget -> sorted Branches ->
+                    # selected Execution -> CREATED claims -> CAS mutations.
+                    task = await uow.agents.get_task_for_update(task_id)
+                    budget = await uow.agents.get_task_budget_for_update(task_id)
+                    branches = await uow.agents.list_task_branches_for_update(
+                        task_id
+                    )
+                    selected = next(
+                        (item for item in branches if item.branch_id == branch_id),
+                        None,
+                    )
+                    if task is None or budget is None or selected is None:
+                        raise BranchResolutionError(
+                            "TASK_RESOLUTION_CONFLICT",
+                            "Task, budget or selected branch is missing.",
+                        )
+                    if str(task.created_by) != target_user_id:
+                        raise BranchResolutionError(
+                            "TASK_RESOLUTION_CONFLICT",
+                            "Authenticated principal does not own the Task.",
+                        )
+                    selected_state = str(selected.resolution_state)
+                    if str(task.status) in _TASK_TERMINAL_STATES:
+                        if (
+                            str(task.status) == "COMPLETED"
+                            and selected_state == "ADOPTED"
+                            and selected.current_execution_id is not None
+                        ):
+                            result = TaskAdoptionResult(
+                                task_id=task_id,
+                                task_revision=int(task.revision),
+                                selected_branch_id=branch_id,
+                                selected_execution_id=selected.current_execution_id,
+                                task_budget_revision=int(budget.revision),
+                                superseded_branch_ids=tuple(
+                                    item.branch_id
+                                    for item in branches
+                                    if str(item.resolution_state) == "SUPERSEDED"
+                                ),
+                                rejected_resume_claim_ids=(),
+                            )
+                            await uow.commit()
+                            return result
+                        raise BranchResolutionError(
+                            "TASK_ALREADY_RESOLVED",
+                            f"Task is already {task.status}.",
+                        )
+                    if str(budget.state) != "OPEN":
+                        raise BranchResolutionError(
+                            "TASK_RESOLUTION_CONFLICT",
+                            "Nonterminal Task has a CLOSED TaskBudget.",
+                        )
+                    if selected_state != "OPEN":
+                        raise BranchResolutionError(
+                            "BRANCH_NOT_OPEN",
+                            f"Selected TaskBranch is already {selected_state}.",
+                        )
+                    if selected.current_execution_id is None:
+                        raise BranchResolutionError(
+                            "BRANCH_RESULT_NOT_COMPLETED",
+                            "Selected branch has no current execution.",
+                        )
+                    execution = await uow.agents.get_execution_for_update(
+                        selected.current_execution_id
+                    )
+                    if (
+                        execution is None
+                        or execution.task_id != task_id
+                        or execution.branch_id != branch_id
+                        or str(execution.state) != "COMPLETED"
+                        or execution.result is None
+                    ):
+                        raise BranchResolutionError(
+                            "BRANCH_RESULT_NOT_COMPLETED",
+                            "Selected current execution has no durable COMPLETED result.",
+                        )
+                    claims = (
+                        await uow.agents
+                        .list_created_resume_claims_for_task_for_update(task_id)
+                    )
+                    open_branches = [
+                        item
+                        for item in branches
+                        if str(item.resolution_state) == "OPEN"
+                    ]
+                    if int(budget.active_branches) != len(open_branches):
+                        raise BranchResolutionError(
+                            "TASK_RESOLUTION_CONFLICT",
+                            "TaskBudget active_branches differs from branch authority.",
+                        )
+                    now_utc = datetime.now(timezone.utc)
+                    updated_task = await uow.agents.compare_and_set_task(
+                        task_id,
+                        int(task.revision),
+                        {
+                            "status": "COMPLETED",
+                            "wait_reasons": [],
+                            "output": to_json_safe(
+                                dict(execution.result),
+                                path="agent_tasks.output",
+                            ),
+                            "error": None,
+                        },
+                    )
+                    if updated_task is None:
+                        await uow.rollback()
+                        continue
+                    updated_budget = await uow.agents.compare_and_set_task_budget(
+                        task_id,
+                        int(budget.revision),
+                        {
+                            "state": "CLOSED",
+                            "closed_at": now_utc,
+                            "active_branches": 0,
+                        },
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+                    superseded: list[str] = []
+                    branch_conflict = False
+                    for item in open_branches:
+                        target = "ADOPTED" if item.branch_id == branch_id else "SUPERSEDED"
+                        changed = await uow.agents.compare_and_set_task_branch(
+                            item.branch_id,
+                            int(item.revision),
+                            {"resolution_state": target},
+                        )
+                        if changed is None:
+                            branch_conflict = True
+                            break
+                        if target == "SUPERSEDED":
+                            superseded.append(item.branch_id)
+                    if branch_conflict:
+                        await uow.rollback()
+                        continue
+                    rejected: list[str] = []
+                    claim_conflict = False
+                    for claim in claims:
+                        changed = await uow.agents.compare_and_set_resume_claim(
+                            claim.claim_id,
+                            int(claim.revision),
+                            "CREATED",
+                            {
+                                "state": "REJECTED",
+                                "rejection_code": "TASK_RESOLVED",
+                                "rejected_at": now_utc,
+                            },
+                        )
+                        if changed is None:
+                            claim_conflict = True
+                            break
+                        rejected.append(claim.claim_id)
+                    if claim_conflict:
+                        await uow.rollback()
+                        continue
+                    result = TaskAdoptionResult(
+                        task_id=task_id,
+                        task_revision=int(updated_task.revision),
+                        selected_branch_id=branch_id,
+                        selected_execution_id=execution.id,
+                        task_budget_revision=int(updated_budget.revision),
+                        superseded_branch_ids=tuple(superseded),
+                        rejected_resume_claim_ids=tuple(rejected),
+                    )
+                    await uow.commit()
+                    return result
+            except OperationalError as exc:
+                if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                    continue
+                raise
+        raise BranchResolutionError(
+            "TASK_RESOLUTION_CONFLICT",
+            f"ADOPT conflicts exhausted for {task_id}/{branch_id}.",
+        )
+
+    async def aggregate_branches(
+        self,
+        task_id: str,
+        *,
+        aggregate_request_id: str,
+        target_branch_id: str,
+        source_branch_ids: Sequence[str],
+        target_user_id: str,
+    ) -> AggregateAdmission:
+        """Atomically admit one explicit aggregate execution; never ADOPT."""
+
+        ordered_ids = tuple(str(item) for item in source_branch_ids)
+        if (
+            not task_id
+            or not aggregate_request_id
+            or not target_branch_id
+            or not target_user_id
+            or len(ordered_ids) < 2
+            or len(set(ordered_ids)) != len(ordered_ids)
+            or target_branch_id not in ordered_ids
+        ):
+            raise AggregateAdmissionError(
+                "AGGREGATE_INPUT_CONFLICT",
+                "AGGREGATE requires a target included in at least two unique ordered sources.",
+            )
+        execution_id = f"r9_aggregate_{uuid4().hex}"
+        admitted_at = datetime.now(timezone.utc)
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    task = await uow.agents.get_task_for_update(task_id)
+                    budget = await uow.agents.get_task_budget_for_update(task_id)
+                    branches = await uow.agents.list_task_branches_for_update(
+                        task_id
+                    )
+                    branch_map = {item.branch_id: item for item in branches}
+                    receipt = await uow.agents.get_task_aggregate_admission(
+                        task_id, aggregate_request_id
+                    )
+                    if receipt is not None:
+                        committed_ids = tuple(
+                            str(item["branch_id"])
+                            for item in receipt.source_branch_snapshots
+                        )
+                        if (
+                            receipt.target_branch_id != target_branch_id
+                            or committed_ids != ordered_ids
+                            or receipt.created_by != target_user_id
+                        ):
+                            raise AggregateAdmissionError(
+                                "AGGREGATE_REQUEST_CONFLICT",
+                                "aggregate_request_id already committed with different semantics.",
+                            )
+                        execution = await uow.agents.get_execution(
+                            receipt.execution_id
+                        )
+                        target = branch_map.get(receipt.target_branch_id)
+                        if execution is None or target is None or execution.task_id != task_id:
+                            raise AggregateAdmissionError(
+                                "AGGREGATE_INPUT_CONFLICT",
+                                "Committed aggregate durable graph is incomplete.",
+                            )
+                        result = AggregateAdmission(
+                            task_id=task_id,
+                            aggregate_request_id=aggregate_request_id,
+                            plan_fingerprint=receipt.plan_fingerprint,
+                            runtime_seed_fingerprint=(
+                                receipt.runtime_seed_fingerprint
+                            ),
+                            target_branch_id=receipt.target_branch_id,
+                            branch_revision=int(target.revision),
+                            execution_id=receipt.execution_id,
+                            execution_revision=int(execution.revision),
+                            source_branch_ids=committed_ids,
+                            task_revision=int(task.revision),
+                            task_budget_revision=int(budget.revision),
+                        )
+                        await uow.commit()
+                        return result
+                    if task is None or budget is None:
+                        raise AggregateAdmissionError(
+                            "AGGREGATE_INPUT_CONFLICT",
+                            "Task or TaskBudget is missing.",
+                        )
+                    if str(task.created_by) != target_user_id:
+                        raise AggregateAdmissionError(
+                            "AGGREGATE_INPUT_CONFLICT",
+                            "Authenticated principal does not own the Task.",
+                        )
+                    if str(task.status) in _TASK_TERMINAL_STATES or str(budget.state) != "OPEN":
+                        raise AggregateAdmissionError(
+                            "TASK_ALREADY_RESOLVED",
+                            "Terminal Task authority forbids AGGREGATE.",
+                        )
+                    selected_branches = [branch_map.get(item) for item in ordered_ids]
+                    if any(item is None for item in selected_branches):
+                        raise AggregateAdmissionError(
+                            "AGGREGATE_INPUT_CONFLICT",
+                            "An aggregate source branch is missing.",
+                        )
+                    if any(
+                        str(item.resolution_state) != "OPEN"
+                        or item.current_execution_id is None
+                        for item in selected_branches
+                    ):
+                        raise AggregateAdmissionError(
+                            "AGGREGATE_INPUT_CONFLICT",
+                            "Every aggregate source must be an OPEN branch with a current execution.",
+                        )
+                    execution_ids = sorted(
+                        str(item.current_execution_id)
+                        for item in selected_branches
+                    )
+                    execution_map = {}
+                    for current_id in execution_ids:
+                        execution_map[current_id] = (
+                            await uow.agents.get_execution_for_update(current_id)
+                        )
+                    source_executions = [
+                        execution_map[str(item.current_execution_id)]
+                        for item in selected_branches
+                    ]
+                    if any(
+                        item is None
+                        or item.task_id != task_id
+                        or item.branch_id != branch.branch_id
+                        or str(item.state) != "COMPLETED"
+                        or item.result is None
+                        for branch, item in zip(
+                            selected_branches, source_executions
+                        )
+                    ):
+                        raise AggregateAdmissionError(
+                            "AGGREGATE_INPUT_CONFLICT",
+                            "Every aggregate source head must have a durable COMPLETED result.",
+                        )
+                    if (
+                        int(budget.used_executions)
+                        >= int(budget.max_total_executions)
+                        or int(budget.active_executions)
+                        >= int(budget.max_active_executions)
+                    ):
+                        raise AggregateAdmissionError(
+                            "RETRY_BUDGET_EXCEEDED",
+                            "TaskBudget execution capacity is exhausted.",
+                        )
+                    target_branch = branch_map[target_branch_id]
+                    target_execution = execution_map[
+                        str(target_branch.current_execution_id)
+                    ]
+                    delegated = target_execution.parent_execution_id is not None
+                    if delegated and int(budget.active_parallel_agents) >= int(
+                        budget.max_parallel_agents
+                    ):
+                        raise AggregateAdmissionError(
+                            "RETRY_BUDGET_EXCEEDED",
+                            "TaskBudget parallel-Agent capacity is exhausted.",
+                        )
+                    branch_snapshots = [
+                        {
+                            "branch_id": branch.branch_id,
+                            "revision": int(branch.revision),
+                            "resolution_state": str(branch.resolution_state),
+                            "current_execution_id": branch.current_execution_id,
+                        }
+                        for branch in selected_branches
+                    ]
+                    result_fingerprints = [
+                        aggregate_fingerprint(dict(item.result))
+                        for item in source_executions
+                    ]
+                    execution_snapshots = [
+                        {
+                            "execution_id": item.id,
+                            "revision": int(item.revision),
+                            "state": str(item.state),
+                            "result_fingerprint": fingerprint,
+                        }
+                        for item, fingerprint in zip(
+                            source_executions, result_fingerprints
+                        )
+                    ]
+                    target_context_state = dict(
+                        target_execution.context_state or {}
+                    )
+                    if "limits" not in target_context_state:
+                        fork_receipt = (
+                            await uow.agents
+                            .get_task_fork_admission_by_execution(
+                                target_execution.id
+                            )
+                        )
+                        seed = (
+                            dict(fork_receipt.runtime_seed_json or {})
+                            if fork_receipt is not None
+                            else {}
+                        )
+                        if seed:
+                            target_context_state = {
+                                "request_id": seed.get("request_id"),
+                                "workflow_id": seed.get("workflow_id"),
+                                "metadata": dict(seed.get("metadata") or {}),
+                                "causation_id": seed.get("causation_id"),
+                                "trace_id": seed.get("trace_id"),
+                                "limits": dict(seed.get("limits") or {}),
+                            }
+                    try:
+                        limits = AgentExecutionLimits.model_validate(
+                            target_context_state["limits"]
+                        )
+                        fresh_budget = float(limits.timeout_seconds)
+                    except Exception as exc:
+                        raise AggregateAdmissionError(
+                            "AGGREGATE_INPUT_CONFLICT",
+                            "Target branch has no valid durable runtime seed.",
+                        ) from exc
+                    aggregate_request = {
+                        "aggregate_request_id": aggregate_request_id,
+                        "target_branch_id": target_branch_id,
+                        "source_results": [
+                            {
+                                "branch_id": branch.branch_id,
+                                "execution_id": execution.id,
+                                "result": dict(execution.result),
+                            }
+                            for branch, execution in zip(
+                                selected_branches, source_executions
+                            )
+                        ],
+                    }
+                    runtime_seed_fingerprint = aggregate_fingerprint(
+                        {
+                            "context_state": target_context_state,
+                            "request": aggregate_request,
+                            "fresh_active_budget_seconds": fresh_budget,
+                        }
+                    )
+                    plan_fingerprint = aggregate_plan_fingerprint(
+                        task_id=task_id,
+                        target_branch_id=target_branch_id,
+                        source_branch_snapshots=branch_snapshots,
+                        source_execution_snapshots=execution_snapshots,
+                        result_fingerprints=result_fingerprints,
+                        runtime_seed_fingerprint=runtime_seed_fingerprint,
+                        created_by=target_user_id,
+                    )
+                    execution_values = _normalize_execution_store_values(
+                        {
+                            "id": execution_id,
+                            "session_id": str(task.session_id),
+                            "agent_id": target_execution.agent_id,
+                            "task_id": task_id,
+                            "branch_id": target_branch_id,
+                            "parent_execution_id": (
+                                target_execution.parent_execution_id
+                            ),
+                            "retry_of_execution_id": None,
+                            "base_execution_id": target_execution.id,
+                            "base_checkpoint_id": (
+                                target_execution.current_checkpoint_id
+                            ),
+                            "correlation_id": target_execution.correlation_id,
+                            "state": "RUNNING",
+                            "wait_reason": None,
+                            "revision": 1,
+                            "current_checkpoint_id": None,
+                            "bound_client_id": None,
+                            "bound_connection_id": None,
+                            "remaining_active_budget_seconds": fresh_budget,
+                            "wait_expires_at": None,
+                            "request": aggregate_request,
+                            "result": None,
+                            "context_state": target_context_state,
+                            "transcript": list(
+                                target_execution.transcript or []
+                            ),
+                            "inference_request": None,
+                            "inference_response": None,
+                            "error": None,
+                            "started_at": admitted_at,
+                            "completed_at": None,
+                        }
+                    )
+                    updated_task = await uow.agents.compare_and_set_task(
+                        task_id,
+                        int(task.revision),
+                        {"status": "RUNNING", "wait_reasons": []},
+                    )
+                    if updated_task is None:
+                        await uow.rollback()
+                        continue
+                    budget_updates = {
+                        "used_executions": int(budget.used_executions) + 1,
+                        "active_executions": int(budget.active_executions) + 1,
+                    }
+                    if delegated:
+                        budget_updates["active_parallel_agents"] = (
+                            int(budget.active_parallel_agents) + 1
+                        )
+                    updated_budget = await uow.agents.compare_and_set_task_budget(
+                        task_id, int(budget.revision), budget_updates
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+                    await uow.agents.save_execution(execution_values)
+                    updated_branch = await uow.agents.compare_and_set_task_branch(
+                        target_branch_id,
+                        int(target_branch.revision),
+                        {"current_execution_id": execution_id},
+                    )
+                    if updated_branch is None:
+                        await uow.rollback()
+                        continue
+                    reservation_payload = {
+                        "aggregate_request_id": aggregate_request_id,
+                        "execution_id": execution_id,
+                        "plan_fingerprint": plan_fingerprint,
+                    }
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": task_id,
+                            "kind": TaskBudgetReservationKind.NEW_EXECUTION.value,
+                            "reservation_key": execution_id,
+                            "payload_fingerprint": _reservation_fingerprint(
+                                TaskBudgetReservationKind.NEW_EXECUTION,
+                                execution_id,
+                                reservation_payload,
+                            ),
+                        }
+                    )
+                    await uow.agents.save_task_aggregate_admission(
+                        {
+                            "task_id": task_id,
+                            "aggregate_request_id": aggregate_request_id,
+                            "plan_fingerprint": plan_fingerprint,
+                            "runtime_seed_fingerprint": (
+                                runtime_seed_fingerprint
+                            ),
+                            "target_branch_id": target_branch_id,
+                            "execution_id": execution_id,
+                            "source_branch_snapshots": branch_snapshots,
+                            "source_execution_snapshots": execution_snapshots,
+                            "result_fingerprints": result_fingerprints,
+                            "created_by": target_user_id,
+                        }
+                    )
+                    result = AggregateAdmission(
+                        task_id=task_id,
+                        aggregate_request_id=aggregate_request_id,
+                        plan_fingerprint=plan_fingerprint,
+                        runtime_seed_fingerprint=runtime_seed_fingerprint,
+                        target_branch_id=target_branch_id,
+                        branch_revision=int(updated_branch.revision),
+                        execution_id=execution_id,
+                        execution_revision=1,
+                        source_branch_ids=ordered_ids,
+                        task_revision=int(updated_task.revision),
+                        task_budget_revision=int(updated_budget.revision),
+                    )
+                    await uow.commit()
+                    return result
+            except IntegrityError:
+                continue
+            except OperationalError as exc:
+                if "locked" in str(exc).lower() or "busy" in str(exc).lower():
+                    continue
+                raise
+        raise AggregateAdmissionError(
+            "AGGREGATE_REQUEST_CONFLICT",
+            f"AGGREGATE conflicts exhausted for {task_id}.",
         )
 
     @staticmethod
@@ -1251,8 +1994,18 @@ class TaskBudgetService:
                                 "wait_expires_at": None,
                                 "request": dict(source.request or {}),
                                 "result": None,
-                                "context_state": None,
-                                "transcript": None,
+                                # R9-C reconstructs the runtime only from
+                                # committed admission outputs.  Copy the
+                                # terminal source seed instead of consulting
+                                # process memory after commit/restart.
+                                "context_state": dict(
+                                    snapshot.runtime_context_state
+                                ),
+                                "transcript": (
+                                    list(snapshot.checkpoint.transcript_snapshot)
+                                    if snapshot.checkpoint is not None
+                                    else list(source.transcript or [])
+                                ),
                                 "inference_request": None,
                                 "inference_response": None,
                                 "error": None,
@@ -3295,6 +4048,11 @@ __all__ = [
     "RetryConsumeRejected",
     "RetryConsumeDeferred",
     "RetryConsumeConflict",
+    "BranchResolutionError",
+    "BranchDiscardResult",
+    "TaskAdoptionResult",
+    "AggregateAdmission",
+    "AggregateAdmissionError",
     "TaskBudgetClosedError",
     "TaskBudgetConflictError",
     "TaskBudgetError",

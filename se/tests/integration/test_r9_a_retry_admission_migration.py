@@ -27,7 +27,11 @@ def _config(database: Path) -> Config:
 def test_r9_a_15a_is_single_head_after_r8(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["15a_r9_retry_admission"]
+    assert script.get_heads() == ["15b_r9_aggregate_admission"]
+    assert (
+        script.get_revision("15b_r9_aggregate_admission").down_revision
+        == "15a_r9_retry_admission"
+    )
     assert (
         script.get_revision("15a_r9_retry_admission").down_revision
         == "14d_r8_fork_runtime_seed"

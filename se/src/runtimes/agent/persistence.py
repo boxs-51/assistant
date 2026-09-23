@@ -45,6 +45,13 @@ from .contracts.resume import (
     normalize_resume_trigger_type,
     resume_plan_fingerprint,
 )
+from .contracts.retry import (
+    RetryActivationResult,
+    RetryAdmission,
+    RetryExecutionBootstrap,
+    RetryReplayResult,
+    retry_value_fingerprint,
+)
 from .resume_claim import ResumeClaimDeferred, ResumeClaimError, ResumeClaimRejected
 from .serialization import to_json_safe
 from .task_budget import (
@@ -132,12 +139,47 @@ class ForkControlError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+class RetryControlError(RuntimeError):
+    """R9-C durable replay/activation authority error."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+    ) -> None:
+        self.code = code
+        self.retryable = retryable
+        super().__init__(f"{code}: {message}")
+
+
 def _utc_datetime(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+async def _retry_source_context_state_in_uow(uow, execution) -> dict[str, Any]:
+    state = getattr(execution, "context_state", None)
+    if isinstance(state, Mapping):
+        return dict(state)
+    receipt = await uow.agents.get_task_fork_admission_by_execution(
+        execution.id
+    )
+    seed = dict(getattr(receipt, "runtime_seed_json", None) or {})
+    if not seed:
+        return {}
+    return {
+        "request_id": seed.get("request_id"),
+        "workflow_id": seed.get("workflow_id"),
+        "metadata": dict(seed.get("metadata") or {}),
+        "causation_id": seed.get("causation_id"),
+        "trace_id": seed.get("trace_id"),
+        "limits": dict(seed.get("limits") or {}),
+    }
 
 
 _TASK_TERMINAL_STATES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
@@ -403,6 +445,382 @@ class DurableAgentStore:
                 admission=admission,
                 execution_state=str(execution.state),
                 execution_revision=int(execution.revision),
+            )
+            await uow.commit()
+            return result
+
+    async def load_retry_replay(
+        self,
+        *,
+        task_id: str,
+        retry_request_id: str,
+        branch_id: str,
+        source_execution_id: str,
+        source_checkpoint_id: str | None,
+        target_user_id: str,
+    ) -> RetryReplayResult | None:
+        """Replay one committed RETRY without requiring a stale source head."""
+
+        async with self.uow_factory() as uow:
+            receipt = await uow.agents.get_task_retry_admission(
+                task_id, retry_request_id
+            )
+            if receipt is None:
+                await uow.commit()
+                return None
+            task = await uow.agents.get_task(task_id)
+            branch = await uow.agents.get_task_branch(receipt.branch_id)
+            source = await uow.agents.get_execution(
+                receipt.source_execution_id
+            )
+            execution = await uow.agents.get_execution(receipt.execution_id)
+            budget = await uow.agents.get_task_budget(task_id)
+            if any(
+                item is None
+                for item in (task, branch, source, execution, budget)
+            ):
+                raise RetryControlError(
+                    "RETRY_ADMISSION_CORRUPT",
+                    "Committed RetryAdmission durable graph is incomplete.",
+                )
+            if str(task.created_by) != str(target_user_id):
+                raise RetryControlError(
+                    "RETRY_FOREIGN_PRINCIPAL",
+                    "Authenticated principal does not own the AgentTask.",
+                )
+            source_context_state = await _retry_source_context_state_in_uow(
+                uow, source
+            )
+            if (
+                receipt.branch_id != branch_id
+                or receipt.source_execution_id != source_execution_id
+                or receipt.source_checkpoint_id != source_checkpoint_id
+                or receipt.created_by != target_user_id
+            ):
+                raise RetryControlError(
+                    "RETRY_REQUEST_CONFLICT",
+                    "retry_request_id was reused with different semantics.",
+                )
+            if (
+                branch.task_id != task_id
+                or source.task_id != task_id
+                or source.branch_id != branch_id
+                or execution.task_id != task_id
+                or execution.branch_id != branch_id
+                or execution.retry_of_execution_id != source_execution_id
+                or retry_value_fingerprint(dict(execution.request or {}))
+                != retry_value_fingerprint(dict(source.request or {}))
+                or retry_value_fingerprint(dict(execution.context_state or {}))
+                != retry_value_fingerprint(source_context_state)
+            ):
+                raise RetryControlError(
+                    "RETRY_ADMISSION_CORRUPT",
+                    "Committed RetryAdmission no longer matches durable lineage.",
+                )
+            admission = RetryAdmission(
+                task_id=task_id,
+                retry_request_id=retry_request_id,
+                plan_fingerprint=receipt.plan_fingerprint,
+                branch_id=receipt.branch_id,
+                branch_revision=int(branch.revision),
+                source_execution_id=receipt.source_execution_id,
+                source_checkpoint_id=receipt.source_checkpoint_id,
+                execution_id=receipt.execution_id,
+                execution_revision=int(execution.revision),
+                task_revision=int(task.revision),
+                task_budget_revision=int(budget.revision),
+            )
+            result = RetryReplayResult(
+                admission=admission,
+                execution_state=str(execution.state),
+                execution_revision=int(execution.revision),
+            )
+            await uow.commit()
+            return result
+
+    async def prepare_retry_execution_context(
+        self,
+        execution_id: str,
+        *,
+        identity: Identity,
+        agent,
+        clock: ExecutionClock | None = None,
+    ) -> RetryExecutionBootstrap:
+        """Reconstruct an admitted retry after any process restart."""
+
+        def fail(code: str, message: str):
+            raise RetryControlError(code, message)
+
+        principal = str(identity.user_id or "")
+        if not principal:
+            fail("RETRY_FOREIGN_PRINCIPAL", "Authenticated principal is required.")
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                fail("RETRY_EXECUTION_NOT_FOUND", "Retry execution does not exist.")
+            if int(execution.revision) > 1:
+                fail(
+                    "RETRY_EXECUTION_ALREADY_ACTIVATED",
+                    "Retry execution is no longer RUNNING@1 preactivation authority.",
+                )
+            if (
+                str(execution.state) != "RUNNING"
+                or int(execution.revision) != 1
+                or execution.current_checkpoint_id is not None
+                or execution.task_id is None
+                or execution.branch_id is None
+                or execution.retry_of_execution_id is None
+                or execution.bound_client_id is not None
+                or execution.bound_connection_id is not None
+            ):
+                fail(
+                    "RETRY_EXECUTION_LINEAGE_CONFLICT",
+                    "Execution is not an unactivated R9-B retry output.",
+                )
+            receipt = await uow.agents.get_task_retry_admission_by_execution(
+                execution_id
+            )
+            task = await uow.agents.get_task(execution.task_id)
+            branch = await uow.agents.get_task_branch(execution.branch_id)
+            source = await uow.agents.get_execution(
+                execution.retry_of_execution_id
+            )
+            if any(item is None for item in (receipt, task, branch, source)):
+                fail(
+                    "RETRY_ADMISSION_CORRUPT",
+                    "Retry admission durable graph is incomplete.",
+                )
+            if str(task.created_by) != principal or receipt.created_by != principal:
+                fail(
+                    "RETRY_FOREIGN_PRINCIPAL",
+                    "Authenticated principal does not own this retry.",
+                )
+            if (
+                receipt.task_id != execution.task_id
+                or receipt.branch_id != execution.branch_id
+                or receipt.source_execution_id != execution.retry_of_execution_id
+                or receipt.execution_id != execution.id
+                or branch.task_id != execution.task_id
+                or branch.current_execution_id != execution.id
+                or str(branch.resolution_state) != "OPEN"
+                or source.task_id != execution.task_id
+                or source.branch_id != execution.branch_id
+                or str(source.state) not in {"FAILED", "TIMEOUT", "CANCELLED"}
+            ):
+                fail(
+                    "RETRY_ADMISSION_CORRUPT",
+                    "Retry receipt, branch, source and execution disagree.",
+                )
+            source_context_state = await _retry_source_context_state_in_uow(
+                uow, source
+            )
+            if retry_value_fingerprint(dict(execution.request or {})) != (
+                retry_value_fingerprint(dict(source.request or {}))
+            ) or retry_value_fingerprint(dict(execution.context_state or {})) != (
+                retry_value_fingerprint(source_context_state)
+            ):
+                fail(
+                    "RETRY_RUNTIME_CONTEXT_CONFLICT",
+                    "Retry runtime seed differs from the terminal source.",
+                )
+            state = dict(execution.context_state or {})
+            try:
+                limits = AgentExecutionLimits.model_validate(state["limits"])
+            except Exception as exc:
+                raise RetryControlError(
+                    "RETRY_RUNTIME_CONTEXT_INCOMPLETE",
+                    "Retry execution has no valid durable limits.",
+                ) from exc
+            remaining = execution.remaining_active_budget_seconds
+            if remaining is None or not math.isfinite(float(remaining)) or float(remaining) <= 0:
+                fail(
+                    "RETRY_RUNTIME_CONTEXT_INCOMPLETE",
+                    "Retry execution has no valid active budget.",
+                )
+            if agent is None or getattr(agent, "name", None) != execution.agent_id:
+                fail(
+                    "RETRY_EXECUTION_LINEAGE_CONFLICT",
+                    "Current AgentDefinition does not match retry execution agent.",
+                )
+            metadata = dict(state.get("metadata") or {})
+            for key in (
+                "client_id",
+                "connection_id",
+                "origin_client_id",
+                "origin_connection_id",
+                "routing_connection_id",
+            ):
+                metadata.pop(key, None)
+            transcript = [dict(item) for item in (execution.transcript or [])]
+            context = AgentExecutionContext.create(
+                execution_id=execution.id,
+                agent_id=execution.agent_id,
+                session_id=execution.session_id,
+                correlation_id=execution.correlation_id,
+                identity=identity,
+                limits=limits,
+                request_id=state.get("request_id"),
+                task_id=execution.task_id,
+                branch_id=execution.branch_id,
+                parent_execution_id=execution.parent_execution_id,
+                retry_of_execution_id=execution.retry_of_execution_id,
+                base_execution_id=execution.base_execution_id,
+                base_checkpoint_id=execution.base_checkpoint_id,
+                workflow_id=state.get("workflow_id"),
+                connection_id=None,
+                agent=agent,
+                input=dict(execution.request or {}),
+                metadata=metadata,
+                causation_id=state.get("causation_id"),
+                trace_id=state.get("trace_id"),
+                branch_base_transcript=transcript,
+                branch_runtime_seed_fingerprint=receipt.plan_fingerprint,
+                remaining_active_budget_seconds=float(remaining),
+                wait_expires_at=None,
+                clock=clock,
+                activate_budget=False,
+            )
+            context.validate_context_seed()
+            result = RetryExecutionBootstrap(
+                execution_id=execution.id,
+                expected_execution_revision=1,
+                task_id=execution.task_id,
+                branch_id=execution.branch_id,
+                retry_request_id=receipt.retry_request_id,
+                plan_fingerprint=receipt.plan_fingerprint,
+                context=context,
+            )
+            await uow.commit()
+            return result
+
+    async def activate_retry_execution(
+        self,
+        bootstrap: RetryExecutionBootstrap,
+        *,
+        identity: Identity,
+        now_utc: datetime | None = None,
+    ) -> RetryActivationResult:
+        """Atomically acquire the single R9-C retry activation winner."""
+
+        if int(bootstrap.expected_execution_revision) != 1:
+            raise RetryControlError(
+                "RETRY_ACTIVATION_CONFLICT",
+                "Retry bootstrap is not preactivation revision 1.",
+            )
+        principal = str(identity.user_id or "")
+        context = bootstrap.context
+        if (
+            not principal
+            or context.execution_id != bootstrap.execution_id
+            or context.task_id != bootstrap.task_id
+            or context.branch_id != bootstrap.branch_id
+            or context.retry_of_execution_id is None
+            or context.branch_runtime_seed_fingerprint
+            != bootstrap.plan_fingerprint
+            or context.connection_id is not None
+            or context.active_budget_running
+        ):
+            raise RetryControlError(
+                "RETRY_ACTIVATION_CONTEXT_CONFLICT",
+                "Retry bootstrap context differs from immutable handoff identity.",
+            )
+        activated_at = _utc_datetime(now_utc) or datetime.now(timezone.utc)
+        async with self.uow_factory() as uow:
+            # R9 lock order: Task -> Budget -> Branch -> source Execution ->
+            # immutable receipt -> retry Execution CAS.
+            task = await uow.agents.get_task_for_update(bootstrap.task_id)
+            budget = await uow.agents.get_task_budget_for_update(bootstrap.task_id)
+            branch = await uow.agents.get_task_branch_for_update(
+                bootstrap.branch_id
+            )
+            source = await uow.agents.get_execution_for_update(
+                context.retry_of_execution_id
+            )
+            receipt = await uow.agents.get_task_retry_admission_by_execution(
+                bootstrap.execution_id
+            )
+            execution = await uow.agents.get_execution(bootstrap.execution_id)
+            if any(
+                item is None
+                for item in (task, budget, branch, source, receipt, execution)
+            ):
+                raise RetryControlError(
+                    "RETRY_ADMISSION_CORRUPT",
+                    "Retry activation durable graph is incomplete.",
+                )
+            if str(task.created_by) != principal or receipt.created_by != principal:
+                raise RetryControlError(
+                    "RETRY_FOREIGN_PRINCIPAL",
+                    "Authenticated principal does not own the retry Task.",
+                )
+            if str(task.status) in _TASK_TERMINAL_STATES:
+                raise RetryControlError(
+                    "RETRY_TASK_TERMINAL",
+                    "Terminal AgentTask cannot activate a retry.",
+                )
+            if str(budget.state) != "OPEN":
+                raise RetryControlError(
+                    "RETRY_TASK_TERMINAL",
+                    "CLOSED TaskBudget cannot activate a retry.",
+                )
+            if (
+                receipt.task_id != bootstrap.task_id
+                or receipt.branch_id != bootstrap.branch_id
+                or receipt.execution_id != bootstrap.execution_id
+                or receipt.retry_request_id != bootstrap.retry_request_id
+                or receipt.plan_fingerprint != bootstrap.plan_fingerprint
+                or receipt.source_execution_id != context.retry_of_execution_id
+                or branch.task_id != bootstrap.task_id
+                or str(branch.resolution_state) != "OPEN"
+                or branch.current_execution_id != bootstrap.execution_id
+                or source.task_id != bootstrap.task_id
+                or source.branch_id != bootstrap.branch_id
+                or str(source.state) not in {"FAILED", "TIMEOUT", "CANCELLED"}
+            ):
+                raise RetryControlError(
+                    "RETRY_ACTIVATION_CONFLICT",
+                    "Retry authority changed before activation.",
+                    retryable=True,
+                )
+            remaining = execution.remaining_active_budget_seconds
+            if (
+                str(execution.state) != "RUNNING"
+                or int(execution.revision) != 1
+                or execution.retry_of_execution_id != source.id
+                or execution.current_checkpoint_id is not None
+                or execution.bound_client_id is not None
+                or execution.bound_connection_id is not None
+                or remaining is None
+                or context.remaining_active_budget_seconds is None
+                or float(remaining) != float(context.remaining_active_budget_seconds)
+                or retry_value_fingerprint(dict(execution.request or {}))
+                != retry_value_fingerprint(dict(context.input or {}))
+            ):
+                raise RetryControlError(
+                    "RETRY_ACTIVATION_CONTEXT_CONFLICT",
+                    "Retry Execution/context no longer matches committed admission.",
+                )
+            activated = await uow.agents.compare_and_set_retry_activation(
+                bootstrap.execution_id,
+                task_id=bootstrap.task_id,
+                branch_id=bootstrap.branch_id,
+                source_execution_id=source.id,
+                started_at=activated_at,
+            )
+            if activated is None:
+                await uow.rollback()
+                raise RetryControlError(
+                    "RETRY_ACTIVATION_CONFLICT",
+                    "Retry activation CAS lost.",
+                    retryable=True,
+                )
+            result = RetryActivationResult(
+                task_id=bootstrap.task_id,
+                branch_id=bootstrap.branch_id,
+                execution_id=bootstrap.execution_id,
+                source_execution_revision=1,
+                activated_execution_revision=2,
+                remaining_active_budget_seconds=float(remaining),
             )
             await uow.commit()
             return result
@@ -3733,5 +4151,13 @@ class DurableAgentStore:
         )
         async with self.uow_factory() as uow:
             record = await uow.agents.update_task(task_id, values)
+            await uow.commit()
+            return record
+
+    async def load_fork_admission_by_execution(self, execution_id: str):
+        async with self.uow_factory() as uow:
+            record = await uow.agents.get_task_fork_admission_by_execution(
+                execution_id
+            )
             await uow.commit()
             return record

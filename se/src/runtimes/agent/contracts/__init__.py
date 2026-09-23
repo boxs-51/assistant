@@ -1,4 +1,10 @@
 from .clock import ExecutionClock, SystemExecutionClock
+from .branch_resolution import BranchDiscardResult, TaskAdoptionResult
+from .aggregate import (
+    AggregateAdmission,
+    aggregate_fingerprint,
+    aggregate_plan_fingerprint,
+)
 from .context import AgentExecutionContext, UnknownActiveBudgetError
 from .loop import AgentIteration, AgentLoopState, transition, validate_transition
 from .inference import (
@@ -34,8 +40,11 @@ from .fork import (
     fork_transcript_fingerprint,
 )
 from .retry import (
+    RetryActivationResult,
     RetryAdmission,
+    RetryExecutionBootstrap,
     RetryPlan,
+    RetryReplayResult,
     retry_plan_fingerprint,
     retry_value_fingerprint,
 )
@@ -67,6 +76,11 @@ from .context_assembly import (
 
 __all__ = [
     "ExecutionClock",
+    "BranchDiscardResult",
+    "TaskAdoptionResult",
+    "AggregateAdmission",
+    "aggregate_fingerprint",
+    "aggregate_plan_fingerprint",
     "SystemExecutionClock",
     "AgentExecutionContext",
     "UnknownActiveBudgetError",
@@ -103,7 +117,10 @@ __all__ = [
     "fork_side_effect_fingerprint",
     "fork_transcript_fingerprint",
     "RetryAdmission",
+    "RetryActivationResult",
+    "RetryExecutionBootstrap",
     "RetryPlan",
+    "RetryReplayResult",
     "retry_plan_fingerprint",
     "retry_value_fingerprint",
     "CheckpointPendingInvocation",

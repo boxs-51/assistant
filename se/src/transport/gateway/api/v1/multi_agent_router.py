@@ -8,6 +8,9 @@ from .....domain.schemas.multi_agent import (
     AgentSessionCreateRequest,
     AgentTaskCreateRequest,
     AgentTaskForkRequest,
+    AgentTaskRetryRequest,
+    AgentTaskBranchResolutionRequest,
+    AgentTaskAggregateRequest,
 )
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
@@ -20,9 +23,15 @@ from .....runtimes.agent.fork_planning import (
     ForkPlanError,
 )
 from .....runtimes.agent.persistence import ForkControlError
+from .....runtimes.agent.persistence import RetryControlError
+from .....runtimes.agent.retry_planning import RetryPlanError, RetryPlanDeferred
 from .....runtimes.agent.task_budget import (
+    AggregateAdmissionError,
+    BranchResolutionError,
     ForkConsumeDeferred,
     ForkConsumeError,
+    RetryConsumeDeferred,
+    RetryConsumeError,
 )
 
 router = APIRouter(prefix="/v1/multi-agent", tags=["Multi-Agent"])
@@ -89,6 +98,49 @@ def map_error(error: Exception) -> HTTPException:
     if fork_detail is not None:
         status_code, detail = fork_detail
         return HTTPException(status_code=status_code, detail=detail)
+
+    if isinstance(
+        error,
+        (
+            RetryPlanError,
+            RetryConsumeError,
+            RetryControlError,
+            BranchResolutionError,
+            AggregateAdmissionError,
+        ),
+    ):
+        code = str(error.code)
+        retryable = isinstance(
+            error, (RetryPlanDeferred, RetryConsumeDeferred)
+        ) or bool(getattr(error, "retryable", False))
+        if "FOREIGN_PRINCIPAL" in code:
+            status_code = status.HTTP_403_FORBIDDEN
+        elif retryable or any(
+            token in code
+            for token in (
+                "CONFLICT",
+                "TERMINAL",
+                "RESOLVED",
+                "NOT_OPEN",
+                "FORBIDDEN",
+                "EXCEEDED",
+            )
+        ):
+            status_code = status.HTTP_409_CONFLICT
+        else:
+            status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+        message = str(error)
+        prefix = f"{code}: "
+        if message.startswith(prefix):
+            message = message[len(prefix):]
+        return HTTPException(
+            status_code=status_code,
+            detail={
+                "code": code,
+                "message": message,
+                "retryable": retryable,
+            },
+        )
 
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error))
 
@@ -207,6 +259,60 @@ async def fork_agent_task(
 ):
     try:
         return await coordinator.fork_task(task_id, body, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/retry")
+async def retry_agent_task(
+    task_id: str,
+    body: AgentTaskRetryRequest,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.retry_task(task_id, body, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/branches/discard")
+async def discard_agent_task_branch(
+    task_id: str,
+    body: AgentTaskBranchResolutionRequest,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.discard_task_branch(task_id, body, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/branches/adopt")
+async def adopt_agent_task_branch(
+    task_id: str,
+    body: AgentTaskBranchResolutionRequest,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.adopt_task_branch(task_id, body, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/aggregate")
+async def aggregate_agent_task_branches(
+    task_id: str,
+    body: AgentTaskAggregateRequest,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.aggregate_task_branches(
+            task_id, body, identity
+        )
     except Exception as error:
         raise map_error(error) from error
 

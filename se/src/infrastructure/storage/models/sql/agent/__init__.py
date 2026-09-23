@@ -14,6 +14,7 @@ from .checkpoint import (
 from .resume_claim import AgentResumeClaimRecord
 from .fork_admission import AgentTaskForkAdmissionRecord
 from .retry_admission import AgentTaskRetryAdmissionRecord
+from .aggregate_admission import AgentTaskAggregateAdmissionRecord
 
 __all__ = [
     "AgentExecutionRecord",
@@ -33,4 +34,5 @@ __all__ = [
     "AgentResumeClaimRecord",
     "AgentTaskForkAdmissionRecord",
     "AgentTaskRetryAdmissionRecord",
+    "AgentTaskAggregateAdmissionRecord",
 ]

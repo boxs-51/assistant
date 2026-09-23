@@ -18,6 +18,7 @@ from ..models.sql.agent import (
     AgentTaskBranchRecord,
     AgentTaskForkAdmissionRecord,
     AgentTaskRetryAdmissionRecord,
+    AgentTaskAggregateAdmissionRecord,
     TaskBudgetRecord,
     TaskBudgetReservationRecord,
     AgentToolCallRecord,
@@ -453,6 +454,56 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_task_retry_admissions(self, task_id: str):
+        result = await self.session.execute(
+            select(AgentTaskRetryAdmissionRecord)
+            .where(AgentTaskRetryAdmissionRecord.task_id == task_id)
+            .order_by(
+                AgentTaskRetryAdmissionRecord.created_at.asc(),
+                AgentTaskRetryAdmissionRecord.retry_request_id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def save_task_aggregate_admission(self, values: Dict[str, Any]):
+        record = AgentTaskAggregateAdmissionRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_aggregate_admission(
+        self, task_id: str, aggregate_request_id: str
+    ):
+        result = await self.session.execute(
+            select(AgentTaskAggregateAdmissionRecord).where(
+                AgentTaskAggregateAdmissionRecord.task_id == task_id,
+                AgentTaskAggregateAdmissionRecord.aggregate_request_id
+                == aggregate_request_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_aggregate_admission_by_execution(
+        self, execution_id: str
+    ):
+        result = await self.session.execute(
+            select(AgentTaskAggregateAdmissionRecord).where(
+                AgentTaskAggregateAdmissionRecord.execution_id == execution_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_task_branches_for_update(self, task_id: str):
+        """Lock all Task branches in the frozen deterministic branch_id order."""
+
+        result = await self.session.execute(
+            select(AgentTaskBranchRecord)
+            .where(AgentTaskBranchRecord.task_id == task_id)
+            .order_by(AgentTaskBranchRecord.branch_id.asc())
+            .with_for_update()
+        )
+        return list(result.scalars().all())
+
     async def save_task_budget(self, values: Dict[str, Any]):
         record = TaskBudgetRecord(**values)
         self.session.add(record)
@@ -585,6 +636,82 @@ class AgentRepository(BaseRepository):
                 revision=2,
                 state="RUNNING",
                 started_at=started_at,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
+    async def compare_and_set_retry_activation(
+        self,
+        execution_id: str,
+        *,
+        task_id: str,
+        branch_id: str,
+        source_execution_id: str,
+        started_at: datetime,
+    ):
+        """Specialized R9-C RUNNING@1 -> RUNNING@2 retry activation CAS."""
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == 1,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+                AgentExecutionRecord.task_id == task_id,
+                AgentExecutionRecord.branch_id == branch_id,
+                AgentExecutionRecord.retry_of_execution_id
+                == source_execution_id,
+                AgentExecutionRecord.bound_client_id.is_(None),
+                AgentExecutionRecord.bound_connection_id.is_(None),
+            )
+            .values(
+                revision=2,
+                state="RUNNING",
+                started_at=started_at,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
+    async def compare_and_set_retry_preactivation_cancel(
+        self,
+        execution_id: str,
+        *,
+        task_id: str,
+        branch_id: str,
+        source_execution_id: str,
+        completed_at: datetime,
+        error: str = "TASK_CANCELLED_BEFORE_RETRY_ACTIVATION",
+    ):
+        """Race Task cancellation against R9-C activation on revision 1."""
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == 1,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+                AgentExecutionRecord.task_id == task_id,
+                AgentExecutionRecord.branch_id == branch_id,
+                AgentExecutionRecord.retry_of_execution_id
+                == source_execution_id,
+                AgentExecutionRecord.bound_client_id.is_(None),
+                AgentExecutionRecord.bound_connection_id.is_(None),
+            )
+            .values(
+                revision=2,
+                state="CANCELLED",
+                wait_reason=None,
+                wait_expires_at=None,
+                error=error,
+                completed_at=completed_at,
             )
         )
         if result.rowcount != 1:
