@@ -11,6 +11,10 @@ from se.src.infrastructure.event_bus.ws_manager import WebSocketConnectionManage
 from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.registration import ClientCapabilityRegistrationService
 from se.src.runtimes.connection.runtime import ConnectionRuntime
+from se.src.runtimes.agent.resume_claim import (
+    ResumeClaimDeferred,
+    ResumeClaimRejected,
+)
 from se.src.transport.gateway.api.v1 import events_router
 from se.src.transport.gateway.authentication.dependency import (
     get_current_identity,
@@ -111,3 +115,23 @@ def test_websocket_registers_client_capabilities_and_unregisters_on_disconnect()
             "filesystem.read",
             routable_only=True,
         ) == []
+
+
+def test_r8_f_retryable_resume_conflict_preserves_same_claim_id():
+    claim = SimpleNamespace(claim_id="claim-r8-f-retry")
+    deferred = ResumeClaimDeferred(
+        "RESUME_CONFLICT",
+        "transient Task activity conflict",
+        retryable=True,
+    )
+    rejected = ResumeClaimRejected(
+        "RESUME_CONFLICT",
+        "non-retryable conflict",
+    )
+
+    assert (
+        events_router._resume_retry_claim_id(claim, deferred)
+        == "claim-r8-f-retry"
+    )
+    assert events_router._resume_retry_claim_id(claim, rejected) is None
+    assert events_router._resume_retry_claim_id(None, deferred) is None
