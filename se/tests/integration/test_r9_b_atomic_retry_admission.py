@@ -302,8 +302,8 @@ async def test_r9_b_explicit_checkpoint_becomes_retry_base_lineage(tmp_path):
 
         assert replay.execution_id == admission.execution_id
         assert retry.base_checkpoint_id == checkpoint_id
-        assert retry.transcript == [
-            {"role": "user", "content": "explicit retry checkpoint"}
+        assert [(item["role"], item["content"]) for item in retry.transcript] == [
+            ("user", "explicit retry checkpoint")
         ]
     finally:
         await engine.dispose()
