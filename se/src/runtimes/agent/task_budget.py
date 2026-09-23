@@ -626,7 +626,7 @@ class TaskBudgetService:
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
-                    task = await uow.agents.get_task(task_id)
+                    task = await uow.agents.get_task_for_update(task_id)
                     if task is None:
                         raise TaskBudgetRequiredError(
                             f"Unknown AgentTask: {task_id}"
@@ -636,7 +636,9 @@ class TaskBudgetService:
                         await uow.commit()
                         return task
 
-                    budget_record = await uow.agents.get_task_budget(task_id)
+                    budget_record = await uow.agents.get_task_budget_for_update(
+                        task_id
+                    )
                     if budget_record is None:
                         if await uow.agents.has_execution_for_task(task_id):
                             raise TaskBudgetLegacyUninitializedError(
@@ -649,14 +651,30 @@ class TaskBudgetService:
                     budget = _budget_from_record(budget_record)
                     self._require_open(budget)
 
-                    if current_state == target_state:
-                        await uow.commit()
-                        return task
-                    if current_state not in allowed:
+                    if current_state not in allowed and current_state != target_state:
                         raise TaskBudgetConflictError(
                             f"AgentTask {task_id} is {current_state}, "
                             f"expected one of {sorted(allowed)}"
                         )
+
+                    if target_state == "WAITING":
+                        branches = await uow.agents.list_task_branches(task_id)
+                        if len(branches) > 1:
+                            aggregate = (
+                                await reconcile_multibranch_task_activity_in_uow(
+                                    uow,
+                                    task_id=task_id,
+                                )
+                            )
+                            if aggregate is None:
+                                await uow.rollback()
+                                continue
+                            await uow.commit()
+                            return aggregate
+
+                    if current_state == target_state:
+                        await uow.commit()
+                        return task
 
                     updated = await uow.agents.compare_and_set_task(
                         task_id,
@@ -706,12 +724,14 @@ class TaskBudgetService:
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
-                    task = await uow.agents.get_task(task_id)
+                    task = await uow.agents.get_task_for_update(task_id)
                     if task is None:
                         raise TaskBudgetRequiredError(
                             f"Unknown AgentTask: {task_id}"
                         )
-                    budget_record = await uow.agents.get_task_budget(task_id)
+                    budget_record = await uow.agents.get_task_budget_for_update(
+                        task_id
+                    )
                     if budget_record is None:
                         if await uow.agents.has_execution_for_task(task_id):
                             raise TaskBudgetLegacyUninitializedError(
@@ -751,6 +771,20 @@ class TaskBudgetService:
                         raise TaskBudgetConflictError(
                             "Nonterminal AgentTask has CLOSED TaskBudget."
                         )
+
+                    branches = await uow.agents.list_task_branches(task_id)
+                    if len(branches) > 1:
+                        aggregate = (
+                            await reconcile_multibranch_task_activity_in_uow(
+                                uow,
+                                task_id=task_id,
+                            )
+                        )
+                        if aggregate is None:
+                            await uow.rollback()
+                            continue
+                        await uow.commit()
+                        return aggregate
 
                     updated_task = await uow.agents.compare_and_set_task(
                         task_id,
