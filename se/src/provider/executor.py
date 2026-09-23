@@ -216,26 +216,46 @@ class ProviderExecutor:
                 provider=provider.name,
             )
 
-            if stream_remaining is None:
-                async for chunk in provider.chat.chat_stream(
-                    **attempt_kwargs
-                ):
+            stream_iterator = provider.chat.chat_stream(
+                **attempt_kwargs
+            ).__aiter__()
+            try:
+                while True:
+                    try:
+                        if call_budget is None:
+                            chunk = await stream_iterator.__anext__()
+                        else:
+                            remaining = self._remaining_or_raise(
+                                call_budget,
+                                provider.name,
+                            )
+                            next_chunk_task = asyncio.create_task(
+                                stream_iterator.__anext__()
+                            )
+                            done, _ = await asyncio.wait(
+                                {next_chunk_task},
+                                timeout=remaining,
+                                return_when=asyncio.FIRST_COMPLETED,
+                            )
+                            if next_chunk_task not in done:
+                                next_chunk_task.cancel()
+                                await asyncio.gather(
+                                    next_chunk_task,
+                                    return_exceptions=True,
+                                )
+                                raise ProviderDeadlineExceededError(
+                                    "Provider stream deadline exceeded.",
+                                    provider_name=provider.name,
+                                )
+                            chunk = await next_chunk_task
+                    except StopAsyncIteration:
+                        break
+
                     yield chunk
-            else:
-                stream_timeout = asyncio.timeout(stream_remaining)
-                try:
-                    async with stream_timeout:
-                        async for chunk in provider.chat.chat_stream(
-                            **attempt_kwargs
-                        ):
-                            yield chunk
-                except TimeoutError as exc:
-                    if stream_timeout.expired():
-                        raise ProviderDeadlineExceededError(
-                            "Provider stream deadline exceeded.",
-                            provider_name=provider.name,
-                        ) from exc
-                    raise
+            finally:
+                aclose = getattr(stream_iterator, "aclose", None)
+                if callable(aclose):
+                    await aclose()
 
             await breaker.on_success()
 
