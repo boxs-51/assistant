@@ -10,7 +10,7 @@ import structlog
 
 from ...circuit_breaker import CircuitBreakerManager
 from ..exceptions import ProviderDeadlineExceededError
-from ..executor import ProviderExecutor
+from ..executor import ProviderExecutor, await_with_provider_deadline
 from ..policies.routing_policy import RoutingPolicy
 from ..retry_contracts import ProviderCallBudget
 
@@ -106,6 +106,32 @@ class BaseExecutionHandler(ABC):
                 provider_name=provider_name,
             )
         return remaining
+
+    async def _probe_capability_with_budget(
+        self,
+        *,
+        provider: Any,
+        model: Any,
+        capability: Any,
+        http_client: Any,
+        call_budget: ProviderCallBudget,
+    ) -> bool:
+        async def run_probe(remaining: float) -> bool:
+            return await provider.has_capability(
+                model,
+                capability,
+                http_client,
+                remaining,
+            )
+
+        return await await_with_provider_deadline(
+            run_probe,
+            call_budget=call_budget,
+            provider_name=provider.name,
+            timeout_message=(
+                "Provider capability probe deadline exceeded."
+            ),
+        )
 
     async def _get_healthy_fallback_chain(self, initial_chain: list) -> list:
         health_checks = [
