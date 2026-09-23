@@ -1186,52 +1186,60 @@ class AgentRuntime:
             context.wait_expires_at = wait_expires_at
 
             if resume_remaining <= 0.0:
-                timed_out = await self._durable_store.compare_and_set_execution(
-                    context.execution_id,
-                    expected_revision,
-                    {
-                        "state": AgentExecutionState.TIMEOUT.value,
-                        "wait_reason": None,
-                        "wait_expires_at": None,
-                        "remaining_active_budget_seconds": 0.0,
-                        "error": "AGENT_EXECUTION_TIMEOUT",
-                        "completed_at": now_utc,
-                    },
-                )
+                timeout_values = {
+                    "state": AgentExecutionState.TIMEOUT.value,
+                    "wait_reason": None,
+                    "wait_expires_at": None,
+                    "remaining_active_budget_seconds": 0.0,
+                    "error": "AGENT_EXECUTION_TIMEOUT",
+                    "completed_at": now_utc,
+                }
                 if (
-                    timed_out is not None
-                    and self._uses_task_budget(context)
+                    self._uses_task_budget(context)
                     and self._task_budget_service is not None
                 ):
                     assert context.task_id is not None
-                    await self._task_budget_service.reconcile_multibranch_task_activity(
-                        context.task_id
+                    await self._task_budget_service.expire_task_scoped_waiting_execution(
+                        context.task_id,
+                        execution_id=context.execution_id,
+                        source_revision=expected_revision,
+                        transition_values=timeout_values,
+                    )
+                else:
+                    await self._durable_store.compare_and_set_execution(
+                        context.execution_id,
+                        expected_revision,
+                        timeout_values,
                     )
                 raise ExecutionResumeBudgetError(
                     "AGENT_EXECUTION_TIMEOUT: no active budget remains."
                 )
 
             if wait_expires_at is not None and now_utc >= wait_expires_at:
-                timed_out = await self._durable_store.compare_and_set_execution(
-                    context.execution_id,
-                    expected_revision,
-                    {
-                        "state": AgentExecutionState.TIMEOUT.value,
-                        "wait_reason": None,
-                        "wait_expires_at": None,
-                        "remaining_active_budget_seconds": resume_remaining,
-                        "error": "WAIT_TTL_EXPIRED",
-                        "completed_at": now_utc,
-                    },
-                )
+                timeout_values = {
+                    "state": AgentExecutionState.TIMEOUT.value,
+                    "wait_reason": None,
+                    "wait_expires_at": None,
+                    "remaining_active_budget_seconds": resume_remaining,
+                    "error": "WAIT_TTL_EXPIRED",
+                    "completed_at": now_utc,
+                }
                 if (
-                    timed_out is not None
-                    and self._uses_task_budget(context)
+                    self._uses_task_budget(context)
                     and self._task_budget_service is not None
                 ):
                     assert context.task_id is not None
-                    await self._task_budget_service.reconcile_multibranch_task_activity(
-                        context.task_id
+                    await self._task_budget_service.expire_task_scoped_waiting_execution(
+                        context.task_id,
+                        execution_id=context.execution_id,
+                        source_revision=expected_revision,
+                        transition_values=timeout_values,
+                    )
+                else:
+                    await self._durable_store.compare_and_set_execution(
+                        context.execution_id,
+                        expected_revision,
+                        timeout_values,
                     )
                 raise ExecutionWaitExpiredError(
                     "WAIT_TTL_EXPIRED: durable WAITING execution expired."
