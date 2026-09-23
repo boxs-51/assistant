@@ -958,6 +958,7 @@ class TaskBudgetService:
                     now_utc = datetime.now(timezone.utc)
                     cancelled_forks = 0
                     cancelled_retries = 0
+                    cancelled_aggregates = 0
                     cancelled_delegated = 0
 
                     # Lock every TaskBranch once, in the repository's canonical
@@ -1077,7 +1078,59 @@ class TaskBudgetService:
                         if execution.parent_execution_id is not None:
                             cancelled_delegated += 1
 
-                    cancelled_dormant = cancelled_forks + cancelled_retries
+                    aggregate_receipts = (
+                        await uow.agents.list_task_aggregate_admissions(task_id)
+                    )
+                    for receipt in aggregate_receipts:
+                        branch = branch_map.get(receipt.target_branch_id)
+                        execution = await uow.agents.get_execution(
+                            receipt.execution_id
+                        )
+                        if branch is None or execution is None:
+                            raise TaskBudgetConflictError(
+                                "AggregateAdmission durable graph is incomplete "
+                                f"for {receipt.execution_id}."
+                            )
+                        exact_preactivation = (
+                            branch.task_id == task_id
+                            and branch.current_execution_id
+                            == receipt.execution_id
+                            and execution.task_id == task_id
+                            and execution.branch_id
+                            == receipt.target_branch_id
+                            and execution.retry_of_execution_id is None
+                            and str(execution.state) == "RUNNING"
+                            and int(execution.revision) == 1
+                            and execution.current_checkpoint_id is None
+                            and execution.bound_client_id is None
+                            and execution.bound_connection_id is None
+                        )
+                        if not exact_preactivation:
+                            continue
+                        cancelled = await uow.agents.compare_and_set_execution(
+                            execution.id,
+                            1,
+                            {
+                                "state": "CANCELLED",
+                                "wait_reason": None,
+                                "wait_expires_at": None,
+                                "error": (
+                                    "TASK_CANCELLED_BEFORE_AGGREGATE_ACTIVATION"
+                                ),
+                                "completed_at": now_utc,
+                            },
+                        )
+                        if cancelled is None:
+                            continue
+                        cancelled_aggregates += 1
+                        if execution.parent_execution_id is not None:
+                            cancelled_delegated += 1
+
+                    cancelled_dormant = (
+                        cancelled_forks
+                        + cancelled_retries
+                        + cancelled_aggregates
+                    )
                     if budget.active_executions < cancelled_dormant:
                         raise TaskBudgetConflictError(
                             "Dormant execution cancellation would underflow "
