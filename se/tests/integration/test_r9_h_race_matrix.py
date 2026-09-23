@@ -621,7 +621,7 @@ async def test_r9_h_resume_claim_create_vs_adopt_never_leaves_created_claim(tmp_
             client_id=None,
             connection_id=None,
             wait_reason="RESOURCE",
-            trigger_type=ResumeTriggerType.EXPLICIT,
+            trigger_type=ResumeTriggerType.RESOURCE_READY,
             claim_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
         )
 
