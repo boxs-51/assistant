@@ -123,6 +123,57 @@ async def test_r9_c_restart_reproves_safe_checkpoint_tool_projection(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r9_c_restart_rejects_checkpoint_projection_corrupted_after_admission(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, "r9_c_corrupt_checkpoint_restart.sqlite"
+    )
+    try:
+        checkpoint_id = "checkpoint-r9-c-corrupt-restart"
+        _root, plan = await _seed_failed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-c-corrupt-checkpoint-restart",
+            source_checkpoint_id=checkpoint_id,
+            checkpoint_tool_order=("call-a",),
+        )
+        admission = await service.consume_retry_plan(plan)
+
+        async with _Uow(sessions) as uow:
+            result = await uow.agents.get_tool_result(
+                plan.source_execution_id,
+                "call-a",
+            )
+            assert result is not None
+            result.commit_state = "PROVISIONAL"
+            await uow.commit()
+
+        restarted = _store(sessions)
+        with pytest.raises(RetryControlError) as replay_error:
+            await restarted.load_retry_replay(
+                task_id=plan.task_id,
+                retry_request_id=plan.retry_request_id,
+                branch_id=plan.branch_id,
+                source_execution_id=plan.source_execution_id,
+                source_checkpoint_id=checkpoint_id,
+                target_user_id="user-r9",
+            )
+        assert replay_error.value.code == "RETRY_ADMISSION_CORRUPT"
+
+        with pytest.raises(RetryControlError) as bootstrap_error:
+            await restarted.prepare_retry_execution_context(
+                admission.execution_id,
+                identity=_identity(),
+                agent=_agent(),
+            )
+        assert bootstrap_error.value.code == "RETRY_ADMISSION_CORRUPT"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r9_c_simultaneous_activation_has_one_cas_winner(tmp_path):
     engine, sessions, service, planner = await _setup(
         tmp_path, "r9_c_activation_race.sqlite"
