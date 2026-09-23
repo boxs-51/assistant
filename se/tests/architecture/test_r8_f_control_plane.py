@@ -79,6 +79,7 @@ class _Store:
         current_revision=1,
         activation_error=None,
         latest_after_error=None,
+        block_activation=False,
     ):
         self.admission = _admission()
         self.context = _Context()
@@ -90,6 +91,9 @@ class _Store:
         )
         self.activation_error = activation_error
         self.latest_after_error = latest_after_error
+        self.block_activation = block_activation
+        self.activation_started = asyncio.Event()
+        self.release_activation = asyncio.Event()
         self.replay_calls = 0
         self.prepare_calls = 0
         self.activation_calls = 0
@@ -141,6 +145,9 @@ class _Store:
         self.activation_calls += 1
         assert bootstrap.execution_id == EXECUTION
         assert identity.user_id == USER
+        self.activation_started.set()
+        if self.block_activation:
+            await self.release_activation.wait()
         if self.activation_error is not None:
             raise self.activation_error
         self.current = SimpleNamespace(
@@ -210,7 +217,8 @@ class _Supervisor:
 
 
 class _Runtime:
-    def __init__(self):
+    def __init__(self, store):
+        self.store = store
         self.execute_calls = 0
         self.cancel_calls = 0
 
@@ -230,13 +238,19 @@ class _Runtime:
         self.cancel_calls += 1
         assert revision == 2
         assert error_message
+        self.store.current = SimpleNamespace(
+            id=EXECUTION,
+            agent_id=AGENT,
+            state="CANCELLED",
+            revision=3,
+        )
 
 
 def _container(store):
     planner = _Planner()
     budget = _BudgetService()
     supervisor = _Supervisor()
-    runtime = _Runtime()
+    runtime = _Runtime(store)
     container = SimpleNamespace(
         agent_durable_store=store,
         fork_planning_service=planner,
@@ -372,3 +386,56 @@ async def test_r8_f_activation_loser_replays_durable_winner_without_cleanup():
     assert supervisor.start_calls == 0
     assert runtime.execute_calls == 0
     assert runtime.cancel_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r8_f_outer_cancellation_after_activation_commit_fails_closed():
+    store = _Store(block_activation=True)
+    container, _planner, _budget, supervisor, runtime = _container(store)
+
+    outer = asyncio.create_task(
+        execute_forked_agent_task_control_plane(
+            container,
+            TASK,
+            _request(),
+            _identity(),
+        )
+    )
+    await asyncio.wait_for(store.activation_started.wait(), timeout=1)
+
+    outer.cancel()
+    store.release_activation.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await outer
+
+    assert store.activation_calls == 1
+    assert store.current.state == "CANCELLED"
+    assert store.current.revision == 3
+    assert supervisor.release_calls == 1
+    assert supervisor.start_calls == 0
+    assert supervisor.reserved is False
+    assert runtime.execute_calls == 0
+    assert runtime.cancel_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_r8_f_invalid_replay_lifecycle_fails_closed():
+    store = _Store(current_state="CREATED", current_revision=1)
+    container, planner, budget, supervisor, runtime = _container(store)
+
+    with pytest.raises(ForkControlError) as exc:
+        await execute_forked_agent_task_control_plane(
+            container,
+            TASK,
+            _request(),
+            _identity(),
+        )
+
+    assert exc.value.code == "FORK_ADMISSION_CORRUPT"
+    assert store.prepare_calls == 0
+    assert store.activation_calls == 0
+    assert planner.calls == 0
+    assert budget.consume_calls == 0
+    assert supervisor.reserve_calls == 0
+    assert runtime.execute_calls == 0
