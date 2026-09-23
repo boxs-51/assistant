@@ -244,6 +244,46 @@ async def test_r9_f_restart_bootstrap_and_single_activation_owner(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r9_f_restart_rejects_source_result_drift_after_admission(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, name="r9_f_source_drift.sqlite"
+    )
+    try:
+        source, fork = await _seed_two_completed_branches(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-f-source-drift",
+        )
+        ordered = (source["source_branch_id"], fork.branch_id)
+        admission = await service.aggregate_branches(
+            source["task_id"],
+            aggregate_request_id="aggregate-r9-f-source-drift",
+            target_branch_id=fork.branch_id,
+            source_branch_ids=ordered,
+            target_user_id="user-r8-d",
+        )
+
+        async with _Uow(sessions) as uow:
+            source_execution = await uow.agents.get_execution(
+                source["source_execution_id"]
+            )
+            source_execution.result = {"winner": "tampered"}
+            await uow.commit()
+
+        restarted = _store(sessions)
+        with pytest.raises(AggregateControlError) as raised:
+            await restarted.prepare_aggregate_execution_context(
+                admission.execution_id,
+                identity=_identity(),
+                agent=_agent(),
+            )
+        assert raised.value.code == "AGGREGATE_PROVENANCE_CHANGED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r9_f_activated_aggregate_can_complete_then_be_adopted(tmp_path):
     engine, sessions, service, planner = await _setup(
         tmp_path, name="r9_f_complete_adopt.sqlite"
