@@ -1186,7 +1186,7 @@ class AgentRuntime:
             context.wait_expires_at = wait_expires_at
 
             if resume_remaining <= 0.0:
-                await self._durable_store.compare_and_set_execution(
+                timed_out = await self._durable_store.compare_and_set_execution(
                     context.execution_id,
                     expected_revision,
                     {
@@ -1198,12 +1198,21 @@ class AgentRuntime:
                         "completed_at": now_utc,
                     },
                 )
+                if (
+                    timed_out is not None
+                    and self._uses_task_budget(context)
+                    and self._task_budget_service is not None
+                ):
+                    assert context.task_id is not None
+                    await self._task_budget_service.reconcile_multibranch_task_activity(
+                        context.task_id
+                    )
                 raise ExecutionResumeBudgetError(
                     "AGENT_EXECUTION_TIMEOUT: no active budget remains."
                 )
 
             if wait_expires_at is not None and now_utc >= wait_expires_at:
-                await self._durable_store.compare_and_set_execution(
+                timed_out = await self._durable_store.compare_and_set_execution(
                     context.execution_id,
                     expected_revision,
                     {
@@ -1215,6 +1224,15 @@ class AgentRuntime:
                         "completed_at": now_utc,
                     },
                 )
+                if (
+                    timed_out is not None
+                    and self._uses_task_budget(context)
+                    and self._task_budget_service is not None
+                ):
+                    assert context.task_id is not None
+                    await self._task_budget_service.reconcile_multibranch_task_activity(
+                        context.task_id
+                    )
                 raise ExecutionWaitExpiredError(
                     "WAIT_TTL_EXPIRED: durable WAITING execution expired."
                 )
