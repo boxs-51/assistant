@@ -97,10 +97,17 @@ Preserve G1-G4:
 - restart activation exactly once;
 - restart-safe dormant fork cancellation.
 
-G5 is duplicate coverage of:
-`test_r8_f_branch_activity.py::test_r8_f_all_open_branch_heads_terminal_preserves_nonterminal_task`
+G5 carried one additional mixed-terminal invariant beyond the existing FAILED+FAILED R8-F case:
 
-Action: remove G5 only; retain G1-G4 vertical integration.
+- one OPEN branch head is `COMPLETED` with a durable result;
+- another OPEN branch head is terminal (for example `FAILED`);
+- all OPEN heads are terminal;
+- branch result presence alone must not implicitly resolve/adopt the Task.
+
+That invariant is now owned canonically by:
+`test_r8_f_branch_activity.py::test_r8_f_completed_open_branch_does_not_implicitly_resolve_task`
+
+Action: keep the historical G5 wrapper removed; retain G1-G4 vertical integration and the mixed-terminal reconcile invariant under the R8-F branch-activity owner.
 
 ## Exit criteria
 
