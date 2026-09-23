@@ -139,13 +139,19 @@ def test_r10_a_provider_call_budget_retry_tokens_are_shared_and_bounded():
     assert first_provider_view.try_consume_retry() is False
     assert fallback_provider_view.retries_used == 2
 
+    with pytest.raises(AttributeError):
+        budget.retries_used = 0
+    with pytest.raises(AttributeError):
+        budget.max_retries = 99
+    with pytest.raises(AttributeError):
+        budget.deadline_monotonic = 999.0
+
 
 @pytest.mark.parametrize(
     ("kwargs", "error_type"),
     [
         ({"deadline_monotonic": math.inf, "max_retries": 1}, ValueError),
         ({"deadline_monotonic": 10.0, "max_retries": -1}, ValueError),
-        ({"deadline_monotonic": 10.0, "max_retries": 1, "retries_used": 2}, ValueError),
         ({"deadline_monotonic": 10.0, "max_retries": 1.5}, TypeError),
         ({"deadline_monotonic": True, "max_retries": 1}, TypeError),
     ],
