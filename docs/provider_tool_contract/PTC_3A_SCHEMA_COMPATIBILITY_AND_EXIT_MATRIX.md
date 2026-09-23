@@ -41,8 +41,11 @@ top-level `$schema`, but it must not weaken or mutate canonical semantic
 constraints. PTC-3A also normalizes the legacy OpenAPI-style uppercase JSON
 Schema type tokens still accepted by older Gateway fixtures (for example
 `OBJECT` / `INTEGER`) to canonical lowercase tokens on the provider copy,
-recursing only through schema-bearing keywords. Instance data under
-`default`, `const`, or `enum` is not rewritten.
+recursing only through schema-bearing keywords. The compatibility traversal
+covers current applicators plus retained draft-04/06/07 positions used by
+existing schemas, including `unevaluatedItems`, `additionalItems`, and
+schema-valued `dependencies`; property-dependency arrays remain data.
+Instance values under `default`, `const`, or `enum` are not rewritten.
 
 Local execution remains authoritative for argument validation against the
 canonical schema. Provider schema guidance is an inference contract, not a
@@ -106,8 +109,11 @@ New PTC-3A regressions prove:
 5. missing-root and empty parameter schemas are bounded to object schemas on
    provider copies only;
 6. legacy uppercase JSON-Schema type tokens normalize recursively for all three
-   provider adapters without rewriting instance data;
-7. canonical source request/schema remains unchanged.
+   provider adapters, including current/legacy subschema positions such as
+   `unevaluatedItems`, `additionalItems`, and schema-valued `dependencies`;
+7. property-dependency arrays plus instance-valued `default` / `const` /
+   `enum` remain unchanged;
+8. canonical source request/schema remains unchanged.
 
 ## 6. PTC-3B blocked boundary
 
