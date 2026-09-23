@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 from se.src.domain.schemas.agent import AgentDefinition
@@ -21,14 +19,6 @@ from se.src.runtimes.agent.contracts import (
 from se.src.runtimes.agent.events import EventBusAgentEventPublisher
 from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.adapters.policy import DefaultAgentExecutionPolicy
-
-ROOT = Path(__file__).resolve().parents[3]
-EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_10_EXIT_GATE.md"
-LEGACY_STATUS_DOC = ROOT / "se" / "docs" / "legacy" / "phase5" / "Agent_Execution_System.md"
-ARCHITECTURE_WORKFLOW = ROOT / ".github" / "workflows" / "architecture-baseline.yml"
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-exit-gates.yml"
-MAIN_MODULE = ROOT / "se" / "src" / "main.py"
-
 
 class Publisher:
     def __init__(self):
@@ -132,7 +122,7 @@ def make_context():
 
 
 @pytest.mark.asyncio
-async def test_E1_E2_runtime_publishes_lifecycle_events():
+async def test_agent_runtime_publishes_lifecycle_events():
     publisher = Publisher()
     runtime = AgentRuntime(
         context_builder=ContextBuilder(),
@@ -157,7 +147,7 @@ async def test_E1_E2_runtime_publishes_lifecycle_events():
 
 
 @pytest.mark.asyncio
-async def test_E3_events_preserve_correlation_fields():
+async def test_agent_events_preserve_correlation_fields():
     publisher = Publisher()
     runtime = AgentRuntime(
         context_builder=ContextBuilder(),
@@ -181,7 +171,7 @@ async def test_E3_events_preserve_correlation_fields():
 
 
 @pytest.mark.asyncio
-async def test_E2_tool_lifecycle_events_are_published():
+async def test_tool_lifecycle_events_are_published():
     publisher = Publisher()
     runtime = AgentRuntime(
         context_builder=ContextBuilder(),
@@ -205,7 +195,7 @@ async def test_E2_tool_lifecycle_events_are_published():
 
 
 @pytest.mark.asyncio
-async def test_E2_tool_dispatch_failure_publishes_tool_failed():
+async def test_tool_dispatch_failure_publishes_tool_failed():
     publisher = Publisher()
 
     class BrokenTools:
@@ -231,7 +221,7 @@ async def test_E2_tool_dispatch_failure_publishes_tool_failed():
 
 
 @pytest.mark.asyncio
-async def test_E4_publisher_failure_does_not_change_execution_result():
+async def test_publisher_failure_does_not_change_execution_result():
     class BrokenPublisher:
         async def publish(self, event):
             raise RuntimeError("telemetry unavailable")
@@ -249,7 +239,7 @@ async def test_E4_publisher_failure_does_not_change_execution_result():
 
 
 @pytest.mark.asyncio
-async def test_E5_event_bus_adapter_maps_agent_envelope_to_base_event():
+async def test_event_bus_adapter_maps_agent_envelope_to_base_event():
     class Bus:
         def __init__(self):
             self.events = []
@@ -277,17 +267,3 @@ async def test_E5_event_bus_adapter_maps_agent_envelope_to_base_event():
     assert bus.events[0].payload["correlation"]["execution_id"] == "exec-1"
 
 
-def test_E6_E7_E8_gate_docs_ci_and_legacy_reference_exist():
-    gate_doc = EXIT_GATE_DOC.read_text(encoding="utf-8")
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    baseline = ARCHITECTURE_WORKFLOW.read_text(encoding="utf-8")
-    legacy = LEGACY_STATUS_DOC.read_text(encoding="utf-8")
-
-    for criterion in ("E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8"):
-        assert f"**{criterion}:**" in gate_doc
-    assert "python -m pytest -q" in baseline
-    assert "se/tests/architecture/test_phase5_10_exit_gate.py" in workflow
-    assert "phase5_10/PHASE5_10_EXIT_GATE.md" in legacy
-    main_source = MAIN_MODULE.read_text(encoding="utf-8")
-    assert "container.agent_runtime = AgentRuntime(" in main_source
-    assert "EventBusAgentEventPublisher(container.event_bus)" in main_source

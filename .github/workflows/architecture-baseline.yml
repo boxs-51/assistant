@@ -3,6 +3,8 @@ name: Architecture Baseline
 on:
   pull_request:
   push:
+    branches:
+      - main
 
 permissions:
   contents: read

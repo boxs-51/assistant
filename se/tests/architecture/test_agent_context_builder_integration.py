@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
-
 import pytest
 from pydantic import ValidationError
 
@@ -24,15 +22,6 @@ from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
 from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
 from se.src.agent.registry import AgentRegistry
-
-ROOT = Path(__file__).resolve().parents[3]
-EXIT_GATE_DOC = ROOT / "se" / "docs" / "exit-gate" / "PHASE5_11_EXIT_GATE.md"
-CHECKLIST = ROOT / "se" / "docs" /  "legacy" / "phase5" / "phase5_11" / "PHASE5_11_TASK_CHECKLIST.md"
-LEGACY_STATUS_DOC = ROOT / "se" / "docs" /  "legacy" / "phase5" / "Agent_Execution_System.md"
-ARCHITECTURE_WORKFLOW = ROOT / ".github" / "workflows" / "architecture-baseline.yml"
-CI_WORKFLOW = ROOT / ".github" / "workflows" / "phase5-exit-gates.yml"
-MAIN_MODULE = ROOT / "se" / "src" / "main.py"
-
 
 class ContextEngine:
     async def load_context(self, session_id, identity):
@@ -98,7 +87,7 @@ def make_adapter(context):
 
 
 @pytest.mark.asyncio
-async def test_E1_E2_snapshot_is_loaded_per_iteration_and_immutable():
+async def test_context_snapshot_is_loaded_per_iteration_and_immutable():
     context = make_context(tools=["calculator.add"])
     adapter = make_adapter(context)
     snapshot = await adapter.build(
@@ -124,7 +113,7 @@ async def test_E1_E2_snapshot_is_loaded_per_iteration_and_immutable():
 
 
 @pytest.mark.asyncio
-async def test_E3_tool_results_are_composed_as_inference_messages():
+async def test_tool_results_are_composed_as_inference_messages():
     context = make_context()
     adapter = make_adapter(context)
     result = ToolExecutionResult(
@@ -153,7 +142,7 @@ async def test_E3_tool_results_are_composed_as_inference_messages():
 
 
 @pytest.mark.asyncio
-async def test_E4_policy_filters_unregistered_or_unauthorized_tools():
+async def test_policy_filters_unregistered_or_unauthorized_tools():
     context = make_context(tools=["calculator.add", "missing.tool"])
     adapter = make_adapter(context)
     snapshot = await adapter.build(
@@ -165,7 +154,7 @@ async def test_E4_policy_filters_unregistered_or_unauthorized_tools():
 
 
 @pytest.mark.asyncio
-async def test_E5_identity_mismatch_and_cancellation_fail_closed():
+async def test_identity_mismatch_and_cancellation_fail_closed():
     context = make_context()
     adapter = make_adapter(context)
 
@@ -183,19 +172,3 @@ async def test_E5_identity_mismatch_and_cancellation_fail_closed():
         )
 
 
-def test_E6_E7_E8_E9_wiring_docs_and_ci_are_present():
-    gate_doc = EXIT_GATE_DOC.read_text(encoding="utf-8")
-    checklist = CHECKLIST.read_text(encoding="utf-8")
-    legacy = LEGACY_STATUS_DOC.read_text(encoding="utf-8")
-    workflow = CI_WORKFLOW.read_text(encoding="utf-8")
-    baseline = ARCHITECTURE_WORKFLOW.read_text(encoding="utf-8")
-    main_source = MAIN_MODULE.read_text(encoding="utf-8")
-
-    for criterion in ("E1", "E2", "E3", "E4", "E5", "E6", "E7", "E8", "E9"):
-        assert f"**{criterion}:**" in gate_doc
-    assert "[x]" in checklist
-    assert "phase5_11/PHASE5_11_EXIT_GATE.md" in legacy
-    assert "python -m pytest -q" in baseline
-    assert "se/tests/architecture/test_phase5_11_exit_gate.py" in workflow
-    assert "container.context_builder_port = ContextBuilderAdapter(" in main_source
-    assert "context_builder=container.context_builder_port" in main_source

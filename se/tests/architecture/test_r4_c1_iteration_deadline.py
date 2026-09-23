@@ -6,6 +6,7 @@ import pytest
 
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.identity import Identity
+from se.src.infrastructure.storage.models.sql.agent.execution import AgentExecutionRecord
 from se.src.runtimes.agent.contracts import AgentExecutionContext
 
 
@@ -147,3 +148,13 @@ def test_r4_c1_operation_timeout_is_three_level_minimum():
     assert context.remaining_seconds == 6.0
     assert context.remaining_iteration_seconds == 1.0
     assert context.remaining_for_operation(2.0) == 1.0
+
+
+def test_r4_c1_monotonic_deadlines_are_not_durable_sql_columns():
+    columns = set(AgentExecutionRecord.__table__.columns.keys())
+
+    assert "remaining_active_budget_seconds" in columns
+    assert "wait_expires_at" in columns
+    assert "deadline" not in columns
+    assert "active_deadline_monotonic" not in columns
+    assert "iteration_deadline_monotonic" not in columns
