@@ -40,39 +40,39 @@ class ProviderRetryHint:
         object.__setattr__(self, "source", source)
 
 
-@dataclass(slots=True)
 class ProviderCallBudget:
     """Process-local deadline and retry budget for one logical provider call.
 
-    The same object is intended to be shared across every fallback candidate
-    for one logical inference/provider call. It is deliberately non-durable:
-    AE-R10 does not add provider retry state to Task/Agent persistence.
+    One instance is shared across every fallback candidate for the logical
+    call. Public budget state is read-only; additional retry consumption can
+    happen only through try_consume_retry().
     """
 
-    deadline_monotonic: float
-    max_retries: int
-    retries_used: int = 0
+    __slots__ = (
+        "_deadline_monotonic",
+        "_max_retries",
+        "_retries_used",
+    )
 
-    def __post_init__(self) -> None:
-        if isinstance(self.deadline_monotonic, bool):
+    def __init__(
+        self,
+        *,
+        deadline_monotonic: float,
+        max_retries: int,
+    ) -> None:
+        if isinstance(deadline_monotonic, bool):
             raise TypeError("deadline_monotonic must be numeric")
-        self.deadline_monotonic = float(self.deadline_monotonic)
-        if not math.isfinite(self.deadline_monotonic):
+        deadline = float(deadline_monotonic)
+        if not math.isfinite(deadline):
             raise ValueError("deadline_monotonic must be finite")
-        if not isinstance(self.max_retries, int) or isinstance(
-            self.max_retries, bool
-        ):
+        if not isinstance(max_retries, int) or isinstance(max_retries, bool):
             raise TypeError("max_retries must be an integer")
-        if not isinstance(self.retries_used, int) or isinstance(
-            self.retries_used, bool
-        ):
-            raise TypeError("retries_used must be an integer")
-        if self.max_retries < 0:
+        if max_retries < 0:
             raise ValueError("max_retries must be non-negative")
-        if self.retries_used < 0:
-            raise ValueError("retries_used must be non-negative")
-        if self.retries_used > self.max_retries:
-            raise ValueError("retries_used cannot exceed max_retries")
+
+        self._deadline_monotonic = deadline
+        self._max_retries = max_retries
+        self._retries_used = 0
 
     @classmethod
     def from_timeout(
@@ -98,8 +98,20 @@ class ProviderCallBudget:
         )
 
     @property
+    def deadline_monotonic(self) -> float:
+        return self._deadline_monotonic
+
+    @property
+    def max_retries(self) -> int:
+        return self._max_retries
+
+    @property
+    def retries_used(self) -> int:
+        return self._retries_used
+
+    @property
     def retries_remaining(self) -> int:
-        return self.max_retries - self.retries_used
+        return self._max_retries - self._retries_used
 
     def remaining_seconds(self, *, now_monotonic: float) -> float:
         if isinstance(now_monotonic, bool):
@@ -107,12 +119,12 @@ class ProviderCallBudget:
         now = float(now_monotonic)
         if not math.isfinite(now):
             raise ValueError("now_monotonic must be finite")
-        return max(0.0, self.deadline_monotonic - now)
+        return max(0.0, self._deadline_monotonic - now)
 
     def try_consume_retry(self) -> bool:
         """Consume one additional network retry token if one remains."""
 
-        if self.retries_used >= self.max_retries:
+        if self._retries_used >= self._max_retries:
             return False
-        self.retries_used += 1
+        self._retries_used += 1
         return True
