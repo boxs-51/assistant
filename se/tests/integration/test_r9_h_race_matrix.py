@@ -201,10 +201,25 @@ async def test_r9_h_retry_vs_adopt_cannot_rewrite_task_result(tmp_path):
         tmp_path, name="r9_h_retry_adopt.sqlite"
     )
     try:
-        source, fork, plan = await _retryable_fork(
+        source, fork, _stale_plan = await _retryable_fork(
             sessions, service, fork_planner, "task-r9-h-retry-adopt"
         )
         await _complete_root(source, service)
+
+        # Root completion advances Task/TaskBudget authority. Re-plan after
+        # that mutation so RETRY and ADOPT genuinely race the same current
+        # Task revision instead of trivially rejecting a stale pre-completion
+        # RetryPlan.
+        retry_planner = AgentRetryPlanningService(
+            DurableAgentStore(lambda: _Uow(sessions))
+        )
+        plan = await retry_planner.build_retry_plan(
+            retry_request_id="retry-task-r9-h-retry-adopt-current",
+            task_id=source["task_id"],
+            branch_id=fork.branch_id,
+            source_execution_id=fork.execution_id,
+            target_user_id="user-r8-d",
+        )
         outcomes = await asyncio.gather(
             service.consume_retry_plan(plan),
             service.adopt_branch(
