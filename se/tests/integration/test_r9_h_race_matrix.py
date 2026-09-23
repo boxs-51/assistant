@@ -6,8 +6,10 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from se.src.runtimes.agent.contracts.resume import ResumeClaimIntent, ResumeTriggerType
 from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.retry_planning import AgentRetryPlanningService
+from se.src.runtimes.agent.resume_claim import ResumeClaimRejected
 from se.src.runtimes.agent.task_budget import (
     AggregateAdmissionError,
     BranchResolutionError,
@@ -350,6 +352,68 @@ async def test_r9_h_resume_claim_consume_vs_adopt_leaves_no_created_claim(tmp_pa
         assert claim.state != "CREATED"
         if claim.state == "REJECTED":
             assert claim.rejection_code == "TASK_RESOLVED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_h_resume_claim_create_vs_adopt_never_leaves_created_claim(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, name="r9_h_claim_create_adopt.sqlite"
+    )
+    try:
+        source = await _seed_source(
+            sessions, service, planner, task_id="task-r9-h-claim-create-adopt"
+        )
+        fork = await service.consume_fork_plan(source["plan"])
+        await service.finish_task_scoped_execution(
+            source["task_id"],
+            execution_id=fork.execution_id,
+            source_revision=1,
+            transition_values={
+                "state": "COMPLETED",
+                "result": {"winner": "fork"},
+                "completed_at": datetime.now(timezone.utc),
+            },
+            delegated=False,
+        )
+
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        resume_request_id = f"resume-create-{source['task_id']}"
+        intent = ResumeClaimIntent(
+            resume_request_id=resume_request_id,
+            execution_id=source["source_execution_id"],
+            checkpoint_id=source["checkpoint_id"],
+            expected_execution_revision=2,
+            plan_fingerprint="c" * 64,
+            user_id="user-r8-d",
+            client_id=None,
+            connection_id=None,
+            wait_reason="RESOURCE",
+            trigger_type=ResumeTriggerType.EXPLICIT,
+            claim_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+
+        outcomes = await asyncio.gather(
+            store.get_or_create_resume_claim(intent),
+            service.adopt_branch(
+                source["task_id"], fork.branch_id, target_user_id="user-r8-d"
+            ),
+            return_exceptions=True,
+        )
+
+        async with _Uow(sessions) as uow:
+            task = await uow.agents.get_task(source["task_id"])
+            claim = await uow.agents.get_resume_claim_by_request_id(
+                resume_request_id
+            )
+
+        assert task.status == "COMPLETED"
+        assert claim is None or claim.state == "REJECTED"
+        assert claim is None or claim.rejection_code == "TASK_RESOLVED"
+        for outcome in outcomes:
+            if isinstance(outcome, ResumeClaimRejected):
+                assert outcome.code == "TASK_TERMINAL"
     finally:
         await engine.dispose()
 
