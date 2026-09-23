@@ -209,6 +209,7 @@ async def _load_aggregate_source_executions_in_uow(
     *,
     task_id: str,
     for_update: bool,
+    preloaded_execution_map: Mapping[str, Any] | None = None,
 ):
     """Re-prove immutable AGGREGATE source/result provenance."""
 
@@ -238,14 +239,20 @@ async def _load_aggregate_source_executions_in_uow(
             "Aggregate provenance snapshot shape is invalid.",
         ) from exc
 
-    loader = (
-        uow.agents.get_execution_for_update
-        if for_update
-        else uow.agents.get_execution
-    )
-    execution_map = {}
-    for execution_id in sorted(execution_ids):
-        execution_map[execution_id] = await loader(execution_id)
+    execution_map = dict(preloaded_execution_map or {})
+    if not execution_map:
+        loader = (
+            uow.agents.get_execution_for_update
+            if for_update
+            else uow.agents.get_execution
+        )
+        for execution_id in sorted(execution_ids):
+            execution_map[execution_id] = await loader(execution_id)
+    elif set(execution_map) != set(execution_ids):
+        raise AggregateControlError(
+            "AGGREGATE_ADMISSION_CORRUPT",
+            "Prelocked aggregate source set differs from admission provenance.",
+        )
 
     ordered = []
     for index, (
@@ -859,6 +866,35 @@ class DurableAgentStore:
             branch = await uow.agents.get_task_branch_for_update(
                 bootstrap.target_branch_id
             )
+
+            try:
+                source_results = list(
+                    dict(context.input or {})["source_results"]
+                )
+                source_execution_ids = [
+                    str(item["execution_id"]) for item in source_results
+                ]
+            except Exception as exc:
+                raise AggregateControlError(
+                    "AGGREGATE_ACTIVATION_CONTEXT_CONFLICT",
+                    "Aggregate bootstrap has invalid source-result identity.",
+                ) from exc
+
+            # Lock every participating AgentExecution in deterministic id order
+            # before reading the immutable AggregateAdmission receipt.
+            locked_executions = {}
+            for execution_id in sorted(
+                set(source_execution_ids) | {bootstrap.execution_id}
+            ):
+                locked_executions[execution_id] = (
+                    await uow.agents.get_execution_for_update(execution_id)
+                )
+            if any(item is None for item in locked_executions.values()):
+                raise AggregateControlError(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate activation execution graph is incomplete.",
+                )
+
             receipt = await uow.agents.get_task_aggregate_admission_by_execution(
                 bootstrap.execution_id
             )
@@ -915,7 +951,11 @@ class DurableAgentStore:
                     uow,
                     receipt,
                     task_id=bootstrap.task_id,
-                    for_update=True,
+                    for_update=False,
+                    preloaded_execution_map={
+                        execution_id: locked_executions[execution_id]
+                        for execution_id in source_execution_ids
+                    },
                 )
             )
             branch_snapshots = list(receipt.source_branch_snapshots or [])
@@ -938,14 +978,7 @@ class DurableAgentStore:
                     "Aggregate target is absent from source provenance.",
                 )
             target_source = source_executions[target_index]
-            execution = await uow.agents.get_execution(
-                bootstrap.execution_id
-            )
-            if execution is None:
-                raise AggregateControlError(
-                    "AGGREGATE_ADMISSION_CORRUPT",
-                    "Aggregate execution disappeared before activation.",
-                )
+            execution = locked_executions[bootstrap.execution_id]
 
             expected_request = {
                 "aggregate_request_id": receipt.aggregate_request_id,
