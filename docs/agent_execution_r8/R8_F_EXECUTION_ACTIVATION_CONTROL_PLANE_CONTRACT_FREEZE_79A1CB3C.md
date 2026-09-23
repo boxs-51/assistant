@@ -595,6 +595,56 @@ no activity reconciliation may resurrect it
 A single branch COMPLETED/FAILED/CANCELLED never creates Task terminal result
 authority.
 
+Legacy/root wrappers are not exempt from this rule.
+
+A source B1 may have entered `MultiAgentCoordinator.execute_task()` before
+the Task forked. After AgentRuntime settles B1, the legacy wrapper still
+attempts Task-level writes.
+
+Therefore TaskBudget authority MUST fence those stale writes durably:
+
+```text
+legacy transition_task(... -> WAITING)
+    lock Task -> Budget
+    if normalized branch count > 1:
+        rederive aggregate branch activity
+        do not blindly force WAITING
+
+legacy terminalize_task(... -> terminal)
+    lock Task -> Budget
+    if normalized branch count > 1:
+        rederive aggregate branch activity
+        keep TaskBudget OPEN
+        do not terminalize Task
+```
+
+This check must occur inside the same durable transaction. A coordinator-only
+branch-count check is forbidden because FORK could commit between the check and
+Task mutation.
+
+R8-D FORK consume and these legacy-write fences both lock AgentTask first, so
+FORK-vs-terminalization has one serialized outcome:
+
+```text
+terminalization wins first:
+    Task terminal / Budget CLOSED
+    later FORK revalidation fails
+    no ForkAdmission commits
+
+FORK wins first:
+    multiple branches exist
+    later legacy terminal/write rederives aggregate nonterminal activity
+```
+
+Forbidden:
+
+```text
+ForkAdmission committed
+AND Task terminalized by one branch's legacy wrapper
+```
+
+Explicit Task cancellation remains the dedicated `cancel_task()` authority.
+
 ---
 
 # 13. Activity reconciliation integration
@@ -1173,6 +1223,9 @@ Tests:
 B1 RUNNING + B2 COMPLETED -> Task RUNNING
 B1 WAITING + B2 COMPLETED -> Task WAITING
 B1 WAITING + B2 FAILED -> Task WAITING
+legacy source/root WAITING write cannot override a RUNNING sibling
+legacy source/root terminal write cannot terminalize a forked Task
+FORK consume vs legacy terminalize cannot commit fork + terminal Task
 all current branch executions terminal -> Task stays nonterminal
 Task CANCELLED is never resurrected
 single-branch legacy completion behavior unchanged
@@ -1255,6 +1308,12 @@ Branch/FORK authorization uses durable Task ownership.
 R8F-I11
 One branch terminal result never terminalizes a multi-branch Task.
 
+R8F-I11A
+Legacy/source task wrappers cannot overwrite aggregate multi-branch activity after a FORK; WAITING and terminal writes are fenced inside TaskBudget authority.
+
+R8F-I11B
+FORK consume and legacy terminalization serialize on the Task row; a committed ForkAdmission and a one-branch terminal Task outcome cannot coexist from that race.
+
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
 
@@ -1319,6 +1378,9 @@ replay after activation
 two branch runners same Task
 branch completion does not complete Task
 branch failure does not fail Task
+legacy root/source completion does not terminalize a forked Task
+legacy root/source WAITING does not mask a RUNNING sibling
+FORK consume vs legacy terminalization has no split-brain outcome
 WAITING activity derivation
 Task cancellation with two branch runners
 restart-safe branch reads
@@ -1366,6 +1428,8 @@ recharging NEW_EXECUTION or BRANCH during activation
 routing fork E2 through execute_task()
 
 terminalizing Task from one branch result
+
+allowing a legacy/root execute_task wrapper to overwrite aggregate multi-branch activity after FORK
 
 rebuilding ForkPlan before checking committed same-request replay
 
