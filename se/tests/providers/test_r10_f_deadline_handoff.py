@@ -117,7 +117,7 @@ async def test_r10_f_agent_runtime_preserves_absolute_deadline_across_pre_handof
 ):
     clock = _Clock(100.0)
     monkeypatch.setattr(
-        "se.src.runtimes.agent.runtime.time.monotonic",
+        "se.src.runtimes.agent.runtime.monotonic",
         clock.monotonic,
     )
     inference = _CapturingInference()
