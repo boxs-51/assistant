@@ -257,3 +257,48 @@ async def test_r10_b_retry_policy_normalizes_hint_before_retry_decision(
     assert seen_errors[0].error_code == "RESOURCE_EXHAUSTED"
     assert raised.value.retry_after_seconds == 3.0
     assert raised.value.code == PROVIDER_RATE_LIMITED
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "raw_error",
+    [
+        _status_error(
+            408,
+            payload={"error": {"message": "request timeout"}},
+        ),
+        httpx.ReadError(
+            "read failed",
+            request=httpx.Request(
+                "POST",
+                "https://provider.example/v1/chat",
+            ),
+        ),
+    ],
+)
+async def test_r10_b_normalization_does_not_broaden_legacy_retry_set(
+    monkeypatch,
+    raw_error,
+):
+    calls = 0
+    sleeps = []
+
+    async def execute():
+        nonlocal calls
+        calls += 1
+        raise raw_error
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        "se.src.provider.policies.retry.asyncio.sleep",
+        fake_sleep,
+    )
+    policy = RetryPolicy(max_retries=2)
+
+    with pytest.raises(ProviderUnavailableError):
+        await policy.apply(execute, "test-provider")
+
+    assert calls == 1
+    assert sleeps == []
