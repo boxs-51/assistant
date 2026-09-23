@@ -182,7 +182,17 @@ class AgentTaskBranchResolutionResponse(GatewayBaseModel):
 class AgentTaskAggregateRequest(GatewayBaseModel):
     aggregate_request_id: str
     target_branch_id: str
-    source_branch_ids: List[str]
+    source_branch_ids: List[str] = Field(min_length=2)
+
+    @model_validator(mode="after")
+    def _validate_aggregate_sources(self):
+        if len(set(self.source_branch_ids)) != len(self.source_branch_ids):
+            raise ValueError("source_branch_ids must contain unique branches")
+        if self.target_branch_id not in self.source_branch_ids:
+            raise ValueError(
+                "target_branch_id must be included in source_branch_ids"
+            )
+        return self
 
 
 class AgentTaskAggregateResponse(GatewayBaseModel):
