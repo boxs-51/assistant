@@ -10,6 +10,7 @@ from se.src.runtimes.agent.persistence import (
     DurableAgentStore,
     ForkControlError,
 )
+from se.src.runtimes.agent.runtime import AgentRuntime
 from se.tests.integration.test_r8_d_atomic_fork_consume import (
     _Uow,
     _seed_source,
@@ -315,5 +316,95 @@ async def test_r8_f_two_activation_attempts_have_one_winner_and_loser_is_neutral
         assert execution.state == "RUNNING"
         assert before.active_executions == after.active_executions
         assert before.active_branches == after.active_branches
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_activation_win_handoff_cleanup_releases_real_budget_once(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_handoff_cleanup.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-handoff-cleanup",
+        )
+        admission = await service.consume_fork_plan(source["plan"])
+        store = _store(sessions)
+        bootstrap = await store.prepare_fork_execution_context(
+            admission.execution_id,
+            identity=_identity(),
+            agent=_agent(),
+        )
+        activation = await store.activate_fork_execution(
+            bootstrap,
+            identity=_identity(),
+        )
+        before = await service.get_budget(source["task_id"])
+
+        runtime = AgentRuntime(
+            context_builder=None,
+            inference=None,
+            tool_execution=None,
+            execution_policy=None,
+            durable_store=store,
+            task_budget_service=service,
+        )
+        await runtime.cancel_activated_fork_execution(
+            bootstrap.context,
+            activation.activated_execution_revision,
+            error_message="forced start_reserved failure",
+        )
+
+        execution = await store.load_execution(admission.execution_id)
+        after = await service.get_budget(source["task_id"])
+        branch = await store.load_task_branch(admission.branch_id)
+        branch_context = await store.load_task_branch_context(
+            admission.branch_id
+        )
+        async with _Uow(sessions) as uow:
+            receipt = await uow.agents.get_task_fork_admission(
+                source["task_id"],
+                source["plan"].fork_request_id,
+            )
+            task = await uow.agents.get_task(source["task_id"])
+            await uow.commit()
+
+        assert execution.state == "CANCELLED"
+        assert execution.revision == 3
+        assert execution.error == "forced start_reserved failure"
+        assert after.active_executions == before.active_executions - 1
+        assert (
+            after.active_parallel_agents
+            == before.active_parallel_agents
+        )
+        assert after.active_branches == before.active_branches
+        assert branch is not None
+        assert branch.current_execution_id == admission.execution_id
+        assert branch_context is not None
+        assert receipt is not None
+        assert str(task.status) not in {"COMPLETED", "FAILED", "CANCELLED"}
+
+        # Duplicate fail-close observation is idempotent and cannot double
+        # release the precharged execution capacity.
+        await runtime.cancel_activated_fork_execution(
+            bootstrap.context,
+            activation.activated_execution_revision,
+            error_message="forced start_reserved failure",
+        )
+        repeated = await service.get_budget(source["task_id"])
+        repeated_execution = await store.load_execution(
+            admission.execution_id
+        )
+        assert repeated.active_executions == after.active_executions
+        assert repeated.active_branches == after.active_branches
+        assert repeated_execution.revision == 3
+        assert repeated_execution.state == "CANCELLED"
     finally:
         await engine.dispose()
