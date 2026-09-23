@@ -162,7 +162,10 @@ def _resume_claim_matches_wire_request(
     state = getattr(claim.state, "value", str(claim.state))
     connection_matches = (
         claim.connection_id == connection_id
-        or state == ResumeClaimState.CONSUMED.value
+        or state in {
+            ResumeClaimState.CREATED.value,
+            ResumeClaimState.CONSUMED.value,
+        }
     )
     return (
         claim.resume_request_id == resume_request_id
@@ -637,6 +640,52 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             resume_request_id
         )
         if existing_claim is not None:
+            existing_state = getattr(
+                existing_claim.state,
+                "value",
+                str(existing_claim.state),
+            )
+            if (
+                existing_state == ResumeClaimState.CREATED.value
+                and existing_claim.connection_id
+                != plan.target_connection_id
+            ):
+                try:
+                    existing_claim = (
+                        await durable_store.rebind_created_resume_claim(
+                            existing_claim.claim_id,
+                            plan=plan,
+                            resume_request_id=resume_request_id,
+                        )
+                    )
+                except ResumeClaimError as exc:
+                    await _send_resume_rejected(
+                        websocket,
+                        connection_id=connection_id,
+                        execution_id=execution_id,
+                        checkpoint_id=checkpoint_id,
+                        resume_request_id=resume_request_id,
+                        claim_id=existing_claim.claim_id,
+                        code=exc.code,
+                        message=str(exc),
+                        retryable=bool(exc.retryable),
+                    )
+                    return
+
+                # A concurrent consumer/rejecter may have won while the
+                # CREATED rebind CAS was retrying. Replay that durable winner
+                # before applying CREATED-plan matching.
+                if await _replay_resume_claim_outcome(
+                    websocket,
+                    connection_id=connection_id,
+                    execution_id=execution_id,
+                    checkpoint_id=checkpoint_id,
+                    resume_request_id=resume_request_id,
+                    claim=existing_claim,
+                    supervisor=supervisor,
+                ):
+                    return
+
             if not _resume_claim_matches_plan(
                 existing_claim,
                 plan,
