@@ -191,6 +191,7 @@ async def test_r8_f_cancelled_task_cannot_activate_preactivation_fork(tmp_path):
             identity=_identity(),
             agent=_agent(),
         )
+        before = await service.get_budget(source["task_id"])
         await service.cancel_task(source["task_id"])
 
         with pytest.raises(ForkControlError) as exc:
@@ -201,8 +202,12 @@ async def test_r8_f_cancelled_task_cannot_activate_preactivation_fork(tmp_path):
         assert exc.value.code == "FORK_TASK_TERMINAL"
 
         execution = await store.load_execution(admission.execution_id)
-        assert execution.revision == 1
-        assert execution.state == "RUNNING"
+        after = await service.get_budget(source["task_id"])
+        assert execution.revision == 2
+        assert execution.state == "CANCELLED"
+        assert execution.error == "TASK_CANCELLED_BEFORE_FORK_ACTIVATION"
+        assert after.active_executions == before.active_executions - 1
+        assert after.active_branches == before.active_branches
     finally:
         await engine.dispose()
 
