@@ -11,7 +11,11 @@ from se.src.domain.schemas.multi_agent import (
     AgentTaskBranchResolutionRequest,
     AgentTaskRetryRequest,
 )
-from se.src.main import execute_retried_agent_task_control_plane
+from se.src.main import (
+    execute_aggregated_agent_task_control_plane,
+    execute_retried_agent_task_control_plane,
+)
+from se.src.runtimes.agent.contracts.aggregate import AggregateAdmission
 from se.src.runtimes.agent.contracts.retry import (
     RetryAdmission,
     RetryReplayResult,
@@ -188,6 +192,224 @@ async def test_r9_g_retry_committed_replay_is_identity_only():
         "execution_revision": 2,
         "started": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_r9_g_aggregate_public_command_reports_started_after_handoff():
+    aggregate_execution = "aggregate-r9-g"
+    admission = AggregateAdmission(
+        task_id=TASK,
+        aggregate_request_id="aggregate-g-start",
+        plan_fingerprint="a" * 64,
+        runtime_seed_fingerprint="b" * 64,
+        target_branch_id=BRANCH,
+        branch_revision=2,
+        execution_id=aggregate_execution,
+        execution_revision=1,
+        source_branch_ids=(BRANCH, "branch-2"),
+        task_revision=3,
+        task_budget_revision=4,
+    )
+
+    class Context:
+        def __init__(self):
+            self.restored = None
+
+        def restore_active_budget(self, seconds):
+            self.restored = seconds
+
+    context = Context()
+    bootstrap = SimpleNamespace(
+        execution_id=aggregate_execution,
+        context=context,
+    )
+
+    class Store:
+        def __init__(self):
+            self.loads = 0
+
+        async def load_execution(self, execution_id):
+            assert execution_id == aggregate_execution
+            self.loads += 1
+            revision = 1 if self.loads == 1 else 2
+            return SimpleNamespace(
+                id=aggregate_execution,
+                agent_id="agent-r9-g",
+                state="RUNNING",
+                revision=revision,
+            )
+
+        async def prepare_aggregate_execution_context(self, *args, **kwargs):
+            return bootstrap
+
+        async def activate_aggregate_execution(self, *args, **kwargs):
+            return SimpleNamespace(
+                activated_execution_revision=2,
+                remaining_active_budget_seconds=23.0,
+            )
+
+    class CompletedTask:
+        def add_done_callback(self, callback):
+            self.callback = callback
+
+    class Supervisor:
+        async def reserve(self, ctx):
+            assert ctx is context
+            return "token"
+
+        async def start_reserved(self, token, ctx, runner):
+            assert token == "token"
+            assert ctx is context
+            assert callable(runner)
+            return CompletedTask()
+
+        async def release_reserved(self, token):
+            raise AssertionError("successful handoff must keep ownership")
+
+    service = SimpleNamespace(
+        aggregate_branches=lambda *args, **kwargs: admission
+    )
+
+    async def aggregate_branches(*args, **kwargs):
+        return admission
+
+    service.aggregate_branches = aggregate_branches
+    container = SimpleNamespace(
+        agent_durable_store=Store(),
+        task_budget_service=service,
+        agent_registry=SimpleNamespace(
+            get=lambda agent_id: SimpleNamespace(name=agent_id)
+        ),
+        agent_execution_supervisor=Supervisor(),
+        agent_runtime=SimpleNamespace(
+            execute=lambda *args, **kwargs: None,
+        ),
+    )
+
+    response = await execute_aggregated_agent_task_control_plane(
+        container,
+        TASK,
+        AgentTaskAggregateRequest(
+            aggregate_request_id="aggregate-g-start",
+            target_branch_id=BRANCH,
+            source_branch_ids=[BRANCH, "branch-2"],
+        ),
+        _identity(),
+    )
+    assert response["execution_id"] == aggregate_execution
+    assert response["execution_revision"] == 2
+    assert response["started"] is True
+    assert context.restored == 23.0
+
+
+@pytest.mark.asyncio
+async def test_r9_g_aggregate_handoff_failure_is_settled_and_released():
+    aggregate_execution = "aggregate-r9-g-fail"
+    admission = AggregateAdmission(
+        task_id=TASK,
+        aggregate_request_id="aggregate-g-fail",
+        plan_fingerprint="c" * 64,
+        runtime_seed_fingerprint="d" * 64,
+        target_branch_id=BRANCH,
+        branch_revision=2,
+        execution_id=aggregate_execution,
+        execution_revision=1,
+        source_branch_ids=(BRANCH, "branch-2"),
+        task_revision=3,
+        task_budget_revision=4,
+    )
+
+    class Context:
+        def restore_active_budget(self, seconds):
+            self.remaining = seconds
+
+    context = Context()
+    bootstrap = SimpleNamespace(
+        execution_id=aggregate_execution,
+        context=context,
+    )
+
+    class Store:
+        async def load_execution(self, execution_id):
+            return SimpleNamespace(
+                id=execution_id,
+                agent_id="agent-r9-g",
+                state="RUNNING",
+                revision=1,
+            )
+
+        async def prepare_aggregate_execution_context(self, *args, **kwargs):
+            return bootstrap
+
+        async def activate_aggregate_execution(self, *args, **kwargs):
+            return SimpleNamespace(
+                activated_execution_revision=2,
+                remaining_active_budget_seconds=17.0,
+            )
+
+    class Supervisor:
+        def __init__(self):
+            self.released = []
+
+        async def reserve(self, ctx):
+            return "aggregate-token"
+
+        async def start_reserved(self, *args, **kwargs):
+            raise RuntimeError("handoff exploded")
+
+        async def release_reserved(self, token):
+            self.released.append(token)
+
+    class Runtime:
+        def __init__(self):
+            self.cancelled = []
+
+        async def cancel_activated_aggregate_execution(
+            self,
+            ctx,
+            revision,
+            *,
+            error_message,
+        ):
+            self.cancelled.append((ctx, revision, error_message))
+
+        async def execute(self, *args, **kwargs):
+            raise AssertionError("runner must not start")
+
+    async def aggregate_branches(*args, **kwargs):
+        return admission
+
+    supervisor = Supervisor()
+    runtime = Runtime()
+    container = SimpleNamespace(
+        agent_durable_store=Store(),
+        task_budget_service=SimpleNamespace(
+            aggregate_branches=aggregate_branches
+        ),
+        agent_registry=SimpleNamespace(
+            get=lambda agent_id: SimpleNamespace(name=agent_id)
+        ),
+        agent_execution_supervisor=supervisor,
+        agent_runtime=runtime,
+    )
+
+    with pytest.raises(RuntimeError, match="handoff exploded"):
+        await execute_aggregated_agent_task_control_plane(
+            container,
+            TASK,
+            AgentTaskAggregateRequest(
+                aggregate_request_id="aggregate-g-fail",
+                target_branch_id=BRANCH,
+                source_branch_ids=[BRANCH, "branch-2"],
+            ),
+            _identity(),
+        )
+
+    assert supervisor.released == ["aggregate-token"]
+    assert len(runtime.cancelled) == 1
+    assert runtime.cancelled[0][0] is context
+    assert runtime.cancelled[0][1] == 2
+    assert "AGGREGATE_RUNTIME_HANDOFF_FAILED" in runtime.cancelled[0][2]
 
 
 @pytest.mark.asyncio
