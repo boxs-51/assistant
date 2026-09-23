@@ -163,14 +163,33 @@ class ProviderRuntime(BaseRuntime):
                     }
                 ))
             else:
-                async for chunk in self.chat_handler.stream_with_fallback(self._http_client, body):
-                    await self.event_bus.publish(BaseEvent(
-                        event_name="provider.stream.chunk_emitted",
-                        session_id=session_id,
-                        turn_id=event.turn_id,
-                        payload={"chunk": chunk.model_dump(), "sse": chunk.to_sse()}
-                    ))
-                
+                stream = self.chat_handler.stream_with_fallback(
+                    self._http_client,
+                    body,
+                )
+                try:
+                    async for chunk in stream:
+                        await self.event_bus.publish(BaseEvent(
+                            event_name="provider.stream.chunk_emitted",
+                            session_id=session_id,
+                            turn_id=event.turn_id,
+                            payload={
+                                "chunk": chunk.model_dump(),
+                                "sse": chunk.to_sse(),
+                            },
+                        ))
+                finally:
+                    aclose = getattr(stream, "aclose", None)
+                    if callable(aclose):
+                        try:
+                            await aclose()
+                        except Exception as cleanup_error:
+                            logger.warning(
+                                "Provider runtime stream cleanup failed.",
+                                error=str(cleanup_error),
+                                error_type=type(cleanup_error).__name__,
+                            )
+
                 await self.event_bus.publish(BaseEvent(
                     event_name="provider.stream.completed",
                     session_id=session_id,
