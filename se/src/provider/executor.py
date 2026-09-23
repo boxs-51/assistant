@@ -1,3 +1,4 @@
+import asyncio
 import math
 import time
 from typing import Any, AsyncGenerator, Awaitable, Callable
@@ -174,23 +175,71 @@ class ProviderExecutor:
 
     async def execute_stream(
         self,
+        *,
+        call_budget: ProviderCallBudget | None = None,
+        timeout: float | None = None,
         **kwargs,
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
-        """Execute a streaming request without per-chunk retry."""
+        """Execute one stream under the shared logical-call deadline.
+
+        Streaming never performs a provider-local retry. The handler may move
+        to another provider only before the first visible chunk.
+        """
 
         provider = kwargs.get("provider")
         breaker = await self.breaker_manager.get_breaker(provider.name)
+        provider_attempted = False
 
         try:
+            if call_budget is not None:
+                self._remaining_or_raise(call_budget, provider.name)
+
             await breaker.before_request()
 
+            attempt_kwargs = dict(kwargs)
+            stream_remaining: float | None = None
+            if call_budget is not None:
+                stream_remaining = self._remaining_or_raise(
+                    call_budget,
+                    provider.name,
+                )
+                attempt_kwargs["timeout"] = self._bounded_attempt_timeout(
+                    timeout,
+                    stream_remaining,
+                )
+            elif timeout is not None:
+                attempt_kwargs["timeout"] = timeout
+
+            provider_attempted = True
             logger.info(
-                f"Starting streaming from provider {provider.name}"
+                "Starting streaming from provider",
+                provider=provider.name,
             )
-            async for chunk in provider.chat.chat_stream(**kwargs):
-                yield chunk
+
+            if stream_remaining is None:
+                async for chunk in provider.chat.chat_stream(
+                    **attempt_kwargs
+                ):
+                    yield chunk
+            else:
+                try:
+                    async with asyncio.timeout(stream_remaining):
+                        async for chunk in provider.chat.chat_stream(
+                            **attempt_kwargs
+                        ):
+                            yield chunk
+                except TimeoutError as exc:
+                    raise ProviderDeadlineExceededError(
+                        "Provider stream deadline exceeded.",
+                        provider_name=provider.name,
+                    ) from exc
 
             await breaker.on_success()
+
+        except ProviderDeadlineExceededError:
+            if provider_attempted:
+                await breaker.on_failure()
+            raise
 
         except CircuitBreakerOpenError as e:
             logger.warning(
