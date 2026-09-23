@@ -256,7 +256,20 @@ def normalize_provider_tool_schema(
     normalized = deepcopy(dict(schema))
     # $schema selects a meta-schema/dialect rather than constraining instances.
     normalized.pop("$schema", None)
-    return _normalize_json_schema_type_tokens(normalized)
+    normalized = _normalize_json_schema_type_tokens(normalized)
+
+    # Gateway tool invocations carry a JSON object of named arguments. Keep
+    # that invariant identical across provider transports instead of allowing
+    # provider-specific array/primitive roots to drift into the contract.
+    root_type = normalized.get("type")
+    if root_type is None:
+        normalized["type"] = "object"
+    elif root_type != "object":
+        raise ProviderToolContractError(
+            f"{provider} tool parameter JSON Schema root must be type 'object'"
+        )
+    normalized.setdefault("properties", {})
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
