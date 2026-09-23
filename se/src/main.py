@@ -102,6 +102,171 @@ from .domain.schemas.event import BaseEvent
 from .version import __version__
 logger = structlog.get_logger(__name__)
 
+async def execute_forked_agent_task_control_plane(
+    container,
+    task_id,
+    request,
+    identity,
+):
+    """R8-F durable replay/activation path for an already-created E2."""
+
+    store = container.agent_durable_store
+    planner = container.fork_planning_service
+    budget_service = container.task_budget_service
+    supervisor = container.agent_execution_supervisor
+    runtime = container.agent_runtime
+    principal = str(identity.user_id or "")
+    if not principal:
+        raise PermissionError("Authenticated principal is required.")
+
+    replay = await store.load_fork_replay(
+        task_id=task_id,
+        fork_request_id=request.fork_request_id,
+        source_branch_id=request.source_branch_id,
+        source_execution_id=request.source_execution_id,
+        source_checkpoint_id=request.source_checkpoint_id,
+        target_user_id=principal,
+        overlay_messages=request.overlay_messages,
+    )
+    if replay is not None:
+        admission = replay.admission
+    else:
+        plan = await planner.build_fork_plan(
+            fork_request_id=request.fork_request_id,
+            task_id=task_id,
+            source_branch_id=request.source_branch_id,
+            source_execution_id=request.source_execution_id,
+            source_checkpoint_id=request.source_checkpoint_id,
+            target_user_id=principal,
+            overlay_messages=tuple(request.overlay_messages),
+        )
+        admission = await budget_service.consume_fork_plan(plan)
+
+    current = await store.load_execution(admission.execution_id)
+    if current is None:
+        raise ForkControlError(
+            "FORK_ADMISSION_CORRUPT",
+            "ForkAdmission execution is missing.",
+        )
+
+    # RUNNING@1 is the one replay state that must continue activation of
+    # the SAME E2. Every later state is identity/status replay only.
+    if not (
+        str(current.state) == "RUNNING"
+        and int(current.revision) == 1
+    ):
+        return {
+            "task_id": task_id,
+            "fork_request_id": request.fork_request_id,
+            "branch_id": admission.branch_id,
+            "execution_id": admission.execution_id,
+            "execution_state": str(current.state),
+            "execution_revision": int(current.revision),
+            "started": False,
+        }
+
+    agent = container.agent_registry.get(current.agent_id)
+    if agent is None:
+        raise LookupError(
+            f"Agent '{current.agent_id}' is not registered."
+        )
+
+    bootstrap = await store.prepare_fork_execution_context(
+        admission.execution_id,
+        identity=identity,
+        agent=agent,
+    )
+
+    token = await supervisor.reserve(bootstrap.context)
+    activation = None
+    try:
+        try:
+            activation = await store.activate_fork_execution(
+                bootstrap,
+                identity=identity,
+            )
+        except BaseException:
+            # Every pre-WIN exit releases process-local ownership.
+            await supervisor.release_reserved(token)
+            latest = await store.load_execution(admission.execution_id)
+            if (
+                latest is not None
+                and not (
+                    str(latest.state) == "RUNNING"
+                    and int(latest.revision) == 1
+                )
+            ):
+                return {
+                    "task_id": task_id,
+                    "fork_request_id": request.fork_request_id,
+                    "branch_id": admission.branch_id,
+                    "execution_id": admission.execution_id,
+                    "execution_state": str(latest.state),
+                    "execution_revision": int(latest.revision),
+                    "started": False,
+                }
+            raise
+
+        try:
+            bootstrap.context.restore_active_budget(
+                activation.remaining_active_budget_seconds
+            )
+            owned_task = await supervisor.start_reserved(
+                token,
+                bootstrap.context,
+                lambda: runtime.execute(
+                    bootstrap.context,
+                    durable_revision=(
+                        activation.activated_execution_revision
+                    ),
+                ),
+            )
+        except BaseException as handoff_error:
+            try:
+                await runtime.cancel_activated_fork_execution(
+                    bootstrap.context,
+                    activation.activated_execution_revision,
+                    error_message=(
+                        "FORK_RUNTIME_HANDOFF_FAILED: "
+                        f"{type(handoff_error).__name__}: {handoff_error}"
+                    ),
+                )
+            finally:
+                await supervisor.release_reserved(token)
+            raise
+
+        def observe_fork_runner(completed):
+            if completed.cancelled():
+                return
+            # Retrieve the exception so a detached execution-scoped task
+            # is never left as an unobserved asyncio failure.
+            completed.exception()
+
+        owned_task.add_done_callback(observe_fork_runner)
+    except BaseException:
+        # If activation never won, release_reserved above is authoritative.
+        # If it won, the handoff failure path owns durable cleanup.
+        raise
+
+    latest = await store.load_execution(admission.execution_id)
+    return {
+        "task_id": task_id,
+        "fork_request_id": request.fork_request_id,
+        "branch_id": admission.branch_id,
+        "execution_id": admission.execution_id,
+        "execution_state": (
+            str(latest.state) if latest is not None else "RUNNING"
+        ),
+        "execution_revision": (
+            int(latest.revision)
+            if latest is not None
+            else activation.activated_execution_revision
+        ),
+        "started": True,
+    }
+
+
+
 
 # ==============================================================================
 # BOOTSTRAP FACTORIES
@@ -483,162 +648,12 @@ async def bootstrap_runtime_kernel(
         request,
         identity,
     ):
-        """R8-F durable replay/activation path for an already-created E2."""
-
-        store = container.agent_durable_store
-        planner = container.fork_planning_service
-        budget_service = container.task_budget_service
-        supervisor = container.agent_execution_supervisor
-        runtime = container.agent_runtime
-        principal = str(identity.user_id or "")
-        if not principal:
-            raise PermissionError("Authenticated principal is required.")
-
-        replay = await store.load_fork_replay(
-            task_id=task_id,
-            fork_request_id=request.fork_request_id,
-            source_branch_id=request.source_branch_id,
-            source_execution_id=request.source_execution_id,
-            source_checkpoint_id=request.source_checkpoint_id,
-            target_user_id=principal,
-            overlay_messages=request.overlay_messages,
+        return await execute_forked_agent_task_control_plane(
+            container,
+            task_id,
+            request,
+            identity,
         )
-        if replay is not None:
-            admission = replay.admission
-        else:
-            plan = await planner.build_fork_plan(
-                fork_request_id=request.fork_request_id,
-                task_id=task_id,
-                source_branch_id=request.source_branch_id,
-                source_execution_id=request.source_execution_id,
-                source_checkpoint_id=request.source_checkpoint_id,
-                target_user_id=principal,
-                overlay_messages=tuple(request.overlay_messages),
-            )
-            admission = await budget_service.consume_fork_plan(plan)
-
-        current = await store.load_execution(admission.execution_id)
-        if current is None:
-            raise ForkControlError(
-                "FORK_ADMISSION_CORRUPT",
-                "ForkAdmission execution is missing.",
-            )
-
-        # RUNNING@1 is the one replay state that must continue activation of
-        # the SAME E2. Every later state is identity/status replay only.
-        if not (
-            str(current.state) == "RUNNING"
-            and int(current.revision) == 1
-        ):
-            return {
-                "task_id": task_id,
-                "fork_request_id": request.fork_request_id,
-                "branch_id": admission.branch_id,
-                "execution_id": admission.execution_id,
-                "execution_state": str(current.state),
-                "execution_revision": int(current.revision),
-                "started": False,
-            }
-
-        agent = container.agent_registry.get(current.agent_id)
-        if agent is None:
-            raise LookupError(
-                f"Agent '{current.agent_id}' is not registered."
-            )
-
-        bootstrap = await store.prepare_fork_execution_context(
-            admission.execution_id,
-            identity=identity,
-            agent=agent,
-        )
-
-        token = await supervisor.reserve(bootstrap.context)
-        activation = None
-        try:
-            try:
-                activation = await store.activate_fork_execution(
-                    bootstrap,
-                    identity=identity,
-                )
-            except BaseException:
-                # Every pre-WIN exit releases process-local ownership.
-                await supervisor.release_reserved(token)
-                latest = await store.load_execution(admission.execution_id)
-                if (
-                    latest is not None
-                    and not (
-                        str(latest.state) == "RUNNING"
-                        and int(latest.revision) == 1
-                    )
-                ):
-                    return {
-                        "task_id": task_id,
-                        "fork_request_id": request.fork_request_id,
-                        "branch_id": admission.branch_id,
-                        "execution_id": admission.execution_id,
-                        "execution_state": str(latest.state),
-                        "execution_revision": int(latest.revision),
-                        "started": False,
-                    }
-                raise
-
-            try:
-                bootstrap.context.restore_active_budget(
-                    activation.remaining_active_budget_seconds
-                )
-                owned_task = await supervisor.start_reserved(
-                    token,
-                    bootstrap.context,
-                    lambda: runtime.execute(
-                        bootstrap.context,
-                        durable_revision=(
-                            activation.activated_execution_revision
-                        ),
-                    ),
-                )
-            except BaseException as handoff_error:
-                try:
-                    await runtime.cancel_activated_fork_execution(
-                        bootstrap.context,
-                        activation.activated_execution_revision,
-                        error_message=(
-                            "FORK_RUNTIME_HANDOFF_FAILED: "
-                            f"{type(handoff_error).__name__}: {handoff_error}"
-                        ),
-                    )
-                finally:
-                    await supervisor.release_reserved(token)
-                raise
-
-            def observe_fork_runner(completed):
-                if completed.cancelled():
-                    return
-                # Retrieve the exception so a detached execution-scoped task
-                # is never left as an unobserved asyncio failure.
-                completed.exception()
-
-            owned_task.add_done_callback(observe_fork_runner)
-        except BaseException:
-            # If activation never won, release_reserved above is authoritative.
-            # If it won, the handoff failure path owns durable cleanup.
-            raise
-
-        latest = await store.load_execution(admission.execution_id)
-        return {
-            "task_id": task_id,
-            "fork_request_id": request.fork_request_id,
-            "branch_id": admission.branch_id,
-            "execution_id": admission.execution_id,
-            "execution_state": (
-                str(latest.state) if latest is not None else "RUNNING"
-            ),
-            "execution_revision": (
-                int(latest.revision)
-                if latest is not None
-                else activation.activated_execution_revision
-            ),
-            "started": True,
-        }
 
     # Multi-agent HTTP tasks enter the canonical AgentRuntime loop.
     container.multi_agent_coordinator.executor = execute_registered_agent_task
