@@ -351,6 +351,41 @@ async def test_r10_g_executor_bounds_provider_stream_timeout_by_remaining():
 
 
 @pytest.mark.asyncio
+async def test_r10_g_handler_close_after_visible_chunk_closes_provider_stream():
+    closed = asyncio.Event()
+
+    class _CloseAwareChat:
+        async def chat_stream(self, **kwargs):
+            try:
+                yield "first"
+                await asyncio.Event().wait()
+                yield "unreachable"
+            finally:
+                closed.set()
+
+    provider = _Provider("p1")
+    provider.chat = _CloseAwareChat()
+    manager = _BreakerManager()
+    executor = ProviderExecutor(manager, max_retries=0)
+    handler = ChatExecutionHandler(
+        providers={"p1": provider},
+        routing_policy=_Routing([provider]),
+        executor=executor,
+        circuit_breaker_manager=manager,
+        timeout=10.0,
+    )
+    stream = handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+    )
+
+    assert await stream.__anext__() == "first"
+    await stream.aclose()
+
+    assert closed.is_set()
+
+
+@pytest.mark.asyncio
 async def test_r10_g_stream_read_cancellation_drains_provider_child_task():
     started = asyncio.Event()
     cancelled = asyncio.Event()
