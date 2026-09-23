@@ -48,6 +48,7 @@ from .resume_claim import ResumeClaimDeferred, ResumeClaimError, ResumeClaimReje
 from .serialization import to_json_safe
 from .task_budget import (
     prepare_resume_capacity_in_uow,
+    reconcile_multibranch_task_activity_in_uow,
 )
 from .waiting_checkpoint import (
     WaitingCheckpointConflictError,
@@ -2451,6 +2452,18 @@ class DurableAgentStore:
                     "RESUME_CONFLICT",
                     "AgentExecution claim CAS lost.",
                 )
+
+            if plan.task_id is not None:
+                activity = await reconcile_multibranch_task_activity_in_uow(
+                    uow,
+                    task_id=plan.task_id,
+                )
+                if activity is None:
+                    await uow.rollback()
+                    return ResumeClaimRejected(
+                        "RESUME_CONFLICT",
+                        "AgentTask activity CAS lost during resume.",
+                    )
 
             consumed_revision = plan.expected_execution_revision + 1
             consumed = await uow.agents.compare_and_set_resume_claim(
