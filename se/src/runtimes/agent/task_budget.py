@@ -1147,43 +1147,43 @@ class TaskBudgetService:
 
                     updated_task = task
                     if current_state != "CANCELLED":
-                        updated_task = await uow.agents.compare_and_set_task(
-                            task_id,
-                            task.revision,
-                            normalized,
+                            updated_task = await uow.agents.compare_and_set_task(
+                                task_id,
+                                task.revision,
+                                normalized,
+                            )
+                            if updated_task is None:
+                                await uow.rollback()
+                                continue
+
+                        budget_values = {
+                            "state": TaskBudgetState.CLOSED.value,
+                            "closed_at": (
+                                budget.closed_at
+                                if budget.closed_at is not None
+                                else now_utc
+                            ),
+                            "active_executions": (
+                                budget.active_executions - cancelled_dormant
+                            ),
+                            "active_parallel_agents": (
+                                budget.active_parallel_agents
+                                - cancelled_delegated
+                            ),
+                        }
+                        updated_budget = (
+                            await uow.agents.compare_and_set_task_budget(
+                                task_id,
+                                budget.revision,
+                                budget_values,
+                            )
                         )
-                        if updated_task is None:
+                        if updated_budget is None:
                             await uow.rollback()
                             continue
 
-                    budget_values = {
-                        "state": TaskBudgetState.CLOSED.value,
-                        "closed_at": (
-                            budget.closed_at
-                            if budget.closed_at is not None
-                            else now_utc
-                        ),
-                        "active_executions": (
-                            budget.active_executions - cancelled_dormant
-                        ),
-                        "active_parallel_agents": (
-                            budget.active_parallel_agents
-                            - cancelled_delegated
-                        ),
-                    }
-                    updated_budget = (
-                        await uow.agents.compare_and_set_task_budget(
-                            task_id,
-                            budget.revision,
-                            budget_values,
-                        )
-                    )
-                    if updated_budget is None:
-                        await uow.rollback()
-                        continue
-
-                    await uow.commit()
-                    return updated_task
+                        await uow.commit()
+                        return updated_task
             except OperationalError as exc:
                 message = str(exc).lower()
                 if "locked" in message or "busy" in message:
@@ -1499,8 +1499,39 @@ class TaskBudgetService:
                             "BRANCH_RESULT_NOT_COMPLETED",
                             "Selected branch has no current execution.",
                         )
-                    execution = await uow.agents.get_execution_for_update(
-                        selected.current_execution_id
+                    open_branches = [
+                        item
+                        for item in branches
+                        if str(item.resolution_state) == "OPEN"
+                    ]
+                    if int(budget.active_branches) != len(open_branches):
+                        raise BranchResolutionError(
+                            "TASK_RESOLUTION_CONFLICT",
+                            "TaskBudget active_branches differs from branch authority.",
+                        )
+
+                    # Lock every current OPEN-branch execution after all Branch
+                    # rows, in deterministic execution-id order.  ADOPT may
+                    # detach an already-owned RUNNING@2+ loser and let it
+                    # controlled-complete, but it must never strand an
+                    # admission-backed RUNNING@1 that has no runtime owner.
+                    current_execution_ids = sorted(
+                        {
+                            str(item.current_execution_id)
+                            for item in open_branches
+                            if item.current_execution_id is not None
+                        }
+                    )
+                    locked_executions = {}
+                    for current_execution_id in current_execution_ids:
+                        locked_executions[current_execution_id] = (
+                            await uow.agents.get_execution_for_update(
+                                current_execution_id
+                            )
+                        )
+
+                    execution = locked_executions.get(
+                        str(selected.current_execution_id)
                     )
                     if (
                         execution is None
@@ -1513,22 +1544,128 @@ class TaskBudgetService:
                             "BRANCH_RESULT_NOT_COMPLETED",
                             "Selected current execution has no durable COMPLETED result.",
                         )
-                    claims = (
-                        await uow.agents
-                        .list_created_resume_claims_for_task_for_update(task_id)
-                    )
-                    open_branches = [
-                        item
-                        for item in branches
-                        if str(item.resolution_state) == "OPEN"
-                    ]
-                    if int(budget.active_branches) != len(open_branches):
-                        raise BranchResolutionError(
-                            "TASK_RESOLUTION_CONFLICT",
-                            "TaskBudget active_branches differs from branch authority.",
-                        )
+
                     now_utc = datetime.now(timezone.utc)
-                    updated_task = await uow.agents.compare_and_set_task(
+                    release_active = 0
+                    release_parallel = 0
+                    for loser in open_branches:
+                        if loser.branch_id == branch_id:
+                            continue
+                        loser_execution_id = loser.current_execution_id
+                        if loser_execution_id is None:
+                            continue
+                        loser_execution = locked_executions.get(
+                            str(loser_execution_id)
+                        )
+                        if (
+                            loser_execution is None
+                            or loser_execution.task_id != task_id
+                            or loser_execution.branch_id != loser.branch_id
+                        ):
+                            raise BranchResolutionError(
+                                "TASK_RESOLUTION_CONFLICT",
+                                "Loser branch current execution has invalid lineage.",
+                            )
+                        if not (
+                            str(loser_execution.state) == "RUNNING"
+                            and int(loser_execution.revision) == 1
+                        ):
+                            continue
+
+                        fork_receipt = (
+                            await uow.agents.get_task_fork_admission_by_execution(
+                                loser_execution.id
+                            )
+                        )
+                        retry_receipt = (
+                            await uow.agents.get_task_retry_admission_by_execution(
+                                loser_execution.id
+                            )
+                        )
+                        aggregate_receipt = (
+                            await uow.agents
+                            .get_task_aggregate_admission_by_execution(
+                                loser_execution.id
+                            )
+                        )
+                        matching_receipts = 0
+                        if (
+                            fork_receipt is not None
+                            and fork_receipt.task_id == task_id
+                            and fork_receipt.branch_id == loser.branch_id
+                            and fork_receipt.execution_id == loser_execution.id
+                        ):
+                            matching_receipts += 1
+                        if (
+                            retry_receipt is not None
+                            and retry_receipt.task_id == task_id
+                            and retry_receipt.branch_id == loser.branch_id
+                            and retry_receipt.execution_id == loser_execution.id
+                        ):
+                            matching_receipts += 1
+                        if (
+                            aggregate_receipt is not None
+                            and aggregate_receipt.task_id == task_id
+                            and aggregate_receipt.target_branch_id
+                            == loser.branch_id
+                            and aggregate_receipt.execution_id
+                            == loser_execution.id
+                        ):
+                            matching_receipts += 1
+
+                        if (
+                            matching_receipts != 1
+                            or loser_execution.current_checkpoint_id is not None
+                            or loser_execution.bound_client_id is not None
+                            or loser_execution.bound_connection_id is not None
+                        ):
+                            # A revision-1 RUNNING loser without exact immutable
+                            # admission provenance is not safe to reinterpret.
+                            raise BranchResolutionError(
+                                "TASK_RESOLUTION_CONFLICT",
+                                "Loser RUNNING@1 execution is not an exact "
+                                "dormant admission-backed preactivation.",
+                            )
+
+                        cancelled = await uow.agents.compare_and_set_execution(
+                            loser_execution.id,
+                            1,
+                            {
+                                "state": "CANCELLED",
+                                "wait_reason": None,
+                                "wait_expires_at": None,
+                                "error": "TASK_ADOPTED_BEFORE_ACTIVATION",
+                                "completed_at": now_utc,
+                            },
+                        )
+                        if cancelled is None:
+                            await uow.rollback()
+                            break
+                        release_active += 1
+                        if loser_execution.parent_execution_id is not None:
+                            release_parallel += 1
+                    else:
+                        if int(budget.active_executions) < release_active:
+                            raise BranchResolutionError(
+                                "TASK_RESOLUTION_CONFLICT",
+                                "ADOPT would underflow active_executions.",
+                            )
+                        if (
+                            int(budget.active_parallel_agents)
+                            < release_parallel
+                        ):
+                            raise BranchResolutionError(
+                                "TASK_RESOLUTION_CONFLICT",
+                                "ADOPT would underflow active_parallel_agents.",
+                            )
+
+                        claims = (
+                            await uow.agents
+                            .list_created_resume_claims_for_task_for_update(
+                                task_id
+                            )
+                        )
+                        updated_task = await uow.agents.compare_and_set_task(
                         task_id,
                         int(task.revision),
                         {
@@ -1551,6 +1688,13 @@ class TaskBudgetService:
                             "state": "CLOSED",
                             "closed_at": now_utc,
                             "active_branches": 0,
+                            "active_executions": (
+                                int(budget.active_executions) - release_active
+                            ),
+                            "active_parallel_agents": (
+                                int(budget.active_parallel_agents)
+                                - release_parallel
+                            ),
                         },
                     )
                     if updated_budget is None:
