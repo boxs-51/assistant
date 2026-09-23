@@ -1440,6 +1440,12 @@ Task-scoped WAITING -> TIMEOUT paths serialize on Task authority and rederive mu
 R8F-I11J
 If a pre-resume activity epoch loses to a concurrent reconciler, the resume claim/execution/budget remain retryable/unchanged; no partial epoch or capacity mutation may survive rollback.
 
+R8F-I11K
+Transient Task activity epoch/reconciliation conflicts are ResumeClaimDeferred authority outcomes, retried inside the bounded consume loop; if still deferred on wire, RESUME_CONFLICT is retryable and preserves the same durable claim_id/resume_request_id.
+
+R8F-I11L
+AgentExecution claim CAS loss remains a rejection rather than blind internal retry because another execution authority may have won.
+
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
 
@@ -1512,6 +1518,8 @@ FORK admission advances Task activity epoch even when Task was already RUNNING
 R7 resume vs standalone activity reconciliation preserves final Task RUNNING
 R7 pre-resume epoch bump is rolled back/semantically neutral when resume does not commit
 task-scoped WAIT expiry removes the expired branch reason from aggregate Task activity
+transient activity-epoch resume conflicts retry the same CREATED claim internally
+retryable RESUME_CONFLICT wire payload preserves the exact claim_id/resume_request_id
 WAITING activity derivation
 Task cancellation with two branch runners
 restart-safe branch reads
