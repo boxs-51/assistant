@@ -527,6 +527,10 @@ async def test_r7_f_task_budget_reacquire_rolls_back_when_execution_cas_loses(
         branch_id = await _seed_task_waiting(sessions, factory)
         plan = _plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(_intent(plan, "rr-budget-rollback"))
+        async with factory() as uow:
+            task_before = await uow.agents.get_task("task-r7f")
+            task_revision_before = int(task_before.revision)
+            await uow.commit()
 
         async def lose_execution_cas(self, *args, **kwargs):
             return None
@@ -558,11 +562,13 @@ async def test_r7_f_task_budget_reacquire_rolls_back_when_execution_cas_loses(
                 f"{EXECUTION}:2",
             )
             durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            task_after = await uow.agents.get_task("task-r7f")
             assert execution.state == "WAITING"
             assert execution.revision == 2
             assert budget.active_executions == 0
             assert reservation is None
             assert durable_claim.state == "CREATED"
+            assert int(task_after.revision) == task_revision_before
             await uow.commit()
     finally:
         await engine.dispose()
@@ -1330,5 +1336,129 @@ async def test_r8_f_activity_reconcile_race_with_r7_resume_finishes_task_running
         assert int(budget.active_executions) == 1
         assert int(budget.active_branches) == 2
         assert str(durable_claim.state) == "CONSUMED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_task_scoped_wait_expiry_rederives_sibling_wait_reason(tmp_path):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-task-wait-expiry-activity.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        budget_service = TaskBudgetService(
+            factory,
+            default_limits=_limits(),
+            default_policy=TaskBudgetPolicy(version="r7-f"),
+            max_conflict_retries=16,
+        )
+        sibling_branch_id = "branch-r8-f-wait-expiry-sibling"
+        sibling_execution_id = "exec-r8-f-wait-expiry-sibling"
+        now = datetime.now(timezone.utc)
+        expired_at = now - timedelta(seconds=1)
+
+        async with factory() as uow:
+            sibling_branch = await uow.agents.save_task_branch(
+                {
+                    "branch_id": sibling_branch_id,
+                    "task_id": "task-r7f",
+                    "parent_branch_id": branch_id,
+                    "base_execution_id": EXECUTION,
+                    "base_checkpoint_id": CHECKPOINT,
+                    "current_execution_id": None,
+                    "resolution_state": "OPEN",
+                    "revision": 0,
+                    "created_by": USER,
+                    "reason": "R8_FORK",
+                }
+            )
+            assert sibling_branch is not None
+            sibling_execution = await uow.agents.save_execution(
+                {
+                    "id": sibling_execution_id,
+                    "session_id": SESSION,
+                    "agent_id": AGENT,
+                    "task_id": "task-r7f",
+                    "branch_id": sibling_branch_id,
+                    "parent_execution_id": None,
+                    "retry_of_execution_id": None,
+                    "base_execution_id": EXECUTION,
+                    "base_checkpoint_id": CHECKPOINT,
+                    "correlation_id": "corr-r8-f-wait-expiry-sibling",
+                    "state": "WAITING",
+                    "wait_reason": "RESOURCE",
+                    "revision": 2,
+                    "current_checkpoint_id": None,
+                    "remaining_active_budget_seconds": 15.0,
+                    "request": {},
+                }
+            )
+            assert sibling_execution is not None
+            sibling_branch = await uow.agents.compare_and_set_task_branch(
+                sibling_branch_id,
+                0,
+                {"current_execution_id": sibling_execution_id},
+            )
+            assert sibling_branch is not None
+
+            execution = await uow.agents.get_execution(EXECUTION)
+            execution.wait_expires_at = expired_at
+            checkpoint = await uow.agents.get_execution_checkpoint(CHECKPOINT)
+            checkpoint.wait_expires_at = expired_at
+
+            budget = await uow.agents.get_task_budget("task-r7f")
+            updated_budget = await uow.agents.compare_and_set_task_budget(
+                "task-r7f",
+                int(budget.revision),
+                {"active_branches": int(budget.active_branches) + 1},
+            )
+            assert updated_budget is not None
+            await uow.commit()
+
+        task_waiting = await budget_service.reconcile_multibranch_task_activity(
+            "task-r7f"
+        )
+        assert str(task_waiting.status) == "WAITING"
+        assert list(task_waiting.wait_reasons or []) == [
+            "CONNECTION",
+            "RESOURCE",
+        ]
+
+        plan = _plan(
+            task_id="task-r7f",
+            branch_id=branch_id,
+            wait_expires_at=expired_at,
+        )
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-task-wait-expired")
+        )
+        with pytest.raises(ResumeClaimRejected) as raised:
+            await store.consume_resume_claim(
+                ResumeClaimConsumeSpec(
+                    plan=plan,
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    expected_claim_revision=claim.revision,
+                    now_utc=now,
+                )
+            )
+        assert raised.value.code == "WAIT_EXPIRED"
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            task = await uow.agents.get_task("task-r7f")
+            budget = await uow.agents.get_task_budget("task-r7f")
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "TIMEOUT"
+            assert execution.revision == 3
+            assert str(task.status) == "WAITING"
+            assert list(task.wait_reasons or []) == ["RESOURCE"]
+            assert int(budget.active_executions) == 0
+            assert int(budget.active_branches) == 2
+            assert durable_claim.state == "REJECTED"
+            assert durable_claim.rejection_code == "WAIT_EXPIRED"
+            await uow.commit()
     finally:
         await engine.dispose()
