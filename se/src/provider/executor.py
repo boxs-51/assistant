@@ -117,11 +117,17 @@ class ProviderExecutor:
 
             await breaker.before_request()
 
-            response = await self.retry_policy.apply(
-                execution_func,
-                provider.name,
-                call_budget=call_budget,
-            )
+            if call_budget is None:
+                response = await self.retry_policy.apply(
+                    execution_func,
+                    provider.name,
+                )
+            else:
+                response = await self.retry_policy.apply(
+                    execution_func,
+                    provider.name,
+                    call_budget=call_budget,
+                )
 
             await breaker.on_success()
             return response
@@ -242,11 +248,17 @@ class ProviderExecutor:
 
             await breaker.before_request()
 
-            response = await self.retry_policy.apply(
-                execution_func,
-                provider.name,
-                call_budget=call_budget,
-            )
+            if call_budget is None:
+                response = await self.retry_policy.apply(
+                    execution_func,
+                    provider.name,
+                )
+            else:
+                response = await self.retry_policy.apply(
+                    execution_func,
+                    provider.name,
+                    call_budget=call_budget,
+                )
 
             await breaker.on_success()
             return response
