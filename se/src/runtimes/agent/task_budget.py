@@ -920,15 +920,7 @@ class TaskBudgetService:
                                 branch_id=receipt.branch_id,
                                 base_execution_id=receipt.source_execution_id,
                                 base_checkpoint_id=receipt.source_checkpoint_id,
-                                values={
-                                    "state": "CANCELLED",
-                                    "wait_reason": None,
-                                    "wait_expires_at": None,
-                                    "error": (
-                                        "TASK_CANCELLED_BEFORE_FORK_ACTIVATION"
-                                    ),
-                                    "completed_at": now_utc,
-                                },
+                                completed_at=now_utc,
                             )
                         )
                         if cancelled is None:
