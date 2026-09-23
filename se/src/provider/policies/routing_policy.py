@@ -122,9 +122,12 @@ class RoutingPolicy:
             getattr(self._config, "enable_fallback", True)
         )
 
-        # Không có provider ưu tiên: tôn trọng thứ tự deterministic đã resolve.
-        # Khi fallback bị tắt, chỉ provider đầu tiên được phép thực thi.
+        # Không có provider ưu tiên: strict/direct vẫn là single-provider.
+        # Với fallback thường, enable_fallback quyết định có giữ phần còn lại
+        # của chuỗi deterministic hay không.
         if not preferred_name:
+            if routing_type in ("strict", "direct"):
+                return base_chain[:1]
             return base_chain if fallback_enabled else base_chain[:1]
 
         # Kiểm tra xem provider được yêu cầu có tồn tại/được đăng ký không
