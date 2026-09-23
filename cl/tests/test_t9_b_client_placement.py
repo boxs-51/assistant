@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -78,8 +80,11 @@ def test_real_top_level_t9_b_modules_load_as_logical_client_capabilities(tmp_pat
     assert found["tool"] == "find_by_glob"
     assert found["action"] == "find"
 
-    command = subprocess.list2cmdline(
-        [sys.executable, "-c", "print('t9-b')"]
+    command_args = [sys.executable, "-c", "print('t9-b')"]
+    command = (
+        subprocess.list2cmdline(command_args)
+        if os.name == "nt"
+        else shlex.join(command_args)
     )
     terminal = loaded["terminal.run"]["func"](
         command=command,

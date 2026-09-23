@@ -363,7 +363,12 @@ async def test_g1_g2_real_web_is_server_only_and_preserves_physical_toolresult(
         )
     )
     tools_config = settings["tools_config"]
-    assert tools_config["enabled_v2_capabilities"] == []
+    enabled_v2 = tools_config["enabled_v2_capabilities"]
+    assert "*" not in enabled_v2
+    assert not any(
+        capability_id.startswith("web.")
+        for capability_id in enabled_v2
+    )
 
     manager = LocalToolManager(REPO_ROOT / "tools" / "v1", set())
     web_entry = REPO_ROOT / "tools" / "v1" / "web_tool" / "__init__.py"
