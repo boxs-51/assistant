@@ -235,7 +235,7 @@ async def test_r10_d_deadline_exhaustion_is_not_rewritten_as_fallback_exhaustion
     executor = _Executor([first, "should-not-run"], max_retries=2)
     monkeypatch.setattr(
         "se.src.provider.handlers.base.monotonic",
-        _Clock([100.0, 100.5, 110.0]),
+        _Clock([100.0, 100.5, 100.5, 110.0]),
     )
 
     with pytest.raises(ProviderDeadlineExceededError) as raised:
@@ -298,7 +298,7 @@ async def test_r10_d_embedding_deadline_remains_deadline_error(
     )
     monkeypatch.setattr(
         "se.src.provider.handlers.base.monotonic",
-        _Clock([10.0, 10.5, 15.0]),
+        _Clock([10.0, 10.5, 10.5, 15.0]),
     )
 
     with pytest.raises(ProviderDeadlineExceededError) as raised:
