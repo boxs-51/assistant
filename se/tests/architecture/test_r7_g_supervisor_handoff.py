@@ -82,6 +82,22 @@ class _Planner:
         return self.plan
 
 
+class _ReconnectPlanner:
+    def __init__(self, plan):
+        self.plan = plan
+        self.calls = 0
+
+    async def build_resume_plan(self, *args, **kwargs):
+        self.calls += 1
+        connection_id = kwargs["target_connection_id"]
+        if connection_id == self.plan.target_connection_id:
+            return self.plan
+        values = dict(vars(self.plan))
+        values["target_connection_id"] = connection_id
+        values["plan_fingerprint"] = "3" * 64
+        return SimpleNamespace(**values)
+
+
 class _Store:
     def __init__(self, plan):
         self.plan = plan
@@ -99,7 +115,8 @@ class _Store:
 
     async def prepare_resume_plan_context(self, plan, *, identity, agent=None):
         self.prepare_calls += 1
-        assert plan is self.plan
+        assert plan.execution_id == self.plan.execution_id
+        assert plan.checkpoint_id == self.plan.checkpoint_id
         assert identity.user_id == USER
         return SimpleNamespace(
             execution_id=EXECUTION,
@@ -130,6 +147,24 @@ class _Store:
             )
         return self.claim
 
+    async def rebind_created_resume_claim(
+        self,
+        claim_id,
+        *,
+        plan,
+        resume_request_id,
+    ):
+        assert self.claim is not None
+        assert self.claim.claim_id == claim_id
+        assert self.claim.resume_request_id == resume_request_id
+        assert self.claim.state is ResumeClaimState.CREATED
+        assert self.claim.user_id == plan.target_user_id
+        assert self.claim.client_id == plan.target_client_id
+        self.claim.connection_id = plan.target_connection_id
+        self.claim.plan_fingerprint = plan.plan_fingerprint
+        self.claim.revision += 1
+        return self.claim
+
     async def consume_resume_claim(self, spec):
         self.consume_calls += 1
         assert self.claim is not None
@@ -148,7 +183,7 @@ class _Store:
             ),
             remaining_active_budget_seconds=20.0,
             bound_client_id=CLIENT,
-            bound_connection_id=K2,
+            bound_connection_id=self.claim.connection_id,
             already_consumed=False,
         )
 
@@ -174,6 +209,23 @@ class _DeferredConsumeStore(_Store):
             "transient Task activity epoch conflict",
             retryable=True,
         )
+
+
+class _DeferredOnceConsumeStore(_Store):
+    def __init__(self, plan):
+        super().__init__(plan)
+        self.deferred_once = False
+
+    async def consume_resume_claim(self, spec):
+        if not self.deferred_once:
+            self.deferred_once = True
+            self.consume_calls += 1
+            raise ResumeClaimDeferred(
+                "RESUME_CONFLICT",
+                "transient Task activity epoch conflict",
+                retryable=True,
+            )
+        return await super().consume_resume_claim(spec)
 
 
 class _BlockingHandoffStore(_Store):
@@ -659,4 +711,69 @@ async def test_r8_f_retryable_resume_conflict_preserves_same_claim_id_on_wire():
     assert runtime.activation_calls == 0
     assert runtime.execute_calls == 0
     assert supervisor.is_running(EXECUTION) is False
+    await supervisor.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_retryable_created_claim_rebinds_on_new_connection_generation():
+    plan_k2 = _plan()
+    store = _DeferredOnceConsumeStore(plan_k2)
+    runtime = _Runtime()
+    supervisor = AgentExecutionSupervisor()
+    planner = _ReconnectPlanner(plan_k2)
+    container = _container(
+        plan_k2,
+        store,
+        runtime,
+        supervisor,
+        planner=planner,
+    )
+
+    first_socket = _Socket(supervisor=supervisor, runtime=runtime)
+    await _resume_execution(
+        first_socket,
+        _identity(),
+        container,
+        K2,
+        _envelope(K2),
+    )
+
+    first_rejected = [
+        item
+        for item in first_socket.messages
+        if item["type"] == "execution.resume.rejected"
+    ]
+    assert len(first_rejected) == 1
+    assert first_rejected[0]["payload"]["code"] == "RESUME_CONFLICT"
+    assert first_rejected[0]["payload"]["retryable"] is True
+    assert first_rejected[0]["payload"]["claim_id"] == "claim-r7g"
+    assert store.claim.state is ResumeClaimState.CREATED
+    assert store.claim.connection_id == K2
+
+    replacement_connection = "conn-r7g-k3"
+    retry_socket = _Socket(supervisor=supervisor, runtime=runtime)
+    await _resume_execution(
+        retry_socket,
+        _identity(),
+        container,
+        replacement_connection,
+        _envelope(replacement_connection),
+    )
+    await _drain_owned_task()
+
+    accepted = [
+        item
+        for item in retry_socket.messages
+        if item["type"] == "execution.resume.accepted"
+    ]
+    assert len(accepted) == 1
+    assert accepted[0]["connection_id"] == replacement_connection
+    assert accepted[0]["payload"]["resume_request_id"] == REQUEST
+    assert accepted[0]["payload"]["claim_id"] == "claim-r7g"
+    assert store.claim.state is ResumeClaimState.CONSUMED
+    assert store.claim.connection_id == replacement_connection
+    assert store.consume_calls == 2
+    assert runtime.activation_calls == 1
+    assert runtime.execute_calls == 1
+    assert planner.calls == 2
     await supervisor.shutdown()
