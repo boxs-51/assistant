@@ -491,6 +491,46 @@ class DurableAgentStore:
             source_context_state = await _retry_source_context_state_in_uow(
                 uow, source
             )
+            canonical_checkpoint_transcript = None
+            if receipt.source_checkpoint_id is not None:
+                checkpoint = await uow.agents.get_execution_checkpoint(
+                    receipt.source_checkpoint_id
+                )
+                if (
+                    checkpoint is None
+                    or checkpoint.execution_id != source.id
+                    or checkpoint.task_id != task_id
+                    or checkpoint.branch_id != branch_id
+                    or source.current_checkpoint_id
+                    != receipt.source_checkpoint_id
+                ):
+                    raise RetryControlError(
+                        "RETRY_ADMISSION_CORRUPT",
+                        "Retry checkpoint durable lineage is incomplete.",
+                    )
+                from .retry_planning import (
+                    RetryPlanError,
+                    _load_retry_safe_checkpoint_transcript_in_uow,
+                )
+                try:
+                    canonical_checkpoint_transcript = (
+                        await _load_retry_safe_checkpoint_transcript_in_uow(
+                            uow,
+                            source.id,
+                            checkpoint,
+                        )
+                    )
+                except RetryPlanError as exc:
+                    raise RetryControlError(
+                        "RETRY_ADMISSION_CORRUPT",
+                        f"Retry checkpoint safety proof failed: {exc}",
+                    ) from exc
+
+            expected_base_checkpoint_id = (
+                receipt.source_checkpoint_id
+                if receipt.source_checkpoint_id is not None
+                else source.base_checkpoint_id
+            )
             if (
                 receipt.branch_id != branch_id
                 or receipt.source_execution_id != source_execution_id
@@ -508,6 +548,16 @@ class DurableAgentStore:
                 or execution.task_id != task_id
                 or execution.branch_id != branch_id
                 or execution.retry_of_execution_id != source_execution_id
+                or execution.base_checkpoint_id
+                != expected_base_checkpoint_id
+                or (
+                    canonical_checkpoint_transcript is not None
+                    and list(execution.transcript or [])
+                    != [
+                        item.model_dump(mode="json")
+                        for item in canonical_checkpoint_transcript
+                    ]
+                )
                 or retry_value_fingerprint(dict(execution.request or {}))
                 != retry_value_fingerprint(dict(source.request or {}))
                 or retry_value_fingerprint(dict(execution.context_state or {}))
@@ -614,6 +664,53 @@ class DurableAgentStore:
             source_context_state = await _retry_source_context_state_in_uow(
                 uow, source
             )
+            canonical_checkpoint_transcript = None
+            if receipt.source_checkpoint_id is not None:
+                checkpoint = await uow.agents.get_execution_checkpoint(
+                    receipt.source_checkpoint_id
+                )
+                if (
+                    checkpoint is None
+                    or checkpoint.execution_id != source.id
+                    or checkpoint.task_id != execution.task_id
+                    or checkpoint.branch_id != execution.branch_id
+                    or source.current_checkpoint_id
+                    != receipt.source_checkpoint_id
+                    or execution.base_checkpoint_id
+                    != receipt.source_checkpoint_id
+                ):
+                    fail(
+                        "RETRY_ADMISSION_CORRUPT",
+                        "Retry checkpoint durable lineage is incomplete.",
+                    )
+                from .retry_planning import (
+                    RetryPlanError,
+                    _load_retry_safe_checkpoint_transcript_in_uow,
+                )
+                try:
+                    canonical_checkpoint_transcript = (
+                        await _load_retry_safe_checkpoint_transcript_in_uow(
+                            uow,
+                            source.id,
+                            checkpoint,
+                        )
+                    )
+                except RetryPlanError as exc:
+                    raise RetryControlError(
+                        "RETRY_ADMISSION_CORRUPT",
+                        f"Retry checkpoint safety proof failed: {exc}",
+                    ) from exc
+                canonical_payload = [
+                    item.model_dump(mode="json")
+                    for item in canonical_checkpoint_transcript
+                ]
+                if list(execution.transcript or []) != canonical_payload:
+                    fail(
+                        "RETRY_RUNTIME_CONTEXT_CONFLICT",
+                        "Retry transcript differs from canonical COMMITTED "
+                        "checkpoint projection.",
+                    )
+
             if retry_value_fingerprint(dict(execution.request or {})) != (
                 retry_value_fingerprint(dict(source.request or {}))
             ) or retry_value_fingerprint(dict(execution.context_state or {})) != (
