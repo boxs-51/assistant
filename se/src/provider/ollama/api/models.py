@@ -1,10 +1,13 @@
 import asyncio
+import asyncio
 from typing import Dict, Any, Optional
+
+import httpx
 
 from ...core import BaseProvider, ApiType
 from ...core.interfaces.model import ModelProvider
 from ....domain.schemas import ModelInfo, ModelList
-from ...exceptions import  ProviderError
+from ...exceptions import ProviderModelUnavailableError
 from ..converters.model.adapter import OllamaModelAdapter
 from ..converters.model.capabilities import OllamaCapabilityResolver
 
@@ -13,8 +16,27 @@ class OllamaModels(ModelProvider):
     def __init__(self, provider: BaseProvider):
         self.provider = provider
 
-    async def _fetch_show_data(self, model_id: str, http_client: Any, timeout: Any) -> Optional[Dict[str, Any]]:
-        """Gọi endpoint POST /api/show để lấy cấu hình chi tiết của một model từ Ollama."""
+    def _model_unavailable_error(
+        self,
+        model_id: str,
+        *,
+        status_code: int | None = None,
+        raw_response: Any = None,
+    ) -> ProviderModelUnavailableError:
+        return ProviderModelUnavailableError(
+            f"Model '{model_id}' is not available on Ollama.",
+            provider_name=self.provider.name,
+            status_code=status_code,
+            raw_response=raw_response,
+        )
+
+    async def _fetch_show_data(
+        self,
+        model_id: str,
+        http_client: Any,
+        timeout: Any,
+    ) -> Optional[Dict[str, Any]]:
+        """Fetch /api/show while preserving model-missing vs transport failure."""
         try:
             response = await self.provider.send(
                 client=http_client,
@@ -23,13 +45,27 @@ class OllamaModels(ModelProvider):
                 json={"model": model_id},
                 timeout=timeout,
             )
-            data = response.json()
-            # Nếu Ollama trả về error message (vd: model not found)
-            if "error" in data:
-                return None
-            return data
-        except Exception:
-            return None
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            try:
+                raw_response = exc.response.json()
+            except Exception:
+                raw_response = exc.response.text
+            raise self._model_unavailable_error(
+                model_id,
+                status_code=404,
+                raw_response=raw_response,
+            ) from exc
+
+        data = response.json()
+        if isinstance(data, dict) and data.get("error"):
+            raise self._model_unavailable_error(
+                model_id,
+                status_code=getattr(response, "status_code", None),
+                raw_response=data,
+            )
+        return data
 
     async def _resolve_full_capabilities(
         self, model_id: str, show_data: Optional[Dict[str, Any]], http_client: Any, timeout: Any
@@ -60,7 +96,7 @@ class OllamaModels(ModelProvider):
         # Gọi /api/show lấy chi tiết model
         show_data = await self._fetch_show_data(model_id, http_client, timeout)
         if not show_data:
-            raise ProviderError(f"Model '{model_id}' không tồn tại hoặc Ollama không phản hồi.")
+            raise self._model_unavailable_error(model_id)
 
         capabilities = await self._resolve_full_capabilities(model_id, show_data, http_client, timeout)
 
@@ -94,8 +130,24 @@ class OllamaModels(ModelProvider):
             if not model_id:
                 return None
 
-            show_data = await self._fetch_show_data(model_id, http_client, timeout)
-            capabilities = await self._resolve_full_capabilities(model_id, show_data, http_client, timeout)
+            try:
+                show_data = await self._fetch_show_data(
+                    model_id,
+                    http_client,
+                    timeout,
+                )
+            except ProviderModelUnavailableError:
+                # /api/tags can race with local model removal. A definitively
+                # absent listed model is skipped, while transport failures
+                # continue to propagate.
+                return None
+
+            capabilities = await self._resolve_full_capabilities(
+                model_id,
+                show_data,
+                http_client,
+                timeout,
+            )
 
             return OllamaModelAdapter.to_model_info(
                 model_id=model_id,
