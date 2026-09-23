@@ -606,3 +606,91 @@ async def test_ptc3b_stream_tool_probes_use_exact_logical_model():
         "logical/tool-model",
         "logical/tool-model",
     ]
+
+
+
+class _NativeAdapterExecutor(_Executor):
+    def __init__(self):
+        super().__init__()
+        self.adapter_calls = []
+
+    async def execute(self, *, provider, body, call_budget, **kwargs):
+        from se.src.provider.gemini.converters.chats.request import (
+            RequestChats as GeminiRequestChats,
+        )
+        from se.src.provider.ollama.converters.chat.request import (
+            RequestChats as OllamaRequestChats,
+        )
+        from se.src.provider.openai.converters.chats.request import (
+            RequestChats as OpenAIRequestChats,
+        )
+
+        self.provider_calls.append(provider.name)
+        self.budgets.append(call_budget)
+        self.adapter_calls.append(provider.name)
+
+        if provider.name == "openai":
+            return OpenAIRequestChats().adapt_chat_request(body)
+        if provider.name == "gemini":
+            return GeminiRequestChats().adapt_chat(body)
+        if provider.name == "ollama":
+            return OllamaRequestChats().adapt_chat_request(body)
+        raise AssertionError(f"unexpected provider {provider.name}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["openai", "gemini", "ollama"])
+async def test_ptc3b_cross_provider_native_adapter_runs_only_after_tool_eligibility(
+    provider_name,
+):
+    provider = _Provider(provider_name)
+    executor = _NativeAdapterExecutor()
+    handler, _ = _handler([provider], executor=executor)
+
+    prepared = await handler.execute_with_fallback(
+        object(),
+        _tool_body(model="provider-model"),
+    )
+
+    assert _caps(provider) == [
+        ModelCapability.CHAT,
+        ModelCapability.TOOL_CALLING,
+    ]
+    assert executor.adapter_calls == [provider_name]
+
+    if provider_name == "openai":
+        assert prepared["tools"][0]["type"] == "function"
+        assert prepared["tools"][0]["function"]["name"]
+    elif provider_name == "gemini":
+        assert prepared["tools"][0]["function_declarations"][0]["name"]
+    else:
+        assert prepared["tools"][0]["type"] == "function"
+        assert prepared["tools"][0]["function"]["name"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_name", ["openai", "gemini", "ollama"])
+async def test_ptc3b_cross_provider_tool_ineligible_never_enters_native_adapter(
+    provider_name,
+):
+    provider = _Provider(
+        provider_name,
+        {
+            ModelCapability.CHAT: True,
+            ModelCapability.TOOL_CALLING: False,
+        },
+    )
+    executor = _NativeAdapterExecutor()
+    handler, _ = _handler([provider], executor=executor)
+
+    with pytest.raises(NoAvailableProviderError):
+        await handler.execute_with_fallback(
+            object(),
+            _tool_body(model="provider-model"),
+        )
+
+    assert _caps(provider) == [
+        ModelCapability.CHAT,
+        ModelCapability.TOOL_CALLING,
+    ]
+    assert executor.adapter_calls == []
