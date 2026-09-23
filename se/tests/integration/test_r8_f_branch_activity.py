@@ -400,3 +400,61 @@ async def test_r8_f_fork_consume_vs_legacy_terminalize_has_no_split_brain(
         )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_terminal_wrapper_after_waiting_reconcile_stays_nonterminal(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_waiting_then_terminal_guard.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-waiting-then-terminal-guard",
+        )
+        admission = await service.consume_fork_plan(source["plan"])
+        store = _store(sessions)
+        activation = await _activate(store, admission)
+
+        async with _Uow(sessions) as uow:
+            waiting = await uow.agents.compare_and_set_execution(
+                admission.execution_id,
+                activation.activated_execution_revision,
+                {
+                    "state": "WAITING",
+                    "wait_reason": "CONNECTION",
+                },
+            )
+            assert waiting is not None
+            await uow.commit()
+
+        aggregated = await service.reconcile_multibranch_task_activity(
+            source["task_id"]
+        )
+        assert str(aggregated.status) == "WAITING"
+
+        # The legacy root wrapper still calls terminalize_task with
+        # allowed_source_states=(RUNNING,). Multi-branch reconciliation must
+        # run before that stale source-state check.
+        guarded = await service.terminalize_task(
+            source["task_id"],
+            allowed_source_states=("RUNNING",),
+            target_state="COMPLETED",
+            values={"output": {"stale_root_result": True}},
+        )
+
+        assert str(guarded.status) == "WAITING"
+        assert list(guarded.wait_reasons or []) == [
+            "CONNECTION",
+            "RESOURCE",
+        ]
+        assert guarded.output is None
+        budget = await service.get_budget(source["task_id"])
+        assert str(budget.state.value) == "OPEN"
+    finally:
+        await engine.dispose()
