@@ -108,12 +108,24 @@ T1 -> TV1-T1
 T8 -> TV1-T8
 ```
 
-Current TV1-T8 work is governed by:
+TV1-T8 is final-frozen. Current/future Tools coordination is:
 
 ```text
-Issue #7
+Issue #7  — TV1-T8 CLOSED / COMPLETED
+Issue #12 — TV1-T9 boundary/plan checkpoint
+
 tools/v1/T8_METADATA_V2_CONVERGENCE_IMPLEMENTATION_PLAN.md
+tools/v1/TV1_T9_LOGICAL_EXPORT_MIGRATION_IMPLEMENTATION_PLAN.md
 ```
+
+Allocated next phases:
+
+```text
+TV1-T9  Remaining V1 tools -> canonical logical Metadata V2 exports
+TV1-T10 Live Harness & Real-Machine Exit Gate
+```
+
+TV1-T10 is only phase-allocated; it is not audited or open.
 
 ### Historical T7/T8 wording
 
@@ -245,13 +257,23 @@ AE-R8 -> AE-R9 -> AE-R10 -> AE-R11 -> AE-R12 -> AE-R13 -> AE-R14
                                                           v
                                                      CAS-F5+
 
-Tools / Provider Tool:
+Tools:
+TV1-T8-H
+   |
+   v
+TV1-T9 -> TV1-T10
+
+Provider Tool:
 TV1-T8-H
    |
    v
 PTC-1 -> PTC-2 -> PTC-3
                     |
                     +---- overlap audit ----> AE-R10
+
+TV1-T9 and PTC-1 may proceed independently after TV1-T8-H only while
+their exact file ownership remains disjoint. TV1-T10 is ordered after
+TV1-T9 because it validates the final Tools V1 logical/physical surface.
 ```
 
 PTC-1/PTC-2 may proceed independently of Agent branching work only while their exact file scope remains disjoint from active AE ownership.
@@ -338,20 +360,20 @@ PTC-1 (Issue #8 legacy alias "R10")
 
 ## 12. Current coordination snapshot
 
-At creation of this registry:
+At this update:
 
 ```text
-AE-R7    CLOSED
-AE-R8    ACTIVE
-AE-R9+   NOT YET ENTERED
+AE-R8    CLOSED / merged to main @ ae63a25
+AE-R9    ACTIVE / checkpoint Issue #10 / contract-freeze-first
 
-TV1-T7   CLOSED / audit-approved
-TV1-T8   ACTIVE
+TV1-T8   CLOSED / GREEN / FINAL-FROZEN / Issue #7
+TV1-T9   BOUNDARY AUDITED / PLAN FROZEN / CODE NOT STARTED / Issue #12
+TV1-T10  PHASE ALLOCATED ONLY / NOT AUDITED / NOT OPEN
 
 CAS-F1-F4 CLOSED
 CAS-F5+   PAUSED behind AE-R14 production gates
 
-PTC-1-3   ROADMAP ONLY / NOT IMPLEMENTED
+PTC-1-3   ROADMAP ONLY / NOT IMPLEMENTED / Issue #8
 ```
 
 This snapshot is informational. Phase-specific Issues/checkpoints remain the authority for live implementation status.
