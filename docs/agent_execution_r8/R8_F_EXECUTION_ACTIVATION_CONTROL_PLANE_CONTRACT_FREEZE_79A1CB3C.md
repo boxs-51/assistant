@@ -726,8 +726,11 @@ FORK vs standalone reconcile:
     FORK first      -> reconcile sees new RUNNING branch; final Task RUNNING
 
 R7 resume vs standalone reconcile:
-    regardless of ordering, a resumed current branch RUNNING cannot coexist
-    with final Task WAITING
+    resume epoch wins -> execution RUNNING + final Task RUNNING
+    reconciler epoch wins -> stale resume returns RESUME_CONFLICT while
+                             execution/Task remain WAITING and claim stays retryable
+    clean retry -> execution RUNNING + final Task RUNNING
+    forbidden -> execution RUNNING with final Task WAITING
 ```
 
 It must always re-read current branch/execution state while holding this Task
@@ -1431,6 +1434,12 @@ Every fresh FORK admission advances the AgentTask revision/activity epoch in the
 R8F-I11H
 R7 task-scoped resume advances a semantic no-op AgentTask revision/activity epoch before TaskBudget/execution authority writes; visible RUNNING is derived only after the execution CAS succeeds.
 
+R8F-I11I
+Task-scoped WAITING -> TIMEOUT paths serialize on Task authority and rederive multi-branch activity before commit so expired branch reasons cannot remain projected when another OPEN WAITING branch remains.
+
+R8F-I11J
+If a pre-resume activity epoch loses to a concurrent reconciler, the resume claim/execution/budget remain retryable/unchanged; no partial epoch or capacity mutation may survive rollback.
+
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
 
@@ -1502,6 +1511,7 @@ FORK consume vs standalone activity reconciliation has no RUNNING-branch/WAITING
 FORK admission advances Task activity epoch even when Task was already RUNNING
 R7 resume vs standalone activity reconciliation preserves final Task RUNNING
 R7 pre-resume epoch bump is rolled back/semantically neutral when resume does not commit
+task-scoped WAIT expiry removes the expired branch reason from aggregate Task activity
 WAITING activity derivation
 Task cancellation with two branch runners
 restart-safe branch reads
