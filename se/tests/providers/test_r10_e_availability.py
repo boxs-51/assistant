@@ -193,25 +193,39 @@ async def test_r10_e_ollama_transport_failure_is_not_rewritten_as_model_missing(
 
 
 @pytest.mark.asyncio
-async def test_r10_e_ollama_error_payload_is_model_unavailable():
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"error": "model not found"},
+        {},
+        [],
+        {"unexpected": "shape"},
+    ],
+)
+async def test_r10_e_ollama_success_status_malformed_shape_is_response_invalid(
+    payload,
+):
     response = SimpleNamespace(
         status_code=200,
-        json=lambda: {"error": "model not found"},
+        json=lambda: payload,
     )
     provider = SimpleNamespace(
         name="ollama",
         send=AsyncMock(return_value=response),
     )
 
-    with pytest.raises(ProviderModelUnavailableError) as raised:
+    with pytest.raises(ResponseValidationError) as raised:
         await OllamaModels(provider).model(
-            "missing",
+            "logical-model",
             http_client=object(),
             timeout=1.0,
         )
 
-    assert raised.value.code == PROVIDER_MODEL_UNAVAILABLE
-    assert raised.value.provider_name == "ollama"
+    error = raised.value
+    assert error.code == PROVIDER_RESPONSE_INVALID
+    assert error.provider_name == "ollama"
+    assert not isinstance(error, ProviderModelUnavailableError)
+    assert error.raw_response == payload
 
 
 @pytest.mark.asyncio
