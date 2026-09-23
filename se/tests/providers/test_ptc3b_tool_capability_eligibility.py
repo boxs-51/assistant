@@ -441,7 +441,10 @@ async def test_ptc3b_cancellation_during_tool_probe_starts_no_executor_or_fallba
     task = asyncio.create_task(
         handler.execute_with_fallback(object(), _tool_body())
     )
-    await p1.tool_probe_started.wait()
+    await asyncio.wait_for(
+        p1.tool_probe_started.wait(),
+        timeout=0.20,
+    )
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -917,7 +920,10 @@ async def test_ptc3b_stream_cancellation_during_tool_probe_never_starts_stream_o
     stream = handler.stream_with_fallback(object(), _tool_body())
 
     read_task = asyncio.create_task(stream.__anext__())
-    await p1.tool_probe_started.wait()
+    await asyncio.wait_for(
+        p1.tool_probe_started.wait(),
+        timeout=0.20,
+    )
     read_task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
