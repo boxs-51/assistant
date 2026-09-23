@@ -1,3 +1,4 @@
+from dataclasses import replace
 from datetime import datetime, timezone
 import math
 from typing import Any, Dict, List, Mapping, Optional
@@ -1768,6 +1769,148 @@ class DurableAgentStore:
             )
             await uow.commit()
             return result
+
+    @staticmethod
+    def _created_claim_can_rebind_to_plan(
+        record,
+        plan: ResumePlan,
+        resume_request_id: str,
+    ) -> bool:
+        """Prove a CREATED claim differs from this plan only by connection generation.
+
+        ResumePlan fingerprints intentionally bind target_connection_id.  A
+        reconnect retry may therefore migrate one still-CREATED claim only
+        when the current durable fingerprint equals the new plan with the
+        claim's old connection substituted back in.  This keeps all logical
+        resume semantics frozen while allowing K2 -> K3 transport rebinding.
+        """
+
+        if (
+            record.resume_request_id != resume_request_id
+            or record.execution_id != plan.execution_id
+            or record.checkpoint_id != plan.checkpoint_id
+            or record.expected_execution_revision
+            != plan.expected_execution_revision
+            or record.user_id != plan.target_user_id
+            or record.client_id != plan.target_client_id
+            or record.wait_reason != "CONNECTION"
+            or normalize_resume_trigger_type(record.trigger_type)
+            is not ResumeTriggerType.CLIENT_RECONNECT
+            or not record.connection_id
+            or not plan.target_connection_id
+        ):
+            return False
+
+        prior_connection_plan = replace(
+            plan,
+            target_connection_id=str(record.connection_id),
+            plan_fingerprint="",
+        )
+        return (
+            record.plan_fingerprint
+            == resume_plan_fingerprint(prior_connection_plan)
+        )
+
+    async def rebind_created_resume_claim(
+        self,
+        claim_id: str,
+        *,
+        plan: ResumePlan,
+        resume_request_id: str,
+    ) -> ResumeClaim:
+        """CAS one retryable CREATED claim onto a newer connection generation.
+
+        This operation acquires no execution/budget authority and never extends
+        claim TTL.  Non-CREATED winners are returned unchanged so the transport
+        can replay the durable outcome of a concurrent consumer.
+        """
+
+        if not plan.target_user_id:
+            raise ResumeClaimRejected(
+                "FOREIGN_PRINCIPAL",
+                "CLIENT_RECONNECT plan requires a target principal.",
+            )
+        if not plan.target_client_id:
+            raise ResumeClaimRejected(
+                "FOREIGN_CLIENT",
+                "CLIENT_RECONNECT plan requires a stable target client_id.",
+            )
+        if not plan.target_connection_id:
+            raise ResumeClaimRejected(
+                "CONNECTION_NOT_READY",
+                "CLIENT_RECONNECT plan requires a target connection_id.",
+            )
+        if resume_plan_fingerprint(plan) != plan.plan_fingerprint:
+            raise ResumeClaimRejected(
+                "STALE_RESUME_PLAN",
+                "ResumePlan fingerprint does not match its semantics.",
+            )
+
+        for _ in range(8):
+            try:
+                async with self.uow_factory() as uow:
+                    record = await uow.agents.get_resume_claim(claim_id)
+                    if record is None:
+                        await uow.commit()
+                        raise ResumeClaimRejected(
+                            "STALE_RESUME_CLAIM",
+                            "ResumeClaim does not exist.",
+                        )
+
+                    if record.state != ResumeClaimState.CREATED.value:
+                        # A concurrent consume/reject/expire won after the
+                        # transport loaded CREATED.  Preserve that winner for
+                        # normal replay instead of trying to migrate it.
+                        result = self._resume_claim_contract(record)
+                        await uow.commit()
+                        return result
+
+                    if not self._created_claim_can_rebind_to_plan(
+                        record,
+                        plan,
+                        resume_request_id,
+                    ):
+                        await uow.commit()
+                        raise ResumeClaimRejected(
+                            "RESUME_REQUEST_CONFLICT",
+                            "CREATED ResumeClaim differs by more than "
+                            "connection generation.",
+                        )
+
+                    if (
+                        record.connection_id == plan.target_connection_id
+                        and record.plan_fingerprint == plan.plan_fingerprint
+                    ):
+                        result = self._resume_claim_contract(record)
+                        await uow.commit()
+                        return result
+
+                    updated = await uow.agents.compare_and_set_resume_claim(
+                        claim_id,
+                        int(record.revision),
+                        ResumeClaimState.CREATED.value,
+                        {
+                            "connection_id": plan.target_connection_id,
+                            "plan_fingerprint": plan.plan_fingerprint,
+                        },
+                    )
+                    if updated is None:
+                        await uow.rollback()
+                        continue
+                    result = self._resume_claim_contract(updated)
+                    await uow.commit()
+                    return result
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise ResumeClaimDeferred(
+            "RESUME_CONFLICT",
+            "ResumeClaim connection rebind conflicts exhausted.",
+            retryable=True,
+        )
 
     async def record_resume_claim_handoff(
         self,
