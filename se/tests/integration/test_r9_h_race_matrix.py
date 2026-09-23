@@ -47,8 +47,9 @@ def test_r9_h_cancel_task_locks_branches_in_canonical_order():
     lock_all = source.index("list_task_branches_for_update")
     fork_receipts = source.index("list_task_fork_admissions")
     retry_receipts = source.index("list_task_retry_admissions")
+    aggregate_receipts = source.index("list_task_aggregate_admissions")
 
-    assert lock_all < fork_receipts < retry_receipts
+    assert lock_all < fork_receipts < retry_receipts < aggregate_receipts
     assert "get_task_branch_for_update" not in source
 
 
