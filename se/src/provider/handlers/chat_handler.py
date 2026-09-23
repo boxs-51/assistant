@@ -25,6 +25,8 @@ class ChatExecutionHandler(BaseExecutionHandler):
         self,
         http_client: httpx.AsyncClient,
         body: Dict[str, Any],
+        *,
+        timeout: float | None = None,
     ) -> GatewayResponse:
         model = body.get("model")
 
@@ -37,7 +39,8 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 f"No available or valid provider configured for model '{model}'."
             )
 
-        call_budget = self._new_call_budget()
+        effective_timeout = self._effective_call_timeout(timeout)
+        call_budget = self._new_call_budget(effective_timeout)
         healthy_execution_chain = await self._get_healthy_fallback_chain(
             execution_chain
         )
@@ -73,7 +76,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         provider=provider,
                         http_client=http_client,
                         body=body,
-                        timeout=self.timeout,
+                        timeout=effective_timeout,
                         call_budget=call_budget,
                     )
                 except ProviderDeadlineExceededError:
