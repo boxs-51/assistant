@@ -1581,7 +1581,7 @@ class TaskBudgetService:
                         >= int(budget.max_active_executions)
                     ):
                         raise AggregateAdmissionError(
-                            "RETRY_BUDGET_EXCEEDED",
+                            "AGGREGATE_BUDGET_EXCEEDED",
                             "TaskBudget execution capacity is exhausted.",
                         )
                     target_branch = branch_map[target_branch_id]
@@ -1593,7 +1593,7 @@ class TaskBudgetService:
                         budget.max_parallel_agents
                     ):
                         raise AggregateAdmissionError(
-                            "RETRY_BUDGET_EXCEEDED",
+                            "AGGREGATE_BUDGET_EXCEEDED",
                             "TaskBudget parallel-Agent capacity is exhausted.",
                         )
                     branch_snapshots = [
