@@ -22,9 +22,15 @@ class EmbeddingExecutionHandler(BaseExecutionHandler):
                     continue
                 return await self.executor.execute_generic(
                     provider=provider,
-                    execution_callable=lambda p=provider: p.embeddings.embeddings(
-                        http_client=http_client, body=body, timeout=self.timeout
+                    execution_callable=(
+                        lambda attempt_timeout=self.timeout, p=provider:
+                        p.embeddings.embeddings(
+                            http_client=http_client,
+                            body=body,
+                            timeout=attempt_timeout,
+                        )
                     ),
+                    timeout=self.timeout,
                 )
             except Exception as exc:
                 last_error = exc
