@@ -719,11 +719,29 @@ target RUNNING:
 target WAITING:
     NOT EXISTS OPEN current branch head in CREATED/RUNNING
     AND EXISTS OPEN current branch head in WAITING/WAITING_FOR_CONNECTION
+    AND live normalized WAITING reason set == derived snapshot reason set
+```
+
+WAITING reason normalization is the same as the activity projection:
+
+```text
+explicit non-empty execution.wait_reason -> that reason
+WAITING_FOR_CONNECTION with empty reason -> CONNECTION
+WAITING with empty reason -> contributes no reason
+```
+
+The exact-set proof is symmetric:
+
+```text
+no live normalized WAITING reason may exist outside the expected set
+AND every expected reason must still be represented by a current OPEN
+WAITING branch head
 ```
 
 This conditional activity CAS is a dialect backstop, not a replacement for the
-Task-first lock order on row-locking databases. If the live predicate loses,
-the reconciliation transaction retries from a fresh branch snapshot.
+Task-first lock order on row-locking databases. If the live state/reason
+predicate loses, the reconciliation transaction retries from a fresh branch
+snapshot.
 
 ---
 
@@ -1379,6 +1397,9 @@ R7 task-scoped resume preserves Task -> TaskBudget/execution -> activity lock or
 
 R8F-I11E
 Aggregate Task activity CAS is guarded by live branch-head SQL predicates so SQLite/non-row-locking execution cannot commit a stale WAITING state beside a current RUNNING branch.
+
+R8F-I11F
+Task WAITING wait_reasons equal the deterministic normalized union of CURRENT OPEN WAITING branch heads at the successful activity CAS; stale missing/extra reasons make the CAS lose and retry.
 
 R8F-I12
 Task cancellation durably closes Task/TaskBudget before local runner drain.
