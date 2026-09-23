@@ -399,6 +399,42 @@ class AgentRepository(BaseRepository):
         await self.session.flush()
         return await self.get_execution(execution_id)
 
+    async def compare_and_set_fork_preactivation_cancel(
+        self,
+        execution_id: str,
+        *,
+        task_id: str,
+        branch_id: str,
+        base_execution_id: str,
+        base_checkpoint_id: str,
+        values: Dict[str, Any],
+    ):
+        """Race Task cancellation against R8-F activation on revision 1."""
+
+        next_values = dict(values)
+        next_values["revision"] = 2
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == 1,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+                AgentExecutionRecord.task_id == task_id,
+                AgentExecutionRecord.branch_id == branch_id,
+                AgentExecutionRecord.base_execution_id == base_execution_id,
+                AgentExecutionRecord.base_checkpoint_id == base_checkpoint_id,
+                AgentExecutionRecord.retry_of_execution_id.is_(None),
+                AgentExecutionRecord.bound_client_id.is_(None),
+                AgentExecutionRecord.bound_connection_id.is_(None),
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
     async def list_legacy_waiting_executions_for_owner(
         self,
         *,
