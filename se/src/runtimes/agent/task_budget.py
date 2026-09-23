@@ -1614,18 +1614,23 @@ class TaskBudgetService:
                         ):
                             matching_receipts += 1
 
+                        if matching_receipts == 0:
+                            # RUNNING@1 is also used by pre-R9/root lifecycles.
+                            # Without an immutable FORK/RETRY/AGGREGATE receipt
+                            # R9 has no authority to reinterpret or cancel it;
+                            # preserve the established controlled-completion
+                            # behavior for that owner.
+                            continue
                         if (
                             matching_receipts != 1
                             or loser_execution.current_checkpoint_id is not None
                             or loser_execution.bound_client_id is not None
                             or loser_execution.bound_connection_id is not None
                         ):
-                            # A revision-1 RUNNING loser without exact immutable
-                            # admission provenance is not safe to reinterpret.
                             raise BranchResolutionError(
                                 "TASK_RESOLUTION_CONFLICT",
-                                "Loser RUNNING@1 execution is not an exact "
-                                "dormant admission-backed preactivation.",
+                                "Admission-backed loser RUNNING@1 execution "
+                                "has ambiguous or activated authority.",
                             )
 
                         cancelled = await uow.agents.compare_and_set_execution(
