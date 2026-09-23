@@ -5,6 +5,7 @@ from typing import Any, Mapping
 from ....domain.schemas.tool import GatewayToolResult
 from ..contracts.context import AgentExecutionContext
 from ..contracts.context_builder import (
+    AgentContextHistoryMode,
     AgentContextRequest,
     AgentContextSnapshot,
     ContextBuilderPort,
@@ -42,22 +43,30 @@ class ContextBuilderAdapter(ContextBuilderPort):
             raise ValueError("Context iteration must be >= 1.")
         context.ensure_active()
 
-        runtime_loader = getattr(self._context_runtime, "load_context", None)
-        if callable(runtime_loader):
-            loaded = await runtime_loader(context.session_id, context.identity)
-        else:
-            engine = getattr(self._context_runtime, "context_engine", None)
-            if engine is None:
-                raise RuntimeError("ContextRuntime is not initialized.")
-            loaded = await engine.load_context(context.session_id, context.identity)
         history: list[InferenceMessage]
-
-        if request.prior_messages:
+        explicit_history = (
+            request.history_mode is AgentContextHistoryMode.EXPLICIT
+        )
+        if explicit_history or request.prior_messages:
             history = [
                 InferenceMessage.model_validate(jsonable(message))
                 for message in request.prior_messages
             ]
         else:
+            runtime_loader = getattr(self._context_runtime, "load_context", None)
+            if callable(runtime_loader):
+                loaded = await runtime_loader(
+                    context.session_id,
+                    context.identity,
+                )
+            else:
+                engine = getattr(self._context_runtime, "context_engine", None)
+                if engine is None:
+                    raise RuntimeError("ContextRuntime is not initialized.")
+                loaded = await engine.load_context(
+                    context.session_id,
+                    context.identity,
+                )
             history = [
                 gateway_message_to_inference(message)
                 for message in (loaded.session.messages if loaded.session else [])
@@ -72,7 +81,7 @@ class ContextBuilderAdapter(ContextBuilderPort):
 
         input_payload = dict(request.input or context.input or {})
         prompt = input_payload.get("prompt", input_payload.get("content"))
-        if prompt is not None:
+        if not explicit_history and prompt is not None:
             prompt_value = jsonable(prompt)
             if not any(
                 message.role == "user" and message.content == prompt_value

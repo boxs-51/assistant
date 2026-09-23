@@ -17,6 +17,13 @@ class UnknownActiveBudgetError(RuntimeError):
     """Active execution budget is unknown and must not be regenerated."""
 
 
+class ExecutionContextSeedError(RuntimeError):
+    code = "EXECUTION_CONTEXT_SEED_CONFLICT"
+
+    def __init__(self, message: str) -> None:
+        super().__init__(f"{self.code}: {message}")
+
+
 class _UnsetActiveBudget:
     pass
 
@@ -77,6 +84,8 @@ class AgentExecutionContext:
     usage: InferenceUsage = field(default_factory=InferenceUsage)
     causation_id: str | None = None
     trace_id: str | None = None
+    branch_base_transcript: list[Dict[str, Any]] | None = None
+    branch_runtime_seed_fingerprint: str | None = None
     resume_transcript: list[Dict[str, Any]] = field(default_factory=list)
     resume_pending_tool_calls: list[Dict[str, Any]] = field(default_factory=list)
     resume_revision: int | None = None
@@ -123,6 +132,8 @@ class AgentExecutionContext:
         metadata: Optional[Dict[str, Any]] = None,
         causation_id: str | None = None,
         trace_id: str | None = None,
+        branch_base_transcript: Optional[list[Dict[str, Any]]] = None,
+        branch_runtime_seed_fingerprint: str | None = None,
         remaining_active_budget_seconds: (
             float | None | _UnsetActiveBudget
         ) = _UNSET_ACTIVE_BUDGET,
@@ -183,7 +194,34 @@ class AgentExecutionContext:
             wait_expires_at=wait_expires_at,
             causation_id=causation_id,
             trace_id=trace_id,
+            branch_base_transcript=(
+                None
+                if branch_base_transcript is None
+                else [dict(item) for item in branch_base_transcript]
+            ),
+            branch_runtime_seed_fingerprint=branch_runtime_seed_fingerprint,
         )
+
+    def validate_context_seed(self) -> None:
+        """Reject ambiguous R7 RESUME + R8 FORK transcript authority."""
+        if self.branch_base_transcript is None:
+            if self.branch_runtime_seed_fingerprint is not None:
+                raise ExecutionContextSeedError(
+                    "FORK seed fingerprint exists without branch transcript."
+                )
+            return
+        if not self.branch_runtime_seed_fingerprint:
+            raise ExecutionContextSeedError(
+                "FORK branch transcript has no runtime seed fingerprint."
+            )
+        if (
+            self.resume_revision is not None
+            or self.resume_transcript
+            or self.resume_pending_tool_calls
+        ):
+            raise ExecutionContextSeedError(
+                "FORK branch seed and R7 resume seed are mutually exclusive."
+            )
 
     @property
     def active_deadline_monotonic(self) -> float | None:

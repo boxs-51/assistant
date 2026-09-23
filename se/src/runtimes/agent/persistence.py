@@ -17,6 +17,15 @@ from ..capability.contracts.invocation import (
 )
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
+from .contracts.fork import (
+    ForkExecutionBootstrap,
+    ForkRuntimeSeed,
+    fork_overlay_fingerprint,
+    fork_request_fingerprint,
+    fork_runtime_seed_fingerprint,
+    fork_runtime_seed_payload,
+    fork_transcript_fingerprint,
+)
 from .contracts.inference import InferenceMessage, InferenceUsage
 from .contracts.resume import (
     CheckpointPendingInvocation,
@@ -939,6 +948,301 @@ class DurableAgentStore:
 
             await uow.commit()
             return tuple(result)
+
+    async def prepare_fork_execution_context(
+        self,
+        execution_id: str,
+        *,
+        identity: Identity,
+        agent,
+        clock: ExecutionClock | None = None,
+    ) -> ForkExecutionBootstrap:
+        """Reconstruct R8-E branch context without acquiring execution authority."""
+
+        def fail(code: str, message: str):
+            raise ExecutionConflictError(f"{code}: {message}")
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                fail("FORK_EXECUTION_NOT_FOUND", "Fork execution does not exist.")
+            if int(execution.revision) > 1:
+                fail(
+                    "FORK_EXECUTION_ALREADY_ACTIVATED",
+                    "Fork execution is no longer RUNNING@1 pre-activation authority.",
+                )
+            if (
+                str(execution.state) != "RUNNING"
+                or int(execution.revision) != 1
+                or execution.current_checkpoint_id is not None
+                or execution.task_id is None
+                or execution.branch_id is None
+                or execution.base_execution_id is None
+                or execution.base_checkpoint_id is None
+                or execution.retry_of_execution_id is not None
+                or execution.bound_client_id is not None
+                or execution.bound_connection_id is not None
+            ):
+                fail(
+                    "FORK_EXECUTION_LINEAGE_CONFLICT",
+                    "Fork execution is not an unactivated R8-D output.",
+                )
+
+            receipt = await uow.agents.get_task_fork_admission_by_execution(
+                execution_id
+            )
+            if receipt is None:
+                fail(
+                    "FORK_ADMISSION_NOT_FOUND",
+                    "Fork execution has no immutable ForkAdmission.",
+                )
+            if (
+                receipt.runtime_seed_json is None
+                or receipt.runtime_seed_fingerprint is None
+            ):
+                fail(
+                    "FORK_RUNTIME_SEED_MISSING",
+                    "ForkAdmission predates immutable runtime-seed evidence.",
+                )
+            try:
+                seed_payload = fork_runtime_seed_payload(
+                    receipt.runtime_seed_json
+                )
+                if int(seed_payload["version"]) != 1:
+                    raise ValueError("unsupported seed version")
+                if (
+                    fork_runtime_seed_fingerprint(seed_payload)
+                    != receipt.runtime_seed_fingerprint
+                ):
+                    raise ValueError("runtime seed fingerprint mismatch")
+                seed = ForkRuntimeSeed(**seed_payload)
+                limits = AgentExecutionLimits.model_validate(seed.limits)
+            except Exception as exc:
+                raise ExecutionConflictError(
+                    "FORK_RUNTIME_SEED_INVALID: immutable runtime seed is invalid."
+                ) from exc
+
+            if any(
+                key in seed.metadata
+                for key in (
+                    "client_id",
+                    "connection_id",
+                    "origin_client_id",
+                    "origin_connection_id",
+                    "routing_connection_id",
+                )
+            ):
+                fail(
+                    "FORK_RUNTIME_SEED_INVALID",
+                    "Fork runtime seed contains inherited transport affinity.",
+                )
+
+            task = await uow.agents.get_task(receipt.task_id)
+            if task is None:
+                fail("FORK_ADMISSION_CORRUPT", "ForkAdmission task is missing.")
+            if str(task.created_by) != identity.user_id:
+                fail(
+                    "FORK_FOREIGN_PRINCIPAL",
+                    "Authenticated identity does not own this AgentTask.",
+                )
+            task_status = str(getattr(task.status, "value", task.status))
+            if task_status not in {"RUNNING", "WAITING"}:
+                fail(
+                    "FORK_ADMISSION_CORRUPT",
+                    "Fork task is no longer RUNNING/WAITING.",
+                )
+
+            branch = await uow.agents.get_task_branch(receipt.branch_id)
+            if branch is None:
+                fail("FORK_BRANCH_NOT_FOUND", "Fork TaskBranch is missing.")
+            if str(getattr(branch.resolution_state, "value", branch.resolution_state)) != "OPEN":
+                fail("FORK_BRANCH_NOT_OPEN", "Fork TaskBranch is not OPEN.")
+            branch_context = await uow.agents.get_task_branch_context(
+                receipt.branch_id
+            )
+            if branch_context is None:
+                fail(
+                    "FORK_BRANCH_CONTEXT_MISSING",
+                    "Fork TaskBranchContext is missing.",
+                )
+
+            admission_corrupt = (
+                receipt.execution_id != execution.id
+                or receipt.branch_id != execution.branch_id
+                or receipt.task_id != execution.task_id
+                or receipt.created_by != identity.user_id
+                or task.id != receipt.task_id
+                or task.session_id != execution.session_id
+            )
+            if admission_corrupt:
+                fail(
+                    "FORK_ADMISSION_CORRUPT",
+                    "ForkAdmission no longer matches task/execution authority.",
+                )
+            if (
+                branch.task_id != receipt.task_id
+                or branch.current_execution_id != execution.id
+                or branch.parent_branch_id != receipt.source_branch_id
+                or branch.base_execution_id != receipt.source_execution_id
+                or branch.base_checkpoint_id != receipt.source_checkpoint_id
+                or execution.base_execution_id != receipt.source_execution_id
+                or execution.base_checkpoint_id != receipt.source_checkpoint_id
+            ):
+                fail(
+                    "FORK_BRANCH_LINEAGE_CONFLICT",
+                    "Fork Branch/Execution lineage differs from admission authority.",
+                )
+
+            if (
+                int(branch_context.revision)
+                != int(seed.branch_context_revision)
+            ):
+                fail(
+                    "FORK_BRANCH_CONTEXT_CHANGED",
+                    "Fork BranchContext revision changed after admission.",
+                )
+            try:
+                overlay = [
+                    InferenceMessage.model_validate(item)
+                    for item in (branch_context.overlay_messages or [])
+                ]
+            except Exception as exc:
+                raise ExecutionConflictError(
+                    "FORK_BRANCH_CONTEXT_CHANGED: overlay is invalid."
+                ) from exc
+            if any(item.role != "user" for item in overlay):
+                fail(
+                    "FORK_OVERLAY_ROLE_INVALID",
+                    "Initial R8 FORK overlay must contain only user messages.",
+                )
+            if (
+                fork_overlay_fingerprint(
+                    [item.model_dump(mode="json") for item in overlay]
+                )
+                != seed.overlay_fingerprint
+            ):
+                fail(
+                    "FORK_BRANCH_CONTEXT_CHANGED",
+                    "Fork overlay differs from immutable admission evidence.",
+                )
+
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                receipt.source_checkpoint_id
+            )
+            if checkpoint is None:
+                fail(
+                    "FORK_BASE_CHECKPOINT_MISSING",
+                    "Fork base checkpoint is missing.",
+                )
+            if (
+                checkpoint.execution_id != receipt.source_execution_id
+                or checkpoint.session_id != execution.session_id
+                or checkpoint.task_id != receipt.task_id
+                or checkpoint.branch_id != receipt.source_branch_id
+                or int(checkpoint.iteration) != int(seed.checkpoint_iteration)
+            ):
+                fail(
+                    "FORK_BASE_CHECKPOINT_CONFLICT",
+                    "Fork base checkpoint lineage changed.",
+                )
+
+            from .fork_planning import (
+                ForkPlanError,
+                _load_fork_safe_transcript_in_uow,
+            )
+            try:
+                base_transcript = await _load_fork_safe_transcript_in_uow(
+                    uow,
+                    receipt.source_execution_id,
+                    checkpoint,
+                )
+            except ForkPlanError as exc:
+                raise ExecutionConflictError(
+                    f"FORK_BASE_TRANSCRIPT_CHANGED: {exc}"
+                ) from exc
+            if (
+                fork_transcript_fingerprint(base_transcript)
+                != seed.base_transcript_fingerprint
+            ):
+                fail(
+                    "FORK_BASE_TRANSCRIPT_CHANGED",
+                    "Fork base transcript differs from immutable seed.",
+                )
+
+            if (
+                fork_request_fingerprint(dict(execution.request or {}))
+                != seed.request_fingerprint
+            ):
+                fail(
+                    "FORK_RUNTIME_CONTEXT_CONFLICT",
+                    "Fork execution request differs from immutable seed.",
+                )
+            remaining = execution.remaining_active_budget_seconds
+            if (
+                remaining is None
+                or not math.isfinite(float(remaining))
+                or float(remaining) < 0
+                or float(remaining)
+                != float(seed.remaining_active_budget_seconds)
+            ):
+                fail(
+                    "FORK_RUNTIME_CONTEXT_CONFLICT",
+                    "Fork execution active budget differs from immutable seed.",
+                )
+
+            if agent is None or getattr(agent, "name", None) != execution.agent_id:
+                fail(
+                    "FORK_EXECUTION_LINEAGE_CONFLICT",
+                    "Current AgentDefinition does not match fork execution agent.",
+                )
+
+            branch_base_transcript = [
+                item.model_dump(mode="json") for item in base_transcript
+            ] + [item.model_dump(mode="json") for item in overlay]
+            context = AgentExecutionContext.create(
+                execution_id=execution.id,
+                agent_id=execution.agent_id,
+                session_id=execution.session_id,
+                correlation_id=execution.correlation_id,
+                identity=identity,
+                limits=limits,
+                request_id=seed.request_id,
+                task_id=execution.task_id,
+                branch_id=execution.branch_id,
+                parent_execution_id=execution.parent_execution_id,
+                retry_of_execution_id=None,
+                base_execution_id=execution.base_execution_id,
+                base_checkpoint_id=execution.base_checkpoint_id,
+                workflow_id=seed.workflow_id,
+                connection_id=None,
+                agent=agent,
+                input=dict(execution.request or {}),
+                metadata=dict(seed.metadata),
+                causation_id=seed.causation_id,
+                trace_id=seed.trace_id,
+                branch_base_transcript=branch_base_transcript,
+                branch_runtime_seed_fingerprint=(
+                    receipt.runtime_seed_fingerprint
+                ),
+                remaining_active_budget_seconds=float(remaining),
+                wait_expires_at=None,
+                clock=clock,
+                activate_budget=False,
+            )
+            context.validate_context_seed()
+            bootstrap = ForkExecutionBootstrap(
+                execution_id=execution.id,
+                expected_execution_revision=1,
+                task_id=execution.task_id,
+                branch_id=execution.branch_id,
+                fork_request_id=receipt.fork_request_id,
+                plan_fingerprint=receipt.plan_fingerprint,
+                runtime_seed_fingerprint=receipt.runtime_seed_fingerprint,
+                branch_context_revision=int(branch_context.revision),
+                context=context,
+            )
+            await uow.commit()
+            return bootstrap
 
     async def update_execution(self, execution_id: str, values: Dict[str, Any]):
         values = _normalize_json_fields(

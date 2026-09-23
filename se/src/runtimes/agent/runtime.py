@@ -28,6 +28,7 @@ from .contracts import (
     ToolExecutionResult,
     transition,
 )
+from .contracts.context_builder import AgentContextHistoryMode
 from .contracts.policy import AgentExecutionPolicy, PolicyDecision
 from .contracts.events import (
     AgentEventEnvelope,
@@ -1497,10 +1498,22 @@ class AgentRuntime:
         # The runtime should persist each iteration and tool checkpoint before
         # continuing the loop, then resume from the last durable checkpoint.
         iterations: list[AgentIteration] = []
-        transcript: list[InferenceMessage] = [
-            InferenceMessage.model_validate(item)
-            for item in context.resume_transcript
-        ]
+        context.validate_context_seed()
+        if context.branch_base_transcript is not None:
+            transcript = [
+                InferenceMessage.model_validate(item)
+                for item in context.branch_base_transcript
+            ]
+            history_mode = AgentContextHistoryMode.EXPLICIT
+        elif context.resume_revision is not None:
+            transcript = [
+                InferenceMessage.model_validate(item)
+                for item in context.resume_transcript
+            ]
+            history_mode = AgentContextHistoryMode.EXPLICIT
+        else:
+            transcript = []
+            history_mode = AgentContextHistoryMode.AUTO
         latest_tool_results: tuple[ToolExecutionResult, ...] = tuple(
             initial_tool_results
         )
@@ -1613,6 +1626,7 @@ class AgentRuntime:
                                 message.model_dump(mode="json")
                                 for message in transcript
                             ],
+                            history_mode=history_mode,
                             # Tool results already live in transcript. Keeping
                             # this empty avoids duplication by ContextBuilderAdapter.
                             tool_results=[],
@@ -1624,7 +1638,10 @@ class AgentRuntime:
 
                 # The first snapshot contains the authoritative session/system
                 # history. Seed the canonical transcript exactly once.
-                if not transcript:
+                if (
+                    not transcript
+                    and history_mode is AgentContextHistoryMode.AUTO
+                ):
                     transcript.extend(snapshot.messages)
 
                 request_id = f"inf_{uuid.uuid4().hex}"
