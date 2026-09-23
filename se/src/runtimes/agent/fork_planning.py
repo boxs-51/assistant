@@ -96,11 +96,16 @@ def _build_runtime_seed(
             "Checkpoint active budget differs from source execution.",
         )
 
-    checkpoint_metadata = dict(
-        getattr(checkpoint, "metadata", None)
-        or getattr(checkpoint, "metadata_json", None)
-        or {}
-    )
+    raw_checkpoint_metadata = getattr(checkpoint, "metadata_json", None)
+    if raw_checkpoint_metadata is None:
+        candidate = getattr(checkpoint, "metadata", None)
+        raw_checkpoint_metadata = candidate if isinstance(candidate, Mapping) else {}
+    if not isinstance(raw_checkpoint_metadata, Mapping):
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_INCOMPLETE",
+            "Checkpoint metadata is not a mapping.",
+        )
+    checkpoint_metadata = dict(raw_checkpoint_metadata)
     request_id = state.get("request_id")
     checkpoint_request_id = checkpoint_metadata.get("request_id")
     if request_id is not None and checkpoint_request_id is not None and request_id != checkpoint_request_id:
