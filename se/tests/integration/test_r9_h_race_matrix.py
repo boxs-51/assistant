@@ -220,11 +220,107 @@ async def test_r9_h_retry_vs_adopt_cannot_rewrite_task_result(tmp_path):
                 source["source_branch_id"]
             )
             loser = await uow.agents.get_task_branch(fork.branch_id)
+            budget = await uow.agents.get_task_budget(source["task_id"])
+            receipt = await uow.agents.get_task_retry_admission(
+                source["task_id"], plan.retry_request_id
+            )
+            retry_execution = (
+                await uow.agents.get_execution(receipt.execution_id)
+                if receipt is not None
+                else None
+            )
         assert task.status == "COMPLETED"
         assert task.output == {"winner": "root"}
         assert root.resolution_state == "ADOPTED"
         assert loser.resolution_state == "SUPERSEDED"
+        assert budget.active_executions == 0
+        if retry_execution is not None:
+            assert retry_execution.state == "CANCELLED"
+            assert retry_execution.revision == 2
+            assert retry_execution.error == "TASK_ADOPTED_BEFORE_ACTIVATION"
         assert any(not isinstance(item, BaseException) for item in outcomes)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_h_adopt_settles_dormant_fork_preactivation(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, name="r9_h_adopt_dormant_fork.sqlite"
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-h-adopt-dormant-fork",
+        )
+        fork = await service.consume_fork_plan(source["plan"])
+        await _complete_root(source, service)
+        before = await service.get_budget(source["task_id"])
+        assert before.active_executions == 1
+
+        await service.adopt_branch(
+            source["task_id"],
+            source["source_branch_id"],
+            target_user_id="user-r8-d",
+        )
+
+        after = await service.get_budget(source["task_id"])
+        async with _Uow(sessions) as uow:
+            loser = await uow.agents.get_task_branch(fork.branch_id)
+            execution = await uow.agents.get_execution(fork.execution_id)
+        assert loser.resolution_state == "SUPERSEDED"
+        assert execution.state == "CANCELLED"
+        assert execution.revision == 2
+        assert execution.error == "TASK_ADOPTED_BEFORE_ACTIVATION"
+        assert after.state.value == "CLOSED"
+        assert after.active_executions == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r9_h_adopt_settles_dormant_aggregate_preactivation(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path, name="r9_h_adopt_dormant_aggregate.sqlite"
+    )
+    try:
+        source, fork = await _seed_two_completed_branches(
+            sessions,
+            service,
+            planner,
+            task_id="task-r9-h-adopt-dormant-aggregate",
+        )
+        ordered = (source["source_branch_id"], fork.branch_id)
+        aggregate = await service.aggregate_branches(
+            source["task_id"],
+            aggregate_request_id="aggregate-before-adopt",
+            target_branch_id=fork.branch_id,
+            source_branch_ids=ordered,
+            target_user_id="user-r8-d",
+        )
+        before = await service.get_budget(source["task_id"])
+        assert before.active_executions == 1
+
+        await service.adopt_branch(
+            source["task_id"],
+            source["source_branch_id"],
+            target_user_id="user-r8-d",
+        )
+
+        after = await service.get_budget(source["task_id"])
+        async with _Uow(sessions) as uow:
+            loser = await uow.agents.get_task_branch(fork.branch_id)
+            execution = await uow.agents.get_execution(
+                aggregate.execution_id
+            )
+        assert loser.resolution_state == "SUPERSEDED"
+        assert execution.state == "CANCELLED"
+        assert execution.revision == 2
+        assert execution.error == "TASK_ADOPTED_BEFORE_ACTIVATION"
+        assert after.state.value == "CLOSED"
+        assert after.active_executions == 0
     finally:
         await engine.dispose()
 
