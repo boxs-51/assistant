@@ -315,6 +315,22 @@ async def test_r10_f_fallback_reuses_same_absolute_budget(monkeypatch):
     assert executor.budgets[1].deadline_monotonic == pytest.approx(106.0)
 
 
+def test_r10_f_deadline_is_process_local_and_not_serialized():
+    request = InferenceRequest(
+        request_id="req-r10-f-process-local",
+        execution_id="exec-r10-f",
+        iteration=1,
+        messages=[{"role": "user", "content": "hello"}],
+        timeout_seconds=5.0,
+        deadline_monotonic=123.0,
+    )
+
+    dumped = request.model_dump()
+
+    assert request.deadline_monotonic == 123.0
+    assert "deadline_monotonic" not in dumped
+
+
 @pytest.mark.asyncio
 async def test_r10_f_adapter_forwards_absolute_deadline_unchanged(monkeypatch):
     received = []
