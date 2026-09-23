@@ -110,6 +110,12 @@ async def _create_task(service, task_id):
             "input": {},
         }
     )
+    await service.transition_task(
+        task_id,
+        allowed_source_states=("ASSIGNED",),
+        target_state="RUNNING",
+        values={},
+    )
 
 
 def _context(task_id, execution_id, agent_id, parent=None):

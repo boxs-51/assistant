@@ -111,6 +111,15 @@ def _execution_values(task_id, execution_id, *, parent=None):
     }
 
 
+async def _mark_running(service, task_id):
+    await service.transition_task(
+        task_id,
+        allowed_source_states=("ASSIGNED",),
+        target_state="RUNNING",
+        values={},
+    )
+
+
 @pytest.mark.asyncio
 async def test_r5_c2_task_and_budget_creation_is_one_transaction(tmp_path):
     engine, sessions, service = await _setup(tmp_path)
@@ -153,6 +162,7 @@ async def test_r5_c3_c4_execution_slot_transitions_are_atomic(tmp_path):
     engine, sessions, service = await _setup(tmp_path)
     try:
         await service.create_task_with_budget(_task_values("task-flow"))
+        await _mark_running(service, "task-flow")
         values = _execution_values("task-flow", "exec-flow")
         revision = await service.start_task_scoped_execution(
             "task-flow",
@@ -275,6 +285,7 @@ async def test_r5_c4_agent_runtime_reacquires_and_releases_same_slot(
     engine, sessions, service = await _setup(tmp_path)
     try:
         await service.create_task_with_budget(_task_values("task-runtime-resume"))
+        await _mark_running(service, "task-runtime-resume")
         await service.start_task_scoped_execution(
             "task-runtime-resume",
             execution_id="exec-runtime-resume",
@@ -295,6 +306,12 @@ async def test_r5_c4_agent_runtime_reacquires_and_releases_same_slot(
             },
             delegated=False,
         )
+
+        async with sessions() as session:
+            admitted = await AgentRepository(session).get_execution(
+                "exec-runtime-resume"
+            )
+            root_branch_id = admitted.branch_id
 
         store = DurableAgentStore(lambda: _Uow(sessions))
         runtime = AgentRuntime(
@@ -317,6 +334,7 @@ async def test_r5_c4_agent_runtime_reacquires_and_releases_same_slot(
             ),
             limits=AgentExecutionLimits(timeout_seconds=30),
             task_id="task-runtime-resume",
+            branch_id=root_branch_id,
             input={"prompt": "hello"},
             remaining_active_budget_seconds=30.0,
             activate_budget=False,
@@ -359,6 +377,7 @@ async def test_r5_c3_budget_exhaustion_creates_no_execution(tmp_path):
     )
     try:
         await service.create_task_with_budget(_task_values("task-limit"))
+        await _mark_running(service, "task-limit")
         await service.start_task_scoped_execution(
             "task-limit",
             execution_id="exec-first",
@@ -368,14 +387,22 @@ async def test_r5_c3_budget_exhaustion_creates_no_execution(tmp_path):
             ),
         )
 
+        async with sessions() as session:
+            first = await AgentRepository(session).get_execution("exec-first")
+            root_branch_id = first.branch_id
+
+        second_values = _execution_values(
+            "task-limit",
+            "exec-second",
+            parent="exec-first",
+        )
+        second_values["branch_id"] = root_branch_id
         with pytest.raises(TaskBudgetExceededError):
             await service.start_task_scoped_execution(
                 "task-limit",
                 execution_id="exec-second",
-                execution_values=_execution_values(
-                    "task-limit",
-                    "exec-second",
-                ),
+                execution_values=second_values,
+                delegation_depth=1,
             )
 
         async with sessions() as session:

@@ -7,12 +7,22 @@ from .....domain.schemas.multi_agent import (
     AgentMessageRequest,
     AgentSessionCreateRequest,
     AgentTaskCreateRequest,
+    AgentTaskForkRequest,
 )
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
 from .....application.connection_affinity import (
     ConnectionAffinityError,
     validate_connection_affinity,
+)
+from .....runtimes.agent.fork_planning import (
+    ForkPlanDeferred,
+    ForkPlanError,
+)
+from .....runtimes.agent.persistence import ForkControlError
+from .....runtimes.agent.task_budget import (
+    ForkConsumeDeferred,
+    ForkConsumeError,
 )
 
 router = APIRouter(prefix="/v1/multi-agent", tags=["Multi-Agent"])
@@ -29,11 +39,57 @@ def get_coordinator(
     return container.multi_agent_coordinator
 
 
+def _fork_error_http_detail(error: Exception):
+    if not isinstance(
+        error,
+        (ForkPlanError, ForkConsumeError, ForkControlError),
+    ):
+        return None
+
+    code = str(error.code)
+    if isinstance(error, ForkControlError):
+        retryable = bool(error.retryable)
+    else:
+        retryable = isinstance(
+            error,
+            (ForkPlanDeferred, ForkConsumeDeferred),
+        )
+
+    if code == "FORK_FOREIGN_PRINCIPAL":
+        status_code = status.HTTP_403_FORBIDDEN
+    elif retryable or isinstance(error, ForkConsumeError) and "CONFLICT" in code:
+        status_code = status.HTTP_409_CONFLICT
+    elif any(
+        token in code
+        for token in ("CONFLICT", "TERMINAL", "CLOSED", "CHANGED")
+    ):
+        status_code = status.HTTP_409_CONFLICT
+    else:
+        status_code = status.HTTP_422_UNPROCESSABLE_ENTITY
+
+    message = str(error)
+    prefix = f"{code}: "
+    if message.startswith(prefix):
+        message = message[len(prefix):]
+
+    return status_code, {
+        "code": code,
+        "message": message,
+        "retryable": retryable,
+    }
+
+
 def map_error(error: Exception) -> HTTPException:
     if isinstance(error, PermissionError):
         return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(error))
     if isinstance(error, LookupError):
         return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(error))
+
+    fork_detail = _fork_error_http_detail(error)
+    if fork_detail is not None:
+        status_code, detail = fork_detail
+        return HTTPException(status_code=status_code, detail=detail)
+
     return HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(error))
 
 
@@ -138,6 +194,49 @@ async def get_agent_task(
 ):
     try:
         return coordinator.get_task(task_id, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.post("/tasks/{task_id}/fork")
+async def fork_agent_task(
+    task_id: str,
+    body: AgentTaskForkRequest,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.fork_task(task_id, body, identity)
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.get("/tasks/{task_id}/branches")
+async def list_agent_task_branches(
+    task_id: str,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.list_task_branches_durable(
+            task_id,
+            identity,
+        )
+    except Exception as error:
+        raise map_error(error) from error
+
+
+@router.get("/branches/{branch_id}")
+async def get_agent_task_branch(
+    branch_id: str,
+    coordinator=Depends(get_coordinator),
+    identity: Identity = Depends(get_current_identity),
+):
+    try:
+        return await coordinator.get_task_branch_durable(
+            branch_id,
+            identity,
+        )
     except Exception as error:
         raise map_error(error) from error
 

@@ -39,6 +39,26 @@ class CapabilityInvocationRepository:
         )
 
 
+    async def list_records_for_execution(
+        self,
+        execution_id: str,
+    ) -> list[CapabilityInvocationRecord]:
+        """Read durable invocation authority for one AgentExecution.
+
+        R8-C uses this exact query for side-effect safety planning.  The
+        deterministic ordering is semantic-hash input only; it is not tool
+        execution order.
+        """
+        result = await self.session.execute(
+            select(CapabilityInvocationRecord)
+            .where(
+                CapabilityInvocationRecord.execution_id == execution_id
+            )
+            .order_by(CapabilityInvocationRecord.invocation_id.asc())
+        )
+        return list(result.scalars().all())
+
+
 class SqlCapabilityInvocationStore:
     """Durable invocation authority with revision-based CAS transitions."""
 

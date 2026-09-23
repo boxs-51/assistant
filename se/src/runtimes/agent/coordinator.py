@@ -14,7 +14,10 @@ from ...domain.schemas.multi_agent import (
     AgentSession,
     AgentSessionStatus,
     AgentTask,
+    AgentTaskForkRequest,
+    AgentTaskForkResponse,
     AgentTaskStatus,
+    TaskBranch,
 )
 from ...domain.schemas.agent_execution import (
     AgentExecution,
@@ -34,6 +37,7 @@ class MultiAgentCoordinator:
         agent_registry: AgentRegistry,
         durable_store=None,
         executor=None,
+        fork_executor=None,
         execution_id_factory: AgentExecutionIdFactory | None = None,
         execution_supervisor=None,
         task_budget_service=None,
@@ -41,6 +45,7 @@ class MultiAgentCoordinator:
         self.agent_registry = agent_registry
         self.durable_store = durable_store
         self.executor = executor
+        self.fork_executor = fork_executor
         self.execution_supervisor = execution_supervisor
         self.task_budget_service = task_budget_service
         self.execution_id_factory = (
@@ -79,6 +84,34 @@ class MultiAgentCoordinator:
             time.time(),
         )
         return task
+
+    @staticmethod
+    def _task_from_record(record) -> AgentTask:
+        """Materialize a response view from durable AgentTask authority."""
+        now = time.time()
+        return AgentTask(
+            task_id=str(record.id),
+            session_id=str(record.session_id),
+            created_by=str(record.created_by),
+            assigned_agent_id=str(record.assigned_agent_id),
+            revision=int(getattr(record, "revision", 0)),
+            parent_task_id=getattr(record, "parent_task_id", None),
+            connection_id=getattr(record, "connection_id", None),
+            client_id=getattr(record, "client_id", None),
+            status=AgentTaskStatus(str(record.status)),
+            wait_reasons=list(getattr(record, "wait_reasons", None) or []),
+            input=dict(getattr(record, "input", None) or {}),
+            output=getattr(record, "output", None),
+            error=getattr(record, "error", None),
+            created_at=MultiAgentCoordinator._record_timestamp(
+                getattr(record, "created_at", None),
+                now,
+            ),
+            updated_at=MultiAgentCoordinator._record_timestamp(
+                getattr(record, "updated_at", None),
+                now,
+            ),
+        )
 
     async def _persist(self, method: str, values: dict):
         if self.durable_store is not None:
@@ -238,6 +271,84 @@ class MultiAgentCoordinator:
         self._require_session(task.session_id, identity)
         return task
 
+    async def _load_owned_task_record(
+        self,
+        task_id: str,
+        identity: Identity,
+    ):
+        if self.durable_store is None:
+            raise RuntimeError("Durable AgentTask storage is unavailable.")
+        task = await self.durable_store.load_task(task_id)
+        if task is None:
+            raise LookupError("Agent task not found.")
+        if str(task.created_by) != str(identity.user_id or ""):
+            raise PermissionError("Agent task access denied.")
+        return task
+
+    @staticmethod
+    def _branch_from_record(record) -> TaskBranch:
+        now = time.time()
+        return TaskBranch(
+            branch_id=record.branch_id,
+            task_id=record.task_id,
+            parent_branch_id=record.parent_branch_id,
+            base_execution_id=record.base_execution_id,
+            base_checkpoint_id=record.base_checkpoint_id,
+            current_execution_id=record.current_execution_id,
+            resolution_state=str(record.resolution_state),
+            revision=int(record.revision),
+            created_by=record.created_by,
+            reason=record.reason,
+            created_at=MultiAgentCoordinator._record_timestamp(
+                getattr(record, "created_at", None),
+                now,
+            ),
+            updated_at=MultiAgentCoordinator._record_timestamp(
+                getattr(record, "updated_at", None),
+                now,
+            ),
+        )
+
+    async def list_task_branches_durable(
+        self,
+        task_id: str,
+        identity: Identity,
+    ) -> List[TaskBranch]:
+        await self._load_owned_task_record(task_id, identity)
+        records = await self.durable_store.list_task_branches(task_id)
+        return [self._branch_from_record(record) for record in records]
+
+    async def get_task_branch_durable(
+        self,
+        branch_id: str,
+        identity: Identity,
+    ) -> TaskBranch:
+        if self.durable_store is None:
+            raise RuntimeError("Durable TaskBranch storage is unavailable.")
+        branch = await self.durable_store.load_task_branch(branch_id)
+        if branch is None:
+            raise LookupError("Task branch not found.")
+        await self._load_owned_task_record(branch.task_id, identity)
+        return self._branch_from_record(branch)
+
+    async def fork_task(
+        self,
+        task_id: str,
+        request: AgentTaskForkRequest,
+        identity: Identity,
+    ) -> AgentTaskForkResponse:
+        await self._load_owned_task_record(task_id, identity)
+        if self.fork_executor is None:
+            raise RuntimeError("Fork execution runtime is unavailable.")
+        result = self.fork_executor(
+            task_id,
+            request,
+            identity,
+        )
+        if inspect.isawaitable(result):
+            result = await result
+        return AgentTaskForkResponse.model_validate(result)
+
     def cancel_task(self, task_id: str, identity: Identity) -> AgentTask:
         """Compatibility facade.
 
@@ -262,16 +373,24 @@ class MultiAgentCoordinator:
         task_id: str,
         identity: Identity,
     ) -> AgentTask:
-        task = self.get_task(task_id, identity)
         runner = self._running_tasks.get(task_id)
 
         if self.task_budget_service is not None:
+            source = await self._load_owned_task_record(task_id, identity)
+            task = self._tasks.get(task_id)
+            if task is None:
+                task = self._task_from_record(source)
+            else:
+                self._sync_task_from_record(task, source)
+
             durable = await self.task_budget_service.cancel_task(
                 task_id,
                 values={
-                    "wait_reasons": task.wait_reasons,
-                    "output": task.output,
-                    "error": task.error,
+                    "wait_reasons": list(
+                        getattr(source, "wait_reasons", None) or []
+                    ),
+                    "output": getattr(source, "output", None),
+                    "error": getattr(source, "error", None),
                 },
             )
             self._sync_task_from_record(task, durable)
@@ -279,6 +398,7 @@ class MultiAgentCoordinator:
             if task.status is not AgentTaskStatus.CANCELLED:
                 return task
         else:
+            task = self.get_task(task_id, identity)
             task.status = AgentTaskStatus.CANCELLED
             task.updated_at = time.time()
 

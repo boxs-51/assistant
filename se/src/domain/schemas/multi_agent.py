@@ -29,6 +29,14 @@ class AgentMessageType(str, Enum):
     AGENT_MESSAGE = "agent.message"
 
 
+class BranchResolutionState(str, Enum):
+    OPEN = "OPEN"
+    ADOPTED = "ADOPTED"
+    SUPERSEDED = "SUPERSEDED"
+    DISCARDED = "DISCARDED"
+    CANCELLED = "CANCELLED"
+
+
 class AgentSession(GatewayBaseModel):
     session_id: str
     owner_user_id: str
@@ -77,6 +85,29 @@ class AgentTask(GatewayBaseModel):
         return values
 
 
+class TaskBranch(GatewayBaseModel):
+    branch_id: str
+    task_id: str
+    parent_branch_id: Optional[str] = None
+    base_execution_id: Optional[str] = None
+    base_checkpoint_id: Optional[str] = None
+    current_execution_id: Optional[str] = None
+    resolution_state: BranchResolutionState = BranchResolutionState.OPEN
+    revision: int = Field(default=0, ge=0)
+    created_by: str
+    reason: Optional[str] = None
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+
+class TaskBranchContext(GatewayBaseModel):
+    branch_id: str
+    revision: int = Field(default=0, ge=0)
+    overlay_messages: List[Dict[str, Any]] = Field(default_factory=list)
+    created_at: Optional[float] = None
+    updated_at: Optional[float] = None
+
+
 class AgentSessionCreateRequest(GatewayBaseModel):
     agent_ids: List[str] = Field(default_factory=list)
 
@@ -99,3 +130,21 @@ class AgentTaskCreateRequest(GatewayBaseModel):
     input: Dict[str, Any] = Field(default_factory=dict)
     parent_task_id: Optional[str] = None
     connection_id: Optional[str] = None
+
+
+class AgentTaskForkRequest(GatewayBaseModel):
+    fork_request_id: str
+    source_branch_id: str
+    source_execution_id: str
+    source_checkpoint_id: str
+    overlay_messages: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class AgentTaskForkResponse(GatewayBaseModel):
+    task_id: str
+    fork_request_id: str
+    branch_id: str
+    execution_id: str
+    execution_state: str
+    execution_revision: int = Field(ge=0)
+    started: bool = False

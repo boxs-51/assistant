@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import and_, case, or_, select, update
 
 from ..interfaces.repository import BaseRepository
 from ..models.sql.agent import (
@@ -14,11 +14,20 @@ from ..models.sql.agent import (
     AgentSessionMemberRecord,
     AgentSessionRecord,
     AgentTaskRecord,
+    AgentTaskBranchContextRecord,
+    AgentTaskBranchRecord,
+    AgentTaskForkAdmissionRecord,
     TaskBudgetRecord,
     TaskBudgetReservationRecord,
     AgentToolCallRecord,
     AgentToolResultRecord,
 )
+
+
+_TASK_BRANCH_MUTABLE_FIELDS = frozenset({
+    "current_execution_id",
+    "resolution_state",
+})
 
 
 class AgentRepository(BaseRepository):
@@ -79,6 +88,23 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def get_task_for_update(
+        self,
+        task_id: str,
+    ) -> Optional[AgentTaskRecord]:
+        """Lock one AgentTask revision for an atomic multi-row admission.
+
+        PostgreSQL/MySQL honor FOR UPDATE. SQLite safely compiles this as its
+        dialect permits while the existing CAS/transaction fences remain the
+        test/runtime backstop.
+        """
+        result = await self.session.execute(
+            select(AgentTaskRecord)
+            .where(AgentTaskRecord.id == task_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def compare_and_set_task(
         self,
         task_id: str,
@@ -100,6 +126,282 @@ class AgentRepository(BaseRepository):
         await self.session.flush()
         return await self.get_task(task_id)
 
+    async def compare_and_set_task_activity(
+        self,
+        task_id: str,
+        expected_revision: int,
+        *,
+        target_state: str,
+        wait_reasons: List[str],
+    ):
+        """CAS derived R8 Task activity against the live branch-head graph.
+
+        Task row locks serialize row-locking databases. These EXISTS predicates
+        are the SQLite/dialect backstop so a FORK/resume that commits a RUNNING
+        current branch between snapshot and UPDATE makes a stale WAITING write
+        lose instead of committing split-brain state.
+        """
+
+        target = str(target_state)
+        if target not in {"RUNNING", "WAITING"}:
+            raise ValueError(
+                "Task activity target must be RUNNING or WAITING."
+            )
+
+        active_heads = (
+            select(AgentTaskBranchRecord.branch_id)
+            .join(
+                AgentExecutionRecord,
+                AgentExecutionRecord.id
+                == AgentTaskBranchRecord.current_execution_id,
+            )
+            .where(
+                AgentTaskBranchRecord.task_id == task_id,
+                AgentTaskBranchRecord.resolution_state == "OPEN",
+                AgentExecutionRecord.state.in_(("CREATED", "RUNNING")),
+            )
+        )
+        waiting_heads = (
+            select(AgentTaskBranchRecord.branch_id)
+            .join(
+                AgentExecutionRecord,
+                AgentExecutionRecord.id
+                == AgentTaskBranchRecord.current_execution_id,
+            )
+            .where(
+                AgentTaskBranchRecord.task_id == task_id,
+                AgentTaskBranchRecord.resolution_state == "OPEN",
+                AgentExecutionRecord.state.in_(
+                    ("WAITING", "WAITING_FOR_CONNECTION")
+                ),
+            )
+        )
+
+        statement = update(AgentTaskRecord).where(
+            AgentTaskRecord.id == task_id,
+            AgentTaskRecord.revision == expected_revision,
+        )
+        if target == "RUNNING":
+            statement = statement.where(active_heads.exists())
+        else:
+            expected_reasons = tuple(sorted({str(item) for item in wait_reasons}))
+            if not expected_reasons:
+                raise ValueError(
+                    "WAITING Task activity requires at least one wait reason."
+                )
+
+            normalized_reason = case(
+                (
+                    and_(
+                        AgentExecutionRecord.wait_reason.is_not(None),
+                        AgentExecutionRecord.wait_reason != "",
+                    ),
+                    AgentExecutionRecord.wait_reason,
+                ),
+                (
+                    AgentExecutionRecord.state == "WAITING_FOR_CONNECTION",
+                    "CONNECTION",
+                ),
+                else_=None,
+            )
+            live_waiting_reason_rows = (
+                select(normalized_reason.label("normalized_wait_reason"))
+                .select_from(AgentTaskBranchRecord)
+                .join(
+                    AgentExecutionRecord,
+                    AgentExecutionRecord.id
+                    == AgentTaskBranchRecord.current_execution_id,
+                )
+                .where(
+                    AgentTaskBranchRecord.task_id == task_id,
+                    AgentTaskBranchRecord.resolution_state == "OPEN",
+                    AgentExecutionRecord.state.in_(
+                        ("WAITING", "WAITING_FOR_CONNECTION")
+                    ),
+                    normalized_reason.is_not(None),
+                )
+            )
+
+            # Exact-set proof: no live normalized reason may fall outside the
+            # derived snapshot, and every expected reason must still be
+            # represented by at least one current OPEN WAITING branch head.
+            unexpected_reason = live_waiting_reason_rows.where(
+                ~normalized_reason.in_(expected_reasons)
+            )
+            statement = statement.where(
+                ~active_heads.exists(),
+                waiting_heads.exists(),
+                ~unexpected_reason.exists(),
+            )
+            for reason in expected_reasons:
+                expected_reason_exists = live_waiting_reason_rows.where(
+                    normalized_reason == reason
+                )
+                statement = statement.where(
+                    expected_reason_exists.exists()
+                )
+
+        result = await self.session.execute(
+            statement.values(
+                status=target,
+                wait_reasons=list(wait_reasons),
+                revision=expected_revision + 1,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task(task_id)
+
+    async def save_task_branch(self, values: Dict[str, Any]):
+        record = AgentTaskBranchRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_branch(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchRecord).where(
+                AgentTaskBranchRecord.branch_id == branch_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_branch_for_update(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchRecord)
+            .where(AgentTaskBranchRecord.branch_id == branch_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def list_task_branches(self, task_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchRecord)
+            .where(AgentTaskBranchRecord.task_id == task_id)
+            .order_by(
+                AgentTaskBranchRecord.created_at.asc(),
+                AgentTaskBranchRecord.branch_id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def compare_and_set_task_branch(
+        self,
+        branch_id: str,
+        expected_revision: int,
+        values: Dict[str, Any],
+    ):
+        unexpected = set(values) - _TASK_BRANCH_MUTABLE_FIELDS
+        if unexpected:
+            raise ValueError(
+                "TaskBranch immutable fields cannot be changed by CAS: "
+                + ", ".join(sorted(unexpected))
+            )
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(AgentTaskBranchRecord)
+            .where(
+                AgentTaskBranchRecord.branch_id == branch_id,
+                AgentTaskBranchRecord.revision == expected_revision,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task_branch(branch_id)
+
+    async def save_task_branch_context(self, values: Dict[str, Any]):
+        record = AgentTaskBranchContextRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_branch_context(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchContextRecord).where(
+                AgentTaskBranchContextRecord.branch_id == branch_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_branch_context_for_update(self, branch_id: str):
+        result = await self.session.execute(
+            select(AgentTaskBranchContextRecord)
+            .where(AgentTaskBranchContextRecord.branch_id == branch_id)
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def compare_and_set_task_branch_context(
+        self,
+        branch_id: str,
+        expected_revision: int,
+        overlay_messages: List[Dict[str, Any]],
+    ):
+        result = await self.session.execute(
+            update(AgentTaskBranchContextRecord)
+            .where(
+                AgentTaskBranchContextRecord.branch_id == branch_id,
+                AgentTaskBranchContextRecord.revision == expected_revision,
+            )
+            .values(
+                overlay_messages=overlay_messages,
+                revision=expected_revision + 1,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_task_branch_context(branch_id)
+
+    async def save_task_fork_admission(
+        self,
+        values: Dict[str, Any],
+    ):
+        record = AgentTaskForkAdmissionRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_fork_admission(
+        self,
+        task_id: str,
+        fork_request_id: str,
+    ):
+        result = await self.session.execute(
+            select(AgentTaskForkAdmissionRecord).where(
+                AgentTaskForkAdmissionRecord.task_id == task_id,
+                AgentTaskForkAdmissionRecord.fork_request_id
+                == fork_request_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_fork_admission_by_execution(
+        self,
+        execution_id: str,
+    ):
+        result = await self.session.execute(
+            select(AgentTaskForkAdmissionRecord).where(
+                AgentTaskForkAdmissionRecord.execution_id == execution_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def list_task_fork_admissions(self, task_id: str):
+        result = await self.session.execute(
+            select(AgentTaskForkAdmissionRecord)
+            .where(AgentTaskForkAdmissionRecord.task_id == task_id)
+            .order_by(
+                AgentTaskForkAdmissionRecord.created_at.asc(),
+                AgentTaskForkAdmissionRecord.fork_request_id.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
     async def save_task_budget(self, values: Dict[str, Any]):
         record = TaskBudgetRecord(**values)
         self.session.add(record)
@@ -111,6 +413,14 @@ class AgentRepository(BaseRepository):
             select(TaskBudgetRecord).where(
                 TaskBudgetRecord.task_id == task_id
             )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_budget_for_update(self, task_id: str):
+        result = await self.session.execute(
+            select(TaskBudgetRecord)
+            .where(TaskBudgetRecord.task_id == task_id)
+            .with_for_update()
         )
         return result.scalar_one_or_none()
 
@@ -179,6 +489,91 @@ class AgentRepository(BaseRepository):
             select(AgentExecutionRecord).where(AgentExecutionRecord.id == execution_id)
         )
         return result.scalar_one_or_none()
+
+    async def compare_and_set_fork_activation(
+        self,
+        execution_id: str,
+        *,
+        task_id: str,
+        branch_id: str,
+        base_execution_id: str,
+        base_checkpoint_id: str,
+        started_at: datetime,
+    ):
+        """Specialized R8-F RUNNING@1 -> RUNNING@2 activation CAS.
+
+        The mutation surface is intentionally closed: callers can supply only
+        the activation timestamp. State/lineage/budget/affinity cannot be
+        rewritten through this authority primitive.
+        """
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == 1,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+                AgentExecutionRecord.task_id == task_id,
+                AgentExecutionRecord.branch_id == branch_id,
+                AgentExecutionRecord.base_execution_id == base_execution_id,
+                AgentExecutionRecord.base_checkpoint_id == base_checkpoint_id,
+                AgentExecutionRecord.retry_of_execution_id.is_(None),
+                AgentExecutionRecord.bound_client_id.is_(None),
+                AgentExecutionRecord.bound_connection_id.is_(None),
+            )
+            .values(
+                revision=2,
+                state="RUNNING",
+                started_at=started_at,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
+    async def compare_and_set_fork_preactivation_cancel(
+        self,
+        execution_id: str,
+        *,
+        task_id: str,
+        branch_id: str,
+        base_execution_id: str,
+        base_checkpoint_id: str,
+        completed_at: datetime,
+        error: str = "TASK_CANCELLED_BEFORE_FORK_ACTIVATION",
+    ):
+        """Race Task cancellation against R8-F activation on revision 1."""
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == 1,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.current_checkpoint_id.is_(None),
+                AgentExecutionRecord.task_id == task_id,
+                AgentExecutionRecord.branch_id == branch_id,
+                AgentExecutionRecord.base_execution_id == base_execution_id,
+                AgentExecutionRecord.base_checkpoint_id == base_checkpoint_id,
+                AgentExecutionRecord.retry_of_execution_id.is_(None),
+                AgentExecutionRecord.bound_client_id.is_(None),
+                AgentExecutionRecord.bound_connection_id.is_(None),
+            )
+            .values(
+                revision=2,
+                state="CANCELLED",
+                wait_reason=None,
+                wait_expires_at=None,
+                error=error,
+                completed_at=completed_at,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
 
     async def list_legacy_waiting_executions_for_owner(
         self,

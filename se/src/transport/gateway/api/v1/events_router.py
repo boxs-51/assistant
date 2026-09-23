@@ -136,6 +136,19 @@ def _resume_exception_code(exc: BaseException, fallback: str) -> str:
     return fallback
 
 
+def _resume_retry_claim_id(claim, exc: BaseException) -> str | None:
+    """Preserve one CREATED claim identity only for retryable RESUME_CONFLICT."""
+
+    if (
+        claim is None
+        or str(getattr(exc, "code", "")) != "RESUME_CONFLICT"
+        or not bool(getattr(exc, "retryable", False))
+    ):
+        return None
+    claim_id = getattr(claim, "claim_id", None)
+    return str(claim_id) if claim_id else None
+
+
 def _resume_claim_matches_wire_request(
     claim,
     *,
@@ -149,7 +162,10 @@ def _resume_claim_matches_wire_request(
     state = getattr(claim.state, "value", str(claim.state))
     connection_matches = (
         claim.connection_id == connection_id
-        or state == ResumeClaimState.CONSUMED.value
+        or state in {
+            ResumeClaimState.CREATED.value,
+            ResumeClaimState.CONSUMED.value,
+        }
     )
     return (
         claim.resume_request_id == resume_request_id
@@ -624,6 +640,52 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             resume_request_id
         )
         if existing_claim is not None:
+            existing_state = getattr(
+                existing_claim.state,
+                "value",
+                str(existing_claim.state),
+            )
+            if (
+                existing_state == ResumeClaimState.CREATED.value
+                and existing_claim.connection_id
+                != plan.target_connection_id
+            ):
+                try:
+                    existing_claim = (
+                        await durable_store.rebind_created_resume_claim(
+                            existing_claim.claim_id,
+                            plan=plan,
+                            resume_request_id=resume_request_id,
+                        )
+                    )
+                except ResumeClaimError as exc:
+                    await _send_resume_rejected(
+                        websocket,
+                        connection_id=connection_id,
+                        execution_id=execution_id,
+                        checkpoint_id=checkpoint_id,
+                        resume_request_id=resume_request_id,
+                        claim_id=existing_claim.claim_id,
+                        code=exc.code,
+                        message=str(exc),
+                        retryable=bool(exc.retryable),
+                    )
+                    return
+
+                # A concurrent consumer/rejecter may have won while the
+                # CREATED rebind CAS was retrying. Replay that durable winner
+                # before applying CREATED-plan matching.
+                if await _replay_resume_claim_outcome(
+                    websocket,
+                    connection_id=connection_id,
+                    execution_id=execution_id,
+                    checkpoint_id=checkpoint_id,
+                    resume_request_id=resume_request_id,
+                    claim=existing_claim,
+                    supervisor=supervisor,
+                ):
+                    return
+
             if not _resume_claim_matches_plan(
                 existing_claim,
                 plan,
@@ -729,6 +791,7 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             )
             return
 
+        claim = None
         consumed = None
         owned_task = None
         continue_after_ack = asyncio.Event()
@@ -995,6 +1058,10 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             return
         except ResumeClaimError as exc:
             await supervisor.release_reserved(token)
+            # No resume authority was acquired. For a retryable
+            # RESUME_CONFLICT preserve the exact CREATED claim/request
+            # identity so ClientRuntime retries the same logical attempt.
+            retry_claim_id = _resume_retry_claim_id(claim, exc)
             await _send_resume_rejected(
                 websocket,
                 connection_id=connection_id,
@@ -1004,6 +1071,7 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
                 code=exc.code,
                 message=str(exc),
                 retryable=bool(exc.retryable),
+                claim_id=retry_claim_id,
             )
             return
         except BaseException as exc:

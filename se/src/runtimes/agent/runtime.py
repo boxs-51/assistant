@@ -28,6 +28,7 @@ from .contracts import (
     ToolExecutionResult,
     transition,
 )
+from .contracts.context_builder import AgentContextHistoryMode
 from .contracts.policy import AgentExecutionPolicy, PolicyDecision
 from .contracts.events import (
     AgentEventEnvelope,
@@ -144,15 +145,25 @@ class AgentRuntime:
     ) -> int:
         if self._uses_task_budget(context):
             assert context.task_id is not None
-            return await self._task_budget_service.finish_task_scoped_execution(
-                context.task_id,
-                execution_id=context.execution_id,
-                source_revision=revision,
-                transition_values=values,
-                delegated=context.parent_execution_id is not None,
-                checkpoint_values=checkpoint_values,
-                pending_invocations=pending_invocations,
+            target_revision = await (
+                self._task_budget_service.finish_task_scoped_execution(
+                    context.task_id,
+                    execution_id=context.execution_id,
+                    source_revision=revision,
+                    transition_values=values,
+                    delegated=context.parent_execution_id is not None,
+                    checkpoint_values=checkpoint_values,
+                    pending_invocations=pending_invocations,
+                )
             )
+            reconciler = getattr(
+                self._task_budget_service,
+                "reconcile_multibranch_task_activity",
+                None,
+            )
+            if callable(reconciler):
+                await reconciler(context.task_id)
+            return target_revision
         if checkpoint_values is not None:
             writer = getattr(
                 self._durable_store,
@@ -1072,6 +1083,22 @@ class AgentRuntime:
                         child_agent_id=context.agent_id,
                     )
                 )
+                if context.parent_execution_id is not None:
+                    if delegation.branch_id is None:
+                        raise ExecutionConflictError(
+                            "Delegated execution has no durable TaskBranch."
+                        )
+                    if (
+                        context.branch_id is not None
+                        and context.branch_id != delegation.branch_id
+                    ):
+                        raise ExecutionConflictError(
+                            "Delegated execution branch does not match durable "
+                            "parent lineage."
+                        )
+                    context.branch_id = delegation.branch_id
+                    new_values["branch_id"] = delegation.branch_id
+
                 new_values.update(
                     {
                         "state": AgentExecutionState.RUNNING.value,
@@ -1079,6 +1106,21 @@ class AgentRuntime:
                         "started_at": context.clock.now_utc(),
                     }
                 )
+                if (
+                    context.parent_execution_id is None
+                    and context.branch_id is None
+                ):
+                    admission = await (
+                        self._task_budget_service
+                        .start_root_task_scoped_execution(
+                            context.task_id,
+                            execution_id=context.execution_id,
+                            execution_values=new_values,
+                        )
+                    )
+                    context.branch_id = admission.branch_id
+                    return admission.execution_revision
+
                 return await (
                     self._task_budget_service.start_task_scoped_execution(
                         context.task_id,
@@ -1144,35 +1186,77 @@ class AgentRuntime:
             context.wait_expires_at = wait_expires_at
 
             if resume_remaining <= 0.0:
-                await self._durable_store.compare_and_set_execution(
-                    context.execution_id,
-                    expected_revision,
-                    {
-                        "state": AgentExecutionState.TIMEOUT.value,
-                        "wait_reason": None,
-                        "wait_expires_at": None,
-                        "remaining_active_budget_seconds": 0.0,
-                        "error": "AGENT_EXECUTION_TIMEOUT",
-                        "completed_at": now_utc,
-                    },
-                )
+                timeout_values = {
+                    "state": AgentExecutionState.TIMEOUT.value,
+                    "wait_reason": None,
+                    "wait_expires_at": None,
+                    "remaining_active_budget_seconds": 0.0,
+                    "error": "AGENT_EXECUTION_TIMEOUT",
+                    "completed_at": now_utc,
+                }
+                if (
+                    self._uses_task_budget(context)
+                    and self._task_budget_service is not None
+                ):
+                    assert context.task_id is not None
+                    timeout_revision = (
+                        await self._task_budget_service.expire_task_scoped_waiting_execution(
+                            context.task_id,
+                            execution_id=context.execution_id,
+                            source_revision=expected_revision,
+                            transition_values=timeout_values,
+                        )
+                    )
+                    if timeout_revision is None:
+                        raise ExecutionConflictError(
+                            "Stale AgentExecution revision/state while applying "
+                            f"task-scoped timeout: {context.execution_id}@"
+                            f"{expected_revision}"
+                        )
+                else:
+                    await self._durable_store.compare_and_set_execution(
+                        context.execution_id,
+                        expected_revision,
+                        timeout_values,
+                    )
                 raise ExecutionResumeBudgetError(
                     "AGENT_EXECUTION_TIMEOUT: no active budget remains."
                 )
 
             if wait_expires_at is not None and now_utc >= wait_expires_at:
-                await self._durable_store.compare_and_set_execution(
-                    context.execution_id,
-                    expected_revision,
-                    {
-                        "state": AgentExecutionState.TIMEOUT.value,
-                        "wait_reason": None,
-                        "wait_expires_at": None,
-                        "remaining_active_budget_seconds": resume_remaining,
-                        "error": "WAIT_TTL_EXPIRED",
-                        "completed_at": now_utc,
-                    },
-                )
+                timeout_values = {
+                    "state": AgentExecutionState.TIMEOUT.value,
+                    "wait_reason": None,
+                    "wait_expires_at": None,
+                    "remaining_active_budget_seconds": resume_remaining,
+                    "error": "WAIT_TTL_EXPIRED",
+                    "completed_at": now_utc,
+                }
+                if (
+                    self._uses_task_budget(context)
+                    and self._task_budget_service is not None
+                ):
+                    assert context.task_id is not None
+                    timeout_revision = (
+                        await self._task_budget_service.expire_task_scoped_waiting_execution(
+                            context.task_id,
+                            execution_id=context.execution_id,
+                            source_revision=expected_revision,
+                            transition_values=timeout_values,
+                        )
+                    )
+                    if timeout_revision is None:
+                        raise ExecutionConflictError(
+                            "Stale AgentExecution revision/state while applying "
+                            f"task-scoped timeout: {context.execution_id}@"
+                            f"{expected_revision}"
+                        )
+                else:
+                    await self._durable_store.compare_and_set_execution(
+                        context.execution_id,
+                        expected_revision,
+                        timeout_values,
+                    )
                 raise ExecutionWaitExpiredError(
                     "WAIT_TTL_EXPIRED: durable WAITING execution expired."
                 )
@@ -1246,6 +1330,22 @@ class AgentRuntime:
         error_message: str = "RESUME_ACTIVATION_FAILED",
     ) -> None:
         """Fail closed when a claimed RUNNING resume cannot acquire an owner."""
+        await self._cancel_durable_revision(
+            context,
+            revision,
+            error_message=error_message,
+        )
+
+    async def cancel_activated_fork_execution(
+        self,
+        context: AgentExecutionContext,
+        revision: int,
+        *,
+        error_message: str = "FORK_RUNTIME_HANDOFF_FAILED",
+    ) -> None:
+        """Fail closed after a durable FORK activation wins but local start fails."""
+
+        context.freeze_active_budget()
         await self._cancel_durable_revision(
             context,
             revision,
@@ -1466,10 +1566,22 @@ class AgentRuntime:
         # The runtime should persist each iteration and tool checkpoint before
         # continuing the loop, then resume from the last durable checkpoint.
         iterations: list[AgentIteration] = []
-        transcript: list[InferenceMessage] = [
-            InferenceMessage.model_validate(item)
-            for item in context.resume_transcript
-        ]
+        context.validate_context_seed()
+        if context.branch_base_transcript is not None:
+            transcript = [
+                InferenceMessage.model_validate(item)
+                for item in context.branch_base_transcript
+            ]
+            history_mode = AgentContextHistoryMode.EXPLICIT
+        elif context.resume_revision is not None:
+            transcript = [
+                InferenceMessage.model_validate(item)
+                for item in context.resume_transcript
+            ]
+            history_mode = AgentContextHistoryMode.EXPLICIT
+        else:
+            transcript = []
+            history_mode = AgentContextHistoryMode.AUTO
         latest_tool_results: tuple[ToolExecutionResult, ...] = tuple(
             initial_tool_results
         )
@@ -1582,6 +1694,7 @@ class AgentRuntime:
                                 message.model_dump(mode="json")
                                 for message in transcript
                             ],
+                            history_mode=history_mode,
                             # Tool results already live in transcript. Keeping
                             # this empty avoids duplication by ContextBuilderAdapter.
                             tool_results=[],
@@ -1593,7 +1706,10 @@ class AgentRuntime:
 
                 # The first snapshot contains the authoritative session/system
                 # history. Seed the canonical transcript exactly once.
-                if not transcript:
+                if (
+                    not transcript
+                    and history_mode is AgentContextHistoryMode.AUTO
+                ):
                     transcript.extend(snapshot.messages)
 
                 request_id = f"inf_{uuid.uuid4().hex}"

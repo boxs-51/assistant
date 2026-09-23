@@ -79,6 +79,7 @@ def _context(
     revision: int = 7,
     remaining: float | None = 40.0,
     expiry: datetime | None = None,
+    task_id: str | None = None,
 ) -> AgentExecutionContext:
     context = AgentExecutionContext.create(
         execution_id=execution_id,
@@ -91,6 +92,7 @@ def _context(
             scopes={"*"},
         ),
         limits=AgentExecutionLimits(timeout_seconds=60),
+        task_id=task_id,
         remaining_active_budget_seconds=remaining,
         wait_expires_at=expiry,
         clock=clock,
@@ -117,6 +119,40 @@ def _record(
         remaining_active_budget_seconds=remaining,
         wait_expires_at=expiry,
     )
+
+
+class _ActivityBudget:
+    def __init__(self, store) -> None:
+        self.store = store
+        self.reconciled: list[str] = []
+
+    async def expire_task_scoped_waiting_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        source_revision: int,
+        transition_values,
+    ):
+        updated = await self.store.compare_and_set_execution(
+            execution_id,
+            source_revision,
+            transition_values,
+        )
+        self.reconciled.append(task_id)
+        return updated.revision if updated is not None else None
+
+
+class _LostExpiryBudget:
+    async def expire_task_scoped_waiting_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        source_revision: int,
+        transition_values,
+    ):
+        return None
 
 
 def _runtime(store) -> AgentRuntime:
@@ -223,3 +259,61 @@ async def test_r4_b2_two_valid_resume_claims_have_one_winner():
     ) == 1
     assert store.record.state == "RUNNING"
     assert store.record.revision == 8
+
+
+@pytest.mark.asyncio
+async def test_r8_f_task_scoped_direct_wait_expiry_reconciles_activity():
+    clock = _FakeClock()
+    expiry = clock.now_utc()
+    store = _MemoryStore(_record(clock, expiry=expiry))
+    budget = _ActivityBudget(store)
+    context = _context(
+        clock,
+        expiry=expiry,
+        task_id="task-r8-f-direct-expiry",
+    )
+    runtime = AgentRuntime(
+        context_builder=None,
+        inference=None,
+        tool_execution=None,
+        execution_policy=None,
+        durable_store=store,
+        task_budget_service=budget,
+    )
+
+    with pytest.raises(
+        ExecutionWaitExpiredError,
+        match="WAIT_TTL_EXPIRED",
+    ):
+        await runtime._begin_durable_execution(context)
+
+    assert store.record.state == "TIMEOUT"
+    assert store.record.revision == 8
+    assert budget.reconciled == ["task-r8-f-direct-expiry"]
+
+
+@pytest.mark.asyncio
+async def test_r8_f_task_scoped_direct_wait_expiry_cas_loser_is_conflict():
+    clock = _FakeClock()
+    expiry = clock.now_utc()
+    store = _MemoryStore(_record(clock, expiry=expiry))
+    context = _context(
+        clock,
+        expiry=expiry,
+        task_id="task-r8-f-direct-expiry-conflict",
+    )
+    runtime = AgentRuntime(
+        context_builder=None,
+        inference=None,
+        tool_execution=None,
+        execution_policy=None,
+        durable_store=store,
+        task_budget_service=_LostExpiryBudget(),
+    )
+
+    with pytest.raises(ExecutionConflictError, match="task-scoped timeout"):
+        await runtime._begin_durable_execution(context)
+
+    assert store.record.state == "WAITING"
+    assert store.record.revision == 7
+    assert store.record.wait_reason == "CONNECTION"

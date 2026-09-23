@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+import asyncio
 from typing import Dict, Any, Tuple
 import uuid
 from fastapi import FastAPI
@@ -74,11 +75,12 @@ from .runtimes.capability.local_tool_loader import register_local_tools
 from .runtimes.capability.builtins import register_builtin_support
 from .runtimes.capability.invocation import CapabilityInvocationLifecycle
 from .runtimes.agent.coordinator import MultiAgentCoordinator
-from .runtimes.agent.persistence import DurableAgentStore
+from .runtimes.agent.persistence import DurableAgentStore, ForkControlError
 from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.supervisor import AgentExecutionSupervisor
 from .runtimes.agent.task_budget import TaskBudgetService
 from .runtimes.agent.resume_planning import AgentResumePlanningService
+from .runtimes.agent.fork_planning import AgentForkPlanningService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
 from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
@@ -99,6 +101,242 @@ from .domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
 from .domain.schemas.event import BaseEvent
 from .version import __version__
 logger = structlog.get_logger(__name__)
+
+def _classify_fork_replay_execution(execution) -> str:
+    """Classify only durable R8-F lifecycle shapes that may be replayed."""
+
+    state = str(getattr(execution, "state", ""))
+    try:
+        revision = int(getattr(execution, "revision"))
+    except (TypeError, ValueError) as exc:
+        raise ForkControlError(
+            "FORK_ADMISSION_CORRUPT",
+            "Fork execution has an invalid durable revision.",
+        ) from exc
+
+    if state == "RUNNING" and revision == 1:
+        return "PREACTIVATION"
+    if state == "RUNNING" and revision >= 2:
+        return "IDENTITY_REPLAY"
+    if state == "WAITING" and revision >= 3:
+        return "IDENTITY_REPLAY"
+    if state in {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"} and revision >= 2:
+        return "IDENTITY_REPLAY"
+
+    raise ForkControlError(
+        "FORK_ADMISSION_CORRUPT",
+        (
+            "ForkAdmission execution has an invalid lifecycle shape: "
+            f"{state}@{revision}."
+        ),
+    )
+
+
+async def _activate_fork_owned(
+    *,
+    store,
+    runtime,
+    supervisor,
+    token,
+    bootstrap,
+    identity,
+):
+    """Resolve durable activation to a known outcome across caller cancellation."""
+
+    activation_task = asyncio.create_task(
+        store.activate_fork_execution(
+            bootstrap,
+            identity=identity,
+        ),
+        name=f"fork-activation:{bootstrap.execution_id}",
+    )
+    try:
+        return await asyncio.shield(activation_task)
+    except asyncio.CancelledError:
+        outcome = (
+            await asyncio.gather(
+                activation_task,
+                return_exceptions=True,
+            )
+        )[0]
+        if not isinstance(outcome, BaseException):
+            try:
+                await runtime.cancel_activated_fork_execution(
+                    bootstrap.context,
+                    outcome.activated_execution_revision,
+                    error_message="FORK_ACTIVATION_CALLER_CANCELLED",
+                )
+            finally:
+                await supervisor.release_reserved(token)
+        else:
+            await supervisor.release_reserved(token)
+        raise
+
+
+async def execute_forked_agent_task_control_plane(
+    container,
+    task_id,
+    request,
+    identity,
+):
+    """R8-F durable replay/activation path for an already-created E2."""
+
+    store = container.agent_durable_store
+    planner = container.fork_planning_service
+    budget_service = container.task_budget_service
+    supervisor = container.agent_execution_supervisor
+    runtime = container.agent_runtime
+    principal = str(identity.user_id or "")
+    if not principal:
+        raise PermissionError("Authenticated principal is required.")
+
+    replay = await store.load_fork_replay(
+        task_id=task_id,
+        fork_request_id=request.fork_request_id,
+        source_branch_id=request.source_branch_id,
+        source_execution_id=request.source_execution_id,
+        source_checkpoint_id=request.source_checkpoint_id,
+        target_user_id=principal,
+        overlay_messages=request.overlay_messages,
+    )
+    if replay is not None:
+        admission = replay.admission
+    else:
+        plan = await planner.build_fork_plan(
+            fork_request_id=request.fork_request_id,
+            task_id=task_id,
+            source_branch_id=request.source_branch_id,
+            source_execution_id=request.source_execution_id,
+            source_checkpoint_id=request.source_checkpoint_id,
+            target_user_id=principal,
+            overlay_messages=tuple(request.overlay_messages),
+        )
+        admission = await budget_service.consume_fork_plan(plan)
+
+    current = await store.load_execution(admission.execution_id)
+    if current is None:
+        raise ForkControlError(
+            "FORK_ADMISSION_CORRUPT",
+            "ForkAdmission execution is missing.",
+        )
+
+    lifecycle = _classify_fork_replay_execution(current)
+    if lifecycle == "IDENTITY_REPLAY":
+        return {
+            "task_id": task_id,
+            "fork_request_id": request.fork_request_id,
+            "branch_id": admission.branch_id,
+            "execution_id": admission.execution_id,
+            "execution_state": str(current.state),
+            "execution_revision": int(current.revision),
+            "started": False,
+        }
+
+    agent = container.agent_registry.get(current.agent_id)
+    if agent is None:
+        raise LookupError(
+            f"Agent '{current.agent_id}' is not registered."
+        )
+
+    bootstrap = await store.prepare_fork_execution_context(
+        admission.execution_id,
+        identity=identity,
+        agent=agent,
+    )
+
+    token = await supervisor.reserve(bootstrap.context)
+    activation = None
+    try:
+        try:
+            activation = await _activate_fork_owned(
+                store=store,
+                runtime=runtime,
+                supervisor=supervisor,
+                token=token,
+                bootstrap=bootstrap,
+                identity=identity,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            # Every ordinary pre-WIN exit releases process-local ownership.
+            await supervisor.release_reserved(token)
+            latest = await store.load_execution(admission.execution_id)
+            if latest is None:
+                raise ForkControlError(
+                    "FORK_ADMISSION_CORRUPT",
+                    "ForkAdmission execution disappeared during activation.",
+                )
+            latest_lifecycle = _classify_fork_replay_execution(latest)
+            if latest_lifecycle == "IDENTITY_REPLAY":
+                return {
+                    "task_id": task_id,
+                    "fork_request_id": request.fork_request_id,
+                    "branch_id": admission.branch_id,
+                    "execution_id": admission.execution_id,
+                    "execution_state": str(latest.state),
+                    "execution_revision": int(latest.revision),
+                    "started": False,
+                }
+            raise
+
+        try:
+            bootstrap.context.restore_active_budget(
+                activation.remaining_active_budget_seconds
+            )
+            owned_task = await supervisor.start_reserved(
+                token,
+                bootstrap.context,
+                lambda: runtime.execute(
+                    bootstrap.context,
+                    durable_revision=(
+                        activation.activated_execution_revision
+                    ),
+                ),
+            )
+        except BaseException as handoff_error:
+            try:
+                await runtime.cancel_activated_fork_execution(
+                    bootstrap.context,
+                    activation.activated_execution_revision,
+                    error_message=(
+                        "FORK_RUNTIME_HANDOFF_FAILED: "
+                        f"{type(handoff_error).__name__}: {handoff_error}"
+                    ),
+                )
+            finally:
+                await supervisor.release_reserved(token)
+            raise
+
+        def observe_fork_runner(completed):
+            if completed.cancelled():
+                return
+            # Retrieve the exception so a detached execution-scoped task
+            # is never left as an unobserved asyncio failure.
+            completed.exception()
+
+        owned_task.add_done_callback(observe_fork_runner)
+    except BaseException:
+        # Pre-WIN cancellation/failure and post-WIN handoff cleanup are
+        # explicitly owned above.
+        raise
+
+    latest = await store.load_execution(admission.execution_id)
+    if latest is None:
+        raise ForkControlError(
+            "FORK_ADMISSION_CORRUPT",
+            "ForkAdmission execution disappeared after activation.",
+        )
+    _classify_fork_replay_execution(latest)
+    return {
+        "task_id": task_id,
+        "fork_request_id": request.fork_request_id,
+        "branch_id": admission.branch_id,
+        "execution_id": admission.execution_id,
+        "execution_state": str(latest.state),
+        "execution_revision": int(latest.revision),
+        "started": True,
+    }
 
 
 # ==============================================================================
@@ -396,6 +634,9 @@ async def bootstrap_runtime_kernel(
         container.agent_durable_store,
         container.capability_runtime,
     )
+    container.fork_planning_service = AgentForkPlanningService(
+        container.agent_durable_store
+    )
     container.agent_runtime = AgentRuntime(
         context_builder=container.context_builder_port,
         inference=container.inference_port,
@@ -473,8 +714,23 @@ async def bootstrap_runtime_kernel(
         )
         return result.model_dump(mode="json")
 
+    async def execute_forked_agent_task(
+        task_id,
+        request,
+        identity,
+    ):
+        return await execute_forked_agent_task_control_plane(
+            container,
+            task_id,
+            request,
+            identity,
+        )
+
     # Multi-agent HTTP tasks enter the canonical AgentRuntime loop.
     container.multi_agent_coordinator.executor = execute_registered_agent_task
+    container.multi_agent_coordinator.fork_executor = (
+        execute_forked_agent_task
+    )
 
     logger.info("AI Runtime Kernel & Runtimes booted successfully.")
     return container

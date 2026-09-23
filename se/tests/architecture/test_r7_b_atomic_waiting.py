@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import timezone
+import hashlib
 
 import pytest
 from sqlalchemy import text
@@ -56,6 +57,11 @@ def _limits() -> TaskBudgetLimits:
     )
 
 
+def _root_branch_id(task_id: str) -> str:
+    digest = hashlib.sha256(task_id.encode("utf-8")).hexdigest()[:40]
+    return f"r8_root_{digest}"
+
+
 def _checkpoint(execution_id: str, session_id: str, *, task_id: str | None, revision: int):
     return {
         "checkpoint_id": f"{execution_id}:checkpoint:{revision}",
@@ -63,7 +69,11 @@ def _checkpoint(execution_id: str, session_id: str, *, task_id: str | None, revi
         "execution_revision": revision,
         "session_id": session_id,
         "task_id": task_id,
-        "branch_id": None,
+        "branch_id": (
+            _root_branch_id(task_id)
+            if task_id is not None
+            else None
+        ),
         "iteration": 3,
         "wait_reason": "CONNECTION",
         "remaining_active_budget_seconds": 20.0,

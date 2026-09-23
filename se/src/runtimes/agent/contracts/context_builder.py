@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from enum import Enum
 from types import MappingProxyType
 from typing import Any, Dict, Protocol, Sequence
 
@@ -11,6 +12,11 @@ from .inference import InferenceMessage, InferenceToolDefinition
 from .tool import ToolExecutionResult
 
 
+class AgentContextHistoryMode(str, Enum):
+    AUTO = "AUTO"
+    EXPLICIT = "EXPLICIT"
+
+
 class AgentContextRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -18,6 +24,7 @@ class AgentContextRequest(BaseModel):
     iteration: int
     input: Mapping[str, Any] = Field(default_factory=dict)
     prior_messages: Sequence[Mapping[str, Any]] = Field(default_factory=list)
+    history_mode: AgentContextHistoryMode = AgentContextHistoryMode.AUTO
     tool_results: Sequence[ToolExecutionResult] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 

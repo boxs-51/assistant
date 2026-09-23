@@ -1,0 +1,33 @@
+name: R8 Exit Gates
+
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  r8-exit-gates:
+    name: R8 A-G exit gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements-test.txt
+
+      - name: Run R8 exit gates
+        run: >
+          python -m pytest -q
+          se/tests/architecture/test_r8_*.py
+          se/tests/integration/test_r8_*.py
+          se/tests/transport/test_r8_g_control_plane.py

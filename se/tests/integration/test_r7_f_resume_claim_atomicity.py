@@ -35,7 +35,7 @@ from se.src.runtimes.agent.contracts.resume import (
     resume_plan_fingerprint,
 )
 from se.src.runtimes.agent.persistence import DurableAgentStore
-from se.src.runtimes.agent.resume_claim import ResumeClaimRejected
+from se.src.runtimes.agent.resume_claim import ResumeClaimDeferred, ResumeClaimRejected
 from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.task_budget import TaskBudgetService
 from se.src.runtimes.capability.contracts.definition import CapabilityIdempotency
@@ -138,7 +138,13 @@ def _invocation_values(*, execution_id=EXECUTION, revision=5):
     }
 
 
-def _plan(*, task_id=None, revision=2, wait_expires_at=None) -> ResumePlan:
+def _plan(
+    *,
+    task_id=None,
+    branch_id=None,
+    revision=2,
+    wait_expires_at=None,
+) -> ResumePlan:
     action = ResumeInvocationAction(
         invocation_id=INVOCATION,
         tool_call_id=TOOL_CALL,
@@ -160,7 +166,7 @@ def _plan(*, task_id=None, revision=2, wait_expires_at=None) -> ResumePlan:
         agent_id=AGENT,
         session_id=SESSION,
         task_id=task_id,
-        branch_id=None,
+        branch_id=branch_id,
         parent_execution_id=None,
         retry_of_execution_id=None,
         base_execution_id=None,
@@ -288,6 +294,9 @@ async def _seed_task_waiting(sessions, factory):
         },
     )
     async with factory() as uow:
+        execution = await uow.agents.get_execution(EXECUTION)
+        branch_id = execution.branch_id
+        assert branch_id is not None
         uow.session.add(CapabilityInvocationRecord(**_invocation_values()))
         await uow.commit()
 
@@ -309,7 +318,7 @@ async def _seed_task_waiting(sessions, factory):
             "execution_revision": 2,
             "session_id": SESSION,
             "task_id": "task-r7f",
-            "branch_id": None,
+            "branch_id": branch_id,
             "iteration": 1,
             "wait_reason": "CONNECTION",
             "remaining_active_budget_seconds": 20.0,
@@ -328,6 +337,7 @@ async def _seed_task_waiting(sessions, factory):
             }
         ],
     )
+    return branch_id
 
 
 @pytest.mark.asyncio
@@ -514,9 +524,13 @@ async def test_r7_f_task_budget_reacquire_rolls_back_when_execution_cas_loses(
 ):
     engine, sessions, factory, store = await _setup(tmp_path, "budget-rollback.sqlite")
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(_intent(plan, "rr-budget-rollback"))
+        async with factory() as uow:
+            task_before = await uow.agents.get_task("task-r7f")
+            task_revision_before = int(task_before.revision)
+            await uow.commit()
 
         async def lose_execution_cas(self, *args, **kwargs):
             return None
@@ -548,11 +562,13 @@ async def test_r7_f_task_budget_reacquire_rolls_back_when_execution_cas_loses(
                 f"{EXECUTION}:2",
             )
             durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            task_after = await uow.agents.get_task("task-r7f")
             assert execution.state == "WAITING"
             assert execution.revision == 2
             assert budget.active_executions == 0
             assert reservation is None
             assert durable_claim.state == "CREATED"
+            assert int(task_after.revision) == task_revision_before
             await uow.commit()
     finally:
         await engine.dispose()
@@ -584,8 +600,8 @@ async def test_r7_f_concurrent_same_request_creates_one_durable_claim(tmp_path):
 async def test_r7_f_task_scoped_consume_reacquires_capacity_once(tmp_path):
     engine, sessions, factory, store = await _setup(tmp_path, "budget-success.sqlite")
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(_intent(plan, "rr-budget-success"))
 
         result = await store.consume_resume_claim(
@@ -642,8 +658,8 @@ async def test_r7_f_claim_cas_loss_rolls_back_execution_budget_and_reservation(
 ):
     engine, sessions, factory, store = await _setup(tmp_path, "claim-cas-rollback.sqlite")
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(_intent(plan, "rr-claim-cas-loss"))
         original = AgentRepository.compare_and_set_resume_claim
 
@@ -1036,8 +1052,8 @@ async def test_r7_g_real_recovery_checkpoint_releases_task_budget_and_keeps_clai
         "r7-g-real-recovery.sqlite",
     )
     try:
-        await _seed_task_waiting(sessions, factory)
-        plan = _plan(task_id="task-r7f")
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
         identity = Identity(
             user_id=USER,
             session_id=SESSION,
@@ -1211,5 +1227,561 @@ async def test_r7_g_resume_handoff_outcome_is_durable_idempotent_and_immutable(
                 },
             )
         assert raised.value.code == "RESUME_REQUEST_CONFLICT"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_activity_reconcile_race_with_r7_resume_finishes_task_running(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-r7-resume-activity-race.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        budget_service = TaskBudgetService(
+            factory,
+            default_limits=_limits(),
+            default_policy=TaskBudgetPolicy(version="r7-f"),
+            max_conflict_retries=16,
+        )
+
+        sibling_branch_id = "branch-r8-f-terminal-sibling"
+        sibling_execution_id = "exec-r8-f-terminal-sibling"
+        async with factory() as uow:
+            sibling_branch = await uow.agents.save_task_branch(
+                {
+                    "branch_id": sibling_branch_id,
+                    "task_id": "task-r7f",
+                    "parent_branch_id": branch_id,
+                    "base_execution_id": EXECUTION,
+                    "base_checkpoint_id": CHECKPOINT,
+                    "current_execution_id": None,
+                    "resolution_state": "OPEN",
+                    "revision": 0,
+                    "created_by": USER,
+                    "reason": "R8_FORK",
+                }
+            )
+            assert sibling_branch is not None
+            sibling_execution = await uow.agents.save_execution(
+                {
+                    "id": sibling_execution_id,
+                    "session_id": SESSION,
+                    "agent_id": AGENT,
+                    "task_id": "task-r7f",
+                    "branch_id": sibling_branch_id,
+                    "parent_execution_id": None,
+                    "retry_of_execution_id": None,
+                    "base_execution_id": EXECUTION,
+                    "base_checkpoint_id": CHECKPOINT,
+                    "correlation_id": "corr-r8-f-terminal-sibling",
+                    "state": "FAILED",
+                    "revision": 1,
+                    "request": {},
+                    "error": "terminal sibling",
+                    "completed_at": datetime.now(timezone.utc),
+                }
+            )
+            assert sibling_execution is not None
+            sibling_branch = await uow.agents.compare_and_set_task_branch(
+                sibling_branch_id,
+                0,
+                {"current_execution_id": sibling_execution_id},
+            )
+            assert sibling_branch is not None
+            budget = await uow.agents.get_task_budget("task-r7f")
+            updated_budget = await uow.agents.compare_and_set_task_budget(
+                "task-r7f",
+                int(budget.revision),
+                {"active_branches": int(budget.active_branches) + 1},
+            )
+            assert updated_budget is not None
+            await uow.commit()
+
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-activity-race")
+        )
+        spec = ResumeClaimConsumeSpec(
+            plan=plan,
+            claim_id=claim.claim_id,
+            resume_request_id=claim.resume_request_id,
+            expected_claim_revision=claim.revision,
+            now_utc=datetime.now(timezone.utc),
+        )
+
+        resume_outcome, reconcile_outcome = await asyncio.gather(
+            store.consume_resume_claim(spec),
+            budget_service.reconcile_multibranch_task_activity("task-r7f"),
+            return_exceptions=True,
+        )
+
+        assert not isinstance(reconcile_outcome, BaseException)
+
+        # Two serialized authority orders are valid:
+        # A) resume epoch wins -> execution + Task become RUNNING;
+        # B) reconciler epoch wins -> stale resume returns RESUME_CONFLICT,
+        #    leaving WAITING/WAITING and the CREATED claim retryable.
+        if isinstance(resume_outcome, BaseException):
+            assert isinstance(resume_outcome, ResumeClaimRejected)
+            assert resume_outcome.code == "RESUME_CONFLICT"
+            async with factory() as uow:
+                task = await uow.agents.get_task("task-r7f")
+                execution = await uow.agents.get_execution(EXECUTION)
+                budget = await uow.agents.get_task_budget("task-r7f")
+                durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+                assert str(execution.state) == "WAITING"
+                assert int(execution.revision) == 2
+                assert str(task.status) == "WAITING"
+                assert int(budget.active_executions) == 0
+                assert str(durable_claim.state) == "CREATED"
+                await uow.commit()
+
+            # Same durable claim/plan remains live after the stale activity
+            # epoch loss; a clean retry must converge to RUNNING.
+            resume_outcome = await store.consume_resume_claim(spec)
+
+        assert resume_outcome.consumed_execution_revision == 3
+        async with factory() as uow:
+            task = await uow.agents.get_task("task-r7f")
+            execution = await uow.agents.get_execution(EXECUTION)
+            budget = await uow.agents.get_task_budget("task-r7f")
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            await uow.commit()
+
+        assert str(execution.state) == "RUNNING"
+        assert int(execution.revision) == 3
+        assert str(task.status) == "RUNNING"
+        assert list(task.wait_reasons or []) == []
+        assert int(budget.active_executions) == 1
+        assert int(budget.active_branches) == 2
+        assert str(durable_claim.state) == "CONSUMED"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_task_scoped_wait_expiry_rederives_sibling_wait_reason(tmp_path):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-task-wait-expiry-activity.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        budget_service = TaskBudgetService(
+            factory,
+            default_limits=_limits(),
+            default_policy=TaskBudgetPolicy(version="r7-f"),
+            max_conflict_retries=16,
+        )
+        sibling_branch_id = "branch-r8-f-wait-expiry-sibling"
+        sibling_execution_id = "exec-r8-f-wait-expiry-sibling"
+        now = datetime.now(timezone.utc)
+        expired_at = now - timedelta(seconds=1)
+
+        async with factory() as uow:
+            sibling_branch = await uow.agents.save_task_branch(
+                {
+                    "branch_id": sibling_branch_id,
+                    "task_id": "task-r7f",
+                    "parent_branch_id": branch_id,
+                    "base_execution_id": EXECUTION,
+                    "base_checkpoint_id": CHECKPOINT,
+                    "current_execution_id": None,
+                    "resolution_state": "OPEN",
+                    "revision": 0,
+                    "created_by": USER,
+                    "reason": "R8_FORK",
+                }
+            )
+            assert sibling_branch is not None
+            sibling_execution = await uow.agents.save_execution(
+                {
+                    "id": sibling_execution_id,
+                    "session_id": SESSION,
+                    "agent_id": AGENT,
+                    "task_id": "task-r7f",
+                    "branch_id": sibling_branch_id,
+                    "parent_execution_id": None,
+                    "retry_of_execution_id": None,
+                    "base_execution_id": EXECUTION,
+                    "base_checkpoint_id": CHECKPOINT,
+                    "correlation_id": "corr-r8-f-wait-expiry-sibling",
+                    "state": "WAITING",
+                    "wait_reason": "RESOURCE",
+                    "revision": 2,
+                    "current_checkpoint_id": None,
+                    "remaining_active_budget_seconds": 15.0,
+                    "request": {},
+                }
+            )
+            assert sibling_execution is not None
+            sibling_branch = await uow.agents.compare_and_set_task_branch(
+                sibling_branch_id,
+                0,
+                {"current_execution_id": sibling_execution_id},
+            )
+            assert sibling_branch is not None
+
+            execution = await uow.agents.get_execution(EXECUTION)
+            execution.wait_expires_at = expired_at
+            checkpoint = await uow.agents.get_execution_checkpoint(CHECKPOINT)
+            checkpoint.wait_expires_at = expired_at
+
+            budget = await uow.agents.get_task_budget("task-r7f")
+            updated_budget = await uow.agents.compare_and_set_task_budget(
+                "task-r7f",
+                int(budget.revision),
+                {"active_branches": int(budget.active_branches) + 1},
+            )
+            assert updated_budget is not None
+            await uow.commit()
+
+        task_waiting = await budget_service.reconcile_multibranch_task_activity(
+            "task-r7f"
+        )
+        assert str(task_waiting.status) == "WAITING"
+        assert list(task_waiting.wait_reasons or []) == [
+            "CONNECTION",
+            "RESOURCE",
+        ]
+
+        plan = _plan(
+            task_id="task-r7f",
+            branch_id=branch_id,
+            wait_expires_at=expired_at,
+        )
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-task-wait-expired")
+        )
+        with pytest.raises(ResumeClaimRejected) as raised:
+            await store.consume_resume_claim(
+                ResumeClaimConsumeSpec(
+                    plan=plan,
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    expected_claim_revision=claim.revision,
+                    now_utc=now,
+                )
+            )
+        assert raised.value.code == "WAIT_EXPIRED"
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            task = await uow.agents.get_task("task-r7f")
+            budget = await uow.agents.get_task_budget("task-r7f")
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "TIMEOUT"
+            assert execution.revision == 3
+            assert str(task.status) == "WAITING"
+            assert list(task.wait_reasons or []) == ["RESOURCE"]
+            assert int(budget.active_executions) == 0
+            assert int(budget.active_branches) == 2
+            assert durable_claim.state == "REJECTED"
+            assert durable_claim.rejection_code == "WAIT_EXPIRED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_transient_resume_activity_epoch_conflict_retries_internally(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-activity-internal-retry.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-activity-internal-retry")
+        )
+
+        original = AgentRepository.compare_and_set_task
+        losses = 0
+
+        async def lose_first_task_epoch(self, task_id, revision, values):
+            nonlocal losses
+            if task_id == "task-r7f" and losses == 0:
+                losses += 1
+                return None
+            return await original(self, task_id, revision, values)
+
+        monkeypatch.setattr(
+            AgentRepository,
+            "compare_and_set_task",
+            lose_first_task_epoch,
+        )
+
+        result = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+
+        assert losses == 1
+        assert result.claim_id == claim.claim_id
+        assert result.resume_request_id == claim.resume_request_id
+        assert result.consumed_execution_revision == 3
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            task = await uow.agents.get_task("task-r7f")
+            assert str(execution.state) == "RUNNING"
+            assert int(execution.revision) == 3
+            assert str(durable_claim.state) == "CONSUMED"
+            assert str(task.status) == "RUNNING"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_exhausted_resume_activity_epoch_conflict_is_retryable_deferred(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-activity-deferred.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-activity-deferred")
+        )
+
+        async with factory() as uow:
+            task_before = await uow.agents.get_task("task-r7f")
+            task_revision_before = int(task_before.revision)
+            await uow.commit()
+
+        async def always_lose_task_epoch(self, task_id, revision, values):
+            if task_id == "task-r7f":
+                return None
+            raise AssertionError("unexpected Task CAS")
+
+        monkeypatch.setattr(
+            AgentRepository,
+            "compare_and_set_task",
+            always_lose_task_epoch,
+        )
+
+        with pytest.raises(ResumeClaimDeferred) as raised:
+            await store.consume_resume_claim(
+                ResumeClaimConsumeSpec(
+                    plan=plan,
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    expected_claim_revision=claim.revision,
+                    now_utc=datetime.now(timezone.utc),
+                )
+            )
+
+        assert raised.value.code == "RESUME_CONFLICT"
+        assert raised.value.retryable is True
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            budget = await uow.agents.get_task_budget("task-r7f")
+            task_after = await uow.agents.get_task("task-r7f")
+            assert str(execution.state) == "WAITING"
+            assert int(execution.revision) == 2
+            assert str(durable_claim.state) == "CREATED"
+            assert int(budget.active_executions) == 0
+            assert int(task_after.revision) == task_revision_before
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_resume_consume_retries_transient_activity_deferred_same_claim(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-deferred-retry.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-deferred-retry")
+        )
+        spec = ResumeClaimConsumeSpec(
+            plan=plan,
+            claim_id=claim.claim_id,
+            resume_request_id=claim.resume_request_id,
+            expected_claim_revision=claim.revision,
+            now_utc=datetime.now(timezone.utc),
+        )
+
+        original = store._consume_resume_claim_once
+        attempts = 0
+
+        async def transient_once(inner_spec):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return ResumeClaimDeferred(
+                    "RESUME_CONFLICT",
+                    "simulated Task activity epoch loss",
+                    retryable=True,
+                )
+            return await original(inner_spec)
+
+        monkeypatch.setattr(
+            store,
+            "_consume_resume_claim_once",
+            transient_once,
+        )
+        result = await store.consume_resume_claim(spec)
+
+        assert attempts == 2
+        assert result.claim_id == claim.claim_id
+        assert result.resume_request_id == claim.resume_request_id
+        assert result.consumed_execution_revision == 3
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "RUNNING"
+            assert execution.revision == 3
+            assert durable_claim.state == "CONSUMED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_created_resume_claim_rebinds_across_connection_generation(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-claim-rebind.sqlite",
+    )
+    try:
+        await _seed_non_task(sessions)
+        plan_k2 = _plan()
+        claim_k2 = await store.get_or_create_resume_claim(
+            _intent(plan_k2, "rr-r8-f-rebind")
+        )
+        original_expiry = claim_k2.claim_expires_at
+
+        plan_k3 = replace(
+            plan_k2,
+            target_connection_id="conn-r7f-k3",
+            plan_fingerprint="",
+        )
+        plan_k3 = replace(
+            plan_k3,
+            plan_fingerprint=resume_plan_fingerprint(plan_k3),
+        )
+
+        rebound = await store.rebind_created_resume_claim(
+            claim_k2.claim_id,
+            plan=plan_k3,
+            resume_request_id=claim_k2.resume_request_id,
+        )
+
+        assert rebound.claim_id == claim_k2.claim_id
+        assert rebound.resume_request_id == claim_k2.resume_request_id
+        assert rebound.state.value == "CREATED"
+        assert rebound.revision == claim_k2.revision + 1
+        assert rebound.connection_id == "conn-r7f-k3"
+        assert rebound.plan_fingerprint == plan_k3.plan_fingerprint
+        assert rebound.claim_expires_at == original_expiry
+
+        consumed = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan_k3,
+                claim_id=rebound.claim_id,
+                resume_request_id=rebound.resume_request_id,
+                expected_claim_revision=rebound.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+        assert consumed.claim_id == claim_k2.claim_id
+        assert consumed.resume_request_id == claim_k2.resume_request_id
+        assert consumed.bound_client_id == CLIENT
+        assert consumed.bound_connection_id == "conn-r7f-k3"
+        assert consumed.consumed_execution_revision == 3
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_created_resume_claim_rebind_rejects_semantic_change(
+    tmp_path,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-claim-rebind-conflict.sqlite",
+    )
+    try:
+        await _seed_non_task(sessions)
+        plan_k2 = _plan()
+        claim_k2 = await store.get_or_create_resume_claim(
+            _intent(plan_k2, "rr-r8-f-rebind-conflict")
+        )
+
+        conflicts = [
+            replace(
+                plan_k2,
+                target_client_id="client-r7f-foreign",
+                target_connection_id="conn-r7f-k3",
+                plan_fingerprint="",
+            ),
+            replace(
+                plan_k2,
+                target_user_id="user-r7f-foreign",
+                target_connection_id="conn-r7f-k3",
+                plan_fingerprint="",
+            ),
+            replace(
+                plan_k2,
+                correlation_id="corr-r7f-changed",
+                target_connection_id="conn-r7f-k3",
+                plan_fingerprint="",
+            ),
+        ]
+        for conflict in conflicts:
+            conflict = replace(
+                conflict,
+                plan_fingerprint=resume_plan_fingerprint(conflict),
+            )
+            with pytest.raises(ResumeClaimRejected) as raised:
+                await store.rebind_created_resume_claim(
+                    claim_k2.claim_id,
+                    plan=conflict,
+                    resume_request_id=claim_k2.resume_request_id,
+                )
+            assert raised.value.code == "RESUME_REQUEST_CONFLICT"
+
+        current = await store.load_resume_claim_by_request_id(
+            claim_k2.resume_request_id
+        )
+        assert current.claim_id == claim_k2.claim_id
+        assert current.state.value == "CREATED"
+        assert current.revision == claim_k2.revision
+        assert current.client_id == CLIENT
+        assert current.connection_id == K2
+        assert current.plan_fingerprint == plan_k2.plan_fingerprint
     finally:
         await engine.dispose()
