@@ -17,6 +17,7 @@ from ..models.sql.agent import (
     AgentTaskBranchContextRecord,
     AgentTaskBranchRecord,
     AgentTaskForkAdmissionRecord,
+    AgentTaskRetryAdmissionRecord,
     TaskBudgetRecord,
     TaskBudgetReservationRecord,
     AgentToolCallRecord,
@@ -401,6 +402,56 @@ class AgentRepository(BaseRepository):
             )
         )
         return list(result.scalars().all())
+
+    async def save_task_retry_admission(
+        self,
+        values: Dict[str, Any],
+    ):
+        record = AgentTaskRetryAdmissionRecord(**values)
+        self.session.add(record)
+        await self.session.flush()
+        return record
+
+    async def get_task_retry_admission(
+        self,
+        task_id: str,
+        retry_request_id: str,
+    ):
+        result = await self.session.execute(
+            select(AgentTaskRetryAdmissionRecord).where(
+                AgentTaskRetryAdmissionRecord.task_id == task_id,
+                AgentTaskRetryAdmissionRecord.retry_request_id
+                == retry_request_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_retry_admission_for_update(
+        self,
+        task_id: str,
+        retry_request_id: str,
+    ):
+        result = await self.session.execute(
+            select(AgentTaskRetryAdmissionRecord)
+            .where(
+                AgentTaskRetryAdmissionRecord.task_id == task_id,
+                AgentTaskRetryAdmissionRecord.retry_request_id
+                == retry_request_id,
+            )
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
+    async def get_task_retry_admission_by_execution(
+        self,
+        execution_id: str,
+    ):
+        result = await self.session.execute(
+            select(AgentTaskRetryAdmissionRecord).where(
+                AgentTaskRetryAdmissionRecord.execution_id == execution_id
+            )
+        )
+        return result.scalar_one_or_none()
 
     async def save_task_budget(self, values: Dict[str, Any]):
         record = TaskBudgetRecord(**values)
@@ -900,6 +951,29 @@ class AgentRepository(BaseRepository):
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_created_resume_claims_for_task_for_update(
+        self,
+        task_id: str,
+    ):
+        """Lock CREATED ResumeClaims whose executions belong to one Task."""
+
+        result = await self.session.execute(
+            select(AgentResumeClaimRecord)
+            .join(
+                AgentExecutionRecord,
+                AgentExecutionRecord.id == AgentResumeClaimRecord.execution_id,
+            )
+            .where(
+                AgentExecutionRecord.task_id == task_id,
+                AgentResumeClaimRecord.state == "CREATED",
+            )
+            .order_by(
+                AgentResumeClaimRecord.claim_id.asc(),
+            )
+            .with_for_update()
+        )
+        return list(result.scalars().all())
 
     async def compare_and_set_resume_claim(
         self,
