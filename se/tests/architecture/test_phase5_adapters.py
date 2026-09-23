@@ -212,7 +212,7 @@ def test_provider_adapter_serialization_is_gemini_compatible_with_tools():
 @pytest.mark.asyncio
 async def test_provider_adapter_propagates_timeout_and_cancellation():
     class SlowHandler:
-        async def execute_with_fallback(self, http_client, body):
+        async def execute_with_fallback(self, http_client, body, *, timeout=None):
             await asyncio.sleep(10)
             raise AssertionError("provider should have been cancelled before completion")
 
