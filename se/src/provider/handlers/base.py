@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import math
 from time import monotonic
 from abc import ABC
 from typing import Any, Dict, Optional
@@ -33,13 +34,49 @@ class BaseExecutionHandler(ABC):
         self.circuit_breaker_manager = circuit_breaker_manager
         self.timeout = 60.0 if timeout is None else float(timeout)
 
-    def _new_call_budget(self) -> ProviderCallBudget:
-        """Create exactly one process-local budget for one logical handler call."""
+    def _effective_call_timeout(
+        self,
+        caller_timeout: float | None = None,
+    ) -> float:
+        """Clamp one logical provider call by caller and provider limits."""
 
-        if self.timeout <= 0:
+        configured_timeout = float(self.timeout)
+        if (
+            not math.isfinite(configured_timeout)
+            or configured_timeout <= 0
+        ):
             raise ProviderDeadlineExceededError(
                 "Provider call deadline is already exhausted."
             )
+
+        if caller_timeout is None:
+            return configured_timeout
+        if isinstance(caller_timeout, bool):
+            raise ProviderDeadlineExceededError(
+                "Caller provider deadline is invalid or exhausted."
+            )
+
+        try:
+            caller_value = float(caller_timeout)
+        except (TypeError, ValueError) as exc:
+            raise ProviderDeadlineExceededError(
+                "Caller provider deadline is invalid or exhausted."
+            ) from exc
+
+        if not math.isfinite(caller_value) or caller_value <= 0:
+            raise ProviderDeadlineExceededError(
+                "Caller provider deadline is invalid or exhausted."
+            )
+
+        return min(configured_timeout, caller_value)
+
+    def _new_call_budget(
+        self,
+        caller_timeout: float | None = None,
+    ) -> ProviderCallBudget:
+        """Create exactly one process-local budget for one logical handler call."""
+
+        effective_timeout = self._effective_call_timeout(caller_timeout)
 
         retry_policy = getattr(self.executor, "retry_policy", None)
         max_retries = getattr(retry_policy, "max_retries", 0)
@@ -52,7 +89,7 @@ class BaseExecutionHandler(ABC):
 
         return ProviderCallBudget.from_timeout(
             now_monotonic=monotonic(),
-            timeout_seconds=self.timeout,
+            timeout_seconds=effective_timeout,
             max_retries=max_retries,
         )
 
