@@ -40,15 +40,12 @@ class EmbeddingExecutionHandler(BaseExecutionHandler):
 
         for provider in healthy_chain:
             try:
-                probe_timeout = self._remaining_timeout(
-                    call_budget,
-                    provider_name=provider.name,
-                )
-                if not await provider.has_capability(
-                    model,
-                    ModelCapability.EMBEDDINGS,
-                    http_client,
-                    probe_timeout,
+                if not await self._probe_capability_with_budget(
+                    provider=provider,
+                    model=model,
+                    capability=ModelCapability.EMBEDDINGS,
+                    http_client=http_client,
+                    call_budget=call_budget,
                 ):
                     continue
 

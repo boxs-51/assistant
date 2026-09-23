@@ -21,6 +21,80 @@ from .retry_contracts import ProviderCallBudget
 logger = structlog.get_logger(__name__)
 
 
+async def await_with_provider_deadline(
+    operation: Callable[[float], Awaitable[Any]],
+    *,
+    call_budget: ProviderCallBudget,
+    provider_name: str,
+    timeout_message: str,
+    now_monotonic: Callable[[], float] | None = None,
+) -> Any:
+    """Run one owned provider await under the logical monotonic deadline.
+
+    The child is cancelled and retrieved on logical timeout or caller
+    cancellation. A result that becomes visible only after the logical
+    deadline is rejected as deadline-exceeded rather than accepted as success.
+    """
+
+    clock = time.monotonic if now_monotonic is None else now_monotonic
+    remaining = call_budget.remaining_seconds(
+        now_monotonic=clock()
+    )
+    if remaining <= 0:
+        raise ProviderDeadlineExceededError(
+            timeout_message,
+            provider_name=provider_name,
+        )
+
+    child = asyncio.create_task(operation(remaining))
+    try:
+        done, _ = await asyncio.wait(
+            {child},
+            timeout=remaining,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if child not in done:
+            child.cancel()
+            await asyncio.gather(child, return_exceptions=True)
+            raise ProviderDeadlineExceededError(
+                timeout_message,
+                provider_name=provider_name,
+            )
+
+        result: Any = None
+        terminal_error: Exception | None = None
+        terminal_cancel: asyncio.CancelledError | None = None
+        try:
+            result = child.result()
+        except asyncio.CancelledError as error:
+            terminal_cancel = error
+        except Exception as error:
+            terminal_error = error
+
+        if call_budget.remaining_seconds(
+            now_monotonic=clock()
+        ) <= 0:
+            raise ProviderDeadlineExceededError(
+                timeout_message,
+                provider_name=provider_name,
+            )
+
+        if terminal_cancel is not None:
+            raise terminal_cancel
+        if terminal_error is not None:
+            raise terminal_error
+        return result
+    except asyncio.CancelledError:
+        if not child.done():
+            child.cancel()
+        await asyncio.gather(child, return_exceptions=True)
+        raise
+    finally:
+        if not child.done():
+            child.cancel()
+            await asyncio.gather(child, return_exceptions=True)
+
+
 class ProviderExecutor:
     """Execute one provider request under resilience policies."""
 
@@ -100,17 +174,26 @@ class ProviderExecutor:
         async def execution_func():
             nonlocal provider_attempted
             attempt_kwargs = dict(kwargs)
-            if call_budget is not None:
-                remaining = self._remaining_or_raise(
-                    call_budget,
-                    provider.name,
-                )
-                attempt_kwargs["timeout"] = self._bounded_attempt_timeout(
-                    attempt_kwargs.get("timeout"),
+            if call_budget is None:
+                provider_attempted = True
+                return await provider.chat.chat(**attempt_kwargs)
+
+            async def run_attempt(remaining: float):
+                nonlocal provider_attempted
+                bounded_kwargs = dict(attempt_kwargs)
+                bounded_kwargs["timeout"] = self._bounded_attempt_timeout(
+                    bounded_kwargs.get("timeout"),
                     remaining,
                 )
-            provider_attempted = True
-            return await provider.chat.chat(**attempt_kwargs)
+                provider_attempted = True
+                return await provider.chat.chat(**bounded_kwargs)
+
+            return await await_with_provider_deadline(
+                run_attempt,
+                call_budget=call_budget,
+                provider_name=provider.name,
+                timeout_message="Provider call deadline exceeded during attempt.",
+            )
 
         try:
             if call_budget is not None:
@@ -330,11 +413,12 @@ class ProviderExecutor:
 
         async def execution_func():
             nonlocal provider_attempted
-            if call_budget is not None:
-                remaining = self._remaining_or_raise(
-                    call_budget,
-                    provider.name,
-                )
+            if call_budget is None:
+                provider_attempted = True
+                return await execution_callable()
+
+            async def run_attempt(remaining: float):
+                nonlocal provider_attempted
                 attempt_timeout = self._bounded_attempt_timeout(
                     timeout,
                     remaining,
@@ -342,8 +426,14 @@ class ProviderExecutor:
                 provider_attempted = True
                 return await execution_callable(attempt_timeout)
 
-            provider_attempted = True
-            return await execution_callable()
+            return await await_with_provider_deadline(
+                run_attempt,
+                call_budget=call_budget,
+                provider_name=provider.name,
+                timeout_message=(
+                    "Provider generic call deadline exceeded during attempt."
+                ),
+            )
 
         try:
             if call_budget is not None:

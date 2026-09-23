@@ -58,15 +58,12 @@ class ChatExecutionHandler(BaseExecutionHandler):
             ) as span:
                 span.set_attribute("provider.name", provider.name)
                 try:
-                    probe_timeout = self._remaining_timeout(
-                        call_budget,
-                        provider_name=provider.name,
-                    )
-                    if not await provider.has_capability(
-                        model,
-                        ModelCapability.CHAT,
-                        http_client,
-                        probe_timeout,
+                    if not await self._probe_capability_with_budget(
+                        provider=provider,
+                        model=model,
+                        capability=ModelCapability.CHAT,
+                        http_client=http_client,
+                        call_budget=call_budget,
                     ):
                         continue
 
@@ -162,15 +159,12 @@ class ChatExecutionHandler(BaseExecutionHandler):
             stream_started = False
             provider_stream = None
             try:
-                probe_timeout = self._remaining_timeout(
-                    call_budget,
-                    provider_name=provider.name,
-                )
-                if not await provider.has_capability(
-                    model,
-                    ModelCapability.CHAT_STREAM,
-                    http_client,
-                    probe_timeout,
+                if not await self._probe_capability_with_budget(
+                    provider=provider,
+                    model=model,
+                    capability=ModelCapability.CHAT_STREAM,
+                    http_client=http_client,
+                    call_budget=call_budget,
                 ):
                     continue
 
