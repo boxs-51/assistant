@@ -124,6 +124,7 @@ def map_error(error: Exception) -> HTTPException:
                 "NOT_OPEN",
                 "FORBIDDEN",
                 "EXCEEDED",
+                "EXECUTION_ACTIVE",
             )
         ):
             status_code = status.HTTP_409_CONFLICT
