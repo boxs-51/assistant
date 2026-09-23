@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -11,6 +12,7 @@ from se.src.runtimes.agent.task_budget import (
     AggregateAdmissionError,
     BranchResolutionError,
     RetryConsumeError,
+    TaskBudgetService,
 )
 from se.tests.integration.test_r8_d_atomic_fork_consume import (
     _Uow,
@@ -24,6 +26,16 @@ from se.tests.integration.test_r9_b_atomic_retry_admission import (
 from se.tests.integration.test_r9_de_branch_resolution import (
     _seed_two_completed_branches,
 )
+
+
+def test_r9_h_cancel_task_locks_branches_in_canonical_order():
+    source = inspect.getsource(TaskBudgetService.cancel_task)
+    lock_all = source.index("list_task_branches_for_update")
+    fork_receipts = source.index("list_task_fork_admissions")
+    retry_receipts = source.index("list_task_retry_admissions")
+
+    assert lock_all < fork_receipts < retry_receipts
+    assert "get_task_branch_for_update" not in source
 
 
 async def _complete_root(source, service):
