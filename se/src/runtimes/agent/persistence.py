@@ -2470,6 +2470,35 @@ class DurableAgentStore:
                         await uow.commit()
                         return result
 
+                    # Task-scoped ResumeClaim creation must serialize with R9
+                    # ADOPT. Reading the execution does not acquire authority;
+                    # the Task row is the first lock, matching ADOPT's frozen
+                    # order. If ADOPT already won, no new CREATED claim may
+                    # commit. If claim creation wins first, ADOPT will observe
+                    # and reject that CREATED claim before completing the Task.
+                    execution = await uow.agents.get_execution(
+                        intent.execution_id
+                    )
+                    if execution is None:
+                        raise ResumeClaimRejected(
+                            "STALE_RESUME_CLAIM",
+                            "ResumeClaim execution no longer exists.",
+                        )
+                    if execution.task_id is not None:
+                        task = await uow.agents.get_task_for_update(
+                            execution.task_id
+                        )
+                        if task is None:
+                            raise ResumeClaimRejected(
+                                "STALE_RESUME_CLAIM",
+                                "ResumeClaim AgentTask no longer exists.",
+                            )
+                        if str(task.status) in _TASK_TERMINAL_STATES:
+                            raise ResumeClaimRejected(
+                                "TASK_TERMINAL",
+                                "Terminal AgentTask cannot create a ResumeClaim.",
+                            )
+
                     record = await uow.agents.save_resume_claim(values)
                     result = self._resume_claim_contract(record)
                     await uow.commit()
