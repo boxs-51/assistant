@@ -1,122 +1,323 @@
-from typing import Optional, Any
+from __future__ import annotations
+
+import math
+import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Optional
+
+import httpx
+
+from .retry_contracts import ProviderRetryHint, ProviderRetryHintSource
+
+
+PROVIDER_ERROR = "PROVIDER_ERROR"
+PROVIDER_AUTHENTICATION_FAILED = "PROVIDER_AUTHENTICATION_FAILED"
+PROVIDER_RATE_LIMITED = "PROVIDER_RATE_LIMITED"
+PROVIDER_UNAVAILABLE = "PROVIDER_UNAVAILABLE"
+PROVIDER_MODEL_UNAVAILABLE = "PROVIDER_MODEL_UNAVAILABLE"
+PROVIDER_RESPONSE_INVALID = "PROVIDER_RESPONSE_INVALID"
+PROVIDER_FALLBACK_EXHAUSTED = "PROVIDER_FALLBACK_EXHAUSTED"
+PROVIDER_DEADLINE_EXCEEDED = "PROVIDER_DEADLINE_EXCEEDED"
+
+_GOOGLE_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo"
+_PROTO_DURATION_SECONDS_RE = re.compile(
+    r"^(?P<seconds>\d+)(?:\.(?P<fraction>\d{1,9}))?s$"
+)
+
 
 class ProviderError(Exception):
-    """Lớp ngoại lệ cơ sở cho tất cả các lỗi liên quan đến provider."""
+    """Base exception for provider failures."""
+
+    code = PROVIDER_ERROR
     failure_domain = "PROVIDER"
     retryable = False
 
     def __init__(
-        self, 
-        message: str, 
+        self,
+        message: str,
         provider_name: Optional[str] = None,
         status_code: Optional[int] = None,
         error_code: Optional[str] = None,
         raw_response: Optional[Any] = None,
-        is_network_error: bool = False
+        is_network_error: bool = False,
+        retry_hint: Optional[ProviderRetryHint] = None,
     ):
         self.provider_name = provider_name
         self.status_code = status_code
         self.error_code = error_code
         self.raw_response = raw_response
         self.is_network_error = is_network_error
-        
-        # Tạo message chi tiết bao gồm cả mã lỗi nếu có
+        self.retry_hint = retry_hint
+
         prefix = f"[{provider_name}]" if provider_name else ""
         if is_network_error:
             code_info = " (Network/Connection Error)"
         else:
-            code_info = f" (Status: {status_code}, Code: {error_code})" if status_code or error_code else ""
+            code_info = (
+                f" (Status: {status_code}, Code: {error_code})"
+                if status_code or error_code
+                else ""
+            )
         super().__init__(f"{prefix} {message}{code_info}")
 
+    @property
+    def retry_after_seconds(self) -> Optional[float]:
+        if self.retry_hint is None:
+            return None
+        return self.retry_hint.retry_after_seconds
 
-class NoAvailableProviderError(ProviderError):
-    """Ngoại lệ được ném ra khi tất cả các provider trong chuỗi fallback đều thất bại."""
-    pass
+
+class ProviderFallbackExhaustedError(ProviderError):
+    """All eligible providers for one logical call have been exhausted."""
+
+    code = PROVIDER_FALLBACK_EXHAUSTED
+
+
+class NoAvailableProviderError(ProviderFallbackExhaustedError):
+    """Compatibility name for an exhausted/unavailable provider chain."""
 
 
 class ProviderAuthenticationError(ProviderError):
-    """Lỗi xác thực với provider (e.g., sai API key, token hết hạn). HTTP 401, 403"""
-    pass
+    """Authentication/authorization failure from a provider."""
+
+    code = PROVIDER_AUTHENTICATION_FAILED
 
 
 class ProviderRateLimitError(ProviderError):
-    """Lỗi do vượt quá giới hạn tần suất hoặc hết quota (hết tiền, giới hạn tokens). HTTP 429"""
+    """Provider quota or rate-limit failure."""
+
+    code = PROVIDER_RATE_LIMITED
     retryable = True
 
 
 class ProviderUnavailableError(ProviderError):
-    """Lỗi khi provider không khả dụng hoặc bị timeout đột xuất. HTTP 502, 503, 504"""
+    """Transient provider/network unavailability."""
+
+    code = PROVIDER_UNAVAILABLE
     retryable = True
 
 
-class ResponseValidationError(ProviderError):
-    """Lỗi khi phản hồi từ provider không hợp lệ (e.g., sai schema JSON, rỗng)."""
-    pass
+class ProviderModelUnavailableError(ProviderError):
+    """Mapped model is definitively unavailable on this provider."""
 
-import httpx
- 
-def wrap_provider_exception(error: Exception, provider_name: str) -> ProviderError:
+    code = PROVIDER_MODEL_UNAVAILABLE
+
+
+class ResponseValidationError(ProviderError):
+    """Provider response is structurally invalid."""
+
+    code = PROVIDER_RESPONSE_INVALID
+
+
+class ProviderDeadlineExceededError(ProviderError):
+    """Logical provider-call deadline is exhausted."""
+
+    code = PROVIDER_DEADLINE_EXCEEDED
+
+
+def parse_retry_after_hint(
+    value: str | None,
+    *,
+    now_utc: datetime | None = None,
+) -> ProviderRetryHint | None:
+    """Parse HTTP Retry-After into a relative retry delay.
+
+    Delta-seconds are accepted only in their RFC integer form. HTTP-date uses
+    wall clock solely to derive a relative delay; later logical deadline
+    accounting remains monotonic.
     """
-    Chuyển đổi các ngoại lệ từ httpx (HTTPStatusError, RequestError) 
-    thành Custom Provider Exceptions có đầy đủ cấu trúc mã lỗi.
-    """
-    # Trường hợp 1: Nếu lỗi đã là Custom Exception của hệ thống, giữ nguyên
+
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+
+    if value.isdigit():
+        try:
+            seconds = float(int(value, 10))
+            return ProviderRetryHint(
+                retry_after_seconds=seconds,
+                source=ProviderRetryHintSource.RETRY_AFTER,
+            )
+        except (OverflowError, ValueError):
+            return None
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at is None:
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    try:
+        seconds = max(
+            0.0,
+            (retry_at.astimezone(timezone.utc) - now.astimezone(timezone.utc))
+            .total_seconds(),
+        )
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(seconds):
+        return None
+    return ProviderRetryHint(
+        retry_after_seconds=seconds,
+        source=ProviderRetryHintSource.RETRY_AFTER,
+    )
+
+
+def parse_google_rpc_retry_info_hint(
+    raw_response: Any,
+) -> ProviderRetryHint | None:
+    """Parse Gemini/google.rpc RetryInfo retryDelay from an error payload."""
+
+    if not isinstance(raw_response, dict):
+        return None
+    error_data = raw_response.get("error")
+    if not isinstance(error_data, dict):
+        return None
+    details = error_data.get("details")
+    if not isinstance(details, list):
+        return None
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        if detail.get("@type") != _GOOGLE_RETRY_INFO_TYPE:
+            continue
+        retry_delay = detail.get("retryDelay")
+        if not isinstance(retry_delay, str):
+            continue
+        match = _PROTO_DURATION_SECONDS_RE.fullmatch(retry_delay.strip())
+        if match is None:
+            continue
+
+        seconds = float(match.group("seconds"))
+        fraction = match.group("fraction")
+        if fraction:
+            seconds += int(fraction) / (10 ** len(fraction))
+        if not math.isfinite(seconds):
+            continue
+
+        return ProviderRetryHint(
+            retry_after_seconds=seconds,
+            source=ProviderRetryHintSource.GOOGLE_RPC_RETRY_INFO,
+        )
+    return None
+
+
+def extract_rate_limit_retry_hint(
+    response: httpx.Response,
+    raw_response: Any,
+    *,
+    now_utc: datetime | None = None,
+) -> ProviderRetryHint | None:
+    """Select the strongest valid hint attached to one HTTP 429 response."""
+
+    if response.status_code != 429:
+        return None
+
+    hints = [
+        parse_retry_after_hint(
+            response.headers.get("Retry-After"),
+            now_utc=now_utc,
+        ),
+        parse_google_rpc_retry_info_hint(raw_response),
+    ]
+    valid_hints = [hint for hint in hints if hint is not None]
+    if not valid_hints:
+        return None
+    return max(valid_hints, key=lambda hint: hint.retry_after_seconds)
+
+
+def wrap_provider_exception(
+    error: Exception,
+    provider_name: str,
+    *,
+    now_utc: datetime | None = None,
+) -> ProviderError:
+    """Normalize httpx/provider failures into structured provider errors."""
+
     if isinstance(error, ProviderError):
         return error
 
-    # Trường hợp 2: Lỗi HTTPStatusError (Có phản hồi từ API nhưng mã lỗi 4xx, 5xx)
     if isinstance(error, httpx.HTTPStatusError):
         status_code = error.response.status_code
         error_code = None
         message = str(error)
         raw_response = None
-        
+
         try:
             raw_response = error.response.json()
-            # Parser thông minh theo chuẩn chung của các API lớn (OpenAI, Gemini, Anthropic)
             if isinstance(raw_response, dict):
-                if "error" in raw_response: # Chuẩn OpenAI, Anthropic
+                if "error" in raw_response:
                     error_data = raw_response["error"]
                     if isinstance(error_data, dict):
                         message = error_data.get("message", message)
-                        error_code = error_data.get("code")  # e.g., 'insufficient_quota', 'too_many_requests'
-                elif "detail" in raw_response: # Chuẩn FastAPI / Một số local provider
+                        error_code = (
+                            error_data.get("status")
+                            or error_data.get("code")
+                        )
+                elif "detail" in raw_response:
                     message = raw_response["detail"]
         except Exception:
-            # Fallback nếu response không phải JSON (trả về HTML hoặc text thô)
-            message = error.response.text[:500] # Giới hạn kí tự tránh làm phình log
+            message = error.response.text[:500]
+
+        retry_hint = extract_rate_limit_retry_hint(
+            error.response,
+            raw_response,
+            now_utc=now_utc,
+        )
 
         if status_code in (401, 403):
             return ProviderAuthenticationError(
-                message=f"Auth Failed: {message}", provider_name=provider_name,
-                status_code=status_code, error_code=error_code, raw_response=raw_response
+                message=f"Auth Failed: {message}",
+                provider_name=provider_name,
+                status_code=status_code,
+                error_code=error_code,
+                raw_response=raw_response,
             )
-        elif status_code == 429:
+        if status_code == 429:
             return ProviderRateLimitError(
-                message=f"Quota/Rate Limit Exceeded: {message}", provider_name=provider_name,
-                status_code=status_code, error_code=error_code, raw_response=raw_response
+                message=f"Quota/Rate Limit Exceeded: {message}",
+                provider_name=provider_name,
+                status_code=status_code,
+                error_code=error_code,
+                raw_response=raw_response,
+                retry_hint=retry_hint,
             )
-        elif status_code == 408 or 500 <= status_code < 600:
+        if status_code == 408 or 500 <= status_code < 600:
             return ProviderUnavailableError(
-                message=f"Provider Service Unavailable: {message}", provider_name=provider_name,
-                status_code=status_code, error_code=error_code, raw_response=raw_response
+                message=f"Provider Service Unavailable: {message}",
+                provider_name=provider_name,
+                status_code=status_code,
+                error_code=error_code,
+                raw_response=raw_response,
             )
-        else:
-            return ProviderError(
-                message=message, provider_name=provider_name,
-                status_code=status_code, error_code=error_code, raw_response=raw_response
-            )
+        return ProviderError(
+            message=message,
+            provider_name=provider_name,
+            status_code=status_code,
+            error_code=error_code,
+            raw_response=raw_response,
+        )
 
-    # Trường hợp 3: Lỗi httpx.RequestError (Mất mạng, Timeout, DNS sập, Không có response)
     if isinstance(error, httpx.RequestError):
-        # Transport errors have no provider response and are generally transient.
-        # Keep them in one retryable category while preserving the concrete cause.
-        prefix = "Network Timeout" if isinstance(error, httpx.TimeoutException) else "Network Request Failed"
+        prefix = (
+            "Network Timeout"
+            if isinstance(error, httpx.TimeoutException)
+            else "Network Request Failed"
+        )
         return ProviderUnavailableError(
             message=f"{prefix} (No Response): {str(error)}",
             provider_name=provider_name,
-            is_network_error=True
+            is_network_error=True,
         )
 
-    # Trường hợp 4: Các lỗi ngoại vi khác (Lỗi code logic, lỗi hệ thống)
     return ProviderError(message=str(error), provider_name=provider_name)
