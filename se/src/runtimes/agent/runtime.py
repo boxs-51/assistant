@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import math
-import time
+from time import monotonic
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
@@ -1764,7 +1764,7 @@ class AgentRuntime:
                 # before any awaited publication/accounting work.  The same
                 # absolute deadline is then shared by the adapter and provider.
                 inference_deadline_monotonic = (
-                    time.monotonic() + inference_timeout
+                    monotonic() + inference_timeout
                 )
 
                 await self._publish(
