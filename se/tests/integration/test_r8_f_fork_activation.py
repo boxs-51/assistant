@@ -6,11 +6,17 @@ import pytest
 
 from se.src.domain.schemas.agent import AgentDefinition
 from se.src.domain.schemas.identity import Identity
+from se.src.domain.schemas.multi_agent import AgentTaskForkRequest
+from se.src.main import execute_forked_agent_task_control_plane
 from se.src.runtimes.agent.persistence import (
     DurableAgentStore,
     ForkControlError,
 )
 from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.agent.supervisor import (
+    AgentExecutionOwnershipError,
+    AgentExecutionSupervisor,
+)
 from se.tests.integration.test_r8_d_atomic_fork_consume import (
     _Uow,
     _seed_source,
@@ -407,4 +413,206 @@ async def test_r8_f_activation_win_handoff_cleanup_releases_real_budget_once(
         assert repeated_execution.revision == 3
         assert repeated_execution.state == "CANCELLED"
     finally:
+        await engine.dispose()
+
+
+def _fork_request(source) -> AgentTaskForkRequest:
+    return AgentTaskForkRequest(
+        fork_request_id=source["plan"].fork_request_id,
+        source_branch_id=source["source_branch_id"],
+        source_execution_id=source["source_execution_id"],
+        source_checkpoint_id=source["checkpoint_id"],
+        overlay_messages=list(source["plan"].overlay_messages),
+    )
+
+
+def _real_fork_container(*, store, planner, service, supervisor, runtime):
+    return type(
+        "_ForkContainer",
+        (),
+        {
+            "agent_durable_store": store,
+            "fork_planning_service": planner,
+            "task_budget_service": service,
+            "agent_execution_supervisor": supervisor,
+            "agent_runtime": runtime,
+            "agent_registry": type(
+                "_Registry",
+                (),
+                {"get": staticmethod(lambda agent_id: _agent())},
+            )(),
+        },
+    )()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_cancel_wins_revision_one_race_and_blocks_runtime(tmp_path):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_cancel_wins_activation_race.sqlite",
+    )
+    supervisor = AgentExecutionSupervisor()
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-cancel-wins-race",
+        )
+        admission = await service.consume_fork_plan(source["plan"])
+        store = _store(sessions)
+        runtime = AgentRuntime(
+            context_builder=None,
+            inference=None,
+            tool_execution=None,
+            execution_policy=None,
+            durable_store=store,
+            task_budget_service=service,
+        )
+        container = _real_fork_container(
+            store=store,
+            planner=planner,
+            service=service,
+            supervisor=supervisor,
+            runtime=runtime,
+        )
+
+        original_activate = store.activate_fork_execution
+        activation_ready = asyncio.Event()
+        allow_activation = asyncio.Event()
+
+        async def delayed_activation(bootstrap, *, identity, now_utc=None):
+            activation_ready.set()
+            await allow_activation.wait()
+            return await original_activate(
+                bootstrap,
+                identity=identity,
+                now_utc=now_utc,
+            )
+
+        store.activate_fork_execution = delayed_activation
+
+        fork_call = asyncio.create_task(
+            execute_forked_agent_task_control_plane(
+                container,
+                source["task_id"],
+                _fork_request(source),
+                _identity(),
+            )
+        )
+        await asyncio.wait_for(activation_ready.wait(), timeout=1)
+
+        before = await service.get_budget(source["task_id"])
+        cancelled_task = await service.cancel_task(source["task_id"])
+        await supervisor.cancel_task(source["task_id"])
+        allow_activation.set()
+
+        result = await fork_call
+        execution = await store.load_execution(admission.execution_id)
+        after = await service.get_budget(source["task_id"])
+
+        assert str(cancelled_task.status) == "CANCELLED"
+        assert result["execution_id"] == admission.execution_id
+        assert result["execution_state"] == "CANCELLED"
+        assert result["execution_revision"] == 2
+        assert result["started"] is False
+        assert execution.state == "CANCELLED"
+        assert execution.revision == 2
+        assert after.active_executions == before.active_executions - 1
+        assert after.active_branches == before.active_branches
+        assert supervisor.active_execution_ids() == ()
+    finally:
+        await supervisor.shutdown()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_activation_wins_then_task_cancel_forces_handoff_fail_close(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_activation_wins_cancel_race.sqlite",
+    )
+    supervisor = AgentExecutionSupervisor()
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-activation-wins-race",
+        )
+        admission = await service.consume_fork_plan(source["plan"])
+        store = _store(sessions)
+        runtime = AgentRuntime(
+            context_builder=None,
+            inference=None,
+            tool_execution=None,
+            execution_policy=None,
+            durable_store=store,
+            task_budget_service=service,
+        )
+        container = _real_fork_container(
+            store=store,
+            planner=planner,
+            service=service,
+            supervisor=supervisor,
+            runtime=runtime,
+        )
+
+        original_activate = store.activate_fork_execution
+        activation_committed = asyncio.Event()
+        allow_activation_return = asyncio.Event()
+
+        async def committed_then_blocked(
+            bootstrap,
+            *,
+            identity,
+            now_utc=None,
+        ):
+            result = await original_activate(
+                bootstrap,
+                identity=identity,
+                now_utc=now_utc,
+            )
+            activation_committed.set()
+            await allow_activation_return.wait()
+            return result
+
+        store.activate_fork_execution = committed_then_blocked
+
+        fork_call = asyncio.create_task(
+            execute_forked_agent_task_control_plane(
+                container,
+                source["task_id"],
+                _fork_request(source),
+                _identity(),
+            )
+        )
+        await asyncio.wait_for(activation_committed.wait(), timeout=1)
+
+        before_cancel = await service.get_budget(source["task_id"])
+        activated = await store.load_execution(admission.execution_id)
+        assert activated.state == "RUNNING"
+        assert activated.revision == 2
+
+        cancelled_task = await service.cancel_task(source["task_id"])
+        await supervisor.cancel_task(source["task_id"])
+        closed_budget = await service.get_budget(source["task_id"])
+        assert str(cancelled_task.status) == "CANCELLED"
+        assert closed_budget.active_executions == before_cancel.active_executions
+
+        allow_activation_return.set()
+        with pytest.raises(AgentExecutionOwnershipError):
+            await fork_call
+
+        execution = await store.load_execution(admission.execution_id)
+        after = await service.get_budget(source["task_id"])
+        assert execution.state == "CANCELLED"
+        assert execution.revision == 3
+        assert after.active_executions == before_cancel.active_executions - 1
+        assert after.active_branches == before_cancel.active_branches
+        assert supervisor.active_execution_ids() == ()
+    finally:
+        await supervisor.shutdown()
         await engine.dispose()
