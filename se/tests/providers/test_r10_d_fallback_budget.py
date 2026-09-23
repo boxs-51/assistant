@@ -513,3 +513,71 @@ async def test_r10_d_embedding_raw_http_probe_failure_keeps_structured_detail(
     assert error.error_code == "RESOURCE_EXHAUSTED"
     assert error.__cause__ is raw_probe_error
     assert executor.provider_calls == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_r10_d_chat_providerless_probe_error_uses_current_provider_identity(
+    monkeypatch,
+):
+    providerless_error = ProviderError("model probe failed")
+    providers = [
+        _Provider("p1"),
+        _ProbeErrorProvider("ollama", providerless_error),
+    ]
+    executor = _Executor(
+        [ProviderError("p1 failed", provider_name="p1")],
+        max_retries=1,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.monotonic",
+        _Clock([100.0, 100.1, 100.2, 100.3]),
+    )
+
+    with pytest.raises(NoAvailableProviderError) as raised:
+        await _chat_handler(
+            providers,
+            executor,
+            timeout=10.0,
+        ).execute_with_fallback(
+            object(),
+            {"model": "logical-model"},
+        )
+
+    error = raised.value
+    assert error.code == PROVIDER_FALLBACK_EXHAUSTED
+    assert error.provider_name == "ollama"
+    assert error.__cause__ is providerless_error
+
+
+@pytest.mark.asyncio
+async def test_r10_d_embedding_providerless_probe_error_uses_current_provider_identity(
+    monkeypatch,
+):
+    providerless_error = ProviderError("model probe failed")
+    providers = [
+        _Provider("p1"),
+        _ProbeErrorProvider("ollama", providerless_error),
+    ]
+    executor = _Executor(
+        [ProviderError("p1 failed", provider_name="p1")],
+        max_retries=1,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.monotonic",
+        _Clock([50.0, 50.1, 50.2, 50.3]),
+    )
+
+    with pytest.raises(NoAvailableProviderError) as raised:
+        await _embedding_handler(
+            providers,
+            executor,
+            timeout=5.0,
+        ).execute(
+            object(),
+            {"model": "embedding-model", "input": ["x"]},
+        )
+
+    error = raised.value
+    assert error.code == PROVIDER_FALLBACK_EXHAUSTED
+    assert error.provider_name == "ollama"
+    assert error.__cause__ is providerless_error
