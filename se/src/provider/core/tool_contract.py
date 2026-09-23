@@ -157,7 +157,16 @@ _JSON_SCHEMA_TYPES = frozenset(
     {"null", "boolean", "object", "array", "number", "string", "integer"}
 )
 _SCHEMA_MAP_KEYWORDS = frozenset(
-    {"properties", "patternProperties", "$defs", "definitions", "dependentSchemas"}
+    {
+        "properties",
+        "patternProperties",
+        "$defs",
+        "definitions",
+        "dependentSchemas",
+        # Draft-04/06/07 compatibility: each value may be either a schema
+        # or a property-name array. The recursive helper leaves arrays intact.
+        "dependencies",
+    }
 )
 _SCHEMA_SINGLE_KEYWORDS = frozenset(
     {
@@ -166,6 +175,9 @@ _SCHEMA_SINGLE_KEYWORDS = frozenset(
         "propertyNames",
         "contains",
         "items",
+        "unevaluatedItems",
+        # Draft-04/06/07 tuple-schema compatibility.
+        "additionalItems",
         "not",
         "if",
         "then",
