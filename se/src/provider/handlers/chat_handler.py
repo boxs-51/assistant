@@ -10,6 +10,7 @@ from ..exceptions import (
     NoAvailableProviderError,
     ProviderDeadlineExceededError,
     ProviderError,
+    wrap_provider_exception,
 )
 from .base import BaseExecutionHandler
 
@@ -47,6 +48,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
             )
 
         last_exception: Exception | None = None
+        last_detail: ProviderError | None = None
 
         for provider in healthy_execution_chain:
             with tracer.start_as_current_span(
@@ -82,6 +84,10 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 ) as error:
                     span.record_exception(error)
                     last_exception = error
+                    last_detail = wrap_provider_exception(
+                        error,
+                        provider.name,
+                    )
                     continue
 
         try:
@@ -91,20 +97,25 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 "Provider call deadline exhausted during fallback."
             ) from last_exception
 
+        detail = last_detail or (
+            last_exception
+            if isinstance(last_exception, ProviderError)
+            else None
+        )
         final_error = NoAvailableProviderError(
             "All providers in fallback chain failed.",
             provider_name=getattr(
-                last_exception,
+                detail,
                 "provider_name",
                 None,
             ),
             status_code=getattr(
-                last_exception,
+                detail,
                 "status_code",
                 None,
             ),
             error_code=getattr(
-                last_exception,
+                detail,
                 "error_code",
                 None,
             ),
