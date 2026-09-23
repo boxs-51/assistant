@@ -1,3 +1,4 @@
+from copy import deepcopy
 import httpx
 import json
 
@@ -49,6 +50,7 @@ class ResponseChats:
             if not isinstance(response_data, dict):
                 raise TypeError("response body must be a JSON object")
 
+            raw_response = deepcopy(response_data)
             self._restore_tool_names(
                 response_data,
                 tool_names,
@@ -57,7 +59,7 @@ class ResponseChats:
             response_data["metadata"] = {
                 "provider": "openai",
                 "provider_response_id": response_data.get("id"),
-                "raw_response": response_data.copy(),
+                "raw_response": raw_response,
             }
             return GatewayResponse.model_validate(response_data)
         except ResponseValidationError:
