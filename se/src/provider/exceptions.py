@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Optional
+import math
+import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
+from typing import Any, Optional
 
 import httpx
 
-if TYPE_CHECKING:
-    from .retry_contracts import ProviderRetryHint
+from .retry_contracts import ProviderRetryHint, ProviderRetryHintSource
 
 
 PROVIDER_ERROR = "PROVIDER_ERROR"
@@ -16,6 +19,11 @@ PROVIDER_MODEL_UNAVAILABLE = "PROVIDER_MODEL_UNAVAILABLE"
 PROVIDER_RESPONSE_INVALID = "PROVIDER_RESPONSE_INVALID"
 PROVIDER_FALLBACK_EXHAUSTED = "PROVIDER_FALLBACK_EXHAUSTED"
 PROVIDER_DEADLINE_EXCEEDED = "PROVIDER_DEADLINE_EXCEEDED"
+
+_GOOGLE_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo"
+_PROTO_DURATION_SECONDS_RE = re.compile(
+    r"^(?P<seconds>\d+)(?:\.(?P<fraction>\d{1,9}))?s$"
+)
 
 
 class ProviderError(Exception):
@@ -33,7 +41,7 @@ class ProviderError(Exception):
         error_code: Optional[str] = None,
         raw_response: Optional[Any] = None,
         is_network_error: bool = False,
-        retry_hint: Optional["ProviderRetryHint"] = None,
+        retry_hint: Optional[ProviderRetryHint] = None,
     ):
         self.provider_name = provider_name
         self.status_code = status_code
@@ -108,7 +116,132 @@ class ProviderDeadlineExceededError(ProviderError):
     code = PROVIDER_DEADLINE_EXCEEDED
 
 
-def wrap_provider_exception(error: Exception, provider_name: str) -> ProviderError:
+def parse_retry_after_hint(
+    value: str | None,
+    *,
+    now_utc: datetime | None = None,
+) -> ProviderRetryHint | None:
+    """Parse HTTP Retry-After into a relative retry delay.
+
+    Delta-seconds are accepted only in their RFC integer form. HTTP-date uses
+    wall clock solely to derive a relative delay; later logical deadline
+    accounting remains monotonic.
+    """
+
+    if value is None:
+        return None
+    value = value.strip()
+    if not value:
+        return None
+
+    if value.isdigit():
+        try:
+            seconds = float(int(value, 10))
+            return ProviderRetryHint(
+                retry_after_seconds=seconds,
+                source=ProviderRetryHintSource.RETRY_AFTER,
+            )
+        except (OverflowError, ValueError):
+            return None
+
+    try:
+        retry_at = parsedate_to_datetime(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at is None:
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+
+    now = now_utc or datetime.now(timezone.utc)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=timezone.utc)
+    try:
+        seconds = max(
+            0.0,
+            (retry_at.astimezone(timezone.utc) - now.astimezone(timezone.utc))
+            .total_seconds(),
+        )
+    except (OverflowError, ValueError):
+        return None
+    if not math.isfinite(seconds):
+        return None
+    return ProviderRetryHint(
+        retry_after_seconds=seconds,
+        source=ProviderRetryHintSource.RETRY_AFTER,
+    )
+
+
+def parse_google_rpc_retry_info_hint(
+    raw_response: Any,
+) -> ProviderRetryHint | None:
+    """Parse Gemini/google.rpc RetryInfo retryDelay from an error payload."""
+
+    if not isinstance(raw_response, dict):
+        return None
+    error_data = raw_response.get("error")
+    if not isinstance(error_data, dict):
+        return None
+    details = error_data.get("details")
+    if not isinstance(details, list):
+        return None
+
+    for detail in details:
+        if not isinstance(detail, dict):
+            continue
+        if detail.get("@type") != _GOOGLE_RETRY_INFO_TYPE:
+            continue
+        retry_delay = detail.get("retryDelay")
+        if not isinstance(retry_delay, str):
+            continue
+        match = _PROTO_DURATION_SECONDS_RE.fullmatch(retry_delay.strip())
+        if match is None:
+            continue
+
+        seconds = float(match.group("seconds"))
+        fraction = match.group("fraction")
+        if fraction:
+            seconds += int(fraction) / (10 ** len(fraction))
+        if not math.isfinite(seconds):
+            continue
+
+        return ProviderRetryHint(
+            retry_after_seconds=seconds,
+            source=ProviderRetryHintSource.GOOGLE_RPC_RETRY_INFO,
+        )
+    return None
+
+
+def extract_rate_limit_retry_hint(
+    response: httpx.Response,
+    raw_response: Any,
+    *,
+    now_utc: datetime | None = None,
+) -> ProviderRetryHint | None:
+    """Select the strongest valid hint attached to one HTTP 429 response."""
+
+    if response.status_code != 429:
+        return None
+
+    hints = [
+        parse_retry_after_hint(
+            response.headers.get("Retry-After"),
+            now_utc=now_utc,
+        ),
+        parse_google_rpc_retry_info_hint(raw_response),
+    ]
+    valid_hints = [hint for hint in hints if hint is not None]
+    if not valid_hints:
+        return None
+    return max(valid_hints, key=lambda hint: hint.retry_after_seconds)
+
+
+def wrap_provider_exception(
+    error: Exception,
+    provider_name: str,
+    *,
+    now_utc: datetime | None = None,
+) -> ProviderError:
     """Normalize httpx/provider failures into structured provider errors."""
 
     if isinstance(error, ProviderError):
@@ -127,11 +260,20 @@ def wrap_provider_exception(error: Exception, provider_name: str) -> ProviderErr
                     error_data = raw_response["error"]
                     if isinstance(error_data, dict):
                         message = error_data.get("message", message)
-                        error_code = error_data.get("code")
+                        error_code = (
+                            error_data.get("status")
+                            or error_data.get("code")
+                        )
                 elif "detail" in raw_response:
                     message = raw_response["detail"]
         except Exception:
             message = error.response.text[:500]
+
+        retry_hint = extract_rate_limit_retry_hint(
+            error.response,
+            raw_response,
+            now_utc=now_utc,
+        )
 
         if status_code in (401, 403):
             return ProviderAuthenticationError(
@@ -148,6 +290,7 @@ def wrap_provider_exception(error: Exception, provider_name: str) -> ProviderErr
                 status_code=status_code,
                 error_code=error_code,
                 raw_response=raw_response,
+                retry_hint=retry_hint,
             )
         if status_code == 408 or 500 <= status_code < 600:
             return ProviderUnavailableError(
