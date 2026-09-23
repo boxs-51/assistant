@@ -421,10 +421,11 @@ AE-R8    CLOSED / merged
 AE-R9    CLOSED / merged to main @ 28757e9c / PR #13
 
 PRE-ROADMAP CI GATE
-Issue #16  ACTIVE / blocks next production roadmap phase until closed or explicitly re-frozen
+Issue #16  CLOSED / superseded as an active gate
 
-AE-R10   CONTRACT FROZEN / production code NOT STARTED / Issue #14
-AE-R11-14 NOT STARTED
+AE-R10   CLOSED / FINAL GREEN / merged to main @ 7569e9ea / Issue #14
+AE-R11   BOUNDARY AUDITED / PLAN FROZEN / CODE NOT STARTED / Issue #31
+AE-R12-14 NOT STARTED
 
 TV1-T8   CLOSED / GREEN / FINAL-FROZEN / Issue #7
 TV1-T9   BOUNDARY AUDITED / PLAN FROZEN / CODE NOT STARTED / Issue #12
