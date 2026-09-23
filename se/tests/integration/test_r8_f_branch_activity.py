@@ -4,6 +4,8 @@ import asyncio
 
 import pytest
 
+from se.src.runtimes.agent.task_budget import ForkConsumeError
+
 from se.src.domain.schemas.agent import AgentDefinition
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.agent.persistence import DurableAgentStore
@@ -262,5 +264,139 @@ async def test_r8_f_all_open_branch_heads_terminal_preserves_nonterminal_task(
         assert str(after.status) == str(before.status)
         budget = await service.get_budget(source["task_id"])
         assert str(budget.state.value) == "OPEN"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_legacy_waiting_write_cannot_override_running_sibling(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_legacy_waiting_guard.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-legacy-waiting-guard",
+        )
+        await service.consume_fork_plan(source["plan"])
+
+        durable = await service.transition_task(
+            source["task_id"],
+            allowed_source_states=("RUNNING",),
+            target_state="WAITING",
+            values={"wait_reasons": ["RESOURCE"]},
+        )
+
+        assert str(durable.status) == "RUNNING"
+        assert list(durable.wait_reasons or []) == []
+        budget = await service.get_budget(source["task_id"])
+        assert str(budget.state.value) == "OPEN"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_legacy_terminal_write_cannot_close_multibranch_task(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_legacy_terminal_guard.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-legacy-terminal-guard",
+        )
+        admission = await service.consume_fork_plan(source["plan"])
+
+        durable = await service.terminalize_task(
+            source["task_id"],
+            allowed_source_states=("RUNNING",),
+            target_state="COMPLETED",
+            values={"output": {"stale_root_result": True}},
+        )
+
+        assert str(durable.status) == "RUNNING"
+        assert durable.output is None
+        budget = await service.get_budget(source["task_id"])
+        assert str(budget.state.value) == "OPEN"
+        assert budget.active_branches == 2
+        async with _Uow(sessions) as uow:
+            branch = await uow.agents.get_task_branch(admission.branch_id)
+            assert branch is not None
+            assert str(branch.resolution_state) == "OPEN"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_fork_consume_vs_legacy_terminalize_has_no_split_brain(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_fork_vs_terminalize.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-fork-vs-terminalize",
+        )
+
+        fork_outcome, terminal_outcome = await asyncio.gather(
+            service.consume_fork_plan(source["plan"]),
+            service.terminalize_task(
+                source["task_id"],
+                allowed_source_states=("RUNNING",),
+                target_state="COMPLETED",
+                values={"output": {"legacy": True}},
+            ),
+            return_exceptions=True,
+        )
+
+        async with _Uow(sessions) as uow:
+            task = await uow.agents.get_task(source["task_id"])
+            branches = await uow.agents.list_task_branches(
+                source["task_id"]
+            )
+            budget_record = await uow.agents.get_task_budget(
+                source["task_id"]
+            )
+            receipts = await uow.agents.list_task_fork_admissions(
+                source["task_id"]
+            )
+            await uow.commit()
+
+        if isinstance(fork_outcome, BaseException):
+            assert isinstance(fork_outcome, ForkConsumeError)
+            assert not isinstance(terminal_outcome, BaseException)
+            assert str(task.status) == "COMPLETED"
+            assert str(budget_record.state) == "CLOSED"
+            assert len(branches) == 1
+            assert receipts == []
+        else:
+            assert not isinstance(terminal_outcome, BaseException)
+            assert str(task.status) == "RUNNING"
+            assert str(budget_record.state) == "OPEN"
+            assert len(branches) == 2
+            assert len(receipts) == 1
+            assert receipts[0].execution_id == fork_outcome.execution_id
+
+        # Forbidden split-brain state: committed fork plus terminal Task.
+        assert not (
+            len(receipts) == 1
+            and str(task.status) in {"COMPLETED", "FAILED", "CANCELLED"}
+        )
     finally:
         await engine.dispose()
