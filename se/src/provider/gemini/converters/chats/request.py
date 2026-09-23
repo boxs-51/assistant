@@ -6,6 +6,12 @@ import re
 import json
 
 from ...file_extension import FileHelper
+from ....core.tool_contract import (
+    ProviderToolContractError,
+    ProviderToolNameMap,
+    normalize_provider_tool_schema,
+)
+from ....core.tool_request_context import build_request_tool_name_map
 from .....domain.schemas import GatewayToolDefinition
 from .acttachment import (
     MediaContentHandler,
@@ -88,7 +94,12 @@ class RequestChats:
         parts.append({"text": text_content})
         return parts
 
-    def _format_function_response(self, name: str, content: Any) -> Dict[str, Any]:
+    def _format_function_response(
+        self,
+        name: str,
+        content: Any,
+        tool_names: ProviderToolNameMap,
+    ) -> Dict[str, Any]:
         """
         Chuẩn hóa kết quả trả về của Tool/Function thành Gemini functionResponse format.
         Gemini bắt buộc khối 'response' phải là một JSON Object (Dict).
@@ -108,17 +119,28 @@ class RequestChats:
         else:
             response_obj = {"response": content}
 
+        if not isinstance(name, str) or not name:
+            raise ProviderToolContractError(
+                "Gemini functionResponse requires a canonical logical tool name"
+            )
+
         return {
             "functionResponse": {
-                "name": name,
+                "name": tool_names.provider_name(name),
                 "response": response_obj
             }
         }
 
-    def adapt_chat(self, request: Dict[str, Any]) -> Dict[str, Any]:
+    def adapt_chat(
+        self,
+        request: Dict[str, Any],
+        *,
+        tool_names: ProviderToolNameMap | None = None,
+    ) -> Dict[str, Any]:
         """
         Hàm chính điều phối: Chuyển đổi chuẩn Request OpenAI/Gateway sang REST Payload của Gemini.
         """
+        names = tool_names or build_request_tool_name_map("gemini", request)
         gemini_contents = []
         system_instruction_text = ""
 
@@ -160,7 +182,7 @@ class RequestChats:
                                     args = {"raw_arguments": args}
                             gemini_parts.append({
                                 "functionCall": {
-                                    "name": func.get("name"),
+                                    "name": names.provider_name(func.get("name")),
                                     "args": args
                                 }
                             })
@@ -173,7 +195,7 @@ class RequestChats:
                                 args = {"raw_arguments": args}
                         gemini_parts.append({
                             "functionCall": {
-                                "name": tool_calls.get("name"),
+                                "name": names.provider_name(tool_calls.get("name")),
                                 "args": args
                             }
                         })
@@ -206,9 +228,13 @@ class RequestChats:
                     tool_name = content.get("name") or tool_name
 
                 if not tool_name:
-                    tool_name = "unnamed_tool"
+                    raise ProviderToolContractError(
+                        "Gemini tool-result history requires a logical tool name"
+                    )
 
-                gemini_parts.append(self._format_function_response(tool_name, content))
+                gemini_parts.append(
+                    self._format_function_response(tool_name, content, names)
+                )
 
             # KỊCH BẢN C: NGƯỜI DÙNG (USER) HOẶC CÁC ROLE KHÁC
             else:
@@ -217,9 +243,15 @@ class RequestChats:
                 # 1. Xử lý trường hợp đặc biệt: user message chứa tool_result / function_response
                 if "tool_result" in msg or "function_response" in msg:
                     tool_data = msg.get("tool_result") or msg.get("function_response")
-                    tool_name = tool_data.get("name") or tool_data.get("tool_name") or "unnamed_tool"
+                    tool_name = tool_data.get("name") or tool_data.get("tool_name")
+                    if not tool_name:
+                        raise ProviderToolContractError(
+                            "Gemini function response requires a logical tool name"
+                        )
                     tool_content = tool_data.get("content") or tool_data.get("response") or tool_data
-                    gemini_parts.append(self._format_function_response(tool_name, tool_content))
+                    gemini_parts.append(
+                        self._format_function_response(tool_name, tool_content, names)
+                    )
 
                 # 2. Xử lý content chính của User
                 if isinstance(content, str):
@@ -232,9 +264,15 @@ class RequestChats:
                         
                         # Bóc tách nếu part chứa tool_result riêng lẻ
                         if part_type in ["tool_result", "function_response"]:
-                            tool_name = part.get("name") or part.get("tool_name") or "unnamed_tool"
+                            tool_name = part.get("name") or part.get("tool_name")
+                            if not tool_name:
+                                raise ProviderToolContractError(
+                                    "Gemini content tool result requires a logical tool name"
+                                )
                             tool_content = part.get("content") or part.get("output") or ""
-                            gemini_parts.append(self._format_function_response(tool_name, tool_content))
+                            gemini_parts.append(
+                                self._format_function_response(tool_name, tool_content, names)
+                            )
                             continue
 
                         if part_type == "text":
@@ -289,12 +327,13 @@ class RequestChats:
                         gemini_tools.append({"code_execution": {}})
                 else:
                     decl = {
-                        "name": tool.name,
+                        "name": names.provider_name(tool.name),
                         "description": tool.description
                     }
                     if tool.parameters:
-                        param_schema = tool.parameters.copy() if isinstance(tool.parameters, dict) else tool.parameters
-                        param_schema.pop("$schema", None)
+                        param_schema = normalize_provider_tool_schema(
+                            "gemini", tool.parameters
+                        )
 
                         # --- ĐIỂM SỬA QUAN TRỌNG CHO GEMINI ---
                         # Đảm bảo type luôn là OBJECT (In hoa) để Gemini tiếp nhận
