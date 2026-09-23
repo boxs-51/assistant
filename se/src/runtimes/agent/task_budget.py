@@ -1815,6 +1815,84 @@ class TaskBudgetService:
             mutate_budget=mutate,
         )
 
+    async def expire_task_scoped_waiting_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        source_revision: int,
+        transition_values: dict[str, Any],
+    ) -> int | None:
+        """Atomically WAITING -> TIMEOUT with R8 multi-branch activity.
+
+        WAITING already released active execution capacity, so this transition
+        is deliberately TaskBudget-accounting neutral. The Task row is the
+        serialization authority and the execution timeout plus aggregate Task
+        projection commit together.
+        """
+
+        if str(transition_values.get("state") or "") != "TIMEOUT":
+            raise ValueError("waiting expiry transition must target TIMEOUT")
+        normalized = _normalize_execution_store_values(transition_values)
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    task = await uow.agents.get_task_for_update(task_id)
+                    if task is None:
+                        raise TaskBudgetRequiredError(
+                            f"Unknown AgentTask: {task_id}"
+                        )
+
+                    execution = await uow.agents.get_execution(execution_id)
+                    if execution is None:
+                        raise TaskBudgetConflictError(
+                            f"Unknown AgentExecution: {execution_id}"
+                        )
+                    if execution.task_id != task_id:
+                        raise TaskBudgetConflictError(
+                            "AgentExecution belongs to a different AgentTask."
+                        )
+                    if (
+                        str(execution.state) != "WAITING"
+                        or int(execution.revision) != int(source_revision)
+                    ):
+                        await uow.commit()
+                        return None
+
+                    updated = await uow.agents.compare_and_set_execution(
+                        execution_id,
+                        source_revision,
+                        normalized,
+                    )
+                    if updated is None:
+                        await uow.rollback()
+                        return None
+
+                    activity = await reconcile_multibranch_task_activity_in_uow(
+                        uow,
+                        task_id=task_id,
+                        locked_task=task,
+                    )
+                    if activity is None:
+                        # The timeout mutation is part of this same UoW, so an
+                        # activity race rolls it back before retry.
+                        await uow.rollback()
+                        continue
+
+                    await uow.commit()
+                    return source_revision + 1
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            "Task-scoped WAITING expiry activity conflicts exhausted for "
+            f"{task_id}/{execution_id}@{source_revision}"
+        )
+
     async def finish_task_scoped_execution(
         self,
         task_id: str,
