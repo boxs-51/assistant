@@ -4,6 +4,7 @@ import asyncio
 
 import pytest
 
+from se.src.infrastructure.storage.models.sql.agent import AgentIterationRecord
 from se.src.runtimes.agent.task_budget import ForkConsumeError
 
 from se.src.domain.schemas.agent import AgentDefinition
@@ -11,6 +12,7 @@ from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.tests.integration.test_r8_d_atomic_fork_consume import (
     _Uow,
+    _runtime_context_state,
     _seed_source,
     _setup,
 )
@@ -457,5 +459,163 @@ async def test_r8_f_terminal_wrapper_after_waiting_reconcile_stays_nonterminal(
         assert guarded.output is None
         budget = await service.get_budget(source["task_id"])
         assert str(budget.state.value) == "OPEN"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_fork_consume_vs_standalone_reconcile_has_no_waiting_running_split(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="r8_f_fork_vs_reconcile.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-r8-f-fork-vs-reconcile",
+            fork_request_id="fork-r8-f-b2",
+        )
+        b2 = await service.consume_fork_plan(source["plan"])
+        store = _store(sessions)
+        activation = await _activate(store, b2)
+
+        # Emulate the normal runtime persistence that makes B2 a future
+        # forkable WAITING source.
+        async with _Uow(sessions) as uow:
+            updated = await uow.agents.update_execution(
+                b2.execution_id,
+                {
+                    "context_state": _runtime_context_state(
+                        "task-r8-f-fork-vs-reconcile-b2"
+                    )
+                },
+            )
+            assert updated is not None
+            uow.session.add(
+                AgentIterationRecord(
+                    id="iter-r8-f-fork-vs-reconcile-b2",
+                    execution_id=b2.execution_id,
+                    iteration=1,
+                    state="WAITING",
+                    tool_call_ids=[],
+                )
+            )
+            await uow.commit()
+
+        b2_checkpoint = "cp-r8-f-fork-vs-reconcile-b2"
+        assert await service.finish_task_scoped_execution(
+            source["task_id"],
+            execution_id=b2.execution_id,
+            source_revision=activation.activated_execution_revision,
+            transition_values={
+                "state": "WAITING",
+                "wait_reason": "RESOURCE",
+                "remaining_active_budget_seconds": 30.0,
+                "wait_expires_at": None,
+                "completed_at": None,
+            },
+            delegated=False,
+            checkpoint_values={
+                "checkpoint_id": b2_checkpoint,
+                "execution_id": b2.execution_id,
+                "execution_revision": 3,
+                "session_id": source["session_id"],
+                "task_id": source["task_id"],
+                "branch_id": b2.branch_id,
+                "iteration": 1,
+                "wait_reason": "RESOURCE",
+                "remaining_active_budget_seconds": 30.0,
+                "wait_expires_at": None,
+                "transcript_snapshot": [
+                    {"role": "user", "content": "base"},
+                    {"role": "user", "content": "fork-local"},
+                ],
+                "metadata_json": {},
+            },
+            pending_invocations=(),
+        ) == 3
+
+        # B1 is terminal while B2 is the only WAITING open branch head.
+        # Task intentionally remains RUNNING until aggregate reconciliation.
+        async with _Uow(sessions) as uow:
+            source_execution = await uow.agents.get_execution(
+                source["source_execution_id"]
+            )
+            terminal = await uow.agents.compare_and_set_execution(
+                source["source_execution_id"],
+                int(source_execution.revision),
+                {
+                    "state": "COMPLETED",
+                    "wait_reason": None,
+                    "completed_at": None,
+                },
+            )
+            assert terminal is not None
+            await uow.commit()
+
+        b3_plan = await planner.build_fork_plan(
+            fork_request_id="fork-r8-f-b3",
+            task_id=source["task_id"],
+            source_branch_id=b2.branch_id,
+            source_execution_id=b2.execution_id,
+            source_checkpoint_id=b2_checkpoint,
+            target_user_id=_identity().user_id,
+            overlay_messages=(
+                {"role": "user", "content": "b3-overlay"},
+            ),
+        )
+
+        fork_outcome, reconcile_outcome = await asyncio.gather(
+            service.consume_fork_plan(b3_plan),
+            service.reconcile_multibranch_task_activity(source["task_id"]),
+            return_exceptions=True,
+        )
+
+        async with _Uow(sessions) as uow:
+            task = await uow.agents.get_task(source["task_id"])
+            receipts = await uow.agents.list_task_fork_admissions(
+                source["task_id"]
+            )
+            branches = await uow.agents.list_task_branches(source["task_id"])
+            branch_heads = []
+            for branch in branches:
+                if branch.current_execution_id is None:
+                    continue
+                execution = await uow.agents.get_execution(
+                    branch.current_execution_id
+                )
+                if execution is not None:
+                    branch_heads.append((branch.branch_id, str(execution.state)))
+            await uow.commit()
+
+        b3_receipts = [
+            item for item in receipts
+            if item.fork_request_id == "fork-r8-f-b3"
+        ]
+        if b3_receipts:
+            assert not isinstance(fork_outcome, BaseException)
+            assert str(task.status) == "RUNNING"
+            assert any(
+                branch_id == b3_receipts[0].branch_id and state == "RUNNING"
+                for branch_id, state in branch_heads
+            )
+        else:
+            assert isinstance(fork_outcome, ForkConsumeError)
+            assert str(task.status) == "WAITING"
+
+        # The forbidden stale snapshot outcome.
+        assert not (
+            b3_receipts
+            and str(task.status) == "WAITING"
+            and any(
+                branch_id == b3_receipts[0].branch_id and state == "RUNNING"
+                for branch_id, state in branch_heads
+            )
+        )
+        assert not isinstance(reconcile_outcome, BaseException)
     finally:
         await engine.dispose()
