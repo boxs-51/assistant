@@ -4,8 +4,11 @@ from dataclasses import fields, replace
 
 from se.src.runtimes.agent.contracts.fork import (
     ForkPlan,
+    ForkRuntimeSeed,
     ForkSideEffectSnapshot,
+    fork_overlay_fingerprint,
     fork_plan_fingerprint,
+    fork_runtime_seed_fingerprint,
     fork_side_effect_fingerprint,
     fork_transcript_fingerprint,
 )
@@ -34,6 +37,32 @@ def _effect(revision=4, result_fingerprint="a" * 64):
 def _plan(**updates):
     transcript = updates.pop("base_transcript", (_message(),))
     effects = updates.pop("side_effects", (_effect(),))
+    overlay_messages = (
+        {
+            "role": "user",
+            "content": "branch-local",
+            "tool_calls": [],
+            "name": None,
+            "tool_call_id": None,
+            "metadata": {},
+        },
+    )
+    runtime_seed = ForkRuntimeSeed(
+        version=1,
+        request_id="request-1",
+        workflow_id=None,
+        metadata={"safe": True},
+        causation_id=None,
+        trace_id="trace-1",
+        limits={"timeout_seconds": 60.0},
+        request_fingerprint="r" * 64,
+        remaining_active_budget_seconds=30.0,
+        checkpoint_iteration=4,
+        base_transcript_fingerprint=fork_transcript_fingerprint(transcript),
+        side_effect_fingerprint=fork_side_effect_fingerprint(effects),
+        branch_context_revision=0,
+        overlay_fingerprint=fork_overlay_fingerprint(overlay_messages),
+    )
     values = {
         "fork_request_id": "fork-request-a",
         "task_id": "task-1",
@@ -53,9 +82,9 @@ def _plan(**updates):
         "base_transcript_fingerprint": fork_transcript_fingerprint(transcript),
         "side_effects": effects,
         "side_effect_fingerprint": fork_side_effect_fingerprint(effects),
-        "overlay_messages": (
-            {"role": "user", "content": "branch-local", "tool_calls": [], "name": None, "tool_call_id": None, "metadata": {}},
-        ),
+        "runtime_seed": runtime_seed,
+        "runtime_seed_fingerprint": fork_runtime_seed_fingerprint(runtime_seed),
+        "overlay_messages": overlay_messages,
         "target_user_id": "user-1",
     }
     values.update(updates)
