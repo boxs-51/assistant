@@ -4,7 +4,7 @@ import importlib
 import time
 from typing import Any, Optional
 
-from tools.v1._shared.contracts import failure_result, success_result
+from tools.v1._shared.contracts import failure_result, success_result, tool_result_schema
 from tools.v1._shared.limits import IntLimitSpec, resolve_int_limit
 
 
@@ -31,13 +31,215 @@ CLOSE_VERIFY_TIMEOUT_SECONDS = 2.0
 CLOSE_VERIFY_POLL_SECONDS = 0.05
 
 
+_WINDOW_SELECTOR_PROPERTIES = {
+    "title_query": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": MAX_TITLE_QUERY_CHARS,
+    },
+    "window_handle": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": MAX_WINDOW_HANDLE,
+    },
+    "pid": {
+        "type": "integer",
+        "minimum": 1,
+        "maximum": MAX_PID,
+    },
+}
+
+
+def _single_target_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": dict(_WINDOW_SELECTOR_PROPERTIES),
+        "required": [],
+        "anyOf": [
+            {"required": ["title_query"]},
+            {"required": ["window_handle"]},
+            {"required": ["pid"]},
+        ],
+    }
+
+
 TOOL_METADATA = {
+    "manifest_version": "2.0",
     "name": "window_tool",
+    "version": WINDOW_TOOL_VERSION,
     "description": (
         "Quản lý cửa sổ ứng dụng với targeting an toàn theo title/handle/PID. "
         "Các side effect chỉ chạy khi selector resolve đúng một cửa sổ; "
         "kết quả trả về theo ToolResult có cấu trúc."
     ),
+    "expose_root": False,
+    "exports": [
+        {
+            "id": "window.list",
+            "version": "1.0",
+            "name": "window.list",
+            "description": "Liệt kê cửa sổ ứng dụng với số kết quả bị giới hạn.",
+            "bind": {"action": "list"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": WINDOW_RESULTS.minimum,
+                        "maximum": WINDOW_RESULTS.maximum,
+                    }
+                },
+                "required": [],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "IDEMPOTENT",
+            "effects": ["READ"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "window.find",
+            "version": "1.0",
+            "name": "window.find",
+            "description": "Tìm cửa sổ theo title_query không phân biệt hoa thường.",
+            "bind": {"action": "find"},
+            "input_schema": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "title_query": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": MAX_TITLE_QUERY_CHARS,
+                    },
+                    "max_results": {
+                        "type": "integer",
+                        "minimum": WINDOW_RESULTS.minimum,
+                        "maximum": WINDOW_RESULTS.maximum,
+                    },
+                },
+                "required": ["title_query"],
+            },
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "IDEMPOTENT",
+            "effects": ["READ"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "window.geometry",
+            "version": "1.0",
+            "name": "window.geometry",
+            "description": "Đọc geometry của đúng một cửa sổ được resolve bằng selector.",
+            "bind": {"action": "get_geometry"},
+            "input_schema": _single_target_schema(),
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "IDEMPOTENT",
+            "effects": ["READ"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "window.focus",
+            "version": "1.0",
+            "name": "window.focus",
+            "description": "Focus đúng một cửa sổ sau khi selector resolve duy nhất.",
+            "bind": {"action": "focus"},
+            "input_schema": _single_target_schema(),
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "window.close",
+            "version": "1.0",
+            "name": "window.close",
+            "description": "Đóng đúng một cửa sổ sau khi selector resolve duy nhất.",
+            "bind": {"action": "close"},
+            "input_schema": _single_target_schema(),
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "NON_IDEMPOTENT",
+            "effects": ["EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "window.minimize",
+            "version": "1.0",
+            "name": "window.minimize",
+            "description": "Minimize đúng một cửa sổ sau khi selector resolve duy nhất.",
+            "bind": {"action": "minimize"},
+            "input_schema": _single_target_schema(),
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "window.maximize",
+            "version": "1.0",
+            "name": "window.maximize",
+            "description": "Maximize đúng một cửa sổ sau khi selector resolve duy nhất.",
+            "bind": {"action": "maximize"},
+            "input_schema": _single_target_schema(),
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "window.restore",
+            "version": "1.0",
+            "name": "window.restore",
+            "description": "Restore đúng một cửa sổ sau khi selector resolve duy nhất.",
+            "bind": {"action": "restore"},
+            "input_schema": _single_target_schema(),
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+    ],
+    # Legacy root descriptive fields remain only for direct physical callers.
     "base_risk": "MEDIUM",
     "effects": ["READ", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": [],
@@ -81,7 +283,6 @@ TOOL_METADATA = {
         "required": ["action"],
     },
 }
-
 
 class _WindowToolError(Exception):
     def __init__(

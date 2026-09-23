@@ -8,7 +8,7 @@ import time
 from copy import deepcopy
 from typing import Any, Callable, Optional
 
-from tools.v1._shared.contracts import failure_result, success_result
+from tools.v1._shared.contracts import failure_result, success_result, tool_result_schema
 from tools.v1._shared.limits import (
     FloatLimitSpec,
     IntLimitSpec,
@@ -189,12 +189,88 @@ _ROOT_PROPERTIES["clicks"] = {
     "maximum": MAX_SCROLL_ABS,
 }
 
+def _desktop_input_schema(action: str) -> dict[str, Any]:
+    spec = _ACTION_SPECS[action]
+    schema: dict[str, Any] = {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": deepcopy(spec["properties"]),
+        "required": list(spec["required"]),
+    }
+    if action == "mouse_click":
+        schema["allOf"] = [
+            {
+                "if": {"required": ["x"]},
+                "then": {"required": ["y"]},
+            },
+            {
+                "if": {"required": ["y"]},
+                "then": {"required": ["x"]},
+            },
+        ]
+    elif action == "mouse_drag":
+        schema["allOf"] = [
+            {
+                "if": {"required": ["start_x"]},
+                "then": {"required": ["start_y"]},
+            },
+            {
+                "if": {"required": ["start_y"]},
+                "then": {"required": ["start_x"]},
+            },
+        ]
+    return schema
+
+
+_DESKTOP_LOGICAL_EXPORTS = (
+    ("desktop.screen_info", "get_screen_info", "IDEMPOTENT", ["READ"]),
+    ("desktop.mouse_move", "mouse_move", "UNKNOWN", ["EXTERNAL_SIDE_EFFECT"]),
+    ("desktop.mouse_click", "mouse_click", "NON_IDEMPOTENT", ["EXTERNAL_SIDE_EFFECT"]),
+    ("desktop.mouse_drag", "mouse_drag", "NON_IDEMPOTENT", ["EXTERNAL_SIDE_EFFECT"]),
+    ("desktop.mouse_scroll", "mouse_scroll", "NON_IDEMPOTENT", ["EXTERNAL_SIDE_EFFECT"]),
+    ("desktop.type_text", "type_text", "NON_IDEMPOTENT", ["EXTERNAL_SIDE_EFFECT"]),
+    ("desktop.press_key", "press_key", "NON_IDEMPOTENT", ["EXTERNAL_SIDE_EFFECT"]),
+    ("desktop.hotkey", "hotkey", "NON_IDEMPOTENT", ["EXTERNAL_SIDE_EFFECT"]),
+)
+
+
+def _build_logical_exports() -> list[dict[str, Any]]:
+    exports: list[dict[str, Any]] = []
+    for capability_id, action, idempotency, effects in _DESKTOP_LOGICAL_EXPORTS:
+        spec = _ACTION_SPECS[action]
+        exports.append(
+            {
+                "id": capability_id,
+                "version": "1.0",
+                "name": capability_id,
+                "description": spec["description"],
+                "bind": {"action": action},
+                "input_schema": _desktop_input_schema(action),
+                "output_schema": tool_result_schema({}),
+                "kind": "TOOL",
+                "execution_mode": "ONE_SHOT",
+                "idempotency": idempotency,
+                "effects": effects,
+                "base_risk": spec["base_risk"],
+                "required_scopes": [],
+                "required_permissions": [],
+                "danger_patterns": [],
+            }
+        )
+    return exports
+
+
 TOOL_METADATA = {
+    "manifest_version": "2.0",
     "name": DESKTOP_TOOL_NAME,
+    "version": DESKTOP_TOOL_VERSION,
     "description": (
         "Điều khiển chuột/bàn phím desktop với lazy dependencies, hard bounds, "
         "scoped PyAutoGUI state và kết quả ToolResult không echo nội dung được gõ."
     ),
+    "expose_root": False,
+    "exports": _build_logical_exports(),
+    # Legacy root descriptive fields remain only for direct physical callers.
     "base_risk": "HIGH",
     "effects": ["EXECUTE", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": [],
@@ -204,7 +280,6 @@ TOOL_METADATA = {
         "required": ["action"],
     },
 }
-
 
 class _DesktopToolError(Exception):
     def __init__(

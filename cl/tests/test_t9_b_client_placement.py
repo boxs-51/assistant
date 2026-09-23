@@ -34,13 +34,14 @@ def _default_tools_config() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["tools_config"]
 
 
-def test_default_client_placement_uses_exact_t9_b_ids_and_no_web():
+def test_default_client_placement_retains_t9_b_ids_and_no_web():
     config = _default_tools_config()
+    enabled = config["enabled_v2_capabilities"]
 
-    assert config["enabled_v2_capabilities"] == list(T9_B_IDS)
-    assert "*" not in config["enabled_v2_capabilities"]
-    assert not any(item.startswith("web.") for item in config["enabled_v2_capabilities"])
-    assert not set(PHYSICAL_ROOTS).intersection(config["enabled_v2_capabilities"])
+    assert set(T9_B_IDS).issubset(enabled)
+    assert "*" not in enabled
+    assert not any(item.startswith("web.") for item in enabled)
+    assert not set(PHYSICAL_ROOTS).intersection(enabled)
 
 
 def test_real_top_level_t9_b_modules_load_as_logical_client_capabilities(tmp_path):

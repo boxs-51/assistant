@@ -8,7 +8,7 @@ from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.tool.registry import ToolRegistry
 
 
-T9_B_CAPABILITIES = (
+T9_CAPABILITIES = (
     "file.read",
     "file.search",
     "file.write",
@@ -17,6 +17,22 @@ T9_B_CAPABILITIES = (
     "glob.find",
     "terminal.run",
     "terminal.launch",
+    "window.list",
+    "window.find",
+    "window.geometry",
+    "window.focus",
+    "window.close",
+    "window.minimize",
+    "window.maximize",
+    "window.restore",
+    "desktop.screen_info",
+    "desktop.mouse_move",
+    "desktop.mouse_click",
+    "desktop.mouse_drag",
+    "desktop.mouse_scroll",
+    "desktop.type_text",
+    "desktop.press_key",
+    "desktop.hotkey",
 )
 
 
@@ -31,20 +47,26 @@ def test_tools_v1_are_discovered_and_executable_metadata_is_registered():
 
     result = register_local_tools(runtime, tools, root)
 
-    assert result["desktop_automation"] == "registered"
-    assert result["window_tool"] == "registered"
-    for capability_id in T9_B_CAPABILITIES:
+    for capability_id in T9_CAPABILITIES:
         assert result[capability_id] == "registered"
     assert result["web.search"] == "registered"
     assert result["web.read"] == "registered"
     assert result["web.read_many"] == "registered"
 
-    for physical_root in ("file_tool", "find_by_glob", "terminal_tool", "web_tool"):
+    physical_roots = (
+        "file_tool",
+        "find_by_glob",
+        "terminal_tool",
+        "window_tool",
+        "desktop_automation",
+        "web_tool",
+    )
+    for physical_root in physical_roots:
         assert physical_root not in result
         assert runtime.registry.get_driver(physical_root) is None
         assert tools.get(physical_root) is None
 
-    for capability_id in (*T9_B_CAPABILITIES, "web.search", "web.read", "web.read_many"):
+    for capability_id in (*T9_CAPABILITIES, "web.search", "web.read", "web.read_many"):
         assert runtime.registry.get_driver(capability_id) is not None
         assert tools.get(capability_id) is not None
         implementation = runtime.catalog.get_implementation(
@@ -54,6 +76,3 @@ def test_tools_v1_are_discovered_and_executable_metadata_is_registered():
         assert runtime.driver_registry.get(
             implementation.implementation_id
         ) is runtime.registry.get_driver(capability_id)
-
-    assert runtime.registry.get_driver("desktop_automation") is not None
-    assert runtime.registry.get_driver("window_tool") is not None
