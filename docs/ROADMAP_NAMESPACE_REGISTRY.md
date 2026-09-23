@@ -18,6 +18,7 @@ This document prevents phase-name collisions across independent roadmap tracks. 
 | `TV1-T*` | Tools V1 / Metadata / consumer convergence | `TV1-T0` through current/future `TV1-T*` phases | `tools/v1/**` plans and active Tools checkpoint issues |
 | `CAS-F*` | Central Asset Storage | `CAS-F0` through `CAS-F8+` | Central Asset Storage checkpoint/contracts |
 | `PTC-*` | Provider Tool Contract Convergence | `PTC-1` through `PTC-3+` | Issue #8 and future PTC freeze/completion documents |
+| `CTX-F*` | Context / Memory / Personalization / CompactContext | `CTX-F0` through `CTX-F12+` | Issue #15 and `docs/context_future/**` |
 
 Bare historical phase IDs remain valid aliases only inside their original track context.
 
@@ -30,6 +31,8 @@ F5  -> CAS-F5
 ```
 
 New provider-tool work MUST use `PTC-*`; it must not allocate bare `R*` IDs.
+
+Future Context/Memory/Personalization work MUST use `CTX-F*`; it must not reuse `CAS-F*` or bare `F*` identifiers.
 
 ---
 
@@ -47,6 +50,7 @@ TV1-T8-E
 CAS-F5
 CAS-F5-0
 PTC-1
+CTX-F0
 ```
 
 Avoid ambiguous standalone forms in cross-track coordination:
@@ -220,7 +224,41 @@ Historical finding IDs such as `P0-T8-XPROV-1` remain valid evidence labels; the
 
 ---
 
-## 7. PTC / Agent overlap boundary
+## 7. Future Context / Memory namespace — CTX-F*
+
+Issue #15 parks the future Context / Memory / Personalization / CompactContext program behind the Agent Execution production hardening roadmap.
+
+Canonical provisional phases:
+
+```text
+CTX-F0   Contract freeze
+CTX-F1   Tool Response Payload
+CTX-F2   Context source identities
+CTX-F3   Session/Task/Branch discovery
+CTX-F4   Context Access APIs
+CTX-F5   Long-term Memory
+CTX-F6   Personalization
+CTX-F7   Pins / score / dedup
+CTX-F8   Execution Continuity State
+CTX-F9   Working Set + ContextSnapshot
+CTX-F10  CompactContext
+CTX-F11  DefaultChatAgent migration
+CTX-F12  Observability / quality gates
+```
+
+Current status:
+
+```text
+FUTURE / PARKED / ARCHITECTURE ONLY
+```
+
+Production implementation is blocked until AE-R10 through AE-R14 have completed their production exit gates unless the roadmap is explicitly re-frozen earlier. CAS-F5+ must also be re-audited on the eventual unified post-R14 baseline before cross-cutting Context/Asset integration resumes.
+
+Do not wire Memory, Personalization, ContextSnapshot, CompactContext, or automatic context retrieval into production while this track is parked.
+
+---
+
+## 8. PTC / Agent overlap boundary
 
 PTC-3 and AE-R10 may touch adjacent provider-routing/fallback code.
 
@@ -245,42 +283,57 @@ Neither roadmap may silently absorb the other's responsibilities.
 
 ---
 
-## 8. Dependency graph
+## 9. Dependency graph
 
 ```text
-Agent:
-AE-R8 -> AE-R9 -> AE-R10 -> AE-R11 -> AE-R12 -> AE-R13 -> AE-R14
-                                                          |
-                                                          v
-                                                   re-audit CAS-F5
-                                                          |
-                                                          v
-                                                     CAS-F5+
-
-Tools:
-TV1-T8-H
-   |
-   v
-TV1-T9 -> TV1-T10
-
-Provider Tool:
-TV1-T8-H
-   |
-   v
-PTC-1 -> PTC-2 -> PTC-3
-                    |
-                    +---- overlap audit ----> AE-R10
-
-TV1-T9 and PTC-1 may proceed independently after TV1-T8-H only while
-their exact file ownership remains disjoint. TV1-T10 is ordered after
-TV1-T9 because it validates the final Tools V1 logical/physical surface.
+Merged baseline:
+AE-R9 CLOSED / merged @ 28757e9c
+        |
+        v
+PRE-ROADMAP GATE — Issue #16
+CI / Exit-Gate cleanup
+        |
+        v
+POST-CLEANUP CANONICAL MAIN
+        |
+        +-----------------------------+-----------------------------+
+        |                             |                             |
+        v                             v                             v
+Agent track                      Tools track                   Provider Tool
+AE-R10                           re-audit/reconcile             PTC-1
+  |                              TV1-T8 onto current main         |
+AE-R11                                |                           v
+  |                                   v                         PTC-2
+AE-R12                           TV1-T9 -> TV1-T10                 |
+  |                                                                 v
+AE-R13                                                          PTC-3
+  |                                                               |
+AE-R14 <---------------- fresh overlap audit ----------------------+
+  |
+  v
+POST-R14 UNIFIED BASELINE
+  |
+  +----------------------+----------------------+
+  |                                             |
+  v                                             v
+re-audit CAS-F5-0                         re-audit CTX-F0
+  |                                             |
+  v                                             v
+CAS-F5+                                   CTX-F0 -> CTX-F12+
 ```
+
+Rules:
+- Issue #16 is a hard pre-roadmap implementation gate. No AE-R10, TV1-T9, PTC production implementation starts until it is closed or explicitly re-frozen with a documented exception.
+- The historical `tools-v1-contract-freeze` branch must be reconciled onto the post-cleanup canonical main before TV1-T9 production code, because it predates large Agent roadmap changes.
+- PTC-1/PTC-2 may proceed independently only after the Tools baseline is reconciled and their exact file scope remains disjoint from active AE ownership.
+- PTC-3 requires a fresh overlap audit with AE-R10/shared provider routing before implementation.
+- CAS-F5+ and CTX-F* remain parked behind AE-R14 and require fresh post-R14 audits.
 
 PTC-1/PTC-2 may proceed independently of Agent branching work only while their exact file scope remains disjoint from active AE ownership.
 
 ---
 
-## 9. Branch, commit, Issue, and checkpoint convention
+## 10. Branch, commit, Issue, and checkpoint convention
 
 For new work, prefer:
 
@@ -308,7 +361,7 @@ Existing branches and historical commits are not renamed solely to adopt this co
 
 ---
 
-## 10. Allocation rule for future roadmaps
+## 11. Allocation rule for future roadmaps
 
 A new roadmap MUST NOT allocate a bare phase prefix already owned by another active or historical repository-wide track.
 
@@ -327,13 +380,14 @@ R -> AE-R*    Agent Execution
 T -> TV1-T*   Tools V1
 F -> CAS-F*   Central Asset Storage
 PTC -> PTC-*  Provider Tool Contract
+CTX -> CTX-F*  Context / Memory / Personalization
 ```
 
 Do not allocate a second independent `R10`, `T8`, or `F5` roadmap meaning.
 
 ---
 
-## 11. Historical compatibility rule
+## 12. Historical compatibility rule
 
 Historical evidence is immutable context, not a migration target.
 
@@ -358,29 +412,40 @@ PTC-1 (Issue #8 legacy alias "R10")
 
 ---
 
-## 12. Current coordination snapshot
+## 13. Current coordination snapshot
 
 At this update:
 
 ```text
-AE-R8    CLOSED / merged to main @ ae63a25
-AE-R9    ACTIVE / checkpoint Issue #10 / contract-freeze-first
+AE-R8    CLOSED / merged
+AE-R9    CLOSED / merged to main @ 28757e9c / PR #13
+
+PRE-ROADMAP CI GATE
+Issue #16  ACTIVE / blocks next production roadmap phase until closed or explicitly re-frozen
+
+AE-R10   CONTRACT FROZEN / production code NOT STARTED / Issue #14
+AE-R11-14 NOT STARTED
 
 TV1-T8   CLOSED / GREEN / FINAL-FROZEN / Issue #7
 TV1-T9   BOUNDARY AUDITED / PLAN FROZEN / CODE NOT STARTED / Issue #12
 TV1-T10  PHASE ALLOCATED ONLY / NOT AUDITED / NOT OPEN
+Tools implementation must first reconcile its historical branch onto post-cleanup main.
 
 CAS-F1-F4 CLOSED
 CAS-F5+   PAUSED behind AE-R14 production gates
 
-PTC-1-3   ROADMAP ONLY / NOT IMPLEMENTED / Issue #8
+PTC-1-3  ROADMAP ONLY / NOT IMPLEMENTED / Issue #8
+PTC-3    requires fresh overlap audit with AE-R10
+
+CTX-F0-F12 FUTURE / PARKED / architecture only / Issue #15
+CTX implementation waits for post-AE-R14 re-audit.
 ```
 
 This snapshot is informational. Phase-specific Issues/checkpoints remain the authority for live implementation status.
 
 ---
 
-## 13. Final invariant
+## 14. Final invariant
 
 Every roadmap identifier used in cross-track coordination must resolve to exactly one owner.
 
@@ -389,6 +454,7 @@ AE-R8     != TV1-T8
 AE-R10    != PTC-1
 AE-R12    != PTC-3
 AE-R8-F7  != CAS-F7
+CTX-F5    != CAS-F5
 ```
 
 If a proposed identifier cannot be resolved unambiguously through this registry, stop and assign a qualified namespace before implementation starts.
