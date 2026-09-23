@@ -80,6 +80,46 @@ def test_cross_provider_nested_json_schema_semantics_are_preserved():
     assert body == original
 
 
+def test_legacy_uppercase_type_tokens_normalize_recursively_on_provider_copy():
+    legacy_schema = {
+        "type": "OBJECT",
+        "properties": {
+            "count": {"type": "INTEGER", "minimum": 1},
+            "items": {
+                "type": "ARRAY",
+                "items": {
+                    "type": "OBJECT",
+                    "properties": {
+                        "label": {"type": "STRING"},
+                    },
+                },
+            },
+        },
+        "required": ["count"],
+    }
+    body = _body(legacy_schema)
+    original = deepcopy(body)
+
+    openai = OpenAIRequestChats().adapt_chat_request(body)
+    gemini = GeminiRequestChats().adapt_chat(body)
+    ollama = OllamaRequestChats().adapt_chat_request(body)
+
+    schemas = [
+        openai["tools"][0]["function"]["parameters"],
+        gemini["tools"][0]["function_declarations"][0]["parametersJsonSchema"],
+        ollama["tools"][0]["function"]["parameters"],
+    ]
+    for schema in schemas:
+        assert schema["type"] == "object"
+        assert schema["properties"]["count"]["type"] == "integer"
+        items = schema["properties"]["items"]
+        assert items["type"] == "array"
+        assert items["items"]["type"] == "object"
+        assert items["items"]["properties"]["label"]["type"] == "string"
+
+    assert body == original
+
+
 def test_gemini_json_schema_root_must_describe_an_object():
     body = _body(
         {
