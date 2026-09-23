@@ -84,10 +84,9 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     last_exception = error
                     continue
 
-        remaining = call_budget.remaining_seconds(
-            now_monotonic=__import__("time").monotonic()
-        )
-        if remaining <= 0:
+        try:
+            self._remaining_timeout(call_budget)
+        except ProviderDeadlineExceededError as deadline_error:
             raise ProviderDeadlineExceededError(
                 "Provider call deadline exhausted during fallback."
             ) from last_exception
