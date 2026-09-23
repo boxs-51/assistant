@@ -244,6 +244,43 @@ async def test_r9_h_retry_vs_adopt_cannot_rewrite_task_result(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r9_h_adopt_settles_dormant_retry_preactivation(tmp_path):
+    engine, sessions, service, fork_planner = await _setup(
+        tmp_path, name="r9_h_adopt_dormant_retry.sqlite"
+    )
+    try:
+        source, fork, plan = await _retryable_fork(
+            sessions,
+            service,
+            fork_planner,
+            "task-r9-h-adopt-dormant-retry",
+        )
+        retry = await service.consume_retry_plan(plan)
+        await _complete_root(source, service)
+        before = await service.get_budget(source["task_id"])
+        assert before.active_executions == 1
+
+        await service.adopt_branch(
+            source["task_id"],
+            source["source_branch_id"],
+            target_user_id="user-r8-d",
+        )
+
+        after = await service.get_budget(source["task_id"])
+        async with _Uow(sessions) as uow:
+            loser = await uow.agents.get_task_branch(fork.branch_id)
+            execution = await uow.agents.get_execution(retry.execution_id)
+        assert loser.resolution_state == "SUPERSEDED"
+        assert execution.state == "CANCELLED"
+        assert execution.revision == 2
+        assert execution.error == "TASK_ADOPTED_BEFORE_ACTIVATION"
+        assert after.state.value == "CLOSED"
+        assert after.active_executions == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r9_h_adopt_settles_dormant_fork_preactivation(tmp_path):
     engine, sessions, service, planner = await _setup(
         tmp_path, name="r9_h_adopt_dormant_fork.sqlite"
