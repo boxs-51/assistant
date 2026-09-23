@@ -276,7 +276,7 @@ async def test_r10_e_model_unavailable_probe_skips_without_retry_charge():
         timeout_seconds=1_000_000_000.0,
         max_retries=2,
     )
-    handler._new_call_budget = lambda: call_budget
+    handler._new_call_budget = lambda _timeout=None: call_budget
 
     result = await handler.execute_with_fallback(
         object(),
