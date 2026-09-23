@@ -1,7 +1,9 @@
 from .clock import ExecutionClock, SystemExecutionClock
 from .branch_resolution import BranchDiscardResult, TaskAdoptionResult
 from .aggregate import (
+    AggregateActivationResult,
     AggregateAdmission,
+    AggregateExecutionBootstrap,
     aggregate_fingerprint,
     aggregate_plan_fingerprint,
 )
@@ -78,7 +80,9 @@ __all__ = [
     "ExecutionClock",
     "BranchDiscardResult",
     "TaskAdoptionResult",
+    "AggregateActivationResult",
     "AggregateAdmission",
+    "AggregateExecutionBootstrap",
     "aggregate_fingerprint",
     "aggregate_plan_fingerprint",
     "SystemExecutionClock",
