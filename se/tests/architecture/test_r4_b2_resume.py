@@ -79,6 +79,7 @@ def _context(
     revision: int = 7,
     remaining: float | None = 40.0,
     expiry: datetime | None = None,
+    task_id: str | None = None,
 ) -> AgentExecutionContext:
     context = AgentExecutionContext.create(
         execution_id=execution_id,
@@ -91,6 +92,7 @@ def _context(
             scopes={"*"},
         ),
         limits=AgentExecutionLimits(timeout_seconds=60),
+        task_id=task_id,
         remaining_active_budget_seconds=remaining,
         wait_expires_at=expiry,
         clock=clock,
@@ -117,6 +119,15 @@ def _record(
         remaining_active_budget_seconds=remaining,
         wait_expires_at=expiry,
     )
+
+
+class _ActivityBudget:
+    def __init__(self) -> None:
+        self.reconciled: list[str] = []
+
+    async def reconcile_multibranch_task_activity(self, task_id: str):
+        self.reconciled.append(task_id)
+        return SimpleNamespace(id=task_id, status="WAITING")
 
 
 def _runtime(store) -> AgentRuntime:
@@ -223,3 +234,34 @@ async def test_r4_b2_two_valid_resume_claims_have_one_winner():
     ) == 1
     assert store.record.state == "RUNNING"
     assert store.record.revision == 8
+
+
+@pytest.mark.asyncio
+async def test_r8_f_task_scoped_direct_wait_expiry_reconciles_activity():
+    clock = _FakeClock()
+    expiry = clock.now_utc()
+    store = _MemoryStore(_record(clock, expiry=expiry))
+    budget = _ActivityBudget()
+    context = _context(
+        clock,
+        expiry=expiry,
+        task_id="task-r8-f-direct-expiry",
+    )
+    runtime = AgentRuntime(
+        context_builder=None,
+        inference=None,
+        tool_execution=None,
+        execution_policy=None,
+        durable_store=store,
+        task_budget_service=budget,
+    )
+
+    with pytest.raises(
+        ExecutionWaitExpiredError,
+        match="WAIT_TTL_EXPIRED",
+    ):
+        await runtime._begin_durable_execution(context)
+
+    assert store.record.state == "TIMEOUT"
+    assert store.record.revision == 8
+    assert budget.reconciled == ["task-r8-f-direct-expiry"]
