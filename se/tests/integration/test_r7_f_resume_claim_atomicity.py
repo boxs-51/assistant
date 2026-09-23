@@ -35,7 +35,7 @@ from se.src.runtimes.agent.contracts.resume import (
     resume_plan_fingerprint,
 )
 from se.src.runtimes.agent.persistence import DurableAgentStore
-from se.src.runtimes.agent.resume_claim import ResumeClaimRejected
+from se.src.runtimes.agent.resume_claim import ResumeClaimDeferred, ResumeClaimRejected
 from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.task_budget import TaskBudgetService
 from se.src.runtimes.capability.contracts.definition import CapabilityIdempotency
@@ -1482,6 +1482,127 @@ async def test_r8_f_task_scoped_wait_expiry_rederives_sibling_wait_reason(tmp_pa
             assert int(budget.active_branches) == 2
             assert durable_claim.state == "REJECTED"
             assert durable_claim.rejection_code == "WAIT_EXPIRED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_transient_resume_activity_epoch_conflict_retries_internally(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-activity-internal-retry.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-activity-internal-retry")
+        )
+
+        original = AgentRepository.compare_and_set_task
+        losses = 0
+
+        async def lose_first_task_epoch(self, task_id, revision, values):
+            nonlocal losses
+            if task_id == "task-r7f" and losses == 0:
+                losses += 1
+                return None
+            return await original(self, task_id, revision, values)
+
+        monkeypatch.setattr(
+            AgentRepository,
+            "compare_and_set_task",
+            lose_first_task_epoch,
+        )
+
+        result = await store.consume_resume_claim(
+            ResumeClaimConsumeSpec(
+                plan=plan,
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                expected_claim_revision=claim.revision,
+                now_utc=datetime.now(timezone.utc),
+            )
+        )
+
+        assert losses == 1
+        assert result.claim_id == claim.claim_id
+        assert result.resume_request_id == claim.resume_request_id
+        assert result.consumed_execution_revision == 3
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            task = await uow.agents.get_task("task-r7f")
+            assert str(execution.state) == "RUNNING"
+            assert int(execution.revision) == 3
+            assert str(durable_claim.state) == "CONSUMED"
+            assert str(task.status) == "RUNNING"
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_exhausted_resume_activity_epoch_conflict_is_retryable_deferred(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-activity-deferred.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-activity-deferred")
+        )
+
+        async with factory() as uow:
+            task_before = await uow.agents.get_task("task-r7f")
+            task_revision_before = int(task_before.revision)
+            await uow.commit()
+
+        async def always_lose_task_epoch(self, task_id, revision, values):
+            if task_id == "task-r7f":
+                return None
+            raise AssertionError("unexpected Task CAS")
+
+        monkeypatch.setattr(
+            AgentRepository,
+            "compare_and_set_task",
+            always_lose_task_epoch,
+        )
+
+        with pytest.raises(ResumeClaimDeferred) as raised:
+            await store.consume_resume_claim(
+                ResumeClaimConsumeSpec(
+                    plan=plan,
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    expected_claim_revision=claim.revision,
+                    now_utc=datetime.now(timezone.utc),
+                )
+            )
+
+        assert raised.value.code == "RESUME_CONFLICT"
+        assert raised.value.retryable is True
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            budget = await uow.agents.get_task_budget("task-r7f")
+            task_after = await uow.agents.get_task("task-r7f")
+            assert str(execution.state) == "WAITING"
+            assert int(execution.revision) == 2
+            assert str(durable_claim.state) == "CREATED"
+            assert int(budget.active_executions) == 0
+            assert int(task_after.revision) == task_revision_before
             await uow.commit()
     finally:
         await engine.dispose()
