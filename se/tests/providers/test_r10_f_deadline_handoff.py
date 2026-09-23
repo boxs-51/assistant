@@ -112,8 +112,14 @@ def _agent_context(clock: _Clock) -> AgentExecutionContext:
 
 
 @pytest.mark.asyncio
-async def test_r10_f_agent_runtime_preserves_absolute_deadline_across_pre_handoff_await():
+async def test_r10_f_agent_runtime_preserves_absolute_deadline_across_pre_handoff_await(
+    monkeypatch,
+):
     clock = _Clock(100.0)
+    monkeypatch.setattr(
+        "se.src.runtimes.agent.runtime.time.monotonic",
+        clock.monotonic,
+    )
     inference = _CapturingInference()
     runtime = AgentRuntime(
         context_builder=_ContextBuilder(),
