@@ -1294,6 +1294,22 @@ class AgentRuntime:
             error_message=error_message,
         )
 
+    async def cancel_activated_fork_execution(
+        self,
+        context: AgentExecutionContext,
+        revision: int,
+        *,
+        error_message: str = "FORK_RUNTIME_HANDOFF_FAILED",
+    ) -> None:
+        """Fail closed after a durable FORK activation wins but local start fails."""
+
+        context.freeze_active_budget()
+        await self._cancel_durable_revision(
+            context,
+            revision,
+            error_message=error_message,
+        )
+
     async def _begin_durable_execution_owned(
         self,
         context: AgentExecutionContext,
