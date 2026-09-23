@@ -31,6 +31,9 @@ def _plan(**updates):
         "base_execution_id": None,
         "base_checkpoint_id": None,
         "correlation_id": "corr-r9",
+        "request_fingerprint": "d" * 64,
+        "source_context_fingerprint": "e" * 64,
+        "fresh_active_budget_seconds": 60.0,
         "target_user_id": "user-r9",
     }
     values.update(updates)
@@ -63,6 +66,9 @@ def test_r9_a_retry_fingerprint_is_key_order_stable_and_semantic():
         replace(base, expected_task_budget_revision=6),
         replace(base, budget_policy_fingerprint="c" * 64),
         replace(base, source_execution_id="exec-r9-other"),
+        replace(base, request_fingerprint="f" * 64),
+        replace(base, source_context_fingerprint="1" * 64),
+        replace(base, fresh_active_budget_seconds=30.0),
     )
     for item in changed:
         assert retry_plan_fingerprint(item) != base.plan_fingerprint
