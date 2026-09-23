@@ -351,6 +351,48 @@ async def test_r10_g_executor_bounds_provider_stream_timeout_by_remaining():
 
 
 @pytest.mark.asyncio
+async def test_r10_g_stream_read_cancellation_drains_provider_child_task():
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+
+    class _BlockingChat:
+        async def chat_stream(self, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            yield "unreachable"
+
+    manager = _BreakerManager()
+    executor = ProviderExecutor(manager, max_retries=0)
+    provider = SimpleNamespace(name="p1", chat=_BlockingChat())
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=10.0,
+        max_retries=0,
+    )
+    stream = executor.execute_stream(
+        provider=provider,
+        http_client=object(),
+        body={"model": "logical-model"},
+        timeout=60.0,
+        call_budget=budget,
+    )
+
+    read_task = asyncio.create_task(stream.__anext__())
+    await started.wait()
+    read_task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await read_task
+
+    assert cancelled.is_set()
+    await stream.aclose()
+
+
+@pytest.mark.asyncio
 async def test_r10_g_downstream_pause_is_not_cancelled_inside_provider_timer():
     class _TwoChunkChat:
         def __init__(self):
