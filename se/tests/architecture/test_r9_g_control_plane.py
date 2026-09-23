@@ -3,6 +3,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from se.src.domain.schemas.identity import Identity
 from se.src.domain.schemas.multi_agent import (
@@ -71,6 +72,44 @@ def test_r9_g_routes_and_stable_error_envelope_are_public():
         assert mapped.status_code == 409
         assert mapped.detail["code"] == code
         assert mapped.detail["retryable"] is False
+
+
+def test_r9_g_aggregate_structural_input_is_rejected_before_control_plane():
+    invalid_payloads = (
+        {
+            "aggregate_request_id": "aggregate-too-short",
+            "target_branch_id": BRANCH,
+            "source_branch_ids": [BRANCH],
+        },
+        {
+            "aggregate_request_id": "aggregate-duplicate",
+            "target_branch_id": BRANCH,
+            "source_branch_ids": [BRANCH, BRANCH],
+        },
+        {
+            "aggregate_request_id": "aggregate-target-missing",
+            "target_branch_id": BRANCH,
+            "source_branch_ids": ["branch-2", "branch-3"],
+        },
+    )
+    for payload in invalid_payloads:
+        with pytest.raises(ValidationError):
+            AgentTaskAggregateRequest(**payload)
+
+
+def test_r9_g_aggregate_budget_error_keeps_aggregate_taxonomy():
+    mapped = map_error(
+        AggregateAdmissionError(
+            "AGGREGATE_BUDGET_EXCEEDED",
+            "aggregate execution capacity exhausted",
+        )
+    )
+    assert mapped.status_code == 409
+    assert mapped.detail == {
+        "code": "AGGREGATE_BUDGET_EXCEEDED",
+        "message": "aggregate execution capacity exhausted",
+        "retryable": False,
+    }
 
 
 @pytest.mark.asyncio
