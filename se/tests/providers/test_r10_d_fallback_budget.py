@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from se.src.provider.exceptions import (
@@ -398,3 +399,117 @@ async def test_r10_d_retry_delay_that_cannot_fit_falls_back_immediately(
     assert executor.budgets[0] is executor.budgets[1]
     assert executor.retries_seen == [0, 0]
     assert executor.budgets[1].retries_used == 0
+
+
+class _ProbeErrorProvider(_Provider):
+    def __init__(self, name, probe_error):
+        super().__init__(name)
+        self.probe_error = probe_error
+
+    async def has_capability(
+        self,
+        model,
+        capability,
+        http_client,
+        timeout,
+    ):
+        self.probe_timeouts.append(timeout)
+        raise self.probe_error
+
+
+@pytest.mark.asyncio
+async def test_r10_d_chat_raw_probe_failure_keeps_last_provider_and_raw_cause(
+    monkeypatch,
+):
+    request = httpx.Request(
+        "GET",
+        "https://provider.example/models",
+    )
+    raw_probe_error = httpx.ReadError(
+        "probe read failed",
+        request=request,
+    )
+    providers = [
+        _Provider("p1"),
+        _ProbeErrorProvider("p2", raw_probe_error),
+    ]
+    executor = _Executor(
+        [ProviderError("p1 failed", provider_name="p1")],
+        max_retries=1,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.time.monotonic",
+        _Clock([100.0, 100.1, 100.2, 100.3]),
+    )
+
+    with pytest.raises(NoAvailableProviderError) as raised:
+        await _chat_handler(
+            providers,
+            executor,
+            timeout=10.0,
+        ).execute_with_fallback(
+            object(),
+            {"model": "logical-model"},
+        )
+
+    error = raised.value
+    assert error.code == PROVIDER_FALLBACK_EXHAUSTED
+    assert error.provider_name == "p2"
+    assert error.status_code is None
+    assert error.__cause__ is raw_probe_error
+    assert executor.provider_calls == ["p1"]
+
+
+@pytest.mark.asyncio
+async def test_r10_d_embedding_raw_http_probe_failure_keeps_structured_detail(
+    monkeypatch,
+):
+    request = httpx.Request(
+        "GET",
+        "https://provider.example/models",
+    )
+    response = httpx.Response(
+        429,
+        request=request,
+        json={
+            "error": {
+                "status": "RESOURCE_EXHAUSTED",
+                "message": "probe quota",
+            }
+        },
+    )
+    raw_probe_error = httpx.HTTPStatusError(
+        "probe 429",
+        request=request,
+        response=response,
+    )
+    providers = [
+        _Provider("p1"),
+        _ProbeErrorProvider("p2", raw_probe_error),
+    ]
+    executor = _Executor(
+        [ProviderError("p1 failed", provider_name="p1")],
+        max_retries=1,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.time.monotonic",
+        _Clock([50.0, 50.1, 50.2, 50.3]),
+    )
+
+    with pytest.raises(NoAvailableProviderError) as raised:
+        await _embedding_handler(
+            providers,
+            executor,
+            timeout=5.0,
+        ).execute(
+            object(),
+            {"model": "embedding-model", "input": ["x"]},
+        )
+
+    error = raised.value
+    assert error.code == PROVIDER_FALLBACK_EXHAUSTED
+    assert error.provider_name == "p2"
+    assert error.status_code == 429
+    assert error.error_code == "RESOURCE_EXHAUSTED"
+    assert error.__cause__ is raw_probe_error
+    assert executor.provider_calls == ["p1"]
