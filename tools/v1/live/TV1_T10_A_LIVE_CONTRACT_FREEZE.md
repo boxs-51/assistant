@@ -116,8 +116,8 @@ TOOLS_V1_LIVE_ARTIFACT_ROOT=<absolute-path>
 After the required live gate succeeds:
 
 1. if `TOOLS_V1_LIVE_ARTIFACT_ROOT` is set:
-   - it MUST be an absolute path;
-   - expand user markers;
+   - expand user markers first;
+   - the expanded path MUST be absolute;
    - resolve symlinks / normalized path as far as the platform permits;
    - reject it if the resolved path is the repository root or a descendant of the
      repository root;
@@ -272,7 +272,12 @@ Required top-level fields:
   "status": "PASS | FAIL | SKIP",
   "environment": {},
   "scenarios": [],
-  "cleanup": {}
+  "cleanup": {
+    "owned_pids": [],
+    "terminated_pids": [],
+    "still_alive_pids": [],
+    "errors": []
+  }
 }
 ```
 
@@ -316,7 +321,28 @@ status
 tool
 action
 summary
+error
 ```
+
+Allowed step statuses are exactly:
+
+```text
+PASS
+FAIL
+SKIP
+```
+
+For a failed tool invocation, `error` records a redacted structured projection of the
+canonical ToolResult error:
+
+```text
+code
+message
+retryable
+details
+```
+
+For a passing/skipped step, `error` is null.
 
 Raw secret-bearing inputs MUST NOT be copied into evidence.
 
@@ -354,8 +380,19 @@ For each owned live process:
 4. escalate only for that owned PID/process tree when necessary;
 5. record cleanup outcome in evidence.
 
-Cleanup failure makes the run fail unless a later phase freezes a narrower explicit
-exception.
+Cleanup evidence MUST contain:
+
+```text
+owned_pids
+terminated_pids
+still_alive_pids
+errors
+```
+
+All four fields are present even when empty.
+
+Any non-empty `still_alive_pids` or cleanup `errors` makes the overall run status
+`FAIL` unless a later boundary audit freezes a narrower explicit exception.
 
 ---
 
