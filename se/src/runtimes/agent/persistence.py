@@ -605,7 +605,7 @@ class DurableAgentStore:
                 or str(branch.resolution_state) != "OPEN"
                 or source.task_id != execution.task_id
                 or source.branch_id != execution.branch_id
-                or str(source.state) not in {"FAILED", "TIMEOUT", "CANCELLED"}
+                or str(source.state) not in {"FAILED", "TIMEOUT"}
             ):
                 fail(
                     "RETRY_ADMISSION_CORRUPT",
@@ -775,7 +775,7 @@ class DurableAgentStore:
                 or branch.current_execution_id != bootstrap.execution_id
                 or source.task_id != bootstrap.task_id
                 or source.branch_id != bootstrap.branch_id
-                or str(source.state) not in {"FAILED", "TIMEOUT", "CANCELLED"}
+                or str(source.state) not in {"FAILED", "TIMEOUT"}
             ):
                 raise RetryControlError(
                     "RETRY_ACTIVATION_CONFLICT",
