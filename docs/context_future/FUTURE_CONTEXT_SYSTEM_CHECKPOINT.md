@@ -68,3 +68,30 @@ When this work is resumed:
 7. only then start implementation.
 
 This checkpoint exists so future sessions/agents do not reconstruct these architectural decisions from chat history.
+
+
+## Central Asset cross-roadmap checkpoint
+
+Detailed audit/matrix:
+
+```text
+docs/context_future/CENTRAL_ASSET_F1_F8_CTX_F_DEPENDENCY_AUDIT.md
+```
+
+Durable conclusions from that audit:
+
+```text
+- Central Asset F1-F4 remain the canonical file/media architecture,
+  but the parked branch must be replayed/re-audited on post-R14 main.
+- F5-0 must be re-frozen after R10/R11/R12 and before provider hydration.
+- CTX must reuse one canonical asset read-lease/GC fence rather than inventing
+  a parallel Context lease authority.
+- FileAsset.revision is lifecycle/CAS authority, not content-version authority;
+  Context uses canonical content evidence such as blob_id + sha256.
+- F6/F7/F8 require dedicated contract freezes before code.
+- Full F5-F8 completion is not automatically required before CTX-F0/F1;
+  the detailed HARD/SOFT/EXIT matrix controls sequencing.
+```
+
+Central Asset still has no dedicated issue at this checkpoint. Creating/activating
+that issue remains a required action at the post-R14 Central Asset resumption gate.
