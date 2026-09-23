@@ -159,7 +159,11 @@ def _reservation(connection, task_id: str, branch_id: str, fingerprint: str):
 def test_r8_b_remains_on_single_linear_migration_chain(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["14d_r8_fork_runtime_seed"]
+    assert script.get_heads() == ["15a_r9_retry_admission"]
+    assert (
+        script.get_revision("15a_r9_retry_admission").down_revision
+        == "14d_r8_fork_runtime_seed"
+    )
     assert script.get_revision("14b_r8_root_branch_accounting") is not None
     assert (
         script.get_revision("14c_r8_fork_admission").down_revision
