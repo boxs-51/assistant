@@ -1212,6 +1212,119 @@ class TaskBudgetService:
                             "BRANCH_RESOLUTION_CONFLICT",
                             "TaskBudget active_branches differs from branch authority.",
                         )
+
+                    # DISCARD must revoke any dormant execution authority before
+                    # the branch stops participating in Task activity. Active
+                    # RUNNING/WAITING owners are rejected fail-closed; only an
+                    # immutable admission-backed RUNNING@1 preactivation may be
+                    # cancelled in this same Task/Budget/Branch transaction.
+                    release_active = 0
+                    release_parallel = 0
+                    if selected.current_execution_id is not None:
+                        execution = await uow.agents.get_execution_for_update(
+                            selected.current_execution_id
+                        )
+                        if (
+                            execution is None
+                            or execution.task_id != task_id
+                            or execution.branch_id != branch_id
+                        ):
+                            raise BranchResolutionError(
+                                "BRANCH_RESOLUTION_CONFLICT",
+                                "TaskBranch current execution has invalid lineage.",
+                            )
+                        execution_state = str(execution.state)
+                        if execution_state in {
+                            "COMPLETED",
+                            "FAILED",
+                            "CANCELLED",
+                            "TIMEOUT",
+                        }:
+                            pass
+                        elif (
+                            execution_state == "RUNNING"
+                            and int(execution.revision) == 1
+                        ):
+                            fork_receipt = (
+                                await uow.agents
+                                .get_task_fork_admission_by_execution(execution.id)
+                            )
+                            retry_receipt = (
+                                await uow.agents
+                                .get_task_retry_admission_by_execution(execution.id)
+                            )
+                            aggregate_receipt = (
+                                await uow.agents
+                                .get_task_aggregate_admission_by_execution(execution.id)
+                            )
+                            matching_receipts = 0
+                            if (
+                                fork_receipt is not None
+                                and fork_receipt.task_id == task_id
+                                and fork_receipt.branch_id == branch_id
+                                and fork_receipt.execution_id == execution.id
+                            ):
+                                matching_receipts += 1
+                            if (
+                                retry_receipt is not None
+                                and retry_receipt.task_id == task_id
+                                and retry_receipt.branch_id == branch_id
+                                and retry_receipt.execution_id == execution.id
+                            ):
+                                matching_receipts += 1
+                            if (
+                                aggregate_receipt is not None
+                                and aggregate_receipt.task_id == task_id
+                                and aggregate_receipt.target_branch_id == branch_id
+                                and aggregate_receipt.execution_id == execution.id
+                            ):
+                                matching_receipts += 1
+                            if (
+                                matching_receipts != 1
+                                or execution.current_checkpoint_id is not None
+                                or execution.bound_client_id is not None
+                                or execution.bound_connection_id is not None
+                            ):
+                                raise BranchResolutionError(
+                                    "BRANCH_EXECUTION_ACTIVE",
+                                    "Branch execution is not a dormant admitted preactivation.",
+                                )
+                            cancelled = await uow.agents.compare_and_set_execution(
+                                execution.id,
+                                1,
+                                {
+                                    "state": "CANCELLED",
+                                    "wait_reason": None,
+                                    "wait_expires_at": None,
+                                    "error": (
+                                        "BRANCH_DISCARDED_BEFORE_ACTIVATION"
+                                    ),
+                                    "completed_at": datetime.now(timezone.utc),
+                                },
+                            )
+                            if cancelled is None:
+                                await uow.rollback()
+                                continue
+                            release_active = 1
+                            if execution.parent_execution_id is not None:
+                                release_parallel = 1
+                        else:
+                            raise BranchResolutionError(
+                                "BRANCH_EXECUTION_ACTIVE",
+                                "RUNNING/WAITING branch execution must settle before DISCARD.",
+                            )
+
+                    if int(budget.active_executions) < release_active:
+                        raise BranchResolutionError(
+                            "BRANCH_RESOLUTION_CONFLICT",
+                            "DISCARD would underflow active_executions.",
+                        )
+                    if int(budget.active_parallel_agents) < release_parallel:
+                        raise BranchResolutionError(
+                            "BRANCH_RESOLUTION_CONFLICT",
+                            "DISCARD would underflow active_parallel_agents.",
+                        )
+
                     changed = await uow.agents.compare_and_set_task_branch(
                         branch_id,
                         int(selected.revision),
@@ -1223,7 +1336,16 @@ class TaskBudgetService:
                     updated_budget = await uow.agents.compare_and_set_task_budget(
                         task_id,
                         int(budget.revision),
-                        {"active_branches": int(budget.active_branches) - 1},
+                        {
+                            "active_branches": int(budget.active_branches) - 1,
+                            "active_executions": (
+                                int(budget.active_executions) - release_active
+                            ),
+                            "active_parallel_agents": (
+                                int(budget.active_parallel_agents)
+                                - release_parallel
+                            ),
+                        },
                     )
                     if updated_budget is None:
                         await uow.rollback()
