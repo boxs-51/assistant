@@ -41,6 +41,7 @@ class RetryPlan:
     source_execution_state: str
     source_agent_id: str
     source_checkpoint_id: str | None
+    source_checkpoint_transcript_fingerprint: str | None
 
     expected_task_budget_revision: int
     budget_policy_fingerprint: str
@@ -140,6 +141,9 @@ def retry_plan_fingerprint(values: RetryPlan | Mapping[str, Any]) -> str:
         "source_execution_state": _get(values, "source_execution_state"),
         "source_agent_id": _get(values, "source_agent_id"),
         "source_checkpoint_id": _get(values, "source_checkpoint_id"),
+        "source_checkpoint_transcript_fingerprint": _get(
+            values, "source_checkpoint_transcript_fingerprint"
+        ),
         "expected_task_budget_revision": int(
             _get(values, "expected_task_budget_revision")
         ),
