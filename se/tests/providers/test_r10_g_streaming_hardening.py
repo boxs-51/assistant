@@ -8,11 +8,13 @@ import pytest
 
 from se.src.domain.schemas.event import BaseEvent
 from se.src.provider.exceptions import (
+    PROVIDER_ERROR,
     PROVIDER_FALLBACK_EXHAUSTED,
     PROVIDER_RATE_LIMITED,
     PROVIDER_UNAVAILABLE,
     NoAvailableProviderError,
     ProviderDeadlineExceededError,
+    ProviderError,
     ProviderRateLimitError,
     ProviderUnavailableError,
 )
@@ -346,6 +348,39 @@ async def test_r10_g_executor_bounds_provider_stream_timeout_by_remaining():
     assert len(chat.timeouts) == 1
     assert chat.timeouts[0] is not None
     assert 0 < chat.timeouts[0] <= 1.0
+
+
+@pytest.mark.asyncio
+async def test_r10_g_provider_internal_timeout_is_not_logical_deadline():
+    class _InternalTimeoutChat:
+        async def chat_stream(self, **kwargs):
+            raise TimeoutError("provider internal timeout")
+            yield "unreachable"
+
+    manager = _BreakerManager()
+    executor = ProviderExecutor(manager, max_retries=0)
+    provider = SimpleNamespace(
+        name="p1",
+        chat=_InternalTimeoutChat(),
+    )
+    budget = ProviderCallBudget.from_timeout(
+        now_monotonic=time.monotonic(),
+        timeout_seconds=1.0,
+        max_retries=0,
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        async for _ in executor.execute_stream(
+            provider=provider,
+            http_client=object(),
+            body={"model": "logical-model"},
+            timeout=60.0,
+            call_budget=budget,
+        ):
+            pass
+
+    assert raised.value.code == PROVIDER_ERROR
+    assert not isinstance(raised.value, ProviderDeadlineExceededError)
 
 
 @pytest.mark.asyncio
