@@ -335,18 +335,21 @@ class RequestChats:
                             "gemini", tool.parameters
                         )
 
-                        # --- ĐIỂM SỬA QUAN TRỌNG CHO GEMINI ---
-                        # Đảm bảo type luôn là OBJECT (In hoa) để Gemini tiếp nhận
-                        if "type" in param_schema and isinstance(param_schema["type"], str):
-                            param_schema["type"] = param_schema["type"].upper()
-                        else:
-                            param_schema["type"] = "OBJECT"
+                        # Gateway tool parameters are canonical JSON Schema.
+                        # Gemini GenerateContent exposes parametersJsonSchema
+                        # specifically for this representation; using it avoids
+                        # partially coercing nested JSON Schema into the
+                        # provider's OpenAPI Schema enum representation.
+                        root_type = param_schema.get("type")
+                        if root_type is None:
+                            param_schema["type"] = "object"
+                        elif root_type != "object":
+                            raise ProviderToolContractError(
+                                "Gemini tool parameter JSON Schema root must be type 'object'"
+                            )
+                        param_schema.setdefault("properties", {})
 
-                        # Đảm bảo properties luôn tồn tại (kể cả khi không có param nào)
-                        if "properties" not in param_schema:
-                            param_schema["properties"] = {}
-
-                        decl["parameters"] = param_schema
+                        decl["parametersJsonSchema"] = param_schema
                         
                     function_declarations.append(decl)
             
