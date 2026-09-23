@@ -62,10 +62,25 @@ class RetryPolicy:
                 status_code = getattr(error, "status_code", None)
                 error_code = getattr(error, "error_code", None)
 
-                if (
-                    not self._is_retryable(error)
-                    or attempt >= self.max_retries
-                ):
+                # R10-B normalizes raw evidence before classification, but it
+                # must not broaden the legacy retry set. Raw HTTP and transport
+                # failures keep their pre-R10 retryability until R10-C owns the
+                # scheduling policy.
+                if isinstance(raw_error, httpx.HTTPStatusError):
+                    raw_status = raw_error.response.status_code
+                    retryable = (
+                        raw_status == 429
+                        or 500 <= raw_status < 600
+                    )
+                elif isinstance(raw_error, httpx.RequestError):
+                    retryable = isinstance(
+                        raw_error,
+                        (httpx.TimeoutException, httpx.ConnectError),
+                    )
+                else:
+                    retryable = self._is_retryable(error)
+
+                if not retryable or attempt >= self.max_retries:
                     if error is raw_error:
                         raise
                     raise error from raw_error
