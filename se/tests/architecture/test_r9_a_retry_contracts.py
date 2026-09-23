@@ -25,6 +25,7 @@ def _plan(**updates):
         "source_execution_state": "FAILED",
         "source_agent_id": "agent-r9",
         "source_checkpoint_id": None,
+        "source_checkpoint_transcript_fingerprint": None,
         "expected_task_budget_revision": 5,
         "budget_policy_fingerprint": "b" * 64,
         "parent_execution_id": None,
@@ -63,6 +64,10 @@ def test_r9_a_retry_fingerprint_is_key_order_stable_and_semantic():
         replace(base, expected_execution_revision=10),
         replace(base, source_execution_state="TIMEOUT"),
         replace(base, source_checkpoint_id="cp-r9"),
+        replace(
+            base,
+            source_checkpoint_transcript_fingerprint="2" * 64,
+        ),
         replace(base, expected_task_budget_revision=6),
         replace(base, budget_policy_fingerprint="c" * 64),
         replace(base, source_execution_id="exec-r9-other"),
