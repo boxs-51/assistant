@@ -588,6 +588,7 @@ class DurableAgentStore:
                 "remaining_active_budget_seconds",
                 None,
             )
+            context_remaining = context.remaining_active_budget_seconds
             if (
                 str(execution.state) != "RUNNING"
                 or int(execution.revision) != 1
@@ -608,7 +609,8 @@ class DurableAgentStore:
                 or not math.isfinite(float(remaining))
                 or float(remaining)
                 != float(seed.remaining_active_budget_seconds)
-                or float(context.remaining_active_budget_seconds or -1)
+                or context_remaining is None
+                or float(context_remaining)
                 != float(seed.remaining_active_budget_seconds)
                 or context.limits.model_dump(mode="json") != dict(seed.limits)
                 or dict(context.metadata) != dict(seed.metadata)
