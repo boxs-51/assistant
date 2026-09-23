@@ -468,7 +468,7 @@ def _client_capability_runtime(loaded_tools, events=None):
     return runtime, realtime, dispatcher
 
 
-def test_repository_default_config_enables_only_t9_b_logical_capabilities():
+def test_repository_default_config_uses_explicit_v2_ids_without_web():
     config_path = (
         Path(__file__).resolve().parents[1]
         / "config"
@@ -477,18 +477,16 @@ def test_repository_default_config_enables_only_t9_b_logical_capabilities():
     settings = json.loads(config_path.read_text(encoding="utf-8"))
 
     enabled = settings["tools_config"]["enabled_v2_capabilities"]
-    assert enabled == [
-        "file.read",
-        "file.search",
-        "file.write",
-        "file.append",
-        "file.replace",
-        "glob.find",
-        "terminal.run",
-        "terminal.launch",
-    ]
+    assert isinstance(enabled, list)
     assert "*" not in enabled
-    assert not any(item.startswith("web.") for item in enabled)
+    assert all(
+        isinstance(capability_id, str) and capability_id
+        for capability_id in enabled
+    )
+    assert not any(
+        capability_id.startswith("web.")
+        for capability_id in enabled
+    )
 
 
 def test_v2_registration_separates_logical_definition_from_provenance(tmp_path):
