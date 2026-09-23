@@ -6,7 +6,10 @@ from types import SimpleNamespace
 
 import pytest
 
-from se.src.provider.exceptions import ProviderDeadlineExceededError
+from se.src.provider.exceptions import (
+    ProviderDeadlineExceededError,
+    ProviderUnavailableError,
+)
 from se.src.provider.executor import ProviderExecutor
 from se.src.provider.handlers.chat_handler import ChatExecutionHandler
 from se.src.provider.handlers.embedding_handler import EmbeddingExecutionHandler
@@ -424,3 +427,133 @@ async def test_postmerge_r10_successful_bounded_probe_preserves_fallback():
     assert p1.probe_calls == 1
     assert p2.probe_calls == 1
     assert executor.execute_calls == 1
+
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_late_provider_error_yields_deadline_not_retryable_error(
+    monkeypatch,
+):
+    clock = {"now": 100.0}
+    breaker = _Breaker()
+
+    class _LateErrorChat:
+        async def chat(self, **kwargs):
+            clock["now"] = 101.0
+            raise ProviderUnavailableError(
+                "late provider failure",
+                provider_name="p1",
+            )
+
+    provider = _Provider("p1", _LateErrorChat())
+    executor = _executor(breaker)
+    budget = ProviderCallBudget(
+        deadline_monotonic=100.5,
+        max_retries=2,
+    )
+
+    monkeypatch.setattr(
+        "se.src.provider.executor.time.monotonic",
+        lambda: clock["now"],
+    )
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await executor.execute(
+            provider=provider,
+            http_client=object(),
+            body={"model": "logical-model"},
+            timeout=30.0,
+            call_budget=budget,
+        )
+
+    assert breaker.before_calls == 1
+    assert breaker.success_calls == 0
+    assert breaker.failure_calls == 1
+    assert budget.retries_used == 0
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_late_generic_error_yields_deadline_not_retryable_error(
+    monkeypatch,
+):
+    clock = {"now": 50.0}
+    breaker = _Breaker()
+    provider = SimpleNamespace(name="p1")
+    executor = _executor(breaker)
+    budget = ProviderCallBudget(
+        deadline_monotonic=50.5,
+        max_retries=2,
+    )
+
+    async def operation(attempt_timeout):
+        clock["now"] = 51.0
+        raise ProviderUnavailableError(
+            "late generic failure",
+            provider_name="p1",
+        )
+
+    monkeypatch.setattr(
+        "se.src.provider.executor.time.monotonic",
+        lambda: clock["now"],
+    )
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await executor.execute_generic(
+            provider,
+            operation,
+            call_budget=budget,
+            timeout=30.0,
+        )
+
+    assert breaker.before_calls == 1
+    assert breaker.success_calls == 0
+    assert breaker.failure_calls == 1
+    assert budget.retries_used == 0
+
+
+@pytest.mark.asyncio
+async def test_postmerge_r10_late_capability_error_yields_deadline_in_shared_probe(
+    monkeypatch,
+):
+    clock = {"now": 200.0}
+
+    class _LateProbeProvider(_ProbeProvider):
+        async def has_capability(
+            self,
+            model,
+            capability,
+            http_client,
+            timeout,
+        ):
+            self.probe_calls += 1
+            clock["now"] = 201.0
+            raise ProviderUnavailableError(
+                "late probe failure",
+                provider_name=self.name,
+            )
+
+    provider = _LateProbeProvider("p1")
+    executor = _NoAttemptExecutor(max_retries=2)
+    handler = _chat_handler([provider], executor, timeout=10.0)
+    budget = ProviderCallBudget(
+        deadline_monotonic=200.5,
+        max_retries=2,
+    )
+
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.monotonic",
+        lambda: clock["now"],
+    )
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await handler._probe_capability_with_budget(
+            provider=provider,
+            model="logical-model",
+            capability="CHAT",
+            http_client=object(),
+            call_budget=budget,
+        )
+
+    assert provider.probe_calls == 1
+    assert executor.execute_calls == 0
+    assert budget.retries_used == 0
