@@ -2172,6 +2172,29 @@ class DurableAgentStore:
                 )
                 await uow.commit()
                 return error
+            locked_task = None
+            if plan.task_id is not None:
+                # Any task-scoped WAITING lifecycle mutation that can affect
+                # aggregate branch activity serializes on Task first,
+                # including WAIT-TTL expiry before resume capacity is staged.
+                locked_task = await uow.agents.get_task_for_update(plan.task_id)
+                if (
+                    locked_task is None
+                    or locked_task.session_id != plan.session_id
+                    or locked_task.created_by != plan.target_user_id
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow, claim, code="TASK_TERMINAL", now_utc=now_utc
+                    )
+                    await uow.commit()
+                    return error
+                if str(locked_task.status) in _TASK_TERMINAL_STATES:
+                    error = await self._reject_created_claim_in_uow(
+                        uow, claim, code="TASK_TERMINAL", now_utc=now_utc
+                    )
+                    await uow.commit()
+                    return error
+
             if (
                 execution_wait_expires_at is not None
                 and now_utc >= execution_wait_expires_at
@@ -2212,6 +2235,18 @@ class DurableAgentStore:
                         "STALE_RESUME_CLAIM",
                         "ResumeClaim changed during WAIT expiry.",
                     )
+                if plan.task_id is not None:
+                    activity = await reconcile_multibranch_task_activity_in_uow(
+                        uow,
+                        task_id=plan.task_id,
+                        locked_task=locked_task,
+                    )
+                    if activity is None:
+                        await uow.rollback()
+                        return ResumeClaimRejected(
+                            "RESUME_CONFLICT",
+                            "AgentTask activity changed during WAIT expiry.",
+                        )
                 await uow.commit()
                 return ResumeClaimRejected(
                     "WAIT_EXPIRED",
@@ -2404,28 +2439,10 @@ class DurableAgentStore:
                         await uow.commit()
                         return error
 
-            locked_task = None
             if plan.task_id is not None:
-                # Preserve the canonical R8-F lock order for any path that
-                # may later write aggregate Task activity:
-                # Task -> TaskBudget / execution -> Task activity.
-                locked_task = await uow.agents.get_task_for_update(plan.task_id)
-                if (
-                    locked_task is None
-                    or locked_task.session_id != plan.session_id
-                    or locked_task.created_by != plan.target_user_id
-                ):
-                    error = await self._reject_created_claim_in_uow(
-                        uow, claim, code="TASK_TERMINAL", now_utc=now_utc
-                    )
-                    await uow.commit()
-                    return error
-                if str(locked_task.status) in _TASK_TERMINAL_STATES:
-                    error = await self._reject_created_claim_in_uow(
-                        uow, claim, code="TASK_TERMINAL", now_utc=now_utc
-                    )
-                    await uow.commit()
-                    return error
+                # Task authority was locked before WAIT expiry handling. Keep
+                # that same lock through capacity/execution/activity writes.
+                assert locked_task is not None
 
                 # R7 resume may change current branch activity WAITING -> RUNNING.
                 # Advance a semantic no-op Task activity epoch before
