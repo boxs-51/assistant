@@ -1,38 +1,127 @@
-from typing import Dict, Any
+from copy import deepcopy
+import json
+from typing import Any, Dict, Mapping
 
-class RequestChats():
+from ....core.tool_contract import (
+    ProviderToolNameMap,
+    ProviderToolContractError,
+    normalize_provider_tool_schema,
+)
+from ....core.tool_request_context import build_request_tool_name_map
 
-    def adapt_chat_request(self, request: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Chuyển đổi request body từ chuẩn Gateway sang chuẩn OpenAI.
-        """
-        adapted_request = request.copy()
+
+class RequestChats:
+
+    @staticmethod
+    def _tool_dict(tool: Any) -> dict[str, Any]:
+        if isinstance(tool, Mapping):
+            return deepcopy(dict(tool))
+        if hasattr(tool, "model_dump"):
+            return deepcopy(tool.model_dump(mode="python"))
+        raise ProviderToolContractError(
+            f"unsupported OpenAI tool definition: {type(tool).__name__}"
+        )
+
+    @staticmethod
+    def _arguments_json(arguments: Any) -> str:
+        if isinstance(arguments, str):
+            return arguments
+        if isinstance(arguments, (dict, list)):
+            return json.dumps(arguments, ensure_ascii=False)
+        raise ProviderToolContractError(
+            "OpenAI assistant tool-call arguments must be a JSON string/object"
+        )
+
+    def adapt_chat_request(
+        self,
+        request: Dict[str, Any],
+        *,
+        tool_names: ProviderToolNameMap | None = None,
+    ) -> Dict[str, Any]:
+        """Lower the neutral Gateway request to OpenAI Chat Completions."""
+
+        adapted_request = deepcopy(request)
+        names = tool_names or build_request_tool_name_map("openai", adapted_request)
+
         config = adapted_request.pop("config", {}) or {}
         adapted_request.pop("metadata", None)
         adapted_request.pop("session_id", None)
-        for field in ("temperature", "top_p", "max_tokens", "presence_penalty", "frequency_penalty", "response_format"):
+        adapted_request.pop("connection_id", None)
+        adapted_request.pop("agent_enabled", None)
+        adapted_request.pop("agent_id", None)
+
+        for field in (
+            "temperature",
+            "top_p",
+            "max_tokens",
+            "presence_penalty",
+            "frequency_penalty",
+            "response_format",
+        ):
             if config.get(field) is not None:
                 adapted_request[field] = config[field]
         if "stream" in config:
             adapted_request["stream"] = bool(config["stream"])
 
-        # OpenAI sử dụng 'model' trực tiếp, không cần dịch tên model ở đây
-        # Logic dịch tên model đã được xử lý ở BaseProvider.prepare_request
+        tools = adapted_request.get("tools")
+        if tools:
+            native_tools = []
+            for raw_tool in tools:
+                tool = self._tool_dict(raw_tool)
+                logical_name = tool.get("name")
+                if not isinstance(logical_name, str) or not logical_name:
+                    raise ProviderToolContractError(
+                        "OpenAI tool definition requires a non-empty logical name"
+                    )
 
-        # Xử lý trường 'stream' nếu có
-        if "stream" in adapted_request and adapted_request["stream"] is False:
-            # OpenAI mặc định stream là false nếu không có, nhưng nếu người dùng gửi explicit false
-            # thì không cần thay đổi gì. Nếu gửi true thì cũng không cần thay đổi.
-            pass
-        
-        # Xử lý các trường khác nếu cần thiết để tương thích hoàn toàn với OpenAI API
-        # Ví dụ:
-        # - 'max_tokens' -> 'max_tokens' (tương thích)
-        # - 'temperature' -> 'temperature' (tương thích)
-        # - 'top_p' -> 'top_p' (tương thích)
-        # - 'stop' -> 'stop' (tương thích)
-        # - 'presence_penalty' -> 'presence_penalty' (tương thích)
-        # - 'frequency_penalty' -> 'frequency_penalty' (tương thích)
-        # - 'seed' -> 'seed' (tương thích)
+                function: dict[str, Any] = {
+                    "name": names.provider_name(logical_name),
+                    "description": str(tool.get("description") or ""),
+                }
+                parameters = normalize_provider_tool_schema(
+                    "openai", tool.get("parameters")
+                )
+                if parameters is not None:
+                    function["parameters"] = parameters
+
+                native_tools.append({"type": "function", "function": function})
+            adapted_request["tools"] = native_tools
+
+        for message in adapted_request.get("messages") or []:
+            if not isinstance(message, dict):
+                continue
+
+            if message.get("role") == "assistant":
+                tool_calls = message.get("tool_calls") or []
+                if isinstance(tool_calls, list):
+                    for call in tool_calls:
+                        if not isinstance(call, dict):
+                            continue
+                        function = call.get("function")
+                        if not isinstance(function, dict):
+                            continue
+                        logical_name = function.get("name")
+                        if isinstance(logical_name, str) and logical_name:
+                            function["name"] = names.provider_name(logical_name)
+                        if "arguments" in function:
+                            function["arguments"] = self._arguments_json(
+                                function["arguments"]
+                            )
+
+                function_call = message.get("function_call")
+                if isinstance(function_call, dict):
+                    logical_name = function_call.get("name")
+                    if isinstance(logical_name, str) and logical_name:
+                        function_call["name"] = names.provider_name(logical_name)
+                    if "arguments" in function_call:
+                        function_call["arguments"] = self._arguments_json(
+                            function_call["arguments"]
+                        )
+
+            if message.get("role") == "tool":
+                # Chat Completions identifies tool-result messages by
+                # tool_call_id; neutral Gateway name is not a wire field.
+                message.pop("name", None)
+                message.pop("tool_name", None)
 
         return adapted_request
