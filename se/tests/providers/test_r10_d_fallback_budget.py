@@ -12,6 +12,11 @@ from se.src.provider.exceptions import (
     ProviderError,
     ProviderRateLimitError,
 )
+from se.src.provider.policies.retry import RetryPolicy
+from se.src.provider.retry_contracts import (
+    ProviderRetryHint,
+    ProviderRetryHintSource,
+)
 from se.src.provider.handlers.chat_handler import ChatExecutionHandler
 from se.src.provider.handlers.embedding_handler import EmbeddingExecutionHandler
 
@@ -307,3 +312,89 @@ async def test_r10_d_embedding_deadline_remains_deadline_error(
 
     assert raised.value.code == PROVIDER_DEADLINE_EXCEEDED
     assert executor.provider_calls == ["p1"]
+
+
+class _RetryingExecutor:
+    def __init__(self):
+        self.retry_policy = RetryPolicy(max_retries=1)
+        self.budgets = []
+        self.retries_seen = []
+
+    async def is_provider_healthy(self, provider_name):
+        return True
+
+    async def execute(self, *, provider, call_budget, **kwargs):
+        self.budgets.append(call_budget)
+        self.retries_seen.append(call_budget.retries_used)
+
+        async def attempt():
+            outcome = provider.attempt_outcomes.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+
+        return await self.retry_policy.apply(
+            attempt,
+            provider.name,
+            call_budget=call_budget,
+        )
+
+
+@pytest.mark.asyncio
+async def test_r10_d_retry_delay_that_cannot_fit_falls_back_immediately(
+    monkeypatch,
+):
+    first = _Provider("p1")
+    second = _Provider("p2")
+    first.attempt_outcomes = [
+        ProviderRateLimitError(
+            "retry later",
+            provider_name="p1",
+            status_code=429,
+            error_code="RESOURCE_EXHAUSTED",
+            retry_hint=ProviderRetryHint(
+                retry_after_seconds=20.0,
+                source=ProviderRetryHintSource.RETRY_AFTER,
+            ),
+        )
+    ]
+    second.attempt_outcomes = ["fallback-ok"]
+
+    executor = _RetryingExecutor()
+    sleeps = []
+
+    async def fake_sleep(delay):
+        sleeps.append(delay)
+
+    monkeypatch.setattr(
+        "se.src.provider.handlers.base.time.monotonic",
+        lambda: 100.0,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.policies.retry.time.monotonic",
+        lambda: 100.0,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.policies.retry.random.uniform",
+        lambda _a, _b: 0.0,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.policies.retry.asyncio.sleep",
+        fake_sleep,
+    )
+
+    result = await _chat_handler(
+        [first, second],
+        executor,
+        timeout=10.0,
+    ).execute_with_fallback(
+        object(),
+        {"model": "logical-model"},
+    )
+
+    assert result == "fallback-ok"
+    assert sleeps == []
+    assert len(executor.budgets) == 2
+    assert executor.budgets[0] is executor.budgets[1]
+    assert executor.retries_seen == [0, 0]
+    assert executor.budgets[1].retries_used == 0
