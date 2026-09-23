@@ -288,55 +288,33 @@ async def test_r9_h_discard_vs_adopt_same_branch_has_one_resolution(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_r9_h_created_resume_claim_then_discard_cannot_consume(tmp_path):
+async def test_r9_h_created_resume_claim_rejects_if_branch_resolves_before_consume(
+    tmp_path,
+):
     engine, sessions, factory, store = await _resume_setup(
         tmp_path,
-        "r9_h_claim_then_discard.sqlite",
+        "r9_h_claim_then_resolution.sqlite",
     )
     try:
         branch_id = await _seed_resume_task_waiting(sessions, factory)
         plan = _resume_plan(task_id="task-r7f", branch_id=branch_id)
         claim = await store.get_or_create_resume_claim(
-            _resume_intent(plan, "rr-r9-h-discard")
+            _resume_intent(plan, "rr-r9-h-resolution")
         )
 
-        service = TaskBudgetService(
-            factory,
-            max_conflict_retries=16,
-        )
-        # Another OPEN branch keeps DISCARD legal while the resume branch
-        # remains WAITING. Reuse the task's durable budget service to create
-        # a sibling terminal branch without changing the stale claim.
+        # Model the durable resolution fence winning after claim creation but
+        # before consume. Public DISCARD itself rejects a WAITING head with
+        # BRANCH_EXECUTION_ACTIVE; this direct branch CAS isolates and proves
+        # the consume-time OPEN/current revalidation against stale authority.
         async with factory() as uow:
-            root_branch = await uow.agents.get_task_branch(branch_id)
-            await uow.agents.save_task_branch(
-                {
-                    "branch_id": "branch-r9-h-discard-keeper",
-                    "task_id": "task-r7f",
-                    "parent_branch_id": branch_id,
-                    "base_execution_id": plan.execution_id,
-                    "base_checkpoint_id": plan.checkpoint_id,
-                    "current_execution_id": None,
-                    "resolution_state": "OPEN",
-                    "revision": 0,
-                    "created_by": "user-r7f",
-                    "reason": "R9_H_TEST_KEEPER",
-                }
-            )
-            budget = await uow.agents.get_task_budget("task-r7f")
-            changed = await uow.agents.compare_and_set_task_budget(
-                "task-r7f",
-                int(budget.revision),
-                {"active_branches": int(budget.active_branches) + 1},
+            branch = await uow.agents.get_task_branch(branch_id)
+            changed = await uow.agents.compare_and_set_task_branch(
+                branch_id,
+                int(branch.revision),
+                {"resolution_state": "DISCARDED"},
             )
             assert changed is not None
             await uow.commit()
-
-        await service.discard_branch(
-            "task-r7f",
-            branch_id,
-            target_user_id="user-r7f",
-        )
 
         with pytest.raises(ResumeClaimRejected) as raised:
             await store.consume_resume_claim(
