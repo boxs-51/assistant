@@ -1319,9 +1319,32 @@ async def test_r8_f_activity_reconcile_race_with_r7_resume_finishes_task_running
             return_exceptions=True,
         )
 
-        assert not isinstance(resume_outcome, BaseException)
         assert not isinstance(reconcile_outcome, BaseException)
 
+        # Two serialized authority orders are valid:
+        # A) resume epoch wins -> execution + Task become RUNNING;
+        # B) reconciler epoch wins -> stale resume returns RESUME_CONFLICT,
+        #    leaving WAITING/WAITING and the CREATED claim retryable.
+        if isinstance(resume_outcome, BaseException):
+            assert isinstance(resume_outcome, ResumeClaimRejected)
+            assert resume_outcome.code == "RESUME_CONFLICT"
+            async with factory() as uow:
+                task = await uow.agents.get_task("task-r7f")
+                execution = await uow.agents.get_execution(EXECUTION)
+                budget = await uow.agents.get_task_budget("task-r7f")
+                durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+                assert str(execution.state) == "WAITING"
+                assert int(execution.revision) == 2
+                assert str(task.status) == "WAITING"
+                assert int(budget.active_executions) == 0
+                assert str(durable_claim.state) == "CREATED"
+                await uow.commit()
+
+            # Same durable claim/plan remains live after the stale activity
+            # epoch loss; a clean retry must converge to RUNNING.
+            resume_outcome = await store.consume_resume_claim(spec)
+
+        assert resume_outcome.consumed_execution_revision == 3
         async with factory() as uow:
             task = await uow.agents.get_task("task-r7f")
             execution = await uow.agents.get_execution(EXECUTION)
