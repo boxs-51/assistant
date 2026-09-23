@@ -677,10 +677,11 @@ AgentTask FOR UPDATE
 -> Task CAS if a write is needed
 ```
 
-This is required because R8-D FORK consume can add a new RUNNING branch while
-Task is already RUNNING without bumping Task revision. A stale activity
-snapshot must therefore conflict on the Task row, not rely only on revision
-CAS.
+This is required because R8-D FORK consume changes the live branch-head
+activity graph even when Task is already visibly RUNNING. Fresh FORK consume
+therefore advances the Task revision/activity epoch in the same transaction,
+while the Task-row lock remains the primary serialization fence on row-locking
+databases.
 
 R7 resume must preserve the same order:
 
