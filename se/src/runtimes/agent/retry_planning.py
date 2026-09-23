@@ -34,6 +34,7 @@ class RetryRevalidationSnapshot:
     branch: Any
     execution: Any
     checkpoint: Any | None
+    checkpoint_transcript: tuple[Any, ...] | None
     delegated: bool
     fresh_active_budget_seconds: float
     runtime_context_state: dict[str, Any]
@@ -153,6 +154,99 @@ async def _require_no_source_capability_side_effects_in_uow(
             "Source execution gained capability invocation authority after "
             "RETRY planning.",
         )
+
+
+def _retry_checkpoint_transcript_fingerprint(messages) -> str:
+    return retry_value_fingerprint(
+        [
+            item.model_dump(mode="json")
+            for item in messages
+        ]
+    )
+
+
+async def _load_retry_safe_checkpoint_transcript(
+    store,
+    execution_id: str,
+    checkpoint_id: str,
+):
+    """Reuse R8-C strict side-effect + transcript proof for RETRY_FROM_CHECKPOINT."""
+
+    from .fork_planning import AgentForkPlanningService, ForkPlanError
+
+    fork_planner = AgentForkPlanningService(store)
+    try:
+        side_effects = await fork_planner._load_safe_side_effects(execution_id)
+        transcript = await store.load_fork_safe_checkpoint_transcript(
+            execution_id,
+            checkpoint_id,
+        )
+    except ForkPlanError as exc:
+        raise RetryPlanRejected(
+            "RETRY_CHECKPOINT_UNSAFE",
+            str(exc),
+        ) from exc
+    except RuntimeError as exc:
+        raise RetryPlanRejected(
+            "RETRY_CHECKPOINT_UNSAFE",
+            str(exc),
+        ) from exc
+
+    transcript_tool_ids = [
+        item.tool_call_id
+        for item in transcript
+        if item.role == "tool"
+    ]
+    for effect in side_effects:
+        if transcript_tool_ids.count(effect.tool_call_id) != 1:
+            raise RetryPlanRejected(
+                "RETRY_CHECKPOINT_UNSAFE",
+                "Every terminal source side effect must appear exactly once "
+                "in the canonical retry checkpoint transcript.",
+            )
+    return tuple(transcript)
+
+
+async def _load_retry_safe_checkpoint_transcript_in_uow(
+    uow,
+    execution_id: str,
+    checkpoint,
+):
+    from .fork_planning import (
+        ForkPlanError,
+        _load_fork_safe_transcript_in_uow,
+        _load_safe_side_effects_in_uow,
+    )
+
+    try:
+        side_effects = await _load_safe_side_effects_in_uow(
+            uow,
+            execution_id,
+        )
+        transcript = await _load_fork_safe_transcript_in_uow(
+            uow,
+            execution_id,
+            checkpoint,
+        )
+    except ForkPlanError as exc:
+        raise RetryPlanRejected(
+            "RETRY_CHECKPOINT_UNSAFE",
+            str(exc),
+        ) from exc
+
+    transcript_tool_ids = [
+        item.tool_call_id
+        for item in transcript
+        if item.role == "tool"
+    ]
+    for effect in side_effects:
+        if transcript_tool_ids.count(effect.tool_call_id) != 1:
+            raise RetryPlanRejected(
+                "RETRY_CHECKPOINT_UNSAFE",
+                "Every terminal source side effect must appear exactly once "
+                "in the canonical retry checkpoint transcript.",
+            )
+    return tuple(transcript)
 
 
 async def _load_optional_checkpoint(
@@ -300,10 +394,26 @@ class AgentRetryPlanningService:
             branch_id=branch_id,
             source_checkpoint_id=source_checkpoint_id,
         )
-        await _require_no_source_capability_side_effects(
-            self._store,
-            source_execution_id,
-        )
+        checkpoint_transcript = None
+        checkpoint_transcript_fingerprint = None
+        if checkpoint is None:
+            await _require_no_source_capability_side_effects(
+                self._store,
+                source_execution_id,
+            )
+        else:
+            checkpoint_transcript = (
+                await _load_retry_safe_checkpoint_transcript(
+                    self._store,
+                    source_execution_id,
+                    checkpoint.checkpoint_id,
+                )
+            )
+            checkpoint_transcript_fingerprint = (
+                _retry_checkpoint_transcript_fingerprint(
+                    checkpoint_transcript
+                )
+            )
 
         budget = await self._store.load_task_budget(task_id)
         if budget is None:
@@ -364,6 +474,9 @@ class AgentRetryPlanningService:
             "source_agent_id": str(execution.agent_id),
             "source_checkpoint_id": (
                 checkpoint.checkpoint_id if checkpoint is not None else None
+            ),
+            "source_checkpoint_transcript_fingerprint": (
+                checkpoint_transcript_fingerprint
             ),
             "expected_task_budget_revision": int(budget.revision),
             "budget_policy_fingerprint": str(budget.policy_fingerprint),
@@ -543,10 +656,33 @@ async def revalidate_retry_plan_in_uow(
                 "Source checkpoint gained pending invocation snapshots.",
             )
 
-    await _require_no_source_capability_side_effects_in_uow(
-        uow,
-        plan.source_execution_id,
-    )
+    checkpoint_transcript = None
+    if checkpoint is None:
+        if plan.source_checkpoint_transcript_fingerprint is not None:
+            raise RetryPlanRejected(
+                "RETRY_PLAN_FINGERPRINT_INVALID",
+                "Retry plan binds checkpoint transcript evidence without a checkpoint.",
+            )
+        await _require_no_source_capability_side_effects_in_uow(
+            uow,
+            plan.source_execution_id,
+        )
+    else:
+        checkpoint_transcript = (
+            await _load_retry_safe_checkpoint_transcript_in_uow(
+                uow,
+                plan.source_execution_id,
+                checkpoint,
+            )
+        )
+        if (
+            _retry_checkpoint_transcript_fingerprint(checkpoint_transcript)
+            != plan.source_checkpoint_transcript_fingerprint
+        ):
+            raise RetryPlanRejected(
+                "RETRY_CHECKPOINT_TRANSCRIPT_CHANGED",
+                "Canonical checkpoint transcript changed after RETRY planning.",
+            )
 
     delegated = execution.parent_execution_id is not None
     if delegated and (
@@ -563,6 +699,7 @@ async def revalidate_retry_plan_in_uow(
         branch=branch,
         execution=execution,
         checkpoint=checkpoint,
+        checkpoint_transcript=checkpoint_transcript,
         delegated=delegated,
         fresh_active_budget_seconds=fresh_active_budget_seconds,
         runtime_context_state=dict(runtime_context_state),
