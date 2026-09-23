@@ -136,6 +136,19 @@ def _resume_exception_code(exc: BaseException, fallback: str) -> str:
     return fallback
 
 
+def _resume_retry_claim_id(claim, exc: BaseException) -> str | None:
+    """Preserve one CREATED claim identity only for retryable RESUME_CONFLICT."""
+
+    if (
+        claim is None
+        or str(getattr(exc, "code", "")) != "RESUME_CONFLICT"
+        or not bool(getattr(exc, "retryable", False))
+    ):
+        return None
+    claim_id = getattr(claim, "claim_id", None)
+    return str(claim_id) if claim_id else None
+
+
 def _resume_claim_matches_wire_request(
     claim,
     *,
@@ -996,16 +1009,10 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             return
         except ResumeClaimError as exc:
             await supervisor.release_reserved(token)
-            retry_claim_id = None
-            if (
-                claim is not None
-                and exc.code == "RESUME_CONFLICT"
-                and bool(exc.retryable)
-            ):
-                # No resume authority was acquired. Preserve the exact CREATED
-                # claim/request identity so ClientRuntime can retry the same
-                # logical attempt instead of tombstoning or minting a new rr.
-                retry_claim_id = claim.claim_id
+            # No resume authority was acquired. For a retryable
+            # RESUME_CONFLICT preserve the exact CREATED claim/request
+            # identity so ClientRuntime retries the same logical attempt.
+            retry_claim_id = _resume_retry_claim_id(claim, exc)
             await _send_resume_rejected(
                 websocket,
                 connection_id=connection_id,
