@@ -200,6 +200,91 @@ def _budget_from_record(record) -> TaskBudget:
     )
 
 
+async def reconcile_multibranch_task_activity_in_uow(
+    uow,
+    *,
+    task_id: str,
+):
+    """Derive only nonterminal R8 activity from OPEN branch heads.
+
+    Returns None only when the AgentTask CAS loses and the caller should retry
+    or roll back its surrounding authority transaction.
+    """
+
+    task = await uow.agents.get_task(task_id)
+    if task is None:
+        raise TaskBudgetRequiredError(f"Unknown AgentTask: {task_id}")
+    current_task_state = str(task.status)
+    if current_task_state in _TASK_TERMINAL_STATES:
+        return task
+
+    branches = await uow.agents.list_task_branches(task_id)
+    if len(branches) <= 1:
+        return task
+
+    current_executions = []
+    for branch in branches:
+        if str(branch.resolution_state) != "OPEN":
+            continue
+        execution_id = branch.current_execution_id
+        if execution_id is None:
+            continue
+        execution = await uow.agents.get_execution(execution_id)
+        if (
+            execution is None
+            or execution.task_id != task_id
+            or execution.branch_id != branch.branch_id
+        ):
+            raise TaskBudgetConflictError(
+                "TaskBranch current_execution_id has invalid durable lineage."
+            )
+        current_executions.append(execution)
+
+    target_state: str | None = None
+    wait_reasons: list[str] = []
+    if any(
+        str(execution.state) in {"CREATED", "RUNNING"}
+        for execution in current_executions
+    ):
+        target_state = "RUNNING"
+    else:
+        waiting_reasons: set[str] = set()
+        for execution in current_executions:
+            state = str(execution.state)
+            if state not in {"WAITING", "WAITING_FOR_CONNECTION"}:
+                continue
+            reason = str(execution.wait_reason or "")
+            if not reason and state == "WAITING_FOR_CONNECTION":
+                reason = "CONNECTION"
+            if reason:
+                waiting_reasons.add(reason)
+        if waiting_reasons:
+            target_state = "WAITING"
+            wait_reasons = sorted(waiting_reasons)
+
+    # All OPEN branch heads terminal (or unresolved/missing heads): R9 owns
+    # result resolution. Preserve the existing nonterminal Task + OPEN budget.
+    if target_state is None:
+        return task
+
+    current_reasons = sorted(str(item) for item in (task.wait_reasons or []))
+    if (
+        current_task_state == target_state
+        and current_reasons == wait_reasons
+    ):
+        return task
+
+    updated = await uow.agents.compare_and_set_task(
+        task_id,
+        int(task.revision),
+        {
+            "status": target_state,
+            "wait_reasons": wait_reasons,
+        },
+    )
+    return updated
+
+
 async def prepare_resume_capacity_in_uow(
     uow,
     *,
@@ -1887,6 +1972,34 @@ class TaskBudgetService:
 
         raise TaskBudgetConflictError(
             f"Tool-call reservation conflicts exhausted for {task_id}"
+        )
+
+    async def reconcile_multibranch_task_activity(
+        self,
+        task_id: str,
+    ):
+        """Retry/rederive the minimal R8 multi-branch Task activity projection."""
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    updated = await reconcile_multibranch_task_activity_in_uow(
+                        uow,
+                        task_id=task_id,
+                    )
+                    if updated is None:
+                        await uow.rollback()
+                        continue
+                    await uow.commit()
+                    return updated
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"Task activity CAS conflicts exhausted for {task_id}"
         )
 
     async def get_budget(self, task_id: str) -> TaskBudget | None:
