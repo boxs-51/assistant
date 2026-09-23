@@ -145,15 +145,25 @@ class AgentRuntime:
     ) -> int:
         if self._uses_task_budget(context):
             assert context.task_id is not None
-            return await self._task_budget_service.finish_task_scoped_execution(
-                context.task_id,
-                execution_id=context.execution_id,
-                source_revision=revision,
-                transition_values=values,
-                delegated=context.parent_execution_id is not None,
-                checkpoint_values=checkpoint_values,
-                pending_invocations=pending_invocations,
+            target_revision = await (
+                self._task_budget_service.finish_task_scoped_execution(
+                    context.task_id,
+                    execution_id=context.execution_id,
+                    source_revision=revision,
+                    transition_values=values,
+                    delegated=context.parent_execution_id is not None,
+                    checkpoint_values=checkpoint_values,
+                    pending_invocations=pending_invocations,
+                )
             )
+            reconciler = getattr(
+                self._task_budget_service,
+                "reconcile_multibranch_task_activity",
+                None,
+            )
+            if callable(reconciler):
+                await reconciler(context.task_id)
+            return target_revision
         if checkpoint_values is not None:
             writer = getattr(
                 self._durable_store,
