@@ -628,10 +628,7 @@ class DurableAgentStore:
                 branch_id=bootstrap.branch_id,
                 base_execution_id=receipt.source_execution_id,
                 base_checkpoint_id=receipt.source_checkpoint_id,
-                values={
-                    "state": "RUNNING",
-                    "started_at": activated_at,
-                },
+                started_at=activated_at,
             )
             if activated is None:
                 await uow.rollback()
