@@ -846,3 +846,42 @@ async def test_r10_g_handler_cancellation_survives_failing_cleanup_without_fallb
     assert p1_stream.close_calls == 1
     assert executor.provider_calls == ["p1"]
     assert p2.probe_calls == 0
+
+
+
+@pytest.mark.asyncio
+async def test_r10_g_deadline_expiry_before_first_stream_read_does_not_penalize_breaker():
+    class _SequencedBudget:
+        def __init__(self):
+            self.remaining_values = [1.0, 0.5, 0.0]
+
+        def remaining_seconds(self, *, now_monotonic):
+            return self.remaining_values.pop(0)
+
+    class _NeverReadChat:
+        def __init__(self):
+            self.reads = 0
+
+        async def chat_stream(self, **kwargs):
+            self.reads += 1
+            yield "must-not-be-read"
+
+    manager = _BreakerManager()
+    executor = ProviderExecutor(manager, max_retries=0)
+    chat = _NeverReadChat()
+    provider = SimpleNamespace(name="p1", chat=chat)
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        async for _ in executor.execute_stream(
+            provider=provider,
+            http_client=object(),
+            body={"model": "logical-model"},
+            timeout=60.0,
+            call_budget=_SequencedBudget(),
+        ):
+            pass
+
+    breaker = await manager.get_breaker("p1")
+    assert chat.reads == 0
+    assert breaker.failures == 0
+    assert breaker.successes == 0
