@@ -2498,6 +2498,22 @@ class DurableAgentStore:
                                 "TASK_TERMINAL",
                                 "Terminal AgentTask cannot create a ResumeClaim.",
                             )
+                        if execution.branch_id is not None:
+                            branch_record = await uow.agents.get_task_branch(
+                                execution.branch_id
+                            )
+                            if (
+                                branch_record is None
+                                or branch_record.task_id != execution.task_id
+                                or str(branch_record.resolution_state) != "OPEN"
+                                or branch_record.current_execution_id
+                                != execution.id
+                            ):
+                                raise ResumeClaimRejected(
+                                    "BRANCH_NOT_OPEN",
+                                    "Resolved or non-current TaskBranch cannot "
+                                    "create a ResumeClaim.",
+                                )
 
                     record = await uow.agents.save_resume_claim(values)
                     result = self._resume_claim_contract(record)
@@ -2784,6 +2800,35 @@ class DurableAgentStore:
                     )
                     await uow.commit()
                     return error
+
+                # R9 branch resolution shares Task-first serialization. Lock
+                # TaskBudget then Branch in the frozen order before any
+                # WAITING -> RUNNING/timeout authority mutation.
+                locked_budget = await uow.agents.get_task_budget_for_update(
+                    plan.task_id
+                )
+                if locked_budget is None or str(locked_budget.state) != "OPEN":
+                    error = await self._reject_created_claim_in_uow(
+                        uow, claim, code="TASK_TERMINAL", now_utc=now_utc
+                    )
+                    await uow.commit()
+                    return error
+                if plan.branch_id is not None:
+                    locked_branch = await uow.agents.get_task_branch_for_update(
+                        plan.branch_id
+                    )
+                    if (
+                        locked_branch is None
+                        or locked_branch.task_id != plan.task_id
+                        or str(locked_branch.resolution_state) != "OPEN"
+                        or locked_branch.current_execution_id
+                        != plan.execution_id
+                    ):
+                        error = await self._reject_created_claim_in_uow(
+                            uow, claim, code="BRANCH_NOT_OPEN", now_utc=now_utc
+                        )
+                        await uow.commit()
+                        return error
 
             if (
                 execution_wait_expires_at is not None
