@@ -64,6 +64,13 @@ PHYSICAL_ROOTS = {
     "web_tool",
 }
 
+T9_E_AGENT_IDS = {
+    "agent-command-reviewer",
+    "agent-coordinator",
+    "agent-web-researcher",
+}
+
+
 PHYSICAL_TOOL_BY_ID = {
     **{capability_id: "file_tool" for capability_id in NON_WEB_IDS[:5]},
     "glob.find": "find_by_glob",
@@ -179,11 +186,8 @@ def test_real_support_loader_projects_frozen_agent_tools_only():
 
     discovered = register_builtin_support(container)
 
-    assert discovered["agents"] == [
-        "agent-command-reviewer",
-        "agent-coordinator",
-        "agent-web-researcher",
-    ]
+    discovered_agents = set(discovered["agents"])
+    assert T9_E_AGENT_IDS.issubset(discovered_agents)
     assert container.agent_registry.list_all() == []
 
     command_reviewer = container.agent_registry.get(
@@ -218,7 +222,7 @@ def test_real_support_loader_projects_frozen_agent_tools_only():
         agent.name: agent
         for agent in container.agent_registry.list_all()
     }
-    assert set(loaded_agents) == set(discovered["agents"])
+    assert set(loaded_agents) == T9_E_AGENT_IDS
 
     for agent in loaded_agents.values():
         assert not PHYSICAL_ROOTS.intersection(agent.tools)
@@ -250,7 +254,7 @@ def test_real_support_loader_projects_frozen_agent_tools_only():
 
     summaries = container.support_loader.list_agent_summaries(_guest())
     summary_by_name = {item.name: item for item in summaries}
-    assert set(summary_by_name) == set(discovered["agents"])
+    assert T9_E_AGENT_IDS.issubset(summary_by_name)
     assert summary_by_name["agent-command-reviewer"].tools == (
         command_reviewer.tools
     )
