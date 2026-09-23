@@ -74,6 +74,34 @@ class ForkExecutionBootstrap:
 
 
 @dataclass(frozen=True, slots=True)
+class ForkActivationResult:
+    """Durable R8-F activation winner for one already-admitted FORK."""
+
+    task_id: str
+    branch_id: str
+    execution_id: str
+    source_execution_revision: int
+    activated_execution_revision: int
+    remaining_active_budget_seconds: float
+
+
+@dataclass(frozen=True, slots=True)
+class ForkReplayResult:
+    """Durable same-request replay view independent of source progress."""
+
+    admission: "ForkAdmission"
+    execution_state: str
+    execution_revision: int
+
+    @property
+    def preactivation(self) -> bool:
+        return (
+            self.execution_state == "RUNNING"
+            and self.execution_revision == 1
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ForkAdmission:
     """Committed R8-D FORK result returned by atomic consume."""
 
@@ -312,8 +340,10 @@ def fork_plan_fingerprint(values: ForkPlan | Mapping[str, Any]) -> str:
 
 
 __all__ = [
+    "ForkActivationResult",
     "ForkAdmission",
     "ForkExecutionBootstrap",
+    "ForkReplayResult",
     "ForkPlan",
     "ForkRuntimeSeed",
     "ForkSideEffectSnapshot",
