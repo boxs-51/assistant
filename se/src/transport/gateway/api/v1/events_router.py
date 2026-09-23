@@ -729,6 +729,7 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             )
             return
 
+        claim = None
         consumed = None
         owned_task = None
         continue_after_ack = asyncio.Event()
@@ -995,6 +996,16 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
             return
         except ResumeClaimError as exc:
             await supervisor.release_reserved(token)
+            retry_claim_id = None
+            if (
+                claim is not None
+                and exc.code == "RESUME_CONFLICT"
+                and bool(exc.retryable)
+            ):
+                # No resume authority was acquired. Preserve the exact CREATED
+                # claim/request identity so ClientRuntime can retry the same
+                # logical attempt instead of tombstoning or minting a new rr.
+                retry_claim_id = claim.claim_id
             await _send_resume_rejected(
                 websocket,
                 connection_id=connection_id,
@@ -1004,6 +1015,7 @@ async def _resume_execution(websocket, identity, container, connection_id, envel
                 code=exc.code,
                 message=str(exc),
                 retryable=bool(exc.retryable),
+                claim_id=retry_claim_id,
             )
             return
         except BaseException as exc:
