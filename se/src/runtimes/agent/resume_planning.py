@@ -239,6 +239,19 @@ class AgentResumePlanningService:
                     "TASK_TERMINAL",
                     f"AgentTask {execution.task_id} is already {task_status}.",
                 )
+            branch_id = getattr(execution, "branch_id", None)
+            if branch_id is not None:
+                branch = await self._store.load_task_branch(branch_id)
+                if (
+                    branch is None
+                    or branch.task_id != execution.task_id
+                    or str(branch.resolution_state) != "OPEN"
+                    or branch.current_execution_id != execution.id
+                ):
+                    raise ResumePlanRejected(
+                        "BRANCH_NOT_OPEN",
+                        "Resolved or non-current TaskBranch cannot resume.",
+                    )
 
         remaining = checkpoint.remaining_active_budget_seconds
         if remaining is None or not math.isfinite(float(remaining)):

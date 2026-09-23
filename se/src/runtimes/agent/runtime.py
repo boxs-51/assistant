@@ -1352,6 +1352,38 @@ class AgentRuntime:
             error_message=error_message,
         )
 
+    async def cancel_activated_retry_execution(
+        self,
+        context: AgentExecutionContext,
+        revision: int,
+        *,
+        error_message: str = "RETRY_RUNTIME_HANDOFF_FAILED",
+    ) -> None:
+        """Fail closed after retry activation wins but local handoff fails."""
+
+        context.freeze_active_budget()
+        await self._cancel_durable_revision(
+            context,
+            revision,
+            error_message=error_message,
+        )
+
+    async def cancel_activated_aggregate_execution(
+        self,
+        context: AgentExecutionContext,
+        revision: int,
+        *,
+        error_message: str = "AGGREGATE_RUNTIME_HANDOFF_FAILED",
+    ) -> None:
+        """Fail closed after aggregate activation wins but local handoff fails."""
+
+        context.freeze_active_budget()
+        await self._cancel_durable_revision(
+            context,
+            revision,
+            error_message=error_message,
+        )
+
     async def _begin_durable_execution_owned(
         self,
         context: AgentExecutionContext,

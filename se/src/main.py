@@ -75,12 +75,18 @@ from .runtimes.capability.local_tool_loader import register_local_tools
 from .runtimes.capability.builtins import register_builtin_support
 from .runtimes.capability.invocation import CapabilityInvocationLifecycle
 from .runtimes.agent.coordinator import MultiAgentCoordinator
-from .runtimes.agent.persistence import DurableAgentStore, ForkControlError
+from .runtimes.agent.persistence import (
+    AggregateControlError,
+    DurableAgentStore,
+    ForkControlError,
+    RetryControlError,
+)
 from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.supervisor import AgentExecutionSupervisor
 from .runtimes.agent.task_budget import TaskBudgetService
 from .runtimes.agent.resume_planning import AgentResumePlanningService
 from .runtimes.agent.fork_planning import AgentForkPlanningService
+from .runtimes.agent.retry_planning import AgentRetryPlanningService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
 from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
@@ -332,6 +338,372 @@ async def execute_forked_agent_task_control_plane(
         "task_id": task_id,
         "fork_request_id": request.fork_request_id,
         "branch_id": admission.branch_id,
+        "execution_id": admission.execution_id,
+        "execution_state": str(latest.state),
+        "execution_revision": int(latest.revision),
+        "started": True,
+    }
+
+
+def _classify_retry_replay_execution(execution) -> str:
+    state = str(getattr(execution, "state", ""))
+    try:
+        revision = int(getattr(execution, "revision"))
+    except (TypeError, ValueError) as exc:
+        raise RetryControlError(
+            "RETRY_ADMISSION_CORRUPT",
+            "Retry execution has an invalid durable revision.",
+        ) from exc
+    if state == "RUNNING" and revision == 1:
+        return "PREACTIVATION"
+    if state == "RUNNING" and revision >= 2:
+        return "IDENTITY_REPLAY"
+    if state == "WAITING" and revision >= 3:
+        return "IDENTITY_REPLAY"
+    if state in {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"} and revision >= 2:
+        return "IDENTITY_REPLAY"
+    raise RetryControlError(
+        "RETRY_ADMISSION_CORRUPT",
+        f"Retry execution has an invalid lifecycle shape: {state}@{revision}.",
+    )
+
+
+async def execute_retried_agent_task_control_plane(
+    container,
+    task_id,
+    request,
+    identity,
+):
+    """R9-G explicit retry replay/admission/activation command."""
+
+    store = container.agent_durable_store
+    principal = str(identity.user_id or "")
+    if not principal:
+        raise PermissionError("Authenticated principal is required.")
+    replay = await store.load_retry_replay(
+        task_id=task_id,
+        retry_request_id=request.retry_request_id,
+        branch_id=request.branch_id,
+        source_execution_id=request.source_execution_id,
+        source_checkpoint_id=request.source_checkpoint_id,
+        target_user_id=principal,
+    )
+    if replay is not None:
+        admission = replay.admission
+    else:
+        plan = await container.retry_planning_service.build_retry_plan(
+            retry_request_id=request.retry_request_id,
+            task_id=task_id,
+            branch_id=request.branch_id,
+            source_execution_id=request.source_execution_id,
+            source_checkpoint_id=request.source_checkpoint_id,
+            target_user_id=principal,
+        )
+        admission = await container.task_budget_service.consume_retry_plan(plan)
+    current = await store.load_execution(admission.execution_id)
+    if current is None:
+        raise RetryControlError(
+            "RETRY_ADMISSION_CORRUPT", "Retry execution is missing."
+        )
+    lifecycle = _classify_retry_replay_execution(current)
+    if lifecycle == "IDENTITY_REPLAY":
+        return {
+            "task_id": task_id,
+            "retry_request_id": request.retry_request_id,
+            "branch_id": admission.branch_id,
+            "execution_id": admission.execution_id,
+            "execution_state": str(current.state),
+            "execution_revision": int(current.revision),
+            "started": False,
+        }
+    agent = container.agent_registry.get(current.agent_id)
+    if agent is None:
+        raise LookupError(f"Agent '{current.agent_id}' is not registered.")
+    bootstrap = await store.prepare_retry_execution_context(
+        admission.execution_id, identity=identity, agent=agent
+    )
+    supervisor = container.agent_execution_supervisor
+    runtime = container.agent_runtime
+    token = await supervisor.reserve(bootstrap.context)
+    activation = None
+    try:
+        try:
+            activation = await store.activate_retry_execution(
+                bootstrap, identity=identity
+            )
+        except BaseException:
+            await supervisor.release_reserved(token)
+            latest = await store.load_execution(admission.execution_id)
+            if latest is not None and (
+                _classify_retry_replay_execution(latest)
+                == "IDENTITY_REPLAY"
+            ):
+                return {
+                    "task_id": task_id,
+                    "retry_request_id": request.retry_request_id,
+                    "branch_id": admission.branch_id,
+                    "execution_id": admission.execution_id,
+                    "execution_state": str(latest.state),
+                    "execution_revision": int(latest.revision),
+                    "started": False,
+                }
+            raise
+        try:
+            bootstrap.context.restore_active_budget(
+                activation.remaining_active_budget_seconds
+            )
+            owned_task = await supervisor.start_reserved(
+                token,
+                bootstrap.context,
+                lambda: runtime.execute(
+                    bootstrap.context,
+                    durable_revision=activation.activated_execution_revision,
+                ),
+            )
+        except BaseException as handoff_error:
+            try:
+                await runtime.cancel_activated_retry_execution(
+                    bootstrap.context,
+                    activation.activated_execution_revision,
+                    error_message=(
+                        "RETRY_RUNTIME_HANDOFF_FAILED: "
+                        f"{type(handoff_error).__name__}: {handoff_error}"
+                    ),
+                )
+            finally:
+                await supervisor.release_reserved(token)
+            raise
+        owned_task.add_done_callback(
+            lambda completed: (
+                None if completed.cancelled() else completed.exception()
+            )
+        )
+    except BaseException:
+        raise
+    latest = await store.load_execution(admission.execution_id)
+    if latest is None:
+        raise RetryControlError(
+            "RETRY_ADMISSION_CORRUPT",
+            "Retry execution disappeared after activation.",
+        )
+    _classify_retry_replay_execution(latest)
+    return {
+        "task_id": task_id,
+        "retry_request_id": request.retry_request_id,
+        "branch_id": admission.branch_id,
+        "execution_id": admission.execution_id,
+        "execution_state": str(latest.state),
+        "execution_revision": int(latest.revision),
+        "started": True,
+    }
+
+
+def _classify_aggregate_replay_execution(execution) -> str:
+    state = str(getattr(execution, "state", ""))
+    try:
+        revision = int(getattr(execution, "revision"))
+    except (TypeError, ValueError) as exc:
+        raise AggregateControlError(
+            "AGGREGATE_ADMISSION_CORRUPT",
+            "Aggregate execution has an invalid durable revision.",
+        ) from exc
+    if state == "RUNNING" and revision == 1:
+        return "PREACTIVATION"
+    if state == "RUNNING" and revision >= 2:
+        return "IDENTITY_REPLAY"
+    if state == "WAITING" and revision >= 3:
+        return "IDENTITY_REPLAY"
+    if state in {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"} and revision >= 2:
+        return "IDENTITY_REPLAY"
+    raise AggregateControlError(
+        "AGGREGATE_ADMISSION_CORRUPT",
+        (
+            "Aggregate execution has an invalid lifecycle shape: "
+            f"{state}@{revision}."
+        ),
+    )
+
+
+async def _activate_aggregate_owned(
+    *,
+    store,
+    runtime,
+    supervisor,
+    token,
+    bootstrap,
+    identity,
+):
+    """Resolve aggregate activation to a known outcome across caller cancellation."""
+
+    activation_task = asyncio.create_task(
+        store.activate_aggregate_execution(
+            bootstrap,
+            identity=identity,
+        ),
+        name=f"aggregate-activation:{bootstrap.execution_id}",
+    )
+    try:
+        return await asyncio.shield(activation_task)
+    except asyncio.CancelledError:
+        outcome = (
+            await asyncio.gather(
+                activation_task,
+                return_exceptions=True,
+            )
+        )[0]
+        if not isinstance(outcome, BaseException):
+            try:
+                await runtime.cancel_activated_aggregate_execution(
+                    bootstrap.context,
+                    outcome.activated_execution_revision,
+                    error_message="AGGREGATE_ACTIVATION_CALLER_CANCELLED",
+                )
+            finally:
+                await supervisor.release_reserved(token)
+        else:
+            await supervisor.release_reserved(token)
+        raise
+
+
+async def execute_aggregated_agent_task_control_plane(
+    container,
+    task_id,
+    request,
+    identity,
+):
+    """R9-F/G durable AGGREGATE admission/replay/activation/handoff command."""
+
+    store = container.agent_durable_store
+    service = container.task_budget_service
+    supervisor = container.agent_execution_supervisor
+    runtime = container.agent_runtime
+    principal = str(identity.user_id or "")
+    if not principal:
+        raise PermissionError("Authenticated principal is required.")
+
+    admission = await service.aggregate_branches(
+        task_id,
+        aggregate_request_id=request.aggregate_request_id,
+        target_branch_id=request.target_branch_id,
+        source_branch_ids=tuple(request.source_branch_ids),
+        target_user_id=principal,
+    )
+    current = await store.load_execution(admission.execution_id)
+    if current is None:
+        raise AggregateControlError(
+            "AGGREGATE_ADMISSION_CORRUPT",
+            "Aggregate execution is missing.",
+        )
+
+    lifecycle = _classify_aggregate_replay_execution(current)
+    if lifecycle == "IDENTITY_REPLAY":
+        return {
+            "task_id": task_id,
+            "aggregate_request_id": request.aggregate_request_id,
+            "target_branch_id": admission.target_branch_id,
+            "source_branch_ids": list(admission.source_branch_ids),
+            "execution_id": admission.execution_id,
+            "execution_state": str(current.state),
+            "execution_revision": int(current.revision),
+            "started": False,
+        }
+
+    agent = container.agent_registry.get(current.agent_id)
+    if agent is None:
+        raise LookupError(f"Agent '{current.agent_id}' is not registered.")
+
+    bootstrap = await store.prepare_aggregate_execution_context(
+        admission.execution_id,
+        identity=identity,
+        agent=agent,
+    )
+    token = await supervisor.reserve(bootstrap.context)
+    activation = None
+    try:
+        try:
+            activation = await _activate_aggregate_owned(
+                store=store,
+                runtime=runtime,
+                supervisor=supervisor,
+                token=token,
+                bootstrap=bootstrap,
+                identity=identity,
+            )
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            await supervisor.release_reserved(token)
+            latest = await store.load_execution(admission.execution_id)
+            if latest is None:
+                raise AggregateControlError(
+                    "AGGREGATE_ADMISSION_CORRUPT",
+                    "Aggregate execution disappeared during activation.",
+                )
+            if (
+                _classify_aggregate_replay_execution(latest)
+                == "IDENTITY_REPLAY"
+            ):
+                return {
+                    "task_id": task_id,
+                    "aggregate_request_id": request.aggregate_request_id,
+                    "target_branch_id": admission.target_branch_id,
+                    "source_branch_ids": list(admission.source_branch_ids),
+                    "execution_id": admission.execution_id,
+                    "execution_state": str(latest.state),
+                    "execution_revision": int(latest.revision),
+                    "started": False,
+                }
+            raise
+
+        try:
+            bootstrap.context.restore_active_budget(
+                activation.remaining_active_budget_seconds
+            )
+            owned_task = await supervisor.start_reserved(
+                token,
+                bootstrap.context,
+                lambda: runtime.execute(
+                    bootstrap.context,
+                    durable_revision=(
+                        activation.activated_execution_revision
+                    ),
+                ),
+            )
+        except BaseException as handoff_error:
+            try:
+                await runtime.cancel_activated_aggregate_execution(
+                    bootstrap.context,
+                    activation.activated_execution_revision,
+                    error_message=(
+                        "AGGREGATE_RUNTIME_HANDOFF_FAILED: "
+                        f"{type(handoff_error).__name__}: {handoff_error}"
+                    ),
+                )
+            finally:
+                await supervisor.release_reserved(token)
+            raise
+
+        def observe_aggregate_runner(completed):
+            if completed.cancelled():
+                return
+            completed.exception()
+
+        owned_task.add_done_callback(observe_aggregate_runner)
+    except BaseException:
+        raise
+
+    latest = await store.load_execution(admission.execution_id)
+    if latest is None:
+        raise AggregateControlError(
+            "AGGREGATE_ADMISSION_CORRUPT",
+            "Aggregate execution disappeared after activation.",
+        )
+    _classify_aggregate_replay_execution(latest)
+    return {
+        "task_id": task_id,
+        "aggregate_request_id": request.aggregate_request_id,
+        "target_branch_id": admission.target_branch_id,
+        "source_branch_ids": list(admission.source_branch_ids),
         "execution_id": admission.execution_id,
         "execution_state": str(latest.state),
         "execution_revision": int(latest.revision),
@@ -637,6 +1009,9 @@ async def bootstrap_runtime_kernel(
     container.fork_planning_service = AgentForkPlanningService(
         container.agent_durable_store
     )
+    container.retry_planning_service = AgentRetryPlanningService(
+        container.agent_durable_store
+    )
     container.agent_runtime = AgentRuntime(
         context_builder=container.context_builder_port,
         inference=container.inference_port,
@@ -726,10 +1101,71 @@ async def bootstrap_runtime_kernel(
             identity,
         )
 
+    async def execute_retried_agent_task(task_id, request, identity):
+        return await execute_retried_agent_task_control_plane(
+            container, task_id, request, identity
+        )
+
+    async def discard_agent_task_branch(task_id, request, identity):
+        result = await container.task_budget_service.discard_branch(
+            task_id,
+            request.branch_id,
+            target_user_id=str(identity.user_id or ""),
+        )
+        task = await container.agent_durable_store.load_task(task_id)
+        branch = await container.agent_durable_store.load_task_branch(
+            result.branch_id
+        )
+        return {
+            "task_id": task_id,
+            "branch_id": result.branch_id,
+            "resolution_state": str(branch.resolution_state),
+            "task_status": str(task.status),
+            "execution_id": branch.current_execution_id,
+        }
+
+    async def adopt_agent_task_branch(task_id, request, identity):
+        result = await container.task_budget_service.adopt_branch(
+            task_id,
+            request.branch_id,
+            target_user_id=str(identity.user_id or ""),
+        )
+        task = await container.agent_durable_store.load_task(task_id)
+        branch = await container.agent_durable_store.load_task_branch(
+            result.selected_branch_id
+        )
+        return {
+            "task_id": task_id,
+            "branch_id": result.selected_branch_id,
+            "resolution_state": str(branch.resolution_state),
+            "task_status": str(task.status),
+            "execution_id": result.selected_execution_id,
+        }
+
+    async def aggregate_agent_task_branches(task_id, request, identity):
+        return await execute_aggregated_agent_task_control_plane(
+            container,
+            task_id,
+            request,
+            identity,
+        )
+
     # Multi-agent HTTP tasks enter the canonical AgentRuntime loop.
     container.multi_agent_coordinator.executor = execute_registered_agent_task
     container.multi_agent_coordinator.fork_executor = (
         execute_forked_agent_task
+    )
+    container.multi_agent_coordinator.retry_executor = (
+        execute_retried_agent_task
+    )
+    container.multi_agent_coordinator.discard_executor = (
+        discard_agent_task_branch
+    )
+    container.multi_agent_coordinator.adopt_executor = (
+        adopt_agent_task_branch
+    )
+    container.multi_agent_coordinator.aggregate_executor = (
+        aggregate_agent_task_branches
     )
 
     logger.info("AI Runtime Kernel & Runtimes booted successfully.")

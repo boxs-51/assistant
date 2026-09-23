@@ -16,6 +16,12 @@ from ...domain.schemas.multi_agent import (
     AgentTask,
     AgentTaskForkRequest,
     AgentTaskForkResponse,
+    AgentTaskRetryRequest,
+    AgentTaskRetryResponse,
+    AgentTaskBranchResolutionRequest,
+    AgentTaskBranchResolutionResponse,
+    AgentTaskAggregateRequest,
+    AgentTaskAggregateResponse,
     AgentTaskStatus,
     TaskBranch,
 )
@@ -38,6 +44,10 @@ class MultiAgentCoordinator:
         durable_store=None,
         executor=None,
         fork_executor=None,
+        retry_executor=None,
+        discard_executor=None,
+        adopt_executor=None,
+        aggregate_executor=None,
         execution_id_factory: AgentExecutionIdFactory | None = None,
         execution_supervisor=None,
         task_budget_service=None,
@@ -46,6 +56,10 @@ class MultiAgentCoordinator:
         self.durable_store = durable_store
         self.executor = executor
         self.fork_executor = fork_executor
+        self.retry_executor = retry_executor
+        self.discard_executor = discard_executor
+        self.adopt_executor = adopt_executor
+        self.aggregate_executor = aggregate_executor
         self.execution_supervisor = execution_supervisor
         self.task_budget_service = task_budget_service
         self.execution_id_factory = (
@@ -348,6 +362,62 @@ class MultiAgentCoordinator:
         if inspect.isawaitable(result):
             result = await result
         return AgentTaskForkResponse.model_validate(result)
+
+    async def retry_task(
+        self,
+        task_id: str,
+        request: AgentTaskRetryRequest,
+        identity: Identity,
+    ) -> AgentTaskRetryResponse:
+        await self._load_owned_task_record(task_id, identity)
+        if self.retry_executor is None:
+            raise RuntimeError("Retry execution runtime is unavailable.")
+        result = self.retry_executor(task_id, request, identity)
+        if inspect.isawaitable(result):
+            result = await result
+        return AgentTaskRetryResponse.model_validate(result)
+
+    async def discard_task_branch(
+        self,
+        task_id: str,
+        request: AgentTaskBranchResolutionRequest,
+        identity: Identity,
+    ) -> AgentTaskBranchResolutionResponse:
+        await self._load_owned_task_record(task_id, identity)
+        if self.discard_executor is None:
+            raise RuntimeError("Branch resolution runtime is unavailable.")
+        result = self.discard_executor(task_id, request, identity)
+        if inspect.isawaitable(result):
+            result = await result
+        return AgentTaskBranchResolutionResponse.model_validate(result)
+
+    async def adopt_task_branch(
+        self,
+        task_id: str,
+        request: AgentTaskBranchResolutionRequest,
+        identity: Identity,
+    ) -> AgentTaskBranchResolutionResponse:
+        await self._load_owned_task_record(task_id, identity)
+        if self.adopt_executor is None:
+            raise RuntimeError("Task resolution runtime is unavailable.")
+        result = self.adopt_executor(task_id, request, identity)
+        if inspect.isawaitable(result):
+            result = await result
+        return AgentTaskBranchResolutionResponse.model_validate(result)
+
+    async def aggregate_task_branches(
+        self,
+        task_id: str,
+        request: AgentTaskAggregateRequest,
+        identity: Identity,
+    ) -> AgentTaskAggregateResponse:
+        await self._load_owned_task_record(task_id, identity)
+        if self.aggregate_executor is None:
+            raise RuntimeError("Aggregate execution runtime is unavailable.")
+        result = self.aggregate_executor(task_id, request, identity)
+        if inspect.isawaitable(result):
+            result = await result
+        return AgentTaskAggregateResponse.model_validate(result)
 
     def cancel_task(self, task_id: str, identity: Identity) -> AgentTask:
         """Compatibility facade.

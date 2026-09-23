@@ -49,6 +49,7 @@ class ApplicationContainer:
     context_builder_port: Optional[Any] = None
     resume_planning_service: Optional[Any] = None
     fork_planning_service: Optional[Any] = None
+    retry_planning_service: Optional[Any] = None
     agent_runtime: Optional[Any] = None
     agent_execution_supervisor: Optional[Any] = None
     agent_durable_store: Optional[Any] = None
