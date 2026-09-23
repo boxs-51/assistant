@@ -112,24 +112,26 @@ T1 -> TV1-T1
 T8 -> TV1-T8
 ```
 
-TV1-T8 is final-frozen. Current/future Tools coordination is:
+Current Tools coordination is:
 
 ```text
 Issue #7  — TV1-T8 CLOSED / COMPLETED
-Issue #12 — TV1-T9 boundary/plan checkpoint
+Issue #12 — TV1-T9 CLOSED / MERGED / FROZEN / POST-MERGE GREEN
 
 tools/v1/T8_METADATA_V2_CONVERGENCE_IMPLEMENTATION_PLAN.md
 tools/v1/TV1_T9_LOGICAL_EXPORT_MIGRATION_IMPLEMENTATION_PLAN.md
+tools/v1/TV1_T9_LOGICAL_EXPORT_MIGRATION_COMPLETION.md
 ```
 
-Allocated next phases:
+Allocated next phase:
 
 ```text
-TV1-T9  Remaining V1 tools -> canonical logical Metadata V2 exports
 TV1-T10 Live Harness & Real-Machine Exit Gate
 ```
 
-TV1-T10 is only phase-allocated; it is not audited or open.
+TV1-T10 has a completed boundary audit with six P1 live-harness groups, but
+implementation is NOT OPEN and no dedicated T10 coordination issue exists at
+this snapshot.
 
 ### Historical T7/T8 wording
 
@@ -216,6 +218,13 @@ Canonical phases:
 PTC-1  Provider-facing tool-name/schema lowering
 PTC-2  OpenAI/Ollama tool contract adapters
 PTC-3  Tool-capability-aware routing + cross-provider exit gate
+```
+
+Current status:
+
+```text
+PTC-1 -> PTC-3  CLOSED / MERGED / FINAL GREEN
+Issue #8       CLOSED / completed
 ```
 
 Issue number #8, its URL, and historical finding IDs remain unchanged.
@@ -323,13 +332,13 @@ CAS-F5+                                   CTX-F0 -> CTX-F12+
 ```
 
 Rules:
-- Issue #16 is a hard pre-roadmap implementation gate. No AE-R10, TV1-T9, PTC production implementation starts until it is closed or explicitly re-frozen with a documented exception.
-- The historical `tools-v1-contract-freeze` branch must be reconciled onto the post-cleanup canonical main before TV1-T9 production code, because it predates large Agent roadmap changes.
-- PTC-1/PTC-2 may proceed independently only after the Tools baseline is reconciled and their exact file scope remains disjoint from active AE ownership.
-- PTC-3 requires a fresh overlap audit with AE-R10/shared provider routing before implementation.
+- Issue #16 is CLOSED / completed and no longer blocks later roadmap phases.
+- TV1-T9 has been reconciled, merged and post-merge validated on canonical main.
+- PTC-1 through PTC-3 are CLOSED / merged / FINAL GREEN and are inherited
+  authority for later Agent work.
+- AE-R11 is the active Agent roadmap phase under Issue #31.
+- TV1-T10 remains boundary-audited only and has no implementation claim.
 - CAS-F5+ and CTX-F* remain parked behind AE-R14 and require fresh post-R14 audits.
-
-PTC-1/PTC-2 may proceed independently of Agent branching work only while their exact file scope remains disjoint from active AE ownership.
 
 ---
 
@@ -417,25 +426,25 @@ PTC-1 (Issue #8 legacy alias "R10")
 At this update:
 
 ```text
+canonical main 78479a64a97353094817b92a090449191782d366
+
 AE-R8    CLOSED / merged
-AE-R9    CLOSED / merged to main @ 28757e9c / PR #13
+AE-R9    CLOSED / merged / PR #13
+AE-R10   CLOSED / FINAL GREEN / Issue #14
+AE-R11   ACTIVE / R11-A measurement + storage contract / Issue #31
+AE-R12-14 NOT STARTED
 
 PRE-ROADMAP CI GATE
-Issue #16  ACTIVE / blocks next production roadmap phase until closed or explicitly re-frozen
-
-AE-R10   CONTRACT FROZEN / production code NOT STARTED / Issue #14
-AE-R11-14 NOT STARTED
+Issue #16 CLOSED / completed
 
 TV1-T8   CLOSED / GREEN / FINAL-FROZEN / Issue #7
-TV1-T9   BOUNDARY AUDITED / PLAN FROZEN / CODE NOT STARTED / Issue #12
-TV1-T10  PHASE ALLOCATED ONLY / NOT AUDITED / NOT OPEN
-Tools implementation must first reconcile its historical branch onto post-cleanup main.
+TV1-T9   CLOSED / MERGED / FROZEN / POST-MERGE GREEN / Issue #12
+TV1-T10  BOUNDARY AUDITED / P1 PLAN FROZEN / IMPLEMENTATION NOT OPEN
 
-CAS-F1-F4 CLOSED
-CAS-F5+   PAUSED behind AE-R14 production gates
+PTC-1-3  CLOSED / MERGED / FINAL GREEN / Issue #8
 
-PTC-1-3  ROADMAP ONLY / NOT IMPLEMENTED / Issue #8
-PTC-3    requires fresh overlap audit with AE-R10
+CAS-F1-F4 historically CLOSED on parked line
+CAS-F5+   PAUSED behind AE-R14; post-R14 replay/re-audit required
 
 CTX-F0-F12 FUTURE / PARKED / architecture only / Issue #15
 CTX implementation waits for post-AE-R14 re-audit.
