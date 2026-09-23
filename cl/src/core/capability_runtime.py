@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from typing import Any, Dict
 
 
@@ -43,64 +44,135 @@ class CapabilityRuntime:
                 else {}
             )
 
-            name = metadata.get(
-                "name",
-                capability_id,
-            )
-
-            description = metadata.get(
-                "description",
-                name,
-            )
-
+            name = metadata.get("name", capability_id)
+            description = metadata.get("description", name)
             parameters = metadata.get(
                 "parameters",
                 metadata.get(
                     "input_schema",
-                    {
-                        "type": "object",
-                    },
+                    {"type": "object"},
                 ),
             )
+            output_schema = metadata.get("output_schema", {})
 
-            output_schema = metadata.get(
-                "output_schema",
-                {},
+            is_canonical_v2 = (
+                metadata.get("manifest_version") == "2.0"
             )
+
+            if is_canonical_v2:
+                definition_metadata = {
+                    "base_risk": metadata.get(
+                        "base_risk",
+                        "HIGH",
+                    ),
+                    "required_permissions": sorted(
+                        metadata.get(
+                            "required_permissions",
+                            [],
+                        )
+                    ),
+                    "danger_patterns": sorted(
+                        metadata.get(
+                            "danger_patterns",
+                            [],
+                        )
+                    ),
+                }
+                definition = {
+                    "id": capability_id,
+                    "version": metadata["version"],
+                    "name": name,
+                    "description": description,
+                    "parameters": deepcopy(
+                        metadata.get(
+                            "input_schema",
+                            parameters,
+                        )
+                    ),
+                    "output_schema": deepcopy(output_schema),
+                    "source": "LOCAL",
+                    "execution_kind": "PYTHON",
+                    "kind": metadata.get("kind", "TOOL"),
+                    "execution_mode": metadata.get(
+                        "execution_mode",
+                        "ONE_SHOT",
+                    ),
+                    "idempotency": metadata.get(
+                        "idempotency",
+                        "UNKNOWN",
+                    ),
+                    "effects": sorted(
+                        metadata.get("effects", [])
+                    ),
+                    "require_auth": bool(
+                        metadata.get(
+                            "require_auth",
+                            False,
+                        )
+                    ),
+                    "required_scopes": sorted(
+                        metadata.get(
+                            "required_scopes",
+                            [],
+                        )
+                    ),
+                    "metadata": definition_metadata,
+                }
+                registration_metadata = {
+                    "client_id": self.client_id,
+                    "local_name": capability_id,
+                    "physical_tool": metadata[
+                        "physical_tool"
+                    ],
+                    "physical_version": metadata[
+                        "physical_version"
+                    ],
+                    "bind": deepcopy(metadata.get("bind", {})),
+                    "manifest_version": "2.0",
+                }
+            else:
+                definition = {
+                    "id": capability_id,
+                    "version": metadata.get(
+                        "version",
+                        "1.0",
+                    ),
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
+                    "output_schema": output_schema,
+                    "source": "CLIENT",
+                    "execution_kind": "PYTHON",
+                    "kind": metadata.get("kind", "TOOL"),
+                    "execution_mode": metadata.get(
+                        "execution_mode",
+                        "ONE_SHOT",
+                    ),
+                    "idempotency": metadata.get(
+                        "idempotency",
+                        "UNKNOWN",
+                    ),
+                    "effects": metadata.get("effects", []),
+                    "require_auth": metadata.get(
+                        "require_auth",
+                        False,
+                    ),
+                    "required_scopes": metadata.get(
+                        "required_scopes",
+                        [],
+                    ),
+                    "metadata": {
+                        "client_id": self.client_id,
+                    },
+                }
+                registration_metadata = {
+                    "client_id": self.client_id,
+                    "local_name": capability_id,
+                }
 
             capabilities.append(
                 {
-                    "definition": {
-                        "id": capability_id,
-                        "version": metadata.get(
-                            "version",
-                            "1.0",
-                        ),
-                        "name": name,
-                        "description": description,
-                        "parameters": parameters,
-                        "output_schema": output_schema,
-                        "source": "CLIENT",
-                        "execution_kind": "PYTHON",
-                        "kind": metadata.get("kind", "TOOL"),
-                        "execution_mode": metadata.get("execution_mode", "ONE_SHOT"),
-                        "idempotency": metadata.get(
-                            "idempotency",
-                            "UNKNOWN",
-                        ),
-                        "effects": metadata.get("effects", []),
-                        "require_auth": metadata.get(
-                            "require_auth",
-                            False,
-                        ),
-                        "required_scopes": metadata.get(
-                            "required_scopes",
-                            [],
-                        ),
-                        "metadata": {
-                            "client_id": self.client_id,
-                        },
-                    },
+                    "definition": definition,
                     "kind": "TOOL",
                     "location": "CLIENT",
                     "driver_kind": "REMOTE_CLIENT",
@@ -111,10 +183,7 @@ class CapabilityRuntime:
                         f"{self.realtime.connection_id}:"
                         f"{capability_id}"
                     ),
-                    "metadata": {
-                        "client_id": self.client_id,
-                        "local_name": capability_id,
-                    },
+                    "metadata": registration_metadata,
                 }
             )
 

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import List, Dict
+from copy import deepcopy
+from typing import Any, Dict, List
 
 from ..connection.contracts import ConnectionNotFoundError
 from ..connection.registry import ConnectionRegistry
@@ -12,6 +13,7 @@ from .catalog import (
     CapabilityImplementationConflictError,
     InvalidCapabilityBindingError,
 )
+from .contracts.definition import CapabilityDefinition
 from .contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
@@ -22,10 +24,62 @@ from .contracts.registration import (
     CapabilityRegistration,
     ClientCapabilityRegistration,
 )
-from .contracts.definition import CapabilityDefinition
+
+
+_DEFINITION_PROVENANCE_METADATA_KEYS = frozenset(
+    {
+        "client_id",
+        "physical_tool",
+        "physical_version",
+        "bind",
+        "binding_action",
+        "manifest_version",
+        "metadata_version",
+        "local_name",
+        "connection_id",
+        "implementation_id",
+        "driver_kind",
+    }
+)
+
 
 class ClientRegistrationError(ValueError):
     """Base error for invalid client capability registration requests."""
+
+
+def _logical_definition_contract(
+    definition: CapabilityDefinition,
+) -> Dict[str, Any]:
+    """Return deterministic logical semantics independent of provenance."""
+    value = definition.model_dump(mode="json")
+    value["id"] = definition.capability_id
+
+    # These describe one physical implementation source, not the logical API.
+    value.pop("source", None)
+    value.pop("execution_kind", None)
+
+    value["effects"] = sorted(value.get("effects") or [])
+    value["required_scopes"] = sorted(
+        value.get("required_scopes") or []
+    )
+
+    metadata = dict(value.get("metadata") or {})
+    for key in _DEFINITION_PROVENANCE_METADATA_KEYS:
+        metadata.pop(key, None)
+    for key in ("required_permissions", "danger_patterns"):
+        if key in metadata:
+            metadata[key] = sorted(metadata[key] or [])
+    value["metadata"] = metadata
+    return value
+
+
+def _implementation_contract(
+    implementation: CapabilityImplementation,
+) -> Dict[str, Any]:
+    """Return implementation identity/ownership semantics without lifecycle state."""
+    value = implementation.model_dump(mode="json")
+    value.pop("state", None)
+    return value
 
 
 class ClientCapabilityRegistrationService:
@@ -63,32 +117,47 @@ class ClientCapabilityRegistrationService:
                 f"'{request.owner_id}'"
             )
 
+        # Deep-own the caller payload before any object from it can become
+        # catalog state. CapabilityDefinition is mutable and the catalog stores
+        # definition objects by reference, so retaining request-owned models
+        # would allow out-of-band mutation after a successful registration.
+        owned_request = request.model_copy(deep=True)
+
         implementations = [
-            self._build_implementation(request, item)
-            for item in request.capabilities
+            self._build_implementation(owned_request, item)
+            for item in owned_request.capabilities
         ]
-        self._validate_batch(request, implementations)
+        self._validate_batch(owned_request, implementations)
 
-        definitions = {
-            item.definition.capability_id: item.definition
-            for item in request.capabilities
-        }
-        self._validate_existing_definitions(definitions, allow_update=True)
-        self._validate_existing_implementations(implementations, allow_update=True)
+        definitions: Dict[str, CapabilityDefinition] = {}
+        for item in owned_request.capabilities:
+            definitions.setdefault(
+                item.definition.capability_id,
+                item.definition,
+            )
 
-        for definition in definitions.values():
-            self.catalog.register_definition(definition, allow_update=True)
+        self._validate_existing_definitions(definitions)
+        self._validate_existing_implementations(implementations)
+
+        # Commit only entries proven absent during preflight. Equivalent
+        # definitions/implementations remain canonical and are reused.
+        for capability_id, definition in definitions.items():
+            if not self.catalog.contains_definition(capability_id):
+                self.catalog.register_definition(definition)
 
         registered: List[CapabilityImplementation] = []
         for implementation in implementations:
             if self.catalog.contains_implementation(
                 implementation.implementation_id
             ):
-                existing = self.catalog.get_implementation(implementation.implementation_id)
-                registered.append(existing)
+                registered.append(
+                    self.catalog.get_implementation(
+                        implementation.implementation_id
+                    )
+                )
                 continue
 
-            self.catalog.register_implementation(implementation, allow_update=True)
+            self.catalog.register_implementation(implementation)
             registered.append(
                 self.catalog.transition_implementation(
                     implementation.implementation_id,
@@ -103,7 +172,9 @@ class ClientCapabilityRegistrationService:
             connection_id
         )
         for implementation in implementations:
-            self.catalog.remove_implementation(implementation.implementation_id)
+            self.catalog.remove_implementation(
+                implementation.implementation_id
+            )
         return len(implementations)
 
     @staticmethod
@@ -115,6 +186,35 @@ class ClientCapabilityRegistrationService:
             raise InvalidCapabilityBindingError(
                 "Client self-registration requires location=CLIENT"
             )
+
+        manifest_version = registration.metadata.get(
+            "manifest_version"
+        )
+        if manifest_version is not None and manifest_version != "2.0":
+            raise ClientRegistrationError(
+                "Unsupported client capability manifest_version: "
+                f"{manifest_version!r}"
+            )
+
+        if manifest_version == "2.0":
+            definition = registration.definition
+            if (
+                definition.source != "LOCAL"
+                or definition.execution_kind != "PYTHON"
+            ):
+                raise ClientRegistrationError(
+                    "Canonical Metadata V2 client definitions require "
+                    "source=LOCAL and execution_kind=PYTHON"
+                )
+            leaked_provenance = set(definition.metadata).intersection(
+                _DEFINITION_PROVENANCE_METADATA_KEYS
+            )
+            if leaked_provenance:
+                raise ClientRegistrationError(
+                    "Canonical Metadata V2 definition metadata cannot contain "
+                    "implementation provenance: "
+                    + ", ".join(sorted(leaked_provenance))
+                )
         if registration.owner_type != CapabilityOwnerType.CLIENT:
             raise InvalidCapabilityBindingError(
                 "Client self-registration requires owner_type=CLIENT"
@@ -127,16 +227,20 @@ class ClientCapabilityRegistrationService:
             raise PermissionError(
                 f"Capability '{registration.implementation_id}' owner mismatch"
             )
-        if registration.connection_id not in {None, request.connection_id}:
+        if registration.connection_id not in {
+            None,
+            request.connection_id,
+        }:
             raise PermissionError(
-                f"Capability '{registration.implementation_id}' connection mismatch"
+                f"Capability '{registration.implementation_id}' "
+                "connection mismatch"
             )
         if not registration.implementation_id.strip():
             raise ClientRegistrationError(
                 "Client registration requires non-empty implementation_id"
             )
 
-        metadata = dict(registration.metadata)
+        metadata = deepcopy(registration.metadata)
         metadata["client_id"] = request.client_id
         return CapabilityImplementation.from_definition(
             registration.definition,
@@ -154,61 +258,67 @@ class ClientCapabilityRegistrationService:
         request: ClientCapabilityRegistration,
         implementations: List[CapabilityImplementation],
     ) -> None:
-        implementation_ids = [item.implementation_id for item in implementations]
+        implementation_ids = [
+            item.implementation_id for item in implementations
+        ]
         if len(set(implementation_ids)) != len(implementation_ids):
             raise ClientRegistrationError(
-                "Client registration contains duplicate implementation_id values"
+                "Client registration contains duplicate implementation_id "
+                "values"
             )
-        definitions = {}
+
+        definitions: Dict[str, CapabilityDefinition] = {}
         for registration in request.capabilities:
             capability_id = registration.definition.capability_id
-            existing = definitions.get(capability_id)
-            if existing is not None and existing != registration.definition:
+            if capability_id in definitions:
                 raise ClientRegistrationError(
-                    f"Client registration contains conflicting definitions: "
-                    f"{capability_id}"
+                    "Client registration contains duplicate capability_id "
+                    f"values: {capability_id}"
                 )
             definitions[capability_id] = registration.definition
 
     def _validate_existing_definitions(
-            self, 
-            definitions: Dict[str, CapabilityDefinition],
-            *, 
-            allow_update: bool = False,
+        self,
+        definitions: Dict[str, CapabilityDefinition],
     ) -> None:
         for capability_id, definition in definitions.items():
             if not self.catalog.contains_definition(capability_id):
                 continue
-            if self.catalog.get_definition(capability_id) != definition and not allow_update:
+
+            existing = self.catalog.get_definition(capability_id)
+            if (
+                _logical_definition_contract(existing)
+                != _logical_definition_contract(definition)
+            ):
                 raise CapabilityDefinitionConflictError(
-                    f"Capability definition already exists with different contract: "
-                    f"{capability_id}"
+                    "Capability definition already exists with different "
+                    f"contract: {capability_id}"
                 )
 
     def _validate_existing_implementations(
         self,
         implementations: List[CapabilityImplementation],
-        *,
-        allow_update: bool = False
     ) -> None:
         for implementation in implementations:
             if not self.catalog.contains_implementation(
                 implementation.implementation_id
             ):
                 continue
+
             existing = self.catalog.get_implementation(
                 implementation.implementation_id
             )
             if existing.state == CapabilityImplementationState.REMOVED:
                 raise CapabilityImplementationConflictError(
-                    f"Removed implementation cannot be re-registered: "
+                    "Removed implementation cannot be re-registered: "
                     f"{implementation.implementation_id}"
                 )
-            comparable = existing.model_copy(
-                update={"state": implementation.state}
-            )
-            if comparable != implementation and not allow_update:
+
+            if (
+                _implementation_contract(existing)
+                != _implementation_contract(implementation)
+            ):
                 raise CapabilityImplementationConflictError(
-                    f"Implementation already exists with a different contract: "
-                    f"{implementation.implementation_id}"
+                    "Implementation already exists with a different "
+                    f"contract: {implementation.implementation_id}"
                 )

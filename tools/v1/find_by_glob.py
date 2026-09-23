@@ -1,9 +1,27 @@
-from pathlib import Path
-from typing import List, Optional, Union, Dict, Any
+from __future__ import annotations
+
+import heapq
+import os
+import re
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Optional
+
+from tools.v1._shared.contracts import failure_result, success_result
+from tools.v1._shared.limits import IntLimitSpec, resolve_int_limit
+
+GLOB_TOOL_VERSION = "2.0.0"
+MAX_GLOB_PATTERN_CHARS = 2048
+MAX_GLOB_ROOT_CHARS = 4096
+GLOB_MAX_RESULTS_HARD = 5000
+GLOB_DEFAULT_MAX_RESULTS = 500
+
 
 TOOL_METADATA = {
     "name": "find_by_glob",
-    "description": "Tìm kiếm danh sách đường dẫn tệp tin và thư mục dựa trên mẫu glob pattern.",
+    "description": (
+        "Tìm file/thư mục theo glob pattern trong một root_dir có boundary rõ ràng. "
+        "Kết quả trả về theo ToolResult có cấu trúc."
+    ),
     "base_risk": "LOW",
     "effects": ["READ"],
     "danger_patterns": [],
@@ -12,19 +30,19 @@ TOOL_METADATA = {
         "properties": {
             "pattern": {
                 "type": "string",
-                "description": "Mẫu khớp tên glob pattern (ví dụ: '*.py', '**/*.json', 'src/*.cpp').",
+                "minLength": 1,
+                "maxLength": MAX_GLOB_PATTERN_CHARS,
             },
             "root_dir": {
                 "type": "string",
-                "description": "Đường dẫn thư mục gốc để bắt đầu tìm kiếm (Mặc định: '.').",
+                "minLength": 1,
+                "maxLength": MAX_GLOB_ROOT_CHARS,
             },
-            "recursive": {
-                "type": "boolean",
-                "description": "Tìm kiếm đệ quy trong các thư mục con (Mặc định: true).",
-            },
+            "recursive": {"type": "boolean"},
             "max_results": {
                 "type": "integer",
-                "description": "Số lượng đường dẫn trả về tối đa để tránh quá tải bộ nhớ (Mặc định: 500).",
+                "minimum": 1,
+                "maximum": GLOB_MAX_RESULTS_HARD,
             },
         },
         "required": ["pattern"],
@@ -32,11 +50,122 @@ TOOL_METADATA = {
 }
 
 
-class GlobSearchTool:
-    """Class quản lý tìm kiếm tệp tin và thư mục theo Glob pattern."""
+class _GlobToolError(Exception):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
 
-    def __init__(self, default_max_results: int = 500):
+
+def _canonical_path(path: Path) -> str:
+    return Path(os.path.abspath(os.fspath(path))).as_posix()
+
+
+def _validate_root(root_dir: str) -> tuple[Path, str]:
+    if not isinstance(root_dir, str) or not root_dir:
+        raise _GlobToolError("INVALID_ARGUMENT", "root_dir must be a non-empty string")
+    if "\x00" in root_dir:
+        raise _GlobToolError("INVALID_ARGUMENT", "root_dir contains a NUL character")
+    if len(root_dir) > MAX_GLOB_ROOT_CHARS:
+        raise _GlobToolError(
+            "INVALID_ARGUMENT",
+            f"root_dir exceeds the hard limit of {MAX_GLOB_ROOT_CHARS} characters",
+        )
+
+    path = Path(os.path.abspath(root_dir))
+    canonical = path.as_posix()
+    if len(canonical) > MAX_GLOB_ROOT_CHARS:
+        raise _GlobToolError(
+            "INVALID_ARGUMENT",
+            f"canonical root_dir exceeds the hard limit of {MAX_GLOB_ROOT_CHARS} characters",
+        )
+    if not path.exists():
+        raise _GlobToolError(
+            "GLOB_ROOT_NOT_FOUND",
+            "glob root directory does not exist",
+            {"root_dir": canonical},
+        )
+    if not path.is_dir():
+        raise _GlobToolError(
+            "GLOB_ROOT_NOT_DIRECTORY",
+            "glob root path is not a directory",
+            {"root_dir": canonical},
+        )
+    return path, canonical
+
+
+def _validate_pattern(pattern: str) -> str:
+    if not isinstance(pattern, str) or not pattern.strip():
+        raise _GlobToolError("INVALID_ARGUMENT", "glob pattern must be non-empty")
+    if "\x00" in pattern:
+        raise _GlobToolError("GLOB_PATTERN_OUTSIDE_ROOT", "glob pattern contains NUL")
+    if len(pattern) > MAX_GLOB_PATTERN_CHARS:
+        raise _GlobToolError(
+            "INVALID_ARGUMENT",
+            f"glob pattern exceeds the hard limit of {MAX_GLOB_PATTERN_CHARS} characters",
+        )
+
+    if PurePosixPath(pattern).is_absolute() or PureWindowsPath(pattern).is_absolute():
+        raise _GlobToolError(
+            "GLOB_PATTERN_OUTSIDE_ROOT",
+            "absolute glob patterns are not allowed",
+        )
+    if PureWindowsPath(pattern).drive:
+        raise _GlobToolError(
+            "GLOB_PATTERN_OUTSIDE_ROOT",
+            "drive-qualified glob patterns are not allowed",
+        )
+
+    segments = [segment for segment in re.split(r"[\\/]+", pattern) if segment]
+    if any(segment == ".." for segment in segments):
+        raise _GlobToolError(
+            "GLOB_PATTERN_OUTSIDE_ROOT",
+            "parent traversal is not allowed in glob patterns",
+        )
+    return pattern
+
+
+class GlobSearchTool:
+    """Deterministic bounded glob search rooted at one directory."""
+
+    def __init__(self, default_max_results: int = GLOB_DEFAULT_MAX_RESULTS) -> None:
+        self._limit_spec = IntLimitSpec(
+            "max_results",
+            default=default_max_results,
+            minimum=1,
+            maximum=GLOB_MAX_RESULTS_HARD,
+        )
         self.default_max_results = default_max_results
+
+    def _success(
+        self,
+        data: dict[str, Any],
+        *,
+        truncated: bool = False,
+    ) -> dict[str, Any]:
+        return success_result(
+            tool="find_by_glob",
+            action="find",
+            version=GLOB_TOOL_VERSION,
+            data=data,
+            truncated=truncated,
+        )
+
+    def _failure(self, error: _GlobToolError) -> dict[str, Any]:
+        return failure_result(
+            tool="find_by_glob",
+            action="find",
+            version=GLOB_TOOL_VERSION,
+            code=error.code,
+            message=error.message,
+            details=error.details,
+        )
 
     def find(
         self,
@@ -44,47 +173,90 @@ class GlobSearchTool:
         root_dir: str = ".",
         recursive: bool = True,
         max_results: Optional[int] = None,
-    ) -> Union[List[str], str]:
-        """Tìm kiếm đường dẫn tệp tin và thư mục dựa theo glob pattern (Có giới hạn số lượng)."""
-        if not pattern or not pattern.strip():
-            return "Lỗi: Mẫu tìm kiếm (pattern) không được để trống."
-
-        base_path = Path(root_dir)
-        if not base_path.exists():
-            return f"Lỗi: Thư mục gốc '{root_dir}' không tồn tại."
-        if not base_path.is_dir():
-            return f"Lỗi: '{root_dir}' không phải là thư mục."
-
-        limit = max_results if (max_results is not None and max_results > 0) else self.default_max_results
-
+    ) -> dict[str, Any]:
         try:
-            # Chuẩn hóa pattern nếu tìm kiếm đệ quy
-            if recursive and not pattern.startswith("**"):
-                search_pattern = f"**/{pattern}"
+            normalized_pattern = _validate_pattern(pattern)
+            base_path, canonical_root = _validate_root(root_dir)
+            if type(recursive) is not bool:
+                raise _GlobToolError(
+                    "INVALID_ARGUMENT",
+                    "recursive must be a boolean",
+                )
+            try:
+                limit = resolve_int_limit(max_results, self._limit_spec)
+            except Exception as exc:
+                if exc.__class__.__module__.startswith("tools.v1._shared"):
+                    raise _GlobToolError(
+                        "INVALID_ARGUMENT",
+                        str(exc),
+                        {"exception_type": type(exc).__name__},
+                    ) from exc
+                raise
+
+            has_recursive_prefix = (
+                normalized_pattern == "**"
+                or normalized_pattern.startswith("**/")
+                or normalized_pattern.startswith("**\\")
+            )
+            if recursive and not has_recursive_prefix:
+                search_pattern = f"**/{normalized_pattern}"
             else:
-                search_pattern = pattern
+                search_pattern = normalized_pattern
 
-            matches = []
-            # Duyệt từng đường dẫn và dừng sớm nếu chạm giới hạn max_results
-            for path in base_path.glob(search_pattern):
-                matches.append(path.as_posix())
-                if len(matches) >= limit:
-                    break
+            def sort_key(path: Path) -> tuple[str, str]:
+                canonical = _canonical_path(path)
+                return canonical.casefold(), canonical
 
-            if not matches:
-                return f"Thông báo: Không tìm thấy tệp hoặc thư mục nào phù hợp với mẫu '{pattern}' trong '{root_dir}'."
+            try:
+                selected_plus_one = heapq.nsmallest(
+                    limit + 1,
+                    base_path.glob(search_pattern),
+                    key=sort_key,
+                )
+            except (OSError, ValueError, RuntimeError) as exc:
+                raise _GlobToolError(
+                    "GLOB_IO_ERROR",
+                    "glob traversal failed",
+                    {
+                        "root_dir": canonical_root,
+                        "exception_type": type(exc).__name__,
+                    },
+                ) from exc
 
-            # Sắp xếp kết quả theo thứ tự alphabet
-            matches.sort()
+            truncated = len(selected_plus_one) > limit
+            selected = selected_plus_one[:limit]
+            matches: list[dict[str, Any]] = []
+            for path in selected:
+                is_symlink = path.is_symlink()
+                try:
+                    if path.is_file():
+                        kind = "file"
+                    elif path.is_dir():
+                        kind = "directory"
+                    else:
+                        kind = "other"
+                except OSError:
+                    kind = "other"
+                matches.append(
+                    {
+                        "path": _canonical_path(path),
+                        "kind": kind,
+                        "is_symlink": is_symlink,
+                    }
+                )
 
-            # Bổ sung cảnh báo nếu số kết quả chạm ngưỡng giới hạn
-            if len(matches) >= limit:
-                matches.append(f"... [CẢNH BÁO: Đã đạt giới hạn tối đa {limit} kết quả].")
-
-            return matches
-
-        except Exception as e:
-            return f"Lỗi khi tìm kiếm glob với pattern '{pattern}': {str(e)}"
+            return self._success(
+                {
+                    "root_dir": canonical_root,
+                    "pattern": normalized_pattern,
+                    "recursive": recursive,
+                    "returned_count": len(matches),
+                    "matches": matches,
+                },
+                truncated=truncated,
+            )
+        except _GlobToolError as exc:
+            return self._failure(exc)
 
     def execute(
         self,
@@ -92,9 +264,9 @@ class GlobSearchTool:
         root_dir: str = ".",
         recursive: bool = True,
         max_results: Optional[int] = None,
-        **kwargs  # Bắt tham số thừa từ ToolExecutor
-    ) -> Union[List[str], str]:
-        """Hàm điều hướng chung cho Tool Executor."""
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        del kwargs
         return self.find(
             pattern=pattern,
             root_dir=root_dir,
@@ -111,13 +283,12 @@ def run(
     root_dir: str = ".",
     recursive: bool = True,
     max_results: Optional[int] = None,
-    **kwargs
-) -> Union[List[str], str]:
-    """Hàm entrypoint chuẩn tương thích hoàn toàn với LocalToolManager & ToolExecutor."""
+    **kwargs: Any,
+) -> dict[str, Any]:
     return _default_glob_tool.execute(
         pattern=pattern,
         root_dir=root_dir,
         recursive=recursive,
         max_results=max_results,
-        **kwargs
+        **kwargs,
     )

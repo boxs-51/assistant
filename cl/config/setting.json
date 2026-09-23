@@ -4,7 +4,12 @@
     "temperature": 0.2
   },
   "tools_config": {
-    "allowed_local_tools": ["*"],
-    "blocked_local_tools": ["delete_path"]
+    "allowed_local_tools": [
+      "*"
+    ],
+    "blocked_local_tools": [
+      "delete_path"
+    ],
+    "enabled_v2_capabilities": []
   }
 }

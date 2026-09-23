@@ -1,330 +1,727 @@
+from __future__ import annotations
+
+import importlib
+import math
+import sys
+import threading
 import time
-from typing import Dict, List, Optional, Tuple, Union
+from copy import deepcopy
+from typing import Any, Callable, Optional
 
-try:
-    import pyautogui
-except ImportError:
-    pyautogui = None
+from tools.v1._shared.contracts import failure_result, success_result
+from tools.v1._shared.limits import (
+    FloatLimitSpec,
+    IntLimitSpec,
+    resolve_float_limit,
+    resolve_int_limit,
+)
 
-try:
-    import pyperclip
-except ImportError:
-    pyperclip = None
 
-try:
-    from pynput.keyboard import Controller as KeyboardController
-except ImportError:
-    KeyboardController = None
+DESKTOP_TOOL_NAME = "desktop_automation"
+DESKTOP_TOOL_VERSION = "2.0.0"
 
+MAX_COORD_ABS = 1_000_000
+MAX_SCREEN_DIMENSION = 1_000_000
+
+MAX_TEXT_CHARS = 32_768
+MAX_KEY_CHARS = 64
+MAX_HOTKEY_KEYS = 16
+
+CLICK_COUNT = IntLimitSpec("clicks", default=1, minimum=1, maximum=100)
+PRESS_COUNT = IntLimitSpec("presses", default=1, minimum=1, maximum=100)
+
+MAX_SCROLL_ABS = 10_000
+
+MOVE_DURATION = FloatLimitSpec("duration", default=0.2, minimum=0.0, maximum=30.0)
+DRAG_DURATION = FloatLimitSpec("duration", default=0.5, minimum=0.0, maximum=30.0)
+TYPE_INTERVAL = FloatLimitSpec("interval", default=0.02, minimum=0.0, maximum=1.0)
+PYAUTOGUI_PAUSE = FloatLimitSpec("pause", default=0.1, minimum=0.0, maximum=5.0)
+
+CLIPBOARD_COPY_SETTLE_SECONDS = 0.05
+CLIPBOARD_PASTE_SETTLE_SECONDS = 0.05
+
+_MOUSE_BUTTONS = frozenset({"left", "right", "middle"})
+_PYAUTOGUI_STATE_LOCK = threading.RLock()
+
+
+_ACTION_SPECS: dict[str, dict[str, Any]] = {
+    "get_screen_info": {
+        "description": "Lấy kích thước màn hình và vị trí chuột hiện tại.",
+        "base_risk": "LOW",
+        "properties": {},
+        "required": [],
+    },
+    "mouse_click": {
+        "description": "Click chuột tại vị trí chỉ định hoặc vị trí hiện tại.",
+        "base_risk": "HIGH",
+        "properties": {
+            "x": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "y": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "button": {"type": "string", "enum": sorted(_MOUSE_BUTTONS)},
+            "clicks": {
+                "type": "integer",
+                "minimum": CLICK_COUNT.minimum,
+                "maximum": CLICK_COUNT.maximum,
+            },
+        },
+        "required": [],
+    },
+    "mouse_move": {
+        "description": "Di chuyển chuột đến tọa độ đích.",
+        "base_risk": "LOW",
+        "properties": {
+            "x": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "y": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "duration": {
+                "type": "number",
+                "minimum": MOVE_DURATION.minimum,
+                "maximum": MOVE_DURATION.maximum,
+            },
+        },
+        "required": ["x", "y"],
+    },
+    "mouse_drag": {
+        "description": "Kéo chuột từ vị trí hiện tại hoặc điểm bắt đầu tường minh đến tọa độ đích.",
+        "base_risk": "HIGH",
+        "properties": {
+            "x": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "y": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "start_x": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "start_y": {"type": "integer", "minimum": -MAX_COORD_ABS, "maximum": MAX_COORD_ABS},
+            "button": {"type": "string", "enum": sorted(_MOUSE_BUTTONS)},
+            "duration": {
+                "type": "number",
+                "minimum": DRAG_DURATION.minimum,
+                "maximum": DRAG_DURATION.maximum,
+            },
+        },
+        "required": ["x", "y"],
+    },
+    "mouse_scroll": {
+        "description": "Cuộn chuột theo số nấc có dấu.",
+        "base_risk": "LOW",
+        "properties": {
+            "clicks": {
+                "type": "integer",
+                "minimum": -MAX_SCROLL_ABS,
+                "maximum": MAX_SCROLL_ABS,
+                "not": {"const": 0},
+            }
+        },
+        "required": ["clicks"],
+    },
+    "type_text": {
+        "description": "Nhập văn bản vào ứng dụng đang focus; Unicode mặc định dùng Clipboard.",
+        "base_risk": "HIGH",
+        "properties": {
+            "text": {"type": "string", "minLength": 1, "maxLength": MAX_TEXT_CHARS},
+            "force_direct": {"type": "boolean"},
+            "restore_clipboard": {"type": "boolean"},
+            "interval": {
+                "type": "number",
+                "minimum": TYPE_INTERVAL.minimum,
+                "maximum": TYPE_INTERVAL.maximum,
+            },
+        },
+        "required": ["text"],
+    },
+    "press_key": {
+        "description": "Nhấn một phím đơn một số lần hữu hạn.",
+        "base_risk": "HIGH",
+        "properties": {
+            "key": {"type": "string", "minLength": 1, "maxLength": MAX_KEY_CHARS},
+            "presses": {
+                "type": "integer",
+                "minimum": PRESS_COUNT.minimum,
+                "maximum": PRESS_COUNT.maximum,
+            },
+        },
+        "required": ["key"],
+    },
+    "hotkey": {
+        "description": "Thực thi một tổ hợp phím hữu hạn.",
+        "base_risk": "HIGH",
+        "properties": {
+            "keys": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": MAX_HOTKEY_KEYS,
+                "items": {"type": "string", "minLength": 1, "maxLength": MAX_KEY_CHARS},
+            }
+        },
+        "required": ["keys"],
+    },
+}
+
+
+def _build_actions_metadata() -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for action, spec in _ACTION_SPECS.items():
+        result[action] = {
+            "name": action,
+            "description": spec["description"],
+            "base_risk": spec["base_risk"],
+            "danger_patterns": [],
+            "parameters": {
+                "type": "object",
+                "properties": deepcopy(spec["properties"]),
+                "required": list(spec["required"]),
+            },
+        }
+    return result
+
+
+ACTIONS_METADATA = _build_actions_metadata()
+
+_ROOT_PROPERTIES: dict[str, Any] = {
+    "action": {"type": "string", "enum": list(_ACTION_SPECS)},
+}
+for _spec in _ACTION_SPECS.values():
+    for _name, _schema in _spec["properties"].items():
+        _ROOT_PROPERTIES.setdefault(_name, deepcopy(_schema))
+
+# V1 root metadata is a broad physical dispatcher schema. "clicks" is shared
+# by positive mouse-click counts and signed scroll deltas, while per-action
+# ACTIONS_METADATA retains the stricter action-specific contracts.
+_ROOT_PROPERTIES["clicks"] = {
+    "type": "integer",
+    "minimum": -MAX_SCROLL_ABS,
+    "maximum": MAX_SCROLL_ABS,
+}
 
 TOOL_METADATA = {
-    "name": "desktop_automation",
-    "description": "Điều khiển tự động hóa các thao tác chuột và bàn phím trên máy tính desktop.",
-    "base_risk": "HIGH",  # Tương tác trực tiếp với thiết bị ngoại vi và giao diện OS
+    "name": DESKTOP_TOOL_NAME,
+    "description": (
+        "Điều khiển chuột/bàn phím desktop với lazy dependencies, hard bounds, "
+        "scoped PyAutoGUI state và kết quả ToolResult không echo nội dung được gõ."
+    ),
+    "base_risk": "HIGH",
     "effects": ["EXECUTE", "EXTERNAL_SIDE_EFFECT"],
     "danger_patterns": [],
     "parameters": {
         "type": "object",
-        "properties": {
-            "action": {
-                "type": "string",
-                "enum": [
-                    "get_screen_info",
-                    "mouse_click",
-                    "mouse_move",
-                    "mouse_scroll",
-                    "type_text",
-                    "press_key",
-                    "hotkey",
-                    "mouse_drag",
-                ],
-                "description": "Thao tác điều khiển cần thực hiện.",
-            },
-            "x": {
-                "type": "integer",
-                "description": "Tọa độ X trên màn hình (dùng cho mouse_click, mouse_move).",
-            },
-            "y": {
-                "type": "integer",
-                "description": "Tọa độ Y trên màn hình (dùng cho mouse_click, mouse_move).",
-            },
-            "start_x": {
-                "type": "integer",
-                "description": "Tọa độ X bắt đầu kéo (dùng cho mouse_drag).",
-            },
-            "start_y": {
-                "type": "integer",
-                "description": "Tọa độ Y bắt đầu kéo (dùng cho mouse_drag).",
-            },
-            "button": {
-                "type": "string",
-                "enum": ["left", "right", "middle"],
-                "description": "Nút chuột cần click (Mặc định: 'left').",
-            },
-            "clicks": {
-                "type": "integer",
-                "description": "Số lần click hoặc số nấc cuộn chuột (dùng cho mouse_click, mouse_scroll).",
-            },
-            "duration": {
-                "type": "number",
-                "description": "Thời gian di chuyển chuột tính bằng giây (Mặc định: 0.2).",
-            },
-            "text": {
-                "type": "string",
-                "description": "Chuỗi văn bản cần gõ hoặc dán (dùng cho type_text).",
-            },
-            "force_direct": {
-                "type": "boolean",
-                "description": "Bắt buộc gõ phím trực tiếp thay vì dán qua Clipboard (dùng cho type_text).",
-            },
-            "restore_clipboard": {
-                "type": "boolean",
-                "description": "Khôi phục dữ liệu Clipboard cũ sau khi dán (dùng cho type_text).",
-            },
-            "interval": {
-                "type": "number",
-                "description": "Khoảng nghỉ giữa các ký tự khi gõ phím trực tiếp (Mặc định: 0.02).",
-            },
-            "key": {
-                "type": "string",
-                "description": "Tên phím đơn cần nhấn (ví dụ: 'enter', 'tab', 'esc') (dùng cho press_key).",
-            },
-            "presses": {
-                "type": "integer",
-                "description": "Số lần nhấn phím (dùng cho press_key).",
-            },
-            "keys": {
-                "type": "array",
-                "items": {"type": "string"},
-                "description": "Danh sách các phím trong tổ hợp phím tắt (ví dụ: ['ctrl', 'c']) (dùng cho hotkey).",
-            },
-        },
+        "properties": _ROOT_PROPERTIES,
         "required": ["action"],
     },
 }
 
-# Chi tiết Metadata tách riêng cho từng sub-action
-ACTIONS_METADATA = {
-    "get_screen_info": {
-        "name": "get_screen_info",
-        "description": "Lấy thông tin kích thước màn hình và tọa độ chuột hiện tại.",
-        "base_risk": "LOW",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {},
-            "required": [],
-        },
-    },
-    "mouse_click": {
-        "name": "mouse_click",
-        "description": "Thực hiện click chuột tại vị trí (x, y) hoặc vị trí chuột hiện tại.",
-        "base_risk": "HIGH",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer", "description": "Tọa độ X trên màn hình."},
-                "y": {"type": "integer", "description": "Tọa độ Y trên màn hình."},
-                "button": {
-                    "type": "string",
-                    "enum": ["left", "right", "middle"],
-                    "description": "Nút chuột (Mặc định: 'left').",
-                },
-                "clicks": {
-                    "type": "integer",
-                    "description": "Số lần click (Mặc định: 1).",
-                },
-            },
-            "required": [],
-        },
-    },
-    "mouse_move": {
-        "name": "mouse_move",
-        "description": "Di chuyển con trỏ chuột tới tọa độ (x, y).",
-        "base_risk": "LOW",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer", "description": "Tọa độ X."},
-                "y": {"type": "integer", "description": "Tọa độ Y."},
-                "duration": {
-                    "type": "number",
-                    "description": "Thời gian di chuyển tính bằng giây.",
-                },
-            },
-            "required": ["x", "y"],
-        },
-    },
-    "mouse_drag": {
-        "name": "mouse_drag",
-        "description": "Kéo thả chuột từ vị trí hiện tại (hoặc từ start_x, start_y) đến vị trí đích (x, y).",
-        "base_risk": "HIGH",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "x": {"type": "integer", "description": "Tọa độ X đích."},
-                "y": {"type": "integer", "description": "Tọa độ Y đích."},
-                "start_x": {"type": "integer", "description": "Tọa độ X bắt đầu (Tùy chọn)."},
-                "start_y": {"type": "integer", "description": "Tọa độ Y bắt đầu (Tùy chọn)."},
-                "button": {
-                    "type": "string",
-                    "enum": ["left", "right", "middle"],
-                    "description": "Nút chuột giữ khi kéo (Mặc định: 'left').",
-                },
-                "duration": {
-                    "type": "number",
-                    "description": "Thời gian kéo chuột tính bằng giây (Mặc định: 0.5).",
-                },
-            },
-            "required": ["x", "y"],
-        },
-    },
-    "mouse_scroll": {
-        "name": "mouse_scroll",
-        "description": "Cuộn con lăn chuột lên hoặc xuống.",
-        "base_risk": "LOW",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "clicks": {
-                    "type": "integer",
-                    "description": "Số nấc cuộn (Số dương: cuộn lên, Số âm: cuộn xuống).",
-                }
-            },
-            "required": ["clicks"],
-        },
-    },
-    "type_text": {
-        "name": "type_text",
-        "description": "Gõ hoặc dán chuỗi văn bản vào cửa sổ ứng dụng đang kích hoạt (Hỗ trợ Unicode/Tiếng Việt).",
-        "base_risk": "HIGH",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "text": {
-                    "type": "string",
-                    "description": "Nội dung văn bản cần nhập.",
-                },
-                "force_direct": {
-                    "type": "boolean",
-                    "description": "Bắt buộc gõ phím trực tiếp thay vì dán Clipboard.",
-                },
-                "restore_clipboard": {
-                    "type": "boolean",
-                    "description": "Khôi phục Clipboard sau khi dán.",
-                },
-                "interval": {
-                    "type": "number",
-                    "description": "Khoảng thời gian trễ giữa các phím khi gõ trực tiếp.",
-                },
-            },
-            "required": ["text"],
-        },
-    },
-    "press_key": {
-        "name": "press_key",
-        "description": "Nhấn phím đơn trên bàn phím (ví dụ: 'enter', 'tab', 'backspace', 'esc').",
-        "base_risk": "HIGH",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "key": {"type": "string", "description": "Tên phím cần nhấn."},
-                "presses": {
-                    "type": "integer",
-                    "description": "Số lần nhấn phím (Mặc định: 1).",
-                },
-            },
-            "required": ["key"],
-        },
-    },
-    "hotkey": {
-        "name": "hotkey",
-        "description": "Thực thi tổ hợp phím tắt trên bàn phím (ví dụ: ['ctrl', 'c'], ['alt', 'tab']).",
-        "base_risk": "HIGH",
-        "danger_patterns": [],
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "keys": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "Danh sách các phím cấu thành tổ hợp phím tắt.",
-                }
-            },
-            "required": ["keys"],
-        },
-    },
-}
+
+class _DesktopToolError(Exception):
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        details: Optional[dict[str, Any]] = None,
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+        self.details = details or {}
+
+
+def _as_invalid_argument(exc: Exception) -> _DesktopToolError:
+    return _DesktopToolError(
+        "INVALID_ARGUMENT",
+        str(exc),
+        {"exception_type": type(exc).__name__},
+    )
+
+
+def _resolve_int(value: Optional[int], spec: IntLimitSpec) -> int:
+    try:
+        return resolve_int_limit(value, spec)
+    except Exception as exc:
+        if exc.__class__.__module__.startswith("tools.v1._shared"):
+            raise _as_invalid_argument(exc) from exc
+        raise
+
+
+def _resolve_float(
+    value: Optional[float | int],
+    spec: FloatLimitSpec,
+) -> float:
+    try:
+        return resolve_float_limit(value, spec)
+    except Exception as exc:
+        if exc.__class__.__module__.startswith("tools.v1._shared"):
+            raise _as_invalid_argument(exc) from exc
+        raise
+
+
+def _validate_bool(value: Any, *, name: str) -> bool:
+    if type(value) is not bool:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"{name} must be a boolean",
+        )
+    return value
+
+
+def _validate_coordinate(value: Any, *, name: str) -> int:
+    if type(value) is not int:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"{name} must be an integer",
+        )
+    if value < -MAX_COORD_ABS or value > MAX_COORD_ABS:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"{name} exceeds the coordinate hard limit",
+        )
+    return value
+
+
+def _validate_optional_coordinate(value: Any, *, name: str) -> Optional[int]:
+    if value is None:
+        return None
+    return _validate_coordinate(value, name=name)
+
+
+def _validate_coordinate_pair(
+    x: Any,
+    y: Any,
+    *,
+    x_name: str,
+    y_name: str,
+    required: bool,
+) -> tuple[Optional[int], Optional[int]]:
+    if x is None and y is None:
+        if required:
+            raise _DesktopToolError(
+                "INVALID_ARGUMENT",
+                f"{x_name} and {y_name} are required",
+            )
+        return None, None
+    if x is None or y is None:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"{x_name} and {y_name} must be provided together",
+        )
+    return (
+        _validate_coordinate(x, name=x_name),
+        _validate_coordinate(y, name=y_name),
+    )
+
+
+def _validate_button(button: Any) -> str:
+    if not isinstance(button, str):
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            "button must be a string",
+        )
+    normalized = button.strip().lower()
+    if normalized not in _MOUSE_BUTTONS:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            "button must be left, right, or middle",
+        )
+    return normalized
+
+
+def _validate_scroll(clicks: Any) -> int:
+    if type(clicks) is not int:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            "clicks must be an integer",
+        )
+    if clicks == 0 or abs(clicks) > MAX_SCROLL_ABS:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"scroll clicks must be nonzero with absolute value <= {MAX_SCROLL_ABS}",
+        )
+    return clicks
+
+
+def _validate_key(key: Any, *, name: str = "key") -> str:
+    if not isinstance(key, str):
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"{name} must be a string",
+        )
+    normalized = key.strip().lower()
+    if not normalized:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"{name} must be non-empty",
+        )
+    if len(normalized) > MAX_KEY_CHARS:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"{name} exceeds the hard key-length limit",
+        )
+    return normalized
+
+
+def _validate_hotkey(keys: Any) -> list[str]:
+    if not isinstance(keys, list):
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            "keys must be a list",
+        )
+    if not keys or len(keys) > MAX_HOTKEY_KEYS:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"keys must contain between 1 and {MAX_HOTKEY_KEYS} entries",
+        )
+    return [_validate_key(value, name=f"keys[{index}]") for index, value in enumerate(keys)]
+
+
+def _validate_text(text: Any) -> str:
+    if not isinstance(text, str):
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            "text must be a string",
+        )
+    if not text:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            "text must be non-empty",
+        )
+    if "\x00" in text:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            "text contains a NUL character",
+        )
+    if len(text) > MAX_TEXT_CHARS:
+        raise _DesktopToolError(
+            "INVALID_ARGUMENT",
+            f"text exceeds the hard limit of {MAX_TEXT_CHARS} characters",
+        )
+    return text
+
 
 class DesktopAutomation:
-    """Class điều khiển tự động hóa thao tác chuột và bàn phím."""
+    """Bounded, lazy desktop automation with scoped backend state."""
 
-    def __init__(self, failsafe: bool = True, pause: float = 0.1):
-        self.pyautogui = pyautogui
-        self.pyperclip = pyperclip
-        self.keyboard = KeyboardController() if KeyboardController else None
+    def __init__(
+        self,
+        failsafe: bool = True,
+        pause: float = PYAUTOGUI_PAUSE.default,
+    ) -> None:
+        self.failsafe = _validate_bool(failsafe, name="failsafe")
+        self.pause = _resolve_float(pause, PYAUTOGUI_PAUSE)
+        self._pyautogui: Any = None
+        self._pyperclip: Any = None
+        self._unicode_keyboard: Any = None
 
-        if self.pyautogui is not None:
-            self.pyautogui.FAILSAFE = failsafe
-            self.pyautogui.PAUSE = pause
+    def _success(
+        self,
+        action: str,
+        data: dict[str, Any],
+    ) -> dict[str, Any]:
+        return success_result(
+            tool=DESKTOP_TOOL_NAME,
+            action=action,
+            version=DESKTOP_TOOL_VERSION,
+            data=data,
+        )
 
-    def _check_pyautogui(self) -> Optional[str]:
-        if self.pyautogui is None:
-            return "Lỗi: Thư viện 'pyautogui' chưa cài đặt. Hãy chạy 'pip install pyautogui'."
-        return None
+    def _failure(
+        self,
+        action: str,
+        error: _DesktopToolError,
+    ) -> dict[str, Any]:
+        return failure_result(
+            tool=DESKTOP_TOOL_NAME,
+            action=action,
+            version=DESKTOP_TOOL_VERSION,
+            code=error.code,
+            message=error.message,
+            details=error.details,
+        )
 
-    def get_screen_info(self) -> Union[dict, str]:
-        """Lấy kích thước màn hình và vị trí chuột hiện tại."""
-        err = self._check_pyautogui()
-        if err:
-            return err
-        width, height = self.pyautogui.size()
-        x, y = self.pyautogui.position()
-        return {
-            "screen_width": width,
-            "screen_height": height,
-            "mouse_x": x,
-            "mouse_y": y,
-        }
+    @staticmethod
+    def _load_dependency(module_name: str, dependency_name: str) -> Any:
+        try:
+            return importlib.import_module(module_name)
+        except Exception as exc:
+            raise _DesktopToolError(
+                "DEPENDENCY_UNAVAILABLE",
+                f"{dependency_name} is unavailable in the current environment",
+                {
+                    "dependency": dependency_name,
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+
+    def _load_pyautogui(self) -> Any:
+        if self._pyautogui is None:
+            self._pyautogui = self._load_dependency("pyautogui", "pyautogui")
+        return self._pyautogui
+
+    def _load_clipboard(self) -> Any:
+        if self._pyperclip is None:
+            self._pyperclip = self._load_dependency("pyperclip", "pyperclip")
+        return self._pyperclip
+
+    def _load_unicode_keyboard(self) -> Any:
+        if self._unicode_keyboard is not None:
+            return self._unicode_keyboard
+        module = self._load_dependency("pynput.keyboard", "pynput.keyboard")
+        try:
+            controller_class = module.Controller
+            controller = controller_class()
+        except Exception as exc:
+            raise _DesktopToolError(
+                "DEPENDENCY_UNAVAILABLE",
+                "pynput.keyboard Controller is unavailable in the current environment",
+                {
+                    "dependency": "pynput.keyboard",
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+        self._unicode_keyboard = controller
+        return controller
+
+    @staticmethod
+    def _is_failsafe_exception(backend: Any, exc: Exception) -> bool:
+        fail_safe_type = getattr(backend, "FailSafeException", None)
+        return isinstance(fail_safe_type, type) and isinstance(exc, fail_safe_type)
+
+    def _call_pyautogui(
+        self,
+        backend: Any,
+        method_name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        try:
+            method = getattr(backend, method_name)
+            return method(*args, **kwargs)
+        except Exception as exc:
+            if self._is_failsafe_exception(backend, exc):
+                raise _DesktopToolError(
+                    "DESKTOP_FAILSAFE_TRIGGERED",
+                    "PyAutoGUI fail-safe was triggered",
+                    {"operation": method_name},
+                ) from exc
+            raise _DesktopToolError(
+                "DESKTOP_OPERATION_FAILED",
+                "desktop backend operation failed",
+                {
+                    "operation": method_name,
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+
+    def _run_with_scoped_pyautogui(
+        self,
+        callback: Callable[[Any], Any],
+    ) -> Any:
+        backend = self._load_pyautogui()
+        with _PYAUTOGUI_STATE_LOCK:
+            try:
+                old_failsafe = backend.FAILSAFE
+                old_pause = backend.PAUSE
+            except Exception as exc:
+                raise _DesktopToolError(
+                    "DESKTOP_BACKEND_CONFIG_FAILED",
+                    "PyAutoGUI global state could not be read",
+                    {
+                        "phase": "snapshot",
+                        "exception_type": type(exc).__name__,
+                    },
+                ) from exc
+
+            try:
+                backend.FAILSAFE = self.failsafe
+                backend.PAUSE = self.pause
+            except Exception as exc:
+                try:
+                    backend.FAILSAFE = old_failsafe
+                    backend.PAUSE = old_pause
+                except Exception as restore_exc:
+                    raise _DesktopToolError(
+                        "DESKTOP_BACKEND_STATE_RESTORE_FAILED",
+                        "PyAutoGUI global state could not be restored",
+                        {
+                            "phase": "apply_rollback",
+                            "exception_type": type(restore_exc).__name__,
+                        },
+                    ) from restore_exc
+                raise _DesktopToolError(
+                    "DESKTOP_BACKEND_CONFIG_FAILED",
+                    "PyAutoGUI global state could not be applied",
+                    {
+                        "phase": "apply",
+                        "exception_type": type(exc).__name__,
+                    },
+                ) from exc
+
+            original: BaseException | None = None
+            result: Any = None
+            try:
+                result = callback(backend)
+            except BaseException as exc:
+                original = exc
+
+            restore_error: Exception | None = None
+            try:
+                backend.FAILSAFE = old_failsafe
+                backend.PAUSE = old_pause
+            except Exception as exc:
+                restore_error = exc
+
+            if original is not None:
+                if restore_error is not None and isinstance(
+                    original,
+                    _DesktopToolError,
+                ):
+                    raise _DesktopToolError(
+                        "DESKTOP_BACKEND_STATE_RESTORE_FAILED",
+                        "PyAutoGUI global state could not be restored",
+                        {
+                            "phase": "restore_after_error",
+                            "exception_type": type(restore_error).__name__,
+                        },
+                    ) from restore_error
+                raise original
+
+            if restore_error is not None:
+                raise _DesktopToolError(
+                    "DESKTOP_BACKEND_STATE_RESTORE_FAILED",
+                    "PyAutoGUI global state could not be restored",
+                    {
+                        "phase": "restore_after_success",
+                        "exception_type": type(restore_error).__name__,
+                    },
+                ) from restore_error
+            return result
+
+    @staticmethod
+    def _validate_screen_dimension(value: Any, *, name: str) -> int:
+        if type(value) is not int or value <= 0 or value > MAX_SCREEN_DIMENSION:
+            raise _DesktopToolError(
+                "DESKTOP_PROPERTY_FAILED",
+                f"{name} returned an invalid screen dimension",
+                {"property": name},
+            )
+        return value
+
+    def get_screen_info(self) -> dict[str, Any]:
+        action = "get_screen_info"
+        try:
+            def operation(backend: Any) -> dict[str, int]:
+                size = self._call_pyautogui(backend, "size")
+                position = self._call_pyautogui(backend, "position")
+                try:
+                    width, height = size
+                    mouse_x, mouse_y = position
+                except Exception as exc:
+                    raise _DesktopToolError(
+                        "DESKTOP_PROPERTY_FAILED",
+                        "desktop backend returned malformed screen information",
+                        {"exception_type": type(exc).__name__},
+                    ) from exc
+                screen_width = self._validate_screen_dimension(
+                    width, name="screen_width"
+                )
+                screen_height = self._validate_screen_dimension(
+                    height, name="screen_height"
+                )
+                if (
+                    type(mouse_x) is not int
+                    or type(mouse_y) is not int
+                    or abs(mouse_x) > MAX_COORD_ABS
+                    or abs(mouse_y) > MAX_COORD_ABS
+                ):
+                    raise _DesktopToolError(
+                        "DESKTOP_PROPERTY_FAILED",
+                        "desktop backend returned invalid mouse coordinates",
+                        {"property": "mouse_position"},
+                    )
+                return {
+                    "screen_width": screen_width,
+                    "screen_height": screen_height,
+                    "mouse_x": mouse_x,
+                    "mouse_y": mouse_y,
+                }
+
+            data = self._run_with_scoped_pyautogui(operation)
+            return self._success(action, data)
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
 
     def mouse_click(
         self,
         x: Optional[int] = None,
         y: Optional[int] = None,
         button: str = "left",
-        clicks: int = 1,
-    ) -> str:
-        """Click chuột tại vị trí (x, y) hoặc tại vị trí hiện tại."""
-        err = self._check_pyautogui()
-        if err:
-            return err
+        clicks: int = CLICK_COUNT.default,
+    ) -> dict[str, Any]:
+        action = "mouse_click"
         try:
-            self.pyautogui.click(x=x, y=y, clicks=clicks, button=button)
-            pos_str = (
-                f"tại ({x}, {y})"
-                if x is not None and y is not None
-                else "tại vị trí hiện tại"
+            validated_x, validated_y = _validate_coordinate_pair(
+                x,
+                y,
+                x_name="x",
+                y_name="y",
+                required=False,
             )
-            return f"Thành công: Click {button} {clicks} lần {pos_str}."
-        except Exception as e:
-            return f"Lỗi điều khiển chuột: {str(e)}"
+            validated_button = _validate_button(button)
+            validated_clicks = _resolve_int(clicks, CLICK_COUNT)
 
-    def mouse_move(self, x: int, y: int, duration: float = 0.2) -> str:
-        """Di chuyển chuột đến tọa độ (x, y)."""
-        err = self._check_pyautogui()
-        if err:
-            return err
+            self._run_with_scoped_pyautogui(
+                lambda backend: self._call_pyautogui(
+                    backend,
+                    "click",
+                    x=validated_x,
+                    y=validated_y,
+                    clicks=validated_clicks,
+                    button=validated_button,
+                )
+            )
+            return self._success(
+                action,
+                {
+                    "x": validated_x,
+                    "y": validated_y,
+                    "position_mode": (
+                        "current" if validated_x is None else "explicit"
+                    ),
+                    "button": validated_button,
+                    "clicks": validated_clicks,
+                },
+            )
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
+
+    def mouse_move(
+        self,
+        x: int,
+        y: int,
+        duration: float = MOVE_DURATION.default,
+    ) -> dict[str, Any]:
+        action = "mouse_move"
         try:
-            self.pyautogui.moveTo(x, y, duration=duration)
-            return f"Thành công: Đã di chuyển chuột tới ({x}, {y})."
-        except Exception as e:
-            return f"Lỗi di chuyển chuột: {str(e)}"
+            validated_x, validated_y = _validate_coordinate_pair(
+                x,
+                y,
+                x_name="x",
+                y_name="y",
+                required=True,
+            )
+            assert validated_x is not None and validated_y is not None
+            validated_duration = _resolve_float(duration, MOVE_DURATION)
+            self._run_with_scoped_pyautogui(
+                lambda backend: self._call_pyautogui(
+                    backend,
+                    "moveTo",
+                    validated_x,
+                    validated_y,
+                    duration=validated_duration,
+                )
+            )
+            return self._success(
+                action,
+                {
+                    "x": validated_x,
+                    "y": validated_y,
+                    "duration_seconds": validated_duration,
+                },
+            )
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
 
     def mouse_drag(
         self,
@@ -333,106 +730,291 @@ class DesktopAutomation:
         start_x: Optional[int] = None,
         start_y: Optional[int] = None,
         button: str = "left",
-        duration: float = 0.5,
-    ) -> str:
-        """Kéo giữ chuột đến tọa độ (x, y)."""
-        err = self._check_pyautogui()
-        if err:
-            return err
+        duration: float = DRAG_DURATION.default,
+    ) -> dict[str, Any]:
+        action = "mouse_drag"
         try:
-            if start_x is not None and start_y is not None:
-                self.pyautogui.moveTo(start_x, start_y)
-            self.pyautogui.dragTo(x, y, duration=duration, button=button)
-            from_str = f"từ ({start_x}, {start_y}) " if start_x is not None and start_y is not None else ""
-            return f"Thành công: Đã kéo chuột {from_str}đến ({x}, {y}) bằng nút {button}."
-        except Exception as e:
-            return f"Lỗi kéo chuột: {str(e)}"
+            target_x, target_y = _validate_coordinate_pair(
+                x,
+                y,
+                x_name="x",
+                y_name="y",
+                required=True,
+            )
+            assert target_x is not None and target_y is not None
+            validated_start_x, validated_start_y = _validate_coordinate_pair(
+                start_x,
+                start_y,
+                x_name="start_x",
+                y_name="start_y",
+                required=False,
+            )
+            validated_button = _validate_button(button)
+            validated_duration = _resolve_float(duration, DRAG_DURATION)
 
+            def operation(backend: Any) -> None:
+                if validated_start_x is not None:
+                    self._call_pyautogui(
+                        backend,
+                        "moveTo",
+                        validated_start_x,
+                        validated_start_y,
+                    )
+                self._call_pyautogui(
+                    backend,
+                    "dragTo",
+                    target_x,
+                    target_y,
+                    duration=validated_duration,
+                    button=validated_button,
+                )
 
-    def mouse_scroll(self, clicks: int) -> str:
-        """Cuộn chuột lên (số dương) hoặc xuống (số âm)."""
-        err = self._check_pyautogui()
-        if err:
-            return err
+            self._run_with_scoped_pyautogui(operation)
+            return self._success(
+                action,
+                {
+                    "x": target_x,
+                    "y": target_y,
+                    "start_x": validated_start_x,
+                    "start_y": validated_start_y,
+                    "explicit_start": validated_start_x is not None,
+                    "button": validated_button,
+                    "duration_seconds": validated_duration,
+                },
+            )
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
+
+    def mouse_scroll(self, clicks: int) -> dict[str, Any]:
+        action = "mouse_scroll"
         try:
-            self.pyautogui.scroll(clicks)
-            direction = "lên" if clicks > 0 else "xuống"
-            return f"Thành công: Đã cuộn chuột {direction} {abs(clicks)} nấc."
-        except Exception as e:
-            return f"Lỗi cuộn chuột: {str(e)}"
+            validated_clicks = _validate_scroll(clicks)
+            self._run_with_scoped_pyautogui(
+                lambda backend: self._call_pyautogui(
+                    backend,
+                    "scroll",
+                    validated_clicks,
+                )
+            )
+            return self._success(action, {"clicks": validated_clicks})
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
+
+    def press_key(
+        self,
+        key: str,
+        presses: int = PRESS_COUNT.default,
+    ) -> dict[str, Any]:
+        action = "press_key"
+        try:
+            validated_key = _validate_key(key)
+            validated_presses = _resolve_int(presses, PRESS_COUNT)
+            self._run_with_scoped_pyautogui(
+                lambda backend: self._call_pyautogui(
+                    backend,
+                    "press",
+                    validated_key,
+                    presses=validated_presses,
+                )
+            )
+            return self._success(
+                action,
+                {
+                    "key": validated_key,
+                    "presses": validated_presses,
+                },
+            )
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
+
+    def hotkey(self, keys: list[str]) -> dict[str, Any]:
+        action = "hotkey"
+        try:
+            validated_keys = _validate_hotkey(keys)
+            self._run_with_scoped_pyautogui(
+                lambda backend: self._call_pyautogui(
+                    backend,
+                    "hotkey",
+                    *validated_keys,
+                )
+            )
+            return self._success(
+                action,
+                {
+                    "keys": validated_keys,
+                    "key_count": len(validated_keys),
+                },
+            )
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
+
+    @staticmethod
+    def _clipboard_call(
+        clipboard: Any,
+        method_name: str,
+        *args: Any,
+    ) -> Any:
+        try:
+            method = getattr(clipboard, method_name)
+            return method(*args)
+        except Exception as exc:
+            raise _DesktopToolError(
+                "DESKTOP_CLIPBOARD_ERROR",
+                "clipboard operation failed",
+                {
+                    "operation": method_name,
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+
+    @staticmethod
+    def _paste_keys() -> tuple[str, str]:
+        return ("command", "v") if sys.platform == "darwin" else ("ctrl", "v")
+
+    def _type_ascii(
+        self,
+        text: str,
+        interval: float,
+    ) -> dict[str, Any]:
+        self._run_with_scoped_pyautogui(
+            lambda backend: self._call_pyautogui(
+                backend,
+                "write",
+                text,
+                interval=interval,
+            )
+        )
+        return {
+            "character_count": len(text),
+            "method": "pyautogui",
+            "clipboard_restored": None,
+        }
+
+    def _type_unicode_direct(self, text: str) -> dict[str, Any]:
+        keyboard = self._load_unicode_keyboard()
+        try:
+            keyboard.type(text)
+        except Exception as exc:
+            raise _DesktopToolError(
+                "DESKTOP_OPERATION_FAILED",
+                "direct Unicode keyboard input failed",
+                {
+                    "operation": "pynput.type",
+                    "exception_type": type(exc).__name__,
+                },
+            ) from exc
+        return {
+            "character_count": len(text),
+            "method": "pynput",
+            "clipboard_restored": None,
+        }
+
+    def _type_unicode_clipboard(
+        self,
+        text: str,
+        *,
+        restore_clipboard: bool,
+    ) -> dict[str, Any]:
+        clipboard = self._load_clipboard()
+        old_clipboard: Any = None
+        clipboard_mutated = False
+        original_error: _DesktopToolError | None = None
+        passthrough_error: BaseException | None = None
+
+        if restore_clipboard:
+            old_clipboard = self._clipboard_call(clipboard, "paste")
+            if not isinstance(old_clipboard, str):
+                raise _DesktopToolError(
+                    "DESKTOP_CLIPBOARD_ERROR",
+                    "clipboard snapshot is not text",
+                    {"operation": "paste"},
+                )
+
+        try:
+            self._clipboard_call(clipboard, "copy", text)
+            clipboard_mutated = True
+            time.sleep(CLIPBOARD_COPY_SETTLE_SECONDS)
+
+            paste_keys = self._paste_keys()
+            self._run_with_scoped_pyautogui(
+                lambda backend: self._call_pyautogui(
+                    backend,
+                    "hotkey",
+                    *paste_keys,
+                )
+            )
+            time.sleep(CLIPBOARD_PASTE_SETTLE_SECONDS)
+        except _DesktopToolError as exc:
+            original_error = exc
+        except BaseException as exc:
+            passthrough_error = exc
+        finally:
+            if restore_clipboard and clipboard_mutated:
+                try:
+                    self._clipboard_call(clipboard, "copy", old_clipboard)
+                except _DesktopToolError as restore_exc:
+                    if passthrough_error is None:
+                        raise _DesktopToolError(
+                            "DESKTOP_CLIPBOARD_RESTORE_FAILED",
+                            "clipboard could not be restored after text input",
+                            {
+                                "trigger": (
+                                    original_error.code
+                                    if original_error is not None
+                                    else "success"
+                                ),
+                                "exception_type": restore_exc.details.get(
+                                    "exception_type",
+                                    type(restore_exc).__name__,
+                                ),
+                            },
+                        ) from restore_exc
+
+        if passthrough_error is not None:
+            raise passthrough_error
+        if original_error is not None:
+            raise original_error
+
+        return {
+            "character_count": len(text),
+            "method": "clipboard",
+            "clipboard_restored": restore_clipboard,
+        }
 
     def type_text(
         self,
         text: str,
         force_direct: bool = False,
         restore_clipboard: bool = True,
-        interval: float = 0.02,
-    ) -> str:
-        """Gõ/Dán chuỗi văn bản vào ứng dụng đang focus (Hỗ trợ Tiếng Việt & Emoji)."""
-        err = self._check_pyautogui()
-        if err:
-            return err
-
-        if not text:
-            return "Lỗi: Chuỗi văn bản rỗng."
-
-        is_unicode = any(ord(char) > 127 for char in text)
-        is_long_text = len(text) > 20
-        use_paste = (is_unicode or is_long_text) and not force_direct
-
-        if use_paste:
-            if self.pyperclip is None:
-                return "Lỗi: Cần cài 'pyperclip' (pip install pyperclip) để dán tiếng Việt."
-
-            try:
-                old_clipboard = self.pyperclip.paste()
-                self.pyperclip.copy(text)
-                time.sleep(0.05)
-
-                self.pyautogui.hotkey("ctrl", "v")
-                time.sleep(0.05)
-
-                if restore_clipboard:
-                    self.pyperclip.copy(old_clipboard)
-
-                return f"Thành công: Đã dán '{text}' ({len(text)} ký tự)."
-            except Exception as e:
-                return f"Lỗi dán Clipboard: {str(e)}"
-
+        interval: float = TYPE_INTERVAL.default,
+    ) -> dict[str, Any]:
+        action = "type_text"
         try:
-            if self.keyboard is not None and is_unicode:
-                self.keyboard.type(text)
+            validated_text = _validate_text(text)
+            validated_force_direct = _validate_bool(
+                force_direct,
+                name="force_direct",
+            )
+            validated_restore = _validate_bool(
+                restore_clipboard,
+                name="restore_clipboard",
+            )
+            validated_interval = _resolve_float(interval, TYPE_INTERVAL)
+
+            is_unicode = any(ord(char) > 127 for char in validated_text)
+            if not is_unicode:
+                data = self._type_ascii(validated_text, validated_interval)
+            elif validated_force_direct:
+                data = self._type_unicode_direct(validated_text)
             else:
-                self.pyautogui.write(text, interval=interval)
-            return f"Thành công: Đã gõ trực tiếp '{text}' ({len(text)} ký tự)."
-        except Exception as e:
-            return f"Lỗi gõ phím: {str(e)}"
+                data = self._type_unicode_clipboard(
+                    validated_text,
+                    restore_clipboard=validated_restore,
+                )
+            return self._success(action, data)
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
 
-    def press_key(self, key: str, presses: int = 1) -> str:
-        """Nhấn phím đơn (ví dụ: 'enter', 'tab', 'backspace', 'esc', 'f5')."""
-        err = self._check_pyautogui()
-        if err:
-            return err
-        try:
-            self.pyautogui.press(key, presses=presses)
-            return f"Thành công: Đã nhấn phím '{key}' {presses} lần."
-        except Exception as e:
-            return f"Lỗi nhấn phím: {str(e)}"
-
-    def hotkey(self, keys: List[str]) -> str:
-        """Thực thi tổ hợp phím (ví dụ: ['ctrl', 'c'], ['alt', 'tab'])."""
-        err = self._check_pyautogui()
-        if err:
-            return err
-        try:
-            self.pyautogui.hotkey(*keys)
-            return f"Thành công: Đã bấm tổ hợp phím {' + '.join(keys)}."
-        except Exception as e:
-            return f"Lỗi bấm tổ hợp phím: {str(e)}"
-
-    # ------------------------------------------------------------------
-    # DISPATCHER / ENTRY POINT (ĐIỀU HƯỚNG BẰNG TÊN ACTION)
-    # ------------------------------------------------------------------
     def execute(
         self,
         action: str,
@@ -441,86 +1023,132 @@ class DesktopAutomation:
         start_x: Optional[int] = None,
         start_y: Optional[int] = None,
         button: str = "left",
-        clicks: int = 1,
-        duration: float = 0.2,
+        clicks: Optional[int] = None,
+        duration: Optional[float] = None,
         text: Optional[str] = None,
         force_direct: bool = False,
         restore_clipboard: bool = True,
-        interval: float = 0.02,
+        interval: float = TYPE_INTERVAL.default,
         key: Optional[str] = None,
-        presses: int = 1,
-        keys: Optional[List[str]] = None,
-        **kwargs
-    ) -> Union[dict, str]:
-        """Hàm điều hướng chung cho AI Agent hoặc gọi động theo action."""
-        if action in ("get_screen_info", "screen_info", "info"):
+        presses: int = PRESS_COUNT.default,
+        keys: Optional[list[str]] = None,
+        **kwargs: Any,
+    ) -> dict[str, Any]:
+        del kwargs
+        aliases = {
+            "screen_info": "get_screen_info",
+            "info": "get_screen_info",
+            "click": "mouse_click",
+            "move": "mouse_move",
+            "drag": "mouse_drag",
+            "scroll": "mouse_scroll",
+            "type": "type_text",
+            "write": "type_text",
+            "press": "press_key",
+            "shortcut": "hotkey",
+        }
+        canonical = aliases.get(action, action)
+
+        if canonical == "get_screen_info":
             return self.get_screen_info()
-
-        elif action in ("click", "mouse_click"):
-            return self.mouse_click(x=x, y=y, button=button, clicks=clicks)
-
-        elif action in ("move", "mouse_move"):
+        if canonical == "mouse_click":
+            return self.mouse_click(
+                x=x,
+                y=y,
+                button=button,
+                clicks=CLICK_COUNT.default if clicks is None else clicks,
+            )
+        if canonical == "mouse_move":
             if x is None or y is None:
-                return "Lỗi: Action 'move' yêu cầu hai tham số 'x' và 'y'."
-            return self.mouse_move(x=x, y=y, duration=duration)
-
-        elif action in ("drag", "mouse_drag"):
+                return self._failure(
+                    canonical,
+                    _DesktopToolError(
+                        "INVALID_ARGUMENT",
+                        "x and y are required for mouse_move",
+                    ),
+                )
+            return self.mouse_move(
+                x=x,
+                y=y,
+                duration=MOVE_DURATION.default if duration is None else duration,
+            )
+        if canonical == "mouse_drag":
             if x is None or y is None:
-                return "Lỗi: Action 'drag' yêu cầu hai tham số 'x' và 'y'."
+                return self._failure(
+                    canonical,
+                    _DesktopToolError(
+                        "INVALID_ARGUMENT",
+                        "x and y are required for mouse_drag",
+                    ),
+                )
             return self.mouse_drag(
                 x=x,
                 y=y,
                 start_x=start_x,
                 start_y=start_y,
                 button=button,
-                duration=duration,
+                duration=DRAG_DURATION.default if duration is None else duration,
             )
-
-        elif action in ("scroll", "mouse_scroll"):
+        if canonical == "mouse_scroll":
+            if clicks is None:
+                return self._failure(
+                    canonical,
+                    _DesktopToolError(
+                        "INVALID_ARGUMENT",
+                        "clicks is required for mouse_scroll",
+                    ),
+                )
             return self.mouse_scroll(clicks=clicks)
-
-        elif action in ("type", "type_text", "write"):
+        if canonical == "type_text":
             if text is None:
-                return "Lỗi: Action 'type' yêu cầu tham số 'text'."
+                return self._failure(
+                    canonical,
+                    _DesktopToolError(
+                        "INVALID_ARGUMENT",
+                        "text is required for type_text",
+                    ),
+                )
             return self.type_text(
                 text=text,
                 force_direct=force_direct,
                 restore_clipboard=restore_clipboard,
                 interval=interval,
             )
-
-        elif action in ("press", "press_key"):
+        if canonical == "press_key":
             if key is None:
-                return "Lỗi: Action 'press' yêu cầu tham số 'key'."
+                return self._failure(
+                    canonical,
+                    _DesktopToolError(
+                        "INVALID_ARGUMENT",
+                        "key is required for press_key",
+                    ),
+                )
             return self.press_key(key=key, presses=presses)
-
-        elif action in ("hotkey", "shortcut"):
-            if not keys:
-                return "Lỗi: Action 'hotkey' yêu cầu tham số danh sách 'keys'."
+        if canonical == "hotkey":
+            if keys is None:
+                return self._failure(
+                    canonical,
+                    _DesktopToolError(
+                        "INVALID_ARGUMENT",
+                        "keys are required for hotkey",
+                    ),
+                )
             return self.hotkey(keys=keys)
 
-        else:
-            valid_actions = (
-                "get_screen_info",
-                "mouse_click",
-                "mouse_move",
-                "mouse_scroll",
-                "type_text",
-                "press_key",
-                "hotkey",
-                "mouse_drag",
-            )
-            return f"Lỗi: Action '{action}' không hợp lệ. Chọn một trong: {valid_actions}"
+        return failure_result(
+            tool=DESKTOP_TOOL_NAME,
+            action=action if isinstance(action, str) and action else "unknown",
+            version=DESKTOP_TOOL_VERSION,
+            code="INVALID_ARGUMENT",
+            message="unsupported desktop action",
+            details={},
+        )
 
 
-# ======================================================================
-# BẢO TỒN TÍNH TƯƠNG THÍCH NGƯỢC (Hàm Wrappers)
-# ======================================================================
 _default_desktop_automation = DesktopAutomation()
 
 
-def get_screen_info() -> Union[dict, str]:
-    """Hàm wrapper lấy thông tin màn hình."""
+def get_screen_info() -> dict[str, Any]:
     return _default_desktop_automation.get_screen_info()
 
 
@@ -528,15 +1156,27 @@ def mouse_click(
     x: Optional[int] = None,
     y: Optional[int] = None,
     button: str = "left",
-    clicks: int = 1,
-) -> str:
-    """Hàm wrapper click chuột."""
-    return _default_desktop_automation.mouse_click(x=x, y=y, button=button, clicks=clicks)
+    clicks: int = CLICK_COUNT.default,
+) -> dict[str, Any]:
+    return _default_desktop_automation.mouse_click(
+        x=x,
+        y=y,
+        button=button,
+        clicks=clicks,
+    )
 
 
-def mouse_move(x: int, y: int, duration: float = 0.2) -> str:
-    """Hàm wrapper di chuyển chuột."""
-    return _default_desktop_automation.mouse_move(x=x, y=y, duration=duration)
+def mouse_move(
+    x: int,
+    y: int,
+    duration: float = MOVE_DURATION.default,
+) -> dict[str, Any]:
+    return _default_desktop_automation.mouse_move(
+        x=x,
+        y=y,
+        duration=duration,
+    )
+
 
 def mouse_drag(
     x: int,
@@ -544,9 +1184,8 @@ def mouse_drag(
     start_x: Optional[int] = None,
     start_y: Optional[int] = None,
     button: str = "left",
-    duration: float = 0.5,
-) -> str:
-    """Hàm wrapper kéo chuột."""
+    duration: float = DRAG_DURATION.default,
+) -> dict[str, Any]:
     return _default_desktop_automation.mouse_drag(
         x=x,
         y=y,
@@ -556,8 +1195,8 @@ def mouse_drag(
         duration=duration,
     )
 
-def mouse_scroll(clicks: int) -> str:
-    """Hàm wrapper cuộn chuột."""
+
+def mouse_scroll(clicks: int) -> dict[str, Any]:
     return _default_desktop_automation.mouse_scroll(clicks=clicks)
 
 
@@ -565,9 +1204,8 @@ def type_text(
     text: str,
     force_direct: bool = False,
     restore_clipboard: bool = True,
-    interval: float = 0.02,
-) -> str:
-    """Hàm wrapper gõ văn bản."""
+    interval: float = TYPE_INTERVAL.default,
+) -> dict[str, Any]:
     return _default_desktop_automation.type_text(
         text=text,
         force_direct=force_direct,
@@ -576,16 +1214,19 @@ def type_text(
     )
 
 
-def press_key(key: str, presses: int = 1) -> str:
-    """Hàm wrapper nhấn phím."""
-    return _default_desktop_automation.press_key(key=key, presses=presses)
+def press_key(
+    key: str,
+    presses: int = PRESS_COUNT.default,
+) -> dict[str, Any]:
+    return _default_desktop_automation.press_key(
+        key=key,
+        presses=presses,
+    )
 
 
-def hotkey(keys: List[str]) -> str:
-    """Hàm wrapper bấm tổ hợp phím."""
+def hotkey(keys: list[str]) -> dict[str, Any]:
     return _default_desktop_automation.hotkey(keys=keys)
 
 
-def run(action: str, **kwargs) -> Union[dict, str]:
-    """Hàm wrapper dạng dispatcher chung."""
+def run(action: str, **kwargs: Any) -> dict[str, Any]:
     return _default_desktop_automation.execute(action=action, **kwargs)

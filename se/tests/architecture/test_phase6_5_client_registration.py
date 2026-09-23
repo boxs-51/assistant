@@ -144,7 +144,10 @@ def test_registration_rejects_conflicting_duplicate_definitions() -> None:
     )
     request.capabilities.append(duplicate)
 
-    with pytest.raises(ClientRegistrationError, match="conflicting definitions"):
+    with pytest.raises(
+        ClientRegistrationError,
+        match="duplicate capability_id",
+    ):
         service.register(request)
 
 
