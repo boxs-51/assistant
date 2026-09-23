@@ -27,6 +27,7 @@ async def await_with_provider_deadline(
     call_budget: ProviderCallBudget,
     provider_name: str,
     timeout_message: str,
+    now_monotonic: Callable[[], float] | None = None,
 ) -> Any:
     """Run one owned provider await under the logical monotonic deadline.
 
@@ -35,8 +36,9 @@ async def await_with_provider_deadline(
     deadline is rejected as deadline-exceeded rather than accepted as success.
     """
 
+    clock = time.monotonic if now_monotonic is None else now_monotonic
     remaining = call_budget.remaining_seconds(
-        now_monotonic=time.monotonic()
+        now_monotonic=clock()
     )
     if remaining <= 0:
         raise ProviderDeadlineExceededError(
@@ -61,7 +63,7 @@ async def await_with_provider_deadline(
 
         result = await child
         if call_budget.remaining_seconds(
-            now_monotonic=time.monotonic()
+            now_monotonic=clock()
         ) <= 0:
             raise ProviderDeadlineExceededError(
                 timeout_message,
