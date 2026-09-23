@@ -67,7 +67,11 @@ class ProviderInferenceAdapter(InferencePort):
 
         body = self.serialize_request(request)
         provider_task = asyncio.create_task(
-            handler.execute_with_fallback(self._http_client, body),
+            handler.execute_with_fallback(
+                self._http_client,
+                body,
+                timeout=request.timeout_seconds,
+            ),
             name=f"inference:{request.execution_id}:{request.request_id}",
         )
         cancellation_task = None
