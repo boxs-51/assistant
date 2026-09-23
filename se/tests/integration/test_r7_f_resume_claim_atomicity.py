@@ -1606,3 +1606,63 @@ async def test_r8_f_exhausted_resume_activity_epoch_conflict_is_retryable_deferr
             await uow.commit()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_f_resume_consume_retries_transient_activity_deferred_same_claim(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions, factory, store = await _setup(
+        tmp_path,
+        "r8-f-resume-deferred-retry.sqlite",
+    )
+    try:
+        branch_id = await _seed_task_waiting(sessions, factory)
+        plan = _plan(task_id="task-r7f", branch_id=branch_id)
+        claim = await store.get_or_create_resume_claim(
+            _intent(plan, "rr-r8-f-deferred-retry")
+        )
+        spec = ResumeClaimConsumeSpec(
+            plan=plan,
+            claim_id=claim.claim_id,
+            resume_request_id=claim.resume_request_id,
+            expected_claim_revision=claim.revision,
+            now_utc=datetime.now(timezone.utc),
+        )
+
+        original = store._consume_resume_claim_once
+        attempts = 0
+
+        async def transient_once(inner_spec):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                return ResumeClaimDeferred(
+                    "RESUME_CONFLICT",
+                    "simulated Task activity epoch loss",
+                    retryable=True,
+                )
+            return await original(inner_spec)
+
+        monkeypatch.setattr(
+            store,
+            "_consume_resume_claim_once",
+            transient_once,
+        )
+        result = await store.consume_resume_claim(spec)
+
+        assert attempts == 2
+        assert result.claim_id == claim.claim_id
+        assert result.resume_request_id == claim.resume_request_id
+        assert result.consumed_execution_revision == 3
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(EXECUTION)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            assert execution.state == "RUNNING"
+            assert execution.revision == 3
+            assert durable_claim.state == "CONSUMED"
+            await uow.commit()
+    finally:
+        await engine.dispose()
