@@ -762,11 +762,6 @@ class TaskBudgetService:
                         await uow.commit()
                         return task
 
-                    if current_state not in allowed:
-                        raise TaskBudgetConflictError(
-                            f"AgentTask {task_id} is {current_state}, "
-                            f"expected one of {sorted(allowed)}"
-                        )
                     if budget.state is not TaskBudgetState.OPEN:
                         raise TaskBudgetConflictError(
                             "Nonterminal AgentTask has CLOSED TaskBudget."
@@ -785,6 +780,12 @@ class TaskBudgetService:
                             continue
                         await uow.commit()
                         return aggregate
+
+                    if current_state not in allowed:
+                        raise TaskBudgetConflictError(
+                            f"AgentTask {task_id} is {current_state}, "
+                            f"expected one of {sorted(allowed)}"
+                        )
 
                     updated_task = await uow.agents.compare_and_set_task(
                         task_id,
