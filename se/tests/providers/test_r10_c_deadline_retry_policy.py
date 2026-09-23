@@ -587,3 +587,64 @@ async def test_r10_c_execute_generic_expired_budget_skips_operation_and_breaker(
     assert calls == 0
     assert breaker.before_calls == 0
     assert breaker.failure_calls == 0
+
+
+class _LegacyRetryPolicy:
+    def __init__(self):
+        self.calls = 0
+
+    async def apply(self, execution_func, provider_name):
+        self.calls += 1
+        assert provider_name == "provider-a"
+        return await execution_func()
+
+
+@pytest.mark.asyncio
+async def test_r10_c_no_budget_executor_preserves_legacy_retry_policy_interface():
+    provider = _Provider(["ok"])
+    breaker = _Breaker()
+    retry_policy = _LegacyRetryPolicy()
+    executor = ProviderExecutor(
+        _BreakerManager(breaker),
+        retry_policy=retry_policy,
+    )
+
+    result = await executor.execute(
+        provider=provider,
+        http_client=object(),
+        body={"model": "m"},
+    )
+
+    assert result == "ok"
+    assert retry_policy.calls == 1
+    assert provider.chat.calls == 1
+    assert breaker.success_calls == 1
+    assert breaker.failure_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r10_c_no_budget_generic_preserves_legacy_retry_policy_interface():
+    provider = _Provider([])
+    breaker = _Breaker()
+    retry_policy = _LegacyRetryPolicy()
+    executor = ProviderExecutor(
+        _BreakerManager(breaker),
+        retry_policy=retry_policy,
+    )
+    calls = 0
+
+    async def operation():
+        nonlocal calls
+        calls += 1
+        return "generic-ok"
+
+    result = await executor.execute_generic(
+        provider,
+        operation,
+    )
+
+    assert result == "generic-ok"
+    assert retry_policy.calls == 1
+    assert calls == 1
+    assert breaker.success_calls == 1
+    assert breaker.failure_calls == 0
