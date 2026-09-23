@@ -11,8 +11,9 @@
 PTC-3A closes only provider-facing tool-schema compatibility that can be
 implemented without touching AE-R10 shared routing/fallback ownership.
 
-Owned production path:
+Owned production paths:
 
+- `se/src/provider/core/tool_contract.py`
 - `se/src/provider/gemini/converters/chats/request.py`
 
 Owned regressions:
@@ -37,7 +38,11 @@ provider-specific model.
 
 Provider lowering may deep-copy and remove transport-only metadata such as
 top-level `$schema`, but it must not weaken or mutate canonical semantic
-constraints.
+constraints. PTC-3A also normalizes the legacy OpenAPI-style uppercase JSON
+Schema type tokens still accepted by older Gateway fixtures (for example
+`OBJECT` / `INTEGER`) to canonical lowercase tokens on the provider copy,
+recursing only through schema-bearing keywords. Instance data under
+`default`, `const`, or `enum` is not rewritten.
 
 Local execution remains authoritative for argument validation against the
 canonical schema. Provider schema guidance is an inference contract, not a
@@ -97,7 +102,9 @@ New PTC-3A regressions prove:
 3. Gemini uses `parametersJsonSchema`, not `parameters`;
 4. an explicit non-object Gemini parameter root fails closed;
 5. a missing root type is bounded on the provider copy only;
-6. canonical source request/schema remains unchanged.
+6. legacy uppercase JSON-Schema type tokens normalize recursively for all three
+   provider adapters without rewriting instance data;
+7. canonical source request/schema remains unchanged.
 
 ## 6. PTC-3B blocked boundary
 
@@ -144,7 +151,7 @@ PTC-3A may close when:
 
 - focused provider schema regressions are GREEN;
 - full Architecture Baseline Linux + Windows are GREEN on exact HEAD;
-- diff contains only the three claimed PTC-3A paths;
+- diff contains only the four claimed PTC-3A paths;
 - no AE-R10 shared routing/retry path is modified;
 - no new P0/P1 is found in last-mile audit.
 
