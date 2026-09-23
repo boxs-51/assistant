@@ -237,6 +237,17 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def get_task_fork_admission_by_execution(
+        self,
+        execution_id: str,
+    ):
+        result = await self.session.execute(
+            select(AgentTaskForkAdmissionRecord).where(
+                AgentTaskForkAdmissionRecord.execution_id == execution_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def save_task_budget(self, values: Dict[str, Any]):
         record = TaskBudgetRecord(**values)
         self.session.add(record)

@@ -1,8 +1,9 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, String, UniqueConstraint, func
+from sqlalchemy import JSON, DateTime, ForeignKey, String, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -36,6 +37,14 @@ class AgentTaskForkAdmissionRecord(Base):
     plan_fingerprint: Mapped[str] = mapped_column(
         String(64),
         nullable=False,
+    )
+    runtime_seed_json: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON,
+        nullable=True,
+    )
+    runtime_seed_fingerprint: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
     )
 
     source_branch_id: Mapped[str] = mapped_column(

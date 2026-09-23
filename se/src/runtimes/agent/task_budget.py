@@ -19,7 +19,12 @@ from ...domain.schemas.task_budget import (
     normalize_task_budget_cost,
     task_budget_policy_fingerprint,
 )
-from .contracts.fork import ForkAdmission, ForkPlan, fork_plan_fingerprint
+from .contracts.fork import (
+    ForkAdmission,
+    ForkPlan,
+    fork_plan_fingerprint,
+    fork_runtime_seed_payload,
+)
 from .serialization import to_json_safe
 from .waiting_checkpoint import (
     stage_waiting_checkpoint,
@@ -745,6 +750,11 @@ class TaskBudgetService:
             or receipt.source_execution_id != plan.source_execution_id
             or receipt.source_checkpoint_id != plan.source_checkpoint_id
             or receipt.created_by != plan.target_user_id
+            or receipt.runtime_seed_json != fork_runtime_seed_payload(
+                plan.runtime_seed
+            )
+            or receipt.runtime_seed_fingerprint
+            != plan.runtime_seed_fingerprint
         ):
             raise ForkConsumeConflict(
                 "FORK_REQUEST_SEMANTIC_CONFLICT",
@@ -1035,6 +1045,11 @@ class TaskBudgetService:
                             "fork_request_id": plan.fork_request_id,
                             "plan_fingerprint":
                                 plan.plan_fingerprint,
+                            "runtime_seed_json": fork_runtime_seed_payload(
+                                plan.runtime_seed
+                            ),
+                            "runtime_seed_fingerprint":
+                                plan.runtime_seed_fingerprint,
                             "source_branch_id":
                                 plan.source_branch_id,
                             "source_execution_id":

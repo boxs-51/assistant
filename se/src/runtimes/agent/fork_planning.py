@@ -1,13 +1,20 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Any, Mapping, Sequence
+
+from ...domain.schemas.agent_execution import AgentExecutionLimits
 
 from .contracts.fork import (
     ForkPlan,
+    ForkRuntimeSeed,
     ForkSideEffectSnapshot,
     committed_result_fingerprint,
+    fork_overlay_fingerprint,
     fork_plan_fingerprint,
+    fork_request_fingerprint,
+    fork_runtime_seed_fingerprint,
     fork_side_effect_fingerprint,
     fork_transcript_fingerprint,
 )
@@ -27,6 +34,117 @@ class ForkPlanRejected(ForkPlanError):
 
 class ForkPlanDeferred(ForkPlanError):
     """The source is valid but current capacity does not permit FORK."""
+
+
+_TRANSPORT_METADATA_KEYS = frozenset(
+    {
+        "client_id",
+        "connection_id",
+        "origin_client_id",
+        "origin_connection_id",
+        "routing_connection_id",
+    }
+)
+
+
+def _build_runtime_seed(
+    *,
+    execution,
+    checkpoint,
+    checkpoint_iteration: int,
+    base_transcript_fingerprint: str,
+    side_effect_fingerprint: str,
+    overlay_messages: Sequence[Mapping[str, Any]],
+) -> ForkRuntimeSeed:
+    state = getattr(execution, "context_state", None)
+    if not isinstance(state, Mapping):
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_INCOMPLETE",
+            "Source execution has no durable context_state mapping.",
+        )
+
+    raw_limits = state.get("limits")
+    if not isinstance(raw_limits, Mapping):
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_INCOMPLETE",
+            "Source execution context_state has no durable limits.",
+        )
+    try:
+        limits = AgentExecutionLimits.model_validate(dict(raw_limits))
+    except Exception as exc:
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_INCOMPLETE",
+            "Source execution limits are invalid.",
+        ) from exc
+
+    remaining = getattr(execution, "remaining_active_budget_seconds", None)
+    checkpoint_remaining = getattr(checkpoint, "remaining_active_budget_seconds", None)
+    if remaining is None:
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_INCOMPLETE",
+            "Source execution has no durable remaining active budget.",
+        )
+    remaining = float(remaining)
+    if not math.isfinite(remaining) or remaining < 0:
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_INCOMPLETE",
+            "Source execution remaining active budget is invalid.",
+        )
+    if checkpoint_remaining is None or float(checkpoint_remaining) != remaining:
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_CONFLICT",
+            "Checkpoint active budget differs from source execution.",
+        )
+
+    checkpoint_metadata = dict(
+        getattr(checkpoint, "metadata", None)
+        or getattr(checkpoint, "metadata_json", None)
+        or {}
+    )
+    request_id = state.get("request_id")
+    checkpoint_request_id = checkpoint_metadata.get("request_id")
+    if request_id is not None and checkpoint_request_id is not None and request_id != checkpoint_request_id:
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_CONFLICT",
+            "Checkpoint request_id differs from source context_state.",
+        )
+    trace_id = state.get("trace_id")
+    checkpoint_trace_id = checkpoint_metadata.get("trace_id")
+    if trace_id is not None and checkpoint_trace_id is not None and trace_id != checkpoint_trace_id:
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_CONFLICT",
+            "Checkpoint trace_id differs from source context_state.",
+        )
+
+    raw_metadata = state.get("metadata") or {}
+    if not isinstance(raw_metadata, Mapping):
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_INCOMPLETE",
+            "Source execution metadata is not a mapping.",
+        )
+    metadata = {
+        str(key): value
+        for key, value in raw_metadata.items()
+        if str(key) not in _TRANSPORT_METADATA_KEYS
+    }
+    metadata = to_json_safe(metadata, path="fork_plan.runtime_seed.metadata")
+
+    return ForkRuntimeSeed(
+        version=1,
+        request_id=checkpoint_request_id if checkpoint_request_id is not None else request_id,
+        workflow_id=state.get("workflow_id"),
+        metadata=dict(metadata),
+        causation_id=state.get("causation_id"),
+        trace_id=checkpoint_trace_id if checkpoint_trace_id is not None else trace_id,
+        limits=limits.model_dump(mode="json"),
+        request_fingerprint=fork_request_fingerprint(dict(getattr(execution, "request", None) or {})),
+        remaining_active_budget_seconds=remaining,
+        checkpoint_iteration=int(checkpoint_iteration),
+        base_transcript_fingerprint=base_transcript_fingerprint,
+        side_effect_fingerprint=side_effect_fingerprint,
+        branch_context_revision=0,
+        overlay_fingerprint=fork_overlay_fingerprint(list(overlay_messages)),
+    )
 
 
 class AgentForkPlanningService:
@@ -247,6 +365,15 @@ class AgentForkPlanningService:
         side_effect_fingerprint = fork_side_effect_fingerprint(
             side_effects
         )
+        runtime_seed = _build_runtime_seed(
+            execution=execution,
+            checkpoint=checkpoint,
+            checkpoint_iteration=int(checkpoint.iteration),
+            base_transcript_fingerprint=transcript_fingerprint,
+            side_effect_fingerprint=side_effect_fingerprint,
+            overlay_messages=normalized_overlay,
+        )
+        runtime_seed_fingerprint = fork_runtime_seed_fingerprint(runtime_seed)
 
         plan_values = {
             "task_id": task_id,
@@ -268,6 +395,8 @@ class AgentForkPlanningService:
             "base_transcript_fingerprint": transcript_fingerprint,
             "side_effects": tuple(side_effects),
             "side_effect_fingerprint": side_effect_fingerprint,
+            "runtime_seed": runtime_seed,
+            "runtime_seed_fingerprint": runtime_seed_fingerprint,
             "overlay_messages": normalized_overlay,
             "target_user_id": target_user_id,
         }
@@ -429,6 +558,11 @@ class AgentForkPlanningService:
                     f"overlay_messages[{index}] is not a valid "
                     "InferenceMessage.",
                 ) from exc
+            if message.role != "user":
+                raise ForkPlanRejected(
+                    "FORK_OVERLAY_ROLE_INVALID",
+                    "Initial R8 FORK overlay messages must use role='user'.",
+                )
             normalized.append(message.model_dump(mode="json"))
         return tuple(normalized)
 
@@ -890,6 +1024,24 @@ async def revalidate_fork_plan_in_uow(
         raise ForkPlanRejected(
             "FORK_TRANSCRIPT_CHANGED",
             "Committed source transcript changed after FORK planning.",
+        )
+
+    current_runtime_seed = _build_runtime_seed(
+        execution=execution,
+        checkpoint=checkpoint,
+        checkpoint_iteration=int(checkpoint.iteration),
+        base_transcript_fingerprint=fork_transcript_fingerprint(base_transcript),
+        side_effect_fingerprint=fork_side_effect_fingerprint(side_effects),
+        overlay_messages=plan.overlay_messages,
+    )
+    if (
+        current_runtime_seed != plan.runtime_seed
+        or fork_runtime_seed_fingerprint(current_runtime_seed)
+        != plan.runtime_seed_fingerprint
+    ):
+        raise ForkPlanRejected(
+            "FORK_RUNTIME_CONTEXT_CONFLICT",
+            "Source runtime context changed after FORK planning.",
         )
 
     transcript_tool_ids = [

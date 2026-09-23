@@ -3,9 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import hashlib
 import json
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 
 from .inference import InferenceMessage
+
+if TYPE_CHECKING:
+    from .context import AgentExecutionContext
 
 
 def _canonical_json(value: Any) -> bytes:
@@ -33,6 +36,41 @@ class ForkSideEffectSnapshot:
     remote_outcome_state: str | None
     tool_call_id: str
     committed_result_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForkRuntimeSeed:
+    """Immutable runtime-context proof captured at FORK planning time."""
+
+    version: int
+    request_id: str | None
+    workflow_id: str | None
+    metadata: dict[str, Any]
+    causation_id: str | None
+    trace_id: str | None
+    limits: dict[str, Any]
+    request_fingerprint: str
+    remaining_active_budget_seconds: float
+    checkpoint_iteration: int
+    base_transcript_fingerprint: str
+    side_effect_fingerprint: str
+    branch_context_revision: int
+    overlay_fingerprint: str
+
+
+@dataclass(frozen=True, slots=True)
+class ForkExecutionBootstrap:
+    """Read-only R8-E handoff. It is not execution/start authority."""
+
+    execution_id: str
+    expected_execution_revision: int
+    task_id: str
+    branch_id: str
+    fork_request_id: str
+    plan_fingerprint: str
+    runtime_seed_fingerprint: str
+    branch_context_revision: int
+    context: "AgentExecutionContext"
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,6 +122,9 @@ class ForkPlan:
     side_effects: tuple[ForkSideEffectSnapshot, ...]
     side_effect_fingerprint: str
 
+    runtime_seed: ForkRuntimeSeed
+    runtime_seed_fingerprint: str
+
     overlay_messages: tuple[dict[str, Any], ...]
     target_user_id: str
 
@@ -102,6 +143,56 @@ def committed_result_fingerprint(values: Mapping[str, Any] | Any) -> str:
         "attempt": int(_get(values, "attempt")),
     }
     return hashlib.sha256(_canonical_json(payload)).hexdigest()
+
+
+def fork_request_fingerprint(request: Mapping[str, Any] | Any) -> str:
+    payload = dict(request or {})
+    return hashlib.sha256(_canonical_json(payload)).hexdigest()
+
+
+def fork_overlay_fingerprint(
+    overlay_messages: tuple[Mapping[str, Any], ...] | list[Mapping[str, Any]],
+) -> str:
+    payload = [
+        InferenceMessage.model_validate(item).model_dump(mode="json")
+        for item in overlay_messages
+    ]
+    return hashlib.sha256(_canonical_json(payload)).hexdigest()
+
+
+def fork_runtime_seed_payload(
+    values: ForkRuntimeSeed | Mapping[str, Any],
+) -> dict[str, Any]:
+    return {
+        "version": int(_get(values, "version")),
+        "request_id": _get(values, "request_id"),
+        "workflow_id": _get(values, "workflow_id"),
+        "metadata": dict(_get(values, "metadata") or {}),
+        "causation_id": _get(values, "causation_id"),
+        "trace_id": _get(values, "trace_id"),
+        "limits": dict(_get(values, "limits") or {}),
+        "request_fingerprint": _get(values, "request_fingerprint"),
+        "remaining_active_budget_seconds": float(
+            _get(values, "remaining_active_budget_seconds")
+        ),
+        "checkpoint_iteration": int(_get(values, "checkpoint_iteration")),
+        "base_transcript_fingerprint": _get(
+            values, "base_transcript_fingerprint"
+        ),
+        "side_effect_fingerprint": _get(values, "side_effect_fingerprint"),
+        "branch_context_revision": int(
+            _get(values, "branch_context_revision")
+        ),
+        "overlay_fingerprint": _get(values, "overlay_fingerprint"),
+    }
+
+
+def fork_runtime_seed_fingerprint(
+    values: ForkRuntimeSeed | Mapping[str, Any],
+) -> str:
+    return hashlib.sha256(
+        _canonical_json(fork_runtime_seed_payload(values))
+    ).hexdigest()
 
 
 def fork_transcript_fingerprint(
@@ -206,6 +297,12 @@ def fork_plan_fingerprint(values: ForkPlan | Mapping[str, Any]) -> str:
             values,
             "side_effect_fingerprint",
         ),
+        "runtime_seed": fork_runtime_seed_payload(
+            _get(values, "runtime_seed")
+        ),
+        "runtime_seed_fingerprint": _get(
+            values, "runtime_seed_fingerprint"
+        ),
         "overlay_messages": [
             dict(item) for item in _get(values, "overlay_messages")
         ],
@@ -216,10 +313,16 @@ def fork_plan_fingerprint(values: ForkPlan | Mapping[str, Any]) -> str:
 
 __all__ = [
     "ForkAdmission",
+    "ForkExecutionBootstrap",
     "ForkPlan",
+    "ForkRuntimeSeed",
     "ForkSideEffectSnapshot",
     "committed_result_fingerprint",
+    "fork_overlay_fingerprint",
     "fork_plan_fingerprint",
+    "fork_request_fingerprint",
+    "fork_runtime_seed_fingerprint",
+    "fork_runtime_seed_payload",
     "fork_side_effect_fingerprint",
     "fork_transcript_fingerprint",
 ]
