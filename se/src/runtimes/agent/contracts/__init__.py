@@ -33,7 +33,12 @@ from .fork import (
     fork_side_effect_fingerprint,
     fork_transcript_fingerprint,
 )
-from .retry import RetryAdmission, RetryPlan, retry_plan_fingerprint
+from .retry import (
+    RetryAdmission,
+    RetryPlan,
+    retry_plan_fingerprint,
+    retry_value_fingerprint,
+)
 from .resume import (
     CheckpointPendingInvocation,
     DurableExecutionCheckpoint,
@@ -100,6 +105,7 @@ __all__ = [
     "RetryAdmission",
     "RetryPlan",
     "retry_plan_fingerprint",
+    "retry_value_fingerprint",
     "CheckpointPendingInvocation",
     "DurableExecutionCheckpoint",
     "ResumeInvocationAction",
