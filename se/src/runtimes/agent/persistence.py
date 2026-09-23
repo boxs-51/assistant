@@ -2243,9 +2243,10 @@ class DurableAgentStore:
                     )
                     if activity is None:
                         await uow.rollback()
-                        return ResumeClaimRejected(
+                        return ResumeClaimDeferred(
                             "RESUME_CONFLICT",
                             "AgentTask activity changed during WAIT expiry.",
+                            retryable=True,
                         )
                 await uow.commit()
                 return ResumeClaimRejected(
@@ -2462,9 +2463,10 @@ class DurableAgentStore:
                 )
                 if activity_task is None:
                     await uow.rollback()
-                    return ResumeClaimRejected(
+                    return ResumeClaimDeferred(
                         "RESUME_CONFLICT",
                         "AgentTask activity epoch changed during resume.",
+                        retryable=True,
                     )
                 locked_task = activity_task
 
@@ -2505,9 +2507,10 @@ class DurableAgentStore:
                 )
                 if activity is None:
                     await uow.rollback()
-                    return ResumeClaimRejected(
+                    return ResumeClaimDeferred(
                         "RESUME_CONFLICT",
                         "AgentTask activity CAS lost during resume.",
+                        retryable=True,
                     )
 
             consumed_revision = plan.expected_execution_revision + 1
@@ -2558,6 +2561,13 @@ class DurableAgentStore:
         for _ in range(8):
             try:
                 outcome = await self._consume_resume_claim_once(spec)
+                if isinstance(outcome, ResumeClaimDeferred):
+                    # Activity-epoch / aggregate-activity conflicts are
+                    # transactionally rolled back and retain the same CREATED
+                    # claim + WAITING execution. Retry the exact claim/plan
+                    # inside this bounded authority loop before surfacing a
+                    # retryable conflict to transport.
+                    continue
                 if isinstance(outcome, ResumeClaimError):
                     raise outcome
                 return outcome
