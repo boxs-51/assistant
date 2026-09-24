@@ -4841,17 +4841,27 @@ class DurableAgentStore:
                     )
                 return sanitized
 
-            resume_transcript = await sanitize_transcript(
-                (
-                    checkpoint.transcript_snapshot
-                    if checkpoint is not None
-                    else getattr(execution, "transcript", None) or (
-                        getattr(latest_iteration, "transcript", None)
-                        if latest_iteration
-                        else []
+            if checkpoint is not None:
+                try:
+                    checkpoint_messages = (
+                        await materialize_checkpoint_transcript_in_uow(
+                            uow,
+                            checkpoint,
+                        )
                     )
+                except CheckpointTranscriptMaterializationError as exc:
+                    raise ExecutionConflictError(str(exc)) from exc
+                transcript_source = [
+                    item.model_dump(mode="json")
+                    for item in checkpoint_messages
+                ]
+            else:
+                transcript_source = getattr(execution, "transcript", None) or (
+                    getattr(latest_iteration, "transcript", None)
+                    if latest_iteration
+                    else []
                 )
-            )
+            resume_transcript = await sanitize_transcript(transcript_source)
 
             pending_tool_calls = []
             if latest_iteration is not None:
