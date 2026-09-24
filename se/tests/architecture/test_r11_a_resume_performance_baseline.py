@@ -405,7 +405,6 @@ async def test_r11_a_resume_materialize_claim_percentile_red_probe(tmp_path):
         sample = report[key]
         assert 0 < sample["p50_ns"] <= sample["p95_ns"] <= sample["p99_ns"]
 
-    pytest.fail(
-        "R11_A_RESUME_PERCENTILE_BASELINE="
-        + json.dumps(report, sort_keys=True, separators=(",", ":"))
-    )
+    # Exact p50/p95/p99 values are retained on Issue #31 / CI #953.
+    # Runtime timing remains measurement evidence rather than a hard threshold.
+    assert report["end_to_end"]["p50_ns"] > 0
