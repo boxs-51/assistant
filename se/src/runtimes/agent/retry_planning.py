@@ -10,7 +10,10 @@ from .contracts.retry import (
     retry_plan_fingerprint,
     retry_value_fingerprint,
 )
-from .checkpoint_transcript import CheckpointTranscriptMaterializationError
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    checkpoint_representation_error_code,
+)
 from .serialization import to_json_safe
 
 
@@ -186,19 +189,14 @@ async def _load_retry_safe_checkpoint_transcript(
         raise RetryPlanRejected(exc.code, str(exc)) from exc
     except ForkPlanError as exc:
         code = (
-            exc.code
-            if str(exc.code).startswith("TRANSCRIPT_")
-            or exc.code in {
-                "INVALID_CHECKPOINT_REPRESENTATION_STATE",
-                "MISSING_TRANSCRIPT_REPRESENTATION",
-                "DUAL_TRANSCRIPT_MISMATCH",
-            }
-            else "RETRY_CHECKPOINT_UNSAFE"
+            checkpoint_representation_error_code(exc.code)
+            or "RETRY_CHECKPOINT_UNSAFE"
         )
         raise RetryPlanRejected(code, str(exc)) from exc
     except RuntimeError as exc:
         raise RetryPlanRejected(
-            "RETRY_CHECKPOINT_UNSAFE",
+            checkpoint_representation_error_code(exc)
+            or "RETRY_CHECKPOINT_UNSAFE",
             str(exc),
         ) from exc
 
