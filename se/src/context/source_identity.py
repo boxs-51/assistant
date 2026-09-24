@@ -130,9 +130,14 @@ def context_source_id(
     authority_id = _require_non_empty("authority_id", authority_id)
     _reject_non_authority_locator(authority_id)
 
+    if not isinstance(source_kind, ContextSourceKind):
+        raise ValueError("source_kind must be a ContextSourceKind")
+
     if source_kind in _VERSIONED_SOURCE_KINDS:
         if authority_version is None:
             raise ValueError(f"{source_kind.value} requires authority_version")
+        if isinstance(authority_version, bool) or not isinstance(authority_version, int):
+            raise ValueError("authority_version must be an integer")
         if authority_version < 0:
             raise ValueError("authority_version must be >= 0")
     elif source_kind in _UNVERSIONED_SOURCE_KINDS:
@@ -205,9 +210,37 @@ class ContextSourceRef(BaseModel):
         return _thaw_json(value)
 
 
+def _validate_optional_string_field(name: str, value: Any) -> None:
+    if value is not None and not isinstance(value, str):
+        raise ValueError(f"{name} must be a string or None")
+
+
+def _validate_stored_context_source_ref_shape(ref: ContextSourceRef) -> None:
+    if not isinstance(ref.context_source_id, str) or not ref.context_source_id.strip():
+        raise ValueError("context_source_id must be a non-empty string")
+    if not isinstance(ref.source_kind, ContextSourceKind):
+        raise ValueError("source_kind must be a ContextSourceKind")
+
+    if ref.authority_version is not None:
+        if isinstance(ref.authority_version, bool) or not isinstance(ref.authority_version, int):
+            raise ValueError("authority_version must be an integer or None")
+
+    _validate_optional_string_field("session_id", ref.session_id)
+    _validate_optional_string_field("task_id", ref.task_id)
+    _validate_optional_string_field("branch_id", ref.branch_id)
+    _validate_optional_string_field("source_state", ref.source_state)
+
+    if ref.source_created_at is not None and not isinstance(ref.source_created_at, datetime):
+        raise ValueError("source_created_at must be a datetime or None")
+
+    _validate_frozen_json(ref.metadata, path="$.metadata")
+
+
 def validate_context_source_ref_integrity(
     ref: ContextSourceRef,
 ) -> ContextSourceRef:
+    _validate_stored_context_source_ref_shape(ref)
+
     canonical_owner = _require_non_empty("owner_user_id", ref.owner_user_id)
     canonical_authority = _require_non_empty("authority_id", ref.authority_id)
     if ref.owner_user_id != canonical_owner:
@@ -224,7 +257,6 @@ def validate_context_source_ref_integrity(
     )
     if ref.context_source_id != expected:
         raise ValueError("context_source_id does not match source authority identity")
-    _validate_frozen_json(ref.metadata, path="$.metadata")
     return ref
 
 
