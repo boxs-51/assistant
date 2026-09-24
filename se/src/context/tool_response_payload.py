@@ -3,8 +3,8 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from datetime import datetime, timezone
 from collections.abc import Mapping
+from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Dict, Protocol
 
@@ -14,6 +14,7 @@ from pydantic import (
     Field,
     field_serializer,
     field_validator,
+    model_validator,
 )
 
 
@@ -26,28 +27,24 @@ class ToolResponsePayloadConflictError(RuntimeError):
     """Raised when one immutable source identity is reused inconsistently."""
 
 
-def _freeze(value: Any) -> Any:
+def _freeze_json(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
-    if isinstance(value, (list, tuple)):
-        return tuple(_freeze(item) for item in value)
-    if isinstance(value, (set, frozenset)):
-        return frozenset(_freeze(item) for item in value)
+        return MappingProxyType({str(key): _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_json(item) for item in value)
     return value
 
 
-def _thaw(value: Any) -> Any:
+def _thaw_json(value: Any) -> Any:
     if isinstance(value, Mapping):
-        return {key: _thaw(item) for key, item in value.items()}
+        return {key: _thaw_json(item) for key, item in value.items()}
     if isinstance(value, tuple):
-        return [_thaw(item) for item in value]
-    if isinstance(value, (set, frozenset)):
-        return [_thaw(item) for item in value]
+        return [_thaw_json(item) for item in value]
     return value
 
 
 def canonical_payload_bytes(value: Any) -> bytes:
-    """Return the canonical JSON representation used by CTX-F1 identity."""
+    """Return canonical JSON bytes for supported CTX-F1 values."""
     try:
         encoded = json.dumps(
             value,
@@ -57,7 +54,7 @@ def canonical_payload_bytes(value: Any) -> bytes:
             allow_nan=False,
         )
     except (TypeError, ValueError) as exc:
-        raise ValueError("ToolResponsePayload content must be canonical JSON.") from exc
+        raise ValueError("ToolResponsePayload values must be canonical JSON.") from exc
     return encoded.encode("utf-8")
 
 
@@ -105,6 +102,7 @@ class ToolResponsePayload(BaseModel):
     execution_id: str
     tool_call_id: str
     logical_capability_id: str
+    source_commit_state: str
     payload_schema_version: int = Field(default=TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION, ge=1)
     content_digest: str
     canonical_bytes: int = Field(ge=0)
@@ -115,19 +113,78 @@ class ToolResponsePayload(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def validate_content_json_domain(cls, value: Any) -> Any:
+        canonical_payload_bytes(value)
+        return value
+
     @field_validator("content", mode="after")
     @classmethod
     def freeze_content(cls, value: Any) -> Any:
-        return _freeze(value)
+        return _freeze_json(value)
+
+    @field_validator("metadata", mode="before")
+    @classmethod
+    def validate_metadata_json_domain(cls, value: Any) -> Any:
+        canonical_payload_bytes(value)
+        return value
 
     @field_validator("metadata", mode="after")
     @classmethod
     def freeze_metadata(cls, value: Dict[str, Any]) -> MappingProxyType:
-        return _freeze(value)
+        return _freeze_json(value)
+
+    @model_validator(mode="after")
+    def validate_integrity(self) -> "ToolResponsePayload":
+        validate_tool_response_payload_integrity(self)
+        return self
 
     @field_serializer("content", "metadata")
     def serialize_mutable_fields(self, value: Any) -> Any:
-        return _thaw(value)
+        return _thaw_json(value)
+
+
+def validate_tool_response_payload_integrity(
+    payload: ToolResponsePayload,
+) -> ToolResponsePayload:
+    required = {
+        "payload_id": payload.payload_id,
+        "source_result_id": payload.source_result_id,
+        "invocation_id": payload.invocation_id,
+        "execution_id": payload.execution_id,
+        "tool_call_id": payload.tool_call_id,
+        "logical_capability_id": payload.logical_capability_id,
+        "content_digest": payload.content_digest,
+    }
+    for name, value in required.items():
+        if not str(value).strip():
+            raise ValueError(f"{name} must be non-empty")
+
+    if payload.source_commit_state != COMMITTED_RESULT_STATE:
+        raise ValueError("Only COMMITTED tool results may create ToolResponsePayload.")
+
+    canonical = canonical_payload_bytes(_thaw_json(payload.content))
+    expected_digest = hashlib.sha256(canonical).hexdigest()
+    if payload.content_digest != expected_digest:
+        raise ValueError("ToolResponsePayload content_digest does not match content.")
+
+    if payload.canonical_bytes != len(canonical):
+        raise ValueError("ToolResponsePayload canonical_bytes does not match content.")
+
+    expected_payload_id = tool_response_payload_id(
+        source_result_id=payload.source_result_id,
+        invocation_id=payload.invocation_id,
+        execution_id=payload.execution_id,
+        tool_call_id=payload.tool_call_id,
+        logical_capability_id=payload.logical_capability_id,
+        content_digest=expected_digest,
+        payload_schema_version=payload.payload_schema_version,
+    )
+    if payload.payload_id != expected_payload_id:
+        raise ValueError("ToolResponsePayload payload_id does not match derived identity.")
+
+    return payload
 
 
 def create_tool_response_payload(
@@ -146,20 +203,6 @@ def create_tool_response_payload(
     payload_schema_version: int = TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION,
 ) -> ToolResponsePayload:
     """Create a dormant payload record from an already-committed tool result."""
-    if source_commit_state != COMMITTED_RESULT_STATE:
-        raise ValueError("Only COMMITTED tool results may create ToolResponsePayload.")
-
-    required = {
-        "source_result_id": source_result_id,
-        "invocation_id": invocation_id,
-        "execution_id": execution_id,
-        "tool_call_id": tool_call_id,
-        "logical_capability_id": logical_capability_id,
-    }
-    for name, value in required.items():
-        if not str(value).strip():
-            raise ValueError(f"{name} must be non-empty")
-
     canonical = canonical_payload_bytes(content)
     digest = hashlib.sha256(canonical).hexdigest()
     payload_id = tool_response_payload_id(
@@ -178,6 +221,7 @@ def create_tool_response_payload(
         execution_id=execution_id,
         tool_call_id=tool_call_id,
         logical_capability_id=logical_capability_id,
+        source_commit_state=source_commit_state,
         payload_schema_version=payload_schema_version,
         content_digest=digest,
         canonical_bytes=len(canonical),
@@ -219,6 +263,8 @@ class InMemoryToolResponsePayloadRepository:
         self._lock = asyncio.Lock()
 
     async def put(self, payload: ToolResponsePayload) -> ToolResponsePayload:
+        validate_tool_response_payload_integrity(payload)
+
         async with self._lock:
             existing_id = self._source_to_id.get(payload.source_result_id)
             if existing_id is not None and existing_id != payload.payload_id:
