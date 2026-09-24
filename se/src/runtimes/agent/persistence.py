@@ -3976,16 +3976,22 @@ class DurableAgentStore:
         self,
         *,
         limit: int | None = None,
+        scan_limit: int | None = None,
+        conversion_after=None,
         validation_after=None,
     ) -> CheckpointBackfillResult:
         """Run one bounded R11-D LEGACY_INLINE -> DUAL convergence batch."""
 
         if limit is not None and limit <= 0:
             raise ValueError("limit must be positive")
+        if scan_limit is not None and scan_limit <= 0:
+            raise ValueError("scan_limit must be positive")
         async with self.uow_factory() as uow:
             result = await backfill_legacy_inline_checkpoints_in_uow(
                 uow,
                 limit=limit,
+                scan_limit=scan_limit,
+                conversion_after=conversion_after,
                 validation_after=validation_after,
             )
             await uow.commit()
