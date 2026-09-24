@@ -250,7 +250,7 @@ Historical finding IDs such as `P0-T8-XPROV-1` remain valid evidence labels; the
 
 ## 7. Future Context / Memory namespace — CTX-F*
 
-Issue #15 parks the future Context / Memory / Personalization / CompactContext program behind the Agent Execution production hardening roadmap.
+Issue #15 owns the Context / Memory / Personalization / CompactContext program. It was originally parked behind the Agent Execution production hardening roadmap; on 2026-09-24 the user explicitly re-froze the gate and authorized constrained early activation from main@f5c77e93.
 
 Canonical provisional phases:
 
@@ -273,12 +273,12 @@ CTX-F12  Observability / quality gates
 Current status:
 
 ```text
-FUTURE / PARKED / ARCHITECTURE ONLY
+EARLY-ACTIVE / CTX-F0 CONTRACT-FIRST / constrained by active AE ownership
 ```
 
-Production implementation is blocked until AE-R10 through AE-R14 have completed their production exit gates unless the roadmap is explicitly re-frozen earlier. CAS-F5+ must also be re-audited on the eventual unified post-R14 baseline before cross-cutting Context/Asset integration resumes.
+The original AE-R14 production gate has been explicitly re-frozen earlier by the user. Early CTX work is allowed only when additive/isolated and non-owning with respect to active AE-R11/R12+ and Central Asset authorities. Cross-cutting Context/Asset integration still requires a fresh CAS audit.
 
-Do not wire Memory, Personalization, ContextSnapshot, CompactContext, or automatic context retrieval into production while this track is parked.
+During early activation, do not wire Memory, Personalization, future durable ContextSnapshot, CompactContext, or automatic persistent-context retrieval into the current Agent runtime until their stage-specific ownership gates are explicitly opened.
 
 ---
 
@@ -355,7 +355,7 @@ Rules:
 - TV1-T10 is coordinated by Issue #38; T10-A is CLOSED/GREEN and T10-B is OPEN
   in side-effect-free helper/unit-test scope, with no Agent Execution/R11 path
   overlap.
-- CAS-F5+ and CTX-F* remain parked behind AE-R14 and require fresh post-R14 audits.
+- CAS-F5+ remains parked behind its own gate. CTX-F* is early-active by explicit user re-freeze; CTX work must remain isolated from active AE ownership and must perform fresh overlap audits at every stage.
 
 ---
 
@@ -463,8 +463,9 @@ PTC-1-3  CLOSED / MERGED / FINAL GREEN / Issue #8
 CAS-F1-F4 historically CLOSED on parked line
 CAS-F5+   PAUSED behind AE-R14; post-R14 replay/re-audit required
 
-CTX-F0-F12 FUTURE / PARKED / architecture only / Issue #15
-CTX implementation waits for post-AE-R14 re-audit.
+CTX-F0    EARLY-ACTIVE / contract freeze / Issue #15
+CTX-F1+   stage-gated; dormant/additive work only until fresh overlap audits open each stage.
+
 ```
 
 This snapshot is informational. Phase-specific Issues/checkpoints remain the authority for live implementation status.
