@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, JSON, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, String, JSON, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -10,6 +10,13 @@ from ..custom_types import default_uuid_str
 
 class AgentIterationRecord(Base):
     __tablename__ = "agent_iterations"
+    __table_args__ = (
+        Index(
+            "ix_agent_iterations_execution_iteration",
+            "execution_id",
+            "iteration",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True, default=default_uuid_str)
     execution_id: Mapped[str] = mapped_column(
