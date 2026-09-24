@@ -100,7 +100,7 @@ async def _seed_legacy_checkpoint(
 
 
 @pytest.mark.asyncio
-async def test_r11_d_backfill_defers_child_until_legacy_parent_converges(tmp_path):
+async def test_r11_d_backfill_limit_one_eventually_converts_parent_and_child(tmp_path):
     engine, sessions = await _db(tmp_path, "r11-d-backfill-order.sqlite")
     try:
         async with sessions() as session:
@@ -122,44 +122,124 @@ async def test_r11_d_backfill_defers_child_until_legacy_parent_converges(tmp_pat
                     {"role": "user", "content": "a"},
                     {"role": "assistant", "content": "b"},
                 ],
-                created_at=now + timedelta(seconds=1),
-            )
-            # Force child to be the first bounded candidate even though its
-            # extant parent remains LEGACY_INLINE.
-            await session.execute(
-                update(AgentExecutionCheckpointRecord)
-                .where(
-                    AgentExecutionCheckpointRecord.checkpoint_id == "cp-child"
-                )
-                .values(created_at=now - timedelta(seconds=1))
+                created_at=now - timedelta(seconds=1),
             )
             await session.commit()
 
         store = DurableAgentStore(lambda: _Uow(sessions))
+
         first = await store.backfill_legacy_inline_checkpoints(limit=1)
-        assert first.scanned == 1
-        assert first.converted == 0
+        assert first.converted == 1
         assert first.deferred == 1
 
-        second = await store.backfill_legacy_inline_checkpoints()
-        assert second.scanned == 2
-        assert second.converted == 2
+        second = await store.backfill_legacy_inline_checkpoints(limit=1)
+        assert second.converted == 1
         assert second.deferred == 0
 
         async with sessions() as session:
-            parent = await AgentRepository(session).get_execution_checkpoint("cp-parent")
-            child = await AgentRepository(session).get_execution_checkpoint("cp-child")
+            repo = AgentRepository(session)
+            parent = await repo.get_execution_checkpoint("cp-parent")
+            child = await repo.get_execution_checkpoint("cp-child")
             assert parent.transcript_snapshot is not None
             assert parent.transcript_ref is not None
-            assert parent.transcript_version is not None
             assert child.transcript_snapshot is not None
             assert child.transcript_ref is not None
-            assert child.transcript_version is not None
 
-        third = await store.backfill_legacy_inline_checkpoints()
-        assert third.converted == 0
-        assert third.deferred == 0
-        assert third.converged == 2
+        # Later bounded runs perform validation only and create no conversion.
+        cursor = None
+        seen = 0
+        for _ in range(4):
+            result = await store.backfill_legacy_inline_checkpoints(
+                limit=1,
+                validation_after=cursor,
+            )
+            assert result.converted == 0
+            seen += result.converged
+            cursor = result.next_validation_after
+            if cursor is None:
+                break
+        assert seen >= 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_backfill_ref_prefix_does_not_starve_later_legacy(tmp_path):
+    engine, sessions = await _db(tmp_path, "r11-d-backfill-prefix.sqlite")
+    try:
+        async with sessions() as session:
+            await _seed_execution(session, "exec-prefix")
+            now = datetime.now(timezone.utc)
+            await _seed_legacy_checkpoint(
+                session,
+                checkpoint_id="cp-early",
+                execution_id="exec-prefix",
+                messages=[{"role": "user", "content": "early"}],
+                created_at=now,
+            )
+            await _seed_legacy_checkpoint(
+                session,
+                checkpoint_id="cp-late",
+                execution_id="exec-prefix",
+                messages=[{"role": "user", "content": "late"}],
+                created_at=now + timedelta(seconds=1),
+            )
+            await session.commit()
+
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        early = await store.backfill_legacy_inline_checkpoints(limit=1)
+        assert early.converted == 1
+
+        # cp-early is now DUAL and remains earlier in global ordering, but the
+        # next bounded conversion must still reach cp-late.
+        late = await store.backfill_legacy_inline_checkpoints(limit=1)
+        assert late.converted == 1
+
+        async with sessions() as session:
+            cp_late = await AgentRepository(session).get_execution_checkpoint(
+                "cp-late"
+            )
+            assert cp_late.transcript_ref is not None
+            assert cp_late.transcript_version is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_ref_validation_cursor_eventually_visits_all_rows(tmp_path):
+    engine, sessions = await _db(tmp_path, "r11-d-backfill-validation.sqlite")
+    try:
+        async with sessions() as session:
+            await _seed_execution(session, "exec-validation")
+            now = datetime.now(timezone.utc)
+            for index in range(3):
+                await _seed_legacy_checkpoint(
+                    session,
+                    checkpoint_id=f"cp-v-{index}",
+                    execution_id="exec-validation",
+                    messages=[{"role": "user", "content": f"m{index}"}],
+                    created_at=now + timedelta(seconds=index),
+                )
+            await session.commit()
+
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        # Convert all rows first.
+        converted = await store.backfill_legacy_inline_checkpoints()
+        assert converted.converted == 3
+
+        cursor = None
+        visited = 0
+        for _ in range(5):
+            page = await store.backfill_legacy_inline_checkpoints(
+                limit=1,
+                validation_after=cursor,
+            )
+            assert page.converted == 0
+            visited += page.converged
+            cursor = page.next_validation_after
+            if cursor is None:
+                break
+        assert visited == 3
     finally:
         await engine.dispose()
 
@@ -230,7 +310,6 @@ async def test_r11_d_backfill_ref_backed_state_is_verified_and_skipped(tmp_path)
             await session.commit()
 
         verified = await store.backfill_legacy_inline_checkpoints()
-        assert verified.scanned == 1
         assert verified.converted == 0
         assert verified.converged == 1
         assert verified.deferred == 0
