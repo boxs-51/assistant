@@ -246,11 +246,28 @@ async def _save_logical_full_with_prefix_share(
     shared_root: str | None = None
     if parent_representation is not None and common > 0:
         cumulative = await _ensure_cumulative_payload_root(repo, parent_representation)
-        shared_root = await _payload_root_at_count(
-            repo,
-            cumulative_payload_root_ref=cumulative,
-            logical_message_count=common,
-        )
+        try:
+            shared_root = await _payload_root_at_count(
+                repo,
+                cumulative_payload_root_ref=cumulative,
+                logical_message_count=common,
+            )
+        except ValueError as exc:
+            if "payload-root boundary" not in str(exc):
+                raise
+            # B1 permits coarse immutable chunks with no node boundary at the
+            # proven common-prefix length. Normalize only that proven prefix
+            # into deterministic content-addressed per-message roots. Existing
+            # B1 rows remain immutable; repeated normalization converges.
+            normalized = await _save_payload_chain(
+                repo,
+                messages=parent_messages[:common],
+            )
+            if normalized is None:
+                raise ValueError(
+                    "Proven common prefix could not be normalized."
+                ) from exc
+            shared_root = str(normalized.payload_root_ref)
 
     suffix = canonical[common:]
     if suffix:
