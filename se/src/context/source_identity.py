@@ -111,10 +111,12 @@ def _require_non_empty(name: str, value: str) -> str:
 
 def _reject_non_authority_locator(authority_id: str) -> None:
     lowered = authority_id.lower()
-    if lowered.startswith(("http://", "https://", "file://")):
-        raise ValueError("authority_id must be a native logical authority, not a URL/path")
-    if "\\" in authority_id or authority_id.startswith(("/", "./", "../")):
-        raise ValueError("authority_id must be a native logical authority, not a URL/path")
+    if "://" in lowered:
+        raise ValueError("authority_id must be a native logical authority, not a URI/path/object key")
+    if "\\" in authority_id or "/" in authority_id:
+        raise ValueError("authority_id must be a native logical authority, not a URI/path/object key")
+    if len(authority_id) >= 3 and authority_id[1:3] == ":/":
+        raise ValueError("authority_id must be a native logical authority, not a URI/path/object key")
 
 
 def context_source_id(
@@ -206,6 +208,14 @@ class ContextSourceRef(BaseModel):
 def validate_context_source_ref_integrity(
     ref: ContextSourceRef,
 ) -> ContextSourceRef:
+    canonical_owner = _require_non_empty("owner_user_id", ref.owner_user_id)
+    canonical_authority = _require_non_empty("authority_id", ref.authority_id)
+    if ref.owner_user_id != canonical_owner:
+        raise ValueError("owner_user_id must already be in canonical normalized form")
+    if ref.authority_id != canonical_authority:
+        raise ValueError("authority_id must already be in canonical normalized form")
+    _reject_non_authority_locator(ref.authority_id)
+
     expected = context_source_id(
         source_kind=ref.source_kind,
         owner_user_id=ref.owner_user_id,
