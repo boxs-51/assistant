@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
-from tools.v1.live.gui_scenarios import build_gui_scenario, run_gui_live
+import tools.v1.live.gui_scenarios as gui_module
+from tools.v1.live.gui_scenarios import GuiProcessController, build_gui_scenario, run_gui_live
 from tools.v1.live.harness import (
     ARTIFACT_ROOT_ENV,
     GUI_GATE_ENV,
@@ -315,3 +316,60 @@ def test_gui_entry_rejects_network_opt_in_before_artifacts(tmp_path):
 
     assert calls == []
     assert not tmp_path.exists() or list(tmp_path.iterdir()) == []
+
+
+def test_gui_default_repo_root_ignores_nested_cwd_for_artifact_containment(
+    tmp_path,
+    monkeypatch,
+):
+    repo = tmp_path / "repo"
+    module_path = repo / "tools" / "v1" / "live" / "gui_scenarios.py"
+    module_path.parent.mkdir(parents=True)
+    nested_cwd = repo / "tools"
+    nested_cwd.mkdir(exist_ok=True)
+    inside_repo_artifacts = repo / ".live-artifacts"
+
+    monkeypatch.setattr(gui_module, "__file__", str(module_path))
+    monkeypatch.chdir(nested_cwd)
+
+    calls = []
+    try:
+        run_gui_live(
+            env={
+                MASTER_GATE_ENV: "1",
+                GUI_GATE_ENV: "1",
+                ARTIFACT_ROOT_ENV: str(inside_repo_artifacts),
+            },
+            terminal_run=lambda **kwargs: calls.append(("terminal", kwargs)),
+            window_run=lambda **kwargs: calls.append(("window", kwargs)),
+            desktop_run=lambda **kwargs: calls.append(("desktop", kwargs)),
+        )
+    except LiveHarnessConfigError:
+        pass
+    else:
+        raise AssertionError(
+            "artifact root inside full repository must fail despite nested cwd"
+        )
+
+    assert calls == []
+    assert not inside_repo_artifacts.exists()
+
+
+def test_gui_root_pid_reuse_fails_closed(monkeypatch):
+    controller = GuiProcessController()
+    controller._descendants[(777, 10.0)] = {}
+
+    class ReusedProcess:
+        def __init__(self, pid):
+            assert pid == 777
+            self.pid = pid
+
+        def create_time(self):
+            return 20.0
+
+        def status(self):
+            return "running"
+
+    monkeypatch.setattr(gui_module.psutil, "Process", ReusedProcess)
+
+    assert controller.verify_owned_window_pid(777, 777) is False
