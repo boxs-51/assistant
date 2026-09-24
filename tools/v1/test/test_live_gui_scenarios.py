@@ -373,3 +373,118 @@ def test_gui_root_pid_reuse_fails_closed(monkeypatch):
     monkeypatch.setattr(gui_module.psutil, "Process", ReusedProcess)
 
     assert controller.verify_owned_window_pid(777, 777) is False
+
+
+def test_gui_zero_window_timeout_preserves_empty_classification(
+    tmp_path,
+    monkeypatch,
+):
+    config = _config(tmp_path)
+    controller = FakeProcessController()
+    desktop_calls = []
+    monkeypatch.setattr(gui_module, "GUI_DISCOVERY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(gui_module, "GUI_DISCOVERY_POLL_SECONDS", 0.0)
+
+    def terminal_run(**kwargs):
+        return _success(
+            "terminal_tool",
+            "launch",
+            {"pid": 201, "started": True, "cwd": kwargs["cwd"]},
+        )
+
+    def window_run(*, action, **kwargs):
+        assert action == "find"
+        return _success(
+            "window_tool",
+            "find",
+            {
+                "returned_count": 0,
+                "total_count": 0,
+                "windows": [],
+            },
+        )
+
+    evidence = ScenarioRunner(config, process_controller=controller).run(
+        (
+            build_gui_scenario(
+                process_controller=controller,
+                terminal_run=terminal_run,
+                window_run=window_run,
+                desktop_run=lambda **kwargs: desktop_calls.append(kwargs),
+            ),
+        )
+    )
+
+    step = evidence["scenarios"][0]["steps"][-1]
+    assert step["id"] == "window-discover-owned"
+    assert step["status"] == "FAIL"
+    assert step["error"]["code"] == "LIVE_GUI_DISCOVERY_TIMEOUT"
+    assert step["error"]["details"]["live_classification"] == "EMPTY_VALID_RESULT"
+    assert step["error"]["details"]["final_returned_count"] == 0
+    assert desktop_calls == []
+    assert evidence["cleanup"]["owned_pids"] == [201]
+    assert evidence["cleanup"]["still_alive_pids"] == []
+    assert evidence["cleanup"]["errors"] == []
+
+
+def test_gui_ownership_mismatch_timeout_preserves_classification(
+    tmp_path,
+    monkeypatch,
+):
+    config = _config(tmp_path)
+    controller = FakeProcessController()
+    desktop_calls = []
+    monkeypatch.setattr(gui_module, "GUI_DISCOVERY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(gui_module, "GUI_DISCOVERY_POLL_SECONDS", 0.0)
+
+    def terminal_run(**kwargs):
+        return _success(
+            "terminal_tool",
+            "launch",
+            {"pid": 301, "started": True, "cwd": kwargs["cwd"]},
+        )
+
+    def window_run(*, action, **kwargs):
+        assert action == "find"
+        return _success(
+            "window_tool",
+            "find",
+            {
+                "returned_count": 1,
+                "total_count": 1,
+                "windows": [
+                    {
+                        "selector": {
+                            "window_handle": 444,
+                            "pid": 999,
+                        },
+                        "title": kwargs["title_query"],
+                        "title_truncated": False,
+                        "app_name": "python",
+                        "app_name_truncated": False,
+                    }
+                ],
+            },
+        )
+
+    evidence = ScenarioRunner(config, process_controller=controller).run(
+        (
+            build_gui_scenario(
+                process_controller=controller,
+                terminal_run=terminal_run,
+                window_run=window_run,
+                desktop_run=lambda **kwargs: desktop_calls.append(kwargs),
+            ),
+        )
+    )
+
+    step = evidence["scenarios"][0]["steps"][-1]
+    assert step["id"] == "window-discover-owned"
+    assert step["status"] == "FAIL"
+    assert step["error"]["code"] == "LIVE_GUI_DISCOVERY_TIMEOUT"
+    assert step["error"]["details"]["live_classification"] == "OWNERSHIP_MISMATCH"
+    assert step["error"]["details"]["final_returned_count"] == 1
+    assert desktop_calls == []
+    assert evidence["cleanup"]["owned_pids"] == [301]
+    assert evidence["cleanup"]["still_alive_pids"] == []
+    assert evidence["cleanup"]["errors"] == []
