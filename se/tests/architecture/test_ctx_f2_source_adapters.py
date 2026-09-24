@@ -1,0 +1,302 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from datetime import datetime, timezone
+
+import pytest
+
+from se.src.context.source_adapters import (
+    project_agent_transcript_source,
+    project_branch_source,
+    project_session_source,
+    project_task_source,
+    project_tool_response_payload_source,
+)
+from se.src.context.source_identity import ContextSourceKind
+from se.src.context.tool_response_payload import create_tool_response_payload
+
+
+NOW = datetime(2026, 9, 24, tzinfo=timezone.utc)
+
+
+@dataclass(frozen=True)
+class Session:
+    id: str = "session-1"
+    user_id: str | None = "user-1"
+    status: str = "active"
+    created_at: datetime = NOW
+
+
+@dataclass(frozen=True)
+class Task:
+    id: str = "task-1"
+    session_id: str = "session-1"
+    revision: int = 3
+    status: str = "WAITING"
+    created_at: datetime = NOW
+    created_by: str = "agent-creator"
+
+
+@dataclass(frozen=True)
+class Branch:
+    branch_id: str = "branch-1"
+    task_id: str = "task-1"
+    revision: int = 2
+    resolution_state: str = "OPEN"
+    created_at: datetime = NOW
+    created_by: str = "agent-creator"
+
+
+@dataclass(frozen=True)
+class Execution:
+    id: str = "exec-1"
+    session_id: str = "session-1"
+    task_id: str | None = "task-1"
+    branch_id: str | None = "branch-1"
+
+
+@dataclass(frozen=True)
+class Checkpoint:
+    execution_id: str = "exec-1"
+    session_id: str = "session-1"
+    task_id: str | None = "task-1"
+    branch_id: str | None = "branch-1"
+    transcript_ref: str | None = "transcript-ref-1"
+    transcript_version: int | None = 4
+    created_at: datetime = NOW
+
+
+@dataclass(frozen=True)
+class Invocation:
+    invocation_id: str = "inv-1"
+    execution_id: str | None = "exec-1"
+    session_id: str | None = "session-1"
+    tool_call_id: str | None = "call-1"
+    capability_id: str = "cap-1"
+    owner_user_id: str | None = "user-1"
+
+
+@dataclass(frozen=True)
+class Result:
+    id: str = "result-1"
+    execution_id: str = "exec-1"
+    invocation_id: str = "inv-1"
+    tool_call_id: str = "call-1"
+    capability_id: str = "cap-1"
+    commit_state: str = "COMMITTED"
+    created_at: datetime = NOW
+
+
+def _payload(**overrides):
+    values = {
+        "source_result_id": "result-1",
+        "invocation_id": "inv-1",
+        "execution_id": "exec-1",
+        "tool_call_id": "call-1",
+        "logical_capability_id": "cap-1",
+        "content": {"ok": True},
+        "source_commit_state": "COMMITTED",
+        "owner_user_id": "user-1",
+        "session_id": "session-1",
+    }
+    values.update(overrides)
+    return create_tool_response_payload(**values)
+
+
+def test_ctx_f2b_session_projection_uses_canonical_session_owner():
+    ref = project_session_source(Session())
+    assert ref.source_kind is ContextSourceKind.SESSION
+    assert ref.authority_id == "session-1"
+    assert ref.owner_user_id == "user-1"
+    assert ref.session_id == "session-1"
+
+
+def test_ctx_f2b_session_projection_rejects_missing_owner():
+    with pytest.raises(ValueError, match="session.user_id"):
+        project_session_source(Session(user_id=None))
+
+
+def test_ctx_f2b_task_projection_is_deterministic_and_revision_sensitive():
+    first = project_task_source(Session(), Task())
+    same = project_task_source(Session(), Task())
+    changed = project_task_source(Session(), Task(revision=4))
+    assert first.context_source_id == same.context_source_id
+    assert first.context_source_id != changed.context_source_id
+    assert first.owner_user_id == "user-1"
+    assert first.source_state == "WAITING"
+
+
+def test_ctx_f2b_task_projection_rejects_session_lineage_mismatch():
+    with pytest.raises(ValueError, match="task.session_id mismatch"):
+        project_task_source(Session(), Task(session_id="other-session"))
+
+
+def test_ctx_f2b_task_created_by_never_becomes_owner():
+    ref = project_task_source(Session(user_id="user-owner"), Task(created_by="other"))
+    assert ref.owner_user_id == "user-owner"
+
+
+def test_ctx_f2b_branch_projection_checks_task_and_session_lineage():
+    ref = project_branch_source(Session(), Task(), Branch())
+    assert ref.source_kind is ContextSourceKind.BRANCH
+    assert ref.task_id == "task-1"
+    assert ref.branch_id == "branch-1"
+
+    with pytest.raises(ValueError, match="branch.task_id mismatch"):
+        project_branch_source(Session(), Task(), Branch(task_id="task-other"))
+
+    with pytest.raises(ValueError, match="task.session_id mismatch"):
+        project_branch_source(Session(), Task(session_id="session-other"), Branch())
+
+
+def test_ctx_f2b_branch_created_by_never_becomes_owner():
+    ref = project_branch_source(
+        Session(user_id="user-owner"),
+        Task(),
+        Branch(created_by="other"),
+    )
+    assert ref.owner_user_id == "user-owner"
+
+
+@pytest.mark.parametrize(
+    "checkpoint,execution,message",
+    [
+        (Checkpoint(execution_id="other"), Execution(), "checkpoint.execution_id mismatch"),
+        (
+            Checkpoint(session_id="other"),
+            Execution(),
+            "checkpoint.session_id mismatch",
+        ),
+        (
+            Checkpoint(),
+            Execution(session_id="other"),
+            "execution.session_id mismatch",
+        ),
+        (
+            Checkpoint(task_id="other"),
+            Execution(),
+            "checkpoint.task_id mismatch",
+        ),
+        (
+            Checkpoint(branch_id="other"),
+            Execution(),
+            "checkpoint.branch_id mismatch",
+        ),
+    ],
+)
+def test_ctx_f2b_transcript_projection_rejects_lineage_mismatch(
+    checkpoint,
+    execution,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        project_agent_transcript_source(Session(), execution, checkpoint)
+
+
+@pytest.mark.parametrize(
+    "checkpoint,message",
+    [
+        (Checkpoint(transcript_ref=None), "checkpoint.transcript_ref"),
+        (Checkpoint(transcript_version=None), "checkpoint.transcript_version"),
+        (Checkpoint(transcript_version=-1), "checkpoint.transcript_version"),
+        (Checkpoint(transcript_version=True), "checkpoint.transcript_version"),
+    ],
+)
+def test_ctx_f2b_transcript_projection_requires_exact_pair(checkpoint, message):
+    with pytest.raises(ValueError, match=message):
+        project_agent_transcript_source(Session(), Execution(), checkpoint)
+
+
+def test_ctx_f2b_transcript_projection_uses_r11_pair_as_native_authority():
+    ref = project_agent_transcript_source(Session(), Execution(), Checkpoint())
+    assert ref.source_kind is ContextSourceKind.AGENT_TRANSCRIPT
+    assert ref.authority_id == "transcript-ref-1"
+    assert ref.authority_version == 4
+    assert ref.session_id == "session-1"
+    assert ref.task_id == "task-1"
+    assert ref.branch_id == "branch-1"
+
+
+def test_ctx_f2b_trp_projection_requires_durable_committed_result():
+    with pytest.raises(ValueError, match="durable tool result must be COMMITTED"):
+        project_tool_response_payload_source(
+            Session(),
+            Execution(),
+            Invocation(),
+            Result(commit_state="PROVISIONAL"),
+            _payload(),
+        )
+
+
+@pytest.mark.parametrize(
+    "invocation,message",
+    [
+        (Invocation(owner_user_id=None), "invocation.owner_user_id"),
+        (Invocation(owner_user_id="other-user"), "invocation.owner_user_id mismatch"),
+        (Invocation(execution_id="other"), "invocation.execution_id mismatch"),
+        (Invocation(session_id="other"), "invocation.session_id mismatch"),
+        (Invocation(invocation_id="other"), "invocation.invocation_id mismatch"),
+        (Invocation(tool_call_id="other"), "invocation.tool_call_id mismatch"),
+        (Invocation(capability_id="other"), "invocation.capability_id mismatch"),
+    ],
+)
+def test_ctx_f2b_trp_projection_rejects_invocation_authority_mismatch(
+    invocation,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        project_tool_response_payload_source(
+            Session(),
+            Execution(),
+            invocation,
+            Result(),
+            _payload(),
+        )
+
+
+@pytest.mark.parametrize(
+    "result,payload_kwargs,message",
+    [
+        (Result(id="other-result"), {}, "payload.source_result_id mismatch"),
+        (Result(invocation_id="other-inv"), {}, "payload.invocation_id mismatch"),
+        (Result(execution_id="other-exec"), {}, "result.execution_id mismatch"),
+        (Result(tool_call_id="other-call"), {}, "payload.tool_call_id mismatch"),
+        (Result(capability_id="other-cap"), {}, "payload.logical_capability_id mismatch"),
+        (Result(), {"owner_user_id": "other-user"}, "payload.owner_user_id mismatch"),
+        (Result(), {"session_id": "other-session"}, "payload.session_id mismatch"),
+    ],
+)
+def test_ctx_f2b_trp_projection_rejects_result_payload_authority_mismatch(
+    result,
+    payload_kwargs,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        project_tool_response_payload_source(
+            Session(),
+            Execution(),
+            Invocation(),
+            result,
+            _payload(**payload_kwargs),
+        )
+
+
+def test_ctx_f2b_trp_projection_accepts_proven_committed_source():
+    payload = _payload()
+    first = project_tool_response_payload_source(
+        Session(), Execution(), Invocation(), Result(), payload
+    )
+    second = project_tool_response_payload_source(
+        Session(), Execution(), Invocation(), Result(), payload
+    )
+    assert first.source_kind is ContextSourceKind.TOOL_RESPONSE_PAYLOAD
+    assert first.authority_id == payload.payload_id
+    assert first.authority_version is None
+    assert first.owner_user_id == "user-1"
+    assert first.context_source_id == second.context_source_id
+
+
+def test_ctx_f2b_has_no_asset_projection_api():
+    import se.src.context.source_adapters as adapters
+
+    assert not hasattr(adapters, "project_asset_source")
