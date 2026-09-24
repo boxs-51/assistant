@@ -16,6 +16,24 @@ class CheckpointTranscriptMaterializationError(RuntimeError):
         super().__init__(f"{code}: {message}")
 
 
+CHECKPOINT_REPRESENTATION_ERROR_CODES = frozenset(
+    {
+        "INVALID_CHECKPOINT_REPRESENTATION_STATE",
+        "MISSING_TRANSCRIPT_REPRESENTATION",
+        "TRANSCRIPT_REPRESENTATION_VERSION_MISMATCH",
+        "TRANSCRIPT_REPRESENTATION_ANCESTRY_INVALID",
+        "TRANSCRIPT_REPRESENTATION_DEPTH_EXCEEDED",
+        "TRANSCRIPT_REPRESENTATION_CORRUPT",
+        "DUAL_TRANSCRIPT_MISMATCH",
+    }
+)
+
+
+def checkpoint_representation_error_code(value: object) -> str | None:
+    code = str(value or "").split(":", 1)[0]
+    return code if code in CHECKPOINT_REPRESENTATION_ERROR_CODES else None
+
+
 def _representation_error_code(exc: Exception) -> str:
     message = str(exc).lower()
     if "ancestry" in message or "cycle" in message or "parent" in message:
