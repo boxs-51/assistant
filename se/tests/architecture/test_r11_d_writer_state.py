@@ -19,7 +19,10 @@ class _Agents:
         self.saved.append(dict(values))
 
     async def save_checkpoint_pending_invocation(self, values):
-        raise AssertionError("no pending invocation expected")
+        raise AssertionError("single-row pending persistence must not be used")
+
+    async def save_checkpoint_pending_invocations(self, values):
+        assert list(values) == []
 
 
 class _Uow:
