@@ -220,6 +220,10 @@ def _validate_stored_context_source_ref_shape(ref: ContextSourceRef) -> None:
         raise ValueError("context_source_id must be a non-empty string")
     if not isinstance(ref.source_kind, ContextSourceKind):
         raise ValueError("source_kind must be a ContextSourceKind")
+    if not isinstance(ref.owner_user_id, str):
+        raise ValueError("owner_user_id must be a string")
+    if not isinstance(ref.authority_id, str):
+        raise ValueError("authority_id must be a string")
 
     if ref.authority_version is not None:
         if isinstance(ref.authority_version, bool) or not isinstance(ref.authority_version, int):
@@ -233,6 +237,8 @@ def _validate_stored_context_source_ref_shape(ref: ContextSourceRef) -> None:
     if ref.source_created_at is not None and not isinstance(ref.source_created_at, datetime):
         raise ValueError("source_created_at must be a datetime or None")
 
+    if not isinstance(ref.metadata, MappingProxyType):
+        raise ValueError("metadata root must be a frozen JSON object")
     _validate_frozen_json(ref.metadata, path="$.metadata")
 
 
