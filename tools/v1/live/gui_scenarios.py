@@ -9,6 +9,8 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
+import psutil
+
 from tools.v1 import desktop_tool, terminal_tool, window_tool
 from tools.v1.live.harness import (
     ARTIFACT_ROOT_ENV,
@@ -21,6 +23,7 @@ from tools.v1.live.harness import (
     ScenarioContext,
     ScenarioRunner,
     ScenarioStep,
+    ProcessIdentity,
     create_live_run_config,
     write_evidence,
 )
@@ -30,6 +33,50 @@ from tools.v1.live.local_scenarios import PsutilProcessController
 GUI_DISCOVERY_TIMEOUT_SECONDS = 5.0
 GUI_DISCOVERY_POLL_SECONDS = 0.1
 GUI_TITLE_PREFIX = "TOOLS_V1_T10E"
+
+
+class GuiProcessController(PsutilProcessController):
+    """LOCAL process cleanup plus exact owned-descendant verification for GUI windows."""
+
+    def verify_owned_window_pid(self, root_pid: int, candidate_pid: int) -> bool:
+        if type(root_pid) is not int or root_pid <= 0:
+            return False
+        if type(candidate_pid) is not int or candidate_pid <= 0:
+            return False
+        if candidate_pid == root_pid:
+            return True
+
+        root_keys = [key for key in self._descendants if key[0] == root_pid]
+        if len(root_keys) != 1:
+            return False
+        key = root_keys[0]
+        try:
+            candidate = psutil.Process(candidate_pid)
+            candidate_identity = ProcessIdentity(
+                pid=candidate_pid,
+                token=candidate.create_time(),
+            )
+            parents = candidate.parents()
+        except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+            return False
+
+        root_token = key[1]
+        owned = False
+        for parent in parents:
+            if parent.pid != root_pid:
+                continue
+            try:
+                if abs(parent.create_time() - root_token) < 0.001:
+                    owned = True
+                    break
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+                return False
+
+        if not owned:
+            return False
+
+        self._descendants[key][candidate_pid] = candidate_identity
+        return True
 
 
 def _python_command(code: str) -> str:
@@ -161,6 +208,7 @@ def _validate_type(result: Mapping[str, Any], *, marker: str) -> bool:
 
 def build_gui_scenario(
     *,
+    process_controller,
     terminal_run=terminal_tool.run,
     window_run=window_tool.run,
     desktop_run=desktop_tool.run,
@@ -181,7 +229,7 @@ def build_gui_scenario(
             cwd=cwd,
         )
         if result.get("ok") is True:
-            expected["pid"] = context.processes.register_launch_result(result)
+            expected["launch_pid"] = context.processes.register_launch_result(result)
         return result
 
     def discover(context: ScenarioContext) -> Mapping[str, Any]:
@@ -202,9 +250,21 @@ def build_gui_scenario(
                     item = windows[0]
                     if isinstance(item, Mapping):
                         selector = item.get("selector")
-                        if isinstance(selector, Mapping) and selector.get("pid") == expected["pid"]:
-                            expected["handle"] = selector.get("window_handle")
-                            return last
+                        if isinstance(selector, Mapping):
+                            candidate_pid = selector.get("pid")
+                            candidate_handle = selector.get("window_handle")
+                            if (
+                                type(candidate_pid) is int
+                                and type(candidate_handle) is int
+                                and candidate_handle > 0
+                                and process_controller.verify_owned_window_pid(
+                                    expected["launch_pid"],
+                                    candidate_pid,
+                                )
+                            ):
+                                expected["pid"] = candidate_pid
+                                expected["handle"] = candidate_handle
+                                return last
             time.sleep(GUI_DISCOVERY_POLL_SECONDS)
         return last or window_run(action="find", title_query=expected["title"], max_results=10)
 
@@ -395,12 +455,14 @@ def run_gui_live(
         repo_root=root,
         env=effective_env,
     )
+    process_controller = GuiProcessController()
     evidence = ScenarioRunner(
         config,
-        process_controller=PsutilProcessController(),
+        process_controller=process_controller,
     ).run(
         (
             build_gui_scenario(
+                process_controller=process_controller,
                 terminal_run=terminal_run,
                 window_run=window_run,
                 desktop_run=desktop_run,
