@@ -150,7 +150,14 @@ async def backfill_legacy_inline_checkpoints_in_uow(
         next_conversion_after = None
 
     has_legacy = await repo.has_legacy_inline_checkpoints()
-    if has_legacy:
+
+    # One public call executes at most one bounded phase. If this invocation
+    # examined any conversion page, return immediately even when it converted
+    # the final LEGACY row. Validation starts on the next call, when the call
+    # begins with no LEGACY work globally.
+    if legacy_page or has_legacy:
+        if not has_legacy:
+            next_conversion_after = None
         return CheckpointBackfillResult(
             scanned=scanned,
             converted=converted,
