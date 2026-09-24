@@ -190,7 +190,7 @@ async def stage_waiting_checkpoint(
         )
     if checkpoint.get("transcript_snapshot") is None:
         raise WaitingCheckpointConflictError(
-            "R11-D DUAL cutover requires an inline transcript snapshot."
+            "R11-D REF_BACKED cutover requires an inline transcript proof snapshot."
         )
 
     proven = await write_transcript_representation_in_uow(
@@ -200,6 +200,9 @@ async def stage_waiting_checkpoint(
     )
     checkpoint["transcript_ref"] = proven.transcript_ref
     checkpoint["transcript_version"] = proven.transcript_version
+    # R11-D5 cutover: caller-provided inline transcript remains proof input,
+    # but new durable checkpoint authority is REF_BACKED-only.
+    checkpoint["transcript_snapshot"] = None
 
     checkpoint["metadata_json"] = to_json_safe(
         checkpoint.get("metadata_json") or {},
