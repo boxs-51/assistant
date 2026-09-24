@@ -51,6 +51,7 @@ from .runtimes.context.runtime import ContextRuntime
 from .transport.gateway.api.v1 import (
     admin as admin_router,
     agent_router,
+    assets_router,
     auth_router,
     capability_router,
     chat_router,
@@ -64,6 +65,8 @@ from .transport.gateway.api.v1 import (
     tool_router,
 )
 from .application.container import ApplicationContainer
+from .application.assets import AssetService
+from .application.messages import CanonicalMessageService
 from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
@@ -860,6 +863,22 @@ async def bootstrap_runtime_kernel(
         default_policy=task_budget_policy,
     )
 
+    asset_service = None
+    asset_storage_driver = config.assets.storage_driver
+    if storage_engine.is_driver_available(asset_storage_driver):
+        asset_service = AssetService(
+            uow_factory,
+            storage_engine.get_object_storage_driver(asset_storage_driver),
+        )
+    else:
+        logger.warning(
+            "Configured asset storage driver is unavailable; "
+            "Central Asset Storage remains disabled",
+            driver=asset_storage_driver,
+        )
+
+    message_service = CanonicalMessageService(uow_factory)
+
     # 1. Tạo ApplicationContainer trước
     container = ApplicationContainer(
         config=config,
@@ -874,6 +893,8 @@ async def bootstrap_runtime_kernel(
         tool_registry=ToolRegistry(),
         capability_registry=capability_registry,
         authorization_service=authorization_service,
+        asset_service=asset_service,
+        message_service=message_service,
         agent_execution_id_factory=agent_execution_id_factory,
         agent_execution_supervisor=agent_execution_supervisor,
         task_budget_service=task_budget_service,
@@ -1244,10 +1265,11 @@ def create_app(config: ConfigSchema | None = None) -> FastAPI:
     app_instance.state.bootstrap_config = config
 
     # Middleware Stack
-    create_middleware_stack(app_instance, config.auth)
+    create_middleware_stack(app_instance, config.auth, config.assets)
 
     # Route Registrations: api/v1 is the sole HTTP router surface.
     app_instance.include_router(auth_router.router)
+    app_instance.include_router(assets_router.router)
     app_instance.include_router(files_router.router)
     app_instance.include_router(models_router.router)
     app_instance.include_router(chat_router.router)

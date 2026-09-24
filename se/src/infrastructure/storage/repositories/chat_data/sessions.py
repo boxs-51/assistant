@@ -1,6 +1,6 @@
 import structlog
 from typing import Optional, List, Dict, Any
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, or_, select, update
 from datetime import datetime, timezone
 import uuid
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -9,8 +9,13 @@ from ...interfaces.repository import BaseRepository
 from ...interfaces.database import DatabaseDriver
 from ...models.sql.chat_data.session import Session, Message
 from ...models.sql.chat_data.attachment import Attachment
+from ...models.sql.assets import FileReferenceRecord
 
 logger = structlog.get_logger(__name__)
+
+
+class SessionAssetReferenceRetentionError(RuntimeError):
+    pass
 
 class SessionRepository(BaseRepository):
     """
@@ -78,6 +83,19 @@ class SessionRepository(BaseRepository):
         result = await self.session.execute(stmt)
         return result.scalars().all()
 
+    async def get_message(
+        self,
+        session_id: str,
+        message_id: str,
+    ) -> Optional[Message]:
+        result = await self.session.execute(
+            select(Message).where(
+                Message.id == message_id,
+                Message.session_id == session_id,
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def update_message_content(
         self, session_id: str, message_id: str, content: Any
     ) -> Optional[Message]:
@@ -133,6 +151,31 @@ class SessionRepository(BaseRepository):
         )
         if owned.scalar_one_or_none() is None:
             return False
+
+        message_ids = select(Message.id).where(
+            Message.session_id == session_id
+        )
+        retained_ref = await self.session.execute(
+            select(FileReferenceRecord.id)
+            .where(
+                or_(
+                    (
+                        (FileReferenceRecord.reference_type == "MESSAGE_CONTENT")
+                        & FileReferenceRecord.message_id.in_(message_ids)
+                    ),
+                    (
+                        (FileReferenceRecord.reference_type == "SESSION_RESOURCE")
+                        & (FileReferenceRecord.session_id == session_id)
+                    ),
+                )
+            )
+            .limit(1)
+        )
+        if retained_ref.scalar_one_or_none() is not None:
+            raise SessionAssetReferenceRetentionError(
+                "Session deletion is blocked while canonical asset "
+                "references require explicit release authority."
+            )
 
         # Explicit child deletion is portable even when SQLite FK cascades are disabled.
         await self.session.execute(delete(Message).where(Message.session_id == session_id))
