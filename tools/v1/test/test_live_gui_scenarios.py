@@ -31,6 +31,7 @@ def _success(tool, action, data):
 class FakeProcessController:
     def __init__(self):
         self.alive = {}
+        self.allowed_descendants = {}
 
     def capture(self, pid):
         ident = ProcessIdentity(pid=pid, token=f"token-{pid}")
@@ -48,6 +49,9 @@ class FakeProcessController:
 
     def kill(self, identity):
         self.alive[identity.pid] = False
+
+    def verify_owned_window_pid(self, root_pid, candidate_pid):
+        return candidate_pid == root_pid or self.allowed_descendants.get(root_pid) == candidate_pid
 
 
 def _config(tmp_path):
@@ -69,7 +73,8 @@ def test_gui_owned_target_flow_uses_pid_and_handle_authority(tmp_path):
     config = _config(tmp_path)
     process_controller = FakeProcessController()
     calls = []
-    state = {"title": None, "typed_title": None, "pid": 4321, "handle": 8765}
+    state = {"title": None, "typed_title": None, "launch_pid": 4321, "pid": 4322, "handle": 8765}
+    process_controller.allowed_descendants[state["launch_pid"]] = state["pid"]
 
     def terminal_run(*, action, command, cwd):
         calls.append(("terminal", action, {"cwd": cwd}))
@@ -77,7 +82,7 @@ def test_gui_owned_target_flow_uses_pid_and_handle_authority(tmp_path):
         return _success(
             "terminal_tool",
             "launch",
-            {"pid": state["pid"], "started": True, "cwd": cwd, "command": command},
+            {"pid": state["launch_pid"], "started": True, "cwd": cwd, "command": command},
         )
 
     def window_run(*, action, **kwargs):
@@ -199,6 +204,7 @@ def test_gui_owned_target_flow_uses_pid_and_handle_authority(tmp_path):
     ).run(
         (
             build_gui_scenario(
+                process_controller=process_controller,
                 terminal_run=terminal_run,
                 window_run=window_run,
                 desktop_run=desktop_run,
@@ -210,8 +216,8 @@ def test_gui_owned_target_flow_uses_pid_and_handle_authority(tmp_path):
     scenario = evidence["scenarios"][0]
     assert scenario["id"] == "gui-window-desktop-owned-target"
     assert [step["status"] for step in scenario["steps"]] == ["PASS"] * 8
-    assert evidence["cleanup"]["owned_pids"] == [state["pid"]]
-    assert evidence["cleanup"]["terminated_pids"] == [state["pid"]]
+    assert evidence["cleanup"]["owned_pids"] == [state["launch_pid"]]
+    assert evidence["cleanup"]["terminated_pids"] == [state["launch_pid"]]
     assert evidence["cleanup"]["still_alive_pids"] == []
     assert evidence["cleanup"]["errors"] == []
 
@@ -260,6 +266,7 @@ def test_gui_mismatched_pid_fails_before_desktop_actions(tmp_path):
     evidence = ScenarioRunner(config, process_controller=controller).run(
         (
             build_gui_scenario(
+                process_controller=controller,
                 terminal_run=terminal_run,
                 window_run=window_run,
                 desktop_run=lambda **kwargs: desktop_calls.append(kwargs),
