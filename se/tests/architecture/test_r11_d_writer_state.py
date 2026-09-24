@@ -79,7 +79,7 @@ async def test_r11_d_caller_supplied_ref_authority_is_rejected():
 
 
 @pytest.mark.asyncio
-async def test_r11_d_empty_inline_transcript_persists_as_dual(monkeypatch):
+async def test_r11_d_empty_inline_transcript_persists_ref_backed(monkeypatch):
     async def fake_writer(uow, *, messages, candidate_parent_checkpoint_id=None):
         assert list(messages) == []
         assert candidate_parent_checkpoint_id == "cp-parent"
@@ -102,7 +102,7 @@ async def test_r11_d_empty_inline_transcript_persists_as_dual(monkeypatch):
     )
 
     saved = uow.agents.saved[0]
-    assert saved["transcript_snapshot"] == []
+    assert saved["transcript_snapshot"] is None
     assert saved["transcript_ref"] == "c" * 64
     assert saved["transcript_version"] == 0
 
@@ -141,7 +141,7 @@ async def test_r11_d_writer_rejects_partial_representation_pair(
 async def test_r11_d_writer_rejects_unreconstructable_state():
     with pytest.raises(
         WaitingCheckpointConflictError,
-        match="DUAL cutover requires an inline transcript snapshot",
+        match="REF_BACKED cutover requires an inline transcript proof snapshot",
     ):
         await stage_waiting_checkpoint(
             _Uow(),
