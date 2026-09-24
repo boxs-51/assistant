@@ -8,7 +8,9 @@ from urllib.parse import urlsplit
 
 from tools.v1 import web_tool
 from tools.v1.live.harness import (
+    GUI_GATE_ENV,
     LiveCategory,
+    LiveHarnessConfigError,
     LiveHarnessDisabled,
     Scenario,
     ScenarioContext,
@@ -249,6 +251,14 @@ def run_network_live(
     web_run=web_tool.run,
 ) -> tuple[dict[str, Any], Path]:
     effective_env = os.environ if env is None else env
+    # T10-D is NETWORK-only. A simultaneous GUI opt-in would widen the
+    # operator authority beyond this stage, so reject it before artifact
+    # allocation or any Web call.
+    if effective_env.get(GUI_GATE_ENV) == "1":
+        raise LiveHarnessConfigError(
+            "TV1-T10-D requires RUN_TOOLS_V1_LIVE_GUI to remain disabled"
+        )
+
     root = (
         Path(__file__).resolve().parents[3]
         if repo_root is None
