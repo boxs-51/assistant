@@ -2,8 +2,20 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 
 from ..interfaces.repository import BaseRepository
+from ..transcript_representation import (
+    HARD_MAX_DELTA_DEPTH,
+    canonical_json_bytes,
+    canonical_transcript_messages,
+    logical_transcript_fingerprint,
+    transcript_chunk_id,
+    transcript_payload_root_ref,
+    transcript_representation_ref,
+)
 from ..models.sql.agent import (
     AgentCheckpointPendingInvocationRecord,
     AgentExecutionCheckpointRecord,
@@ -19,6 +31,9 @@ from ..models.sql.agent import (
     AgentTaskForkAdmissionRecord,
     AgentTaskRetryAdmissionRecord,
     AgentTaskAggregateAdmissionRecord,
+    AgentTranscriptChunkRecord,
+    AgentTranscriptPayloadNodeRecord,
+    AgentTranscriptRepresentationRecord,
     TaskBudgetRecord,
     TaskBudgetReservationRecord,
     AgentToolCallRecord,
@@ -37,6 +52,52 @@ class AgentRepository(BaseRepository):
 
     def __init__(self, session):
         self.session = session
+
+    async def _insert_immutable_do_nothing(
+        self,
+        model,
+        values: Dict[str, Any],
+        *,
+        conflict_columns: tuple[str, ...],
+    ) -> bool:
+        """Insert one immutable identity without poisoning replay races.
+
+        SQLite/PostgreSQL use native ON CONFLICT DO NOTHING so a concurrent
+        duplicate does not invalidate the outer UoW. Other dialects fall back
+        to an isolated savepoint; the caller always re-reads and validates the
+        immutable winner after a no-op/conflict.
+        """
+
+        dialect = self.session.get_bind().dialect.name
+        if dialect == "sqlite":
+            statement = (
+                sqlite_insert(model)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=list(conflict_columns)
+                )
+            )
+            result = await self.session.execute(statement)
+            return result.rowcount == 1
+
+        if dialect == "postgresql":
+            statement = (
+                postgresql_insert(model)
+                .values(**values)
+                .on_conflict_do_nothing(
+                    index_elements=list(conflict_columns)
+                )
+            )
+            result = await self.session.execute(statement)
+            return result.rowcount == 1
+
+        try:
+            async with self.session.begin_nested():
+                self.session.add(model(**values))
+                await self.session.flush()
+            return True
+        except IntegrityError:
+            return False
 
     async def create_session(self, session_id: str, owner_user_id: str, agent_ids: List[str]):
         session = AgentSessionRecord(id=session_id, owner_user_id=owner_user_id)
@@ -1071,6 +1132,442 @@ class AgentRepository(BaseRepository):
             return None
         await self.session.flush()
         return await self.get_execution(execution_id)
+
+    async def get_transcript_chunk(self, chunk_id: str):
+        result = await self.session.execute(
+            select(AgentTranscriptChunkRecord).where(
+                AgentTranscriptChunkRecord.chunk_id == chunk_id
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def save_transcript_chunk(self, values: Dict[str, Any]):
+        payload = canonical_transcript_messages(
+            list(values.get("payload") or [])
+        )
+        expected_chunk_id = transcript_chunk_id(payload)
+        chunk_id = str(values.get("chunk_id") or "")
+        if chunk_id != expected_chunk_id:
+            raise ValueError("Transcript chunk identity does not match payload.")
+
+        expected_count = len(payload)
+        expected_bytes = len(canonical_json_bytes(payload))
+        if int(values.get("message_count", -1)) != expected_count:
+            raise ValueError("Transcript chunk message_count mismatch.")
+        if int(values.get("canonical_bytes", -1)) != expected_bytes:
+            raise ValueError("Transcript chunk canonical_bytes mismatch.")
+
+        await self._insert_immutable_do_nothing(
+            AgentTranscriptChunkRecord,
+            {
+                "chunk_id": chunk_id,
+                "payload": payload,
+                "message_count": expected_count,
+                "canonical_bytes": expected_bytes,
+            },
+            conflict_columns=("chunk_id",),
+        )
+        existing = await self.get_transcript_chunk(chunk_id)
+        if existing is None:
+            raise ValueError(
+                "Transcript chunk insert did not produce a readable row."
+            )
+        if (
+            list(existing.payload) != payload
+            or int(existing.message_count) != expected_count
+            or int(existing.canonical_bytes) != expected_bytes
+        ):
+            raise ValueError(
+                "Transcript chunk identity is already bound to "
+                "different immutable content."
+            )
+        return existing
+
+    async def get_transcript_payload_node(self, payload_root_ref: str):
+        result = await self.session.execute(
+            select(AgentTranscriptPayloadNodeRecord).where(
+                AgentTranscriptPayloadNodeRecord.payload_root_ref
+                == payload_root_ref
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def save_transcript_payload_node(self, values: Dict[str, Any]):
+        chunk_id = str(values.get("chunk_id") or "")
+        chunk = await self.get_transcript_chunk(chunk_id)
+        if chunk is None:
+            raise ValueError("Transcript payload node references missing chunk.")
+
+        parent_ref = values.get("parent_payload_root_ref")
+        parent = None
+        parent_count = 0
+        if parent_ref is not None:
+            parent_ref = str(parent_ref)
+            parent = await self.get_transcript_payload_node(parent_ref)
+            if parent is None:
+                raise ValueError(
+                    "Transcript payload node references missing parent root."
+                )
+            parent_count = int(parent.logical_message_count)
+
+        expected_count = parent_count + int(chunk.message_count)
+        logical_count = int(values.get("logical_message_count", -1))
+        if logical_count != expected_count:
+            raise ValueError(
+                "Transcript payload root logical_message_count mismatch."
+            )
+
+        expected_ref = transcript_payload_root_ref(
+            parent_payload_root_ref=parent_ref,
+            chunk_id=chunk_id,
+            logical_message_count=logical_count,
+        )
+        payload_root_ref = str(values.get("payload_root_ref") or "")
+        if payload_root_ref != expected_ref:
+            raise ValueError("Transcript payload root identity mismatch.")
+
+        await self._insert_immutable_do_nothing(
+            AgentTranscriptPayloadNodeRecord,
+            {
+                "payload_root_ref": payload_root_ref,
+                "parent_payload_root_ref": parent_ref,
+                "chunk_id": chunk_id,
+                "logical_message_count": logical_count,
+            },
+            conflict_columns=("payload_root_ref",),
+        )
+        existing = await self.get_transcript_payload_node(payload_root_ref)
+        if existing is None:
+            raise ValueError(
+                "Transcript payload-root insert did not produce a readable row."
+            )
+        if (
+            existing.parent_payload_root_ref != parent_ref
+            or existing.chunk_id != chunk_id
+            or int(existing.logical_message_count) != logical_count
+        ):
+            raise ValueError(
+                "Transcript payload root is already bound to "
+                "different immutable content."
+            )
+        return existing
+
+    async def _materialize_transcript_payload_root(
+        self,
+        payload_root_ref: str,
+    ) -> list[dict[str, Any]]:
+        chain = []
+        seen: set[str] = set()
+        current_ref: str | None = payload_root_ref
+
+        while current_ref is not None:
+            if current_ref in seen:
+                raise ValueError("Transcript payload-root ancestry cycle detected.")
+            seen.add(current_ref)
+
+            node = await self.get_transcript_payload_node(current_ref)
+            if node is None:
+                raise ValueError("Missing transcript payload-root node.")
+
+            chunk = await self.get_transcript_chunk(node.chunk_id)
+            if chunk is None:
+                raise ValueError("Transcript payload-root references missing chunk.")
+
+            payload = list(chunk.payload)
+            if transcript_chunk_id(payload) != chunk.chunk_id:
+                raise ValueError("Transcript chunk content is corrupt.")
+            if int(chunk.message_count) != len(payload):
+                raise ValueError("Transcript chunk message_count is corrupt.")
+            if int(chunk.canonical_bytes) != len(canonical_json_bytes(payload)):
+                raise ValueError("Transcript chunk canonical_bytes is corrupt.")
+
+            expected_ref = transcript_payload_root_ref(
+                parent_payload_root_ref=node.parent_payload_root_ref,
+                chunk_id=node.chunk_id,
+                logical_message_count=int(node.logical_message_count),
+            )
+            if expected_ref != node.payload_root_ref:
+                raise ValueError("Transcript payload-root identity is corrupt.")
+
+            chain.append((node, payload))
+            current_ref = node.parent_payload_root_ref
+
+        materialized: list[dict[str, Any]] = []
+        for node, payload in reversed(chain):
+            materialized.extend(payload)
+            if int(node.logical_message_count) != len(materialized):
+                raise ValueError(
+                    "Transcript payload-root logical_message_count is corrupt."
+                )
+        return materialized
+
+    async def _materialize_transcript_representation(
+        self,
+        transcript_ref: str,
+        transcript_version: int,
+        *,
+        seen: set[tuple[str, int]] | None = None,
+    ) -> list[dict[str, Any]]:
+        identity = (transcript_ref, transcript_version)
+        active = set() if seen is None else seen
+        if identity in active:
+            raise ValueError("Transcript representation ancestry cycle detected.")
+        active.add(identity)
+        try:
+            record = await self.get_transcript_representation(
+                transcript_ref,
+                transcript_version,
+            )
+            if record is None:
+                raise ValueError("Missing transcript representation.")
+
+            kind = str(record.kind).upper()
+            version = int(record.transcript_version)
+            depth = int(record.delta_depth)
+            parent_ref = record.parent_transcript_ref
+            parent_version = record.parent_transcript_version
+
+            expected_ref = transcript_representation_ref(
+                transcript_version=version,
+                kind=kind,
+                parent_transcript_ref=parent_ref,
+                parent_transcript_version=parent_version,
+                delta_depth=depth,
+                logical_message_count=int(record.logical_message_count),
+                logical_transcript_fingerprint=(
+                    record.logical_transcript_fingerprint
+                ),
+                payload_root_ref=record.payload_root_ref,
+            )
+            if expected_ref != record.transcript_ref:
+                raise ValueError("Transcript representation identity is corrupt.")
+
+            payload = await self._materialize_transcript_payload_root(
+                record.payload_root_ref
+            )
+            if kind == "FULL":
+                if (
+                    version != 0
+                    or depth != 0
+                    or parent_ref is not None
+                    or parent_version is not None
+                ):
+                    raise ValueError("Stored FULL representation shape is invalid.")
+                materialized = payload
+            elif kind == "DELTA":
+                if (
+                    parent_ref is None
+                    or parent_version is None
+                    or not 1 <= depth <= HARD_MAX_DELTA_DEPTH
+                ):
+                    raise ValueError("Stored DELTA representation shape is invalid.")
+                parent = await self.get_transcript_representation(
+                    parent_ref,
+                    int(parent_version),
+                )
+                if parent is None:
+                    raise ValueError(
+                        "Stored DELTA representation parent is missing."
+                    )
+                if version != int(parent.transcript_version) + 1:
+                    raise ValueError(
+                        "Stored DELTA representation version ancestry is invalid."
+                    )
+                if depth != int(parent.delta_depth) + 1:
+                    raise ValueError(
+                        "Stored DELTA representation depth ancestry is invalid."
+                    )
+                if not payload:
+                    raise ValueError("Stored DELTA representation suffix is empty.")
+                parent_messages = await self._materialize_transcript_representation(
+                    parent_ref,
+                    int(parent_version),
+                    seen=active,
+                )
+                materialized = parent_messages + payload
+            else:
+                raise ValueError("Stored transcript representation kind is invalid.")
+
+            if int(record.logical_message_count) != len(materialized):
+                raise ValueError(
+                    "Transcript representation logical_message_count is corrupt."
+                )
+            if (
+                logical_transcript_fingerprint(materialized)
+                != record.logical_transcript_fingerprint
+            ):
+                raise ValueError(
+                    "Transcript representation logical fingerprint is corrupt."
+                )
+            return materialized
+        finally:
+            active.remove(identity)
+
+    async def get_transcript_representation(
+        self,
+        transcript_ref: str,
+        transcript_version: int,
+    ):
+        result = await self.session.execute(
+            select(AgentTranscriptRepresentationRecord).where(
+                AgentTranscriptRepresentationRecord.transcript_ref
+                == transcript_ref,
+                AgentTranscriptRepresentationRecord.transcript_version
+                == transcript_version,
+            )
+        )
+        return result.scalar_one_or_none()
+
+    async def save_transcript_representation(self, values: Dict[str, Any]):
+        kind = str(values.get("kind") or "").upper()
+        version = int(values.get("transcript_version", -1))
+        delta_depth = int(values.get("delta_depth", -1))
+        logical_count = int(values.get("logical_message_count", -1))
+        logical_fingerprint = str(
+            values.get("logical_transcript_fingerprint") or ""
+        )
+        payload_root_ref = str(values.get("payload_root_ref") or "")
+        parent_ref = values.get("parent_transcript_ref")
+        parent_version = values.get("parent_transcript_version")
+
+        if len(logical_fingerprint) != 64:
+            raise ValueError(
+                "Transcript logical fingerprint must be a SHA-256 hex digest."
+            )
+        try:
+            int(logical_fingerprint, 16)
+        except ValueError as exc:
+            raise ValueError(
+                "Transcript logical fingerprint must be hexadecimal."
+            ) from exc
+
+        payload_root = await self.get_transcript_payload_node(payload_root_ref)
+        if payload_root is None:
+            raise ValueError(
+                "Transcript representation references missing payload root."
+            )
+
+        parent = None
+        if kind == "FULL":
+            if (
+                version != 0
+                or delta_depth != 0
+                or parent_ref is not None
+                or parent_version is not None
+            ):
+                raise ValueError("Invalid FULL transcript representation shape.")
+            if int(payload_root.logical_message_count) != logical_count:
+                raise ValueError(
+                    "FULL payload root must materialize the full logical count."
+                )
+            materialized = await self._materialize_transcript_payload_root(
+                payload_root_ref
+            )
+        elif kind == "DELTA":
+            if parent_ref is None or parent_version is None:
+                raise ValueError(
+                    "DELTA transcript representation requires exact parent pair."
+                )
+            parent_ref = str(parent_ref)
+            parent_version = int(parent_version)
+            parent = await self.get_transcript_representation(
+                parent_ref,
+                parent_version,
+            )
+            if parent is None:
+                raise ValueError(
+                    "DELTA transcript representation references missing parent."
+                )
+            if version != int(parent.transcript_version) + 1:
+                raise ValueError("DELTA transcript_version must be parent + 1.")
+            if delta_depth != int(parent.delta_depth) + 1:
+                raise ValueError("DELTA depth must be parent depth + 1.")
+            if not 1 <= delta_depth <= HARD_MAX_DELTA_DEPTH:
+                raise ValueError("DELTA depth exceeds R11-B safety envelope.")
+            suffix_count = logical_count - int(parent.logical_message_count)
+            if suffix_count <= 0:
+                raise ValueError("DELTA must append at least one message.")
+            if int(payload_root.logical_message_count) != suffix_count:
+                raise ValueError(
+                    "DELTA payload root must contain only the append suffix."
+                )
+            parent_messages = await self._materialize_transcript_representation(
+                parent_ref,
+                parent_version,
+            )
+            suffix_messages = await self._materialize_transcript_payload_root(
+                payload_root_ref
+            )
+            materialized = parent_messages + suffix_messages
+        else:
+            raise ValueError("Transcript representation kind must be FULL or DELTA.")
+
+        if len(materialized) != logical_count:
+            raise ValueError(
+                "Transcript representation materialized message count mismatch."
+            )
+        if logical_transcript_fingerprint(materialized) != logical_fingerprint:
+            raise ValueError(
+                "Transcript representation logical fingerprint mismatch."
+            )
+
+        expected_ref = transcript_representation_ref(
+            transcript_version=version,
+            kind=kind,
+            parent_transcript_ref=parent_ref,
+            parent_transcript_version=parent_version,
+            delta_depth=delta_depth,
+            logical_message_count=logical_count,
+            logical_transcript_fingerprint=logical_fingerprint,
+            payload_root_ref=payload_root_ref,
+        )
+        transcript_ref = str(values.get("transcript_ref") or "")
+        if transcript_ref != expected_ref:
+            raise ValueError("Transcript representation identity mismatch.")
+
+        await self._insert_immutable_do_nothing(
+            AgentTranscriptRepresentationRecord,
+            {
+                "transcript_ref": transcript_ref,
+                "transcript_version": version,
+                "kind": kind,
+                "parent_transcript_ref": parent_ref,
+                "parent_transcript_version": parent_version,
+                "delta_depth": delta_depth,
+                "logical_message_count": logical_count,
+                "logical_transcript_fingerprint": logical_fingerprint,
+                "payload_root_ref": payload_root_ref,
+            },
+            conflict_columns=("transcript_ref", "transcript_version"),
+        )
+        existing = await self.get_transcript_representation(
+            transcript_ref,
+            version,
+        )
+        if existing is None:
+            raise ValueError(
+                "Transcript representation insert did not produce a readable row."
+            )
+        immutable_values = (
+            ("kind", kind),
+            ("parent_transcript_ref", parent_ref),
+            ("parent_transcript_version", parent_version),
+            ("delta_depth", delta_depth),
+            ("logical_message_count", logical_count),
+            ("logical_transcript_fingerprint", logical_fingerprint),
+            ("payload_root_ref", payload_root_ref),
+        )
+        for field_name, expected in immutable_values:
+            if getattr(existing, field_name) != expected:
+                raise ValueError(
+                    "Transcript representation identity is already bound "
+                    "to different immutable content."
+                )
+        await self._materialize_transcript_representation(
+            transcript_ref,
+            version,
+        )
+        return existing
 
     async def save_execution_checkpoint(self, values: Dict[str, Any]):
         record = AgentExecutionCheckpointRecord(**values)
