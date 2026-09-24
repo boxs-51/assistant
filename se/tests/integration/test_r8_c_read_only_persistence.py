@@ -21,6 +21,7 @@ from se.src.infrastructure.storage.repositories.capability_invocations import (
 )
 from se.src.infrastructure.storage.transcript_representation import (
     canonical_json_bytes,
+    canonical_transcript_messages,
     logical_transcript_fingerprint,
     transcript_chunk_id,
     transcript_payload_root_ref,
@@ -437,7 +438,17 @@ async def test_r11_c_real_b1_representation_converges_resume_fork_retry_readers(
             "cp-r8-c",
         )
 
-        assert converged_resume == inline_resume
+        assert inline_resume == ({"role": "user", "content": "base"},)
+        if mode == "DUAL":
+            # DUAL retains the pre-C inline outward shape after canonical
+            # equality has been proven against the ref-backed authority.
+            assert converged_resume == inline_resume
+        else:
+            # REF_BACKED has no pre-R11 raw JSON shape to preserve; continuation
+            # equivalence is the established canonical InferenceMessage meaning.
+            assert canonical_transcript_messages(converged_resume) == (
+                canonical_transcript_messages(inline_resume)
+            )
         assert [
             item.model_dump(mode="json") for item in converged_fork
         ] == [item.model_dump(mode="json") for item in inline_fork]
