@@ -520,10 +520,32 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         "growth": growth,
     }
 
-    # R11-D DUAL cutover now writes one content-addressed transcript
-    # representation graph in the same UoW as the checkpoint. Keep the
-    # baseline exact so later performance stages measure changes deliberately.
-    expected_pending = {
+    # R11-A frozen pre-cutover evidence. Do not mutate this before-state when
+    # later R11 stages intentionally change the production writer.
+    frozen_r11_a_pending = {
+        0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
+            "insert": 1, "rollbacks": 0, "select": 2, "sql": 4, "update": 1},
+        1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
+            "insert": 2, "rollbacks": 0, "select": 3, "sql": 6, "update": 1},
+        8: {"begins": 1, "commits": 1, "delete": 0, "flushes": 9,
+            "insert": 9, "rollbacks": 0, "select": 10, "sql": 20, "update": 1},
+        32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
+             "insert": 33, "rollbacks": 0, "select": 34, "sql": 68, "update": 1},
+    }
+    assert frozen_r11_a_pending == {
+        0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
+            "insert": 1, "rollbacks": 0, "select": 2, "sql": 4, "update": 1},
+        1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
+            "insert": 2, "rollbacks": 0, "select": 3, "sql": 6, "update": 1},
+        8: {"begins": 1, "commits": 1, "delete": 0, "flushes": 9,
+            "insert": 9, "rollbacks": 0, "select": 10, "sql": 20, "update": 1},
+        32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
+             "insert": 33, "rollbacks": 0, "select": 34, "sql": 68, "update": 1},
+    }
+
+    # R11-D DUAL current-writer evidence is tracked separately from the frozen
+    # R11-A before-state.
+    expected_r11_d_pending = {
         0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
             "insert": 4, "rollbacks": 0, "select": 15, "sql": 20, "update": 1},
         1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
@@ -533,7 +555,17 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
              "insert": 36, "rollbacks": 0, "select": 47, "sql": 84, "update": 1},
     }
-    assert pending == expected_pending
+    assert pending == expected_r11_d_pending
+
+    before0 = frozen_r11_a_pending[0]
+    after0 = expected_r11_d_pending[0]
+    assert after0["sql"] - before0["sql"] == 16
+    assert after0["select"] - before0["select"] == 13
+    assert after0["insert"] - before0["insert"] == 3
+    for count, sample in pending.items():
+        assert sample["select"] - pending[0]["select"] == count
+        assert sample["insert"] - pending[0]["insert"] == count
+        assert sample["flushes"] - pending[0]["flushes"] == count
 
     assert growth == {
         10: {
