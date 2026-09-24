@@ -12,6 +12,7 @@ from ...infrastructure.storage.transcript_representation import (
     transcript_payload_root_ref,
     transcript_representation_ref,
 )
+from .checkpoint_transcript import materialize_checkpoint_transcript_in_uow
 
 
 @dataclass(frozen=True)
@@ -63,6 +64,30 @@ async def _save_payload_root(
     )
 
 
+async def _save_payload_chain(
+    repo,
+    *,
+    messages: Sequence[dict[str, Any]],
+    parent_payload_root_ref: str | None = None,
+):
+    canonical = canonical_transcript_messages(messages)
+    current = parent_payload_root_ref
+    if not canonical:
+        if current is not None:
+            return await repo.get_transcript_payload_node(current)
+        return await _save_payload_root(repo, messages=())
+
+    node = None
+    for message in canonical:
+        node = await _save_payload_root(
+            repo,
+            messages=(message,),
+            parent_payload_root_ref=current,
+        )
+        current = str(node.payload_root_ref)
+    return node
+
+
 async def _ensure_cumulative_payload_root(repo, representation) -> str:
     kind = str(representation.kind).upper()
     if kind == "FULL":
@@ -83,15 +108,42 @@ async def _ensure_cumulative_payload_root(repo, representation) -> str:
         raise ValueError("DELTA transcript representation parent is missing.")
 
     cumulative_parent = await _ensure_cumulative_payload_root(repo, parent)
-    suffix = await repo._materialize_transcript_payload_root(
+    suffix = await repo.materialize_transcript_payload_root(
         str(representation.payload_root_ref)
     )
-    root = await _save_payload_root(
+    root = await _save_payload_chain(
         repo,
         messages=suffix,
         parent_payload_root_ref=cumulative_parent,
     )
+    if root is None:
+        raise ValueError("DELTA cumulative payload root could not be created.")
     return str(root.payload_root_ref)
+
+
+async def _payload_root_at_count(
+    repo,
+    *,
+    cumulative_payload_root_ref: str,
+    logical_message_count: int,
+) -> str | None:
+    if logical_message_count < 0:
+        raise ValueError("logical_message_count must be non-negative")
+    if logical_message_count == 0:
+        return None
+
+    current_ref: str | None = cumulative_payload_root_ref
+    while current_ref is not None:
+        node = await repo.get_transcript_payload_node(current_ref)
+        if node is None:
+            raise ValueError("Missing structural-share payload node.")
+        count = int(node.logical_message_count)
+        if count == logical_message_count:
+            return str(node.payload_root_ref)
+        if count < logical_message_count:
+            raise ValueError("No exact payload-root boundary for proven prefix.")
+        current_ref = node.parent_payload_root_ref
+    raise ValueError("No payload-root boundary for proven prefix.")
 
 
 async def _save_full(
@@ -135,7 +187,9 @@ async def _save_delta(
     suffix: Sequence[dict[str, Any]],
 ):
     canonical = canonical_transcript_messages(messages)
-    suffix_root = await _save_payload_root(repo, messages=suffix)
+    suffix_root = await _save_payload_chain(repo, messages=suffix)
+    if suffix_root is None:
+        raise ValueError("DELTA suffix must be non-empty.")
     version = int(parent.transcript_version) + 1
     depth = int(parent.delta_depth) + 1
     fingerprint = logical_transcript_fingerprint(canonical)
@@ -164,18 +218,72 @@ async def _save_delta(
     )
 
 
+def _common_prefix_length(
+    left: Sequence[dict[str, Any]],
+    right: Sequence[dict[str, Any]],
+) -> int:
+    limit = min(len(left), len(right))
+    index = 0
+    while index < limit and left[index] == right[index]:
+        index += 1
+    return index
+
+
+async def _save_logical_full_with_prefix_share(
+    repo,
+    *,
+    messages: Sequence[dict[str, Any]],
+    parent_representation,
+    parent_messages: Sequence[dict[str, Any]] | None,
+):
+    canonical = canonical_transcript_messages(messages)
+    common = (
+        _common_prefix_length(parent_messages, canonical)
+        if parent_representation is not None and parent_messages is not None
+        else 0
+    )
+
+    shared_root: str | None = None
+    if parent_representation is not None and common > 0:
+        cumulative = await _ensure_cumulative_payload_root(repo, parent_representation)
+        shared_root = await _payload_root_at_count(
+            repo,
+            cumulative_payload_root_ref=cumulative,
+            logical_message_count=common,
+        )
+
+    suffix = canonical[common:]
+    if suffix:
+        root = await _save_payload_chain(
+            repo,
+            messages=suffix,
+            parent_payload_root_ref=shared_root,
+        )
+        if root is None:
+            raise ValueError("FULL payload root could not be created.")
+        payload_root_ref = str(root.payload_root_ref)
+    elif shared_root is not None:
+        payload_root_ref = shared_root
+    else:
+        root = await _save_payload_chain(repo, messages=canonical)
+        if root is None:
+            raise ValueError("FULL payload root could not be created.")
+        payload_root_ref = str(root.payload_root_ref)
+
+    return await _save_full(
+        repo,
+        messages=canonical,
+        payload_root_ref=payload_root_ref,
+    )
+
+
 async def write_transcript_representation_in_uow(
     uow,
     *,
     messages: Sequence[dict[str, Any]],
     candidate_parent_checkpoint_id: str | None = None,
 ) -> ProvenTranscriptRepresentation:
-    """Create/reuse one immutable representation inside the caller's UoW.
-
-    Checkpoint lineage is only a candidate lookup. Canonical transcript proof
-    determines reuse/append ancestry. This function never commits or opens a
-    second transaction.
-    """
+    """Create/reuse one immutable representation inside the caller's UoW."""
 
     repo = uow.agents
     canonical = canonical_transcript_messages(messages)
@@ -184,22 +292,24 @@ async def write_transcript_representation_in_uow(
     parent_messages: list[dict[str, Any]] | None = None
     if candidate_parent_checkpoint_id is not None:
         candidate = await repo.get_execution_checkpoint(candidate_parent_checkpoint_id)
-        if (
-            candidate is not None
-            and candidate.transcript_ref is not None
-            and candidate.transcript_version is not None
-        ):
-            parent_representation = await repo.get_transcript_representation(
-                str(candidate.transcript_ref),
-                int(candidate.transcript_version),
+        if candidate is not None:
+            proven_parent = await materialize_checkpoint_transcript_in_uow(
+                uow,
+                candidate,
             )
-            if parent_representation is None:
-                raise ValueError("Candidate checkpoint references missing representation.")
-            parent_messages = await repo.materialize_transcript_representation(
-                str(candidate.transcript_ref),
-                int(candidate.transcript_version),
-            )
-            parent_messages = canonical_transcript_messages(parent_messages)
+            parent_messages = canonical_transcript_messages(proven_parent)
+            if (
+                candidate.transcript_ref is not None
+                and candidate.transcript_version is not None
+            ):
+                parent_representation = await repo.get_transcript_representation(
+                    str(candidate.transcript_ref),
+                    int(candidate.transcript_version),
+                )
+                if parent_representation is None:
+                    raise ValueError(
+                        "Candidate checkpoint references missing representation."
+                    )
 
     if parent_representation is not None and parent_messages == canonical:
         return ProvenTranscriptRepresentation(
@@ -227,22 +337,24 @@ async def write_transcript_representation_in_uow(
                 repo,
                 parent_representation,
             )
-            full_root = await _save_payload_root(
+            full_root = await _save_payload_chain(
                 repo,
                 messages=suffix,
                 parent_payload_root_ref=cumulative_parent,
             )
+            if full_root is None:
+                raise ValueError("FULL re-anchor payload root could not be created.")
             record = await _save_full(
                 repo,
                 messages=canonical,
                 payload_root_ref=str(full_root.payload_root_ref),
             )
     else:
-        full_root = await _save_payload_root(repo, messages=canonical)
-        record = await _save_full(
+        record = await _save_logical_full_with_prefix_share(
             repo,
             messages=canonical,
-            payload_root_ref=str(full_root.payload_root_ref),
+            parent_representation=parent_representation,
+            parent_messages=parent_messages,
         )
 
     materialized = await repo.materialize_transcript_representation(
@@ -250,7 +362,9 @@ async def write_transcript_representation_in_uow(
         int(record.transcript_version),
     )
     if canonical_transcript_messages(materialized) != canonical:
-        raise ValueError("Written transcript representation does not round-trip canonically.")
+        raise ValueError(
+            "Written transcript representation does not round-trip canonically."
+        )
 
     return ProvenTranscriptRepresentation(
         transcript_ref=str(record.transcript_ref),
