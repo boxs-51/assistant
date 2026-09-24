@@ -53,17 +53,30 @@ class ToolResultContractError(ValueError):
     pass
 
 
+@dataclass(frozen=True)
+class ProcessIdentity:
+    pid: int
+    token: object
+
+
 class ProcessController(Protocol):
-    def is_alive(self, pid: int) -> bool:
+    def capture(self, pid: int) -> ProcessIdentity | None:
+        """Capture stable process identity, or None when the process already exited."""
+
+    def is_alive(self, identity: ProcessIdentity) -> bool:
         ...
 
-    def terminate(self, pid: int) -> None:
+    def terminate(self, identity: ProcessIdentity) -> None:
         ...
 
-    def wait(self, pid: int, timeout_seconds: float) -> bool:
-        """Return True when the process is confirmed no longer alive."""
+    def wait(
+        self,
+        identity: ProcessIdentity,
+        timeout_seconds: float,
+    ) -> bool:
+        """Return True when this exact process identity is confirmed no longer alive."""
 
-    def kill(self, pid: int) -> None:
+    def kill(self, identity: ProcessIdentity) -> None:
         ...
 
 
@@ -331,22 +344,24 @@ class OwnedProcessRegistry:
         self._controller = controller
         self._graceful_timeout_seconds = graceful_timeout_seconds
         self._kill_timeout_seconds = kill_timeout_seconds
-        self._owned_pids: set[int] = set()
+        self._owned: dict[int, ProcessIdentity] = {}
+        self._already_exited_pids: set[int] = set()
 
     @property
     def owned_pids(self) -> tuple[int, ...]:
-        return tuple(sorted(self._owned_pids))
-
-    def register_pid(self, pid: int) -> None:
-        if type(pid) is not int or pid <= 0:
-            raise LiveHarnessConfigError("owned pid must be a positive integer")
-        self._owned_pids.add(pid)
+        return tuple(
+            sorted(set(self._owned).union(self._already_exited_pids))
+        )
 
     def register_launch_result(self, result: Mapping[str, Any]) -> int:
         validated = validate_tool_result(result)
         if validated["ok"] is not True:
             raise ToolResultContractError(
                 "cannot register ownership from a failed launch ToolResult"
+            )
+        if validated["tool"] != "terminal_tool":
+            raise ToolResultContractError(
+                "owned process registration requires tool='terminal_tool'"
             )
         if validated["action"] != "launch":
             raise ToolResultContractError(
@@ -362,52 +377,67 @@ class OwnedProcessRegistry:
             raise ToolResultContractError(
                 "launch ToolResult.data.pid must be a positive integer"
             )
-        self.register_pid(pid)
+        if data.get("started") is not True:
+            raise ToolResultContractError(
+                "launch ToolResult.data.started must be true"
+            )
+        if self._controller is None:
+            raise LiveHarnessConfigError(
+                "a process controller is required before registering launch ownership"
+            )
+
+        identity = self._controller.capture(pid)
+        if identity is None:
+            self._already_exited_pids.add(pid)
+            return pid
+        if identity.pid != pid:
+            raise LiveHarnessConfigError(
+                "captured process identity pid does not match launch result pid"
+            )
+
+        existing = self._owned.get(pid)
+        if existing is not None and existing != identity:
+            raise LiveHarnessConfigError(
+                "pid was already registered with a different process identity"
+            )
+        self._owned[pid] = identity
         return pid
 
     def cleanup(self) -> dict[str, Any]:
         report: dict[str, Any] = {
             "owned_pids": list(self.owned_pids),
-            "terminated_pids": [],
+            "terminated_pids": sorted(self._already_exited_pids),
             "still_alive_pids": [],
             "errors": [],
         }
-        if not self._owned_pids:
+        if not self._owned:
             return report
 
-        if self._controller is None:
-            report["still_alive_pids"] = list(self.owned_pids)
-            report["errors"].append(
-                _synthetic_error(
-                    "LIVE_PROCESS_CONTROLLER_MISSING",
-                    "owned processes cannot be cleaned without a process controller",
-                )
-            )
-            return report
-
-        for pid in self.owned_pids:
+        assert self._controller is not None
+        for pid in sorted(self._owned):
+            identity = self._owned[pid]
             try:
-                if not self._controller.is_alive(pid):
+                if not self._controller.is_alive(identity):
                     report["terminated_pids"].append(pid)
                     continue
 
-                self._controller.terminate(pid)
+                self._controller.terminate(identity)
                 if self._controller.wait(
-                    pid,
+                    identity,
                     self._graceful_timeout_seconds,
                 ):
                     report["terminated_pids"].append(pid)
                     continue
 
-                self._controller.kill(pid)
+                self._controller.kill(identity)
                 if self._controller.wait(
-                    pid,
+                    identity,
                     self._kill_timeout_seconds,
                 ):
                     report["terminated_pids"].append(pid)
                     continue
 
-                if self._controller.is_alive(pid):
+                if self._controller.is_alive(identity):
                     report["still_alive_pids"].append(pid)
                 else:
                     report["terminated_pids"].append(pid)
@@ -423,7 +453,7 @@ class OwnedProcessRegistry:
                     )
                 )
                 try:
-                    if self._controller.is_alive(pid):
+                    if self._controller.is_alive(identity):
                         report["still_alive_pids"].append(pid)
                 except Exception:
                     if pid not in report["still_alive_pids"]:

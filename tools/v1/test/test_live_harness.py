@@ -16,6 +16,7 @@ from tools.v1.live.harness import (
     LiveHarnessConfigError,
     LiveHarnessDisabled,
     OwnedProcessRegistry,
+    ProcessIdentity,
     Scenario,
     ScenarioRunner,
     ScenarioStep,
@@ -253,28 +254,85 @@ def test_structured_error_projection_redacts_secret_details():
 
 
 class FakeProcessController:
-    def __init__(self, alive, *, stubborn=()):
+    def __init__(self, alive, *, stubborn=(), generations=None):
         self.alive = set(alive)
         self.stubborn = set(stubborn)
+        self.generations = dict(generations or {})
         self.calls = []
 
-    def is_alive(self, pid: int) -> bool:
-        self.calls.append(("is_alive", pid))
-        return pid in self.alive
+    def capture(self, pid: int):
+        self.calls.append(("capture", pid))
+        if pid not in self.alive:
+            return None
+        return ProcessIdentity(
+            pid=pid,
+            token=self.generations.get(pid, f"generation-{pid}"),
+        )
 
-    def terminate(self, pid: int) -> None:
-        self.calls.append(("terminate", pid))
-        if pid not in self.stubborn:
-            self.alive.discard(pid)
+    def is_alive(self, identity: ProcessIdentity) -> bool:
+        self.calls.append(("is_alive", identity.pid, identity.token))
+        return (
+            identity.pid in self.alive
+            and identity.token
+            == self.generations.get(
+                identity.pid,
+                f"generation-{identity.pid}",
+            )
+        )
 
-    def wait(self, pid: int, timeout_seconds: float) -> bool:
-        self.calls.append(("wait", pid, timeout_seconds))
-        return pid not in self.alive
+    def terminate(self, identity: ProcessIdentity) -> None:
+        self.calls.append(("terminate", identity.pid, identity.token))
+        if identity.pid not in self.stubborn:
+            self.alive.discard(identity.pid)
 
-    def kill(self, pid: int) -> None:
-        self.calls.append(("kill", pid))
-        if pid not in self.stubborn:
-            self.alive.discard(pid)
+    def wait(
+        self,
+        identity: ProcessIdentity,
+        timeout_seconds: float,
+    ) -> bool:
+        self.calls.append(
+            ("wait", identity.pid, identity.token, timeout_seconds)
+        )
+        return not self.is_alive(identity)
+
+    def kill(self, identity: ProcessIdentity) -> None:
+        self.calls.append(("kill", identity.pid, identity.token))
+        if identity.pid not in self.stubborn:
+            self.alive.discard(identity.pid)
+
+
+def test_process_ownership_only_accepts_structured_terminal_launch():
+    controller = FakeProcessController({22})
+    registry = OwnedProcessRegistry(controller)
+
+    with pytest.raises(ToolResultContractError):
+        registry.register_launch_result(
+            _success(
+                tool="other_tool",
+                action="launch",
+                data={"pid": 22, "started": True},
+            )
+        )
+
+    with pytest.raises(ToolResultContractError):
+        registry.register_launch_result(
+            _success(
+                tool="terminal_tool",
+                action="run",
+                data={"pid": 22, "started": True},
+            )
+        )
+
+    with pytest.raises(ToolResultContractError):
+        registry.register_launch_result(
+            _success(
+                tool="terminal_tool",
+                action="launch",
+                data={"pid": 22, "started": False},
+            )
+        )
+
+    assert controller.calls == []
 
 
 def test_owned_process_cleanup_never_targets_unowned_pid():
@@ -304,21 +362,57 @@ def test_owned_process_cleanup_never_targets_unowned_pid():
     assert 999 in controller.alive
 
 
-def test_missing_or_stubborn_process_controller_fails_cleanup():
+def test_launch_ownership_requires_controller_and_stubborn_cleanup_fails():
+    launch = _success(
+        tool="terminal_tool",
+        action="launch",
+        data={"pid": 7, "started": True},
+    )
     missing = OwnedProcessRegistry(None)
-    missing.register_pid(7)
-    report = missing.cleanup()
-    assert report["owned_pids"] == [7]
-    assert report["still_alive_pids"] == [7]
-    assert report["errors"][0]["code"] == "LIVE_PROCESS_CONTROLLER_MISSING"
+    with pytest.raises(LiveHarnessConfigError):
+        missing.register_launch_result(launch)
 
     stubborn_controller = FakeProcessController({9}, stubborn={9})
     stubborn = OwnedProcessRegistry(stubborn_controller)
-    stubborn.register_pid(9)
+    stubborn.register_launch_result(
+        _success(
+            tool="terminal_tool",
+            action="launch",
+            data={"pid": 9, "started": True},
+        )
+    )
     report = stubborn.cleanup()
     assert report["still_alive_pids"] == [9]
-    assert ("terminate", 9) in stubborn_controller.calls
-    assert ("kill", 9) in stubborn_controller.calls
+    assert any(call[:2] == ("terminate", 9) for call in stubborn_controller.calls)
+    assert any(call[:2] == ("kill", 9) for call in stubborn_controller.calls)
+
+
+def test_cleanup_uses_captured_identity_and_refuses_pid_reuse():
+    controller = FakeProcessController(
+        {55},
+        generations={55: "generation-a"},
+    )
+    registry = OwnedProcessRegistry(controller)
+    registry.register_launch_result(
+        _success(
+            tool="terminal_tool",
+            action="launch",
+            data={"pid": 55, "started": True},
+        )
+    )
+
+    # Simulate the launched process exiting and the OS reusing the PID.
+    controller.generations[55] = "generation-b"
+
+    report = registry.cleanup()
+
+    assert report["owned_pids"] == [55]
+    assert report["terminated_pids"] == [55]
+    assert report["still_alive_pids"] == []
+    assert not any(
+        call[0] in {"terminate", "kill"} and call[1] == 55
+        for call in controller.calls
+    )
 
 
 def test_scenario_runner_is_explicit_fail_fast_and_always_tears_down(tmp_path):
