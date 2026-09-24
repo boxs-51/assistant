@@ -655,7 +655,6 @@ async def revalidate_retry_plan_in_uow(
             or checkpoint.session_id != plan.session_id
             or checkpoint.task_id != plan.task_id
             or checkpoint.branch_id != plan.branch_id
-            or checkpoint.transcript_snapshot is None
             or int(checkpoint.execution_revision)
             > int(plan.expected_execution_revision)
         ):
