@@ -520,15 +520,18 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         "growth": growth,
     }
 
+    # R11-D DUAL cutover now writes one content-addressed transcript
+    # representation graph in the same UoW as the checkpoint. Keep the
+    # baseline exact so later performance stages measure changes deliberately.
     expected_pending = {
         0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
-            "insert": 1, "rollbacks": 0, "select": 2, "sql": 4, "update": 1},
+            "insert": 4, "rollbacks": 0, "select": 15, "sql": 20, "update": 1},
         1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
-            "insert": 2, "rollbacks": 0, "select": 3, "sql": 6, "update": 1},
+            "insert": 5, "rollbacks": 0, "select": 16, "sql": 22, "update": 1},
         8: {"begins": 1, "commits": 1, "delete": 0, "flushes": 9,
-            "insert": 9, "rollbacks": 0, "select": 10, "sql": 20, "update": 1},
+            "insert": 12, "rollbacks": 0, "select": 23, "sql": 36, "update": 1},
         32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
-             "insert": 33, "rollbacks": 0, "select": 34, "sql": 68, "update": 1},
+             "insert": 36, "rollbacks": 0, "select": 47, "sql": 84, "update": 1},
     }
     assert pending == expected_pending
 
