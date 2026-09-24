@@ -136,10 +136,26 @@ async def stage_waiting_checkpoint(
         "parent_checkpoint_id",
         getattr(execution, "current_checkpoint_id", None),
     )
-    checkpoint["transcript_snapshot"] = to_json_safe(
-        list(checkpoint.get("transcript_snapshot") or []),
-        path="agent_execution_checkpoints.transcript_snapshot",
-    )
+    snapshot = checkpoint.get("transcript_snapshot")
+    if snapshot is not None:
+        checkpoint["transcript_snapshot"] = to_json_safe(
+            list(snapshot),
+            path="agent_execution_checkpoints.transcript_snapshot",
+        )
+    elif "transcript_snapshot" in checkpoint:
+        checkpoint["transcript_snapshot"] = None
+
+    transcript_ref = checkpoint.get("transcript_ref")
+    transcript_version = checkpoint.get("transcript_version")
+    if (transcript_ref is None) != (transcript_version is None):
+        raise WaitingCheckpointConflictError(
+            "Checkpoint transcript_ref/transcript_version must be an exact pair."
+        )
+    if checkpoint.get("transcript_snapshot") is None and transcript_ref is None:
+        raise WaitingCheckpointConflictError(
+            "Checkpoint transcript representation is not reconstructable."
+        )
+
     checkpoint["metadata_json"] = to_json_safe(
         checkpoint.get("metadata_json") or {},
         path="agent_execution_checkpoints.metadata",
