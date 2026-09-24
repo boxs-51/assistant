@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, case, or_, select, update
+from sqlalchemy import and_, case, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -1738,6 +1738,24 @@ class AgentRepository(BaseRepository):
         self.session.add(record)
         await self.session.flush()
         return record
+
+    async def save_checkpoint_pending_invocations(
+        self,
+        values: List[Dict[str, Any]],
+    ) -> None:
+        """Persist one checkpoint's frozen pending rows as one DB batch.
+
+        The caller owns the surrounding transaction.  This helper deliberately
+        does not flush/commit an ORM row at a time; AsyncSession.execute with a
+        parameter sequence uses one executemany operation while preserving the
+        table's unique/FK/check constraints atomically.
+        """
+        if not values:
+            return
+        await self.session.execute(
+            insert(AgentCheckpointPendingInvocationRecord),
+            [dict(item) for item in values],
+        )
 
     async def list_checkpoint_pending_invocations(self, checkpoint_id: str):
         result = await self.session.execute(
