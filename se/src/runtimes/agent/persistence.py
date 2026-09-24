@@ -4243,7 +4243,7 @@ class DurableAgentStore:
                         "wait_expires_at": execution.wait_expires_at,
                         "origin_client_id": source.origin_client_id,
                         "origin_connection_id": source.origin_connection_id,
-                        "transcript_snapshot": list(transcript_snapshot),
+                        "transcript_snapshot": None,
                         "transcript_ref": proven.transcript_ref,
                         "transcript_version": proven.transcript_version,
                         "legacy_source_key": source.legacy_source_key,
