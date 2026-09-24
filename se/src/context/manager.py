@@ -8,6 +8,7 @@ from sqlalchemy.orm import selectinload
 from ..domain.schemas.session import Session as SessionSchema
 from ..domain.schemas.context import ContextObject, Project, GatewayAttachment
 from ..domain.schemas.request import GatewayChatRequest, GatewayMessage
+from ..domain.schemas.message import decode_persisted_message_content
 from ..domain.schemas.identity import Identity
 
 from ..infrastructure.storage.core.manager import StorageEngine
@@ -34,7 +35,7 @@ class ContextEngine:
         return value.timestamp() if hasattr(value, "timestamp") else float(value)
 
     @staticmethod
-    def _attachment_schema(attachment) -> GatewayAttachment:
+    def _legacy_attachment_schema(attachment) -> GatewayAttachment:
         metadata = attachment.metadata_json or {}
         return GatewayAttachment(
             id=attachment.id,
@@ -43,6 +44,22 @@ class ContextEngine:
             size=attachment.size_bytes,
             uri=attachment.storage_uri,
             source="local",
+            metadata=metadata,
+        )
+
+    @staticmethod
+    def _asset_schema(file_record, blob_record) -> GatewayAttachment:
+        metadata = dict(file_record.metadata_json or {})
+        if blob_record.sha256:
+            metadata["sha256"] = blob_record.sha256
+        return GatewayAttachment(
+            asset_id=file_record.id,
+            filename=file_record.filename,
+            mime_type=file_record.mime_type,
+            size=blob_record.size_bytes,
+            extension=file_record.extension,
+            uri=f"asset://{file_record.id}",
+            source="asset",
             metadata=metadata,
         )
 
@@ -57,11 +74,13 @@ class ContextEngine:
             messages=[
                 GatewayMessage(
                     role=message.role,
-                    content=message.content.get("data", "")
-                    if isinstance(message.content, dict)
-                    else message.content,
+                    content=decode_persisted_message_content(message.content),
                     turn_id=getattr(message, "turn_id", None),
-                    sequence=getattr(message, "sequence", None),
+                    sequence=(
+                        getattr(message, "sequence", None)
+                        if (getattr(message, "sequence", None) or 0) >= 1
+                        else None
+                    ),
                     created_at=getattr(message, "created_at", None),
                     completed_at=getattr(message, "completed_at", None),
                 )
@@ -71,46 +90,79 @@ class ContextEngine:
             updated_at=cls._timestamp(session_db.updated_at),
         )
 
-    async def load_context(self, session_id: str, identity: Identity) -> ContextObject:
-        """
-        Tải toàn bộ ngữ cảnh cho một session cụ thể.
-        Đây là hàm cốt lõi của Context Runtime.
-        """
+    async def load_context(
+        self,
+        session_id: str,
+        identity: Identity,
+    ) -> ContextObject:
         async with self.uow_factory() as uow:
-            # 1. Tải session từ DB, kèm theo các message và attachment liên quan
-            session_repo = uow.sessions
-            session_db = await session_repo.get_by_id(
-                session_id, 
-                options=[selectinload(OrmSession.messages), selectinload(OrmSession.attachments)]
+            session_db = await uow.sessions.get_by_id(
+                session_id,
+                options=[
+                    selectinload(OrmSession.messages),
+                    selectinload(OrmSession.attachments),
+                ],
             )
             if not session_db or session_db.user_id != identity.user_id:
-                raise ValueError(f"Session {session_id} not found or access denied.")
-
-            # 2. Tải project chứa session đó (nếu có)
+                raise ValueError(
+                    f"Session {session_id} not found or access denied."
+                )
             project_db = None
             if session_db.project_id:
-                project_repo = uow.projects
-                project_db = await project_repo.get_by_id(session_db.project_id, with_relations=True)
-
-            # 3. Tập hợp các file có thể truy cập
+                project_db = await uow.projects.get_by_id(
+                    session_db.project_id,
+                    with_relations=True,
+                )
+            asset_repo = getattr(uow, "assets", None)
+            central_rows = (
+                await asset_repo.list_context_file_rows(
+                    session_id=session_id,
+                    owner_user_id=session_db.user_id,
+                    project_id=session_db.project_id,
+                )
+                if asset_repo is not None
+                else []
+            )
             accessible_files = []
+            seen = set()
+            for file_record, blob_record in central_rows:
+                key = ("asset", file_record.id)
+                if key not in seen:
+                    accessible_files.append(
+                        self._asset_schema(file_record, blob_record)
+                    )
+                    seen.add(key)
+            legacy = []
             if project_db:
-                accessible_files.extend([self._attachment_schema(f) for f in project_db.attachments])
-            accessible_files.extend([self._attachment_schema(f) for f in session_db.attachments])
-
-            # 4. Chuyển đổi từ DB model sang Pydantic schema
+                legacy.extend(project_db.attachments)
+            legacy.extend(session_db.attachments)
+            for attachment in legacy:
+                key = ("legacy", attachment.id)
+                if key in seen:
+                    continue
+                accessible_files.append(
+                    self._legacy_attachment_schema(attachment)
+                )
+                seen.add(key)
             session_schema = self._session_schema(session_db)
-            project_schema = Project(
-                project_id=project_db.id,
-                user_id=project_db.user_id,
-                organization_id=project_db.organization_id,
-                name=project_db.name,
-                created_at=self._timestamp(project_db.created_at),
-                updated_at=self._timestamp(project_db.updated_at),
-                files=accessible_files,
-            ) if project_db else None
-
-            return ContextObject(project=project_schema, session=session_schema, accessible_files=accessible_files)
+            project_schema = (
+                Project(
+                    project_id=project_db.id,
+                    user_id=project_db.user_id,
+                    organization_id=project_db.organization_id,
+                    name=project_db.name,
+                    created_at=self._timestamp(project_db.created_at),
+                    updated_at=self._timestamp(project_db.updated_at),
+                    files=accessible_files,
+                )
+                if project_db
+                else None
+            )
+            return ContextObject(
+                project=project_schema,
+                session=session_schema,
+                accessible_files=accessible_files,
+            )
 
     async def create_new_session(self, identity: Identity, project_id: Optional[str] = None) -> SessionSchema:
         """Tạo một session mới và lưu vào DB."""

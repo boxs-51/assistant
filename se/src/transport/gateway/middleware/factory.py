@@ -3,11 +3,19 @@ from starlette.middleware.sessions import SessionMiddleware
 from fastapi.middleware.cors import CORSMiddleware
 
 from .observability import observability_middleware
+from .asset_upload_limit import AssetUploadBodyLimitMiddleware
 from ..authentication.middleware import AuthenticationMiddleware
-from ....infrastructure.config.schemas import AuthenticationSettings
+from ....infrastructure.config.schemas import (
+    AssetStorageSettings,
+    AuthenticationSettings,
+)
 
 
-def create_middleware_stack(app: FastAPI, auth_config: AuthenticationSettings):
+def create_middleware_stack(
+    app: FastAPI,
+    auth_config: AuthenticationSettings,
+    asset_config: AssetStorageSettings,
+):
     """
     Hàm tập trung để khởi tạo và đăng ký tất cả các middleware cho ứng dụng.
     Thứ tự đăng ký middleware là rất quan trọng.
@@ -30,7 +38,14 @@ def create_middleware_stack(app: FastAPI, auth_config: AuthenticationSettings):
         max_age=600  # 10 phút
     )
 
-    # 4. Middleware xử lý Cross-Origin Resource Sharing (CORS)
+    # 4. CAS upload ingress bound. CORS is registered after this block so
+    # CORS remains outermost and can decorate limiter-generated 413 responses.
+    app.add_middleware(
+        AssetUploadBodyLimitMiddleware,
+        max_upload_bytes=asset_config.max_upload_bytes,
+    )
+
+    # 5. Middleware xử lý Cross-Origin Resource Sharing (CORS)
     ALLOWED_ORIGINS = ["*"]
     app.add_middleware(
         CORSMiddleware,

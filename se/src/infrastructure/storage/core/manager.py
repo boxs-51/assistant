@@ -3,11 +3,13 @@ import structlog
 from .registry import DriverRegistry, RepositoryRegistry
 
 from ..interfaces.cache import CacheDriver
+from ..interfaces.object import ObjectStorageDriver
 
 from ..drivers.inmemory.driver import InMemoryDriver
 from ..drivers.redis.driver import RedisDriver
 from ..drivers.sqlite.driver import SQLiteDriver
 from ..drivers.chroma.driver import ChromaVectorDriver
+from ..drivers.object_local.driver import LocalObjectStorageDriver
 
 from ..repositories.sessions import SessionRepository
 from ..services.embedding_service import EmbeddingService
@@ -204,6 +206,25 @@ class StorageEngine:
 
         return driver
 
+    def get_object_storage_driver(
+        self,
+        name: str = "object-local",
+    ) -> ObjectStorageDriver:
+        driver = self.drivers.get(name)
+        if driver is None:
+            raise RuntimeError(
+                f"Object storage driver '{name}' is not configured"
+            )
+        if not isinstance(driver, ObjectStorageDriver):
+            raise TypeError(
+                f"Driver '{name}' is not an ObjectStorageDriver"
+            )
+        if not self.drivers.is_available(name):
+            raise RuntimeError(
+                f"Object storage driver '{name}' is unavailable"
+            )
+        return driver
+
     def is_driver_available(self, name: str) -> bool:
         """
         Runtime availability check.
@@ -235,6 +256,7 @@ class StorageEngine:
             "sqlite": SQLiteDriver,
             "chroma": ChromaVectorDriver,
             "in-memory": InMemoryDriver,
+            "object-local": LocalObjectStorageDriver,
         }
 
         if not self.config.storage.drivers:

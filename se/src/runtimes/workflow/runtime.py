@@ -7,6 +7,7 @@ from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from ...domain.schemas.identity import Identity
+from ...domain.schemas.message import contains_canonical_asset_content
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ..agent.contracts.context import AgentExecutionContext
 from ..agent.adapters.messages import jsonable
@@ -96,23 +97,57 @@ class WorkflowRuntime(BaseRuntime):
 
     async def _handle_context_built(self, event: BaseEvent):
         """Bước 2: Sau khi Context dựng xong -> Yêu cầu Provider Runtime gọi LLM."""
-        logger.debug("Handling context built, triggering provider execution", session_id=event.session_id)
-        
+        logger.debug(
+            "Handling context built, triggering provider execution",
+            session_id=event.session_id,
+        )
+
         body = dict(event.payload.get("request_body", {}))
         mode = body.pop("_chat_execution_mode", "DIRECT")
         event.payload["request_body"] = body
-        if mode == "DIRECT" and getattr(self.container, "direct_chat_runtime", None):
+
+        if contains_canonical_asset_content(body.get("messages", [])):
+            await self.event_bus.publish(
+                BaseEvent(
+                    event_name="provider.failed",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={
+                        "error": (
+                            "Canonical asset content requires provider hydration "
+                            "before inference."
+                        ),
+                        "error_code": "ASSET_HYDRATION_REQUIRED",
+                        "failure_domain": "MESSAGE_ASSET",
+                        "retryable": False,
+                        "status_code": 409,
+                    },
+                )
+            )
+            return
+
+        if mode == "DIRECT" and getattr(
+            self.container,
+            "direct_chat_runtime",
+            None,
+        ):
             await self._execute_direct(event, body)
             return
-        if mode == "AGENT" and getattr(self.container, "agent_runtime", None):
+        if mode == "AGENT" and getattr(
+            self.container,
+            "agent_runtime",
+            None,
+        ):
             await self._execute_agent(event, body)
             return
-        await self.event_bus.publish(BaseEvent(
-            event_name="provider.chat.execute",
-            session_id=event.session_id,
-            turn_id=event.turn_id,
-            payload=event.payload
-        ))
+        await self.event_bus.publish(
+            BaseEvent(
+                event_name="provider.chat.execute",
+                session_id=event.session_id,
+                turn_id=event.turn_id,
+                payload=event.payload,
+            )
+        )
 
     @staticmethod
     def _response_payload(response, extra_metadata: dict | None = None) -> dict:

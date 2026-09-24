@@ -111,6 +111,28 @@ class DriverConfig(BaseModel):
 class StorageSettings(BaseModel):
     drivers: Dict[str, DriverConfig] = Field(default_factory=dict)
 
+class AssetStorageSettings(BaseModel):
+    storage_driver: str = Field(default="object-local", min_length=1)
+    max_upload_bytes: int = Field(default=268_435_456, gt=0)
+    upload_chunk_bytes: int = Field(
+        default=262_144,
+        ge=16_384,
+        le=8_388_608,
+    )
+    list_default_limit: int = Field(default=50, ge=1, le=500)
+    list_max_limit: int = Field(default=100, ge=1, le=1000)
+
+    model_config = ConfigDict(frozen=True)
+
+    @model_validator(mode="after")
+    def validate_list_limits(self) -> "AssetStorageSettings":
+        if self.list_default_limit > self.list_max_limit:
+            raise ValueError(
+                "assets.list_default_limit cannot exceed assets.list_max_limit"
+            )
+        return self
+
+
 class CircuitBreakerProviderSettings(BaseModel):
     """Cấu hình ngưỡng cho một Circuit Breaker cụ thể."""
     failure_threshold: int = 3
@@ -213,6 +235,7 @@ class ConfigSchema(BaseModel):
     semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
+    assets: AssetStorageSettings = Field(default_factory=AssetStorageSettings)
     auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)
     oauth: OAuthSettings = Field(default_factory=OAuthSettings)
     frontend: FrontendSettings = Field(default_factory=FrontendSettings)

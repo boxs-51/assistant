@@ -35,7 +35,15 @@ def _upgrade_to_14b(database: Path, monkeypatch) -> Config:
 def test_r8_d_14c_remains_parent_of_single_r8_e_head(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["17a_r11_checkpoint_cutover"]
+    assert script.get_heads() == ["18a_cas_r0_assets"]
+    assert (
+        script.get_revision("18a_cas_r0_assets").down_revision
+        == "17a_r11_checkpoint_cutover"
+    )
+    assert (
+        script.get_revision("17a_r11_checkpoint_cutover").down_revision
+        == "16a_r11_transcript_representation"
+    )
     assert (
         script.get_revision("16a_r11_transcript_representation").down_revision
         == "15b_r9_aggregate_admission"

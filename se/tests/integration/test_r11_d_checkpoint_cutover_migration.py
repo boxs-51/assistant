@@ -26,7 +26,11 @@ def _config(database: Path) -> Config:
 
 def test_r11_d_is_single_linear_migration_head(tmp_path: Path):
     script = ScriptDirectory.from_config(_config(tmp_path / "unused.sqlite"))
-    assert script.get_heads() == ["17a_r11_checkpoint_cutover"]
+    assert script.get_heads() == ["18a_cas_r0_assets"]
+    assert (
+        script.get_revision("18a_cas_r0_assets").down_revision
+        == "17a_r11_checkpoint_cutover"
+    )
     assert (
         script.get_revision("17a_r11_checkpoint_cutover").down_revision
         == "16a_r11_transcript_representation"
