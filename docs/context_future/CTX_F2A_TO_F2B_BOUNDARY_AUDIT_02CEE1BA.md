@@ -41,89 +41,139 @@ The adapter may only project facts already proven by the source subsystem.
 
 ### SESSION adapter
 
-Input authority:
+Canonical authority:
 ```text
-server-side Session authority
-session_id
-trusted owner_user_id
+chat_data.Session only
+NOT AgentSessionRecord
+```
+
+Required already-loaded evidence:
+```text
+Session.id
+Session.user_id
+Session.status
+Session.created_at
+```
+
+Eligibility:
+```text
+Session.user_id is present and non-empty
+owner_user_id = Session.user_id
 ```
 
 Output:
 ```text
 source_kind = SESSION
-authority_id = session_id
+authority_id = Session.id
 authority_version = None
-session_id = session_id
+session_id = Session.id
 ```
 
 Rules:
-- owner_user_id comes from trusted server-side identity, never caller/model metadata;
+- no caller/model-supplied owner value is accepted;
+- AgentSessionRecord is a separate control-plane namespace and is not projected as CTX SESSION;
 - Session projection does not reactivate historical Tasks;
 - no Session mutation.
 
 ### TASK adapter
 
-Input authority:
+Required already-loaded evidence bundle:
 ```text
-task_id
-task revision
-trusted owner_user_id
-optional session/branch projection IDs
-descriptive task state
+chat_data.Session
+AgentTaskRecord
+```
+
+Required proof:
+```text
+task.session_id == session.id
+session.user_id is present and non-empty
 ```
 
 Output:
 ```text
 source_kind = TASK
-authority_id = task_id
-authority_version = task revision
+authority_id = task.id
+authority_version = task.revision
+owner_user_id = session.user_id
+session_id = session.id
+task_id = task.id
+source_state = task.status
 ```
 
 Rules:
+- no loose owner_user_id argument exists;
+- task.created_by is descriptive provenance only;
 - revision is native Task authority, not CTX revision;
 - terminal Task remains historical/discoverable projection only;
 - adapter cannot resume/reopen/continue a Task.
 
 ### BRANCH adapter
 
-Input authority:
+Required already-loaded evidence bundle:
 ```text
-branch_id
-branch revision
-trusted owner_user_id
-optional task/session projection IDs
-descriptive branch state
+chat_data.Session
+AgentTaskRecord
+AgentTaskBranchRecord
+```
+
+Required proof:
+```text
+branch.task_id == task.id
+task.session_id == session.id
+session.user_id is present and non-empty
 ```
 
 Output:
 ```text
 source_kind = BRANCH
-authority_id = branch_id
-authority_version = branch revision
+authority_id = branch.branch_id
+authority_version = branch.revision
+owner_user_id = session.user_id
+session_id = session.id
+task_id = task.id
+branch_id = branch.branch_id
+source_state = branch.resolution_state
 ```
 
 Rules:
+- no loose owner_user_id argument exists;
+- branch.created_by is descriptive provenance only;
 - branch lifecycle/resolution remains Agent authority;
 - no branch promotion/merge/resolution decision in CTX.
 
 ### AGENT_TRANSCRIPT adapter
 
-Input authority:
+Required already-loaded evidence bundle:
 ```text
-transcript_ref
-transcript_version
-trusted owner_user_id
-optional session/task/branch projection IDs
+chat_data.Session
+AgentExecutionRecord
+AgentExecutionCheckpointRecord
+```
+
+Required proof:
+```text
+checkpoint.execution_id == execution.id
+checkpoint.session_id == execution.session_id == session.id
+checkpoint.task_id == execution.task_id
+checkpoint.branch_id == execution.branch_id
+checkpoint.transcript_ref is present
+checkpoint.transcript_version is present and >= 0
+session.user_id is present and non-empty
 ```
 
 Output:
 ```text
 source_kind = AGENT_TRANSCRIPT
-authority_id = transcript_ref
-authority_version = transcript_version
+authority_id = checkpoint.transcript_ref
+authority_version = checkpoint.transcript_version
+owner_user_id = session.user_id
+session_id = session.id
+task_id = checkpoint.task_id
+branch_id = checkpoint.branch_id
 ```
 
 Rules:
+- no loose ref/version/owner projection API exists;
 - exact pair remains R11-owned immutable persistence identity;
 - F2B does not materialize, reconstruct, validate ancestry, repair, retain, or GC transcript storage;
 - missing/corrupt R11 transcript evidence fails at the R11 authority boundary;
@@ -131,24 +181,31 @@ Rules:
 
 ### TOOL_RESPONSE_PAYLOAD adapter
 
-Input authority:
+Required already-loaded evidence bundle:
 ```text
-validated ToolResponsePayload
-tool_response_payload_id
-trusted owner_user_id
-optional projection IDs
+chat_data.Session
+AgentExecutionRecord
+CapabilityInvocation
+AgentToolResultRecord
+ToolResponsePayload
 ```
+
+Required proof is defined in section 11 and includes durable result commitment plus exact identity/ownership relationships.
 
 Output:
 ```text
 source_kind = TOOL_RESPONSE_PAYLOAD
-authority_id = tool_response_payload_id
+authority_id = payload.payload_id
 authority_version = None
+owner_user_id = session.user_id
+session_id = session.id
 ```
 
 Rules:
+- no loose owner_user_id argument exists;
 - must re-use CTX-F1 integrity validation before projection;
-- only COMMITTED TRP is eligible;
+- durable AgentToolResult.commit_state == COMMITTED is the commitment authority;
+- self-declared payload COMMITTED is not sufficient;
 - F2B does not persist or garbage-collect TRP;
 - binary/file content remains CAS, not TRP.
 
@@ -178,13 +235,16 @@ ASSET adapter belongs to CTX-F2C after explicit CAS-R0 handoff.
 ## 5. Adapter purity and trust boundary
 
 Each adapter must:
-- accept an already-authoritative typed/native object or explicit trusted fields;
+- accept only an already-loaded authority evidence bundle or structural evidence DTO/Protocol that preserves the frozen native field semantics;
 - derive `ContextSourceRef` only through `create_context_source_ref(...)`;
 - never accept user/model-provided owner identity;
 - never reinterpret provider-local locators as authority;
 - never mutate source subsystem state;
+- never import SQLAlchemy ORM/storage models into the CTX production adapter module; use structural Protocol/evidence DTO interfaces or equivalent decoupled views;
 - never open transactions or repositories merely to construct the projection;
 - never cache globally.
+
+Concrete ORM records may be used by upstream loaders and architecture tests as evidence providers, but CTX projection code must remain storage-layer decoupled.
 
 Adapters are projection helpers, not source readers.
 
@@ -462,6 +522,8 @@ result.execution_id == execution.id
 
 invocation.execution_id == execution.id
 invocation.session_id   == session.id
+invocation.owner_user_id is present and non-empty
+invocation.owner_user_id == session.user_id
 
 payload.source_result_id      == result.id
 payload.invocation_id         == result.invocation_id
@@ -578,7 +640,9 @@ Before F2B semantic freeze, tests must additionally prove:
 - execution mismatch rejects;
 - tool_call mismatch rejects;
 - capability mismatch rejects;
-- owner/session mismatch rejects;
+- invocation owner missing rejects;
+- invocation owner mismatch rejects;
+- payload owner/session mismatch rejects;
 - proven COMMITTED source bundle produces deterministic TRP ContextSourceRef.
 
 ## 14. Updated F2B pre-code gate
