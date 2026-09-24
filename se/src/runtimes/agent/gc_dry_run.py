@@ -207,6 +207,19 @@ async def build_task_gc_dry_run_in_uow(
 
     task_key = add("task", task.id, task)
 
+    # SUBTASK lineage is semantic rather than FK-backed. A task-scoped
+    # collector may not remove a parent Task while any other Task still names
+    # it as parent_task_id, regardless of the child's current lifecycle state.
+    inbound_child_task_rows = await _rows(
+        session,
+        select(AgentTaskRecord).where(
+            AgentTaskRecord.id != task_id,
+            AgentTaskRecord.parent_task_id == task_id,
+        ),
+    )
+    if inbound_child_task_rows:
+        problems.append("external_child_task_reference")
+
     budget_rows = await _rows(
         session,
         select(TaskBudgetRecord).where(TaskBudgetRecord.task_id == task_id),
