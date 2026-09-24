@@ -192,3 +192,16 @@ def test_ctx_f1_rejects_non_json_metadata_leaves_and_unordered_sets():
             source_commit_state="COMMITTED",
             metadata={"tags": {"a", "b"}},
         )
+
+
+
+@pytest.mark.asyncio
+async def test_ctx_f1_repository_rejects_model_copy_with_non_json_metadata():
+    repo = InMemoryToolResponsePayloadRepository()
+    valid = _payload()
+    forged = valid.model_copy(update={"metadata": {"buffer": bytearray(b"abc")}})
+
+    with pytest.raises(ValueError, match="canonical JSON"):
+        await repo.put(forged)
+
+    assert await repo.get(valid.payload_id) is None
