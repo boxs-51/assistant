@@ -1628,18 +1628,13 @@ class AgentRepository(BaseRepository):
         )
         return list(result.scalars().all())
 
-    async def list_legacy_inline_checkpoint_backfill_candidates(
+    async def list_checkpoint_backfill_candidates(
         self,
         *,
         limit: int | None = None,
     ):
         statement = (
             select(AgentExecutionCheckpointRecord)
-            .where(
-                AgentExecutionCheckpointRecord.transcript_snapshot.is_not(None),
-                AgentExecutionCheckpointRecord.transcript_ref.is_(None),
-                AgentExecutionCheckpointRecord.transcript_version.is_(None),
-            )
             .order_by(
                 AgentExecutionCheckpointRecord.created_at.asc(),
                 AgentExecutionCheckpointRecord.checkpoint_id.asc(),
