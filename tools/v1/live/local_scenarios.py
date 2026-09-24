@@ -227,10 +227,16 @@ class PsutilProcessController:
 
 def _validate_terminal_run(result: Mapping[str, Any]) -> bool:
     data = result.get("data")
+    if not isinstance(data, Mapping):
+        return False
+    stdout = data.get("stdout")
+    cwd = data.get("cwd")
     return (
-        isinstance(data, Mapping)
-        and data.get("exit_code") == 0
-        and LOCAL_MARKER in str(data.get("stdout", ""))
+        data.get("exit_code") == 0
+        and isinstance(stdout, str)
+        and LOCAL_MARKER in stdout
+        and isinstance(cwd, str)
+        and bool(cwd)
     )
 
 
@@ -245,9 +251,12 @@ def _validate_file_write(result: Mapping[str, Any]) -> bool:
 
 def _validate_file_read(result: Mapping[str, Any]) -> bool:
     data = result.get("data")
+    if not isinstance(data, Mapping):
+        return False
+    content = data.get("content")
     return (
-        isinstance(data, Mapping)
-        and LOCAL_MARKER in str(data.get("content", ""))
+        isinstance(content, str)
+        and LOCAL_MARKER in content
         and data.get("eof") is True
     )
 
@@ -259,20 +268,26 @@ def _validate_glob(result: Mapping[str, Any]) -> bool:
     matches = data.get("matches")
     if not isinstance(matches, list):
         return False
-    return any(
-        isinstance(item, Mapping)
-        and Path(str(item.get("path", ""))).name == LOCAL_FILE_NAME
-        for item in matches
-    )
+    for item in matches:
+        if not isinstance(item, Mapping):
+            continue
+        path = item.get("path")
+        if isinstance(path, str) and Path(path).name == LOCAL_FILE_NAME:
+            return True
+    return False
 
 
 def _validate_launch(result: Mapping[str, Any]) -> bool:
     data = result.get("data")
+    if not isinstance(data, Mapping):
+        return False
+    cwd = data.get("cwd")
     return (
-        isinstance(data, Mapping)
-        and type(data.get("pid")) is int
+        type(data.get("pid")) is int
         and data["pid"] > 0
         and data.get("started") is True
+        and isinstance(cwd, str)
+        and bool(cwd)
     )
 
 
