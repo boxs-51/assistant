@@ -4,7 +4,7 @@
 **Issue authority:** #31  
 **Pull request:** #40  
 **Canonical base:** `main@78479a64a97353094817b92a090449191782d366`  
-**R11-A code/test candidate:** `688d5f5243db26575bdf453a3aa269d983062886`  
+**R11-A code/test candidate:** `42339745f7939a98e5d417d4a6d2d2f738ea6470`  
 **Status:** COMPLETION CANDIDATE / INDEPENDENT AUDIT PENDING
 
 > This document records R11-A evidence. It does not authorize R11-B by itself.
@@ -46,7 +46,7 @@ PTC-1-3  CLOSED / FINAL GREEN
 TV1-T9   CLOSED / MERGED / FROZEN / POST-MERGE GREEN
 Issue #16 CLOSED
 CTX #15  FUTURE / PARKED
-TV1-T10 Issue #38 OPEN / T10-A CLAIMED / CONTRACT-DOC STAGE / NO RUNTIME DELTA
+TV1-T10 Issue #38 OPEN / T10-A CLOSED-GREEN / T10-B OPEN / T10-C CLOSED
 ```
 
 Canonical main remained:
@@ -459,3 +459,184 @@ R11-A is **not final-closed** until the independent audit records no blocking
 A-level P0/P1.
 
 R11-B remains CLOSED until that decision.
+
+
+---
+
+## 15. Independent-audit P1 closure candidate — expanded pre-optimization baseline
+
+Independent audit on the earlier completion candidate found that R11-A had not
+yet measured every dimension promised before R11-B. The owner preserved all
+earlier evidence and added new RED-first measurement coverage.
+
+### Architecture #951 — real writer bytes + reconstruction percentiles
+
+Exact RED candidate:
+```text
+eb168e5326563c4f4e9825d985d7c05a819cf3dd
+```
+
+Result:
+```text
+Linux   1 intentional sentinel failed
+        1439 passed / 1 skipped / 159 subtests
+Windows SUCCESS
+```
+
+Real DBAPI checkpoint INSERT bound-parameter bytes through the production
+`commit_waiting_checkpoint()` path:
+
+```text
+10 messages      2,503 B
+100 messages    23,926 B
+1000 messages  238,129 B
+```
+
+Fork-safe reconstruction, 20 samples per shape:
+
+```text
+messages   p50        p95         p99
+10         ~2.37 ms   ~2.56 ms    ~4.78 ms
+100        ~2.94 ms   ~3.02 ms    ~5.93 ms
+1000       ~8.54 ms   ~10.49 ms   ~181.47 ms
+```
+
+The high p99 outlier is retained as evidence and is why timing remains a
+measurement/non-regression input rather than an exact shared-runner CI
+threshold.
+
+### Architecture #952 — branch percentiles, rows-per-Task, synchronized CAS
+
+Exact RED candidate:
+```text
+9428426544466871791466464c74ecc88c5f9154
+```
+
+Result:
+```text
+Linux   2 intentional sentinels failed
+        1439 passed / 1 skipped / 159 subtests
+Windows SUCCESS
+```
+
+Branch-create distribution over ten real durable FORK consumes:
+
+```text
+p50 ~16.63 ms
+p95 ~35.60 ms
+p99 ~35.60 ms
+```
+
+Rows-per-Task for the frozen workload:
+
+```text
+root WAITING  10 durable rows
+after 1 FORK  16 durable rows
+```
+
+The synchronized contention harness uses a one-shot barrier at the first
+Task CAS boundary so both contenders arrive before either CAS proceeds.
+
+Observed authority:
+```text
+barrier arrivals      2
+winner                1
+conflict              1
+final active branches 2
+final budget revision 3
+
+Task CAS p50          ~1.93 ms
+Task CAS p95/p99      ~20.30 ms
+TaskBudget CAS        one winner sample ~1.73 ms
+```
+
+Only the winning contender reaches TaskBudget CAS in this final-capacity race;
+the losing contender fails at the earlier Task activity CAS authority.
+
+### Architecture #953 — real RESUME planning/claim distribution
+
+Exact RED candidate:
+```text
+3206b061bb3e6d69a4311197fe049b79982206c5
+```
+
+Result:
+```text
+Linux   exactly 3 intentional measurement sentinels failed
+        1439 passed / 1 skipped / 159 subtests
+Windows SUCCESS
+```
+
+Twenty independent normalized CONNECTION-WAITING executions exercised:
+
+```text
+AgentResumePlanningService.build_resume_plan()
+  -> DurableAgentStore.get_or_create_resume_claim()
+  -> DurableAgentStore.consume_resume_claim()
+```
+
+using 100-message checkpoint transcripts.
+
+```text
+phase           p50        p95        p99
+planning        ~9.65 ms   ~10.72 ms  ~13.07 ms
+claim+consume   ~11.76 ms  ~13.31 ms  ~17.69 ms
+end-to-end      ~21.51 ms  ~24.03 ms  ~30.76 ms
+```
+
+### Architecture #957 — all new sentinels removed
+
+Exact test HEAD:
+```text
+42339745f7939a98e5d417d4a6d2d2f738ea6470
+```
+
+Result:
+```text
+Linux:
+1442 passed
+1 skipped
+51 warnings
+159 subtests passed
+
+Windows:
+101 passed
+2 warnings
+
+Conclusion:
+SUCCESS / SUCCESS
+```
+
+All new timing measurements remain evidence-only. CI asserts deterministic
+storage shape, row counts, materialization validity, percentile ordering, and
+race authority rather than exact host timing.
+
+### P1-R11-A-MEAS-1 status
+
+```text
+resume latency distribution:              PRESENT
+reconstruction p50/p95/p99:              PRESENT
+rows-per-Task baseline:                   PRESENT
+real checkpoint writer serialized bytes: PRESENT
+synchronized Task/TaskBudget CAS race:    PRESENT
+branch-create distribution:               PRESENT
+production behavior change:               NONE
+```
+
+P1-R11-A-MEAS-1 is ready for independent closure review.
+
+### P1-R11-0-DEP-1 current-state sync
+
+At this same checkpoint:
+
+```text
+Issue #38   OPEN
+T10-A       CLOSED / GREEN
+T10-B       OPEN / side-effect-free helper+unit-test scope
+candidate   e8a74f26b70fa76c75dd0607ccd131bdeb888826
+T10-C       CLOSED
+R11 overlap none
+```
+
+This replaces the stale earlier T10-A-claimed snapshot. P1-R11-0-DEP-1 is ready
+for independent closure review against this current-state record.
