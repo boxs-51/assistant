@@ -1,3 +1,5 @@
+import inspect
+
 from cl.src.ui.bridge import UIBridge
 
 
@@ -187,6 +189,22 @@ def test_skill_tool_and_agent_app_actions_hide_endpoint_orchestration():
     assert run["data"]["task"]["status"] == "RUNNING"
     assert bridge.get_agent_task_status("task-1")["data"]["status"] == "COMPLETED"
     assert bridge.cancel_agent_task("task-1")["data"]["status"] == "CANCELLED"
+
+
+def test_execute_tool_rejects_a_missing_tool_name_without_raising():
+    bridge, _, gateway = _bridge()
+
+    result = bridge.execute_tool()
+
+    assert result == {"success": False, "error": "Tool name is required."}
+    assert gateway.registered_skills == []
+
+
+def test_execute_tool_signature_does_not_shadow_javascript_arguments_object():
+    parameter_names = list(inspect.signature(UIBridge.execute_tool).parameters)
+
+    assert parameter_names == ["self", "tool_name", "tool_arguments"]
+    assert "arguments" not in parameter_names
 
 
 def test_account_actions_are_exposed_through_bridge_without_leaking_exceptions():

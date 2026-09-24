@@ -1,14 +1,29 @@
 .gateway-panel {
-  flex: 1;
+  flex: 1 1 0;
   min-height: 0;
   overflow-y: auto;
   overscroll-behavior: contain;
   padding: 16px 12px 20px;
   color: var(--text-main, #cdd6f4);
   scrollbar-gutter: stable;
+  scrollbar-color: rgba(255, 255, 255, 0.32) transparent;
+  scrollbar-width: thin;
 }
 
 #page-gateway { min-height: 0; }
+
+.gateway-panel::-webkit-scrollbar {
+  width: 7px;
+}
+
+.gateway-panel::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.32);
+  border-radius: 4px;
+}
+
+.gateway-panel::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.5);
+}
 
 .gateway-heading {
   display: flex;

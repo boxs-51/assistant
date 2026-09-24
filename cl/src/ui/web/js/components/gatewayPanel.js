@@ -26,7 +26,7 @@ function setOutput(panel, value, error = false) {
 async function callBridge(method, ...args) {
   const target = window.pywebview?.api?.[method];
   if (!target) throw new Error(`Bridge method '${method}' chưa sẵn sàng.`);
-  const response = await target.apply(window.pywebview.api, args);
+  const response = await target(...args);
   if (response?.success === false) throw new Error(response.error || 'Thao tác thất bại.');
   return response?.data ?? response;
 }

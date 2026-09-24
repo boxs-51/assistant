@@ -531,6 +531,6 @@ export function switchSidebarPage(pageName) {
   });
 
   document.querySelectorAll('.sidebar-page').forEach(page => {
-    page.style.display = page.id === `page-${pageName}` ? 'block' : 'none';
+    page.style.display = page.id === `page-${pageName}` ? 'flex' : 'none';
   });
 }

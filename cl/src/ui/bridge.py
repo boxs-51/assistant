@@ -217,9 +217,12 @@ class UIBridge:
         self._record_activity("skill.deactivate", "success" if unloaded else "error", skill_name)
         return {"success": unloaded, "data": {"name": skill_name, "loaded": False}}
 
-    def execute_tool(self, tool_name: str, arguments: dict = None):
-        arguments = arguments or {}
-        if not isinstance(arguments, dict):
+    def execute_tool(self, tool_name: str = None, tool_arguments: dict = None):
+        if not isinstance(tool_name, str) or not tool_name.strip():
+            return {"success": False, "error": "Tool name is required."}
+        tool_name = tool_name.strip()
+        tool_arguments = tool_arguments or {}
+        if not isinstance(tool_arguments, dict):
             return {"success": False, "error": "Tool arguments phải là object."}
         try:
             local = self._engine.registry.get_tool(tool_name)
@@ -227,7 +230,7 @@ class UIBridge:
             risk_level = str(metadata.get("base_risk", "HIGH")).upper()
             approved = self._engine.hitl.request_approval(
                 tool_name,
-                arguments,
+                tool_arguments,
                 risk_level,
                 "Thực thi Tool trực tiếp từ giao diện.",
             )
@@ -235,7 +238,7 @@ class UIBridge:
                 raise PermissionError("Tool execution was not approved.")
             result = self._engine.gateway_client.execute_capability(
                 tool_name,
-                {"arguments": arguments},
+                {"arguments": tool_arguments},
             )
             self._record_activity("tool.execute", "success", tool_name)
             return {"success": True, "data": result}
