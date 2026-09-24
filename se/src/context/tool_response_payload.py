@@ -27,12 +27,52 @@ class ToolResponsePayloadConflictError(RuntimeError):
     """Raised when one immutable source identity is reused inconsistently."""
 
 
+def _validate_json_input(value: Any, *, path: str = "$") -> None:
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return
+    if isinstance(value, list):
+        for index, item in enumerate(value):
+            _validate_json_input(item, path=f"{path}[{index}]")
+        return
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"ToolResponsePayload JSON object keys must be strings at {path}."
+                )
+            _validate_json_input(item, path=f"{path}.{key}")
+        return
+    raise ValueError(
+        f"ToolResponsePayload values must use canonical JSON containers at {path}."
+    )
+
+
 def _freeze_json(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return MappingProxyType({str(key): _freeze_json(item) for key, item in value.items()})
+    if isinstance(value, dict):
+        return MappingProxyType({key: _freeze_json(item) for key, item in value.items()})
     if isinstance(value, list):
         return tuple(_freeze_json(item) for item in value)
     return value
+
+
+def _validate_frozen_json(value: Any, *, path: str = "$") -> None:
+    if value is None or isinstance(value, (str, bool, int, float)):
+        return
+    if isinstance(value, MappingProxyType):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"ToolResponsePayload frozen JSON keys must be strings at {path}."
+                )
+            _validate_frozen_json(item, path=f"{path}.{key}")
+        return
+    if isinstance(value, tuple):
+        for index, item in enumerate(value):
+            _validate_frozen_json(item, path=f"{path}[{index}]")
+        return
+    raise ValueError(
+        f"ToolResponsePayload contains a non-frozen JSON container at {path}."
+    )
 
 
 def _thaw_json(value: Any) -> Any:
@@ -45,6 +85,7 @@ def _thaw_json(value: Any) -> Any:
 
 def canonical_payload_bytes(value: Any) -> bytes:
     """Return canonical JSON bytes for supported CTX-F1 values."""
+    _validate_json_input(value)
     try:
         encoded = json.dumps(
             value,
@@ -164,6 +205,8 @@ def validate_tool_response_payload_integrity(
     if payload.source_commit_state != COMMITTED_RESULT_STATE:
         raise ValueError("Only COMMITTED tool results may create ToolResponsePayload.")
 
+    _validate_frozen_json(payload.content, path="$.content")
+    _validate_frozen_json(payload.metadata, path="$.metadata")
     canonical = canonical_payload_bytes(_thaw_json(payload.content))
     canonical_payload_bytes(_thaw_json(payload.metadata))
     expected_digest = hashlib.sha256(canonical).hexdigest()
