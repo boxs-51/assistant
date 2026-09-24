@@ -328,3 +328,34 @@ def test_ctx_f2_integrity_rejects_unvalidated_source_kind():
 
     with pytest.raises(ValueError, match="source_kind must be a ContextSourceKind"):
         validate_context_source_ref_integrity(forged)
+
+
+def test_ctx_f2_integrity_rejects_non_object_frozen_metadata_root():
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+    )
+    forged = valid.model_copy(update={"metadata": ()})
+
+    with pytest.raises(ValueError, match="metadata root must be a frozen JSON object"):
+        validate_context_source_ref_integrity(forged)
+
+
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("owner_user_id", {"bad": "owner"}, "owner_user_id must be a string"),
+        ("authority_id", ["bad-authority"], "authority_id must be a string"),
+    ],
+)
+def test_ctx_f2_integrity_rejects_non_string_identity_fields(field, value, message):
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+    )
+    forged = valid.model_copy(update={field: value})
+
+    with pytest.raises(ValueError, match=message):
+        validate_context_source_ref_integrity(forged)
