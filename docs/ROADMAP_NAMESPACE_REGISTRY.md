@@ -131,17 +131,22 @@ TV1-T10 Live Harness & Real-Machine Exit Gate
 
 TV1-T10 is now coordinated by Issue #38.
 
-Current live state:
+Current live state at this R11 checkpoint:
 ```text
 Issue #38  OPEN
-TV1-T10-A CLAIMED
-candidate  71b5b355dfb449d5dd633e5cb7b9df6aa1451fac
-scope      one contract-doc file under tools/v1/live/**
-production/runtime/test delta 0
+TV1-T10-A CLOSED / GREEN @ 71b5b355
+TV1-T10-B OPEN / helper+unit-test stage
+candidate  e8a74f26b70fa76c75dd0607ccd131bdeb888826
+P1 PID reuse ownership fence   CLOSED
+P1 evidence message leak       CLOSED semantically
+stale assertion                FIXED
+T10-B closure                  CI + final audit pending
+T10-C                          CLOSED
 ```
 
-TV1-T10-A is contract-doc stage only. Real-machine execution and production
-tool-runtime changes are not authorized by this state.
+T10-B remains side-effect-free live-helper/unit-test work. It authorizes no
+external network, real GUI, persistent real background-process execution, or
+Agent Execution persistence changes. Exact R11 path overlap remains none.
 
 ### Historical T7/T8 wording
 
@@ -347,8 +352,9 @@ Rules:
 - PTC-1 through PTC-3 are CLOSED / merged / FINAL GREEN and are inherited
   authority for later Agent work.
 - AE-R11 is the active Agent roadmap phase under Issue #31.
-- TV1-T10 is coordinated by Issue #38; T10-A is CLAIMED at contract-doc stage
-  only, with no production/runtime changes and no R11 path overlap.
+- TV1-T10 is coordinated by Issue #38; T10-A is CLOSED/GREEN and T10-B is OPEN
+  in side-effect-free helper/unit-test scope, with no Agent Execution/R11 path
+  overlap.
 - CAS-F5+ and CTX-F* remain parked behind AE-R14 and require fresh post-R14 audits.
 
 ---
@@ -450,7 +456,7 @@ Issue #16 CLOSED / completed
 
 TV1-T8   CLOSED / GREEN / FINAL-FROZEN / Issue #7
 TV1-T9   CLOSED / MERGED / FROZEN / POST-MERGE GREEN / Issue #12
-TV1-T10  Issue #38 OPEN / T10-A CLAIMED / CONTRACT-DOC STAGE / NO RUNTIME DELTA
+TV1-T10  Issue #38 OPEN / T10-A CLOSED-GREEN / T10-B OPEN / T10-C CLOSED
 
 PTC-1-3  CLOSED / MERGED / FINAL GREEN / Issue #8
 
