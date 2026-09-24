@@ -4,7 +4,7 @@
 **Issue authority:** #31  
 **Pull request:** #40  
 **Canonical base:** `main@78479a64a97353094817b92a090449191782d366`  
-**R11-A code/test candidate:** `42339745f7939a98e5d417d4a6d2d2f738ea6470`  
+**R11-A code/test candidate:** `efdc3924d1bec4453772d746a9b4b5e18831281a`  
 **Status:** COMPLETION CANDIDATE / INDEPENDENT AUDIT PENDING
 
 > This document records R11-A evidence. It does not authorize R11-B by itself.
@@ -640,3 +640,82 @@ R11 overlap none
 
 This replaces the stale earlier T10-A-claimed snapshot. P1-R11-0-DEP-1 is ready
 for independent closure review against this current-state record.
+
+
+---
+
+## 16. Direct TaskBudget CAS contention addendum
+
+A parallel R11-A agent strengthened the contention baseline after the first
+expanded-measurement GREEN by instrumenting the TaskBudget CAS directly.
+
+### Architecture #959
+
+Exact RED candidate:
+```text
+da5a3a6c10defcb80d6bcf905c2c02dc69eb4f0b
+```
+
+Result:
+```text
+Linux   exactly 1 intentional sentinel failed
+        1442 passed / 1 skipped / 159 subtests
+Windows SUCCESS
+```
+
+Ten independent Tasks each run two concurrent `reserve_branch_slot()` calls.
+A one-shot barrier is inside
+`AgentRepository.compare_and_set_task_budget()`, so both contenders reach the
+TaskBudget CAS boundary before proceeding.
+
+Observed:
+```text
+samples                  10
+service calls            20
+service successes        20
+barrier arrivals         20
+
+TaskBudget CAS attempts  30
+CAS successes            20
+CAS stale/retry          10
+CAS locked                0
+other CAS errors          0
+
+final active branches    20 total
+reservation rows         20 total
+
+CAS latency:
+p50 ~1.57 ms
+p95 ~4.49 ms
+p99 ~4.62 ms
+
+two-call race latency:
+p50 ~11.78 ms
+p95 ~16.31 ms
+p99 ~16.31 ms
+```
+
+The extra ten CAS attempts are the expected stale/retry authority: each race
+produces two committed reservations while one contender must retry after losing
+the first shared revision.
+
+The sentinel was removed at:
+```text
+efdc3924d1bec4453772d746a9b4b5e18831281a
+```
+
+CI retains deterministic assertions for:
+- both service calls succeeding;
+- exactly two barrier arrivals per race;
+- two committed CAS successes per Task;
+- one or more stale/locked retry signals per race;
+- zero unexpected CAS error classes;
+- final budget counters;
+- reservation-row cardinality;
+- valid percentile ordering.
+
+Exact timing values remain evidence-only.
+
+This direct CAS distribution supersedes any ambiguity in the earlier
+FORK-capacity contention measurement and fully satisfies the frozen
+TaskBudget-contention measurement requirement for R11-A.
