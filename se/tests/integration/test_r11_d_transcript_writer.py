@@ -3,13 +3,23 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.models.sql.agent import (
+    AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
+    AgentTranscriptRepresentationRecord,
 )
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
+from se.src.infrastructure.storage.transcript_representation import (
+    canonical_transcript_messages,
+    transcript_chunk_id,
+)
+from se.src.runtimes.agent.checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+)
 from se.src.runtimes.agent.checkpoint_transcript_writer import (
     write_transcript_representation_in_uow,
 )
@@ -222,26 +232,45 @@ async def test_r11_d_depth_ten_reanchors_full_with_structural_prefix_share(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_r11_d_unproven_rewrite_forces_independent_full(tmp_path):
+async def test_r11_d_rewrite_full_shares_maximal_common_prefix(tmp_path):
     engine, sessions = await _database(tmp_path)
     try:
         async with sessions() as session:
             uow = _Uow(session)
+            original = [_message("a"), _message("b"), _message("c"), _message("d")]
             first = await write_transcript_representation_in_uow(
                 uow,
-                messages=[_message("a"), _message("b")],
+                messages=original,
             )
             await _execution_and_checkpoint(
                 uow,
                 execution_id="exec-rewrite",
                 checkpoint_id="cp-rewrite",
                 representation=first,
-                snapshot=[_message("a"), _message("b")],
+                snapshot=original,
             )
 
+            first_record = await uow.agents.get_transcript_representation(
+                first.transcript_ref,
+                first.transcript_version,
+            )
+            prefix_root = await uow.agents.get_transcript_payload_node(
+                first_record.payload_root_ref
+            )
+            while int(prefix_root.logical_message_count) > 3:
+                prefix_root = await uow.agents.get_transcript_payload_node(
+                    prefix_root.parent_payload_root_ref
+                )
+
+            rewritten_messages = [
+                _message("a"),
+                _message("b"),
+                _message("c"),
+                _message("x"),
+            ]
             rewritten = await write_transcript_representation_in_uow(
                 uow,
-                messages=[_message("a"), _message("c")],
+                messages=rewritten_messages,
                 candidate_parent_checkpoint_id="cp-rewrite",
             )
             record = await uow.agents.get_transcript_representation(
@@ -251,6 +280,119 @@ async def test_r11_d_unproven_rewrite_forces_independent_full(tmp_path):
             assert record.kind == "FULL"
             assert record.parent_transcript_ref is None
             assert record.parent_transcript_version is None
+
+            root = await uow.agents.get_transcript_payload_node(record.payload_root_ref)
+            assert root.parent_payload_root_ref == prefix_root.payload_root_ref
+            assert await uow.agents.get_transcript_chunk(
+                transcript_chunk_id(canonical_transcript_messages(rewritten_messages))
+            ) is None
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_delete_full_reuses_existing_prefix_root(tmp_path):
+    engine, sessions = await _database(tmp_path)
+    try:
+        async with sessions() as session:
+            uow = _Uow(session)
+            original = [_message("a"), _message("b"), _message("c"), _message("d")]
+            first = await write_transcript_representation_in_uow(
+                uow,
+                messages=original,
+            )
+            await _execution_and_checkpoint(
+                uow,
+                execution_id="exec-delete",
+                checkpoint_id="cp-delete",
+                representation=first,
+                snapshot=original,
+            )
+
+            first_record = await uow.agents.get_transcript_representation(
+                first.transcript_ref,
+                first.transcript_version,
+            )
+            prefix_root = await uow.agents.get_transcript_payload_node(
+                first_record.payload_root_ref
+            )
+            while int(prefix_root.logical_message_count) > 3:
+                prefix_root = await uow.agents.get_transcript_payload_node(
+                    prefix_root.parent_payload_root_ref
+                )
+
+            chunk_count_before = await session.scalar(
+                select(func.count()).select_from(
+                    type(await uow.agents.get_transcript_chunk(prefix_root.chunk_id))
+                )
+            )
+
+            deleted = await write_transcript_representation_in_uow(
+                uow,
+                messages=original[:3],
+                candidate_parent_checkpoint_id="cp-delete",
+            )
+            record = await uow.agents.get_transcript_representation(
+                deleted.transcript_ref,
+                deleted.transcript_version,
+            )
+            assert record.kind == "FULL"
+            assert record.payload_root_ref == prefix_root.payload_root_ref
+
+            chunk_count_after = await session.scalar(
+                select(func.count()).select_from(
+                    type(await uow.agents.get_transcript_chunk(prefix_root.chunk_id))
+                )
+            )
+            assert chunk_count_after == chunk_count_before
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_dual_mismatch_candidate_fails_before_child_representation(tmp_path):
+    engine, sessions = await _database(tmp_path)
+    try:
+        async with sessions() as session:
+            uow = _Uow(session)
+            original = [_message("a"), _message("b")]
+            first = await write_transcript_representation_in_uow(
+                uow,
+                messages=original,
+            )
+            await _execution_and_checkpoint(
+                uow,
+                execution_id="exec-dual",
+                checkpoint_id="cp-dual",
+                representation=first,
+                snapshot=original,
+            )
+
+            await session.execute(
+                update(AgentExecutionCheckpointRecord)
+                .where(AgentExecutionCheckpointRecord.checkpoint_id == "cp-dual")
+                .values(transcript_snapshot=[_message("forged")])
+            )
+            await session.flush()
+
+            before = await session.scalar(
+                select(func.count()).select_from(AgentTranscriptRepresentationRecord)
+            )
+            with pytest.raises(
+                CheckpointTranscriptMaterializationError,
+                match="DUAL_TRANSCRIPT_MISMATCH",
+            ):
+                await write_transcript_representation_in_uow(
+                    uow,
+                    messages=original + [_message("child")],
+                    candidate_parent_checkpoint_id="cp-dual",
+                )
+            after = await session.scalar(
+                select(func.count()).select_from(AgentTranscriptRepresentationRecord)
+            )
+            assert after == before
             await session.rollback()
     finally:
         await engine.dispose()
