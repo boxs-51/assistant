@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from uuid import uuid4
+
 from tools.v1.live.harness import (
     ARTIFACT_ROOT_ENV,
     MASTER_GATE_ENV,
@@ -53,7 +55,7 @@ def _failure(code, *, retryable=True):
     }
 
 
-def _config(tmp_path):
+def _config(tmp_path, *, run_id="network-unit"):
     repo = tmp_path / "repo"
     repo.mkdir(exist_ok=True)
     return create_live_run_config(
@@ -64,7 +66,7 @@ def _config(tmp_path):
             NETWORK_GATE_ENV: "1",
             ARTIFACT_ROOT_ENV: str(tmp_path / "artifacts"),
         },
-        run_id="network-unit",
+        run_id=run_id,
     )
 
 
@@ -179,7 +181,7 @@ def test_network_remote_unavailability_is_classified_without_local_effects(tmp_p
 
 
 def _search_evidence(tmp_path, payload):
-    config = _config(tmp_path)
+    config = _config(tmp_path, run_id=f"network-unit-{uuid4().hex}")
     evidence = ScenarioRunner(config).run(
         (
             build_network_scenario(
