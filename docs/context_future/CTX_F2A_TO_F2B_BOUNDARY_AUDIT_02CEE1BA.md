@@ -280,3 +280,319 @@ F2B may be considered semantic GREEN only when:
 - Issue #15 independent audit has no open P0/P1.
 
 F2C remains CLOSED until Issue #47 explicitly hands off canonical CAS source evidence.
+
+
+## 10. Pre-code blocker closure: canonical source-authority evidence
+
+This section closes the pre-code authority ambiguity raised by independent audit.
+
+### 10.1 Canonical CTX SESSION authority
+
+For F2B, `ContextSourceKind.SESSION` maps **only** to the canonical chat/conversation session authority:
+
+```text
+se/src/infrastructure/storage/models/sql/chat_data/session.py
+Session
+  id
+  user_id
+  status
+  created_at
+```
+
+It does **not** map to:
+
+```text
+AgentSessionRecord / agent_sessions
+```
+
+`AgentSessionRecord` is a distinct multi-agent control-plane namespace and must not be collapsed into the single F2A SESSION source kind.
+
+Eligibility rule:
+
+```text
+Session.user_id must be present and non-empty
+owner_user_id = Session.user_id
+authority_id  = Session.id
+```
+
+No caller-supplied owner string may substitute for `Session.user_id`.
+
+### 10.2 TASK evidence chain
+
+The pure TASK adapter must consume the already-loaded authoritative pair:
+
+```text
+Chat Session
+AgentTaskRecord
+```
+
+and prove:
+
+```text
+task.session_id == session.id
+session.user_id is present
+```
+
+Then and only then:
+
+```text
+owner_user_id    = session.user_id
+authority_id     = task.id
+authority_version= task.revision
+session_id       = session.id
+task_id          = task.id
+source_state     = task.status
+```
+
+`task.created_by` is descriptive provenance and MUST NOT substitute for owner authority.
+
+### 10.3 BRANCH evidence chain
+
+The pure BRANCH adapter must consume:
+
+```text
+Chat Session
+AgentTaskRecord
+AgentTaskBranchRecord
+```
+
+and prove:
+
+```text
+branch.task_id  == task.id
+task.session_id == session.id
+session.user_id is present
+```
+
+Then:
+
+```text
+owner_user_id     = session.user_id
+authority_id      = branch.branch_id
+authority_version = branch.revision
+session_id        = session.id
+task_id           = task.id
+branch_id         = branch.branch_id
+source_state      = branch.resolution_state
+```
+
+`branch.created_by` is never owner authority.
+
+### 10.4 AGENT_TRANSCRIPT evidence chain
+
+A loose `(transcript_ref, transcript_version, owner_user_id)` tuple is forbidden.
+
+The adapter must consume already-loaded authoritative evidence:
+
+```text
+Chat Session
+AgentExecutionRecord
+AgentExecutionCheckpointRecord
+```
+
+and prove:
+
+```text
+checkpoint.execution_id == execution.id
+checkpoint.session_id   == execution.session_id
+execution.session_id    == session.id
+
+checkpoint.task_id      == execution.task_id
+checkpoint.branch_id    == execution.branch_id
+
+checkpoint.transcript_ref     is present
+checkpoint.transcript_version is present and >= 0
+session.user_id                is present
+```
+
+If task_id/branch_id are absent on both sides, equality remains valid as `None == None`.
+Any mismatch rejects projection.
+
+Then:
+
+```text
+owner_user_id     = session.user_id
+authority_id      = checkpoint.transcript_ref
+authority_version = checkpoint.transcript_version
+session_id        = session.id
+task_id           = checkpoint.task_id
+branch_id         = checkpoint.branch_id
+```
+
+F2B does not materialize or validate transcript content/ancestry. The evidence chain only proves that the exact R11-owned pair belongs to the same canonical execution/session lineage. R11 remains the authority for reconstruction, DUAL equivalence, ancestry, corruption taxonomy, retention and GC.
+
+### 10.5 No repository reads inside adapters
+
+F2B projection helpers may validate relationships among evidence objects passed to them, but they MUST NOT perform SQL/repository/network lookups.
+
+The source-authority layer that already owns/loads those records supplies the evidence bundle. F2B only:
+1. verifies exact cross-record identity relations;
+2. derives owner from canonical Chat Session;
+3. calls `create_context_source_ref(...)`.
+
+This preserves:
+
+```text
+source authority / loading != CTX projection
+```
+
+## 11. Pre-code blocker closure: proven TRP commitment authority
+
+A self-consistent `ToolResponsePayload.source_commit_state == "COMMITTED"` is not sufficient durable proof.
+
+F2B TRP projection must consume the full already-loaded authority evidence bundle:
+
+```text
+Chat Session
+AgentExecutionRecord
+CapabilityInvocation
+AgentToolResultRecord
+ToolResponsePayload
+```
+
+Required checks before projection:
+
+```text
+session.user_id is present
+
+execution.session_id == session.id
+
+result.commit_state == "COMMITTED"
+result.execution_id == execution.id
+
+invocation.execution_id == execution.id
+invocation.session_id   == session.id
+
+payload.source_result_id      == result.id
+payload.invocation_id         == result.invocation_id
+payload.execution_id          == result.execution_id
+payload.tool_call_id          == result.tool_call_id
+payload.logical_capability_id == result.capability_id
+
+invocation.invocation_id == result.invocation_id
+invocation.tool_call_id  == result.tool_call_id
+invocation.capability_id == result.capability_id
+```
+
+If the optional payload projection fields are present, they must also agree:
+
+```text
+payload.owner_user_id is None OR payload.owner_user_id == session.user_id
+payload.session_id    is None OR payload.session_id == session.id
+```
+
+The adapter must additionally run the existing CTX-F1 ToolResponsePayload integrity validator.
+
+Only after all checks pass:
+
+```text
+owner_user_id    = session.user_id
+authority_id     = payload.payload_id
+authority_version= None
+source_kind      = TOOL_RESPONSE_PAYLOAD
+```
+
+### Why this is required
+
+`ToolResponsePayload` is a dormant immutable projection created under the precondition "source result already committed." Its own `source_commit_state` field does not replace R7 durable commitment authority.
+
+Therefore:
+
+```text
+payload says COMMITTED
+!=
+durable AgentToolResult commitment proof
+```
+
+F2B must never upgrade a self-declared payload flag into source authority.
+
+## 12. Revised F2B function contracts
+
+The production candidate may expose pure functions conceptually equivalent to:
+
+```text
+project_session_source(session)
+
+project_task_source(
+    session,
+    task,
+)
+
+project_branch_source(
+    session,
+    task,
+    branch,
+)
+
+project_agent_transcript_source(
+    session,
+    execution,
+    checkpoint,
+)
+
+project_tool_response_payload_source(
+    session,
+    execution,
+    invocation,
+    result,
+    payload,
+)
+```
+
+No loose `owner_user_id` argument is accepted by TASK/BRANCH/TRANSCRIPT/TRP adapters.
+
+The SESSION adapter derives owner directly from canonical Chat Session.
+
+## 13. Revised authority-negative acceptance matrix
+
+Before F2B semantic freeze, tests must additionally prove:
+
+### SESSION namespace
+- Chat Session projects successfully;
+- missing/empty Chat Session user_id rejects;
+- AgentSessionRecord is not accepted as CTX SESSION authority.
+
+### TASK
+- task.session_id mismatch rejects;
+- caller cannot substitute a different owner;
+- task.created_by cannot become owner authority.
+
+### BRANCH
+- branch.task_id mismatch rejects;
+- task.session_id mismatch rejects;
+- branch.created_by cannot become owner authority.
+
+### AGENT_TRANSCRIPT
+- checkpoint.execution_id mismatch rejects;
+- checkpoint/session vs execution/session mismatch rejects;
+- checkpoint.task_id vs execution.task_id mismatch rejects;
+- checkpoint.branch_id vs execution.branch_id mismatch rejects;
+- missing transcript_ref/version rejects;
+- no loose ref/version/owner projection function exists.
+
+### TOOL_RESPONSE_PAYLOAD
+- self-consistent payload claiming COMMITTED with no source proof is not a valid adapter input;
+- durable PROVISIONAL AgentToolResult + self-declared COMMITTED payload rejects;
+- source_result mismatch rejects;
+- invocation mismatch rejects;
+- execution mismatch rejects;
+- tool_call mismatch rejects;
+- capability mismatch rejects;
+- owner/session mismatch rejects;
+- proven COMMITTED source bundle produces deterministic TRP ContextSourceRef.
+
+## 14. Updated F2B pre-code gate
+
+```text
+P1-CTX-F2B-SOURCE-AUTHORITY-1:
+  CONTRACT FIXED CANDIDATE
+
+P1-CTX-F2B-TRP-COMMIT-AUTHORITY-1:
+  CONTRACT FIXED CANDIDATE
+
+F2B production code:
+  STILL CLOSED pending independent re-audit
+
+F2C / ASSET adapter:
+  CLOSED pending Issue #47 canonical content-evidence handoff
+```
