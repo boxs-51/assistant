@@ -33,6 +33,8 @@ def test_r11_f1b_source_freezes_f0_f1a_graph_families():
     source = inspect.getsource(build_task_gc_dry_run_in_uow)
     required = (
         "TaskBudgetReservationRecord",
+        "parent_task_id",
+        "external_child_task_reference",
         "AgentTaskBranchContextRecord",
         "AgentTaskForkAdmissionRecord",
         "AgentTaskRetryAdmissionRecord",
