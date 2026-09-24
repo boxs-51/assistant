@@ -4,7 +4,9 @@ from tools.v1.live.harness import (
     ARTIFACT_ROOT_ENV,
     MASTER_GATE_ENV,
     NETWORK_GATE_ENV,
+    GUI_GATE_ENV,
     LiveCategory,
+    LiveHarnessConfigError,
     LiveHarnessDisabled,
     ScenarioRunner,
     create_live_run_config,
@@ -218,3 +220,29 @@ def test_network_gate_does_not_require_gui_gate(tmp_path):
         MASTER_GATE_ENV,
         NETWORK_GATE_ENV,
     ]
+
+
+def test_network_entry_rejects_gui_opt_in_before_artifacts(tmp_path):
+    calls = []
+
+    def forbidden_web(**kwargs):
+        calls.append(kwargs)
+        raise AssertionError("Web must not run when GUI gate is enabled")
+
+    try:
+        run_network_live(
+            env={
+                MASTER_GATE_ENV: "1",
+                NETWORK_GATE_ENV: "1",
+                GUI_GATE_ENV: "1",
+            },
+            repo_root=tmp_path / "repo",
+            web_run=forbidden_web,
+        )
+    except LiveHarnessConfigError:
+        pass
+    else:
+        raise AssertionError("NETWORK stage must reject simultaneous GUI opt-in")
+
+    assert calls == []
+    assert list(tmp_path.iterdir()) == []
