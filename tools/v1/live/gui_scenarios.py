@@ -12,6 +12,7 @@ from typing import Any
 import psutil
 
 from tools.v1 import desktop_tool, terminal_tool, window_tool
+from tools.v1._shared.contracts import failure_result
 from tools.v1.live.harness import (
     ARTIFACT_ROOT_ENV,
     GUI_GATE_ENV,
@@ -137,7 +138,27 @@ def _validate_launch(result: Mapping[str, Any], *, expected_cwd: str) -> bool:
     )
 
 
-def _validate_find(result: Mapping[str, Any], *, expected_title: str, expected_pid: int) -> bool:
+def _discovery_timeout_result(
+    result: Mapping[str, Any],
+    *,
+    classification: str,
+) -> Mapping[str, Any]:
+    data = result.get("data")
+    returned_count = data.get("returned_count") if isinstance(data, Mapping) else None
+    return failure_result(
+        tool="window_tool",
+        action="find",
+        version="2.0.0",
+        code="LIVE_GUI_DISCOVERY_TIMEOUT",
+        message="owned GUI target was not discovered before the live timeout",
+        details={
+            "live_classification": classification,
+            "final_returned_count": returned_count,
+        },
+    )
+
+
+def _validate_find(result: Mapping[str, Any], *, expected_title: str, expected_pid: int | None) -> bool:
     data = result.get("data")
     if not isinstance(data, Mapping):
         return False
@@ -149,7 +170,8 @@ def _validate_find(result: Mapping[str, Any], *, expected_title: str, expected_p
         return False
     selector = item.get("selector")
     return (
-        isinstance(selector, Mapping)
+        expected_pid is not None
+        and isinstance(selector, Mapping)
         and type(selector.get("window_handle")) is int
         and selector["window_handle"] > 0
         and selector.get("pid") == expected_pid
@@ -242,6 +264,7 @@ def build_gui_scenario(
     def discover(context: ScenarioContext) -> Mapping[str, Any]:
         deadline = time.monotonic() + GUI_DISCOVERY_TIMEOUT_SECONDS
         last: Mapping[str, Any] | None = None
+        classification = "DISCOVERY_TIMEOUT"
         while time.monotonic() < deadline:
             last = window_run(
                 action="find",
@@ -250,30 +273,58 @@ def build_gui_scenario(
             )
             if last.get("ok") is not True:
                 return last
+
             data = last.get("data")
-            if isinstance(data, Mapping) and data.get("returned_count") == 1:
-                windows = data.get("windows")
-                if isinstance(windows, list) and len(windows) == 1:
-                    item = windows[0]
-                    if isinstance(item, Mapping):
-                        selector = item.get("selector")
-                        if isinstance(selector, Mapping):
-                            candidate_pid = selector.get("pid")
-                            candidate_handle = selector.get("window_handle")
-                            if (
-                                type(candidate_pid) is int
-                                and type(candidate_handle) is int
-                                and candidate_handle > 0
-                                and process_controller.verify_owned_window_pid(
-                                    expected["launch_pid"],
-                                    candidate_pid,
-                                )
+            if not isinstance(data, Mapping):
+                classification = "MALFORMED_SUCCESS_RESULT"
+                time.sleep(GUI_DISCOVERY_POLL_SECONDS)
+                continue
+
+            returned_count = data.get("returned_count")
+            windows = data.get("windows")
+            if returned_count == 0 and windows == []:
+                classification = "EMPTY_VALID_RESULT"
+                time.sleep(GUI_DISCOVERY_POLL_SECONDS)
+                continue
+
+            if returned_count == 1 and isinstance(windows, list) and len(windows) == 1:
+                item = windows[0]
+                if isinstance(item, Mapping):
+                    selector = item.get("selector")
+                    if isinstance(selector, Mapping):
+                        candidate_pid = selector.get("pid")
+                        candidate_handle = selector.get("window_handle")
+                        if (
+                            type(candidate_pid) is int
+                            and type(candidate_handle) is int
+                            and candidate_handle > 0
+                        ):
+                            if process_controller.verify_owned_window_pid(
+                                expected["launch_pid"],
+                                candidate_pid,
                             ):
                                 expected["pid"] = candidate_pid
                                 expected["handle"] = candidate_handle
                                 return last
+                            classification = "OWNERSHIP_MISMATCH"
+                            time.sleep(GUI_DISCOVERY_POLL_SECONDS)
+                            continue
+
+            classification = "MALFORMED_OR_AMBIGUOUS_RESULT"
             time.sleep(GUI_DISCOVERY_POLL_SECONDS)
-        return last or window_run(action="find", title_query=expected["title"], max_results=10)
+
+        if last is None:
+            last = window_run(
+                action="find",
+                title_query=expected["title"],
+                max_results=10,
+            )
+            if last.get("ok") is not True:
+                return last
+        return _discovery_timeout_result(
+            last,
+            classification=classification,
+        )
 
     def focus(context: ScenarioContext) -> Mapping[str, Any]:
         return window_run(
@@ -364,7 +415,7 @@ def build_gui_scenario(
                 validate=lambda result: _validate_find(
                     result,
                     expected_title=expected["title"],
-                    expected_pid=expected["pid"],
+                    expected_pid=expected.get("pid"),
                 ),
             ),
             ScenarioStep(
