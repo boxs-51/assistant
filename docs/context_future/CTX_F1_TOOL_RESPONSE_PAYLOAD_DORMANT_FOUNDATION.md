@@ -84,6 +84,7 @@ logical_capability_id
 payload_schema_version
 content_digest
 canonical_bytes
+content (process-local reference only; durable physical storage deferred)
 content_type
 owner_user_id?
 session_id?
@@ -91,7 +92,7 @@ metadata
 created_at
 ```
 
-The object is immutable after creation.
+The object is deeply immutable after creation for payload content and metadata. The process-local reference repository retains canonical logical content only to make the dormant contract executable; this is not durable storage authority.
 
 Owner/session values are provenance only in F1. They do not yet authorize
 cross-session context retrieval; that belongs to later Context Access stages.
