@@ -15,6 +15,11 @@ from .resume_claim import AgentResumeClaimRecord
 from .fork_admission import AgentTaskForkAdmissionRecord
 from .retry_admission import AgentTaskRetryAdmissionRecord
 from .aggregate_admission import AgentTaskAggregateAdmissionRecord
+from .transcript_representation import (
+    AgentTranscriptChunkRecord,
+    AgentTranscriptPayloadNodeRecord,
+    AgentTranscriptRepresentationRecord,
+)
 
 __all__ = [
     "AgentExecutionRecord",
@@ -35,4 +40,7 @@ __all__ = [
     "AgentTaskForkAdmissionRecord",
     "AgentTaskRetryAdmissionRecord",
     "AgentTaskAggregateAdmissionRecord",
+    "AgentTranscriptChunkRecord",
+    "AgentTranscriptPayloadNodeRecord",
+    "AgentTranscriptRepresentationRecord",
 ]
