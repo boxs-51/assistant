@@ -304,6 +304,89 @@ async def test_r7_b_non_task_waiting_uses_same_checkpoint_execution_transaction(
 
 
 @pytest.mark.asyncio
+async def test_r11_d_non_task_waiting_update_failure_rolls_back_dual_graph(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r11d-nontask-rollback.sqlite').as_posix()}"
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(AgentExecutionRecord(
+                id="exec-r11-d-rollback", session_id="session-r7-b",
+                agent_id="agent-r7-b", correlation_id="corr-r11-d-rollback",
+                state="RUNNING", revision=1, request={},
+            ))
+            await _insert_invocation(uow.session, "exec-r11-d-rollback")
+            await uow.commit()
+
+        async with engine.begin() as connection:
+            await connection.execute(text("""
+                CREATE TRIGGER reject_r11d_nontask_waiting
+                BEFORE UPDATE ON agent_executions
+                WHEN NEW.id = 'exec-r11-d-rollback' AND NEW.state = 'WAITING'
+                BEGIN SELECT RAISE(ABORT, 'reject waiting'); END
+            """))
+
+        with pytest.raises(Exception):
+            await store.commit_waiting_checkpoint(
+                "exec-r11-d-rollback",
+                1,
+                {
+                    "state": "WAITING",
+                    "wait_reason": "CONNECTION",
+                    "remaining_active_budget_seconds": 20.0,
+                },
+                checkpoint_values=_checkpoint(
+                    "exec-r11-d-rollback",
+                    "session-r7-b",
+                    task_id=None,
+                    revision=2,
+                ),
+                pending_invocations=_pending(),
+            )
+
+        async with _Uow(sessions) as uow:
+            execution = await uow.agents.get_execution("exec-r11-d-rollback")
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r11-d-rollback:checkpoint:2"
+            )
+            pending = await uow.agents.list_checkpoint_pending_invocations(
+                "exec-r11-d-rollback:checkpoint:2"
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 1
+            assert execution.current_checkpoint_id is None
+            assert checkpoint is None
+            assert pending == []
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(
+                        AgentTranscriptRepresentationRecord
+                    )
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(
+                        AgentTranscriptPayloadNodeRecord
+                    )
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(
+                        AgentTranscriptChunkRecord
+                    )
+                ) or 0
+            ) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r11_d_task_idempotent_waiting_rejects_transcript_change(tmp_path):
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{(tmp_path / 'r11d-task-replay.sqlite').as_posix()}"
