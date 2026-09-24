@@ -1012,7 +1012,7 @@ async def test_r11_a_branch_rows_and_synchronized_contention_red_probe(tmp_path)
 
 
 @pytest.mark.asyncio
-async def test_r11_a_direct_task_budget_cas_contention_red_probe(tmp_path):
+async def test_r11_a_direct_task_budget_cas_contention_baseline(tmp_path):
     report = await _measure_direct_task_budget_cas_contention_distribution(
         tmp_path,
         samples=10,
@@ -1038,7 +1038,7 @@ async def test_r11_a_direct_task_budget_cas_contention_red_probe(tmp_path):
             <= percentiles["p99_ns"]
         )
 
-    pytest.fail(
-        "R11_A_DIRECT_TASK_BUDGET_CAS_CONTENTION_BASELINE="
-        + json.dumps(report, sort_keys=True, separators=(",", ":"))
-    )
+    # Exact p50/p95/p99 values are retained on Issue #31 / CI #959.
+    # CI keeps only deterministic CAS/retry/final-state invariants.
+    assert report["cas_stale"] == 10
+    assert report["cas_locked"] == 0
