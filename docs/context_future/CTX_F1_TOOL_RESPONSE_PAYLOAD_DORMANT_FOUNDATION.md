@@ -93,7 +93,7 @@ metadata
 created_at
 ```
 
-The object is deeply immutable after creation for payload content and metadata. Both content and metadata are restricted to canonical JSON-compatible values; unordered sets, bytearray/custom mutable leaves and non-finite numeric values are rejected. The process-local reference repository retains canonical logical content only to make the dormant contract executable; this is not durable storage authority.
+The object is deeply immutable after creation for payload content and metadata. Both content and metadata are restricted to a structural canonical JSON input domain: object keys must be strings, arrays must be Python lists at admission, and tuple/set/frozenset/custom containers, bytearray/custom mutable leaves, and non-finite numeric values are rejected. Accepted list/object containers are recursively frozen to tuple/MappingProxyType internally. The process-local reference repository retains canonical logical content only to make the dormant contract executable; this is not durable storage authority.
 
 Owner/session values are provenance only in F1. They do not yet authorize
 cross-session context retrieval; that belongs to later Context Access stages.
@@ -108,7 +108,7 @@ The reference repository API is append-only:
 
 No update/delete/GC API is introduced in F1.
 
-Admission integrity is revalidated at both model construction and repository put. The repository recomputes canonical content bytes, digest, size and deterministic payload ID, checks non-empty source identities and requires explicit `source_commit_state=COMMITTED`. This protects first insert as well as replays, including unvalidated `model_copy(update=...)` objects.
+Admission integrity is revalidated at both model construction and repository put. Repository admission also verifies that the in-memory representation is recursively frozen, so unvalidated model-copy container substitutions cannot become repository authority. The repository recomputes canonical content bytes, digest, size and deterministic payload ID, checks non-empty source identities and requires explicit `source_commit_state=COMMITTED`. This protects first insert as well as replays, including unvalidated `model_copy(update=...)` objects.
 
 Required replay behavior:
 
