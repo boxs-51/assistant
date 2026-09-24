@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 
 from ...infrastructure.storage.transcript_representation import (
     canonical_transcript_messages,
@@ -22,6 +23,7 @@ class CheckpointBackfillResult:
     converted: int
     converged: int
     deferred: int
+    next_validation_after: tuple[datetime, str] | None = None
 
 
 def _as_json_messages(messages):
@@ -43,43 +45,31 @@ async def backfill_legacy_inline_checkpoints_in_uow(
     uow,
     *,
     limit: int | None = None,
+    validation_after: tuple[datetime, str] | None = None,
 ) -> CheckpointBackfillResult:
-    """Converge historical LEGACY_INLINE checkpoints to DUAL in one caller UoW.
+    """Converge LEGACY_INLINE to DUAL with independent ref validation progress.
 
-    Checkpoint parent lineage is only a candidate for representation ancestry.
-    A child waits while an extant candidate parent is still LEGACY_INLINE, so
-    worker ordering cannot choose a different physical ancestry. Missing
-    parents do not prove ancestry and therefore fall back through the D1 FULL
-    path. Existing DUAL/REF_BACKED rows are never rewritten by this scan.
+    The conversion budget applies only to rows that still require conversion.
+    Ref-bearing DUAL/REF_BACKED verification uses a separate keyset cursor so
+    already-converged rows cannot starve later LEGACY_INLINE work.
     """
 
     repo = uow.agents
-    candidates = await repo.list_checkpoint_backfill_candidates(limit=limit)
-    pending = {}
+    legacy = await repo.list_legacy_inline_checkpoint_backfill_candidates()
+    pending = {str(item.checkpoint_id): item for item in legacy}
     converted = 0
     converged = 0
+    scanned = 0
+    conversion_budget = limit
 
-    for checkpoint in candidates:
-        snapshot = checkpoint.transcript_snapshot
-        transcript_ref = checkpoint.transcript_ref
-        transcript_version = checkpoint.transcript_version
-        if (transcript_ref is None) != (transcript_version is None):
-            raise CheckpointBackfillError(
-                "Checkpoint has a partial transcript representation pair."
-            )
-        if snapshot is None and transcript_ref is None:
-            raise CheckpointBackfillError(
-                "Checkpoint transcript is not reconstructable."
-            )
-        if transcript_ref is not None:
-            await _canonical_checkpoint_messages(uow, checkpoint)
-            converged += 1
-            continue
-        pending[str(checkpoint.checkpoint_id)] = checkpoint
-
-    while pending:
+    while pending and (
+        conversion_budget is None or converted < conversion_budget
+    ):
         progressed = False
         for checkpoint_id, checkpoint in tuple(pending.items()):
+            if conversion_budget is not None and converted >= conversion_budget:
+                break
+
             parent_id = checkpoint.parent_checkpoint_id
             if parent_id is not None:
                 parent = await repo.get_execution_checkpoint(str(parent_id))
@@ -95,13 +85,14 @@ async def backfill_legacy_inline_checkpoints_in_uow(
                             raise CheckpointBackfillError(
                                 "Parent checkpoint transcript is not reconstructable."
                             )
-                        # The parent exists but remains LEGACY_INLINE. Defer the
-                        # child even when the parent is outside this bounded
-                        # batch; a later pass can converge after the parent.
+                        # An extant parent still needs conversion. Skip this
+                        # child for this pass and continue scanning the full
+                        # LEGACY corpus for an eligible ancestor.
                         continue
                     await _canonical_checkpoint_messages(uow, parent)
 
             expected = await _canonical_checkpoint_messages(uow, checkpoint)
+            scanned += 1
             proven = await write_transcript_representation_in_uow(
                 uow,
                 messages=expected,
@@ -150,9 +141,48 @@ async def backfill_legacy_inline_checkpoints_in_uow(
         if not progressed:
             break
 
+    # If conversion work remains, do not spend bounded budget validating
+    # already-ref-backed rows. A later run continues conversion first.
+    if pending:
+        return CheckpointBackfillResult(
+            scanned=scanned,
+            converted=converted,
+            converged=converged,
+            deferred=len(pending),
+            next_validation_after=validation_after,
+        )
+
+    # Separate ref-bearing verification phase with deterministic keyset
+    # progress. This phase never mutates DUAL/REF_BACKED checkpoints.
+    after_created_at = None
+    after_checkpoint_id = None
+    if validation_after is not None:
+        after_created_at, after_checkpoint_id = validation_after
+
+    validation_rows = (
+        await repo.list_ref_backed_checkpoint_validation_candidates(
+            limit=limit,
+            after_created_at=after_created_at,
+            after_checkpoint_id=after_checkpoint_id,
+        )
+    )
+    next_validation_after = validation_after
+    for checkpoint in validation_rows:
+        scanned += 1
+        await _canonical_checkpoint_messages(uow, checkpoint)
+        converged += 1
+        next_validation_after = (
+            checkpoint.created_at,
+            str(checkpoint.checkpoint_id),
+        )
+
+    if limit is None or len(validation_rows) < limit:
+        next_validation_after = None
+
     return CheckpointBackfillResult(
-        scanned=len(candidates),
+        scanned=scanned,
         converted=converted,
         converged=converged,
-        deferred=len(pending),
+        deferred=0,
+        next_validation_after=next_validation_after,
     )
