@@ -346,13 +346,17 @@ TV1-T9 is CLOSED / MERGED / FROZEN / post-merge GREEN on the canonical main
 line. R11 may measure payload/storage effects but must not redefine canonical
 logical tool identity, Metadata V2 contracts, or physical ToolResult provenance.
 
-TV1-T10 is coordinated by Issue #38. T10-A is CLAIMED with current candidate
-`71b5b355dfb449d5dd633e5cb7b9df6aa1451fac`, whose exact delta from
-`main@78479a64` is one contract-doc file under `tools/v1/live/**`.
+TV1-T10 is coordinated by Issue #38. T10-A is CLOSED/GREEN at `71b5b355`.
+T10-B is OPEN in side-effect-free live-helper/unit-test scope; current exact
+candidate at this R11 checkpoint is
+`e8a74f26b70fa76c75dd0607ccd131bdeb888826`.
 
-T10-A has no production/runtime/test delta and no R11 path overlap. Its
-live-harness contract work remains non-scope for Agent persistence, and it does
-not authorize cross-track production edits.
+The two audited T10-B P1s (PID-reuse cleanup authority and evidence-message
+secret leakage) are fixed; T10-B closure still waits on exact-head CI + final
+audit, and T10-C remains CLOSED.
+
+T10-B has no Agent Execution/R11 path overlap and authorizes no R11 persistence
+changes, external-network run, real-GUI run, or persistent real process run.
 
 ### CAS / CTX
 
