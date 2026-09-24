@@ -338,7 +338,10 @@ def test_network_cleanup_failure_is_tool_contract_failure(tmp_path):
     config = _config(tmp_path)
 
     scenario = build_network_scenario(
-        web_run=lambda **kwargs: _failure("WEB_CLEANUP_FAILED"),
+        web_run=lambda **kwargs: _failure(
+            "WEB_CLEANUP_FAILED",
+            retryable=False,
+        ),
     )
     evidence = ScenarioRunner(config).run((scenario,))
 
