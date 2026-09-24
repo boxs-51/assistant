@@ -240,7 +240,7 @@ def test_structured_error_projection_redacts_secret_details():
 
     assert error == {
         "code": "FAKE_FAILED",
-        "message": "synthetic failure",
+        "message": "Tool invocation failed.",
         "retryable": False,
         "details": {
             "api_token": "[REDACTED]",
