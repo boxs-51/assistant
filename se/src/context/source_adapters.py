@@ -95,9 +95,19 @@ class ToolResultEvidence(Protocol):
     created_at: datetime
 
 
+def _required_attr(obj: object, name: str, *, label: str) -> object:
+    if not hasattr(obj, name):
+        raise ValueError(f"{label}.{name} is required")
+    return getattr(obj, name)
+
+
 def _session_owner(session: SessionEvidence) -> str:
-    _require_non_empty("session.id", session.id)
-    return _require_non_empty("session.user_id", session.user_id)
+    session_id = _required_attr(session, "id", label="session")
+    user_id = _required_attr(session, "user_id", label="session")
+    _require_non_empty("session.id", session_id if isinstance(session_id, str) else None)
+    return _require_non_empty(
+        "session.user_id", user_id if isinstance(user_id, str) else None
+    )
 
 
 def _finalize(ref: ContextSourceRef) -> ContextSourceRef:
@@ -123,6 +133,8 @@ def project_task_source(
     task: TaskEvidence,
 ) -> ContextSourceRef:
     owner_user_id = _session_owner(session)
+    _require_non_empty("task.id", task.id)
+    _require_non_empty("task.session_id", task.session_id)
     _require_equal("task.session_id", task.session_id, session.id)
     return _finalize(
         create_context_source_ref(
@@ -144,6 +156,10 @@ def project_branch_source(
     branch: BranchEvidence,
 ) -> ContextSourceRef:
     owner_user_id = _session_owner(session)
+    _require_non_empty("task.id", task.id)
+    _require_non_empty("task.session_id", task.session_id)
+    _require_non_empty("branch.branch_id", branch.branch_id)
+    _require_non_empty("branch.task_id", branch.task_id)
     _require_equal("branch.task_id", branch.task_id, task.id)
     _require_equal("task.session_id", task.session_id, session.id)
     return _finalize(
@@ -167,6 +183,10 @@ def project_agent_transcript_source(
     checkpoint: CheckpointEvidence,
 ) -> ContextSourceRef:
     owner_user_id = _session_owner(session)
+    _require_non_empty("execution.id", execution.id)
+    _require_non_empty("execution.session_id", execution.session_id)
+    _require_non_empty("checkpoint.execution_id", checkpoint.execution_id)
+    _require_non_empty("checkpoint.session_id", checkpoint.session_id)
     _require_equal("checkpoint.execution_id", checkpoint.execution_id, execution.id)
     _require_equal("checkpoint.session_id", checkpoint.session_id, execution.session_id)
     _require_equal("execution.session_id", execution.session_id, session.id)
@@ -199,6 +219,19 @@ def project_tool_response_payload_source(
 ) -> ContextSourceRef:
     owner_user_id = _session_owner(session)
     validate_tool_response_payload_integrity(payload)
+
+    _require_non_empty("execution.id", execution.id)
+    _require_non_empty("execution.session_id", execution.session_id)
+    _require_non_empty("invocation.invocation_id", invocation.invocation_id)
+    _require_non_empty("invocation.execution_id", invocation.execution_id)
+    _require_non_empty("invocation.session_id", invocation.session_id)
+    _require_non_empty("invocation.tool_call_id", invocation.tool_call_id)
+    _require_non_empty("invocation.capability_id", invocation.capability_id)
+    _require_non_empty("result.id", result.id)
+    _require_non_empty("result.execution_id", result.execution_id)
+    _require_non_empty("result.invocation_id", result.invocation_id)
+    _require_non_empty("result.tool_call_id", result.tool_call_id)
+    _require_non_empty("result.capability_id", result.capability_id)
 
     _require_equal("execution.session_id", execution.session_id, session.id)
     invocation_owner = _require_non_empty(
