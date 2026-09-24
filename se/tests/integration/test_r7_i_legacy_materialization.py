@@ -417,14 +417,16 @@ async def test_r11_d_legacy_pointer_loss_rolls_back_dual_graph_and_checkpoint(tm
     try:
         await _seed_legacy_waiting(sessions)
 
-        with pytest.raises(LegacyCheckpointMaterializationError) as exc:
+        with pytest.raises(
+            ExecutionConflictError,
+            match="lost the WAITING pointer race",
+        ):
             await store.materialize_legacy_checkpoint(
                 "exec-legacy",
                 requested_checkpoint_id="legacy-cp-1",
                 target_user_id="user-1",
                 target_client_id="client-1",
             )
-        assert exc.value.code == "LEGACY_CHECKPOINT_RACE"
 
         async with sessions() as session:
             repo = AgentRepository(session)
