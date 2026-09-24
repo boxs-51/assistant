@@ -4193,6 +4193,11 @@ class DurableAgentStore:
                         source.transcript,
                         active_tool_call_ids=ordered_tool_call_ids,
                     )
+                    proven = await write_transcript_representation_in_uow(
+                        uow,
+                        messages=list(transcript_snapshot),
+                        candidate_parent_checkpoint_id=source.parent_checkpoint_id,
+                    )
                     checkpoint_values = {
                         "checkpoint_id": source.checkpoint_id,
                         "execution_id": execution.id,
@@ -4210,6 +4215,8 @@ class DurableAgentStore:
                         "origin_client_id": source.origin_client_id,
                         "origin_connection_id": source.origin_connection_id,
                         "transcript_snapshot": list(transcript_snapshot),
+                        "transcript_ref": proven.transcript_ref,
+                        "transcript_version": proven.transcript_version,
                         "legacy_source_key": source.legacy_source_key,
                         "metadata_json": {
                             "legacy_materialized": True,
@@ -4240,12 +4247,26 @@ class DurableAgentStore:
                                     "Legacy checkpoint id collides with different "
                                     f"normalized {field} semantics.",
                                 )
-                        if tuple(existing.transcript_snapshot or ()) != tuple(
-                            checkpoint_values["transcript_snapshot"] or ()
-                        ):
+                        try:
+                            existing_messages = await materialize_checkpoint_transcript_in_uow(
+                                uow,
+                                existing,
+                            )
+                        except CheckpointTranscriptMaterializationError as exc:
                             raise LegacyCheckpointMaterializationError(
                                 "LEGACY_CHECKPOINT_UNSAFE",
-                                "Legacy checkpoint transcript snapshot differs.",
+                                "Existing normalized checkpoint transcript is corrupt.",
+                            ) from exc
+                        existing_canonical = canonical_transcript_messages(
+                            existing_messages
+                        )
+                        expected_canonical = canonical_transcript_messages(
+                            checkpoint_values["transcript_snapshot"]
+                        )
+                        if existing_canonical != expected_canonical:
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Legacy checkpoint transcript differs canonically.",
                             )
 
                         persisted_pending = (
