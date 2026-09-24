@@ -43,6 +43,11 @@ class AgentExecutionCheckpointRecord(Base):
             "transcript_snapshot IS NOT NULL OR transcript_ref IS NOT NULL",
             name="ck_agent_execution_checkpoints_transcript_reconstructable",
         ),
+        CheckConstraint(
+            "(transcript_ref IS NULL AND transcript_version IS NULL) OR "
+            "(transcript_ref IS NOT NULL AND transcript_version IS NOT NULL)",
+            name="ck_agent_execution_checkpoints_transcript_ref_pair",
+        ),
         UniqueConstraint(
             "legacy_source_key",
             name="uq_agent_execution_checkpoints_legacy_source_key",

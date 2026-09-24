@@ -9,6 +9,9 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ...domain.schemas.identity import Identity
 from ...infrastructure.storage.repositories.agent import AgentRepository
+from ...infrastructure.storage.transcript_representation import (
+    canonical_transcript_messages,
+)
 from ..capability.contracts.definition import CapabilityIdempotency
 from ..capability.contracts.invocation import (
     CapabilityInvocationState,
@@ -78,6 +81,11 @@ from .legacy_materialization import (
 from .checkpoint_transcript import (
     CheckpointTranscriptMaterializationError,
     materialize_checkpoint_transcript_in_uow,
+)
+from .checkpoint_transcript_writer import write_transcript_representation_in_uow
+from .checkpoint_backfill import (
+    CheckpointBackfillResult,
+    backfill_legacy_inline_checkpoints_in_uow,
 )
 
 
@@ -3964,6 +3972,31 @@ class DurableAgentStore:
             retryable=True,
         )
 
+    async def backfill_legacy_inline_checkpoints(
+        self,
+        *,
+        limit: int | None = None,
+        scan_limit: int | None = None,
+        conversion_after=None,
+        validation_after=None,
+    ) -> CheckpointBackfillResult:
+        """Run one bounded R11-D LEGACY_INLINE -> DUAL convergence batch."""
+
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+        if scan_limit is not None and scan_limit <= 0:
+            raise ValueError("scan_limit must be positive")
+        async with self.uow_factory() as uow:
+            result = await backfill_legacy_inline_checkpoints_in_uow(
+                uow,
+                limit=limit,
+                scan_limit=scan_limit,
+                conversion_after=conversion_after,
+                validation_after=validation_after,
+            )
+            await uow.commit()
+            return result
+
     async def materialize_legacy_checkpoint(
         self,
         execution_id: str,
@@ -4189,6 +4222,11 @@ class DurableAgentStore:
                         source.transcript,
                         active_tool_call_ids=ordered_tool_call_ids,
                     )
+                    proven = await write_transcript_representation_in_uow(
+                        uow,
+                        messages=list(transcript_snapshot),
+                        candidate_parent_checkpoint_id=source.parent_checkpoint_id,
+                    )
                     checkpoint_values = {
                         "checkpoint_id": source.checkpoint_id,
                         "execution_id": execution.id,
@@ -4205,7 +4243,9 @@ class DurableAgentStore:
                         "wait_expires_at": execution.wait_expires_at,
                         "origin_client_id": source.origin_client_id,
                         "origin_connection_id": source.origin_connection_id,
-                        "transcript_snapshot": list(transcript_snapshot),
+                        "transcript_snapshot": None,
+                        "transcript_ref": proven.transcript_ref,
+                        "transcript_version": proven.transcript_version,
                         "legacy_source_key": source.legacy_source_key,
                         "metadata_json": {
                             "legacy_materialized": True,
@@ -4236,12 +4276,26 @@ class DurableAgentStore:
                                     "Legacy checkpoint id collides with different "
                                     f"normalized {field} semantics.",
                                 )
-                        if tuple(existing.transcript_snapshot or ()) != tuple(
-                            checkpoint_values["transcript_snapshot"] or ()
-                        ):
+                        try:
+                            existing_messages = await materialize_checkpoint_transcript_in_uow(
+                                uow,
+                                existing,
+                            )
+                        except CheckpointTranscriptMaterializationError as exc:
                             raise LegacyCheckpointMaterializationError(
                                 "LEGACY_CHECKPOINT_UNSAFE",
-                                "Legacy checkpoint transcript snapshot differs.",
+                                "Existing normalized checkpoint transcript is corrupt.",
+                            ) from exc
+                        existing_canonical = canonical_transcript_messages(
+                            existing_messages
+                        )
+                        expected_canonical = canonical_transcript_messages(
+                            list(transcript_snapshot)
+                        )
+                        if existing_canonical != expected_canonical:
+                            raise LegacyCheckpointMaterializationError(
+                                "LEGACY_CHECKPOINT_UNSAFE",
+                                "Legacy checkpoint transcript differs canonically.",
                             )
 
                         persisted_pending = (

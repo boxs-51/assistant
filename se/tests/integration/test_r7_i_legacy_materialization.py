@@ -11,6 +11,9 @@ from se.src.infrastructure.storage.models.sql.agent import (
     AgentIterationRecord,
     AgentToolCallRecord,
     AgentToolResultRecord,
+    AgentTranscriptChunkRecord,
+    AgentTranscriptPayloadNodeRecord,
+    AgentTranscriptRepresentationRecord,
 )
 from se.src.infrastructure.storage.models.sql.capability import (
     CapabilityInvocationRecord,
@@ -34,14 +37,15 @@ from se.src.runtimes.agent.persistence import (
 
 
 class _Uow:
-    def __init__(self, sessions):
+    def __init__(self, sessions, repository_cls=AgentRepository):
         self._sessions = sessions
+        self._repository_cls = repository_cls
         self._ctx = None
 
     async def __aenter__(self):
         self._ctx = self._sessions()
         self.session = await self._ctx.__aenter__()
-        self.agents = AgentRepository(self.session)
+        self.agents = self._repository_cls(self.session)
         self.capability_invocations = CapabilityInvocationRepository(self.session)
         return self
 
@@ -237,9 +241,9 @@ async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path
         assert checkpoint.execution_revision == 4
         assert checkpoint.origin_client_id == "client-1"
         assert checkpoint.origin_connection_id == "conn-k1"
-        assert checkpoint.transcript_snapshot == (
-            {"role": "user", "content": "run tools"},
-        )
+        assert checkpoint.transcript_snapshot is None
+        assert checkpoint.transcript_ref is not None
+        assert checkpoint.transcript_version is not None
 
         execution = await store.load_execution("exec-legacy")
         assert execution.state == "WAITING"
@@ -281,6 +285,22 @@ async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path
                 ).scalars().all()
             )
         assert checkpoint_count == 1
+        async with sessions() as session:
+            row = await session.get(
+                AgentExecutionCheckpointRecord,
+                "legacy-cp-1",
+            )
+            assert row.transcript_snapshot is None
+            assert row.transcript_ref is not None
+            assert row.transcript_version is not None
+            representation_count = len(
+                (
+                    await session.execute(
+                        select(AgentTranscriptRepresentationRecord)
+                    )
+                ).scalars().all()
+            )
+            assert representation_count == 1
     finally:
         await engine.dispose()
 
@@ -364,6 +384,82 @@ async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(tmp_path
                 )
             ).scalars().all()
         assert rows == []
+    finally:
+        await engine.dispose()
+
+
+class _RejectLegacyPointerRepository(AgentRepository):
+    async def bind_legacy_checkpoint_pointer(
+        self,
+        execution_id: str,
+        *,
+        expected_revision: int,
+        checkpoint_id: str,
+        bound_client_id: str | None,
+    ):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_r11_d_legacy_pointer_loss_rolls_back_dual_graph_and_checkpoint(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r11-d-legacy-pointer-rollback.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(
+        lambda: _Uow(sessions, _RejectLegacyPointerRepository)
+    )
+
+    try:
+        await _seed_legacy_waiting(sessions)
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="lost the WAITING pointer race",
+        ):
+            await store.materialize_legacy_checkpoint(
+                "exec-legacy",
+                requested_checkpoint_id="legacy-cp-1",
+                target_user_id="user-1",
+                target_client_id="client-1",
+            )
+
+        async with sessions() as session:
+            repo = AgentRepository(session)
+            execution = await repo.get_execution("exec-legacy")
+            checkpoint = await repo.get_execution_checkpoint("legacy-cp-1")
+            pending = await repo.list_checkpoint_pending_invocations(
+                "legacy-cp-1"
+            )
+            assert execution.revision == 4
+            assert execution.current_checkpoint_id is None
+            assert checkpoint is None
+            assert pending == []
+            assert len(
+                (
+                    await session.execute(
+                        select(AgentTranscriptRepresentationRecord)
+                    )
+                ).scalars().all()
+            ) == 0
+            assert len(
+                (
+                    await session.execute(
+                        select(AgentTranscriptPayloadNodeRecord)
+                    )
+                ).scalars().all()
+            ) == 0
+            assert len(
+                (
+                    await session.execute(
+                        select(AgentTranscriptChunkRecord)
+                    )
+                ).scalars().all()
+            ) == 0
     finally:
         await engine.dispose()
 

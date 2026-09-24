@@ -1439,6 +1439,12 @@ class AgentRepository(BaseRepository):
         )
         return tuple(int(item) for item in result.scalars().all())
 
+    async def materialize_transcript_payload_root(
+        self,
+        payload_root_ref: str,
+    ) -> list[dict[str, Any]]:
+        return await self._materialize_transcript_payload_root(payload_root_ref)
+
     async def materialize_transcript_representation(
         self,
         transcript_ref: str,
@@ -1621,6 +1627,108 @@ class AgentRepository(BaseRepository):
             .order_by(AgentExecutionCheckpointRecord.created_at.asc())
         )
         return list(result.scalars().all())
+
+    async def list_legacy_inline_checkpoint_backfill_candidates(
+        self,
+        *,
+        limit: int | None = None,
+        after_created_at=None,
+        after_checkpoint_id: str | None = None,
+    ):
+        statement = select(AgentExecutionCheckpointRecord).where(
+            AgentExecutionCheckpointRecord.transcript_snapshot.is_not(None),
+            AgentExecutionCheckpointRecord.transcript_ref.is_(None),
+            AgentExecutionCheckpointRecord.transcript_version.is_(None),
+        )
+        if after_created_at is not None and after_checkpoint_id is not None:
+            statement = statement.where(
+                or_(
+                    AgentExecutionCheckpointRecord.created_at > after_created_at,
+                    and_(
+                        AgentExecutionCheckpointRecord.created_at
+                        == after_created_at,
+                        AgentExecutionCheckpointRecord.checkpoint_id
+                        > after_checkpoint_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            AgentExecutionCheckpointRecord.created_at.asc(),
+            AgentExecutionCheckpointRecord.checkpoint_id.asc(),
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        result = await self.session.execute(statement)
+        return list(result.scalars().all())
+
+    async def has_legacy_inline_checkpoints(self) -> bool:
+        result = await self.session.execute(
+            select(AgentExecutionCheckpointRecord.checkpoint_id)
+            .where(
+                AgentExecutionCheckpointRecord.transcript_snapshot.is_not(None),
+                AgentExecutionCheckpointRecord.transcript_ref.is_(None),
+                AgentExecutionCheckpointRecord.transcript_version.is_(None),
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def list_ref_backed_checkpoint_validation_candidates(
+        self,
+        *,
+        limit: int | None = None,
+        after_created_at=None,
+        after_checkpoint_id: str | None = None,
+    ):
+        statement = select(AgentExecutionCheckpointRecord).where(
+            AgentExecutionCheckpointRecord.transcript_ref.is_not(None),
+            AgentExecutionCheckpointRecord.transcript_version.is_not(None),
+        )
+        if after_created_at is not None and after_checkpoint_id is not None:
+            statement = statement.where(
+                or_(
+                    AgentExecutionCheckpointRecord.created_at > after_created_at,
+                    and_(
+                        AgentExecutionCheckpointRecord.created_at
+                        == after_created_at,
+                        AgentExecutionCheckpointRecord.checkpoint_id
+                        > after_checkpoint_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            AgentExecutionCheckpointRecord.created_at.asc(),
+            AgentExecutionCheckpointRecord.checkpoint_id.asc(),
+        )
+        if limit is not None:
+            statement = statement.limit(limit)
+        result = await self.session.execute(statement)
+        return list(result.scalars().all())
+
+    async def bind_checkpoint_transcript_representation_if_legacy(
+        self,
+        checkpoint_id: str,
+        *,
+        transcript_ref: str,
+        transcript_version: int,
+    ):
+        result = await self.session.execute(
+            update(AgentExecutionCheckpointRecord)
+            .where(
+                AgentExecutionCheckpointRecord.checkpoint_id == checkpoint_id,
+                AgentExecutionCheckpointRecord.transcript_snapshot.is_not(None),
+                AgentExecutionCheckpointRecord.transcript_ref.is_(None),
+                AgentExecutionCheckpointRecord.transcript_version.is_(None),
+            )
+            .values(
+                transcript_ref=transcript_ref,
+                transcript_version=transcript_version,
+            )
+        )
+        await self.session.flush()
+        if result.rowcount != 1:
+            return None
+        return await self.get_execution_checkpoint(checkpoint_id)
 
     async def save_checkpoint_pending_invocation(
         self,

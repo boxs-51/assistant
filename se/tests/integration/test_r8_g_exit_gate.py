@@ -177,9 +177,9 @@ async def test_r8_g_g1_vertical_fork_happy_path_and_same_request_replay(tmp_path
         assert receipt.execution_id == first["execution_id"]
         assert execution.state == "RUNNING"
         assert execution.revision == 2
-        assert source_checkpoint.transcript_snapshot == [
-            {"role": "user", "content": "base"}
-        ]
+        assert source_checkpoint.transcript_snapshot is None
+        assert source_checkpoint.transcript_ref is not None
+        assert source_checkpoint.transcript_version is not None
         assert task.status in {"RUNNING", "WAITING"}
         assert task.output is None
         assert after.active_branches == before.active_branches + 1
@@ -251,9 +251,9 @@ async def test_r8_g_g2_sibling_runners_have_isolated_branch_contexts(tmp_path):
             task = await uow.agents.get_task(source["task_id"])
             await uow.commit()
 
-        assert source_checkpoint.transcript_snapshot == [
-            {"role": "user", "content": "base"}
-        ]
+        assert source_checkpoint.transcript_snapshot is None
+        assert source_checkpoint.transcript_ref is not None
+        assert source_checkpoint.transcript_version is not None
         assert task.status == "RUNNING"
         assert task.output is None
     finally:

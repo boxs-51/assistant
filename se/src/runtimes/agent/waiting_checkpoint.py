@@ -2,6 +2,14 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+from ...infrastructure.storage.transcript_representation import (
+    canonical_transcript_messages,
+)
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    materialize_checkpoint_transcript_in_uow,
+)
+from .checkpoint_transcript_writer import write_transcript_representation_in_uow
 from .serialization import to_json_safe
 
 
@@ -46,6 +54,34 @@ async def verify_committed_waiting_checkpoint(
         raise WaitingCheckpointConflictError(
             "Committed checkpoint does not match execution "
             "task/branch/session transition lineage."
+        )
+
+    expected_snapshot = checkpoint_values.get("transcript_snapshot")
+    if expected_snapshot is None:
+        raise WaitingCheckpointConflictError(
+            "Idempotent WAITING replay requires the expected transcript snapshot."
+        )
+    try:
+        committed_messages = await materialize_checkpoint_transcript_in_uow(
+            uow,
+            checkpoint,
+        )
+    except CheckpointTranscriptMaterializationError as exc:
+        raise WaitingCheckpointConflictError(str(exc)) from exc
+    try:
+        expected_messages = canonical_transcript_messages(
+            list(expected_snapshot)
+        )
+        committed_canonical = canonical_transcript_messages(
+            [item.model_dump(mode="json") for item in committed_messages]
+        )
+    except Exception as exc:
+        raise WaitingCheckpointConflictError(
+            "Idempotent WAITING replay transcript is not canonicalizable."
+        ) from exc
+    if committed_canonical != expected_messages:
+        raise WaitingCheckpointConflictError(
+            "Committed checkpoint transcript differs from idempotent replay."
         )
 
     persisted = await uow.agents.list_checkpoint_pending_invocations(
@@ -136,10 +172,38 @@ async def stage_waiting_checkpoint(
         "parent_checkpoint_id",
         getattr(execution, "current_checkpoint_id", None),
     )
-    checkpoint["transcript_snapshot"] = to_json_safe(
-        list(checkpoint.get("transcript_snapshot") or []),
-        path="agent_execution_checkpoints.transcript_snapshot",
+    snapshot = checkpoint.get("transcript_snapshot")
+    if snapshot is not None:
+        checkpoint["transcript_snapshot"] = to_json_safe(
+            list(snapshot),
+            path="agent_execution_checkpoints.transcript_snapshot",
+        )
+    elif "transcript_snapshot" in checkpoint:
+        checkpoint["transcript_snapshot"] = None
+
+    transcript_ref = checkpoint.get("transcript_ref")
+    transcript_version = checkpoint.get("transcript_version")
+    if transcript_ref is not None or transcript_version is not None:
+        raise WaitingCheckpointConflictError(
+            "Checkpoint ref-bearing authority is owned by the R11-D "
+            "representation writer and may not be caller supplied."
+        )
+    if checkpoint.get("transcript_snapshot") is None:
+        raise WaitingCheckpointConflictError(
+            "R11-D REF_BACKED cutover requires an inline transcript proof snapshot."
+        )
+
+    proven = await write_transcript_representation_in_uow(
+        uow,
+        messages=checkpoint["transcript_snapshot"],
+        candidate_parent_checkpoint_id=checkpoint.get("parent_checkpoint_id"),
     )
+    checkpoint["transcript_ref"] = proven.transcript_ref
+    checkpoint["transcript_version"] = proven.transcript_version
+    # R11-D5 cutover: caller-provided inline transcript remains proof input,
+    # but new durable checkpoint authority is REF_BACKED-only.
+    checkpoint["transcript_snapshot"] = None
+
     checkpoint["metadata_json"] = to_json_safe(
         checkpoint.get("metadata_json") or {},
         path="agent_execution_checkpoints.metadata",

@@ -520,7 +520,9 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         "growth": growth,
     }
 
-    expected_pending = {
+    # R11-A frozen pre-cutover evidence. Do not mutate this before-state when
+    # later R11 stages intentionally change the production writer.
+    frozen_r11_a_pending = {
         0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
             "insert": 1, "rollbacks": 0, "select": 2, "sql": 4, "update": 1},
         1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
@@ -530,7 +532,40 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
              "insert": 33, "rollbacks": 0, "select": 34, "sql": 68, "update": 1},
     }
-    assert pending == expected_pending
+    assert frozen_r11_a_pending == {
+        0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
+            "insert": 1, "rollbacks": 0, "select": 2, "sql": 4, "update": 1},
+        1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
+            "insert": 2, "rollbacks": 0, "select": 3, "sql": 6, "update": 1},
+        8: {"begins": 1, "commits": 1, "delete": 0, "flushes": 9,
+            "insert": 9, "rollbacks": 0, "select": 10, "sql": 20, "update": 1},
+        32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
+             "insert": 33, "rollbacks": 0, "select": 34, "sql": 68, "update": 1},
+    }
+
+    # R11-D DUAL current-writer evidence is tracked separately from the frozen
+    # R11-A before-state.
+    expected_r11_d_pending = {
+        0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
+            "insert": 4, "rollbacks": 0, "select": 15, "sql": 20, "update": 1},
+        1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
+            "insert": 5, "rollbacks": 0, "select": 16, "sql": 22, "update": 1},
+        8: {"begins": 1, "commits": 1, "delete": 0, "flushes": 9,
+            "insert": 12, "rollbacks": 0, "select": 23, "sql": 36, "update": 1},
+        32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
+             "insert": 36, "rollbacks": 0, "select": 47, "sql": 84, "update": 1},
+    }
+    assert pending == expected_r11_d_pending
+
+    before0 = frozen_r11_a_pending[0]
+    after0 = expected_r11_d_pending[0]
+    assert after0["sql"] - before0["sql"] == 16
+    assert after0["select"] - before0["select"] == 13
+    assert after0["insert"] - before0["insert"] == 3
+    for count, sample in pending.items():
+        assert sample["select"] - pending[0]["select"] == count
+        assert sample["insert"] - pending[0]["insert"] == count
+        assert sample["flushes"] - pending[0]["flushes"] == count
 
     assert growth == {
         10: {
@@ -588,19 +623,24 @@ async def test_r11_a_real_writer_bytes_and_reconstruction_percentile_red_probe(
         for count in (10, 100, 1000)
     }
 
+    # Historical pre-cutover inline amplification is preserved above and on
+    # Issue #31 / CI #951/#953. D5 active writer evidence proves the checkpoint
+    # INSERT no longer scales with the full transcript payload.
+    checkpoint_insert_bytes = {
+        count: sample["checkpoint_insert_parameter_bytes"]
+        for count, sample in writer.items()
+    }
+    assert max(checkpoint_insert_bytes.values()) - min(
+        checkpoint_insert_bytes.values()
+    ) <= 128
     for count, sample in writer.items():
         logical = _snapshot_growth(count)["final_transcript_bytes"]
-        assert sample["checkpoint_insert_parameter_bytes"] > logical
-    assert (
-        writer[10]["checkpoint_insert_parameter_bytes"]
-        < writer[100]["checkpoint_insert_parameter_bytes"]
-        < writer[1000]["checkpoint_insert_parameter_bytes"]
-    )
+        assert sample["checkpoint_insert_parameter_bytes"] < logical
 
     for sample in reconstruction.values():
         assert sample["samples"] == 20
         assert 0 < sample["p50_ns"] <= sample["p95_ns"] <= sample["p99_ns"]
 
-    # Exact numeric baseline is preserved durably on Issue #31 / CI #951/#953.
-    # CI gates only structural properties; shared-runner timings remain evidence.
-    assert writer[1000]["checkpoint_insert_parameter_bytes"] > 200_000
+    # Exact pre-cutover numeric baseline remains historical evidence. Active
+    # CI now gates the post-cutover bounded checkpoint-row payload property.
+    assert writer[1000]["checkpoint_insert_parameter_bytes"] < 1_024

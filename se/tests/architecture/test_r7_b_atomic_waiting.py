@@ -4,11 +4,17 @@ from datetime import timezone
 import hashlib
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text, update
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
-from se.src.infrastructure.storage.models.sql.agent import AgentExecutionRecord
+from se.src.infrastructure.storage.models.sql.agent import (
+    AgentExecutionCheckpointRecord,
+    AgentExecutionRecord,
+    AgentTranscriptChunkRecord,
+    AgentTranscriptPayloadNodeRecord,
+    AgentTranscriptRepresentationRecord,
+)
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.models.sql.capability import CapabilityInvocationRecord
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
@@ -243,6 +249,21 @@ async def test_r7_b_execution_update_failure_rolls_back_checkpoint_and_budget_re
             assert execution.current_checkpoint_id is None
             assert budget.active_executions == 1
             assert checkpoint is None
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(AgentTranscriptRepresentationRecord)
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(AgentTranscriptPayloadNodeRecord)
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(AgentTranscriptChunkRecord)
+                ) or 0
+            ) == 0
     finally:
         await engine.dispose()
 
@@ -278,5 +299,277 @@ async def test_r7_b_non_task_waiting_uses_same_checkpoint_execution_transaction(
         assert execution.state == "WAITING"
         assert execution.revision == 2
         assert execution.current_checkpoint_id == "exec-r7-b:checkpoint:2"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_non_task_waiting_update_failure_rolls_back_dual_graph(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r11d-nontask-rollback.sqlite').as_posix()}"
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(AgentExecutionRecord(
+                id="exec-r11-d-rollback", session_id="session-r7-b",
+                agent_id="agent-r7-b", correlation_id="corr-r11-d-rollback",
+                state="RUNNING", revision=1, request={},
+            ))
+            await _insert_invocation(uow.session, "exec-r11-d-rollback")
+            await uow.commit()
+
+        async with engine.begin() as connection:
+            await connection.execute(text("""
+                CREATE TRIGGER reject_r11d_nontask_waiting
+                BEFORE UPDATE ON agent_executions
+                WHEN NEW.id = 'exec-r11-d-rollback' AND NEW.state = 'WAITING'
+                BEGIN SELECT RAISE(ABORT, 'reject waiting'); END
+            """))
+
+        with pytest.raises(Exception):
+            await store.commit_waiting_checkpoint(
+                "exec-r11-d-rollback",
+                1,
+                {
+                    "state": "WAITING",
+                    "wait_reason": "CONNECTION",
+                    "remaining_active_budget_seconds": 20.0,
+                },
+                checkpoint_values=_checkpoint(
+                    "exec-r11-d-rollback",
+                    "session-r7-b",
+                    task_id=None,
+                    revision=2,
+                ),
+                pending_invocations=_pending(),
+            )
+
+        async with _Uow(sessions) as uow:
+            execution = await uow.agents.get_execution("exec-r11-d-rollback")
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r11-d-rollback:checkpoint:2"
+            )
+            pending = await uow.agents.list_checkpoint_pending_invocations(
+                "exec-r11-d-rollback:checkpoint:2"
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 1
+            assert execution.current_checkpoint_id is None
+            assert checkpoint is None
+            assert pending == []
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(
+                        AgentTranscriptRepresentationRecord
+                    )
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(
+                        AgentTranscriptPayloadNodeRecord
+                    )
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(
+                        AgentTranscriptChunkRecord
+                    )
+                ) or 0
+            ) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_task_idempotent_waiting_rejects_transcript_change(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r11d-task-replay.sqlite').as_posix()}"
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    service = TaskBudgetService(
+        lambda: _Uow(sessions),
+        default_limits=_limits(),
+        default_policy=TaskBudgetPolicy(version="r11-d"),
+    )
+    try:
+        await service.create_task_with_budget({
+            "id": "task-r11-d-replay", "session_id": "session-r7-b",
+            "created_by": "user-r7-b", "assigned_agent_id": "agent-r7-b",
+            "revision": 0, "status": "RUNNING", "wait_reasons": [], "input": {},
+        })
+        await service.start_task_scoped_execution(
+            "task-r11-d-replay", execution_id="exec-r11-d-replay",
+            execution_values={
+                "id": "exec-r11-d-replay", "session_id": "session-r7-b",
+                "agent_id": "agent-r7-b", "task_id": "task-r11-d-replay",
+                "correlation_id": "corr-r11-d-replay", "state": "RUNNING",
+                "revision": 1, "request": {},
+            },
+        )
+        async with _Uow(sessions) as uow:
+            await _insert_invocation(uow.session, "exec-r11-d-replay")
+            await uow.commit()
+
+        first = _checkpoint(
+            "exec-r11-d-replay",
+            "session-r7-b",
+            task_id="task-r11-d-replay",
+            revision=2,
+        )
+        first["transcript_snapshot"] = [{"role": "assistant", "content": "A"}]
+        transition = {
+            "state": "WAITING",
+            "wait_reason": "CONNECTION",
+            "remaining_active_budget_seconds": 20.0,
+            "wait_expires_at": None,
+            "completed_at": None,
+        }
+        await service.finish_task_scoped_execution(
+            "task-r11-d-replay",
+            execution_id="exec-r11-d-replay",
+            source_revision=1,
+            transition_values=transition,
+            delegated=False,
+            checkpoint_values=first,
+            pending_invocations=_pending(),
+        )
+
+        retry = dict(first)
+        retry["transcript_snapshot"] = [{"role": "assistant", "content": "B"}]
+        with pytest.raises(Exception, match="transcript differs"):
+            await service.finish_task_scoped_execution(
+                "task-r11-d-replay",
+                execution_id="exec-r11-d-replay",
+                source_revision=1,
+                transition_values=transition,
+                delegated=False,
+                checkpoint_values=retry,
+                pending_invocations=_pending(),
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_non_task_idempotent_waiting_rejects_transcript_change(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r11d-nontask-replay.sqlite').as_posix()}"
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(AgentExecutionRecord(
+                id="exec-r11-d-nontask", session_id="session-r7-b",
+                agent_id="agent-r7-b", correlation_id="corr-r11-d-nontask",
+                state="RUNNING", revision=1, request={},
+            ))
+            await _insert_invocation(uow.session, "exec-r11-d-nontask")
+            await uow.commit()
+
+        first = _checkpoint(
+            "exec-r11-d-nontask",
+            "session-r7-b",
+            task_id=None,
+            revision=2,
+        )
+        first["transcript_snapshot"] = [{"role": "assistant", "content": "A"}]
+        transition = {
+            "state": "WAITING",
+            "wait_reason": "CONNECTION",
+            "remaining_active_budget_seconds": 20.0,
+        }
+        await store.commit_waiting_checkpoint(
+            "exec-r11-d-nontask",
+            1,
+            transition,
+            checkpoint_values=first,
+            pending_invocations=_pending(),
+        )
+
+        retry = dict(first)
+        retry["transcript_snapshot"] = [{"role": "assistant", "content": "B"}]
+        with pytest.raises(Exception, match="transcript differs"):
+            await store.commit_waiting_checkpoint(
+                "exec-r11-d-nontask",
+                1,
+                transition,
+                checkpoint_values=retry,
+                pending_invocations=_pending(),
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_idempotent_waiting_fails_closed_on_corrupt_dual(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r11d-corrupt-dual.sqlite').as_posix()}"
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(AgentExecutionRecord(
+                id="exec-r11-d-corrupt", session_id="session-r7-b",
+                agent_id="agent-r7-b", correlation_id="corr-r11-d-corrupt",
+                state="RUNNING", revision=1, request={},
+            ))
+            await _insert_invocation(uow.session, "exec-r11-d-corrupt")
+            await uow.commit()
+
+        checkpoint = _checkpoint(
+            "exec-r11-d-corrupt",
+            "session-r7-b",
+            task_id=None,
+            revision=2,
+        )
+        checkpoint["transcript_snapshot"] = [{"role": "assistant", "content": "A"}]
+        transition = {
+            "state": "WAITING",
+            "wait_reason": "CONNECTION",
+            "remaining_active_budget_seconds": 20.0,
+        }
+        await store.commit_waiting_checkpoint(
+            "exec-r11-d-corrupt",
+            1,
+            transition,
+            checkpoint_values=checkpoint,
+            pending_invocations=_pending(),
+        )
+
+        async with sessions() as session:
+            await session.execute(
+                update(AgentExecutionCheckpointRecord)
+                .where(
+                    AgentExecutionCheckpointRecord.checkpoint_id
+                    == "exec-r11-d-corrupt:checkpoint:2"
+                )
+                .values(
+                    transcript_snapshot=[{"role": "assistant", "content": "FORGED"}]
+                )
+            )
+            await session.commit()
+
+        with pytest.raises(Exception, match="DUAL_TRANSCRIPT_MISMATCH"):
+            await store.commit_waiting_checkpoint(
+                "exec-r11-d-corrupt",
+                1,
+                transition,
+                checkpoint_values=checkpoint,
+                pending_invocations=_pending(),
+            )
     finally:
         await engine.dispose()
