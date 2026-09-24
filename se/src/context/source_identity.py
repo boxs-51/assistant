@@ -51,6 +51,26 @@ def _thaw_json(value: Any) -> Any:
     return value
 
 
+def _validate_frozen_json(value: Any, *, path: str = "$") -> None:
+    if value is None or isinstance(value, (str, bool, int)):
+        return
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ValueError(f"non-finite number at {path}")
+        return
+    if isinstance(value, MappingProxyType):
+        for key, item in value.items():
+            if not isinstance(key, str):
+                raise ValueError(f"JSON object keys must be strings at {path}")
+            _validate_frozen_json(item, path=f"{path}.{key}")
+        return
+    if isinstance(value, tuple):
+        for index, item in enumerate(value):
+            _validate_frozen_json(item, path=f"{path}[{index}]")
+        return
+    raise ValueError(f"ContextSourceRef contains a non-frozen JSON container at {path}")
+
+
 def _validate_json(value: Any, *, path: str = "$") -> None:
     if value is None or isinstance(value, (str, bool, int)):
         return
@@ -194,9 +214,7 @@ def validate_context_source_ref_integrity(
     )
     if ref.context_source_id != expected:
         raise ValueError("context_source_id does not match source authority identity")
-    _validate_json(_thaw_json(ref.metadata))
-    if not isinstance(ref.metadata, MappingProxyType):
-        raise ValueError("ContextSourceRef metadata must be recursively frozen")
+    _validate_frozen_json(ref.metadata, path="$.metadata")
     return ref
 
 
