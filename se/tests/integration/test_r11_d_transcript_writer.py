@@ -14,8 +14,12 @@ from se.src.infrastructure.storage.models.sql.agent import (
 )
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.transcript_representation import (
+    canonical_json_bytes,
     canonical_transcript_messages,
+    logical_transcript_fingerprint,
     transcript_chunk_id,
+    transcript_payload_root_ref,
+    transcript_representation_ref,
 )
 from se.src.runtimes.agent.checkpoint_transcript import (
     CheckpointTranscriptMaterializationError,
@@ -393,6 +397,225 @@ async def test_r11_d_dual_mismatch_candidate_fails_before_child_representation(t
                 select(func.count()).select_from(AgentTranscriptRepresentationRecord)
             )
             assert after == before
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+async def _seed_coarse_full(uow, messages):
+    canonical = canonical_transcript_messages(messages)
+    chunk_id = transcript_chunk_id(canonical)
+    chunk = await uow.agents.save_transcript_chunk(
+        {
+            "chunk_id": chunk_id,
+            "payload": canonical,
+            "message_count": len(canonical),
+            "canonical_bytes": len(canonical_json_bytes(canonical)),
+        }
+    )
+    root_ref = transcript_payload_root_ref(
+        parent_payload_root_ref=None,
+        chunk_id=chunk.chunk_id,
+        logical_message_count=len(canonical),
+    )
+    root = await uow.agents.save_transcript_payload_node(
+        {
+            "payload_root_ref": root_ref,
+            "parent_payload_root_ref": None,
+            "chunk_id": chunk.chunk_id,
+            "logical_message_count": len(canonical),
+        }
+    )
+    fingerprint = logical_transcript_fingerprint(canonical)
+    ref = transcript_representation_ref(
+        transcript_version=0,
+        kind="FULL",
+        parent_transcript_ref=None,
+        parent_transcript_version=None,
+        delta_depth=0,
+        logical_message_count=len(canonical),
+        logical_transcript_fingerprint=fingerprint,
+        payload_root_ref=root.payload_root_ref,
+    )
+    record = await uow.agents.save_transcript_representation(
+        {
+            "transcript_ref": ref,
+            "transcript_version": 0,
+            "kind": "FULL",
+            "parent_transcript_ref": None,
+            "parent_transcript_version": None,
+            "delta_depth": 0,
+            "logical_message_count": len(canonical),
+            "logical_transcript_fingerprint": fingerprint,
+            "payload_root_ref": root.payload_root_ref,
+        }
+    )
+    return SimpleNamespace(
+        transcript_ref=record.transcript_ref,
+        transcript_version=record.transcript_version,
+    )
+
+
+@pytest.mark.asyncio
+async def test_r11_d_coarse_full_rewrite_normalizes_prefix_boundary_once(tmp_path):
+    engine, sessions = await _database(tmp_path)
+    try:
+        async with sessions() as session:
+            uow = _Uow(session)
+            original = [_message("m0"), _message("m1"), _message("m2"), _message("m3")]
+            coarse = await _seed_coarse_full(uow, original)
+            await _execution_and_checkpoint(
+                uow,
+                execution_id="exec-coarse-rewrite",
+                checkpoint_id="cp-coarse-rewrite",
+                representation=coarse,
+                snapshot=original,
+            )
+
+            before_chunks = await session.scalar(
+                select(func.count()).select_from(
+                    type(await uow.agents.get_transcript_chunk(
+                        transcript_chunk_id(canonical_transcript_messages(original))
+                    ))
+                )
+            )
+
+            rewritten = original[:3] + [_message("x")]
+            first = await write_transcript_representation_in_uow(
+                uow,
+                messages=rewritten,
+                candidate_parent_checkpoint_id="cp-coarse-rewrite",
+            )
+            first_record = await uow.agents.get_transcript_representation(
+                first.transcript_ref,
+                first.transcript_version,
+            )
+            assert first_record.kind == "FULL"
+            assert await uow.agents.materialize_transcript_representation(
+                first.transcript_ref,
+                first.transcript_version,
+            ) == canonical_transcript_messages(rewritten)
+            assert await uow.agents.get_transcript_chunk(
+                transcript_chunk_id(canonical_transcript_messages(rewritten))
+            ) is None
+
+            after_first = await session.scalar(
+                select(func.count()).select_from(
+                    type(await uow.agents.get_transcript_chunk(
+                        transcript_chunk_id(canonical_transcript_messages(original))
+                    ))
+                )
+            )
+
+            second = await write_transcript_representation_in_uow(
+                uow,
+                messages=rewritten,
+                candidate_parent_checkpoint_id="cp-coarse-rewrite",
+            )
+            after_second = await session.scalar(
+                select(func.count()).select_from(
+                    type(await uow.agents.get_transcript_chunk(
+                        transcript_chunk_id(canonical_transcript_messages(original))
+                    ))
+                )
+            )
+
+            assert second == first
+            assert after_second == after_first
+            assert after_first >= before_chunks
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_coarse_full_delete_normalizes_inside_chunk_prefix(tmp_path):
+    engine, sessions = await _database(tmp_path)
+    try:
+        async with sessions() as session:
+            uow = _Uow(session)
+            original = [_message("m0"), _message("m1"), _message("m2"), _message("m3")]
+            coarse = await _seed_coarse_full(uow, original)
+            await _execution_and_checkpoint(
+                uow,
+                execution_id="exec-coarse-delete",
+                checkpoint_id="cp-coarse-delete",
+                representation=coarse,
+                snapshot=original,
+            )
+
+            deleted_messages = original[:3]
+            deleted = await write_transcript_representation_in_uow(
+                uow,
+                messages=deleted_messages,
+                candidate_parent_checkpoint_id="cp-coarse-delete",
+            )
+            record = await uow.agents.get_transcript_representation(
+                deleted.transcript_ref,
+                deleted.transcript_version,
+            )
+            assert record.kind == "FULL"
+            assert await uow.agents.materialize_transcript_representation(
+                deleted.transcript_ref,
+                deleted.transcript_version,
+            ) == canonical_transcript_messages(deleted_messages)
+            assert await uow.agents.get_transcript_chunk(
+                transcript_chunk_id(canonical_transcript_messages(deleted_messages))
+            ) is None
+            await session.rollback()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_delta_anchored_on_coarse_full_normalizes_prefix_boundary(tmp_path):
+    engine, sessions = await _database(tmp_path)
+    try:
+        async with sessions() as session:
+            uow = _Uow(session)
+            base_messages = [_message("m0"), _message("m1"), _message("m2"), _message("m3")]
+            coarse = await _seed_coarse_full(uow, base_messages)
+            await _execution_and_checkpoint(
+                uow,
+                execution_id="exec-coarse-base",
+                checkpoint_id="cp-coarse-base",
+                representation=coarse,
+                snapshot=base_messages,
+            )
+
+            extended = base_messages + [_message("m4")]
+            delta = await write_transcript_representation_in_uow(
+                uow,
+                messages=extended,
+                candidate_parent_checkpoint_id="cp-coarse-base",
+            )
+            await _execution_and_checkpoint(
+                uow,
+                execution_id="exec-coarse-delta",
+                checkpoint_id="cp-coarse-delta",
+                representation=delta,
+                snapshot=extended,
+                parent_checkpoint_id="cp-coarse-base",
+            )
+
+            rewritten = base_messages[:3] + [_message("x"), _message("m4")]
+            result = await write_transcript_representation_in_uow(
+                uow,
+                messages=rewritten,
+                candidate_parent_checkpoint_id="cp-coarse-delta",
+            )
+            record = await uow.agents.get_transcript_representation(
+                result.transcript_ref,
+                result.transcript_version,
+            )
+            assert record.kind == "FULL"
+            assert await uow.agents.materialize_transcript_representation(
+                result.transcript_ref,
+                result.transcript_version,
+            ) == canonical_transcript_messages(rewritten)
+            assert await uow.agents.get_transcript_chunk(
+                transcript_chunk_id(canonical_transcript_messages(rewritten))
+            ) is None
             await session.rollback()
     finally:
         await engine.dispose()
