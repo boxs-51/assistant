@@ -300,3 +300,45 @@ def test_ctx_f2b_has_no_asset_projection_api():
     import se.src.context.source_adapters as adapters
 
     assert not hasattr(adapters, "project_asset_source")
+
+
+def test_ctx_f2b_session_projection_rejects_noncanonical_agent_session_shape():
+    class AgentSessionLike:
+        id = "agent-session-1"
+        owner_user_id = "user-1"
+        status = "ACTIVE"
+        created_at = NOW
+
+    with pytest.raises(ValueError, match="session.user_id is required"):
+        project_session_source(AgentSessionLike())
+
+
+@pytest.mark.parametrize(
+    "execution,checkpoint,message",
+    [
+        (Execution(id=""), Checkpoint(execution_id=""), "execution.id"),
+        (
+            Execution(session_id=""),
+            Checkpoint(session_id=""),
+            "execution.session_id",
+        ),
+    ],
+)
+def test_ctx_f2b_transcript_projection_rejects_empty_lineage_ids(
+    execution,
+    checkpoint,
+    message,
+):
+    with pytest.raises(ValueError, match=message):
+        project_agent_transcript_source(Session(), execution, checkpoint)
+
+
+def test_ctx_f2b_trp_projection_rejects_empty_structural_evidence_ids():
+    with pytest.raises(ValueError, match="execution.id"):
+        project_tool_response_payload_source(
+            Session(),
+            Execution(id=""),
+            Invocation(execution_id=""),
+            Result(execution_id=""),
+            _payload(execution_id=""),
+        )
