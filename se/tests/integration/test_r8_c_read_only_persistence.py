@@ -330,10 +330,7 @@ async def _bind_r11_full_representation(
 ):
     async with sessions() as session:
         repo = AgentRepository(session)
-        canonical = [
-            item
-            for item in messages
-        ]
+        canonical = canonical_transcript_messages(messages)
         chunk_id = transcript_chunk_id(canonical)
         chunk = await repo.save_transcript_chunk(
             {
@@ -550,7 +547,9 @@ async def test_r11_c_real_persisted_depth_corruption_is_depth_exceeded(
         await _seed_source(sessions)
         async with sessions() as session:
             repo = AgentRepository(session)
-            base_messages = [{"role": "user", "content": "base"}]
+            base_messages = canonical_transcript_messages(
+                [{"role": "user", "content": "base"}]
+            )
             base_chunk_id = transcript_chunk_id(base_messages)
             base_chunk = await repo.save_transcript_chunk(
                 {
@@ -600,7 +599,9 @@ async def test_r11_c_real_persisted_depth_corruption_is_depth_exceeded(
                 }
             )
 
-            suffix = [{"role": "user", "content": "delta"}]
+            suffix = canonical_transcript_messages(
+                [{"role": "user", "content": "delta"}]
+            )
             suffix_id = transcript_chunk_id(suffix)
             suffix_chunk = await repo.save_transcript_chunk(
                 {
