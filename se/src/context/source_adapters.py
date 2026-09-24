@@ -30,6 +30,12 @@ def _require_equal(name: str, left: object, right: object) -> None:
         raise ValueError(f"{name} mismatch")
 
 
+def _require_optional_canonical_id(name: str, value: str | None) -> str | None:
+    if value is None:
+        return None
+    return _require_canonical_id(name, value)
+
+
 @runtime_checkable
 class SessionEvidence(Protocol):
     id: str
@@ -193,8 +199,20 @@ def project_agent_transcript_source(
     _require_equal("checkpoint.execution_id", checkpoint.execution_id, execution.id)
     _require_equal("checkpoint.session_id", checkpoint.session_id, execution.session_id)
     _require_equal("execution.session_id", execution.session_id, session.id)
-    _require_equal("checkpoint.task_id", checkpoint.task_id, execution.task_id)
-    _require_equal("checkpoint.branch_id", checkpoint.branch_id, execution.branch_id)
+    execution_task_id = _require_optional_canonical_id(
+        "execution.task_id", execution.task_id
+    )
+    checkpoint_task_id = _require_optional_canonical_id(
+        "checkpoint.task_id", checkpoint.task_id
+    )
+    execution_branch_id = _require_optional_canonical_id(
+        "execution.branch_id", execution.branch_id
+    )
+    checkpoint_branch_id = _require_optional_canonical_id(
+        "checkpoint.branch_id", checkpoint.branch_id
+    )
+    _require_equal("checkpoint.task_id", checkpoint_task_id, execution_task_id)
+    _require_equal("checkpoint.branch_id", checkpoint_branch_id, execution_branch_id)
     transcript_ref = _require_canonical_id("checkpoint.transcript_ref", checkpoint.transcript_ref)
     version = checkpoint.transcript_version
     if isinstance(version, bool) or not isinstance(version, int) or version < 0:
@@ -206,8 +224,8 @@ def project_agent_transcript_source(
             authority_version=version,
             owner_user_id=owner_user_id,
             session_id=session.id,
-            task_id=checkpoint.task_id,
-            branch_id=checkpoint.branch_id,
+            task_id=checkpoint_task_id,
+            branch_id=checkpoint_branch_id,
             source_created_at=checkpoint.created_at,
         )
     )
