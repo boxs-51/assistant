@@ -3,7 +3,12 @@ from __future__ import annotations
 from collections.abc import Mapping
 
 import tools.v1.live.gui_scenarios as gui_module
-from tools.v1.live.gui_scenarios import GuiProcessController, build_gui_scenario, run_gui_live
+from tools.v1.live.gui_scenarios import (
+    GuiProcessController,
+    _target_command,
+    build_gui_scenario,
+    run_gui_live,
+)
 from tools.v1.live.harness import (
     ARTIFACT_ROOT_ENV,
     GUI_GATE_ENV,
@@ -486,5 +491,70 @@ def test_gui_ownership_mismatch_timeout_preserves_classification(
     assert step["error"]["details"]["final_returned_count"] == 1
     assert desktop_calls == []
     assert evidence["cleanup"]["owned_pids"] == [301]
+    assert evidence["cleanup"]["still_alive_pids"] == []
+    assert evidence["cleanup"]["errors"] == []
+
+
+def test_gui_target_command_is_deterministic_and_single_line():
+    args = ("TOOLS_V1_T10E_test", "TOOLS_V1_T10E_test_TYPED", "T10E_test")
+    first = _target_command(*args)
+    second = _target_command(*args)
+
+    assert first == second
+    assert "\n" not in first
+    assert "\r" not in first
+    assert "base64" in first.lower()
+
+
+def test_gui_launch_ack_does_not_imply_target_readiness(tmp_path, monkeypatch):
+    config = _config(tmp_path)
+    controller = FakeProcessController()
+    desktop_calls = []
+    commands = []
+    monkeypatch.setattr(gui_module, "GUI_DISCOVERY_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(gui_module, "GUI_DISCOVERY_POLL_SECONDS", 0.0)
+
+    def terminal_run(**kwargs):
+        commands.append(kwargs["command"])
+        return _success(
+            "terminal_tool",
+            "launch",
+            {"pid": 401, "started": True, "cwd": kwargs["cwd"]},
+        )
+
+    def window_run(*, action, **kwargs):
+        assert action == "find"
+        return _success(
+            "window_tool",
+            "find",
+            {
+                "returned_count": 0,
+                "total_count": 0,
+                "windows": [],
+            },
+        )
+
+    evidence = ScenarioRunner(config, process_controller=controller).run(
+        (
+            build_gui_scenario(
+                process_controller=controller,
+                terminal_run=terminal_run,
+                window_run=window_run,
+                desktop_run=lambda **kwargs: desktop_calls.append(kwargs),
+            ),
+        )
+    )
+
+    assert len(commands) == 1
+    assert "\n" not in commands[0]
+    assert "\r" not in commands[0]
+    steps = evidence["scenarios"][0]["steps"]
+    assert steps[0]["id"] == "gui-target-launch"
+    assert steps[0]["status"] == "PASS"
+    assert steps[1]["id"] == "window-discover-owned"
+    assert steps[1]["status"] == "FAIL"
+    assert steps[1]["error"]["code"] == "LIVE_GUI_DISCOVERY_TIMEOUT"
+    assert desktop_calls == []
+    assert evidence["cleanup"]["owned_pids"] == [401]
     assert evidence["cleanup"]["still_alive_pids"] == []
     assert evidence["cleanup"]["errors"] == []
