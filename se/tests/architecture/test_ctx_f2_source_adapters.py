@@ -7,6 +7,7 @@ import pytest
 
 from se.src.context.source_adapters import (
     project_agent_transcript_source,
+    project_asset_source,
     project_branch_source,
     project_session_source,
     project_task_source,
@@ -85,6 +86,20 @@ class Result:
     capability_id: str = "cap-1"
     commit_state: str = "COMMITTED"
     created_at: datetime = NOW
+
+
+@dataclass(frozen=True)
+class Asset:
+    asset_id: str = "asset-1"
+    owner_user_id: str = "user-1"
+    filename: str = "report.pdf"
+    mime_type: str = "application/pdf"
+    size_bytes: int | None = 128
+    sha256: str | None = "abc123"
+    state: str = "READY"
+    uri: str = "asset://asset-1"
+    origin_type: str = "USER_UPLOAD"
+    revision: int = 1
 
 
 def _payload(**overrides):
@@ -296,10 +311,82 @@ def test_ctx_f2b_trp_projection_accepts_proven_committed_source():
     assert first.context_source_id == second.context_source_id
 
 
-def test_ctx_f2b_has_no_asset_projection_api():
+def test_ctx_f2c_asset_projection_uses_canonical_asset_authority():
+    ref = project_asset_source(Asset())
+    assert ref.source_kind is ContextSourceKind.ASSET
+    assert ref.authority_id == "asset-1"
+    assert ref.authority_version is None
+    assert ref.owner_user_id == "user-1"
+    assert ref.source_state == "READY"
+    assert ref.metadata["uri"] == "asset://asset-1"
+    assert ref.metadata["file_asset_revision"] == 1
+
+
+def test_ctx_f2c_asset_identity_is_stable_across_lifecycle_revision_changes():
+    first = project_asset_source(Asset(revision=1))
+    changed = project_asset_source(Asset(revision=2))
+    assert first.context_source_id == changed.context_source_id
+    assert first.metadata["file_asset_revision"] == 1
+    assert changed.metadata["file_asset_revision"] == 2
+
+
+@pytest.mark.parametrize("state", ["STAGING", "DELETING", "DELETED", ""])
+def test_ctx_f2c_asset_projection_rejects_non_ready_evidence(state):
+    with pytest.raises(ValueError, match="asset.state must be READY"):
+        project_asset_source(Asset(state=state))
+
+
+@pytest.mark.parametrize(
+    "asset,message",
+    [
+        (Asset(asset_id=" asset-1 "), "asset.asset_id"),
+        (Asset(owner_user_id=" user-1 "), "asset.owner_user_id"),
+    ],
+)
+def test_ctx_f2c_asset_projection_rejects_noncanonical_authority_ids(asset, message):
+    with pytest.raises(ValueError, match=message):
+        project_asset_source(asset)
+
+
+@pytest.mark.parametrize(
+    "asset",
+    [
+        Asset(uri="https://example.invalid/asset-1"),
+        Asset(uri="asset://asset-other"),
+        Asset(uri=""),
+    ],
+)
+def test_ctx_f2c_asset_projection_requires_exact_canonical_uri(asset):
+    with pytest.raises(ValueError, match="asset.uri must exactly match"):
+        project_asset_source(asset)
+
+
+@pytest.mark.parametrize("revision", [-1, True, 1.5, "1"])
+def test_ctx_f2c_asset_projection_rejects_invalid_revision(revision):
+    with pytest.raises(ValueError, match="asset.revision"):
+        project_asset_source(Asset(revision=revision))
+
+
+@pytest.mark.parametrize("size_bytes", [-1, True, 1.5, "128"])
+def test_ctx_f2c_asset_projection_rejects_invalid_size(size_bytes):
+    with pytest.raises(ValueError, match="asset.size_bytes"):
+        project_asset_source(Asset(size_bytes=size_bytes))
+
+
+def test_ctx_f2c_asset_projection_allows_unknown_size():
+    ref = project_asset_source(Asset(size_bytes=None))
+    assert ref.metadata["size_bytes"] is None
+
+
+def test_ctx_f2c_adapter_has_no_storage_or_runtime_dependency():
+    import inspect
     import se.src.context.source_adapters as adapters
 
-    assert not hasattr(adapters, "project_asset_source")
+    source = inspect.getsource(adapters)
+    assert "sqlalchemy" not in source
+    assert "infrastructure.storage" not in source
+    assert "AssetService" not in source
+    assert "object_store" not in source
 
 
 def test_ctx_f2b_session_projection_rejects_noncanonical_agent_session_shape():
