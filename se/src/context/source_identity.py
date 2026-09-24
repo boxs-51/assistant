@@ -7,7 +7,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from pydantic import BaseModel, ConfigDict, field_serializer, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator, model_validator
 
 
 CONTEXT_SOURCE_IDENTITY_DOMAIN = "ctx-context-source-v1"
@@ -151,7 +151,17 @@ class ContextSourceRef(BaseModel):
     branch_id: str | None = None
     source_created_at: datetime | None = None
     source_state: str | None = None
-    metadata: dict[str, Any] = {}
+    metadata: dict[str, Any] = Field(default_factory=dict, validate_default=True)
+
+    @field_validator("owner_user_id", "authority_id", mode="before")
+    @classmethod
+    def normalize_identity_strings(cls, value: Any, info) -> str:
+        if not isinstance(value, str):
+            raise ValueError(f"{info.field_name} must be a string")
+        normalized = _require_non_empty(info.field_name, value)
+        if info.field_name == "authority_id":
+            _reject_non_authority_locator(normalized)
+        return normalized
 
     @field_validator("metadata", mode="before")
     @classmethod
