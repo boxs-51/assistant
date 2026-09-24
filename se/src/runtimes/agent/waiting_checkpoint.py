@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+from .checkpoint_transcript_writer import write_transcript_representation_in_uow
 from .serialization import to_json_safe
 
 
@@ -147,19 +148,23 @@ async def stage_waiting_checkpoint(
 
     transcript_ref = checkpoint.get("transcript_ref")
     transcript_version = checkpoint.get("transcript_version")
-    if (transcript_ref is None) != (transcript_version is None):
+    if transcript_ref is not None or transcript_version is not None:
         raise WaitingCheckpointConflictError(
-            "Checkpoint transcript_ref/transcript_version must be an exact pair."
+            "Checkpoint ref-bearing authority is owned by the R11-D "
+            "representation writer and may not be caller supplied."
         )
-    if checkpoint.get("transcript_snapshot") is None and transcript_ref is None:
+    if checkpoint.get("transcript_snapshot") is None:
         raise WaitingCheckpointConflictError(
-            "Checkpoint transcript representation is not reconstructable."
+            "R11-D DUAL cutover requires an inline transcript snapshot."
         )
-    if transcript_ref is not None:
-        raise WaitingCheckpointConflictError(
-            "Checkpoint ref-backed authority must be proven by the R11-D "
-            "representation writer before staging."
-        )
+
+    proven = await write_transcript_representation_in_uow(
+        uow,
+        messages=checkpoint["transcript_snapshot"],
+        candidate_parent_checkpoint_id=checkpoint.get("parent_checkpoint_id"),
+    )
+    checkpoint["transcript_ref"] = proven.transcript_ref
+    checkpoint["transcript_version"] = proven.transcript_version
 
     checkpoint["metadata_json"] = to_json_safe(
         checkpoint.get("metadata_json") or {},
