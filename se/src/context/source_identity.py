@@ -216,6 +216,15 @@ def _validate_optional_string_field(name: str, value: Any) -> None:
 
 
 def _validate_stored_context_source_ref_shape(ref: ContextSourceRef) -> None:
+    declared_fields = set(type(ref).model_fields)
+    stored_fields = set(ref.__dict__)
+    extra_fields = stored_fields - declared_fields
+    if ref.__pydantic_extra__:
+        extra_fields.update(ref.__pydantic_extra__)
+    if extra_fields:
+        joined = ", ".join(sorted(extra_fields))
+        raise ValueError(f"ContextSourceRef contains undeclared stored fields: {joined}")
+
     if not isinstance(ref.context_source_id, str) or not ref.context_source_id.strip():
         raise ValueError("context_source_id must be a non-empty string")
     if not isinstance(ref.source_kind, ContextSourceKind):
