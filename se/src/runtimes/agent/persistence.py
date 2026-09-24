@@ -3976,6 +3976,7 @@ class DurableAgentStore:
         self,
         *,
         limit: int | None = None,
+        validation_after=None,
     ) -> CheckpointBackfillResult:
         """Run one bounded R11-D LEGACY_INLINE -> DUAL convergence batch."""
 
@@ -3985,6 +3986,7 @@ class DurableAgentStore:
             result = await backfill_legacy_inline_checkpoints_in_uow(
                 uow,
                 limit=limit,
+                validation_after=validation_after,
             )
             await uow.commit()
             return result
