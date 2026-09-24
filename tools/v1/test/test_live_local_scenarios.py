@@ -258,11 +258,11 @@ class FakePsutilProcess:
 
     def terminate(self):
         self.terminate_calls += 1
-        self._status = "dead"
+        self._status = "zombie"
 
     def kill(self):
         self.kill_calls += 1
-        self._status = "dead"
+        self._status = "zombie"
 
 
 def test_psutil_controller_refuses_reused_pid(monkeypatch):
