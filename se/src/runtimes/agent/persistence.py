@@ -4290,7 +4290,7 @@ class DurableAgentStore:
                             existing_messages
                         )
                         expected_canonical = canonical_transcript_messages(
-                            checkpoint_values["transcript_snapshot"]
+                            list(transcript_snapshot)
                         )
                         if existing_canonical != expected_canonical:
                             raise LegacyCheckpointMaterializationError(
