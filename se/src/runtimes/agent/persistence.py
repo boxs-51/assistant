@@ -4859,10 +4859,19 @@ class DurableAgentStore:
                     )
                 except CheckpointTranscriptMaterializationError as exc:
                     raise ExecutionConflictError(str(exc)) from exc
-                transcript_source = [
-                    item.model_dump(mode="json")
-                    for item in checkpoint_messages
-                ]
+                transcript_source = (
+                    [dict(item) for item in checkpoint.transcript_snapshot]
+                    if checkpoint.transcript_snapshot is not None
+                    else [
+                        item.model_dump(mode="json")
+                        for item in checkpoint_messages
+                    ]
+                )
+                if len(transcript_source) != len(checkpoint_messages):
+                    raise ExecutionConflictError(
+                        "TRANSCRIPT_REPRESENTATION_CORRUPT: "
+                        "checkpoint transcript length changed during materialization."
+                    )
             else:
                 transcript_source = getattr(execution, "transcript", None) or (
                     getattr(latest_iteration, "transcript", None)
