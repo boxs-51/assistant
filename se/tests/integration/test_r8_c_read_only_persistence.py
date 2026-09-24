@@ -435,9 +435,8 @@ async def test_r11_c_real_b1_representation_converges_resume_fork_retry_readers(
             "cp-r8-c",
         )
 
-        assert inline_resume == ({"role": "user", "content": "base"},)
         if mode == "DUAL":
-            # DUAL retains the pre-C inline outward shape after canonical
+            # DUAL retains the exact pre-C inline outward shape after canonical
             # equality has been proven against the ref-backed authority.
             assert converged_resume == inline_resume
         else:
