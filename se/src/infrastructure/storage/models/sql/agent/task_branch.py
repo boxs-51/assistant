@@ -53,6 +53,12 @@ class AgentTaskBranchRecord(Base):
             "task_id",
             "resolution_state",
         ),
+        Index(
+            "ix_agent_task_branches_task_created_branch",
+            "task_id",
+            "created_at",
+            "branch_id",
+        ),
     )
 
     branch_id: Mapped[str] = mapped_column(String(255), primary_key=True)

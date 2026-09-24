@@ -159,7 +159,11 @@ def _reservation(connection, task_id: str, branch_id: str, fingerprint: str):
 def test_r8_b_remains_on_single_linear_migration_chain(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["18a_cas_r0_assets"]
+    assert script.get_heads() == ["19a_r11_query_order_indexes"]
+    assert (
+        script.get_revision("19a_r11_query_order_indexes").down_revision
+        == "18a_cas_r0_assets"
+    )
     assert (
         script.get_revision("18a_cas_r0_assets").down_revision
         == "17a_r11_checkpoint_cutover"
