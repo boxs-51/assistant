@@ -800,7 +800,7 @@ async def test_r11_a_branch_rows_and_synchronized_contention_red_probe(tmp_path)
             <= percentiles["p99_ns"]
         )
 
-    pytest.fail(
-        "R11_A_BRANCH_ROWS_SYNC_CONTENTION_BASELINE="
-        + json.dumps(report, sort_keys=True, separators=(",", ":"))
-    )
+    # Exact timing baseline is retained on Issue #31 / CI #952/#953.
+    # Keep only deterministic durable-shape and race-authority assertions here.
+    assert rows["root_waiting"]["total_rows"] == 10
+    assert rows["one_fork"]["total_rows"] == 16
