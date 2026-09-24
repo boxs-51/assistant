@@ -601,11 +601,6 @@ async def test_r11_a_real_writer_bytes_and_reconstruction_percentile_red_probe(
         assert sample["samples"] == 20
         assert 0 < sample["p50_ns"] <= sample["p95_ns"] <= sample["p99_ns"]
 
-    pytest.fail(
-        "R11_A_WRITER_RECON_PERCENTILE_BASELINE="
-        + json.dumps(
-            {"writer": writer, "reconstruction": reconstruction},
-            sort_keys=True,
-            separators=(",", ":"),
-        )
-    )
+    # Exact numeric baseline is preserved durably on Issue #31 / CI #951/#953.
+    # CI gates only structural properties; shared-runner timings remain evidence.
+    assert writer[1000]["checkpoint_insert_parameter_bytes"] > 200_000
