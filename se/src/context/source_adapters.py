@@ -104,6 +104,20 @@ class ToolResultEvidence(Protocol):
     created_at: datetime
 
 
+@runtime_checkable
+class AssetEvidence(Protocol):
+    asset_id: str
+    owner_user_id: str
+    filename: str
+    mime_type: str
+    size_bytes: int | None
+    sha256: str | None
+    state: str
+    uri: str
+    origin_type: str
+    revision: int
+
+
 def _required_attr(obj: object, name: str, *, label: str) -> object:
     if not hasattr(obj, name):
         raise ValueError(f"{label}.{name} is required")
@@ -231,6 +245,50 @@ def project_agent_transcript_source(
     )
 
 
+def project_asset_source(asset: AssetEvidence) -> ContextSourceRef:
+    asset_id = _require_canonical_id("asset.asset_id", asset.asset_id)
+    owner_user_id = _require_canonical_id(
+        "asset.owner_user_id", asset.owner_user_id
+    )
+
+    if asset.state != "READY":
+        raise ValueError("asset.state must be READY")
+
+    expected_uri = f"asset://{asset_id}"
+    if asset.uri != expected_uri:
+        raise ValueError("asset.uri must exactly match asset://<asset_id>")
+
+    revision = asset.revision
+    if isinstance(revision, bool) or not isinstance(revision, int) or revision < 0:
+        raise ValueError("asset.revision must be a nonnegative integer")
+
+    size_bytes = asset.size_bytes
+    if size_bytes is not None and (
+        isinstance(size_bytes, bool)
+        or not isinstance(size_bytes, int)
+        or size_bytes < 0
+    ):
+        raise ValueError("asset.size_bytes must be None or a nonnegative integer")
+
+    return _finalize(
+        create_context_source_ref(
+            source_kind=ContextSourceKind.ASSET,
+            authority_id=asset_id,
+            owner_user_id=owner_user_id,
+            source_state="READY",
+            metadata={
+                "filename": asset.filename,
+                "mime_type": asset.mime_type,
+                "size_bytes": size_bytes,
+                "sha256": asset.sha256,
+                "uri": asset.uri,
+                "origin_type": asset.origin_type,
+                "file_asset_revision": revision,
+            },
+        )
+    )
+
+
 def project_tool_response_payload_source(
     session: SessionEvidence,
     execution: ExecutionEvidence,
@@ -299,6 +357,7 @@ def project_tool_response_payload_source(
 
 
 __all__ = [
+    "AssetEvidence",
     "BranchEvidence",
     "CheckpointEvidence",
     "ExecutionEvidence",
@@ -307,6 +366,7 @@ __all__ = [
     "TaskEvidence",
     "ToolResultEvidence",
     "project_agent_transcript_source",
+    "project_asset_source",
     "project_branch_source",
     "project_session_source",
     "project_task_source",
