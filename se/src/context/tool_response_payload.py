@@ -4,9 +4,17 @@ import asyncio
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any, Mapping, Protocol
+from collections.abc import Mapping
+from types import MappingProxyType
+from typing import Any, Dict, Protocol
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_serializer,
+    field_validator,
+)
 
 
 TOOL_RESPONSE_PAYLOAD_IDENTITY_DOMAIN = "ctx-tool-response-payload-v1"
@@ -16,6 +24,26 @@ COMMITTED_RESULT_STATE = "COMMITTED"
 
 class ToolResponsePayloadConflictError(RuntimeError):
     """Raised when one immutable source identity is reused inconsistently."""
+
+
+def _freeze(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze(item) for key, item in value.items()})
+    if isinstance(value, (list, tuple)):
+        return tuple(_freeze(item) for item in value)
+    if isinstance(value, (set, frozenset)):
+        return frozenset(_freeze(item) for item in value)
+    return value
+
+
+def _thaw(value: Any) -> Any:
+    if isinstance(value, Mapping):
+        return {key: _thaw(item) for key, item in value.items()}
+    if isinstance(value, tuple):
+        return [_thaw(item) for item in value]
+    if isinstance(value, (set, frozenset)):
+        return [_thaw(item) for item in value]
+    return value
 
 
 def canonical_payload_bytes(value: Any) -> bytes:
@@ -69,7 +97,7 @@ def tool_response_payload_id(
 class ToolResponsePayload(BaseModel):
     """Immutable CTX-F1 identity/provenance record for one committed tool result."""
 
-    model_config = ConfigDict(extra="forbid", frozen=True)
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
 
     payload_id: str
     source_result_id: str
@@ -77,14 +105,29 @@ class ToolResponsePayload(BaseModel):
     execution_id: str
     tool_call_id: str
     logical_capability_id: str
-    payload_schema_version: int = TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION
+    payload_schema_version: int = Field(default=TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION, ge=1)
     content_digest: str
     canonical_bytes: int = Field(ge=0)
+    content: Any = None
     content_type: str = "application/json"
     owner_user_id: str | None = None
     session_id: str | None = None
-    metadata: Mapping[str, Any] = Field(default_factory=dict)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+    @field_validator("content", mode="after")
+    @classmethod
+    def freeze_content(cls, value: Any) -> Any:
+        return _freeze(value)
+
+    @field_validator("metadata", mode="after")
+    @classmethod
+    def freeze_metadata(cls, value: Dict[str, Any]) -> MappingProxyType:
+        return _freeze(value)
+
+    @field_serializer("content", "metadata")
+    def serialize_mutable_fields(self, value: Any) -> Any:
+        return _thaw(value)
 
 
 def create_tool_response_payload(
@@ -138,6 +181,7 @@ def create_tool_response_payload(
         payload_schema_version=payload_schema_version,
         content_digest=digest,
         canonical_bytes=len(canonical),
+        content=content,
         content_type=content_type,
         owner_user_id=owner_user_id,
         session_id=session_id,
