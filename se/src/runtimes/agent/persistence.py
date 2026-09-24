@@ -75,6 +75,10 @@ from .legacy_materialization import (
     parse_legacy_checkpoint_source,
     sanitize_legacy_transcript,
 )
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    materialize_checkpoint_transcript_in_uow,
+)
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -2321,6 +2325,21 @@ class DurableAgentStore:
             },
         )
 
+    async def materialize_checkpoint_transcript(
+        self,
+        checkpoint,
+    ) -> tuple[InferenceMessage, ...]:
+        async with self.uow_factory() as uow:
+            try:
+                materialized = await materialize_checkpoint_transcript_in_uow(
+                    uow,
+                    checkpoint,
+                )
+            except CheckpointTranscriptMaterializationError:
+                raise
+            await uow.commit()
+            return materialized
+
     async def load_fork_safe_checkpoint_transcript(
         self,
         execution_id: str,
@@ -2346,11 +2365,15 @@ class DurableAgentStore:
                     "FORK_CHECKPOINT_LINEAGE_CONFLICT: "
                     "normalized checkpoint does not belong to source execution."
                 )
-            if checkpoint.transcript_snapshot is None:
-                raise ExecutionConflictError(
-                    "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE: "
-                    "inline transcript snapshot is required."
+            try:
+                materialized = await materialize_checkpoint_transcript_in_uow(
+                    uow,
+                    checkpoint,
                 )
+            except CheckpointTranscriptMaterializationError as exc:
+                raise ExecutionConflictError(
+                    "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE: " + str(exc)
+                ) from exc
 
             pending = await uow.agents.list_checkpoint_pending_invocations(
                 checkpoint_id
@@ -2437,8 +2460,7 @@ class DurableAgentStore:
 
             result: list[InferenceMessage] = []
             seen_active: set[str] = set()
-            for raw in checkpoint.transcript_snapshot:
-                message = InferenceMessage.model_validate(raw)
+            for message in materialized:
                 if message.role != "tool":
                     result.append(message)
                     continue
@@ -4485,14 +4507,17 @@ class DurableAgentStore:
                 raise ExecutionConflictError(
                     "Normalized checkpoint does not belong to execution."
                 )
-            if checkpoint.transcript_snapshot is None:
-                raise ExecutionConflictError(
-                    "R7-D requires an inline reconstructable transcript snapshot."
+            try:
+                materialized = await materialize_checkpoint_transcript_in_uow(
+                    uow,
+                    checkpoint,
                 )
+            except CheckpointTranscriptMaterializationError as exc:
+                raise ExecutionConflictError(str(exc)) from exc
 
             result: list[dict[str, Any]] = []
-            for raw in checkpoint.transcript_snapshot:
-                message = dict(raw)
+            for item in materialized:
+                message = item.model_dump(mode="json")
                 if message.get("role") != "tool":
                     result.append(message)
                     continue
