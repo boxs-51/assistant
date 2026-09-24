@@ -225,69 +225,96 @@ class PsutilProcessController:
             root.kill()
 
 
-def _validate_terminal_run(result: Mapping[str, Any]) -> bool:
+def _canonical_file_path(path: str | Path) -> str:
+    return Path(os.path.abspath(os.fspath(path))).as_posix()
+
+
+def _terminal_cwd(path: str | Path) -> str:
+    return str(Path(path).resolve())
+
+
+def _validate_terminal_run(
+    result: Mapping[str, Any],
+    *,
+    expected_cwd: str,
+) -> bool:
     data = result.get("data")
     if not isinstance(data, Mapping):
         return False
     stdout = data.get("stdout")
-    cwd = data.get("cwd")
     return (
         data.get("exit_code") == 0
         and isinstance(stdout, str)
         and LOCAL_MARKER in stdout
-        and isinstance(cwd, str)
-        and bool(cwd)
+        and data.get("cwd") == expected_cwd
     )
 
 
-def _validate_file_write(result: Mapping[str, Any]) -> bool:
+def _validate_file_write(
+    result: Mapping[str, Any],
+    *,
+    expected_path: str,
+) -> bool:
     data = result.get("data")
     return (
         isinstance(data, Mapping)
+        and data.get("path") == expected_path
         and data.get("changed") is True
         and data.get("created") is True
     )
 
 
-def _validate_file_read(result: Mapping[str, Any]) -> bool:
+def _validate_file_read(
+    result: Mapping[str, Any],
+    *,
+    expected_path: str,
+) -> bool:
     data = result.get("data")
     if not isinstance(data, Mapping):
         return False
     content = data.get("content")
     return (
-        isinstance(content, str)
+        data.get("path") == expected_path
+        and isinstance(content, str)
         and LOCAL_MARKER in content
         and data.get("eof") is True
     )
 
 
-def _validate_glob(result: Mapping[str, Any]) -> bool:
+def _validate_glob(
+    result: Mapping[str, Any],
+    *,
+    expected_root: str,
+    expected_path: str,
+) -> bool:
     data = result.get("data")
     if not isinstance(data, Mapping):
+        return False
+    if data.get("root_dir") != expected_root:
         return False
     matches = data.get("matches")
     if not isinstance(matches, list):
         return False
-    for item in matches:
-        if not isinstance(item, Mapping):
-            continue
-        path = item.get("path")
-        if isinstance(path, str) and Path(path).name == LOCAL_FILE_NAME:
-            return True
-    return False
+    return any(
+        isinstance(item, Mapping)
+        and item.get("path") == expected_path
+        for item in matches
+    )
 
 
-def _validate_launch(result: Mapping[str, Any]) -> bool:
+def _validate_launch(
+    result: Mapping[str, Any],
+    *,
+    expected_cwd: str,
+) -> bool:
     data = result.get("data")
     if not isinstance(data, Mapping):
         return False
-    cwd = data.get("cwd")
     return (
         type(data.get("pid")) is int
         and data["pid"] > 0
         and data.get("started") is True
-        and isinstance(cwd, str)
-        and bool(cwd)
+        and data.get("cwd") == expected_cwd
     )
 
 
@@ -297,7 +324,12 @@ def build_local_scenario(
     glob_run=find_by_glob.run,
     terminal_run=terminal_tool.run,
 ) -> Scenario:
+    expected: dict[str, str] = {}
+
     def terminal_probe(context: ScenarioContext) -> Mapping[str, Any]:
+        expected["terminal_cwd"] = _terminal_cwd(
+            context.config.artifact_directory
+        )
         return terminal_run(
             action="run",
             command=_python_command(f"print({LOCAL_MARKER!r})"),
@@ -309,6 +341,7 @@ def build_local_scenario(
     def file_write(context: ScenarioContext) -> Mapping[str, Any]:
         target = context.config.artifact_directory / LOCAL_FILE_NAME
         context.state["local_file"] = target
+        expected["file_path"] = _canonical_file_path(target)
         return file_run(
             action="write",
             file_paths=str(target),
@@ -327,6 +360,12 @@ def build_local_scenario(
         )
 
     def glob_find(context: ScenarioContext) -> Mapping[str, Any]:
+        expected["glob_root"] = _canonical_file_path(
+            context.config.artifact_directory
+        )
+        expected["glob_path"] = _canonical_file_path(
+            context.config.artifact_directory / LOCAL_FILE_NAME
+        )
         return glob_run(
             pattern="*.txt",
             root_dir=str(context.config.artifact_directory),
@@ -335,6 +374,9 @@ def build_local_scenario(
         )
 
     def terminal_launch(context: ScenarioContext) -> Mapping[str, Any]:
+        expected["terminal_cwd"] = _terminal_cwd(
+            context.config.artifact_directory
+        )
         result = terminal_run(
             action="launch",
             command=_python_command(
@@ -356,7 +398,10 @@ def build_local_scenario(
                 action="run",
                 summary="Run a bounded Python probe in the scenario artifact directory.",
                 execute=terminal_probe,
-                validate=_validate_terminal_run,
+                validate=lambda result: _validate_terminal_run(
+                    result,
+                    expected_cwd=expected["terminal_cwd"],
+                ),
             ),
             ScenarioStep(
                 id="file-write",
@@ -364,7 +409,10 @@ def build_local_scenario(
                 action="write",
                 summary="Create one scenario-owned text file.",
                 execute=file_write,
-                validate=_validate_file_write,
+                validate=lambda result: _validate_file_write(
+                    result,
+                    expected_path=expected["file_path"],
+                ),
             ),
             ScenarioStep(
                 id="file-read",
@@ -372,7 +420,10 @@ def build_local_scenario(
                 action="read",
                 summary="Read the scenario-owned text file through structured data.",
                 execute=file_read,
-                validate=_validate_file_read,
+                validate=lambda result: _validate_file_read(
+                    result,
+                    expected_path=expected["file_path"],
+                ),
             ),
             ScenarioStep(
                 id="glob-find",
@@ -380,7 +431,11 @@ def build_local_scenario(
                 action="find",
                 summary="Discover the scenario-owned text file by structured glob matches.",
                 execute=glob_find,
-                validate=_validate_glob,
+                validate=lambda result: _validate_glob(
+                    result,
+                    expected_root=expected["glob_root"],
+                    expected_path=expected["glob_path"],
+                ),
             ),
             ScenarioStep(
                 id="terminal-launch",
@@ -388,7 +443,10 @@ def build_local_scenario(
                 action="launch",
                 summary="Launch a bounded sleeper and prove owned-process cleanup.",
                 execute=terminal_launch,
-                validate=_validate_launch,
+                validate=lambda result: _validate_launch(
+                    result,
+                    expected_cwd=expected["terminal_cwd"],
+                ),
             ),
         ),
     )

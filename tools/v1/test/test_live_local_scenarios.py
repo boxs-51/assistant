@@ -123,7 +123,7 @@ def test_local_scenario_uses_structured_file_glob_terminal_contracts(tmp_path):
                 "file_tool",
                 "write",
                 {
-                    "path": str(Path(file_paths).resolve()),
+                    "path": Path(file_paths).absolute().as_posix(),
                     "created": True,
                     "changed": True,
                 },
@@ -133,7 +133,7 @@ def test_local_scenario_uses_structured_file_glob_terminal_contracts(tmp_path):
             "file_tool",
             "read",
             {
-                "path": str(Path(file_paths).resolve()),
+                "path": Path(file_paths).absolute().as_posix(),
                 "content": f"{LOCAL_MARKER}\n",
                 "eof": True,
                 "returned_line_count": 1,
@@ -149,17 +149,15 @@ def test_local_scenario_uses_structured_file_glob_terminal_contracts(tmp_path):
             "find_by_glob",
             "find",
             {
-                "root_dir": str(Path(root_dir).resolve()),
+                "root_dir": Path(root_dir).absolute().as_posix(),
                 "pattern": pattern,
                 "returned_count": 1,
                 "matches": [
                     {
-                        "path": str(
-                            (
-                                Path(root_dir)
-                                / LOCAL_FILE_NAME
-                            ).resolve()
-                        ),
+                        "path": (
+                            Path(root_dir)
+                            / LOCAL_FILE_NAME
+                        ).absolute().as_posix(),
                         "kind": "file",
                     }
                 ],
@@ -208,6 +206,153 @@ def test_local_scenario_uses_structured_file_glob_terminal_contracts(tmp_path):
         20,
     )
     assert calls[4][0:3] == ("terminal", "launch", artifact)
+
+
+@pytest.mark.parametrize(
+    "wrong_field",
+    [
+        "terminal_run_cwd",
+        "file_write_path",
+        "file_read_path",
+        "glob_root",
+        "glob_match_path",
+        "terminal_launch_cwd",
+    ],
+)
+def test_local_scenario_rejects_wrong_requested_location(
+    tmp_path,
+    wrong_field,
+):
+    config = _config(tmp_path)
+    controller = FakeController()
+    artifact_terminal = str(config.artifact_directory.resolve())
+    artifact_canonical = config.artifact_directory.absolute().as_posix()
+    file_canonical = (
+        config.artifact_directory / LOCAL_FILE_NAME
+    ).absolute().as_posix()
+    wrong_terminal = str((tmp_path / "wrong-cwd").resolve())
+    wrong_canonical = (tmp_path / "wrong-path").absolute().as_posix()
+
+    def terminal_run(*, action, command, cwd, **kwargs):
+        if action == "run":
+            return _success(
+                "terminal_tool",
+                "run",
+                {
+                    "exit_code": 0,
+                    "stdout": f"{LOCAL_MARKER}\n",
+                    "stderr": "",
+                    "cwd": (
+                        wrong_terminal
+                        if wrong_field == "terminal_run_cwd"
+                        else artifact_terminal
+                    ),
+                    "encoding": "utf-8",
+                    "duration_ms": 1,
+                    "stdout_bytes": len(LOCAL_MARKER) + 1,
+                    "stderr_bytes": 0,
+                },
+            )
+        return _success(
+            "terminal_tool",
+            "launch",
+            {
+                "pid": 4321,
+                "cwd": (
+                    wrong_terminal
+                    if wrong_field == "terminal_launch_cwd"
+                    else artifact_terminal
+                ),
+                "started": True,
+            },
+        )
+
+    def file_run(*, action, file_paths, **kwargs):
+        if action == "write":
+            return _success(
+                "file_tool",
+                "write",
+                {
+                    "path": (
+                        wrong_canonical
+                        if wrong_field == "file_write_path"
+                        else file_canonical
+                    ),
+                    "created": True,
+                    "changed": True,
+                },
+            )
+        return _success(
+            "file_tool",
+            "read",
+            {
+                "path": (
+                    wrong_canonical
+                    if wrong_field == "file_read_path"
+                    else file_canonical
+                ),
+                "content": f"{LOCAL_MARKER}\n",
+                "eof": True,
+                "returned_line_count": 1,
+                "next_start_line": None,
+            },
+        )
+
+    def glob_run(*, pattern, root_dir, recursive, max_results):
+        return _success(
+            "find_by_glob",
+            "find",
+            {
+                "root_dir": (
+                    wrong_canonical
+                    if wrong_field == "glob_root"
+                    else artifact_canonical
+                ),
+                "pattern": pattern,
+                "recursive": recursive,
+                "returned_count": 1,
+                "matches": [
+                    {
+                        "path": (
+                            wrong_canonical
+                            if wrong_field == "glob_match_path"
+                            else file_canonical
+                        ),
+                        "kind": "file",
+                        "is_symlink": False,
+                    }
+                ],
+            },
+        )
+
+    scenario = build_local_scenario(
+        file_run=file_run,
+        glob_run=glob_run,
+        terminal_run=terminal_run,
+    )
+    evidence = ScenarioRunner(
+        config,
+        process_controller=controller,
+    ).run((scenario,))
+
+    assert evidence["status"] == "FAIL"
+    failed_steps = [
+        step
+        for step in evidence["scenarios"][0]["steps"]
+        if step["status"] == "FAIL"
+    ]
+    assert len(failed_steps) == 1
+    assert failed_steps[0]["error"]["code"] == (
+        "LIVE_SCENARIO_ASSERTION_FAILED"
+    )
+
+    if wrong_field != "terminal_launch_cwd":
+        assert controller.calls == []
+    else:
+        # launch ownership is captured before semantic validation so cleanup
+        # still drains the exact owned process even when cwd evidence is wrong.
+        assert any(call[0] == "capture" for call in controller.calls)
+        assert any(call[0] == "terminate" for call in controller.calls)
 
 
 def test_local_entry_gate_blocks_before_controller_or_artifacts(
