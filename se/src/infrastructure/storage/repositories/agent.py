@@ -1327,6 +1327,11 @@ class AgentRepository(BaseRepository):
             parent_ref = record.parent_transcript_ref
             parent_version = record.parent_transcript_version
 
+            if kind == "DELTA" and depth > HARD_MAX_DELTA_DEPTH:
+                raise ValueError(
+                    "Stored DELTA representation depth exceeds R11-B safety envelope."
+                )
+
             expected_ref = transcript_representation_ref(
                 transcript_version=version,
                 kind=kind,
@@ -1417,6 +1422,32 @@ class AgentRepository(BaseRepository):
             )
         )
         return result.scalar_one_or_none()
+
+    async def list_transcript_representation_versions(
+        self,
+        transcript_ref: str,
+    ) -> tuple[int, ...]:
+        result = await self.session.execute(
+            select(AgentTranscriptRepresentationRecord.transcript_version)
+            .where(
+                AgentTranscriptRepresentationRecord.transcript_ref
+                == transcript_ref
+            )
+            .order_by(
+                AgentTranscriptRepresentationRecord.transcript_version.asc()
+            )
+        )
+        return tuple(int(item) for item in result.scalars().all())
+
+    async def materialize_transcript_representation(
+        self,
+        transcript_ref: str,
+        transcript_version: int,
+    ) -> list[dict[str, Any]]:
+        return await self._materialize_transcript_representation(
+            transcript_ref,
+            transcript_version,
+        )
 
     async def save_transcript_representation(self, values: Dict[str, Any]):
         kind = str(values.get("kind") or "").upper()

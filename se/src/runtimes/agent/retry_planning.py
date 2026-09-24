@@ -10,6 +10,10 @@ from .contracts.retry import (
     retry_plan_fingerprint,
     retry_value_fingerprint,
 )
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    checkpoint_representation_error_code,
+)
 from .serialization import to_json_safe
 
 
@@ -181,14 +185,18 @@ async def _load_retry_safe_checkpoint_transcript(
             execution_id,
             checkpoint_id,
         )
+    except CheckpointTranscriptMaterializationError as exc:
+        raise RetryPlanRejected(exc.code, str(exc)) from exc
     except ForkPlanError as exc:
-        raise RetryPlanRejected(
-            "RETRY_CHECKPOINT_UNSAFE",
-            str(exc),
-        ) from exc
+        code = (
+            checkpoint_representation_error_code(exc.code)
+            or "RETRY_CHECKPOINT_UNSAFE"
+        )
+        raise RetryPlanRejected(code, str(exc)) from exc
     except RuntimeError as exc:
         raise RetryPlanRejected(
-            "RETRY_CHECKPOINT_UNSAFE",
+            checkpoint_representation_error_code(exc)
+            or "RETRY_CHECKPOINT_UNSAFE",
             str(exc),
         ) from exc
 
@@ -229,10 +237,17 @@ async def _load_retry_safe_checkpoint_transcript_in_uow(
             checkpoint,
         )
     except ForkPlanError as exc:
-        raise RetryPlanRejected(
-            "RETRY_CHECKPOINT_UNSAFE",
-            str(exc),
-        ) from exc
+        code = (
+            exc.code
+            if str(exc.code).startswith("TRANSCRIPT_")
+            or exc.code in {
+                "INVALID_CHECKPOINT_REPRESENTATION_STATE",
+                "MISSING_TRANSCRIPT_REPRESENTATION",
+                "DUAL_TRANSCRIPT_MISMATCH",
+            }
+            else "RETRY_CHECKPOINT_UNSAFE"
+        )
+        raise RetryPlanRejected(code, str(exc)) from exc
 
     transcript_tool_ids = [
         item.tool_call_id
@@ -272,7 +287,6 @@ async def _load_optional_checkpoint(
         or checkpoint.session_id != execution.session_id
         or checkpoint.task_id != task_id
         or checkpoint.branch_id != branch_id
-        or checkpoint.transcript_snapshot is None
         or int(checkpoint.execution_revision) > int(execution.revision)
     ):
         raise RetryPlanRejected(
@@ -639,7 +653,6 @@ async def revalidate_retry_plan_in_uow(
             or checkpoint.session_id != plan.session_id
             or checkpoint.task_id != plan.task_id
             or checkpoint.branch_id != plan.branch_id
-            or checkpoint.transcript_snapshot is None
             or int(checkpoint.execution_revision)
             > int(plan.expected_execution_revision)
         ):

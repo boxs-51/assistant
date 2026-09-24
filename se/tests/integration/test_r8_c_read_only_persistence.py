@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.models.sql.agent import (
@@ -17,6 +18,26 @@ from se.src.infrastructure.storage.models.sql.capability import (
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.capability_invocations import (
     CapabilityInvocationRepository,
+)
+from se.src.infrastructure.storage.transcript_representation import (
+    canonical_json_bytes,
+    canonical_transcript_messages,
+    logical_transcript_fingerprint,
+    transcript_chunk_id,
+    transcript_payload_root_ref,
+    transcript_representation_ref,
+)
+from se.src.runtimes.agent.checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+)
+from se.src.runtimes.agent.fork_planning import (
+    ForkPlanRejected,
+    _load_fork_safe_transcript_in_uow,
+)
+from se.src.runtimes.agent.retry_planning import (
+    RetryPlanRejected,
+    _load_retry_safe_checkpoint_transcript,
+    _load_retry_safe_checkpoint_transcript_in_uow,
 )
 from se.src.runtimes.agent.persistence import (
     DurableAgentStore,
@@ -149,7 +170,7 @@ def _invocation(invocation_id: str, *, execution_id="exec-r8-c"):
         attempt=1,
         max_attempts=1,
         arguments={},
-        output={"ok": True},
+        output={"value": invocation_id.upper()},
         revision=3,
     )
 
@@ -297,5 +318,360 @@ async def test_r8_c_invocation_scan_is_deterministic_and_read_only(tmp_path):
                 "COMPLETED",
                 "COMPLETED",
             ]
+    finally:
+        await engine.dispose()
+
+
+async def _bind_r11_full_representation(
+    sessions,
+    *,
+    mode: str,
+    messages,
+):
+    async with sessions() as session:
+        repo = AgentRepository(session)
+        canonical = canonical_transcript_messages(messages)
+        chunk_id = transcript_chunk_id(canonical)
+        chunk = await repo.save_transcript_chunk(
+            {
+                "chunk_id": chunk_id,
+                "payload": canonical,
+                "message_count": len(canonical),
+                "canonical_bytes": len(canonical_json_bytes(canonical)),
+            }
+        )
+        root_ref = transcript_payload_root_ref(
+            parent_payload_root_ref=None,
+            chunk_id=chunk.chunk_id,
+            logical_message_count=len(canonical),
+        )
+        root = await repo.save_transcript_payload_node(
+            {
+                "payload_root_ref": root_ref,
+                "parent_payload_root_ref": None,
+                "chunk_id": chunk.chunk_id,
+                "logical_message_count": len(canonical),
+            }
+        )
+        fingerprint = logical_transcript_fingerprint(canonical)
+        rep_ref = transcript_representation_ref(
+            transcript_version=0,
+            kind="FULL",
+            parent_transcript_ref=None,
+            parent_transcript_version=None,
+            delta_depth=0,
+            logical_message_count=len(canonical),
+            logical_transcript_fingerprint=fingerprint,
+            payload_root_ref=root.payload_root_ref,
+        )
+        await repo.save_transcript_representation(
+            {
+                "transcript_ref": rep_ref,
+                "transcript_version": 0,
+                "kind": "FULL",
+                "parent_transcript_ref": None,
+                "parent_transcript_version": None,
+                "delta_depth": 0,
+                "logical_message_count": len(canonical),
+                "logical_transcript_fingerprint": fingerprint,
+                "payload_root_ref": root.payload_root_ref,
+            }
+        )
+        checkpoint = await repo.get_execution_checkpoint("cp-r8-c")
+        checkpoint.transcript_ref = rep_ref
+        checkpoint.transcript_version = 0
+        if mode == "REF_BACKED":
+            checkpoint.transcript_snapshot = None
+        elif mode != "DUAL":
+            raise AssertionError(mode)
+        await session.commit()
+        return rep_ref
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["REF_BACKED", "DUAL"])
+async def test_r11_c_real_b1_representation_converges_resume_fork_retry_readers(
+    tmp_path,
+    mode,
+):
+    engine, sessions = await _database(tmp_path)
+    try:
+        await _seed_source(sessions)
+        store = DurableAgentStore(lambda: _Uow(sessions))
+
+        inline_resume = await store.load_committed_checkpoint_transcript(
+            "exec-r8-c",
+            "cp-r8-c",
+            active_tool_call_ids=("call-b", "call-a"),
+        )
+        inline_fork = await store.load_fork_safe_checkpoint_transcript(
+            "exec-r8-c",
+            "cp-r8-c",
+        )
+        inline_retry = await _load_retry_safe_checkpoint_transcript(
+            store,
+            "exec-r8-c",
+            "cp-r8-c",
+        )
+
+        await _bind_r11_full_representation(
+            sessions,
+            mode=mode,
+            messages=[{"role": "user", "content": "base"}],
+        )
+
+        converged_resume = await store.load_committed_checkpoint_transcript(
+            "exec-r8-c",
+            "cp-r8-c",
+            active_tool_call_ids=("call-b", "call-a"),
+        )
+        converged_fork = await store.load_fork_safe_checkpoint_transcript(
+            "exec-r8-c",
+            "cp-r8-c",
+        )
+        converged_retry = await _load_retry_safe_checkpoint_transcript(
+            store,
+            "exec-r8-c",
+            "cp-r8-c",
+        )
+
+        if mode == "DUAL":
+            # DUAL retains the exact pre-C inline outward shape after canonical
+            # equality has been proven against the ref-backed authority.
+            assert converged_resume == inline_resume
+        else:
+            # REF_BACKED has no pre-R11 raw JSON shape to preserve; continuation
+            # equivalence is the established canonical InferenceMessage meaning.
+            assert canonical_transcript_messages(converged_resume) == (
+                canonical_transcript_messages(inline_resume)
+            )
+        assert [
+            item.model_dump(mode="json") for item in converged_fork
+        ] == [item.model_dump(mode="json") for item in inline_fork]
+        assert [
+            item.model_dump(mode="json") for item in converged_retry
+        ] == [item.model_dump(mode="json") for item in inline_retry]
+
+        async with _Uow(sessions) as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint("cp-r8-c")
+            fork_in_uow = await _load_fork_safe_transcript_in_uow(
+                uow,
+                "exec-r8-c",
+                checkpoint,
+            )
+            retry_in_uow = await _load_retry_safe_checkpoint_transcript_in_uow(
+                uow,
+                "exec-r8-c",
+                checkpoint,
+            )
+            assert [
+                item.model_dump(mode="json") for item in fork_in_uow
+            ] == [item.model_dump(mode="json") for item in converged_fork]
+            assert [
+                item.model_dump(mode="json") for item in retry_in_uow
+            ] == [item.model_dump(mode="json") for item in converged_retry]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_c_real_dual_mismatch_taxonomy_matches_store_and_in_uow(
+    tmp_path,
+):
+    engine, sessions = await _database(tmp_path)
+    try:
+        await _seed_source(sessions)
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        await _bind_r11_full_representation(
+            sessions,
+            mode="DUAL",
+            messages=[{"role": "user", "content": "base"}],
+        )
+
+        async with sessions() as session:
+            repo = AgentRepository(session)
+            checkpoint = await repo.get_execution_checkpoint("cp-r8-c")
+            checkpoint.transcript_snapshot = [
+                {"role": "user", "content": "different"}
+            ]
+            await session.commit()
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="DUAL_TRANSCRIPT_MISMATCH",
+        ):
+            await store.load_fork_safe_checkpoint_transcript(
+                "exec-r8-c",
+                "cp-r8-c",
+            )
+
+        with pytest.raises(
+            RetryPlanRejected,
+            match="DUAL_TRANSCRIPT_MISMATCH",
+        ) as retry_store:
+            await _load_retry_safe_checkpoint_transcript(
+                store,
+                "exec-r8-c",
+                "cp-r8-c",
+            )
+        assert retry_store.value.code == "DUAL_TRANSCRIPT_MISMATCH"
+
+        async with _Uow(sessions) as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint("cp-r8-c")
+            with pytest.raises(ForkPlanRejected) as fork_uow:
+                await _load_fork_safe_transcript_in_uow(
+                    uow,
+                    "exec-r8-c",
+                    checkpoint,
+                )
+            assert fork_uow.value.code == "DUAL_TRANSCRIPT_MISMATCH"
+
+            with pytest.raises(RetryPlanRejected) as retry_uow:
+                await _load_retry_safe_checkpoint_transcript_in_uow(
+                    uow,
+                    "exec-r8-c",
+                    checkpoint,
+                )
+            assert retry_uow.value.code == "DUAL_TRANSCRIPT_MISMATCH"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_c_real_persisted_depth_corruption_is_depth_exceeded(
+    tmp_path,
+):
+    engine, sessions = await _database(tmp_path)
+    try:
+        await _seed_source(sessions)
+        async with sessions() as session:
+            repo = AgentRepository(session)
+            base_messages = canonical_transcript_messages(
+                [{"role": "user", "content": "base"}]
+            )
+            base_chunk_id = transcript_chunk_id(base_messages)
+            base_chunk = await repo.save_transcript_chunk(
+                {
+                    "chunk_id": base_chunk_id,
+                    "payload": base_messages,
+                    "message_count": 1,
+                    "canonical_bytes": len(
+                        canonical_json_bytes(base_messages)
+                    ),
+                }
+            )
+            base_root_ref = transcript_payload_root_ref(
+                parent_payload_root_ref=None,
+                chunk_id=base_chunk.chunk_id,
+                logical_message_count=1,
+            )
+            base_root = await repo.save_transcript_payload_node(
+                {
+                    "payload_root_ref": base_root_ref,
+                    "parent_payload_root_ref": None,
+                    "chunk_id": base_chunk.chunk_id,
+                    "logical_message_count": 1,
+                }
+            )
+            base_fp = logical_transcript_fingerprint(base_messages)
+            base_ref = transcript_representation_ref(
+                transcript_version=0,
+                kind="FULL",
+                parent_transcript_ref=None,
+                parent_transcript_version=None,
+                delta_depth=0,
+                logical_message_count=1,
+                logical_transcript_fingerprint=base_fp,
+                payload_root_ref=base_root.payload_root_ref,
+            )
+            await repo.save_transcript_representation(
+                {
+                    "transcript_ref": base_ref,
+                    "transcript_version": 0,
+                    "kind": "FULL",
+                    "parent_transcript_ref": None,
+                    "parent_transcript_version": None,
+                    "delta_depth": 0,
+                    "logical_message_count": 1,
+                    "logical_transcript_fingerprint": base_fp,
+                    "payload_root_ref": base_root.payload_root_ref,
+                }
+            )
+
+            suffix = canonical_transcript_messages(
+                [{"role": "user", "content": "delta"}]
+            )
+            suffix_id = transcript_chunk_id(suffix)
+            suffix_chunk = await repo.save_transcript_chunk(
+                {
+                    "chunk_id": suffix_id,
+                    "payload": suffix,
+                    "message_count": 1,
+                    "canonical_bytes": len(canonical_json_bytes(suffix)),
+                }
+            )
+            suffix_root_ref = transcript_payload_root_ref(
+                parent_payload_root_ref=None,
+                chunk_id=suffix_chunk.chunk_id,
+                logical_message_count=1,
+            )
+            suffix_root = await repo.save_transcript_payload_node(
+                {
+                    "payload_root_ref": suffix_root_ref,
+                    "parent_payload_root_ref": None,
+                    "chunk_id": suffix_chunk.chunk_id,
+                    "logical_message_count": 1,
+                }
+            )
+            logical = base_messages + suffix
+            logical_fp = logical_transcript_fingerprint(logical)
+            delta_ref = transcript_representation_ref(
+                transcript_version=1,
+                kind="DELTA",
+                parent_transcript_ref=base_ref,
+                parent_transcript_version=0,
+                delta_depth=1,
+                logical_message_count=2,
+                logical_transcript_fingerprint=logical_fp,
+                payload_root_ref=suffix_root.payload_root_ref,
+            )
+            await repo.save_transcript_representation(
+                {
+                    "transcript_ref": delta_ref,
+                    "transcript_version": 1,
+                    "kind": "DELTA",
+                    "parent_transcript_ref": base_ref,
+                    "parent_transcript_version": 0,
+                    "delta_depth": 1,
+                    "logical_message_count": 2,
+                    "logical_transcript_fingerprint": logical_fp,
+                    "payload_root_ref": suffix_root.payload_root_ref,
+                }
+            )
+            checkpoint = await repo.get_execution_checkpoint("cp-r8-c")
+            checkpoint.transcript_snapshot = None
+            checkpoint.transcript_ref = delta_ref
+            checkpoint.transcript_version = 1
+            await session.commit()
+
+        async with sessions() as session:
+            await session.execute(text("PRAGMA ignore_check_constraints = ON"))
+            await session.execute(
+                text(
+                    "UPDATE agent_transcript_representations "
+                    "SET delta_depth = 10 "
+                    "WHERE transcript_ref = :ref AND transcript_version = 1"
+                ),
+                {"ref": delta_ref},
+            )
+            await session.commit()
+
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        checkpoint = await store.load_current_checkpoint("exec-r8-c")
+        with pytest.raises(
+            CheckpointTranscriptMaterializationError,
+            match="TRANSCRIPT_REPRESENTATION_DEPTH_EXCEEDED",
+        ):
+            await store.materialize_checkpoint_transcript(checkpoint)
     finally:
         await engine.dispose()

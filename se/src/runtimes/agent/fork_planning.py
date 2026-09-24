@@ -19,6 +19,11 @@ from .contracts.fork import (
     fork_transcript_fingerprint,
 )
 from .contracts.inference import InferenceMessage
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    checkpoint_representation_error_code,
+    materialize_checkpoint_transcript_in_uow,
+)
 from .serialization import to_json_safe
 
 
@@ -292,12 +297,6 @@ class AgentForkPlanningService:
                 "FORK_CHECKPOINT_LINEAGE_CONFLICT",
                 "Normalized checkpoint lineage differs from source authority.",
             )
-        if checkpoint.transcript_snapshot is None:
-            raise ForkPlanRejected(
-                "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE",
-                "Initial R8-C requires inline checkpoint transcript_snapshot.",
-            )
-
         pending = await self._store.load_checkpoint_pending_invocations(
             source_checkpoint_id
         )
@@ -319,8 +318,14 @@ class AgentForkPlanningService:
                 )
             )
         except ExecutionConflictError as exc:
-            code = str(exc).split(":", 1)[0]
-            if not code.startswith("FORK_"):
+            code = (
+                checkpoint_representation_error_code(exc)
+                or str(exc).split(":", 1)[0]
+            )
+            if not (
+                code.startswith("FORK_")
+                or checkpoint_representation_error_code(code) is not None
+            ):
                 code = "FORK_TRANSCRIPT_UNSAFE"
             raise ForkPlanRejected(code, str(exc)) from exc
 
@@ -737,11 +742,16 @@ async def _load_fork_safe_transcript_in_uow(
     execution_id: str,
     checkpoint,
 ) -> tuple[InferenceMessage, ...]:
-    if checkpoint.transcript_snapshot is None:
-        raise ForkPlanRejected(
-            "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE",
-            "Inline transcript snapshot is required.",
+    try:
+        materialized = await materialize_checkpoint_transcript_in_uow(
+            uow,
+            checkpoint,
         )
+    except CheckpointTranscriptMaterializationError as exc:
+        raise ForkPlanRejected(
+            exc.code,
+            str(exc),
+        ) from exc
 
     pending = await uow.agents.list_checkpoint_pending_invocations(
         checkpoint.checkpoint_id
@@ -813,8 +823,7 @@ async def _load_fork_safe_transcript_in_uow(
 
     result: list[InferenceMessage] = []
     seen_active: set[str] = set()
-    for raw in checkpoint.transcript_snapshot:
-        message = InferenceMessage.model_validate(raw)
+    for message in materialized:
         if message.role != "tool":
             result.append(message)
             continue
@@ -981,7 +990,6 @@ async def revalidate_fork_plan_in_uow(
         or checkpoint.task_id != plan.task_id
         or checkpoint.branch_id != plan.source_branch_id
         or int(checkpoint.iteration) != int(plan.checkpoint_iteration)
-        or checkpoint.transcript_snapshot is None
     ):
         raise ForkPlanRejected(
             "FORK_CHECKPOINT_CONFLICT",

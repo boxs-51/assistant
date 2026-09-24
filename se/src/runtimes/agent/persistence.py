@@ -75,6 +75,10 @@ from .legacy_materialization import (
     parse_legacy_checkpoint_source,
     sanitize_legacy_transcript,
 )
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    materialize_checkpoint_transcript_in_uow,
+)
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -2321,6 +2325,21 @@ class DurableAgentStore:
             },
         )
 
+    async def materialize_checkpoint_transcript(
+        self,
+        checkpoint,
+    ) -> tuple[InferenceMessage, ...]:
+        async with self.uow_factory() as uow:
+            try:
+                materialized = await materialize_checkpoint_transcript_in_uow(
+                    uow,
+                    checkpoint,
+                )
+            except CheckpointTranscriptMaterializationError:
+                raise
+            await uow.commit()
+            return materialized
+
     async def load_fork_safe_checkpoint_transcript(
         self,
         execution_id: str,
@@ -2346,11 +2365,13 @@ class DurableAgentStore:
                     "FORK_CHECKPOINT_LINEAGE_CONFLICT: "
                     "normalized checkpoint does not belong to source execution."
                 )
-            if checkpoint.transcript_snapshot is None:
-                raise ExecutionConflictError(
-                    "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE: "
-                    "inline transcript snapshot is required."
+            try:
+                materialized = await materialize_checkpoint_transcript_in_uow(
+                    uow,
+                    checkpoint,
                 )
+            except CheckpointTranscriptMaterializationError as exc:
+                raise ExecutionConflictError(str(exc)) from exc
 
             pending = await uow.agents.list_checkpoint_pending_invocations(
                 checkpoint_id
@@ -2437,8 +2458,7 @@ class DurableAgentStore:
 
             result: list[InferenceMessage] = []
             seen_active: set[str] = set()
-            for raw in checkpoint.transcript_snapshot:
-                message = InferenceMessage.model_validate(raw)
+            for message in materialized:
                 if message.role != "tool":
                     result.append(message)
                     continue
@@ -4485,18 +4505,31 @@ class DurableAgentStore:
                 raise ExecutionConflictError(
                     "Normalized checkpoint does not belong to execution."
                 )
-            if checkpoint.transcript_snapshot is None:
+            try:
+                materialized = await materialize_checkpoint_transcript_in_uow(
+                    uow,
+                    checkpoint,
+                )
+            except CheckpointTranscriptMaterializationError as exc:
+                raise ExecutionConflictError(str(exc)) from exc
+
+            outward_messages = (
+                [dict(item) for item in checkpoint.transcript_snapshot]
+                if checkpoint.transcript_snapshot is not None
+                else [item.model_dump(mode="json") for item in materialized]
+            )
+            if len(outward_messages) != len(materialized):
                 raise ExecutionConflictError(
-                    "R7-D requires an inline reconstructable transcript snapshot."
+                    "TRANSCRIPT_REPRESENTATION_CORRUPT: "
+                    "checkpoint transcript length changed during materialization."
                 )
 
             result: list[dict[str, Any]] = []
-            for raw in checkpoint.transcript_snapshot:
-                message = dict(raw)
-                if message.get("role") != "tool":
-                    result.append(message)
+            for item, outward in zip(materialized, outward_messages):
+                if item.role != "tool":
+                    result.append(outward)
                     continue
-                tool_call_id = message.get("tool_call_id")
+                tool_call_id = item.tool_call_id
                 if not tool_call_id or tool_call_id in active_ids:
                     continue
                 durable = await uow.agents.get_tool_result(
@@ -4816,17 +4849,36 @@ class DurableAgentStore:
                     )
                 return sanitized
 
-            resume_transcript = await sanitize_transcript(
-                (
-                    checkpoint.transcript_snapshot
-                    if checkpoint is not None
-                    else getattr(execution, "transcript", None) or (
-                        getattr(latest_iteration, "transcript", None)
-                        if latest_iteration
-                        else []
+            if checkpoint is not None:
+                try:
+                    checkpoint_messages = (
+                        await materialize_checkpoint_transcript_in_uow(
+                            uow,
+                            checkpoint,
+                        )
                     )
+                except CheckpointTranscriptMaterializationError as exc:
+                    raise ExecutionConflictError(str(exc)) from exc
+                transcript_source = (
+                    [dict(item) for item in checkpoint.transcript_snapshot]
+                    if checkpoint.transcript_snapshot is not None
+                    else [
+                        item.model_dump(mode="json")
+                        for item in checkpoint_messages
+                    ]
                 )
-            )
+                if len(transcript_source) != len(checkpoint_messages):
+                    raise ExecutionConflictError(
+                        "TRANSCRIPT_REPRESENTATION_CORRUPT: "
+                        "checkpoint transcript length changed during materialization."
+                    )
+            else:
+                transcript_source = getattr(execution, "transcript", None) or (
+                    getattr(latest_iteration, "transcript", None)
+                    if latest_iteration
+                    else []
+                )
+            resume_transcript = await sanitize_transcript(transcript_source)
 
             pending_tool_calls = []
             if latest_iteration is not None:
