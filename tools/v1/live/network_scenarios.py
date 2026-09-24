@@ -133,23 +133,44 @@ def build_network_scenario(*, web_run=web_tool.run) -> Scenario:
         if not isinstance(results, list):
             return result
 
-        urls = [
-            url
-            for item in results
-            if isinstance(item, Mapping)
-            for url in [_public_http_url(item.get("url"))]
-            if url is not None
-        ]
-        if not urls:
+        returned_count = data.get("returned_count")
+        provider = data.get("provider")
+        query = data.get("query")
+
+        # EMPTY_VALID_RESULT is reserved for an exact, structurally valid
+        # empty success. Any non-empty/count-inconsistent/malformed success
+        # remains a successful ToolResult and therefore must fail later via
+        # the scenario validator, never be rewritten as harmless emptiness.
+        if (
+            query == NETWORK_QUERY
+            and isinstance(provider, str)
+            and bool(provider)
+            and returned_count == 0
+            and results == []
+        ):
             return _failure(
                 action="search",
                 code="LIVE_WEB_EMPTY_RESULT",
                 classification="EMPTY_VALID_RESULT",
                 retryable=False,
-                details={"returned_count": data.get("returned_count")},
+                details={"returned_count": 0},
             )
 
-        context.state["discovered_url"] = urls[0]
+        if (
+            type(returned_count) is int
+            and returned_count == len(results)
+            and returned_count > 0
+        ):
+            urls = [
+                url
+                for item in results
+                if isinstance(item, Mapping)
+                for url in [_public_http_url(item.get("url"))]
+                if url is not None
+            ]
+            if urls:
+                context.state["discovered_url"] = urls[0]
+
         return result
 
     def validate_search(result: Mapping[str, Any]) -> bool:
