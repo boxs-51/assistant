@@ -267,3 +267,64 @@ def test_ctx_f2_extra_provider_alias_fields_are_forbidden():
             owner_user_id="user-1",
             provider_file_id="provider-123",
         )
+
+
+def test_ctx_f2_integrity_rejects_fractional_and_boolean_authority_version():
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.TASK,
+        authority_id="task-1",
+        authority_version=1,
+        owner_user_id="user-1",
+    )
+
+    forged_fractional = valid.model_copy(
+        update={
+            "authority_version": 1.5,
+            "context_source_id": "forged",
+        }
+    )
+    with pytest.raises(ValueError, match="authority_version must be an integer"):
+        validate_context_source_ref_integrity(forged_fractional)
+
+    forged_bool = valid.model_copy(
+        update={
+            "authority_version": True,
+            "context_source_id": "forged",
+        }
+    )
+    with pytest.raises(ValueError, match="authority_version must be an integer"):
+        validate_context_source_ref_integrity(forged_bool)
+
+
+@pytest.mark.parametrize(
+    "field,value,message",
+    [
+        ("session_id", {"mutable": []}, "session_id must be a string or None"),
+        ("task_id", ["bad"], "task_id must be a string or None"),
+        ("branch_id", {"bad": 1}, "branch_id must be a string or None"),
+        ("source_state", ["ACTIVE"], "source_state must be a string or None"),
+        ("source_created_at", {"bad": "date"}, "source_created_at must be a datetime or None"),
+    ],
+)
+def test_ctx_f2_integrity_rejects_wrong_typed_projection_fields(field, value, message):
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+    )
+    forged = valid.model_copy(update={field: value})
+
+    with pytest.raises(ValueError, match=message):
+        validate_context_source_ref_integrity(forged)
+
+
+def test_ctx_f2_integrity_rejects_unvalidated_source_kind():
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+    )
+    forged = valid.model_copy(update={"source_kind": "SESSION"})
+
+    with pytest.raises(ValueError, match="source_kind must be a ContextSourceKind"):
+        validate_context_source_ref_integrity(forged)
