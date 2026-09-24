@@ -2,6 +2,13 @@ from __future__ import annotations
 
 from typing import Any, Sequence
 
+from ...infrastructure.storage.transcript_representation import (
+    canonical_transcript_messages,
+)
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    materialize_checkpoint_transcript_in_uow,
+)
 from .checkpoint_transcript_writer import write_transcript_representation_in_uow
 from .serialization import to_json_safe
 
@@ -47,6 +54,34 @@ async def verify_committed_waiting_checkpoint(
         raise WaitingCheckpointConflictError(
             "Committed checkpoint does not match execution "
             "task/branch/session transition lineage."
+        )
+
+    expected_snapshot = checkpoint_values.get("transcript_snapshot")
+    if expected_snapshot is None:
+        raise WaitingCheckpointConflictError(
+            "Idempotent WAITING replay requires the expected transcript snapshot."
+        )
+    try:
+        committed_messages = await materialize_checkpoint_transcript_in_uow(
+            uow,
+            checkpoint,
+        )
+    except CheckpointTranscriptMaterializationError as exc:
+        raise WaitingCheckpointConflictError(str(exc)) from exc
+    try:
+        expected_messages = canonical_transcript_messages(
+            list(expected_snapshot)
+        )
+        committed_canonical = canonical_transcript_messages(
+            [item.model_dump(mode="json") for item in committed_messages]
+        )
+    except Exception as exc:
+        raise WaitingCheckpointConflictError(
+            "Idempotent WAITING replay transcript is not canonicalizable."
+        ) from exc
+    if committed_canonical != expected_messages:
+        raise WaitingCheckpointConflictError(
+            "Committed checkpoint transcript differs from idempotent replay."
         )
 
     persisted = await uow.agents.list_checkpoint_pending_invocations(
