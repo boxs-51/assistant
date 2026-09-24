@@ -55,7 +55,7 @@ def _failure(code, *, retryable=True):
 
 def _config(tmp_path):
     repo = tmp_path / "repo"
-    repo.mkdir()
+    repo.mkdir(exist_ok=True)
     return create_live_run_config(
         category=LiveCategory.NETWORK,
         repo_root=repo,
@@ -297,3 +297,54 @@ def test_network_entry_rejects_gui_opt_in_before_artifacts(tmp_path):
 
     assert calls == []
     assert list(tmp_path.iterdir()) == []
+
+
+def test_network_mixed_valid_and_malformed_results_fail_without_scrape(tmp_path):
+    config = _config(tmp_path)
+    calls = []
+
+    def web_run(*, action, **kwargs):
+        calls.append(action)
+        if action == "search":
+            return _success(
+                "search",
+                {
+                    "query": NETWORK_QUERY,
+                    "returned_count": 2,
+                    "provider": "fake-search",
+                    "results": [
+                        {
+                            "title": "valid",
+                            "url": "https://example.com/",
+                            "snippet": "ok",
+                        },
+                        "malformed-item",
+                    ],
+                },
+            )
+        raise AssertionError("scrape must not run for mixed malformed search")
+
+    evidence = ScenarioRunner(config).run(
+        (build_network_scenario(web_run=web_run),)
+    )
+
+    step = evidence["scenarios"][0]["steps"][0]
+    assert evidence["status"] == "FAIL"
+    assert step["error"]["code"] == "LIVE_SCENARIO_ASSERTION_FAILED"
+    assert calls == ["search"]
+
+
+def test_network_cleanup_failure_is_tool_contract_failure(tmp_path):
+    config = _config(tmp_path)
+
+    scenario = build_network_scenario(
+        web_run=lambda **kwargs: _failure("WEB_CLEANUP_FAILED"),
+    )
+    evidence = ScenarioRunner(config).run((scenario,))
+
+    step = evidence["scenarios"][0]["steps"][0]
+    assert evidence["status"] == "FAIL"
+    assert step["error"]["code"] == "WEB_CLEANUP_FAILED"
+    assert step["error"]["details"]["live_classification"] == (
+        "TOOL_CONTRACT_FAILURE"
+    )
