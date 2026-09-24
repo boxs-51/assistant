@@ -442,6 +442,42 @@ async def test_r11_f1b_external_null_task_semantic_reference_fails_closed():
 
 
 @pytest.mark.asyncio
+async def test_r11_f1b_external_child_task_lineage_fails_closed():
+    engine, sessions = await _database()
+    try:
+        task_id = await _seed_terminal_candidate(sessions)
+        async with sessions() as session:
+            session.add(
+                AgentTaskRecord(
+                    id="external-child-task",
+                    session_id="external-child-session",
+                    created_by="user-2",
+                    assigned_agent_id="agent-2",
+                    parent_task_id=task_id,
+                    status="COMPLETED",
+                    input={},
+                    output={"ok": True},
+                )
+            )
+            await session.commit()
+
+        service = AgentGcDryRunService(lambda: _Uow(sessions))
+        report = await service.classify_task(
+            task_id,
+            policy_eligible_terminal=True,
+        )
+
+        assert report.failed_closed
+        assert not report.has_candidates
+        assert any(
+            "external_child_task_reference" in item.root_or_edge_source
+            for item in report.items
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r11_f1b_pending_invocation_identity_mismatch_fails_closed():
     engine, sessions = await _database()
     try:
