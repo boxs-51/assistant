@@ -296,12 +296,6 @@ class AgentForkPlanningService:
                 "FORK_CHECKPOINT_LINEAGE_CONFLICT",
                 "Normalized checkpoint lineage differs from source authority.",
             )
-        if checkpoint.transcript_snapshot is None:
-            raise ForkPlanRejected(
-                "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE",
-                "Initial R8-C requires inline checkpoint transcript_snapshot.",
-            )
-
         pending = await self._store.load_checkpoint_pending_invocations(
             source_checkpoint_id
         )
@@ -989,7 +983,6 @@ async def revalidate_fork_plan_in_uow(
         or checkpoint.task_id != plan.task_id
         or checkpoint.branch_id != plan.source_branch_id
         or int(checkpoint.iteration) != int(plan.checkpoint_iteration)
-        or checkpoint.transcript_snapshot is None
     ):
         raise ForkPlanRejected(
             "FORK_CHECKPOINT_CONFLICT",
