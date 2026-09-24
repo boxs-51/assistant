@@ -54,12 +54,28 @@ async def backfill_legacy_inline_checkpoints_in_uow(
     """
 
     repo = uow.agents
-    candidates = await repo.list_legacy_inline_checkpoint_backfill_candidates(
-        limit=limit,
-    )
-    pending = {str(item.checkpoint_id): item for item in candidates}
+    candidates = await repo.list_checkpoint_backfill_candidates(limit=limit)
+    pending = {}
     converted = 0
     converged = 0
+
+    for checkpoint in candidates:
+        snapshot = checkpoint.transcript_snapshot
+        transcript_ref = checkpoint.transcript_ref
+        transcript_version = checkpoint.transcript_version
+        if (transcript_ref is None) != (transcript_version is None):
+            raise CheckpointBackfillError(
+                "Checkpoint has a partial transcript representation pair."
+            )
+        if snapshot is None and transcript_ref is None:
+            raise CheckpointBackfillError(
+                "Checkpoint transcript is not reconstructable."
+            )
+        if transcript_ref is not None:
+            await _canonical_checkpoint_messages(uow, checkpoint)
+            converged += 1
+            continue
+        pending[str(checkpoint.checkpoint_id)] = checkpoint
 
     while pending:
         progressed = False
