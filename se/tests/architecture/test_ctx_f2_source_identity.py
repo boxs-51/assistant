@@ -249,7 +249,7 @@ def test_ctx_f2_model_copy_cannot_smuggle_mutable_metadata_descendants():
         update={"metadata": {"nested": [{"value": 1}]}}
     )
 
-    with pytest.raises(ValueError, match="non-frozen JSON container"):
+    with pytest.raises(ValueError, match="metadata root must be a frozen JSON object"):
         validate_context_source_ref_integrity(forged)
 
 
@@ -358,4 +358,18 @@ def test_ctx_f2_integrity_rejects_non_string_identity_fields(field, value, messa
     forged = valid.model_copy(update={field: value})
 
     with pytest.raises(ValueError, match=message):
+        validate_context_source_ref_integrity(forged)
+
+
+def test_ctx_f2_integrity_rejects_model_copy_extra_provider_alias():
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.ASSET,
+        authority_id="asset-1",
+        owner_user_id="user-1",
+    )
+    forged = valid.model_copy(
+        update={"provider_file_id": {"mutable": []}}
+    )
+
+    with pytest.raises(ValueError, match="undeclared stored fields: provider_file_id"):
         validate_context_source_ref_integrity(forged)
