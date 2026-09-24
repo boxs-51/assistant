@@ -150,8 +150,14 @@ def test_ctx_f2_empty_owner_or_authority_is_rejected(field, value):
 @pytest.mark.parametrize("authority_id", [
     "https://example.test/file",
     "file:///tmp/file",
+    "s3://bucket/key",
+    "gs://bucket/key",
+    "provider://file-id",
     "/tmp/file",
     "../relative-file",
+    "bucket/object-key",
+    "folder/local-file",
+    "C:/temp/file",
     r"C:\\temp\\file",
 ])
 def test_ctx_f2_url_and_path_values_are_not_native_authorities(authority_id):
@@ -199,6 +205,22 @@ def test_ctx_f2_projection_metadata_is_deeply_immutable_and_not_identity_authori
 
     dumped = ref.model_dump(mode="json")
     assert dumped["metadata"] == {"nested": [{"value": 1}]}
+
+
+def test_ctx_f2_model_copy_identity_fields_must_remain_canonical():
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+    )
+    forged_owner = valid.model_copy(update={"owner_user_id": " user-1 "})
+    forged_authority = valid.model_copy(update={"authority_id": " session-1 "})
+
+    with pytest.raises(ValueError, match="owner_user_id must already be"):
+        validate_context_source_ref_integrity(forged_owner)
+
+    with pytest.raises(ValueError, match="authority_id must already be"):
+        validate_context_source_ref_integrity(forged_authority)
 
 
 def test_ctx_f2_model_copy_cannot_forge_context_source_id():
