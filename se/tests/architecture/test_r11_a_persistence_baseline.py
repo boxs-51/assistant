@@ -455,12 +455,14 @@ async def test_r11_a_current_waiting_checkpoint_write_amplification_baseline(
     assert all(sample["commits"] == 1 for sample in samples.values())
     assert all(sample["rollbacks"] == 0 for sample in samples.values())
 
-    # Current production path performs one additional invocation lookup,
-    # pending-row INSERT and ORM flush for every pending invocation.
+    # R11-E1 preserves one replay-safety lookup per invocation, but pending
+    # snapshot persistence is one executemany operation with no per-row ORM
+    # flush.  The caller still owns exactly one transaction.
     for count, sample in samples.items():
         assert sample["select"] - baseline["select"] == count
-        assert sample["insert"] - baseline["insert"] == count
-        assert sample["flushes"] - baseline["flushes"] == count
+        assert sample["insert"] - baseline["insert"] == (1 if count else 0)
+        assert sample["flushes"] == baseline["flushes"]
+        assert sample["sql"] - baseline["sql"] == count + (1 if count else 0)
 
 
 def test_r11_a_full_snapshot_growth_exposes_quadratic_copy_baseline():
@@ -543,9 +545,10 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
              "insert": 33, "rollbacks": 0, "select": 34, "sql": 68, "update": 1},
     }
 
-    # R11-D DUAL current-writer evidence is tracked separately from the frozen
-    # R11-A before-state.
-    expected_r11_d_pending = {
+    # R11-D pre-batching writer evidence remains frozen separately from the
+    # R11-A before-state.  Do not rewrite these historical numbers when E1
+    # changes only the active pending-row persistence shape.
+    frozen_r11_d_pending = {
         0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
             "insert": 4, "rollbacks": 0, "select": 15, "sql": 20, "update": 1},
         1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
@@ -555,17 +558,34 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
              "insert": 36, "rollbacks": 0, "select": 47, "sql": 84, "update": 1},
     }
-    assert pending == expected_r11_d_pending
+    assert frozen_r11_d_pending == {
+        0: {"begins": 1, "commits": 1, "delete": 0, "flushes": 1,
+            "insert": 4, "rollbacks": 0, "select": 15, "sql": 20, "update": 1},
+        1: {"begins": 1, "commits": 1, "delete": 0, "flushes": 2,
+            "insert": 5, "rollbacks": 0, "select": 16, "sql": 22, "update": 1},
+        8: {"begins": 1, "commits": 1, "delete": 0, "flushes": 9,
+            "insert": 12, "rollbacks": 0, "select": 23, "sql": 36, "update": 1},
+        32: {"begins": 1, "commits": 1, "delete": 0, "flushes": 33,
+             "insert": 36, "rollbacks": 0, "select": 47, "sql": 84, "update": 1},
+    }
 
     before0 = frozen_r11_a_pending[0]
-    after0 = expected_r11_d_pending[0]
-    assert after0["sql"] - before0["sql"] == 16
-    assert after0["select"] - before0["select"] == 13
-    assert after0["insert"] - before0["insert"] == 3
+    r11_d0 = frozen_r11_d_pending[0]
+    assert r11_d0["sql"] - before0["sql"] == 16
+    assert r11_d0["select"] - before0["select"] == 13
+    assert r11_d0["insert"] - before0["insert"] == 3
+
+    # Active R11-E1 evidence: representation/base writer cost is unchanged at
+    # N=0, replay proof still performs one SELECT per pending invocation, while
+    # row persistence contributes at most one INSERT execution and zero extra
+    # ORM flushes regardless of batch size.
+    assert pending[0] == frozen_r11_d_pending[0]
+    active0 = pending[0]
     for count, sample in pending.items():
-        assert sample["select"] - pending[0]["select"] == count
-        assert sample["insert"] - pending[0]["insert"] == count
-        assert sample["flushes"] - pending[0]["flushes"] == count
+        assert sample["select"] - active0["select"] == count
+        assert sample["insert"] - active0["insert"] == (1 if count else 0)
+        assert sample["flushes"] == active0["flushes"]
+        assert sample["sql"] - active0["sql"] == count + (1 if count else 0)
 
     assert growth == {
         10: {

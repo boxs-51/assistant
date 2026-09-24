@@ -293,8 +293,7 @@ async def stage_waiting_checkpoint(
         )
 
     await uow.agents.save_execution_checkpoint(checkpoint)
-    for row in frozen_rows:
-        await uow.agents.save_checkpoint_pending_invocation(row)
+    await uow.agents.save_checkpoint_pending_invocations(frozen_rows)
 
     execution_values = dict(transition_values)
     execution_values["current_checkpoint_id"] = checkpoint_id

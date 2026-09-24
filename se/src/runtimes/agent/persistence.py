@@ -4348,10 +4348,9 @@ class DurableAgentStore:
                         await uow.agents.save_execution_checkpoint(
                             checkpoint_values
                         )
-                        for values in pending_values:
-                            await uow.agents.save_checkpoint_pending_invocation(
-                                values
-                            )
+                        await uow.agents.save_checkpoint_pending_invocations(
+                            pending_values
+                        )
 
                     bound = await uow.agents.bind_legacy_checkpoint_pointer(
                         execution.id,
