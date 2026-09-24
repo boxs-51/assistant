@@ -4,11 +4,16 @@ from datetime import timezone
 import hashlib
 
 import pytest
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
-from se.src.infrastructure.storage.models.sql.agent import AgentExecutionRecord
+from se.src.infrastructure.storage.models.sql.agent import (
+    AgentExecutionRecord,
+    AgentTranscriptChunkRecord,
+    AgentTranscriptPayloadNodeRecord,
+    AgentTranscriptRepresentationRecord,
+)
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.models.sql.capability import CapabilityInvocationRecord
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
@@ -243,6 +248,21 @@ async def test_r7_b_execution_update_failure_rolls_back_checkpoint_and_budget_re
             assert execution.current_checkpoint_id is None
             assert budget.active_executions == 1
             assert checkpoint is None
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(AgentTranscriptRepresentationRecord)
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(AgentTranscriptPayloadNodeRecord)
+                ) or 0
+            ) == 0
+            assert int(
+                await uow.session.scalar(
+                    select(func.count()).select_from(AgentTranscriptChunkRecord)
+                ) or 0
+            ) == 0
     finally:
         await engine.dispose()
 
