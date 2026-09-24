@@ -34,7 +34,6 @@ REMOTE_UNAVAILABLE_CODES = {
     "WEB_BROWSER_REQUEST_BLOCKED",
     "WEB_REDIRECT_BLOCKED",
     "WEB_REDIRECT_LIMIT",
-    "WEB_CLEANUP_FAILED",
 }
 
 
@@ -161,15 +160,27 @@ def build_network_scenario(*, web_run=web_tool.run) -> Scenario:
             and returned_count == len(results)
             and returned_count > 0
         ):
-            urls = [
-                url
-                for item in results
-                if isinstance(item, Mapping)
-                for url in [_public_http_url(item.get("url"))]
-                if url is not None
-            ]
-            if urls:
-                context.state["discovered_url"] = urls[0]
+            normalized_urls: list[str] = []
+            all_valid = True
+            for item in results:
+                if not isinstance(item, Mapping):
+                    all_valid = False
+                    break
+                title = item.get("title")
+                url = _public_http_url(item.get("url"))
+                snippet = item.get("snippet")
+                if (
+                    not isinstance(title, str)
+                    or not title
+                    or url is None
+                    or not isinstance(snippet, str)
+                ):
+                    all_valid = False
+                    break
+                normalized_urls.append(url)
+
+            if all_valid and len(normalized_urls) == returned_count:
+                context.state["discovered_url"] = normalized_urls[0]
 
         return result
 
@@ -187,11 +198,14 @@ def build_network_scenario(*, web_run=web_tool.run) -> Scenario:
             and isinstance(provider, str)
             and bool(provider)
             and isinstance(results, list)
-            and any(
+            and returned_count == len(results)
+            and returned_count > 0
+            and all(
                 isinstance(item, Mapping)
-                and _public_http_url(item.get("url")) is not None
                 and isinstance(item.get("title"), str)
                 and bool(item.get("title"))
+                and _public_http_url(item.get("url")) is not None
+                and isinstance(item.get("snippet"), str)
                 for item in results
             )
         )
