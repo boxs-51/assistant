@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import os
 import shlex
 import subprocess
@@ -92,6 +93,15 @@ def _python_command(code: str) -> str:
     return subprocess.list2cmdline(args) if os.name == "nt" else shlex.join(args)
 
 
+def _shell_safe_python_source(source: str) -> str:
+    encoded = base64.b64encode(source.encode("utf-8")).decode("ascii")
+    return (
+        "import base64;"
+        f"exec(compile(base64.b64decode({encoded!r}),"
+        "'<tools-v1-live-gui>','exec'))"
+    )
+
+
 def _target_script(title: str, typed_title: str, marker: str) -> str:
     return (
         "import tkinter as tk\n"
@@ -109,6 +119,11 @@ def _target_script(title: str, typed_title: str, marker: str) -> str:
         "root.geometry('480x160+120+120')\n"
         "root.mainloop()\n"
     )
+
+
+def _target_command(title: str, typed_title: str, marker: str) -> str:
+    source = _target_script(title, typed_title, marker)
+    return _python_command(_shell_safe_python_source(source))
 
 
 def _window_identity(data: Any) -> tuple[int, int] | None:
@@ -254,7 +269,7 @@ def build_gui_scenario(
         expected["cwd"] = cwd
         result = terminal_run(
             action="launch",
-            command=_python_command(_target_script(title, typed_title, marker)),
+            command=_target_command(title, typed_title, marker),
             cwd=cwd,
         )
         if result.get("ok") is True:
@@ -402,7 +417,7 @@ def build_gui_scenario(
                 id="gui-target-launch",
                 tool="terminal_tool",
                 action="launch",
-                summary="Launch one unique scenario-owned Tkinter target.",
+                summary="Launch the process that will create one unique scenario-owned Tkinter target.",
                 execute=launch,
                 validate=lambda result: _validate_launch(result, expected_cwd=expected["cwd"]),
             ),
