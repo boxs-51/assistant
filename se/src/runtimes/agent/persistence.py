@@ -83,6 +83,10 @@ from .checkpoint_transcript import (
     materialize_checkpoint_transcript_in_uow,
 )
 from .checkpoint_transcript_writer import write_transcript_representation_in_uow
+from .checkpoint_backfill import (
+    CheckpointBackfillResult,
+    backfill_legacy_inline_checkpoints_in_uow,
+)
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -3967,6 +3971,23 @@ class DurableAgentStore:
             "ResumeClaim SQL conflicts exhausted.",
             retryable=True,
         )
+
+    async def backfill_legacy_inline_checkpoints(
+        self,
+        *,
+        limit: int | None = None,
+    ) -> CheckpointBackfillResult:
+        """Run one bounded R11-D LEGACY_INLINE -> DUAL convergence batch."""
+
+        if limit is not None and limit <= 0:
+            raise ValueError("limit must be positive")
+        async with self.uow_factory() as uow:
+            result = await backfill_legacy_inline_checkpoints_in_uow(
+                uow,
+                limit=limit,
+            )
+            await uow.commit()
+            return result
 
     async def materialize_legacy_checkpoint(
         self,
