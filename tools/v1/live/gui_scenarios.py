@@ -43,13 +43,20 @@ class GuiProcessController(PsutilProcessController):
             return False
         if type(candidate_pid) is not int or candidate_pid <= 0:
             return False
-        if candidate_pid == root_pid:
-            return True
-
         root_keys = [key for key in self._descendants if key[0] == root_pid]
         if len(root_keys) != 1:
             return False
         key = root_keys[0]
+
+        if candidate_pid == root_pid:
+            try:
+                candidate = psutil.Process(candidate_pid)
+                return (
+                    abs(candidate.create_time() - key[1]) < 0.001
+                    and candidate.status() != psutil.STATUS_ZOMBIE
+                )
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+                return False
         try:
             candidate = psutil.Process(candidate_pid)
             candidate_identity = ProcessIdentity(
@@ -449,7 +456,11 @@ def run_gui_live(
     if effective_env.get(NETWORK_GATE_ENV) == "1":
         raise LiveHarnessConfigError("TV1-T10-E GUI execution requires NETWORK gate OFF")
 
-    root = Path.cwd() if repo_root is None else Path(repo_root)
+    root = (
+        Path(__file__).resolve().parents[3]
+        if repo_root is None
+        else Path(repo_root)
+    )
     config = create_live_run_config(
         category=LiveCategory.GUI,
         repo_root=root,
