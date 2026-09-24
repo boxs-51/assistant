@@ -1327,6 +1327,11 @@ class AgentRepository(BaseRepository):
             parent_ref = record.parent_transcript_ref
             parent_version = record.parent_transcript_version
 
+            if kind == "DELTA" and depth > HARD_MAX_DELTA_DEPTH:
+                raise ValueError(
+                    "Stored DELTA representation depth exceeds R11-B safety envelope."
+                )
+
             expected_ref = transcript_representation_ref(
                 transcript_version=version,
                 kind=kind,
