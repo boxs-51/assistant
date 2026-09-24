@@ -270,3 +270,79 @@ async def test_cas_r1_pre_f5_guard_blocks_asset_history_before_provider_executio
     assert failure.payload["retryable"] is False
     assert failure.payload["failure_domain"] == "MESSAGE_ASSET"
     assert failure.payload["error_code"] == "ASSET_HYDRATION_REQUIRED"
+
+
+def test_cas_r1_post_m2_ctx_f3_f4_remain_non_asset_consumers():
+    paths = (
+        Path("se/src/context/discovery.py"),
+        Path("se/src/context/discovery_collection.py"),
+        Path("se/src/context/access.py"),
+    )
+    forbidden = (
+        "ContextSourceKind.ASSET",
+        "project_asset_source",
+        "AssetService",
+        "FileAssetRecord",
+        "FileBlobRecord",
+        "FileReferenceRecord",
+        "FileProviderBindingRecord",
+        "ObjectStorageDriver",
+        "object_store",
+    )
+
+    offenders: list[tuple[str, str]] = []
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        for phrase in forbidden:
+            if phrase in source:
+                offenders.append((path.as_posix(), phrase))
+
+    assert offenders == []
+
+
+def test_cas_r1_post_m2_r11_migration_extends_cas_lineage_without_mutating_cas():
+    migration = Path(
+        "se/src/infrastructure/storage/migrations/sql/versions/"
+        "19a_r11_query_order_indexes.py"
+    ).read_text(encoding="utf-8")
+
+    assert 'revision: str = "19a_r11_query_order_indexes"' in migration
+    assert 'down_revision: Union[str, None] = "18a_cas_r0_assets"' in migration
+
+    forbidden = (
+        '"files"',
+        '"file_blobs"',
+        '"file_references"',
+        '"file_provider_bindings"',
+        "FileAssetRecord",
+        "FileBlobRecord",
+        "FileReferenceRecord",
+        "FileProviderBindingRecord",
+        "ObjectStorageDriver",
+        "object_store",
+    )
+    for phrase in forbidden:
+        assert phrase not in migration
+
+
+def test_cas_r1_post_m2_r11_f1b_remains_agent_only_and_non_destructive():
+    source = Path("se/src/runtimes/agent/gc_dry_run.py").read_text(
+        encoding="utf-8"
+    )
+
+    forbidden = (
+        "FileAssetRecord",
+        "FileBlobRecord",
+        "FileReferenceRecord",
+        "FileProviderBindingRecord",
+        "ObjectStorageDriver",
+        "object_store",
+        "asset://",
+    )
+    for phrase in forbidden:
+        assert phrase not in source
+
+    lowered = source.lower()
+    assert "delete(" not in lowered
+    assert "session.delete" not in lowered
+    assert "truncate" not in lowered
