@@ -623,19 +623,24 @@ async def test_r11_a_real_writer_bytes_and_reconstruction_percentile_red_probe(
         for count in (10, 100, 1000)
     }
 
+    # Historical pre-cutover inline amplification is preserved above and on
+    # Issue #31 / CI #951/#953. D5 active writer evidence proves the checkpoint
+    # INSERT no longer scales with the full transcript payload.
+    checkpoint_insert_bytes = {
+        count: sample["checkpoint_insert_parameter_bytes"]
+        for count, sample in writer.items()
+    }
+    assert max(checkpoint_insert_bytes.values()) - min(
+        checkpoint_insert_bytes.values()
+    ) <= 128
     for count, sample in writer.items():
         logical = _snapshot_growth(count)["final_transcript_bytes"]
-        assert sample["checkpoint_insert_parameter_bytes"] > logical
-    assert (
-        writer[10]["checkpoint_insert_parameter_bytes"]
-        < writer[100]["checkpoint_insert_parameter_bytes"]
-        < writer[1000]["checkpoint_insert_parameter_bytes"]
-    )
+        assert sample["checkpoint_insert_parameter_bytes"] < logical
 
     for sample in reconstruction.values():
         assert sample["samples"] == 20
         assert 0 < sample["p50_ns"] <= sample["p95_ns"] <= sample["p99_ns"]
 
-    # Exact numeric baseline is preserved durably on Issue #31 / CI #951/#953.
-    # CI gates only structural properties; shared-runner timings remain evidence.
-    assert writer[1000]["checkpoint_insert_parameter_bytes"] > 200_000
+    # Exact pre-cutover numeric baseline remains historical evidence. Active
+    # CI now gates the post-cutover bounded checkpoint-row payload property.
+    assert writer[1000]["checkpoint_insert_parameter_bytes"] < 1_024
