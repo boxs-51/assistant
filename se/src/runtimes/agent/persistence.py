@@ -2371,9 +2371,7 @@ class DurableAgentStore:
                     checkpoint,
                 )
             except CheckpointTranscriptMaterializationError as exc:
-                raise ExecutionConflictError(
-                    "FORK_CHECKPOINT_TRANSCRIPT_UNAVAILABLE: " + str(exc)
-                ) from exc
+                raise ExecutionConflictError(str(exc)) from exc
 
             pending = await uow.agents.list_checkpoint_pending_invocations(
                 checkpoint_id
@@ -4515,13 +4513,23 @@ class DurableAgentStore:
             except CheckpointTranscriptMaterializationError as exc:
                 raise ExecutionConflictError(str(exc)) from exc
 
+            outward_messages = (
+                [dict(item) for item in checkpoint.transcript_snapshot]
+                if checkpoint.transcript_snapshot is not None
+                else [item.model_dump(mode="json") for item in materialized]
+            )
+            if len(outward_messages) != len(materialized):
+                raise ExecutionConflictError(
+                    "TRANSCRIPT_REPRESENTATION_CORRUPT: "
+                    "checkpoint transcript length changed during materialization."
+                )
+
             result: list[dict[str, Any]] = []
-            for item in materialized:
-                message = item.model_dump(mode="json")
-                if message.get("role") != "tool":
-                    result.append(message)
+            for item, outward in zip(materialized, outward_messages):
+                if item.role != "tool":
+                    result.append(outward)
                     continue
-                tool_call_id = message.get("tool_call_id")
+                tool_call_id = item.tool_call_id
                 if not tool_call_id or tool_call_id in active_ids:
                     continue
                 durable = await uow.agents.get_tool_result(
