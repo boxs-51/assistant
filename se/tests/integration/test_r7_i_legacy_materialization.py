@@ -11,6 +11,7 @@ from se.src.infrastructure.storage.models.sql.agent import (
     AgentIterationRecord,
     AgentToolCallRecord,
     AgentToolResultRecord,
+    AgentTranscriptRepresentationRecord,
 )
 from se.src.infrastructure.storage.models.sql.capability import (
     CapabilityInvocationRecord,
@@ -281,6 +282,22 @@ async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path
                 ).scalars().all()
             )
         assert checkpoint_count == 1
+        async with sessions() as session:
+            row = await session.get(
+                AgentExecutionCheckpointRecord,
+                "legacy-cp-1",
+            )
+            assert row.transcript_snapshot is not None
+            assert row.transcript_ref is not None
+            assert row.transcript_version is not None
+            representation_count = len(
+                (
+                    await session.execute(
+                        select(AgentTranscriptRepresentationRecord)
+                    )
+                ).scalars().all()
+            )
+            assert representation_count == 1
     finally:
         await engine.dispose()
 
