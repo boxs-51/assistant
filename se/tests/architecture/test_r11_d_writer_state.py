@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import se.src.runtimes.agent.waiting_checkpoint as waiting_checkpoint_module
 from se.src.runtimes.agent.waiting_checkpoint import (
     WaitingCheckpointConflictError,
     stage_waiting_checkpoint,
@@ -55,11 +56,11 @@ def _checkpoint(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_r11_d_ref_backed_writer_requires_proven_authority():
+async def test_r11_d_caller_supplied_ref_authority_is_rejected():
     uow = _Uow()
     with pytest.raises(
         WaitingCheckpointConflictError,
-        match="ref-backed authority must be proven",
+        match="may not be caller supplied",
     ):
         await stage_waiting_checkpoint(
             uow,
@@ -78,7 +79,18 @@ async def test_r11_d_ref_backed_writer_requires_proven_authority():
 
 
 @pytest.mark.asyncio
-async def test_r11_d_empty_inline_transcript_is_not_ref_backed():
+async def test_r11_d_empty_inline_transcript_persists_as_dual(monkeypatch):
+    async def fake_writer(uow, *, messages, candidate_parent_checkpoint_id=None):
+        assert list(messages) == []
+        assert candidate_parent_checkpoint_id == "cp-parent"
+        return SimpleNamespace(transcript_ref="c" * 64, transcript_version=0)
+
+    monkeypatch.setattr(
+        waiting_checkpoint_module,
+        "write_transcript_representation_in_uow",
+        fake_writer,
+    )
+
     uow = _Uow()
     await stage_waiting_checkpoint(
         uow,
@@ -91,8 +103,8 @@ async def test_r11_d_empty_inline_transcript_is_not_ref_backed():
 
     saved = uow.agents.saved[0]
     assert saved["transcript_snapshot"] == []
-    assert saved.get("transcript_ref") is None
-    assert saved.get("transcript_version") is None
+    assert saved["transcript_ref"] == "c" * 64
+    assert saved["transcript_version"] == 0
 
 
 @pytest.mark.asyncio
@@ -109,7 +121,7 @@ async def test_r11_d_writer_rejects_partial_representation_pair(
 ):
     with pytest.raises(
         WaitingCheckpointConflictError,
-        match="transcript_ref/transcript_version must be an exact pair",
+        match="may not be caller supplied",
     ):
         await stage_waiting_checkpoint(
             _Uow(),
@@ -129,7 +141,7 @@ async def test_r11_d_writer_rejects_partial_representation_pair(
 async def test_r11_d_writer_rejects_unreconstructable_state():
     with pytest.raises(
         WaitingCheckpointConflictError,
-        match="representation is not reconstructable",
+        match="DUAL cutover requires an inline transcript snapshot",
     ):
         await stage_waiting_checkpoint(
             _Uow(),
