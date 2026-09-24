@@ -293,6 +293,33 @@ def test_psutil_controller_refuses_reused_pid(monkeypatch):
     assert reused.kill_calls == 0
 
 
+def test_psutil_controller_access_denied_fails_closed(monkeypatch):
+    class AccessDeniedProcess(FakePsutilProcess):
+        def create_time(self):
+            raise __import__("psutil").AccessDenied(pid=self.pid)
+
+    denied = AccessDeniedProcess(77, 1.0)
+
+    monkeypatch.setattr(
+        "tools.v1.live.local_scenarios.psutil.Process",
+        lambda pid: denied,
+    )
+    monkeypatch.setattr(
+        "tools.v1.live.local_scenarios.psutil.STATUS_ZOMBIE",
+        "zombie",
+    )
+
+    controller = PsutilProcessController()
+    with pytest.raises(LiveProcessIdentityError):
+        controller.capture(77)
+
+    # An identity captured earlier must also fail closed if later inspection
+    # becomes access-denied; it must never be treated as already gone.
+    identity = ProcessIdentity(pid=77, token=1.0)
+    with pytest.raises(LiveProcessIdentityError):
+        controller.is_alive(identity)
+
+
 def test_psutil_controller_cleans_exact_owned_tree(monkeypatch):
     root = FakePsutilProcess(100, 10.0)
     child = FakePsutilProcess(101, 11.0)

@@ -56,7 +56,6 @@ def _same_process(process: psutil.Process, identity: ProcessIdentity) -> bool:
         ValueError,
         psutil.NoSuchProcess,
         psutil.ZombieProcess,
-        psutil.AccessDenied,
     ):
         return False
 
@@ -92,8 +91,13 @@ class PsutilProcessController:
                 "cannot verify process identity due to access denial"
             ) from exc
 
-        if not _same_process(process, identity):
-            return None
+        try:
+            if not _same_process(process, identity):
+                return None
+        except psutil.AccessDenied as exc:
+            raise LiveProcessIdentityError(
+                "cannot verify process identity due to access denial"
+            ) from exc
         return process
 
     def _remember_descendants(
@@ -121,9 +125,12 @@ class PsutilProcessController:
             except (
                 psutil.NoSuchProcess,
                 psutil.ZombieProcess,
-                psutil.AccessDenied,
             ):
                 continue
+            except psutil.AccessDenied as exc:
+                raise LiveProcessIdentityError(
+                    "cannot capture owned descendant identity"
+                ) from exc
             remembered.setdefault(child.pid, child_identity)
         return remembered
 
