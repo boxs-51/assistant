@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import inspect
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -272,14 +274,51 @@ async def test_cas_r1_pre_f5_guard_blocks_asset_history_before_provider_executio
     assert failure.payload["error_code"] == "ASSET_HYDRATION_REQUIRED"
 
 
+def _ast_identifiers(tree: ast.AST) -> set[str]:
+    identifiers: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name):
+            identifiers.add(node.id)
+        elif isinstance(node, ast.Attribute):
+            identifiers.add(node.attr)
+        elif isinstance(node, ast.alias):
+            identifiers.add(node.name)
+            if node.asname is not None:
+                identifiers.add(node.asname)
+    return identifiers
+
+
+def _string_literals(tree: ast.AST) -> tuple[str, ...]:
+    return tuple(
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant) and isinstance(node.value, str)
+    )
+
+
+def _call_terminal_name(node: ast.Call) -> str | None:
+    if isinstance(node.func, ast.Name):
+        return node.func.id
+    if isinstance(node.func, ast.Attribute):
+        return node.func.attr
+    return None
+
+
+def _literal_string(node: ast.AST | None) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    return None
+
+
 def test_cas_r1_post_m2_ctx_f3_f4_remain_non_asset_consumers():
     paths = (
         Path("se/src/context/discovery.py"),
         Path("se/src/context/discovery_collection.py"),
         Path("se/src/context/access.py"),
     )
-    forbidden = (
-        "ContextSourceKind.ASSET",
+    forbidden_identifiers = {
+        "ASSET",
+        "AssetEvidence",
         "project_asset_source",
         "AssetService",
         "FileAssetRecord",
@@ -288,61 +327,146 @@ def test_cas_r1_post_m2_ctx_f3_f4_remain_non_asset_consumers():
         "FileProviderBindingRecord",
         "ObjectStorageDriver",
         "object_store",
+    }
+    forbidden_import_fragments = (
+        "application.assets",
+        "storage.models.sql.assets",
+        "storage.repositories.assets",
     )
 
     offenders: list[tuple[str, str]] = []
     for path in paths:
         source = path.read_text(encoding="utf-8")
-        for phrase in forbidden:
-            if phrase in source:
-                offenders.append((path.as_posix(), phrase))
+        tree = ast.parse(source, filename=path.as_posix())
+        identifiers = _ast_identifiers(tree)
+        literals = _string_literals(tree)
+
+        for identifier in sorted(forbidden_identifiers & identifiers):
+            offenders.append((path.as_posix(), f"identifier:{identifier}"))
+        if "ASSET" in literals:
+            offenders.append((path.as_posix(), "literal:ASSET"))
+        if any(value.startswith("asset://") for value in literals):
+            offenders.append((path.as_posix(), "literal:asset://"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                imports = tuple(alias.name for alias in node.names)
+            elif isinstance(node, ast.ImportFrom):
+                imports = (node.module or "",)
+            else:
+                continue
+            for imported in imports:
+                if any(fragment in imported for fragment in forbidden_import_fragments):
+                    offenders.append((path.as_posix(), f"import:{imported}"))
 
     assert offenders == []
 
 
 def test_cas_r1_post_m2_r11_migration_extends_cas_lineage_without_mutating_cas():
-    migration = Path(
+    path = Path(
         "se/src/infrastructure/storage/migrations/sql/versions/"
         "19a_r11_query_order_indexes.py"
-    ).read_text(encoding="utf-8")
+    )
+    migration = path.read_text(encoding="utf-8")
+    tree = ast.parse(migration, filename=path.as_posix())
 
     assert 'revision: str = "19a_r11_query_order_indexes"' in migration
     assert 'down_revision: Union[str, None] = "18a_cas_r0_assets"' in migration
 
-    forbidden = (
-        '"files"',
-        '"file_blobs"',
-        '"file_references"',
-        '"file_provider_bindings"',
-        "FileAssetRecord",
-        "FileBlobRecord",
-        "FileReferenceRecord",
-        "FileProviderBindingRecord",
-        "ObjectStorageDriver",
-        "object_store",
+    actual_operations: list[tuple[str, str | None, str | None]] = []
+    for node in ast.walk(tree):
+        if not (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id == "op"
+        ):
+            continue
+
+        operation = node.func.attr
+        index_name = _literal_string(node.args[0]) if node.args else None
+        if operation == "create_index":
+            table_name = _literal_string(node.args[1]) if len(node.args) > 1 else None
+        elif operation == "drop_index":
+            table_name = next(
+                (
+                    _literal_string(keyword.value)
+                    for keyword in node.keywords
+                    if keyword.arg == "table_name"
+                ),
+                None,
+            )
+        else:
+            table_name = None
+        actual_operations.append((operation, index_name, table_name))
+
+    assert sorted(actual_operations) == sorted(
+        [
+            (
+                "create_index",
+                "ix_agent_iterations_execution_iteration",
+                "agent_iterations",
+            ),
+            (
+                "create_index",
+                "ix_agent_task_branches_task_created_branch",
+                "agent_task_branches",
+            ),
+            (
+                "drop_index",
+                "ix_agent_task_branches_task_created_branch",
+                "agent_task_branches",
+            ),
+            (
+                "drop_index",
+                "ix_agent_iterations_execution_iteration",
+                "agent_iterations",
+            ),
+        ]
     )
-    for phrase in forbidden:
-        assert phrase not in migration
 
 
 def test_cas_r1_post_m2_r11_f1b_remains_agent_only_and_non_destructive():
-    source = Path("se/src/runtimes/agent/gc_dry_run.py").read_text(
-        encoding="utf-8"
-    )
+    path = Path("se/src/runtimes/agent/gc_dry_run.py")
+    source = path.read_text(encoding="utf-8")
+    tree = ast.parse(source, filename=path.as_posix())
 
-    forbidden = (
+    forbidden_identifiers = {
         "FileAssetRecord",
         "FileBlobRecord",
         "FileReferenceRecord",
         "FileProviderBindingRecord",
         "ObjectStorageDriver",
         "object_store",
-        "asset://",
-    )
-    for phrase in forbidden:
-        assert phrase not in source
+    }
+    assert forbidden_identifiers.isdisjoint(_ast_identifiers(tree))
+    assert not any(value.startswith("asset://") for value in _string_literals(tree))
 
-    lowered = source.lower()
-    assert "delete(" not in lowered
-    assert "session.delete" not in lowered
-    assert "truncate" not in lowered
+    destructive_call_names = {
+        "delete",
+        "update",
+        "insert",
+        "flush",
+        "commit",
+        "merge",
+        "add_all",
+    }
+    destructive_calls = sorted(
+        {
+            name
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call)
+            for name in [_call_terminal_name(node)]
+            if name in destructive_call_names
+        }
+    )
+    assert destructive_calls == []
+
+    destructive_sql = re.compile(
+        r"\b(?:delete\s+from|insert\s+into|update\s+\S+\s+set|"
+        r"truncate(?:\s+table)?|drop\s+table|alter\s+table)\b",
+        re.IGNORECASE,
+    )
+    sql_literals = [
+        value for value in _string_literals(tree) if destructive_sql.search(value)
+    ]
+    assert sql_literals == []
