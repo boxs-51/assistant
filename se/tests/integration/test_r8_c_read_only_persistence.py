@@ -170,7 +170,7 @@ def _invocation(invocation_id: str, *, execution_id="exec-r8-c"):
         attempt=1,
         max_attempts=1,
         arguments={},
-        output={"ok": True},
+        output={"value": invocation_id.upper()},
         revision=3,
     )
 
