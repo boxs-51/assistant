@@ -165,6 +165,7 @@ def validate_tool_response_payload_integrity(
         raise ValueError("Only COMMITTED tool results may create ToolResponsePayload.")
 
     canonical = canonical_payload_bytes(_thaw_json(payload.content))
+    canonical_payload_bytes(_thaw_json(payload.metadata))
     expected_digest = hashlib.sha256(canonical).hexdigest()
     if payload.content_digest != expected_digest:
         raise ValueError("ToolResponsePayload content_digest does not match content.")
