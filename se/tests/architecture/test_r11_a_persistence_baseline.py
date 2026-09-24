@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass, field
 import json
+import math
 import time
 
 import pytest
@@ -32,6 +33,7 @@ class _SqlMetrics:
     commits: int = 0
     rollbacks: int = 0
     begins: int = 0
+    checkpoint_insert_parameter_bytes: int = 0
 
     def reset(self) -> None:
         self.statements.clear()
@@ -39,6 +41,7 @@ class _SqlMetrics:
         self.commits = 0
         self.rollbacks = 0
         self.begins = 0
+        self.checkpoint_insert_parameter_bytes = 0
 
     @property
     def total_sql(self) -> int:
@@ -96,6 +99,25 @@ class _MeasuredUow:
         await self.session.rollback()
 
 
+def _bound_parameter_bytes(value) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, memoryview):
+        return value.nbytes
+    if isinstance(value, (bytes, bytearray)):
+        return len(value)
+    if isinstance(value, str):
+        return len(value.encode("utf-8"))
+    if isinstance(value, dict):
+        return sum(
+            _bound_parameter_bytes(key) + _bound_parameter_bytes(item)
+            for key, item in value.items()
+        )
+    if isinstance(value, (tuple, list)):
+        return sum(_bound_parameter_bytes(item) for item in value)
+    return len(str(value).encode("utf-8"))
+
+
 def _install_sql_metrics(engine, metrics: _SqlMetrics) -> None:
     def before_cursor_execute(
         _conn,
@@ -107,6 +129,10 @@ def _install_sql_metrics(engine, metrics: _SqlMetrics) -> None:
     ):
         token = statement.lstrip().split(None, 1)[0].upper()
         metrics.statements[token] += 1
+        if token == "INSERT" and "agent_execution_checkpoints" in statement:
+            metrics.checkpoint_insert_parameter_bytes += (
+                _bound_parameter_bytes(_parameters)
+            )
 
     def on_begin(_conn):
         metrics.begins += 1
@@ -216,13 +242,21 @@ async def _seed_execution_and_invocations(
     return pending
 
 
-async def _measure_waiting_commit(tmp_path, pending_count: int) -> dict[str, int]:
+async def _measure_waiting_commit(
+    tmp_path,
+    pending_count: int,
+    *,
+    message_count: int = 1,
+    capture_checkpoint_bytes: bool = False,
+) -> dict[str, int]:
     metrics = _SqlMetrics()
     engine, sessions = await _new_database(
-        tmp_path / f"r11-a-wait-{pending_count}.sqlite",
+        tmp_path / (
+            f"r11-a-wait-{pending_count}-messages-{message_count}.sqlite"
+        ),
         metrics,
     )
-    execution_id = f"exec-r11-a-{pending_count}"
+    execution_id = f"exec-r11-a-{pending_count}-m{message_count}"
     try:
         pending = await _seed_execution_and_invocations(
             sessions,
@@ -253,14 +287,32 @@ async def _measure_waiting_commit(tmp_path, pending_count: int) -> dict[str, int
                 "wait_expires_at": None,
                 "origin_client_id": "client-r11-a",
                 "origin_connection_id": "conn-r11-a",
-                "transcript_snapshot": [_message(0)],
+                "transcript_snapshot": [
+                    _message(index) for index in range(message_count)
+                ],
                 "metadata_json": {"phase": "r11-a"},
             },
             pending_invocations=pending,
         )
-        return metrics.snapshot()
+        result = metrics.snapshot()
+        if capture_checkpoint_bytes:
+            result["checkpoint_insert_parameter_bytes"] = (
+                metrics.checkpoint_insert_parameter_bytes
+            )
+        return result
     finally:
         await engine.dispose()
+
+
+def _nearest_rank_percentiles(values: list[int]) -> dict[str, int]:
+    ordered = sorted(values)
+    assert ordered
+
+    def at(percent: int) -> int:
+        index = max(0, math.ceil((percent / 100) * len(ordered)) - 1)
+        return ordered[index]
+
+    return {"p50_ns": at(50), "p95_ns": at(95), "p99_ns": at(99)}
 
 
 async def _seed_reconstruction_source(
@@ -345,6 +397,46 @@ async def _measure_reconstruction(
                 "elapsed_ns": elapsed_ns,
             }
         )
+        return result
+    finally:
+        await engine.dispose()
+
+
+async def _measure_reconstruction_distribution(
+    tmp_path,
+    message_count: int,
+    *,
+    samples: int = 20,
+) -> dict[str, int]:
+    metrics = _SqlMetrics()
+    engine, sessions = await _new_database(
+        tmp_path / f"r11-a-reconstruct-dist-{message_count}.sqlite",
+        metrics,
+    )
+    execution_id = f"exec-r11-a-reconstruct-dist-{message_count}"
+    try:
+        await _seed_reconstruction_source(
+            sessions,
+            execution_id=execution_id,
+            message_count=message_count,
+        )
+        store = DurableAgentStore(lambda: _MeasuredUow(sessions, metrics))
+        elapsed: list[int] = []
+        for _ in range(samples):
+            metrics.reset()
+            started_ns = time.perf_counter_ns()
+            transcript = await store.load_fork_safe_checkpoint_transcript(
+                execution_id,
+                f"{execution_id}:checkpoint:7",
+            )
+            elapsed.append(time.perf_counter_ns() - started_ns)
+            assert len(transcript) == message_count
+            snapshot = metrics.snapshot()
+            assert snapshot["select"] == snapshot["sql"] == 3
+            assert snapshot["insert"] == snapshot["update"] == 0
+            assert snapshot["delete"] == 0
+        result = {"samples": samples}
+        result.update(_nearest_rank_percentiles(elapsed))
         return result
     finally:
         await engine.dispose()
@@ -471,3 +563,49 @@ async def test_r11_a_baseline_probe_is_reproducible_and_reports_all_dimensions(
         assert sample["messages"] == count
         assert sample["logical_bytes"] == growth[count]["final_transcript_bytes"]
         assert sample["elapsed_ns"] > 0
+
+
+
+@pytest.mark.asyncio
+async def test_r11_a_real_writer_bytes_and_reconstruction_percentile_red_probe(
+    tmp_path,
+):
+    writer = {
+        count: await _measure_waiting_commit(
+            tmp_path,
+            0,
+            message_count=count,
+            capture_checkpoint_bytes=True,
+        )
+        for count in (10, 100, 1000)
+    }
+    reconstruction = {
+        count: await _measure_reconstruction_distribution(
+            tmp_path,
+            count,
+            samples=20,
+        )
+        for count in (10, 100, 1000)
+    }
+
+    for count, sample in writer.items():
+        logical = _snapshot_growth(count)["final_transcript_bytes"]
+        assert sample["checkpoint_insert_parameter_bytes"] > logical
+    assert (
+        writer[10]["checkpoint_insert_parameter_bytes"]
+        < writer[100]["checkpoint_insert_parameter_bytes"]
+        < writer[1000]["checkpoint_insert_parameter_bytes"]
+    )
+
+    for sample in reconstruction.values():
+        assert sample["samples"] == 20
+        assert 0 < sample["p50_ns"] <= sample["p95_ns"] <= sample["p99_ns"]
+
+    pytest.fail(
+        "R11_A_WRITER_RECON_PERCENTILE_BASELINE="
+        + json.dumps(
+            {"writer": writer, "reconstruction": reconstruction},
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+    )
