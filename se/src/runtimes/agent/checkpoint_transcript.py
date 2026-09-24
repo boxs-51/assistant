@@ -18,10 +18,10 @@ class CheckpointTranscriptMaterializationError(RuntimeError):
 
 def _representation_error_code(exc: Exception) -> str:
     message = str(exc).lower()
-    if "depth" in message:
-        return "TRANSCRIPT_REPRESENTATION_DEPTH_EXCEEDED"
     if "ancestry" in message or "cycle" in message or "parent" in message:
         return "TRANSCRIPT_REPRESENTATION_ANCESTRY_INVALID"
+    if "depth" in message:
+        return "TRANSCRIPT_REPRESENTATION_DEPTH_EXCEEDED"
     return "TRANSCRIPT_REPRESENTATION_CORRUPT"
 
 
