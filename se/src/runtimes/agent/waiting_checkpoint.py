@@ -155,6 +155,11 @@ async def stage_waiting_checkpoint(
         raise WaitingCheckpointConflictError(
             "Checkpoint transcript representation is not reconstructable."
         )
+    if transcript_ref is not None:
+        raise WaitingCheckpointConflictError(
+            "Checkpoint ref-backed authority must be proven by the R11-D "
+            "representation writer before staging."
+        )
 
     checkpoint["metadata_json"] = to_json_safe(
         checkpoint.get("metadata_json") or {},
