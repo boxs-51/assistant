@@ -178,26 +178,77 @@ def test_network_remote_unavailability_is_classified_without_local_effects(tmp_p
     }
 
 
-def test_network_success_with_malformed_structured_data_fails_assertion(tmp_path):
+def _search_evidence(tmp_path, payload):
     config = _config(tmp_path)
+    evidence = ScenarioRunner(config).run(
+        (
+            build_network_scenario(
+                web_run=lambda **kwargs: _success("search", payload)
+            ),
+        )
+    )
+    return evidence, evidence["scenarios"][0]["steps"][0]
 
-    def web_run(*, action, **kwargs):
-        assert action == "search"
-        return _success(
-            "search",
+
+def test_network_nonempty_result_missing_url_is_assertion_failure(tmp_path):
+    evidence, step = _search_evidence(
+        tmp_path,
+        {
+            "query": NETWORK_QUERY,
+            "returned_count": 1,
+            "provider": "fake-search",
+            "results": [{"title": "missing url"}],
+        },
+    )
+
+    assert evidence["status"] == "FAIL"
+    assert step["error"]["code"] == "LIVE_SCENARIO_ASSERTION_FAILED"
+
+
+def test_network_nonpublic_or_malformed_result_is_assertion_failure(tmp_path):
+    for result_item in (
+        {"title": "local", "url": "file:///tmp/private"},
+        "not-a-result-object",
+    ):
+        evidence, step = _search_evidence(
+            tmp_path,
             {
                 "query": NETWORK_QUERY,
                 "returned_count": 1,
                 "provider": "fake-search",
-                "results": [{"title": "missing url"}],
+                "results": [result_item],
             },
         )
+        assert evidence["status"] == "FAIL"
+        assert step["error"]["code"] == "LIVE_SCENARIO_ASSERTION_FAILED"
 
-    evidence = ScenarioRunner(config).run(
-        (build_network_scenario(web_run=web_run),)
+
+def test_network_count_list_inconsistency_is_assertion_failure(tmp_path):
+    payloads = (
+        {
+            "query": NETWORK_QUERY,
+            "returned_count": 0,
+            "provider": "fake-search",
+            "results": [
+                {
+                    "title": "Example",
+                    "url": "https://example.com/",
+                    "snippet": "",
+                }
+            ],
+        },
+        {
+            "query": NETWORK_QUERY,
+            "returned_count": 1,
+            "provider": "fake-search",
+            "results": [],
+        },
     )
-    step = evidence["scenarios"][0]["steps"][0]
-    assert step["error"]["code"] == "LIVE_WEB_EMPTY_RESULT"
+
+    for payload in payloads:
+        evidence, step = _search_evidence(tmp_path, payload)
+        assert evidence["status"] == "FAIL"
+        assert step["error"]["code"] == "LIVE_SCENARIO_ASSERTION_FAILED"
 
 
 def test_network_entry_requires_master_and_network_before_artifacts(tmp_path):
