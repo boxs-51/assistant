@@ -4,6 +4,7 @@ import asyncio
 import gc
 import hashlib
 import json
+import math
 import time
 import tracemalloc
 from collections import Counter
@@ -11,7 +12,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 
 import pytest
-from sqlalchemy import event
+from sqlalchemy import event, text as sql_text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
@@ -59,6 +60,72 @@ class _Metrics:
         }
 
 
+@dataclass
+class _CasTiming:
+    task_ns: list[int] = field(default_factory=list)
+    budget_ns: list[int] = field(default_factory=list)
+
+
+class _OneShotBarrier:
+    def __init__(self, parties: int = 2):
+        self.parties = parties
+        self.arrivals = 0
+        self._released = False
+        self._lock = asyncio.Lock()
+        self._event = asyncio.Event()
+
+    async def wait(self) -> None:
+        async with self._lock:
+            if self._released:
+                return
+            self.arrivals += 1
+            if self.arrivals >= self.parties:
+                self._released = True
+                self._event.set()
+                return
+        await self._event.wait()
+
+
+class _BarrierAgentRepository(AgentRepository):
+    def __init__(self, session, barrier: _OneShotBarrier, timing: _CasTiming):
+        super().__init__(session)
+        self._barrier = barrier
+        self._timing = timing
+
+    async def compare_and_set_task(
+        self,
+        task_id,
+        expected_revision,
+        values,
+    ):
+        await self._barrier.wait()
+        started_ns = time.perf_counter_ns()
+        try:
+            return await super().compare_and_set_task(
+                task_id,
+                expected_revision,
+                values,
+            )
+        finally:
+            self._timing.task_ns.append(time.perf_counter_ns() - started_ns)
+
+    async def compare_and_set_task_budget(
+        self,
+        task_id,
+        expected_revision,
+        values,
+    ):
+        started_ns = time.perf_counter_ns()
+        try:
+            return await super().compare_and_set_task_budget(
+                task_id,
+                expected_revision,
+                values,
+            )
+        finally:
+            self._timing.budget_ns.append(time.perf_counter_ns() - started_ns)
+
+
 class _Uow:
     def __init__(self, sessions, metrics: _Metrics):
         self._sessions = sessions
@@ -90,6 +157,42 @@ class _Uow:
     async def rollback(self):
         self._metrics.rollbacks += 1
         await self.session.rollback()
+
+
+class _BarrierUow(_Uow):
+    def __init__(
+        self,
+        sessions,
+        metrics: _Metrics,
+        barrier: _OneShotBarrier,
+        timing: _CasTiming,
+    ):
+        super().__init__(sessions, metrics)
+        self._barrier = barrier
+        self._timing = timing
+
+    async def __aenter__(self):
+        self._ctx = self._sessions()
+        self.session = await self._ctx.__aenter__()
+        event.listen(self.session.sync_session, "before_flush", self._before_flush)
+        self.agents = _BarrierAgentRepository(
+            self.session,
+            self._barrier,
+            self._timing,
+        )
+        self.capability_invocations = CapabilityInvocationRepository(self.session)
+        return self
+
+
+def _percentiles(values: list[int]) -> dict[str, int]:
+    ordered = sorted(values)
+    assert ordered
+
+    def at(percent: int) -> int:
+        index = max(0, math.ceil((percent / 100) * len(ordered)) - 1)
+        return ordered[index]
+
+    return {"p50_ns": at(50), "p95_ns": at(95), "p99_ns": at(99)}
 
 
 def _install_metrics(engine, metrics: _Metrics) -> None:
@@ -367,6 +470,162 @@ async def _measure_task_budget_contention(tmp_path) -> dict[str, int]:
         await engine.dispose()
 
 
+
+async def _measure_branch_create_distribution(
+    tmp_path,
+    *,
+    samples: int = 10,
+) -> dict[str, int]:
+    engine, sessions, service, planner, metrics = await _setup(
+        tmp_path,
+        name="r11-a-branch-create-distribution.sqlite",
+    )
+    elapsed: list[int] = []
+    try:
+        for index in range(samples):
+            source = await _seed_fork_source(
+                sessions,
+                service,
+                planner,
+                metrics,
+                task_id=f"task-r11-a-branch-dist-{index}",
+                fork_request_id=f"fork-r11-a-dist-{index}",
+            )
+            started_ns = time.perf_counter_ns()
+            admission = await service.consume_fork_plan(source["plan"])
+            elapsed.append(time.perf_counter_ns() - started_ns)
+            assert isinstance(admission, ForkAdmission)
+        result = {"samples": samples}
+        result.update(_percentiles(elapsed))
+        return result
+    finally:
+        await engine.dispose()
+
+
+async def _count_task_rows(session) -> dict[str, int]:
+    tables = (
+        "agent_tasks",
+        "agent_task_budgets",
+        "agent_task_branches",
+        "agent_task_branch_contexts",
+        "agent_executions",
+        "agent_execution_checkpoints",
+        "agent_iterations",
+        "agent_task_budget_reservations",
+        "agent_task_fork_admissions",
+    )
+    result: dict[str, int] = {}
+    for table in tables:
+        count = await session.scalar(
+            sql_text(f"SELECT COUNT(*) FROM {table}")
+        )
+        result[table] = int(count or 0)
+    result["total_rows"] = sum(result.values())
+    return result
+
+
+async def _measure_rows_per_task(tmp_path) -> dict[str, dict[str, int]]:
+    engine, sessions, service, planner, metrics = await _setup(
+        tmp_path,
+        name="r11-a-rows-per-task.sqlite",
+    )
+    try:
+        source = await _seed_fork_source(
+            sessions,
+            service,
+            planner,
+            metrics,
+            task_id="task-r11-a-rows",
+            fork_request_id="fork-r11-a-rows",
+        )
+        async with sessions() as session:
+            root_waiting = await _count_task_rows(session)
+
+        admission = await service.consume_fork_plan(source["plan"])
+        assert isinstance(admission, ForkAdmission)
+        async with sessions() as session:
+            one_fork = await _count_task_rows(session)
+
+        return {"root_waiting": root_waiting, "one_fork": one_fork}
+    finally:
+        await engine.dispose()
+
+
+async def _measure_synchronized_task_budget_contention(
+    tmp_path,
+) -> dict[str, object]:
+    engine, sessions, service, planner, metrics = await _setup(
+        tmp_path,
+        name="r11-a-budget-contention-synchronized.sqlite",
+        limits=_limits(max_active_branches=2),
+    )
+    try:
+        source = await _seed_fork_source(
+            sessions,
+            service,
+            planner,
+            metrics,
+            task_id="task-r11-a-contention-sync",
+            fork_request_id="fork-r11-a-sync-a",
+        )
+        second = await planner.build_fork_plan(
+            fork_request_id="fork-r11-a-sync-b",
+            task_id=source["task_id"],
+            source_branch_id=source["source_branch_id"],
+            source_execution_id=source["source_execution_id"],
+            source_checkpoint_id=source["checkpoint_id"],
+            target_user_id="user-r11-a",
+            overlay_messages=(
+                {"role": "user", "content": "fork-local-sync-b"},
+            ),
+        )
+
+        barrier = _OneShotBarrier(2)
+        timing = _CasTiming()
+        race_factory = lambda: _BarrierUow(
+            sessions,
+            metrics,
+            barrier,
+            timing,
+        )
+        race_service = TaskBudgetService(
+            race_factory,
+            default_limits=_limits(max_active_branches=2),
+            default_policy=TaskBudgetPolicy(version="r11-a-sync"),
+            max_conflict_retries=16,
+        )
+
+        metrics.reset()
+        started_ns = time.perf_counter_ns()
+        results = await asyncio.gather(
+            race_service.consume_fork_plan(source["plan"]),
+            race_service.consume_fork_plan(second),
+            return_exceptions=True,
+        )
+        elapsed_ns = time.perf_counter_ns() - started_ns
+
+        winners = [item for item in results if isinstance(item, ForkAdmission)]
+        conflicts = [item for item in results if isinstance(item, ForkConsumeError)]
+        assert len(winners) == 1
+        assert len(conflicts) == 1
+
+        budget = await service.get_budget(source["task_id"])
+        return {
+            "attempts": 2,
+            "barrier_arrivals": barrier.arrivals,
+            "winners": len(winners),
+            "conflicts": len(conflicts),
+            "final_active_branches": int(budget.active_branches),
+            "final_budget_revision": int(budget.revision),
+            "elapsed_ns": elapsed_ns,
+            "task_cas_samples": len(timing.task_ns),
+            "budget_cas_samples": len(timing.budget_ns),
+            "task_cas": _percentiles(timing.task_ns),
+            "budget_cas": _percentiles(timing.budget_ns),
+        }
+    finally:
+        await engine.dispose()
+
 def _new_context(index: int) -> AgentExecutionContext:
     return AgentExecutionContext.create(
         execution_id=f"exec-memory-{index}",
@@ -496,3 +755,52 @@ async def test_r11_a_branch_budget_memory_probe_report(tmp_path):
     assert memory["contexts"] == 128
     assert memory["allocated_bytes"] > 0
     assert memory["approx_bytes_per_execution"] > 0
+
+
+
+@pytest.mark.asyncio
+async def test_r11_a_branch_rows_and_synchronized_contention_red_probe(tmp_path):
+    report = {
+        "branch_latency": await _measure_branch_create_distribution(
+            tmp_path,
+            samples=10,
+        ),
+        "rows_per_task": await _measure_rows_per_task(tmp_path),
+        "synchronized_contention": (
+            await _measure_synchronized_task_budget_contention(tmp_path)
+        ),
+    }
+
+    branch = report["branch_latency"]
+    assert branch["samples"] == 10
+    assert 0 < branch["p50_ns"] <= branch["p95_ns"] <= branch["p99_ns"]
+
+    rows = report["rows_per_task"]
+    assert rows["root_waiting"]["agent_tasks"] == 1
+    assert rows["one_fork"]["agent_tasks"] == 1
+    assert rows["one_fork"]["total_rows"] > rows["root_waiting"]["total_rows"]
+    assert rows["one_fork"]["agent_task_branches"] == 2
+    assert rows["one_fork"]["agent_executions"] == 2
+    assert rows["one_fork"]["agent_task_fork_admissions"] == 1
+
+    contention = report["synchronized_contention"]
+    assert contention["attempts"] == 2
+    assert contention["barrier_arrivals"] == 2
+    assert contention["winners"] == 1
+    assert contention["conflicts"] == 1
+    assert contention["final_active_branches"] == 2
+    assert contention["task_cas_samples"] >= 2
+    assert contention["budget_cas_samples"] >= 1
+    for key in ("task_cas", "budget_cas"):
+        percentiles = contention[key]
+        assert (
+            0
+            < percentiles["p50_ns"]
+            <= percentiles["p95_ns"]
+            <= percentiles["p99_ns"]
+        )
+
+    pytest.fail(
+        "R11_A_BRANCH_ROWS_SYNC_CONTENTION_BASELINE="
+        + json.dumps(report, sort_keys=True, separators=(",", ":"))
+    )
