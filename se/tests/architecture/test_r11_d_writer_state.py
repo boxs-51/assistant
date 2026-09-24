@@ -55,26 +55,26 @@ def _checkpoint(**overrides):
 
 
 @pytest.mark.asyncio
-async def test_r11_d_ref_backed_writer_preserves_null_snapshot():
+async def test_r11_d_ref_backed_writer_requires_proven_authority():
     uow = _Uow()
-    await stage_waiting_checkpoint(
-        uow,
-        execution=_execution(),
-        source_revision=3,
-        transition_values={"wait_reason": "RESOURCE"},
-        checkpoint_values=_checkpoint(
-            transcript_snapshot=None,
-            transcript_ref="a" * 64,
-            transcript_version=0,
-        ),
-        pending_invocations=(),
-    )
+    with pytest.raises(
+        WaitingCheckpointConflictError,
+        match="ref-backed authority must be proven",
+    ):
+        await stage_waiting_checkpoint(
+            uow,
+            execution=_execution(),
+            source_revision=3,
+            transition_values={"wait_reason": "RESOURCE"},
+            checkpoint_values=_checkpoint(
+                transcript_snapshot=None,
+                transcript_ref="a" * 64,
+                transcript_version=0,
+            ),
+            pending_invocations=(),
+        )
 
-    assert len(uow.agents.saved) == 1
-    saved = uow.agents.saved[0]
-    assert saved["transcript_snapshot"] is None
-    assert saved["transcript_ref"] == "a" * 64
-    assert saved["transcript_version"] == 0
+    assert uow.agents.saved == []
 
 
 @pytest.mark.asyncio
