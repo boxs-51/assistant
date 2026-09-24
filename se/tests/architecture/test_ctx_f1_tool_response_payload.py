@@ -205,3 +205,84 @@ async def test_ctx_f1_repository_rejects_model_copy_with_non_json_metadata():
         await repo.put(forged)
 
     assert await repo.get(valid.payload_id) is None
+
+
+
+def test_ctx_f1_rejects_tuple_containers_and_non_string_object_keys():
+    with pytest.raises(ValueError, match="canonical JSON containers"):
+        create_tool_response_payload(
+            source_result_id="result-tuple-content",
+            invocation_id="invocation-tuple-content",
+            execution_id="execution-1",
+            tool_call_id="call-tuple-content",
+            logical_capability_id="web.search",
+            content=({"value": 1},),
+            source_commit_state="COMMITTED",
+        )
+
+    with pytest.raises(ValueError, match="canonical JSON containers"):
+        create_tool_response_payload(
+            source_result_id="result-tuple-metadata",
+            invocation_id="invocation-tuple-metadata",
+            execution_id="execution-1",
+            tool_call_id="call-tuple-metadata",
+            logical_capability_id="web.search",
+            content={"value": 1},
+            source_commit_state="COMMITTED",
+            metadata={"trace": ({"step": 1},)},
+        )
+
+    with pytest.raises(ValueError, match="keys must be strings"):
+        create_tool_response_payload(
+            source_result_id="result-key",
+            invocation_id="invocation-key",
+            execution_id="execution-1",
+            tool_call_id="call-key",
+            logical_capability_id="web.search",
+            content={1: "not-canonical"},
+            source_commit_state="COMMITTED",
+        )
+
+
+@pytest.mark.asyncio
+async def test_ctx_f1_repository_rejects_unfrozen_container_model_copy():
+    repo = InMemoryToolResponsePayloadRepository()
+    valid = _payload()
+    forged_content = valid.model_copy(
+        update={"content": ({"value": 1},)}
+    )
+    forged_metadata = valid.model_copy(
+        update={"metadata": {"trace": ({"step": 1},)}}
+    )
+
+    with pytest.raises(ValueError, match="non-frozen JSON container"):
+        await repo.put(forged_content)
+
+    with pytest.raises(ValueError, match="non-frozen JSON container"):
+        await repo.put(forged_metadata)
+
+    assert await repo.get(valid.payload_id) is None
+
+
+@pytest.mark.asyncio
+async def test_ctx_f1_repository_payload_cannot_mutate_after_put():
+    repo = InMemoryToolResponsePayloadRepository()
+    payload = create_tool_response_payload(
+        source_result_id="result-post-put",
+        invocation_id="invocation-post-put",
+        execution_id="execution-1",
+        tool_call_id="call-post-put",
+        logical_capability_id="web.search",
+        content={"items": [{"value": 1}]},
+        source_commit_state="COMMITTED",
+        metadata={"trace": [{"step": 1}]},
+    )
+    stored = await repo.put(payload)
+
+    with pytest.raises(TypeError):
+        stored.content["items"][0]["value"] = 2
+    with pytest.raises(TypeError):
+        stored.metadata["trace"][0]["step"] = 2
+
+    assert (await repo.get(stored.payload_id)).content["items"][0]["value"] == 1
+    assert (await repo.get(stored.payload_id)).metadata["trace"][0]["step"] == 1
