@@ -346,8 +346,13 @@ TV1-T9 is CLOSED / MERGED / FROZEN / post-merge GREEN on the canonical main
 line. R11 may measure payload/storage effects but must not redefine canonical
 logical tool identity, Metadata V2 contracts, or physical ToolResult provenance.
 
-TV1-T10 is only boundary-audited; its live-harness implementation is not part of
-R11 and does not authorize cross-track production edits.
+TV1-T10 is coordinated by Issue #38. T10-A is CLAIMED with current candidate
+`71b5b355dfb449d5dd633e5cb7b9df6aa1451fac`, whose exact delta from
+`main@78479a64` is one contract-doc file under `tools/v1/live/**`.
+
+T10-A has no production/runtime/test delta and no R11 path overlap. Its
+live-harness contract work remains non-scope for Agent persistence, and it does
+not authorize cross-track production edits.
 
 ### CAS / CTX
 
