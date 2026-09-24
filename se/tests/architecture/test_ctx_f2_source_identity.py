@@ -5,6 +5,7 @@ from se.src.context.source_identity import (
     ContextSourceRef,
     context_source_id,
     create_context_source_ref,
+    validate_context_source_ref_integrity,
 )
 
 
@@ -208,9 +209,26 @@ def test_ctx_f2_model_copy_cannot_forge_context_source_id():
     )
     forged = valid.model_copy(update={"context_source_id": "forged"})
 
+    with pytest.raises(ValueError, match="does not match"):
+        validate_context_source_ref_integrity(forged)
+
     data = forged.model_dump(mode="json")
     with pytest.raises(ValueError, match="does not match"):
         ContextSourceRef(**data)
+
+
+def test_ctx_f2_model_copy_cannot_smuggle_mutable_metadata_descendants():
+    valid = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+    )
+    forged = valid.model_copy(
+        update={"metadata": {"nested": [{"value": 1}]}}
+    )
+
+    with pytest.raises(ValueError, match="non-frozen JSON container"):
+        validate_context_source_ref_integrity(forged)
 
 
 def test_ctx_f2_extra_provider_alias_fields_are_forbidden():
