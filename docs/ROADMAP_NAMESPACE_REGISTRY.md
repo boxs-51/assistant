@@ -129,9 +129,19 @@ Allocated next phase:
 TV1-T10 Live Harness & Real-Machine Exit Gate
 ```
 
-TV1-T10 has a completed boundary audit with six P1 live-harness groups, but
-implementation is NOT OPEN and no dedicated T10 coordination issue exists at
-this snapshot.
+TV1-T10 is now coordinated by Issue #38.
+
+Current live state:
+```text
+Issue #38  OPEN
+TV1-T10-A CLAIMED
+candidate  71b5b355dfb449d5dd633e5cb7b9df6aa1451fac
+scope      one contract-doc file under tools/v1/live/**
+production/runtime/test delta 0
+```
+
+TV1-T10-A is contract-doc stage only. Real-machine execution and production
+tool-runtime changes are not authorized by this state.
 
 ### Historical T7/T8 wording
 
@@ -337,7 +347,8 @@ Rules:
 - PTC-1 through PTC-3 are CLOSED / merged / FINAL GREEN and are inherited
   authority for later Agent work.
 - AE-R11 is the active Agent roadmap phase under Issue #31.
-- TV1-T10 remains boundary-audited only and has no implementation claim.
+- TV1-T10 is coordinated by Issue #38; T10-A is CLAIMED at contract-doc stage
+  only, with no production/runtime changes and no R11 path overlap.
 - CAS-F5+ and CTX-F* remain parked behind AE-R14 and require fresh post-R14 audits.
 
 ---
@@ -439,7 +450,7 @@ Issue #16 CLOSED / completed
 
 TV1-T8   CLOSED / GREEN / FINAL-FROZEN / Issue #7
 TV1-T9   CLOSED / MERGED / FROZEN / POST-MERGE GREEN / Issue #12
-TV1-T10  BOUNDARY AUDITED / P1 PLAN FROZEN / IMPLEMENTATION NOT OPEN
+TV1-T10  Issue #38 OPEN / T10-A CLAIMED / CONTRACT-DOC STAGE / NO RUNTIME DELTA
 
 PTC-1-3  CLOSED / MERGED / FINAL GREEN / Issue #8
 
