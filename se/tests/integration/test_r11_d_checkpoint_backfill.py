@@ -165,6 +165,8 @@ async def test_r11_d_backfill_limit_one_eventually_converts_parent_and_child(tmp
         assert fourth.scanned == 1
         assert fourth.converted == 1
         assert fourth.deferred == 0
+        assert fourth.next_conversion_after is None
+        assert fourth.converged == 0
 
         async with sessions() as session:
             repo = AgentRepository(session)
@@ -235,6 +237,42 @@ async def test_r11_d_backfill_scan_limit_bounds_large_corpus_work(tmp_path):
                 checkpoint = await repo.get_execution_checkpoint(f"cp-b-{index}")
                 assert checkpoint.transcript_ref is not None
                 assert checkpoint.transcript_version is not None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_final_conversion_defers_validation_to_next_call(tmp_path):
+    engine, sessions = await _db(tmp_path, "r11-d-backfill-phase.sqlite")
+    try:
+        async with sessions() as session:
+            await _seed_execution(session, "exec-phase")
+            await _seed_legacy_checkpoint(
+                session,
+                checkpoint_id="cp-phase",
+                execution_id="exec-phase",
+                messages=[{"role": "user", "content": "A"}],
+            )
+            await session.commit()
+
+        store = DurableAgentStore(lambda: _Uow(sessions))
+
+        converted = await store.backfill_legacy_inline_checkpoints(
+            limit=1,
+            scan_limit=1,
+        )
+        assert converted.scanned == 1
+        assert converted.converted == 1
+        assert converted.converged == 0
+        assert converted.next_conversion_after is None
+
+        validated = await store.backfill_legacy_inline_checkpoints(
+            limit=1,
+            scan_limit=1,
+        )
+        assert validated.scanned == 1
+        assert validated.converted == 0
+        assert validated.converged == 1
     finally:
         await engine.dispose()
 
