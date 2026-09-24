@@ -241,9 +241,9 @@ async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path
         assert checkpoint.execution_revision == 4
         assert checkpoint.origin_client_id == "client-1"
         assert checkpoint.origin_connection_id == "conn-k1"
-        assert checkpoint.transcript_snapshot == (
-            {"role": "user", "content": "run tools"},
-        )
+        assert checkpoint.transcript_snapshot is None
+        assert checkpoint.transcript_ref is not None
+        assert checkpoint.transcript_version is not None
 
         execution = await store.load_execution("exec-legacy")
         assert execution.state == "WAITING"
@@ -290,7 +290,7 @@ async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path
                 AgentExecutionCheckpointRecord,
                 "legacy-cp-1",
             )
-            assert row.transcript_snapshot is not None
+            assert row.transcript_snapshot is None
             assert row.transcript_ref is not None
             assert row.transcript_version is not None
             representation_count = len(
