@@ -1418,6 +1418,32 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def list_transcript_representation_versions(
+        self,
+        transcript_ref: str,
+    ) -> tuple[int, ...]:
+        result = await self.session.execute(
+            select(AgentTranscriptRepresentationRecord.transcript_version)
+            .where(
+                AgentTranscriptRepresentationRecord.transcript_ref
+                == transcript_ref
+            )
+            .order_by(
+                AgentTranscriptRepresentationRecord.transcript_version.asc()
+            )
+        )
+        return tuple(int(item) for item in result.scalars().all())
+
+    async def materialize_transcript_representation(
+        self,
+        transcript_ref: str,
+        transcript_version: int,
+    ) -> list[dict[str, Any]]:
+        return await self._materialize_transcript_representation(
+            transcript_ref,
+            transcript_version,
+        )
+
     async def save_transcript_representation(self, values: Dict[str, Any]):
         kind = str(values.get("kind") or "").upper()
         version = int(values.get("transcript_version", -1))
