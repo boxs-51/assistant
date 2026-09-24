@@ -103,3 +103,26 @@ async def test_ctx_f1_concurrent_true_replay_converges():
 
     assert stored_first.payload_id == stored_second.payload_id
     assert await repo.get_by_source_result("result-1") is stored_first
+
+
+def test_ctx_f1_payload_content_and_metadata_are_deeply_immutable():
+    payload = create_tool_response_payload(
+        source_result_id="result-immutable",
+        invocation_id="invocation-immutable",
+        execution_id="execution-1",
+        tool_call_id="call-immutable",
+        logical_capability_id="web.search",
+        content={"items": [{"value": 1}]},
+        source_commit_state="COMMITTED",
+        metadata={"trace": {"step": 1}},
+    )
+
+    assert payload.content["items"][0]["value"] == 1
+    with pytest.raises(TypeError):
+        payload.content["items"][0]["value"] = 2
+    with pytest.raises(TypeError):
+        payload.metadata["trace"]["step"] = 2
+
+    dumped = payload.model_dump(mode="json")
+    assert dumped["content"] == {"items": [{"value": 1}]}
+    assert dumped["metadata"] == {"trace": {"step": 1}}
