@@ -427,3 +427,42 @@ def test_ctx_f2b_trp_projection_rejects_noncanonical_authority_ids(
             result,
             _payload(**payload_kwargs),
         )
+
+
+@pytest.mark.parametrize(
+    "execution,checkpoint",
+    [
+        (
+            Execution(task_id=" task-1 "),
+            Checkpoint(task_id=" task-1 "),
+        ),
+        (
+            Execution(branch_id=" branch-1 "),
+            Checkpoint(branch_id=" branch-1 "),
+        ),
+        (
+            Execution(task_id=""),
+            Checkpoint(task_id=""),
+        ),
+        (
+            Execution(branch_id=""),
+            Checkpoint(branch_id=""),
+        ),
+    ],
+)
+def test_ctx_f2b_transcript_projection_rejects_noncanonical_optional_lineage_ids(
+    execution,
+    checkpoint,
+):
+    with pytest.raises(ValueError):
+        project_agent_transcript_source(Session(), execution, checkpoint)
+
+
+def test_ctx_f2b_transcript_projection_allows_absent_optional_lineage_ids():
+    ref = project_agent_transcript_source(
+        Session(),
+        Execution(task_id=None, branch_id=None),
+        Checkpoint(task_id=None, branch_id=None),
+    )
+    assert ref.task_id is None
+    assert ref.branch_id is None
