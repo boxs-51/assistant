@@ -21,6 +21,7 @@ from .contracts.fork import (
 from .contracts.inference import InferenceMessage
 from .checkpoint_transcript import (
     CheckpointTranscriptMaterializationError,
+    checkpoint_representation_error_code,
     materialize_checkpoint_transcript_in_uow,
 )
 from .serialization import to_json_safe
@@ -317,8 +318,14 @@ class AgentForkPlanningService:
                 )
             )
         except ExecutionConflictError as exc:
-            code = str(exc).split(":", 1)[0]
-            if not code.startswith("FORK_"):
+            code = (
+                checkpoint_representation_error_code(exc)
+                or str(exc).split(":", 1)[0]
+            )
+            if not (
+                code.startswith("FORK_")
+                or checkpoint_representation_error_code(code) is not None
+            ):
                 code = "FORK_TRANSCRIPT_UNSAFE"
             raise ForkPlanRejected(code, str(exc)) from exc
 
