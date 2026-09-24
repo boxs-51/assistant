@@ -176,19 +176,28 @@ class ContextSourceRef(BaseModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "ContextSourceRef":
-        expected = context_source_id(
-            source_kind=self.source_kind,
-            owner_user_id=self.owner_user_id,
-            authority_id=self.authority_id,
-            authority_version=self.authority_version,
-        )
-        if self.context_source_id != expected:
-            raise ValueError("context_source_id does not match source authority identity")
-        return self
+        return validate_context_source_ref_integrity(self)
 
     @field_serializer("metadata")
     def serialize_metadata(self, value: Any) -> Any:
         return _thaw_json(value)
+
+
+def validate_context_source_ref_integrity(
+    ref: ContextSourceRef,
+) -> ContextSourceRef:
+    expected = context_source_id(
+        source_kind=ref.source_kind,
+        owner_user_id=ref.owner_user_id,
+        authority_id=ref.authority_id,
+        authority_version=ref.authority_version,
+    )
+    if ref.context_source_id != expected:
+        raise ValueError("context_source_id does not match source authority identity")
+    _validate_json(_thaw_json(ref.metadata))
+    if not isinstance(ref.metadata, MappingProxyType):
+        raise ValueError("ContextSourceRef metadata must be recursively frozen")
+    return ref
 
 
 def create_context_source_ref(
