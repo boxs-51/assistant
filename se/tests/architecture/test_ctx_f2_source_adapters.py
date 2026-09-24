@@ -168,7 +168,7 @@ def test_ctx_f2b_branch_created_by_never_becomes_owner():
             "checkpoint.session_id mismatch",
         ),
         (
-            Checkpoint(),
+            Checkpoint(session_id="other"),
             Execution(session_id="other"),
             "execution.session_id mismatch",
         ),
@@ -341,4 +341,89 @@ def test_ctx_f2b_trp_projection_rejects_empty_structural_evidence_ids():
             Invocation(execution_id=""),
             Result(execution_id=""),
             _payload(execution_id=""),
+        )
+
+
+@pytest.mark.parametrize(
+    "session",
+    [
+        Session(id=" session-1 "),
+        Session(user_id=" user-1 "),
+    ],
+)
+def test_ctx_f2b_session_projection_rejects_noncanonical_ids(session):
+    with pytest.raises(ValueError, match="canonical normalized form"):
+        project_session_source(session)
+
+
+@pytest.mark.parametrize(
+    "task",
+    [
+        Task(id=" task-1 "),
+        Task(session_id=" session-1 "),
+    ],
+)
+def test_ctx_f2b_task_projection_rejects_noncanonical_ids(task):
+    with pytest.raises(ValueError, match="canonical normalized form"):
+        project_task_source(Session(), task)
+
+
+@pytest.mark.parametrize(
+    "branch",
+    [
+        Branch(branch_id=" branch-1 "),
+        Branch(task_id=" task-1 "),
+    ],
+)
+def test_ctx_f2b_branch_projection_rejects_noncanonical_ids(branch):
+    with pytest.raises(ValueError, match="canonical normalized form"):
+        project_branch_source(Session(), Task(), branch)
+
+
+@pytest.mark.parametrize(
+    "execution,checkpoint",
+    [
+        (Execution(id=" exec-1 "), Checkpoint()),
+        (Execution(session_id=" session-1 "), Checkpoint(session_id=" session-1 ")),
+        (Execution(), Checkpoint(execution_id=" exec-1 ")),
+        (Execution(), Checkpoint(session_id=" session-1 ")),
+        (Execution(), Checkpoint(transcript_ref=" transcript-ref-1 ")),
+    ],
+)
+def test_ctx_f2b_transcript_projection_rejects_noncanonical_ids(
+    execution,
+    checkpoint,
+):
+    with pytest.raises(ValueError, match="canonical normalized form"):
+        project_agent_transcript_source(Session(), execution, checkpoint)
+
+
+@pytest.mark.parametrize(
+    "invocation,result,payload_kwargs",
+    [
+        (Invocation(invocation_id=" inv-1 "), Result(), {}),
+        (Invocation(execution_id=" exec-1 "), Result(), {}),
+        (Invocation(session_id=" session-1 "), Result(), {}),
+        (Invocation(tool_call_id=" call-1 "), Result(), {}),
+        (Invocation(capability_id=" cap-1 "), Result(), {}),
+        (Invocation(owner_user_id=" user-1 "), Result(), {}),
+        (Invocation(), Result(id=" result-1 "), {}),
+        (Invocation(), Result(execution_id=" exec-1 "), {}),
+        (Invocation(), Result(invocation_id=" inv-1 "), {}),
+        (Invocation(), Result(tool_call_id=" call-1 "), {}),
+        (Invocation(), Result(capability_id=" cap-1 "), {}),
+    ],
+)
+def test_ctx_f2b_trp_projection_rejects_noncanonical_authority_ids(
+    invocation,
+    result,
+    payload_kwargs,
+):
+    with pytest.raises(ValueError, match="canonical normalized form"):
+        project_tool_response_payload_source(
+            Session(),
+            Execution(),
+            invocation,
+            result,
+            _payload(**payload_kwargs),
         )
