@@ -7,6 +7,7 @@ the old router package are removed by the Legacy Router Removal migration.
 from . import (
     admin,
     agent_router,
+    assets_router,
     auth_router,
     chat_router,
     embeddings_router,
@@ -21,6 +22,7 @@ from . import (
 __all__ = [
     "admin",
     "agent_router",
+    "assets_router",
     "auth_router",
     "chat_router",
     "embeddings_router",

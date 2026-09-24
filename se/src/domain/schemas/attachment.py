@@ -1,6 +1,6 @@
 from .base import GatewayBaseModel
 from typing import Literal, Optional, Literal
-from pydantic import Field
+from pydantic import Field, model_validator
 # =================================================================
 # 2. ATTACHMENT & CONTENT PARTS (Cấu trúc lõi cho Multimodal)
 # =================================================================
@@ -20,6 +20,7 @@ class GatewayAttachment(GatewayBaseModel):
     Có thể map tới inlineData (Gemini), input_file (OpenAI), document (Claude), etc.
     """
     id: Optional[str] = None
+    asset_id: Optional[str] = None
     filename: Optional[str] = None
     mime_type: str
     size: Optional[int] = None
@@ -33,9 +34,42 @@ class GatewayAttachment(GatewayBaseModel):
         "url",
         "base64",
         "provider",
-        "memory"
+        "memory",
+        "asset",
     ]="local"
     metadata: FileMetadata = Field(default_factory=FileMetadata)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _validate_canonical_asset_shape(cls, value):
+        if not isinstance(value, dict):
+            return value
+        data = dict(value)
+        asset_id = data.get("asset_id")
+        source = data.get("source")
+        if asset_id:
+            if source not in (None, "asset", ""):
+                raise ValueError(
+                    "asset_id requires source='asset'; legacy/provider identities "
+                    "must not be mixed with canonical assets."
+                )
+            expected_uri = f"asset://{asset_id}"
+            uri = data.get("uri")
+            if uri not in (None, "", expected_uri):
+                raise ValueError(
+                    "Canonical asset uri must match asset://<asset_id>."
+                )
+            for field in ("base64_data", "bytes_data", "provider_file_id"):
+                if data.get(field) not in (None, ""):
+                    raise ValueError(
+                        f"Canonical asset attachment cannot carry {field}."
+                    )
+            data["source"] = "asset"
+            data["uri"] = expected_uri
+            return data
+        if source == "asset":
+            raise ValueError("source='asset' requires asset_id.")
+        return data
 
 class DocumentContent(GatewayBaseModel):
 
