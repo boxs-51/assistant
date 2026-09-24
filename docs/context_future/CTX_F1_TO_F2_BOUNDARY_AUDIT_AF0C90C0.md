@@ -118,12 +118,26 @@ No fallback from missing/corrupt transcript data to Session/Memory/CAS is permit
 
 ### ASSET
 
-Authority key:
+Logical authority key:
 
 ```text
 asset_id
-asset revision if/when the converged CAS contract exposes one as required projection evidence
 ```
+
+CAS evidence concepts remain separate:
+
+```text
+logical Asset authority:       asset_id
+CAS lifecycle revision:        FileAsset.revision
+immutable content evidence:    blob_id + sha256
+```
+
+F2 must not treat `FileAsset.revision` as immutable content version. A lifecycle-only
+revision change must not create a new logical source identity or imply changed bytes.
+If later CTX projection invalidation requires exact asset-content evidence, it must
+consume the CAS-owned immutable content evidence exposed by the converged CAS contract
+(`blob_id + sha256` or its exact canonical equivalent), not infer it from lifecycle
+revision.
 
 CTX must use stable `asset_id`, never:
 
@@ -171,8 +185,10 @@ ContextSourceRef
 Rules:
 
 1. `authority_id` is the native source authority ID, opaque to CTX.
-2. `authority_version` is mandatory where the source contract is explicitly versioned
-   (Task/Branch revision, Agent transcript version).
+2. `authority_version` is mandatory only where the native source authority itself is
+   explicitly versioned for identity/evidence purposes (Task/Branch revision, Agent
+   transcript version). For ASSET, F2A leaves `authority_version` absent; CAS lifecycle
+   revision is not content-version authority.
 3. `context_source_id` is a deterministic CTX projection identity over source kind +
    owner scope + exact authority identity/version.
 4. `context_source_id` is never passed back to another subsystem as if it were that
@@ -266,7 +282,7 @@ Before any production code in F2:
 ```text
 CTX-F2A  ContextSourceRef contract + deterministic identity helper
 CTX-F2B  source adapters for dormant in-process projection
-CTX-F2C  Central Asset source adapter after CAS-R0 handoff
+CTX-F2C  Central Asset source adapter after CAS-R0 handoff, binding canonical immutable content evidence
 CTX-F2D  exit audit / handoff to CTX-F3 discovery
 ```
 
@@ -309,6 +325,8 @@ Required tests:
 - AGENT_TRANSCRIPT same ref/version -> same identity;
 - AGENT_TRANSCRIPT same ref/new version -> different identity;
 - ASSET same asset_id -> same identity;
+- ASSET lifecycle-only revision changes do not alter context_source_id;
+- ASSET content evidence is not invented in F2A; F2C must bind CAS-owned blob_id + sha256 (or exact converged equivalent) before content-version-safe projection;
 - TOOL_RESPONSE_PAYLOAD same payload_id -> same identity;
 - same textual authority_id across different source kinds -> different identity;
 - different owner_user_id -> different identity;
