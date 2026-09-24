@@ -1628,17 +1628,47 @@ class AgentRepository(BaseRepository):
         )
         return list(result.scalars().all())
 
-    async def list_checkpoint_backfill_candidates(
-        self,
-        *,
-        limit: int | None = None,
-    ):
-        statement = (
+    async def list_legacy_inline_checkpoint_backfill_candidates(self):
+        result = await self.session.execute(
             select(AgentExecutionCheckpointRecord)
+            .where(
+                AgentExecutionCheckpointRecord.transcript_snapshot.is_not(None),
+                AgentExecutionCheckpointRecord.transcript_ref.is_(None),
+                AgentExecutionCheckpointRecord.transcript_version.is_(None),
+            )
             .order_by(
                 AgentExecutionCheckpointRecord.created_at.asc(),
                 AgentExecutionCheckpointRecord.checkpoint_id.asc(),
             )
+        )
+        return list(result.scalars().all())
+
+    async def list_ref_backed_checkpoint_validation_candidates(
+        self,
+        *,
+        limit: int | None = None,
+        after_created_at=None,
+        after_checkpoint_id: str | None = None,
+    ):
+        statement = select(AgentExecutionCheckpointRecord).where(
+            AgentExecutionCheckpointRecord.transcript_ref.is_not(None),
+            AgentExecutionCheckpointRecord.transcript_version.is_not(None),
+        )
+        if after_created_at is not None and after_checkpoint_id is not None:
+            statement = statement.where(
+                or_(
+                    AgentExecutionCheckpointRecord.created_at > after_created_at,
+                    and_(
+                        AgentExecutionCheckpointRecord.created_at
+                        == after_created_at,
+                        AgentExecutionCheckpointRecord.checkpoint_id
+                        > after_checkpoint_id,
+                    ),
+                )
+            )
+        statement = statement.order_by(
+            AgentExecutionCheckpointRecord.created_at.asc(),
+            AgentExecutionCheckpointRecord.checkpoint_id.asc(),
         )
         if limit is not None:
             statement = statement.limit(limit)
