@@ -9,6 +9,9 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ...domain.schemas.identity import Identity
 from ...infrastructure.storage.repositories.agent import AgentRepository
+from ...infrastructure.storage.transcript_representation import (
+    canonical_transcript_messages,
+)
 from ..capability.contracts.definition import CapabilityIdempotency
 from ..capability.contracts.invocation import (
     CapabilityInvocationState,
@@ -79,6 +82,7 @@ from .checkpoint_transcript import (
     CheckpointTranscriptMaterializationError,
     materialize_checkpoint_transcript_in_uow,
 )
+from .checkpoint_transcript_writer import write_transcript_representation_in_uow
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
