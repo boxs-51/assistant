@@ -128,13 +128,43 @@ async def test_r11_d_backfill_limit_one_eventually_converts_parent_and_child(tmp
 
         store = DurableAgentStore(lambda: _Uow(sessions))
 
-        first = await store.backfill_legacy_inline_checkpoints(limit=1)
-        assert first.converted == 1
+        first = await store.backfill_legacy_inline_checkpoints(
+            limit=1,
+            scan_limit=1,
+        )
+        assert first.scanned == 1
+        assert first.converted == 0
         assert first.deferred == 1
+        assert first.next_conversion_after is not None
 
-        second = await store.backfill_legacy_inline_checkpoints(limit=1)
+        second = await store.backfill_legacy_inline_checkpoints(
+            limit=1,
+            scan_limit=1,
+            conversion_after=first.next_conversion_after,
+        )
+        assert second.scanned == 1
         assert second.converted == 1
-        assert second.deferred == 0
+        assert second.next_conversion_after is not None
+
+        # One empty tail page resets the keyset pass so the deferred child is
+        # revisited after its parent has converged.
+        third = await store.backfill_legacy_inline_checkpoints(
+            limit=1,
+            scan_limit=1,
+            conversion_after=second.next_conversion_after,
+        )
+        assert third.scanned == 0
+        assert third.converted == 0
+        assert third.next_conversion_after is None
+
+        fourth = await store.backfill_legacy_inline_checkpoints(
+            limit=1,
+            scan_limit=1,
+            conversion_after=third.next_conversion_after,
+        )
+        assert fourth.scanned == 1
+        assert fourth.converted == 1
+        assert fourth.deferred == 0
 
         async with sessions() as session:
             repo = AgentRepository(session)
@@ -159,6 +189,52 @@ async def test_r11_d_backfill_limit_one_eventually_converts_parent_and_child(tmp
             if cursor is None:
                 break
         assert seen >= 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_d_backfill_scan_limit_bounds_large_corpus_work(tmp_path):
+    engine, sessions = await _db(tmp_path, "r11-d-backfill-bounded-work.sqlite")
+    try:
+        async with sessions() as session:
+            await _seed_execution(session, "exec-bounded")
+            now = datetime.now(timezone.utc)
+            for index in range(7):
+                await _seed_legacy_checkpoint(
+                    session,
+                    checkpoint_id=f"cp-b-{index}",
+                    execution_id="exec-bounded",
+                    messages=[{"role": "user", "content": f"m{index}"}],
+                    created_at=now + timedelta(seconds=index),
+                )
+            await session.commit()
+
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        cursor = None
+        converted = 0
+        calls = 0
+        while converted < 7 and calls < 20:
+            page = await store.backfill_legacy_inline_checkpoints(
+                limit=1,
+                scan_limit=1,
+                conversion_after=cursor,
+            )
+            assert page.scanned <= 1
+            assert page.converted <= 1
+            converted += page.converted
+            cursor = page.next_conversion_after
+            calls += 1
+
+        assert converted == 7
+        assert calls < 20
+
+        async with sessions() as session:
+            repo = AgentRepository(session)
+            for index in range(7):
+                checkpoint = await repo.get_execution_checkpoint(f"cp-b-{index}")
+                assert checkpoint.transcript_ref is not None
+                assert checkpoint.transcript_version is not None
     finally:
         await engine.dispose()
 
