@@ -1,0 +1,310 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+
+from tools.v1.live.gui_scenarios import build_gui_scenario, run_gui_live
+from tools.v1.live.harness import (
+    ARTIFACT_ROOT_ENV,
+    GUI_GATE_ENV,
+    MASTER_GATE_ENV,
+    NETWORK_GATE_ENV,
+    LiveCategory,
+    LiveHarnessConfigError,
+    LiveHarnessDisabled,
+    ProcessIdentity,
+    ScenarioRunner,
+    create_live_run_config,
+)
+
+
+def _success(tool, action, data):
+    return {
+        "ok": True,
+        "tool": tool,
+        "action": action,
+        "data": data,
+        "error": None,
+        "meta": {"version": "2.0.0", "truncated": False, "warnings": []},
+    }
+
+
+class FakeProcessController:
+    def __init__(self):
+        self.alive = {}
+
+    def capture(self, pid):
+        ident = ProcessIdentity(pid=pid, token=f"token-{pid}")
+        self.alive[pid] = True
+        return ident
+
+    def is_alive(self, identity):
+        return self.alive.get(identity.pid, False)
+
+    def terminate(self, identity):
+        self.alive[identity.pid] = False
+
+    def wait(self, identity, timeout_seconds):
+        return not self.is_alive(identity)
+
+    def kill(self, identity):
+        self.alive[identity.pid] = False
+
+
+def _config(tmp_path):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    return create_live_run_config(
+        category=LiveCategory.GUI,
+        repo_root=repo,
+        env={
+            MASTER_GATE_ENV: "1",
+            GUI_GATE_ENV: "1",
+            ARTIFACT_ROOT_ENV: str(tmp_path / "artifacts"),
+        },
+        run_id="gui-unit",
+    )
+
+
+def test_gui_owned_target_flow_uses_pid_and_handle_authority(tmp_path):
+    config = _config(tmp_path)
+    process_controller = FakeProcessController()
+    calls = []
+    state = {"title": None, "typed_title": None, "pid": 4321, "handle": 8765}
+
+    def terminal_run(*, action, command, cwd):
+        calls.append(("terminal", action, {"cwd": cwd}))
+        assert action == "launch"
+        return _success(
+            "terminal_tool",
+            "launch",
+            {"pid": state["pid"], "started": True, "cwd": cwd, "command": command},
+        )
+
+    def window_run(*, action, **kwargs):
+        calls.append(("window", action, dict(kwargs)))
+        if action == "find":
+            query = kwargs["title_query"]
+            if state["title"] is None:
+                state["title"] = query
+                title = query
+            elif query != state["title"]:
+                state["typed_title"] = query
+                title = query
+            else:
+                title = query
+            return _success(
+                "window_tool",
+                "find",
+                {
+                    "returned_count": 1,
+                    "total_count": 1,
+                    "windows": [
+                        {
+                            "selector": {
+                                "window_handle": state["handle"],
+                                "pid": state["pid"],
+                            },
+                            "title": title,
+                            "title_truncated": False,
+                            "app_name": "python",
+                            "app_name_truncated": False,
+                        }
+                    ],
+                },
+            )
+        if action == "focus":
+            assert kwargs == {"window_handle": state["handle"], "pid": state["pid"]}
+            return _success(
+                "window_tool",
+                "focus",
+                {
+                    "window": {
+                        "selector": {"window_handle": state["handle"], "pid": state["pid"]},
+                        "title": state["title"],
+                        "title_truncated": False,
+                        "app_name": "python",
+                        "app_name_truncated": False,
+                    },
+                    "confirmed": True,
+                },
+            )
+        if action == "get_geometry":
+            assert kwargs == {"window_handle": state["handle"], "pid": state["pid"]}
+            return _success(
+                "window_tool",
+                "get_geometry",
+                {
+                    "window": {
+                        "selector": {"window_handle": state["handle"], "pid": state["pid"]},
+                        "title": state["title"],
+                        "title_truncated": False,
+                        "app_name": "python",
+                        "app_name_truncated": False,
+                    },
+                    "overall": {"left": 100, "top": 100, "width": 480, "height": 160, "right": 580, "bottom": 260},
+                    "client_area": {"left": 110, "top": 130, "width": 460, "height": 120, "right": 570, "bottom": 250},
+                    "frame_elements": {},
+                },
+            )
+        if action == "close":
+            assert kwargs == {"window_handle": state["handle"], "pid": state["pid"]}
+            process_controller.alive[state["pid"]] = False
+            return _success(
+                "window_tool",
+                "close",
+                {
+                    "window": {
+                        "selector": {"window_handle": state["handle"], "pid": state["pid"]},
+                        "title": state["typed_title"],
+                        "title_truncated": False,
+                        "app_name": "python",
+                        "app_name_truncated": False,
+                    },
+                    "closed": True,
+                },
+            )
+        raise AssertionError(action)
+
+    def desktop_run(*, action, **kwargs):
+        calls.append(("desktop", action, dict(kwargs)))
+        if action == "mouse_click":
+            assert kwargs["x"] == 340
+            assert kwargs["y"] == 190
+            return _success(
+                "desktop_automation",
+                "mouse_click",
+                {
+                    "x": kwargs["x"],
+                    "y": kwargs["y"],
+                    "position_mode": "explicit",
+                    "button": "left",
+                    "clicks": 1,
+                },
+            )
+        if action == "type_text":
+            return _success(
+                "desktop_automation",
+                "type_text",
+                {
+                    "character_count": len(kwargs["text"]),
+                    "method": "pyautogui",
+                    "clipboard_restored": None,
+                },
+            )
+        raise AssertionError(action)
+
+    evidence = ScenarioRunner(
+        config,
+        process_controller=process_controller,
+    ).run(
+        (
+            build_gui_scenario(
+                terminal_run=terminal_run,
+                window_run=window_run,
+                desktop_run=desktop_run,
+            ),
+        )
+    )
+
+    assert evidence["status"] == "PASS"
+    scenario = evidence["scenarios"][0]
+    assert scenario["id"] == "gui-window-desktop-owned-target"
+    assert [step["status"] for step in scenario["steps"]] == ["PASS"] * 8
+    assert evidence["cleanup"]["owned_pids"] == [state["pid"]]
+    assert evidence["cleanup"]["terminated_pids"] == [state["pid"]]
+    assert evidence["cleanup"]["still_alive_pids"] == []
+    assert evidence["cleanup"]["errors"] == []
+
+    side_effect_window_calls = [
+        item for item in calls
+        if item[0] == "window" and item[1] in {"focus", "get_geometry", "close"}
+    ]
+    assert all(
+        call[2] == {"window_handle": state["handle"], "pid": state["pid"]}
+        for call in side_effect_window_calls
+    )
+
+
+def test_gui_mismatched_pid_fails_before_desktop_actions(tmp_path):
+    config = _config(tmp_path)
+    controller = FakeProcessController()
+    desktop_calls = []
+
+    def terminal_run(**kwargs):
+        return _success(
+            "terminal_tool",
+            "launch",
+            {"pid": 111, "started": True, "cwd": kwargs["cwd"]},
+        )
+
+    def window_run(*, action, **kwargs):
+        assert action == "find"
+        return _success(
+            "window_tool",
+            "find",
+            {
+                "returned_count": 1,
+                "total_count": 1,
+                "windows": [
+                    {
+                        "selector": {"window_handle": 222, "pid": 999},
+                        "title": kwargs["title_query"],
+                        "title_truncated": False,
+                        "app_name": "python",
+                        "app_name_truncated": False,
+                    }
+                ],
+            },
+        )
+
+    evidence = ScenarioRunner(config, process_controller=controller).run(
+        (
+            build_gui_scenario(
+                terminal_run=terminal_run,
+                window_run=window_run,
+                desktop_run=lambda **kwargs: desktop_calls.append(kwargs),
+            ),
+        )
+    )
+
+    assert evidence["status"] == "FAIL"
+    assert evidence["scenarios"][0]["steps"][-1]["id"] == "window-discover-owned"
+    assert desktop_calls == []
+    assert evidence["cleanup"]["owned_pids"] == [111]
+
+
+def test_gui_entry_requires_master_and_gui_before_artifacts(tmp_path):
+    repo = tmp_path / "repo"
+
+    for env in ({}, {MASTER_GATE_ENV: "1"}, {GUI_GATE_ENV: "1"}):
+        try:
+            run_gui_live(env=env, repo_root=repo)
+        except LiveHarnessDisabled:
+            pass
+        else:
+            raise AssertionError("missing literal GUI gates must fail closed")
+        assert not tmp_path.exists() or list(tmp_path.iterdir()) == []
+
+
+def test_gui_entry_rejects_network_opt_in_before_artifacts(tmp_path):
+    calls = []
+
+    try:
+        run_gui_live(
+            env={
+                MASTER_GATE_ENV: "1",
+                GUI_GATE_ENV: "1",
+                NETWORK_GATE_ENV: "1",
+            },
+            repo_root=tmp_path / "repo",
+            terminal_run=lambda **kwargs: calls.append(("terminal", kwargs)),
+            window_run=lambda **kwargs: calls.append(("window", kwargs)),
+            desktop_run=lambda **kwargs: calls.append(("desktop", kwargs)),
+        )
+    except LiveHarnessConfigError:
+        pass
+    else:
+        raise AssertionError("T10-E must reject simultaneous NETWORK opt-in")
+
+    assert calls == []
+    assert not tmp_path.exists() or list(tmp_path.iterdir()) == []
