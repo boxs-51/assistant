@@ -311,7 +311,9 @@ def project_tool_error(result: Mapping[str, Any]) -> dict[str, Any] | None:
     assert isinstance(error, Mapping)
     return {
         "code": error["code"],
-        "message": error["message"],
+        # Evidence must never persist arbitrary tool/provider error text because
+        # the canonical ToolResult contract does not guarantee message secrecy.
+        "message": "Tool invocation failed.",
         "retryable": error["retryable"],
         "details": _redact_value(error["details"]),
     }

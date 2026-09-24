@@ -56,7 +56,7 @@ def _failure():
         "data": None,
         "error": {
             "code": "FAKE_FAILED",
-            "message": "synthetic failure",
+            "message": "Tool invocation failed.",
             "retryable": False,
             "details": {
                 "api_token": "secret-token",
@@ -333,6 +333,41 @@ def test_process_ownership_only_accepts_structured_terminal_launch():
         )
 
     assert controller.calls == []
+
+
+def test_error_message_is_not_persisted_in_evidence(tmp_path):
+    secret = "super-secret-provider-token"
+    failing_result = _failure()
+    failing_result["error"]["message"] = (
+        f"provider rejected credential {secret}"
+    )
+
+    projected = project_tool_error(failing_result)
+    assert projected["message"] == "Tool invocation failed."
+    assert secret not in json.dumps(projected, sort_keys=True)
+
+    config = _configured_run(tmp_path)
+    scenario = Scenario(
+        id="redacted-error",
+        category=LiveCategory.LOCAL,
+        steps=(
+            ScenarioStep(
+                id="fail",
+                tool="fake_tool",
+                action="read",
+                summary="structured failure",
+                execute=lambda context: failing_result,
+            ),
+        ),
+    )
+    evidence = ScenarioRunner(config, clock=_clock()).run([scenario])
+    target = write_evidence(evidence, config.artifact_directory)
+    serialized = target.read_text(encoding="utf-8")
+
+    assert secret not in serialized
+    assert "secret-token" not in serialized
+    assert "secret-password" not in serialized
+    assert "Tool invocation failed." in serialized
 
 
 def test_owned_process_cleanup_never_targets_unowned_pid():
