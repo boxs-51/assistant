@@ -29,6 +29,7 @@ docs/ROADMAP_NAMESPACE_REGISTRY.md
 docs/agent_execution_r11/
 se/tests/architecture/test_r11_a_persistence_baseline.py
 se/tests/architecture/test_r11_a_branch_budget_memory_baseline.py
+se/tests/architecture/test_r11_a_resume_performance_baseline.py
 ```
 
 No production source, schema, migration, index, repository, runtime or client
