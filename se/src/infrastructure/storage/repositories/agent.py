@@ -1439,6 +1439,12 @@ class AgentRepository(BaseRepository):
         )
         return tuple(int(item) for item in result.scalars().all())
 
+    async def materialize_transcript_payload_root(
+        self,
+        payload_root_ref: str,
+    ) -> list[dict[str, Any]]:
+        return await self._materialize_transcript_payload_root(payload_root_ref)
+
     async def materialize_transcript_representation(
         self,
         transcript_ref: str,
