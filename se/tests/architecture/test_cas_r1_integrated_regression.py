@@ -119,12 +119,16 @@ def test_cas_r1_f1_model_and_migration_authority_remain_frozen():
         'down_revision: Union[str, None] = "17a_r11_checkpoint_cutover"'
         in migration
     )
-    assert "Object-store I/O is forbidden inside Alembic." in migration
+    assert "Object-store I/O is forbidden" in migration
+    assert "inside Alembic." in migration
+    assert "ObjectStorageDriver" not in migration
+    assert "object_store" not in migration
 
 
 def test_cas_r1_delete_and_reference_release_boundaries_remain_fail_closed():
     delete_source = inspect.getsource(AssetService.delete_asset)
-    assert "Agent release authority" in delete_source
+    assert "Agent release" in delete_source
+    assert "authority can prove canonical readability may be revoked" in delete_source
     assert "raise AssetStateError" in delete_source
     assert "object_store.delete" not in delete_source
 
