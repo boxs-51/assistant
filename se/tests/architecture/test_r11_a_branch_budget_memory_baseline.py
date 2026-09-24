@@ -66,6 +66,12 @@ class _CasTiming:
     budget_ns: list[int] = field(default_factory=list)
 
 
+@dataclass
+class _BudgetCasTiming:
+    elapsed_ns: list[int] = field(default_factory=list)
+    outcomes: Counter[str] = field(default_factory=Counter)
+
+
 class _OneShotBarrier:
     def __init__(self, parties: int = 2):
         self.parties = parties
@@ -126,6 +132,51 @@ class _BarrierAgentRepository(AgentRepository):
             self._timing.budget_ns.append(time.perf_counter_ns() - started_ns)
 
 
+class _BudgetBarrierAgentRepository(AgentRepository):
+    def __init__(
+        self,
+        session,
+        barrier: _OneShotBarrier,
+        timing: _BudgetCasTiming,
+    ):
+        super().__init__(session)
+        self._barrier = barrier
+        self._timing = timing
+
+    async def compare_and_set_task_budget(
+        self,
+        task_id,
+        expected_revision,
+        values,
+    ):
+        await self._barrier.wait()
+        started_ns = time.perf_counter_ns()
+        try:
+            result = await super().compare_and_set_task_budget(
+                task_id,
+                expected_revision,
+                values,
+            )
+        except Exception as exc:
+            message = str(exc).lower()
+            if "locked" in message or "busy" in message:
+                self._timing.outcomes["locked"] += 1
+            else:
+                self._timing.outcomes[
+                    f"error:{type(exc).__name__}"
+                ] += 1
+            raise
+        else:
+            self._timing.outcomes[
+                "success" if result is not None else "stale"
+            ] += 1
+            return result
+        finally:
+            self._timing.elapsed_ns.append(
+                time.perf_counter_ns() - started_ns
+            )
+
+
 class _Uow:
     def __init__(self, sessions, metrics: _Metrics):
         self._sessions = sessions
@@ -176,6 +227,31 @@ class _BarrierUow(_Uow):
         self.session = await self._ctx.__aenter__()
         event.listen(self.session.sync_session, "before_flush", self._before_flush)
         self.agents = _BarrierAgentRepository(
+            self.session,
+            self._barrier,
+            self._timing,
+        )
+        self.capability_invocations = CapabilityInvocationRepository(self.session)
+        return self
+
+
+class _BudgetBarrierUow(_Uow):
+    def __init__(
+        self,
+        sessions,
+        metrics: _Metrics,
+        barrier: _OneShotBarrier,
+        timing: _BudgetCasTiming,
+    ):
+        super().__init__(sessions, metrics)
+        self._barrier = barrier
+        self._timing = timing
+
+    async def __aenter__(self):
+        self._ctx = self._sessions()
+        self.session = await self._ctx.__aenter__()
+        event.listen(self.session.sync_session, "before_flush", self._before_flush)
+        self.agents = _BudgetBarrierAgentRepository(
             self.session,
             self._barrier,
             self._timing,
@@ -626,6 +702,135 @@ async def _measure_synchronized_task_budget_contention(
     finally:
         await engine.dispose()
 
+async def _measure_direct_task_budget_cas_contention_distribution(
+    tmp_path,
+    *,
+    samples: int = 10,
+) -> dict[str, object]:
+    engine, sessions, seed_service, _planner, metrics = await _setup(
+        tmp_path,
+        name="r11-a-direct-budget-cas-contention.sqlite",
+        limits=_limits(max_active_branches=8),
+    )
+    all_cas_ns: list[int] = []
+    race_elapsed_ns: list[int] = []
+    outcomes: Counter[str] = Counter()
+    total_barrier_arrivals = 0
+    service_successes = 0
+    final_active_branches_total = 0
+    reservation_rows_total = 0
+
+    try:
+        for index in range(samples):
+            task_id = f"task-r11-a-direct-budget-cas-{index}"
+            await seed_service.create_task_with_budget(
+                {
+                    "id": task_id,
+                    "session_id": f"session-{task_id}",
+                    "created_by": "user-r11-a",
+                    "assigned_agent_id": "agent-r11-a",
+                    "revision": 0,
+                    "status": "ASSIGNED",
+                    "wait_reasons": [],
+                    "input": {"goal": "measure direct TaskBudget CAS"},
+                }
+            )
+
+            barrier = _OneShotBarrier(2)
+            timing = _BudgetCasTiming()
+            race_factory = lambda: _BudgetBarrierUow(
+                sessions,
+                metrics,
+                barrier,
+                timing,
+            )
+            race_service = TaskBudgetService(
+                race_factory,
+                default_limits=_limits(max_active_branches=8),
+                default_policy=TaskBudgetPolicy(
+                    version="r11-a-direct-budget-cas"
+                ),
+                max_conflict_retries=16,
+            )
+
+            started_ns = time.perf_counter_ns()
+            results = await asyncio.gather(
+                race_service.reserve_branch_slot(
+                    task_id,
+                    reservation_key=f"{task_id}:branch:a",
+                ),
+                race_service.reserve_branch_slot(
+                    task_id,
+                    reservation_key=f"{task_id}:branch:b",
+                ),
+                return_exceptions=True,
+            )
+            race_elapsed_ns.append(time.perf_counter_ns() - started_ns)
+
+            failures = [
+                item for item in results if isinstance(item, BaseException)
+            ]
+            assert failures == []
+            service_successes += len(results)
+
+            assert barrier.arrivals == 2
+            total_barrier_arrivals += barrier.arrivals
+
+            retry_signals = (
+                timing.outcomes["stale"] + timing.outcomes["locked"]
+            )
+            assert len(timing.elapsed_ns) >= 3
+            assert timing.outcomes["success"] == 2
+            assert retry_signals >= 1
+            assert not any(
+                key.startswith("error:")
+                for key in timing.outcomes
+            )
+
+            all_cas_ns.extend(timing.elapsed_ns)
+            outcomes.update(timing.outcomes)
+
+            budget = await seed_service.get_budget(task_id)
+            assert int(budget.active_branches) == 2
+            final_active_branches_total += int(budget.active_branches)
+
+            async with sessions() as session:
+                reservation_rows = await session.scalar(
+                    sql_text(
+                        "SELECT COUNT(*) "
+                        "FROM agent_task_budget_reservations "
+                        "WHERE task_id = :task_id"
+                    ),
+                    {"task_id": task_id},
+                )
+            assert int(reservation_rows or 0) == 2
+            reservation_rows_total += int(reservation_rows or 0)
+
+        other_errors = sum(
+            value
+            for key, value in outcomes.items()
+            if key.startswith("error:")
+        )
+        return {
+            "samples": samples,
+            "service_calls": samples * 2,
+            "service_successes": service_successes,
+            "barrier_arrivals": total_barrier_arrivals,
+            "cas_attempts": len(all_cas_ns),
+            "cas_successes": outcomes["success"],
+            "cas_stale": outcomes["stale"],
+            "cas_locked": outcomes["locked"],
+            "cas_other_errors": other_errors,
+            "retry_signals": outcomes["stale"] + outcomes["locked"],
+            "final_active_branches_total": final_active_branches_total,
+            "reservation_rows_total": reservation_rows_total,
+            "cas_latency": _percentiles(all_cas_ns),
+            "race_latency": _percentiles(race_elapsed_ns),
+        }
+    finally:
+        await engine.dispose()
+
+
 def _new_context(index: int) -> AgentExecutionContext:
     return AgentExecutionContext.create(
         execution_id=f"exec-memory-{index}",
@@ -804,3 +1009,36 @@ async def test_r11_a_branch_rows_and_synchronized_contention_red_probe(tmp_path)
     # Keep only deterministic durable-shape and race-authority assertions here.
     assert rows["root_waiting"]["total_rows"] == 10
     assert rows["one_fork"]["total_rows"] == 16
+
+
+@pytest.mark.asyncio
+async def test_r11_a_direct_task_budget_cas_contention_red_probe(tmp_path):
+    report = await _measure_direct_task_budget_cas_contention_distribution(
+        tmp_path,
+        samples=10,
+    )
+
+    assert report["samples"] == 10
+    assert report["service_calls"] == 20
+    assert report["service_successes"] == 20
+    assert report["barrier_arrivals"] == 20
+    assert report["cas_successes"] == 20
+    assert report["cas_attempts"] >= 30
+    assert report["retry_signals"] >= 10
+    assert report["cas_other_errors"] == 0
+    assert report["final_active_branches_total"] == 20
+    assert report["reservation_rows_total"] == 20
+
+    for key in ("cas_latency", "race_latency"):
+        percentiles = report[key]
+        assert (
+            0
+            < percentiles["p50_ns"]
+            <= percentiles["p95_ns"]
+            <= percentiles["p99_ns"]
+        )
+
+    pytest.fail(
+        "R11_A_DIRECT_TASK_BUDGET_CAS_CONTENTION_BASELINE="
+        + json.dumps(report, sort_keys=True, separators=(",", ":"))
+    )
