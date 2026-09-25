@@ -429,6 +429,29 @@ async def test_ctx_f5_2_in_memory_second_session_cannot_rollback_first_owner():
 
 
 @pytest.mark.asyncio
+async def test_ctx_f5_2_in_memory_nested_savepoint_tracks_physical_owner():
+    engine, sessions = await _database()
+    try:
+        async with sessions() as session:
+            # Install the shared in-memory monitor while SQLite is physically idle.
+            DurableMemoryRecordRepository(session)
+
+            # A nested transaction may emit SAVEPOINT as the first statement that
+            # makes SQLite physically transactional. The monitor must attribute
+            # that transaction to this same logical Connection so the following
+            # SELECT is not misclassified as an unknown pre-existing owner.
+            async with session.begin_nested():
+                result = await session.execute(text("SELECT 1"))
+                assert result.scalar_one() == 1
+
+            # The Session remains usable after releasing the nested transaction.
+            await session.rollback()
+            assert session.in_transaction() is False
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ctx_f5_2_in_memory_unrelated_physical_transaction_is_protected():
     engine, sessions = await _database()
     try:
