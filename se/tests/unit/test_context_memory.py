@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import MappingProxyType
 
 import pytest
@@ -229,6 +229,43 @@ async def test_ctx_f5_1_replay_preserves_canonical_json_type_distinctions(
 
     with pytest.raises(MemoryRecordConflictError, match="memory_id"):
         await repository.put(conflicting)
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_1_replay_normalizes_equivalent_source_datetime_offsets():
+    repository = InMemoryMemoryRecordRepository()
+    utc_source = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+        session_id="session-1",
+        source_created_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        source_state="active",
+        metadata={"label": "canonical"},
+    )
+    offset_source = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+        session_id="session-1",
+        source_created_at=datetime(
+            2026,
+            1,
+            1,
+            1,
+            0,
+            tzinfo=timezone(timedelta(hours=1)),
+        ),
+        source_state="active",
+        metadata={"label": "canonical"},
+    )
+
+    first = _record(source=utc_source)
+    replay = _record(source=offset_source)
+
+    assert first.memory_id == replay.memory_id
+    stored = await repository.put(first)
+    assert await repository.put(replay) is stored
 
 
 @pytest.mark.asyncio
