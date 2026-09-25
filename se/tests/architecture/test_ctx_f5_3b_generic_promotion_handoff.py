@@ -139,6 +139,7 @@ def test_ctx_f5_3b_locks_current_f5_2_identity_and_replay_facts():
     replay_source = _top_level_source("_immutable_record_canonical_bytes")
 
     required_identity_facts = (
+        '"owner_user_id": source_ref.owner_user_id',
         '"source_context_source_id": source_ref.context_source_id',
         '"promotion_authority_id": promotion_authority_id',
         '"content_digest": content_digest',
