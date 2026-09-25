@@ -574,6 +574,69 @@ async def test_ctx_f5_2_in_memory_cursor_race_quarantines_rejected_session():
 
 
 @pytest.mark.asyncio
+async def test_ctx_f5_2_in_memory_preinstalled_reader_raw_tx_is_quarantined():
+    engine, sessions = await _database()
+    second_session = None
+    try:
+        async with sessions() as first_session:
+            await first_session.execute(
+                text(
+                    "CREATE TABLE preinstalled_reader_probe "
+                    "(value INTEGER NOT NULL)"
+                )
+            )
+            await first_session.commit()
+
+            # B acquires its logical Connection before the Memory monitor
+            # exists. SQLite remains physically idle because B has executed no
+            # cursor statement yet.
+            second_session = sessions()
+            await second_session.connection()
+            assert second_session.in_transaction() is True
+
+            # A then starts a real physical transaction before monitor
+            # installation.
+            await first_session.execute(text("BEGIN"))
+            await first_session.execute(
+                text("INSERT INTO preinstalled_reader_probe(value) VALUES (17)")
+            )
+
+            # Install the monitor only after both conditions above exist.
+            DurableMemoryRecordRepository(second_session)
+
+            # B already has a logical transaction, so no new engine begin event
+            # occurs. The cursor guard must discover the raw StaticPool
+            # transaction despite state.active starting false, quarantine B,
+            # and reject the read.
+            with pytest.raises(
+                MemoryAdmissionTransactionError,
+                match="pre-existing transaction",
+            ):
+                await second_session.execute(
+                    text("SELECT count(*) FROM memory_records")
+                )
+
+            # B cleanup is logically successful while its quarantined DBAPI
+            # rollback is suppressed; A remains the physical transaction owner.
+            await second_session.rollback()
+            assert second_session.in_transaction() is False
+
+            await first_session.commit()
+
+            assert (
+                await first_session.execute(
+                    text("SELECT value FROM preinstalled_reader_probe")
+                )
+            ).scalar_one() == 17
+    finally:
+        if second_session is not None:
+            if second_session.in_transaction():
+                await second_session.rollback()
+            await second_session.close()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ctx_f5_2_in_memory_late_monitor_reader_close_is_quarantined():
     engine, sessions = await _database()
     second_session = None
