@@ -200,6 +200,38 @@ async def test_ctx_f5_1_same_identity_with_conflicting_metadata_fails_closed():
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("first_metadata", "replay_metadata"),
+    [
+        ({"value": True}, {"value": 1}),
+        ({"value": 1}, {"value": 1.0}),
+    ],
+)
+async def test_ctx_f5_1_replay_preserves_canonical_json_type_distinctions(
+    first_metadata,
+    replay_metadata,
+):
+    repository = InMemoryMemoryRecordRepository()
+    original = _record(metadata=first_metadata)
+    await repository.put(original)
+
+    conflicting = MemoryRecord(
+        memory_id=original.memory_id,
+        promotion_authority_id=original.promotion_authority_id,
+        memory_schema_version=original.memory_schema_version,
+        source_ref_snapshot=original.source_ref_snapshot,
+        owner_user_id=original.owner_user_id,
+        content_digest=original.content_digest,
+        canonical_bytes=original.canonical_bytes,
+        content={"fact": "alpha"},
+        metadata=replay_metadata,
+    )
+
+    with pytest.raises(MemoryRecordConflictError, match="memory_id"):
+        await repository.put(conflicting)
+
+
+@pytest.mark.asyncio
 async def test_ctx_f5_1_repository_revalidates_unvalidated_record_copy():
     repository = InMemoryMemoryRecordRepository()
     record = _record()
