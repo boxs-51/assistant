@@ -269,6 +269,7 @@ async def _counts(sessions):
         TaskBudgetRecord,
         AgentExecutionRecord,
         AgentExecutionCheckpointRecord,
+        AgentTaskBranchRecord,
         AgentCheckpointPendingInvocationRecord,
         CapabilityInvocationRecord,
         AgentTranscriptRepresentationRecord,
@@ -747,3 +748,170 @@ async def test_r11_f1b_external_checkpoint_pending_to_candidate_invocation_fails
         )
     finally:
         await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_r11_f1b_external_execution_branch_reference_fails_closed():
+    engine, sessions = await _database()
+    try:
+        task_id = await _seed_terminal_candidate(sessions)
+        candidate_execution_id = f"{task_id}:exec"
+
+        async with sessions() as session:
+            session.add(
+                AgentTaskBranchRecord(
+                    branch_id="candidate-branch-nonfk",
+                    task_id=task_id,
+                    parent_branch_id=None,
+                    base_execution_id=None,
+                    base_checkpoint_id=None,
+                    current_execution_id=candidate_execution_id,
+                    resolution_state="ADOPTED",
+                    created_by="user-1",
+                )
+            )
+            session.add(
+                AgentExecutionRecord(
+                    id="external-exec-branch-ref",
+                    session_id="external-session",
+                    agent_id="agent-2",
+                    task_id="external-task",
+                    branch_id="candidate-branch-nonfk",
+                    correlation_id="external-corr-branch",
+                    state="COMPLETED",
+                    revision=1,
+                    request={},
+                    result={"ok": True},
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+
+        before = await _counts(sessions)
+
+        report = await AgentGcDryRunService(
+            lambda: _Uow(sessions)
+        ).classify_task(
+            task_id,
+            policy_eligible_terminal=True,
+        )
+
+        after = await _counts(sessions)
+        assert before == after
+        assert report.failed_closed
+        assert not report.has_candidates
+        assert any(
+            "external_execution_branch_reference"
+            in item.root_or_edge_source
+            for item in report.items
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_f1b_external_execution_current_checkpoint_fails_closed():
+    engine, sessions = await _database()
+    try:
+        task_id = await _seed_terminal_candidate(sessions)
+        candidate_checkpoint_id = f"{task_id}:cp"
+
+        async with sessions() as session:
+            session.add(
+                AgentExecutionRecord(
+                    id="external-exec-current-cp-ref",
+                    session_id="external-session",
+                    agent_id="agent-2",
+                    task_id="external-task",
+                    correlation_id="external-corr-current-cp",
+                    state="COMPLETED",
+                    current_checkpoint_id=candidate_checkpoint_id,
+                    revision=1,
+                    request={},
+                    result={"ok": True},
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.commit()
+
+        before = await _counts(sessions)
+
+        report = await AgentGcDryRunService(
+            lambda: _Uow(sessions)
+        ).classify_task(
+            task_id,
+            policy_eligible_terminal=True,
+        )
+
+        after = await _counts(sessions)
+        assert before == after
+        assert report.failed_closed
+        assert not report.has_candidates
+        assert any(
+            "external_execution_current_checkpoint_reference"
+            in item.root_or_edge_source
+            for item in report.items
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_f1b_external_checkpoint_parent_reference_fails_closed():
+    engine, sessions = await _database()
+    try:
+        task_id = await _seed_terminal_candidate(sessions)
+        candidate_checkpoint_id = f"{task_id}:cp"
+
+        async with sessions() as session:
+            session.add(
+                AgentExecutionRecord(
+                    id="external-exec-parent-cp-ref",
+                    session_id="external-session",
+                    agent_id="agent-2",
+                    task_id="external-task",
+                    correlation_id="external-corr-parent-cp",
+                    state="COMPLETED",
+                    revision=1,
+                    request={},
+                    result={"ok": True},
+                    completed_at=datetime.now(timezone.utc),
+                )
+            )
+            await session.flush()
+            session.add(
+                AgentExecutionCheckpointRecord(
+                    checkpoint_id="external-child-checkpoint",
+                    execution_id="external-exec-parent-cp-ref",
+                    execution_revision=1,
+                    session_id="external-session",
+                    task_id="external-task",
+                    parent_checkpoint_id=candidate_checkpoint_id,
+                    iteration=1,
+                    wait_reason="BUDGET",
+                    transcript_snapshot=[],
+                    metadata_json={},
+                )
+            )
+            await session.commit()
+
+        before = await _counts(sessions)
+
+        report = await AgentGcDryRunService(
+            lambda: _Uow(sessions)
+        ).classify_task(
+            task_id,
+            policy_eligible_terminal=True,
+        )
+
+        after = await _counts(sessions)
+        assert before == after
+        assert report.failed_closed
+        assert not report.has_candidates
+        assert any(
+            "external_checkpoint_parent_reference"
+            in item.root_or_edge_source
+            for item in report.items
+        )
+    finally:
+        await engine.dispose()
+
