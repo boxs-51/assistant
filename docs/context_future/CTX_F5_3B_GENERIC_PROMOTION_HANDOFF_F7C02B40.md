@@ -131,6 +131,7 @@ ContextSourceRef cannot mint or substitute it.
 Existing F5-2 Memory identity binds:
 
 ~~~text
+owner_user_id
 context_source_id
 promotion_authority_id
 content_digest
