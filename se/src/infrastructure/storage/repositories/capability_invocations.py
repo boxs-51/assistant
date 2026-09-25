@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from hashlib import sha256
+from typing import TYPE_CHECKING
 
 from sqlalchemy import false, func, select, update
 from fastapi.encoders import jsonable_encoder
@@ -19,11 +20,13 @@ from ....runtimes.capability.contracts.invocation import (
     RemoteOutcomeState,
     TERMINAL_INVOCATION_STATES,
 )
-from ..models.sql.agent.tool_call import AgentToolCallRecord
 from ..models.sql.capability import (
     CapabilityInvocationAttemptRecord,
     CapabilityInvocationRecord,
 )
+
+if TYPE_CHECKING:
+    from ..models.sql.agent.tool_call import AgentToolCallRecord
 
 
 class InvocationSerializationConflictError(RuntimeError):
@@ -132,6 +135,12 @@ class CapabilityInvocationRepository:
         self,
         invocation_id: str,
     ) -> list[AgentToolCallRecord]:
+        # Import lazily so clean import of this repository does not initialize
+        # the broad Agent ORM package while this module is only partially
+        # defined. By invocation time this module is fully initialized, so the
+        # Agent runtime may safely import CapabilityInvocationRepository back.
+        from ..models.sql.agent.tool_call import AgentToolCallRecord
+
         result = await self.session.execute(
             select(AgentToolCallRecord)
             .where(AgentToolCallRecord.invocation_id == invocation_id)

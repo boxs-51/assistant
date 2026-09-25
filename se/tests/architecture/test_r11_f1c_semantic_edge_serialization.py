@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.capability_invocations import (
@@ -172,15 +175,47 @@ def test_r11_f1c_repair_c_contract_freezes_absent_key_and_r6_boundary():
 
 
 
-def test_r11_f1c_capability_repository_uses_leaf_agent_model_import():
+def test_r11_f1c_capability_repository_has_no_runtime_agent_model_import():
     source = (
         ROOT
         / "se/src/infrastructure/storage/repositories/"
         "capability_invocations.py"
     ).read_text(encoding="utf-8")
 
+    module_prefix = source.split(
+        "async def list_agent_tool_call_bindings",
+        maxsplit=1,
+    )[0]
+    assert "from ..models.sql.agent" not in module_prefix
     assert (
         "from ..models.sql.agent.tool_call import AgentToolCallRecord"
         in source
     )
-    assert "from ..models.sql.agent import AgentToolCallRecord" not in source
+
+
+def test_r11_f1c_capability_repository_clean_process_import_succeeds():
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import "
+                "se.src.infrastructure.storage.repositories."
+                "capability_invocations"
+            ),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        "clean-process capability_invocations import failed:\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
