@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from typing import Any, Mapping, Optional, Sequence
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..models.sql.chat_data.session import Message
@@ -306,6 +308,173 @@ class AssetRepository:
             .order_by(FileReferenceRecord.created_at.asc())
         )
         return list(result.scalars().all())
+
+    @staticmethod
+    def require_provider_binding_namespace(
+        provider_namespace: Optional[str],
+    ) -> str:
+        if not isinstance(provider_namespace, str):
+            raise ValueError("HYDRATION_PROVIDER_SCOPE_UNCONFIGURED")
+        namespace = provider_namespace.strip()
+        if not namespace or namespace == "default":
+            raise ValueError("HYDRATION_PROVIDER_SCOPE_UNCONFIGURED")
+        return namespace
+
+    async def get_live_provider_binding(
+        self,
+        file_id: str,
+        provider_name: str,
+        *,
+        provider_namespace: str,
+    ) -> Optional[FileProviderBindingRecord]:
+        namespace = self.require_provider_binding_namespace(
+            provider_namespace
+        )
+        result = await self.session.execute(
+            select(FileProviderBindingRecord)
+            .where(
+                FileProviderBindingRecord.file_id == file_id,
+                FileProviderBindingRecord.provider_name == provider_name,
+                FileProviderBindingRecord.provider_namespace == namespace,
+                FileProviderBindingRecord.live_claim_token == "LIVE",
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    def provider_binding_matches_blob(
+        binding: FileProviderBindingRecord,
+        blob: FileBlobRecord,
+        *,
+        now: Optional[datetime] = None,
+    ) -> bool:
+        if binding.state != "ACTIVE":
+            return False
+        if binding.live_claim_token != "LIVE":
+            return False
+        if not binding.provider_file_id:
+            return False
+        if binding.source_blob_id != blob.id:
+            return False
+        if not blob.sha256 or binding.source_sha256 != blob.sha256:
+            return False
+        if binding.expires_at is None:
+            return True
+
+        current = now or datetime.now(timezone.utc)
+        expires_at = binding.expires_at
+        if expires_at.tzinfo is None and current.tzinfo is not None:
+            current = current.replace(tzinfo=None)
+        elif expires_at.tzinfo is not None and current.tzinfo is None:
+            current = current.replace(tzinfo=timezone.utc)
+        return expires_at > current
+
+    async def try_create_processing_provider_binding(
+        self,
+        *,
+        file_id: str,
+        owner_user_id: str,
+        provider_name: str,
+        provider_namespace: str,
+    ) -> tuple[FileProviderBindingRecord, bool]:
+        namespace = self.require_provider_binding_namespace(
+            provider_namespace
+        )
+        _, blob = await self.get_owned_ready_file(
+            file_id=file_id,
+            owner_user_id=owner_user_id,
+        )
+        if not blob.sha256:
+            raise ValueError(
+                f"Asset {file_id} canonical READY blob lacks sha256."
+            )
+
+        current = await self.get_live_provider_binding(
+            file_id,
+            provider_name,
+            provider_namespace=namespace,
+        )
+        if current is not None:
+            return current, False
+
+        record = FileProviderBindingRecord(
+            file_id=file_id,
+            provider_name=provider_name,
+            provider_namespace=namespace,
+            provider_file_id=None,
+            source_blob_id=blob.id,
+            source_sha256=blob.sha256,
+            live_claim_token="LIVE",
+            state="PROCESSING",
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(record)
+                await self.session.flush()
+        except IntegrityError:
+            winner = await self.get_live_provider_binding(
+                file_id,
+                provider_name,
+                provider_namespace=namespace,
+            )
+            if winner is None:
+                raise
+            return winner, False
+        return record, True
+
+    async def compare_and_set_provider_binding(
+        self,
+        binding_id: str,
+        *,
+        expected_revision: int,
+        expected_state: str,
+        expected_live_claim_token: Optional[str],
+        values: Mapping[str, Any],
+    ) -> Optional[FileProviderBindingRecord]:
+        predicates = [
+            FileProviderBindingRecord.id == binding_id,
+            FileProviderBindingRecord.revision == expected_revision,
+            FileProviderBindingRecord.state == expected_state,
+        ]
+        if expected_live_claim_token is None:
+            predicates.append(
+                FileProviderBindingRecord.live_claim_token.is_(None)
+            )
+        else:
+            predicates.append(
+                FileProviderBindingRecord.live_claim_token
+                == expected_live_claim_token
+            )
+
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(FileProviderBindingRecord)
+            .where(*predicates)
+            .values(**next_values)
+            .returning(FileProviderBindingRecord)
+        )
+        record = result.scalar_one_or_none()
+        await self.session.flush()
+        return record
+
+    async def expire_active_provider_binding(
+        self,
+        binding_id: str,
+        *,
+        expected_revision: int,
+    ) -> Optional[FileProviderBindingRecord]:
+        return await self.compare_and_set_provider_binding(
+            binding_id,
+            expected_revision=expected_revision,
+            expected_state="ACTIVE",
+            expected_live_claim_token="LIVE",
+            values={
+                "state": "EXPIRED",
+                "live_claim_token": None,
+            },
+        )
 
     async def create_provider_binding(
         self, values: Mapping[str, Any]

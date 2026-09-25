@@ -147,6 +147,14 @@ class ProviderConfig(BaseModel):
     enabled: bool = False
     api_key: str = ""
     base_url: Optional[AnyHttpUrl] = None
+    # Stable server-owned provider tenancy identity used by CAS-F5 bindings.
+    # It is intentionally independent from API key material so credential
+    # rotation for the same logical provider tenancy preserves binding scope.
+    file_binding_namespace: Optional[str] = Field(
+        default=None,
+        min_length=1,
+        max_length=255,
+    )
 
     options: Dict[str, Any] = Field(default_factory=dict)
     

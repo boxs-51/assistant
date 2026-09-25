@@ -31,14 +31,32 @@ class FileProviderBindingRecord(Base):
             "provider_file_id",
             name="uq_file_provider_bindings_provider_identity",
         ),
+        UniqueConstraint(
+            "file_id",
+            "provider_name",
+            "provider_namespace",
+            "live_claim_token",
+            name="uq_file_provider_bindings_live_slot",
+        ),
         CheckConstraint(
             "revision >= 0",
             name="ck_file_provider_bindings_revision_nonnegative",
         ),
         CheckConstraint(
-            "state IN ('PROCESSING', 'ACTIVE', 'EXPIRED', 'DELETING', "
-            "'DELETED', 'ERROR')",
+            "state IN ('PROCESSING', 'ACTIVE', 'UNKNOWN', 'EXPIRED', "
+            "'DELETING', 'DELETED', 'ERROR')",
             name="ck_file_provider_bindings_state",
+        ),
+        CheckConstraint(
+            "state != 'ACTIVE' OR provider_file_id IS NOT NULL",
+            name="ck_file_provider_bindings_active_provider_identity",
+        ),
+        CheckConstraint(
+            "(state NOT IN ('PROCESSING', 'ACTIVE', 'UNKNOWN') "
+            "OR live_claim_token = 'LIVE') AND "
+            "(state NOT IN ('EXPIRED', 'ERROR') "
+            "OR live_claim_token IS NULL)",
+            name="ck_file_provider_bindings_live_claim",
         ),
         Index(
             "ix_file_provider_bindings_file_provider",
@@ -60,9 +78,24 @@ class FileProviderBindingRecord(Base):
     provider_namespace: Mapped[str] = mapped_column(
         String(255), nullable=False, default="default", server_default="default"
     )
-    provider_file_id: Mapped[str] = mapped_column(String(1024), nullable=False)
+    provider_file_id: Mapped[Optional[str]] = mapped_column(
+        String(1024), nullable=True
+    )
     provider_uri: Mapped[Optional[str]] = mapped_column(
         String(2048), nullable=True
+    )
+    source_blob_id: Mapped[Optional[str]] = mapped_column(
+        ForeignKey("file_blobs.id", ondelete="RESTRICT"),
+        nullable=True,
+    )
+    source_sha256: Mapped[Optional[str]] = mapped_column(
+        String(64), nullable=True
+    )
+    live_claim_token: Mapped[Optional[str]] = mapped_column(
+        String(16),
+        nullable=True,
+        default="LIVE",
+        server_default="LIVE",
     )
     state: Mapped[str] = mapped_column(
         String(32),
