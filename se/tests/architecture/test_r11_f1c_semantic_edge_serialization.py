@@ -96,7 +96,8 @@ def test_r11_f1c_semantic_edge_contract_freezes_exact_baseline_and_boundaries():
     text = CONTRACT.read_text(encoding="utf-8")
 
     for phrase in (
-        "c50d0670ae80aac60efc3557eeff8f78a4a8e425",
+        "4e1e5cb3a90412e74a82d6248e53e57dfae30a90",
+        "CTX-F5-0 / PR #80 = MERGED",
         "Architecture #1220",
         "P1-R11-F1C-SEMANTIC-EDGE-RACE-1",
         "parent_task_id",
