@@ -18,7 +18,7 @@ from se.src.infrastructure.storage.models.sql.assets import (
 from se.src.runtimes.workflow.runtime import WorkflowRuntime
 
 
-def test_f5_0_binding_schema_is_still_dormant_and_gaps_are_explicit():
+def test_f5_0_binding_foundation_is_implemented_without_provider_orchestration():
     table = FileProviderBindingRecord.__table__
 
     assert table.name == "file_provider_bindings"
@@ -26,17 +26,14 @@ def test_f5_0_binding_schema_is_still_dormant_and_gaps_are_explicit():
     assert table.c.provider_name.nullable is False
     assert table.c.provider_namespace.nullable is False
 
-    # F5-0 contract gap: a durable PROCESSING claim cannot be created before
-    # the provider returns an id while this column remains NOT NULL.
-    assert table.c.provider_file_id.nullable is False
-
-    # F5-0 contract gap: provider reuse is not yet tied to canonical content
-    # fingerprint authority.
+    # F5-1 foundation implements the schema contract while provider
+    # orchestration and workflow hydration wiring remain separately closed.
+    assert table.c.provider_file_id.nullable is True
     assert "blob_id" not in table.c
     assert "sha256" not in table.c
-    assert "source_blob_id" not in table.c
-    assert "source_sha256" not in table.c
-    assert "live_claim_token" not in table.c
+    assert "source_blob_id" in table.c
+    assert "source_sha256" in table.c
+    assert "live_claim_token" in table.c
 
     provider_identity_unique = [
         constraint
@@ -63,13 +60,13 @@ def test_f5_0_binding_schema_is_still_dormant_and_gaps_are_explicit():
     for state in (
         "PROCESSING",
         "ACTIVE",
+        "UNKNOWN",
         "EXPIRED",
         "DELETING",
         "DELETED",
         "ERROR",
     ):
         assert state in state_constraints[0]
-    assert "UNKNOWN" not in state_constraints[0]
 
 
 @pytest.mark.parametrize(
@@ -186,10 +183,9 @@ def test_f5_0_provider_file_primitives_are_not_cas_application_authority():
 
 
 
-def test_f5_0_provider_namespace_authority_is_frozen_but_not_implemented():
-    # Current configuration has no dedicated stable provider-tenancy authority,
-    # so production hydration must remain closed until the implementation slice.
-    assert "file_binding_namespace" not in ProviderConfig.model_fields
+def test_f5_0_provider_namespace_authority_is_implemented_but_hydration_stays_closed():
+    field = ProviderConfig.model_fields["file_binding_namespace"]
+    assert field.default is None
 
     contract = Path(
         "docs/central_asset/CAS_F5_0_PROVIDER_HYDRATION_CONTRACT_200AA3DC.md"
