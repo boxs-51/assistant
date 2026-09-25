@@ -941,6 +941,16 @@ async def build_task_gc_dry_run_in_uow(
             problems.append("external_retry_execution_reference")
 
     if branch_ids:
+        inbound_execution_branch_rows = await _rows(
+            session,
+            select(AgentExecutionRecord).where(
+                external_task,
+                AgentExecutionRecord.branch_id.in_(branch_ids),
+            ),
+        )
+        if inbound_execution_branch_rows:
+            problems.append("external_execution_branch_reference")
+
         inbound_branch_lineage_rows = await _rows(
             session,
             select(AgentTaskBranchRecord).where(
@@ -984,6 +994,32 @@ async def build_task_gc_dry_run_in_uow(
         )
         if inbound_checkpoint_rows:
             problems.append("external_checkpoint_semantic_reference")
+
+        inbound_current_checkpoint_rows = await _rows(
+            session,
+            select(AgentExecutionRecord).where(
+                external_task,
+                AgentExecutionRecord.current_checkpoint_id.in_(checkpoint_ids),
+            ),
+        )
+        if inbound_current_checkpoint_rows:
+            problems.append(
+                "external_execution_current_checkpoint_reference"
+            )
+
+        inbound_parent_checkpoint_rows = await _rows(
+            session,
+            select(AgentExecutionCheckpointRecord).where(
+                ~AgentExecutionCheckpointRecord.checkpoint_id.in_(
+                    checkpoint_ids
+                ),
+                AgentExecutionCheckpointRecord.parent_checkpoint_id.in_(
+                    checkpoint_ids
+                ),
+            ),
+        )
+        if inbound_parent_checkpoint_rows:
+            problems.append("external_checkpoint_parent_reference")
 
         inbound_branch_checkpoint_rows = await _rows(
             session,
