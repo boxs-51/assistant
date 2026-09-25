@@ -2,16 +2,23 @@
 
 Authority: Issue #74
 
-Exact activation baseline:
+Exact reviewed and landed lineage:
 
 ```text
 Issue #68 = CLOSED / COMPLETED
-canonical main = 200aa3dcce3701b620e510a2a618ebccaddb6dff
-post-merge Architecture #1206 / run 36068281535 = GREEN / GREEN
-F5-0 = ACTIVE-CONTRACT-REFREEZE
-production F5 = CLOSED
-merge authorization = NONE
+reviewed parent main = 25c7453252753fae0ea65ad712a8e89eeac4f802
+reviewed PR #75 HEAD = 1e6d30829f23e045877f0e2e3b909a7274efaddd
+candidate Architecture #1217 / run 36102375063 = GREEN / GREEN
+merge commit / landing main = 51f5c67bdbd3e503b13542c7c82980b87f420d5f
+post-merge Architecture #1218 / run 36102980541 = GREEN / GREEN
+current integration baseline after R11 Repair A = c50d0670ae80aac60efc3557eeff8f78a4a8e425
+current-main Architecture #1220 / run 36104672013 = GREEN / GREEN
+F5-0 = LANDED / CONTRACT RELEASED
+production F5 foundation = RELEASED ONLY TO F5-1 SCOPE
+merge authorization for later PRs = NONE
 ```
+
+The historical activation point `main@200aa3dc...` remains part of the audit trail, but it is not the reviewed parent of the final PR #75 candidate and must not be used as the exact integration baseline for F5-0 release evidence.
 
 ## 1. Canonical identity
 
@@ -528,10 +535,18 @@ These requirements close only the F5-0 contract blockers. They do not authorize 
 ## Final F5-0 status
 
 ```text
-F5-0 contract draft = OPEN / AUDIT REQUIRED
-production F5       = CLOSED
-provider hydration  = CLOSED
-remote cleanup      = CLOSED
-CAS physical GC     = CLOSED
-merge authorization = NONE
+F5-0 contract = LANDED / INDEPENDENTLY RELEASED
+reviewed parent = 25c7453252753fae0ea65ad712a8e89eeac4f802
+audited HEAD = 1e6d30829f23e045877f0e2e3b909a7274efaddd
+landing main = 51f5c67bdbd3e503b13542c7c82980b87f420d5f
+post-merge Architecture #1218 = GREEN / GREEN
+current F5-1 integration baseline = c50d0670ae80aac60efc3557eeff8f78a4a8e425
+F5-1 foundation scope = RELEASED
+provider upload/orchestration = CLOSED
+workflow hydration wiring = CLOSED
+remote cleanup = CLOSED
+READY asset deletion = CLOSED
+UNKNOWN automatic recovery = CLOSED
+CAS physical GC = CLOSED
+merge authorization for later PRs = NONE
 ```

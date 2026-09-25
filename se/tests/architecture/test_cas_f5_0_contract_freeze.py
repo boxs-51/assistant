@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 from pathlib import Path
 
 import pytest
@@ -98,13 +100,36 @@ def test_f5_0_provider_identity_remains_secondary_to_file_asset():
 
 
 def test_f5_0_current_workflow_guard_remains_closed_before_implementation():
-    source = inspect.getsource(WorkflowRuntime._handle_context_built)
+    source = textwrap.dedent(
+        inspect.getsource(WorkflowRuntime._handle_context_built)
+    )
+    tree = ast.parse(source)
 
-    assert "contains_canonical_asset_content" in source
-    assert "ASSET_HYDRATION_REQUIRED" in source
-    assert '"failure_domain": "MESSAGE_ASSET"' in source
-    assert '"retryable": False' in source
-    assert "return" in source
+    asset_guards = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.If)
+        and "contains_canonical_asset_content"
+        in (ast.get_source_segment(source, node.test) or "")
+    ]
+    assert len(asset_guards) == 1
+
+    guard = asset_guards[0]
+
+    # The fail-closed gate must be the positive detector call itself.
+    # A negated or compound condition would invert/broaden the authority gate
+    # while still containing the helper name in rendered source.
+    assert isinstance(guard.test, ast.Call)
+    assert isinstance(guard.test.func, ast.Name)
+    assert guard.test.func.id == "contains_canonical_asset_content"
+
+    guard_source = ast.get_source_segment(source, guard) or ""
+
+    assert "ASSET_HYDRATION_REQUIRED" in guard_source
+    assert '"failure_domain": "MESSAGE_ASSET"' in guard_source
+    assert '"retryable": False' in guard_source
+    assert guard.body
+    assert isinstance(guard.body[-1], ast.Return)
 
 
 def test_f5_0_binding_repository_surface_has_no_production_runtime_caller():
