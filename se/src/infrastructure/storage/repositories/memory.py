@@ -218,26 +218,59 @@ def _ensure_in_memory_physical_monitor(
         quarantined.discard(dbapi_connection)
         original_do_commit(dbapi_connection)
 
-    def _refresh_physical_owner() -> bool:
-        if not state["active"]:
+    def _shared_dbapi_in_transaction() -> bool:
+        pool = getattr(bind, "pool", None)
+        if pool is None:
             return False
+        connection_record = getattr(pool, "__dict__", {}).get("connection")
+        if connection_record is None:
+            return False
+        dbapi_connection = getattr(connection_record, "dbapi_connection", None)
+        if dbapi_connection is None:
+            return False
+        return _dbapi_in_transaction(dbapi_connection)
+
+    def _refresh_physical_owner() -> bool:
         owner_connection = state["owner_connection"]
-        if owner_connection is None:
-            return True
+        if state["active"] and owner_connection is not None:
+            try:
+                still_active = _driver_in_transaction(owner_connection)
+            except BaseException:
+                still_active = False
+            if not still_active:
+                state["active"] = False
+                state["owner_connection"] = None
+            return still_active
+
+        # The physical SQLite transaction may have started before this monitor
+        # existed, so the in-memory state bit cannot be the sole authority.
+        # When the shared StaticPool driver is already transactional and no
+        # monitored owner is known, fail closed as active/unknown-owner. The
+        # cursor guard will quarantine any logical Connection that tries to
+        # attach to it until the raw transaction ends.
         try:
-            still_active = _driver_in_transaction(owner_connection)
+            raw_active = _shared_dbapi_in_transaction()
         except BaseException:
-            still_active = False
-        if not still_active:
-            state["active"] = False
+            raw_active = False
+        if raw_active:
+            state["active"] = True
             state["owner_connection"] = None
-        return still_active
+            return True
+
+        state["active"] = False
+        state["owner_connection"] = None
+        return False
 
     def _guard_connection_begin(connection) -> None:
         physical_active = _refresh_physical_owner()
         owner_connection = state["owner_connection"]
         if physical_active and owner_connection is not connection:
             _quarantine_connection(connection)
+            if owner_connection is None:
+                raise MemoryAdmissionTransactionError(
+                    "SQLite in-memory shared physical connection has a "
+                    "pre-existing transaction"
+                )
             raise MemoryAdmissionTransactionError(
                 "SQLite in-memory shared physical connection is already owned "
                 "by another logical connection"
@@ -268,6 +301,11 @@ def _ensure_in_memory_physical_monitor(
         owner_connection = state["owner_connection"]
         if physical_active and owner_connection is not connection:
             _quarantine_connection(connection)
+            if owner_connection is None:
+                raise MemoryAdmissionTransactionError(
+                    "SQLite in-memory shared physical connection has a "
+                    "pre-existing transaction"
+                )
             raise MemoryAdmissionTransactionError(
                 "SQLite in-memory shared physical connection is already owned "
                 "by another logical connection"
