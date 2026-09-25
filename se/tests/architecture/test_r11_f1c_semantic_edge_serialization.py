@@ -169,3 +169,18 @@ def test_r11_f1c_repair_c_contract_freezes_absent_key_and_r6_boundary():
         "R11-F1-C destructive implementation remains HOLD",
     ):
         assert phrase in text
+
+
+
+def test_r11_f1c_capability_repository_uses_leaf_agent_model_import():
+    source = (
+        ROOT
+        / "se/src/infrastructure/storage/repositories/"
+        "capability_invocations.py"
+    ).read_text(encoding="utf-8")
+
+    assert (
+        "from ..models.sql.agent.tool_call import AgentToolCallRecord"
+        in source
+    )
+    assert "from ..models.sql.agent import AgentToolCallRecord" not in source

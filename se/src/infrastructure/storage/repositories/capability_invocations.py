@@ -19,7 +19,7 @@ from ....runtimes.capability.contracts.invocation import (
     RemoteOutcomeState,
     TERMINAL_INVOCATION_STATES,
 )
-from ..models.sql.agent import AgentToolCallRecord
+from ..models.sql.agent.tool_call import AgentToolCallRecord
 from ..models.sql.capability import (
     CapabilityInvocationAttemptRecord,
     CapabilityInvocationRecord,
