@@ -67,6 +67,21 @@ class RealtimeMultiplexer:
         self.progress_handler = progress_handler
 
     @staticmethod
+    def _reconciliation_correlation_id(
+        invocation_id: str,
+        connection_id: str,
+    ) -> str:
+        """Scope reconciliation correlation to one connection generation.
+
+        R7-J may reconcile the same durable invocation concurrently from two
+        distinct reconnect generations.  The wire response carries both the
+        logical invocation_id and the immutable connection_id, so that pair is
+        the narrowest correlation identity available without weakening generic
+        ConnectionMultiplexer duplicate-registration semantics.
+        """
+        return f"{len(connection_id)}:{connection_id}{invocation_id}"
+
+    @staticmethod
     def _drain_owned_future(
         future: asyncio.Future[Any],
     ) -> None:
@@ -224,8 +239,12 @@ class RealtimeMultiplexer:
         socket = self.registry.require_active_socket(
             envelope.connection_id
         )
-        future = await self.reconciliation_multiplexer.register(
+        correlation_id = self._reconciliation_correlation_id(
             envelope.invocation_id,
+            envelope.connection_id,
+        )
+        future = await self.reconciliation_multiplexer.register(
+            correlation_id,
             envelope.connection_id,
         )
         try:
@@ -234,7 +253,7 @@ class RealtimeMultiplexer:
             )
         except asyncio.CancelledError:
             await self._abandon_pending(
-                envelope.invocation_id,
+                correlation_id,
                 envelope.connection_id,
                 future,
                 multiplexer=self.reconciliation_multiplexer,
@@ -246,7 +265,7 @@ class RealtimeMultiplexer:
                 envelope.invocation_id,
             )
             await self._abandon_pending(
-                envelope.invocation_id,
+                correlation_id,
                 envelope.connection_id,
                 future,
                 multiplexer=self.reconciliation_multiplexer,
@@ -264,7 +283,7 @@ class RealtimeMultiplexer:
             # send capability.cancel because reconcile carries no execution
             # permission.
             await self._abandon_pending(
-                envelope.invocation_id,
+                correlation_id,
                 envelope.connection_id,
                 future,
                 multiplexer=self.reconciliation_multiplexer,
@@ -274,7 +293,7 @@ class RealtimeMultiplexer:
             # Same rule as timeout: reconciliation is query-only and caller
             # cancellation must not be converted into capability.cancel.
             await self._abandon_pending(
-                envelope.invocation_id,
+                correlation_id,
                 envelope.connection_id,
                 future,
                 multiplexer=self.reconciliation_multiplexer,
@@ -349,8 +368,12 @@ class RealtimeMultiplexer:
             )
 
         if envelope.type == "capability.reconciliation":
-            return await self.reconciliation_multiplexer.resolve(
+            correlation_id = self._reconciliation_correlation_id(
                 envelope.invocation_id or "",
+                connection_id,
+            )
+            return await self.reconciliation_multiplexer.resolve(
+                correlation_id,
                 dict(envelope.payload),
                 connection_id,
             )
