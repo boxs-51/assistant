@@ -131,10 +131,19 @@ def test_ctx_f5_0_does_not_release_schema_repository_or_cross_track_lifecycle_au
         assert phrase in text
 
 
-def test_ctx_f5_0_contract_only_delta_contains_no_memory_implementation_file():
-    forbidden_paths = (
-        Path("se/src/context/memory.py"),
-        Path("se/src/context/memory_repository.py"),
-        Path("se/src/infrastructure/storage/repositories/memory.py"),
+def test_ctx_f5_0_contract_freezes_its_stage_without_forbidding_later_released_stages():
+    text = _contract_text()
+
+    required = (
+        "F5-0 itself creates:",
+        "NO Memory table",
+        "NO Memory ORM/model",
+        "NO repository",
+        "NO migration",
+        "NO schema mutation",
+        "Any F5-1 schema/migration must receive a fresh independent release.",
+        "Possible later candidate direction, not released here:",
+        "dormant immutable Memory record + exact provenance/promotion contract",
     )
-    assert all(not path.exists() for path in forbidden_paths)
+    for phrase in required:
+        assert phrase in text
