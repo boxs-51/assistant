@@ -11,6 +11,7 @@ from io import BytesIO
 import structlog
 from ..core import ApiTypeMapper, BaseProvider, EndpointBuilder, ModelCapabilityManager, ModelMapper, NoAuth
 from ..exceptions import ProviderError
+from ..core.interfaces.file import ProviderUploadOutcome, ProviderUploadOutcomeKind
 from .errors import build_mock_error
 from .scenarios import MockScenario
 from .state import MockState
@@ -261,6 +262,38 @@ class MockFiles:
         }
         self.provider.state.files[file_id] = file_data
         return {k: v for k, v in file_data.items() if k != "bytes"}
+
+    async def upload_file_outcome(self, **kwargs) -> ProviderUploadOutcome:
+        """
+        Deterministic zero-network CAS-F5-B outcome boundary.
+
+        SAFE and UNKNOWN never call the generic upload primitive. SUCCESS
+        performs exactly one mock upload so future orchestration tests can
+        assert one logical provider mutation attempt.
+        """
+        kind = ProviderUploadOutcomeKind(
+            self.provider.scenario.file_upload_outcome
+        )
+        self.provider.state.count("files.upload.outcome")
+
+        if kind is ProviderUploadOutcomeKind.SAFE_NO_REMOTE_COMMIT:
+            return ProviderUploadOutcome.safe_no_remote_commit(
+                metadata={"provider": "mock", "mock": True}
+            )
+
+        if kind is ProviderUploadOutcomeKind.REMOTE_OUTCOME_UNKNOWN:
+            return ProviderUploadOutcome.remote_outcome_unknown(
+                metadata={"provider": "mock", "mock": True}
+            )
+
+        uploaded = await self.upload_file(**kwargs)
+        provider_file_id = uploaded.get("name")
+        provider_uri = uploaded.get("uri")
+        return ProviderUploadOutcome.remote_success_known(
+            provider_file_id=provider_file_id,
+            provider_uri=provider_uri,
+            metadata={"provider": "mock", "mock": True},
+        )
 
     async def get_file(self, **kwargs):
         self.provider._before("files.get")

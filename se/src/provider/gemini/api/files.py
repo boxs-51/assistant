@@ -1,14 +1,23 @@
-from typing import List ,Any, Union, BinaryIO
+import asyncio
+from dataclasses import dataclass
+from typing import List, Any, Union, BinaryIO
 from urllib.parse import urljoin
 from fastapi import UploadFile
 
 from ..converters.files.response import ResponseFiles 
 from ...core import ApiType, BaseProvider
-from ...core.interfaces.file import FileProvider
+from ...core.interfaces.file import FileProvider, ProviderUploadOutcome
 from ..file_extension import FileHelper
 
 import structlog
 logger = structlog.get_logger(__name__)
+
+
+@dataclass
+class _GeminiUploadAttemptState:
+    remote_mutation_attempted: bool = False
+    phase: str = "local_validation"
+
 
 class GeminiFiles(FileProvider):
     def __init__(self, provider: BaseProvider):
@@ -169,50 +178,62 @@ class GeminiFiles(FileProvider):
             logger.error("Unexpected error in get_file", provider=self.provider.name, file_id=clean_file_id, error=str(e))
             raise e
         
-    async def upload_file(self, **kwargs) -> Any:
+    async def _upload_file_once(
+        self,
+        state: _GeminiUploadAttemptState,
+        **kwargs,
+    ) -> Any:
         """
-        Tải tệp kích thước lớn lên Gemini File API bằng cơ chế Resumable Upload.
-        Nhận đầu vào là một File-like object (hoặc FastAPI UploadFile) để stream trực tiếp.
+        Execute exactly one Gemini resumable upload attempt.
+
+        The caller owns classification. This method records whether a remote
+        mutating request has been attempted so CAS-F5-B never infers outcome
+        authority from exception strings.
         """
-        # Thay thế file_path bằng file_stream (Có thể là UploadFile, BytesIO, hoặc open file)
         file_stream: Union[UploadFile, BinaryIO] = kwargs.get("file_stream")
-        file_size: int = kwargs.get("file_size")  # Bắt buộc truyền vào vì stream không tự check size chuẩn được
-        mime_type: str = kwargs.get("mime_type", "application/octet-stream")
+        file_size: int = kwargs.get("file_size")
+        mime_type: str = kwargs.get(
+            "mime_type", "application/octet-stream"
+        )
         display_name: str = kwargs.get("display_name")
         http_client = kwargs.get("http_client")
         timeout = kwargs.get("timeout")
 
         if not file_stream:
-            logger.error("Missing required parameter 'file_stream' in upload request")
             raise ValueError("Parameter 'file_stream' is required.")
-
+        if not hasattr(file_stream, "read"):
+            raise ValueError("Parameter 'file_stream' must be readable.")
         if not file_size or file_size <= 0:
-            logger.error("Missing or invalid 'file_size'")
-            raise ValueError("A valid 'file_size' (bytes) is required when uploading via stream.")
-
+            raise ValueError(
+                "A valid 'file_size' (bytes) is required when uploading via stream."
+            )
         if not http_client:
-            logger.error("Missing required parameter 'http_client' in upload request")
             raise ValueError("Parameter 'http_client' is required.")
 
-        # Xác định tên hiển thị tùy thuộc vào loại stream truyền vào
         if not display_name:
             if isinstance(file_stream, UploadFile) and file_stream.filename:
                 resolved_display_name = file_stream.filename
             else:
-                resolved_display_name = getattr(file_stream, "name", "untitled_file")
+                resolved_display_name = getattr(
+                    file_stream, "name", "untitled_file"
+                )
         else:
             resolved_display_name = display_name
 
-        # --- BƯỚC 1: KHỞI TẠO SESSION RESUMABLE UPLOAD ---
+        # Perform local stream preparation before any remote mutation so
+        # failures here are safely classifiable as SAFE_NO_REMOTE_COMMIT.
+        state.phase = "stream_preparation"
+        if isinstance(file_stream, UploadFile):
+            await file_stream.seek(0)
+        elif hasattr(file_stream, "seek"):
+            file_stream.seek(0)
+
         file_metadata = {
             "file": {
                 "displayName": resolved_display_name,
             }
         }
 
-        # Gemini resumable upload uses a dedicated upload endpoint.
-        # IMPORTANT: /v1beta/files is the normal Files resource endpoint;
-        # resumable session initialization must target /upload/v1beta/files.
         base_url = str(self.provider.config.base_url).rstrip("/") + "/"
         upload_init_url = urljoin(base_url, "upload/v1beta/files")
 
@@ -229,91 +250,158 @@ class GeminiFiles(FileProvider):
             provider=self.provider.name,
             file_name=resolved_display_name,
             file_size_bytes=file_size,
-            mime_type=mime_type
+            mime_type=mime_type,
         )
 
+        state.phase = "auth_preparation"
+        auth_url, auth_headers = self.provider.auth.prepare_request(
+            upload_init_url,
+            dict(init_headers),
+        )
+
+        # From this point onward, failure is conservatively UNKNOWN unless a
+        # stable provider identity is returned. The request itself may mutate
+        # provider-side resumable-upload state.
+        state.phase = "resumable_session_start"
+        state.remote_mutation_attempted = True
+        init_response = await http_client.request(
+            method="POST",
+            url=auth_url,
+            json=file_metadata,
+            headers=auth_headers,
+            timeout=timeout if timeout else 300.0,
+        )
+        init_response.raise_for_status()
+
+        upload_url = init_response.headers.get("x-goog-upload-url")
+        if not upload_url:
+            if isinstance(init_response, dict) and "upload_url" in init_response:
+                upload_url = init_response.get("upload_url")
+            else:
+                raise ValueError(
+                    "Gemini resumable upload initialization succeeded but "
+                    "did not return 'X-Goog-Upload-URL'."
+                )
+
+        logger.info(
+            "Resumable upload session created. Streaming data from object..."
+        )
+
+        async def stream_chunk_generator():
+            chunk_size = 64 * 1024
+            if isinstance(file_stream, UploadFile):
+                await file_stream.seek(0)
+                while chunk := await file_stream.read(chunk_size):
+                    yield chunk
+            else:
+                if hasattr(file_stream, "seek"):
+                    file_stream.seek(0)
+                while chunk := file_stream.read(chunk_size):
+                    yield chunk
+
+        state.phase = "upload_finalize"
+        upload_response = await http_client.request(
+            method="POST",
+            url=upload_url,
+            content=stream_chunk_generator(),
+            headers={
+                "Content-Length": str(file_size),
+                "Content-Type": mime_type,
+                "X-Goog-Upload-Offset": "0",
+                "X-Goog-Upload-Command": "upload, finalize",
+            },
+            timeout=timeout if timeout else 300.0,
+        )
+        upload_response.raise_for_status()
+
+        logger.info(
+            "Successfully completed stream upload to Gemini",
+            provider=self.provider.name,
+            status_code=upload_response.status_code,
+        )
+
+        state.phase = "response_adaptation"
+        return await self.response.adapt_file_upload_response(upload_response)
+
+    @staticmethod
+    def _failure_outcome(
+        state: _GeminiUploadAttemptState,
+        error: BaseException,
+    ) -> ProviderUploadOutcome:
+        metadata = {
+            "provider": "gemini",
+            "phase": state.phase,
+            "error_type": type(error).__name__,
+        }
+        if state.remote_mutation_attempted:
+            return ProviderUploadOutcome.remote_outcome_unknown(
+                metadata=metadata
+            )
+        return ProviderUploadOutcome.safe_no_remote_commit(
+            metadata=metadata
+        )
+
+    async def upload_file_outcome(
+        self, **kwargs
+    ) -> ProviderUploadOutcome:
+        """
+        CAS-F5-B typed upload outcome boundary.
+
+        No retry/fallback is performed here. Classification is based only on
+        whether a remote mutating request was attempted and whether a stable
+        provider identity was parsed.
+        """
+        state = _GeminiUploadAttemptState()
         try:
-            # Do not use BaseProvider.send() here: its FILES endpoint resolves to
-            # /v1beta/files, while Gemini resumable initialization is
-            # /upload/v1beta/files.
-            auth_url, auth_headers = self.provider.auth.prepare_request(
-                upload_init_url,
-                dict(init_headers),
-            )
-            init_response = await http_client.request(
-                method="POST",
-                url=auth_url,
-                json=file_metadata,
-                headers=auth_headers,
-                timeout=timeout if timeout else 300.0,
-            )
-            init_response.raise_for_status()
+            attachment = await self._upload_file_once(state, **kwargs)
+        except asyncio.CancelledError as exc:
+            return self._failure_outcome(state, exc)
+        except Exception as exc:
+            return self._failure_outcome(state, exc)
 
-            # Gemini returns the resumable session URL in the
-            # X-Goog-Upload-URL response header, not Location.
-            upload_url = init_response.headers.get("x-goog-upload-url")
-            if not upload_url:
-                if isinstance(init_response, dict) and "upload_url" in init_response:
-                    upload_url = init_response.get("upload_url")
-                else:
-                    raise ValueError(
-                        "Gemini resumable upload initialization succeeded but "
-                        "did not return 'X-Goog-Upload-URL'."
-                    )
-
-            logger.info("Resumable upload session created. Streaming data from object...")
-
-            # --- BƯỚC 2: STREAM DỮ LIỆU TỪ STREAM OBJECT LÊN GEMINI ---
-            
-            # Generator bất đồng bộ đọc dữ liệu theo từng chunk từ stream truyền vào
-            async def stream_chunk_generator():
-                chunk_size = 64 * 1024  # 64KB mỗi chunk
-                
-                # Trường hợp 1: Nếu đầu vào là UploadFile của FastAPI (Cần dùng await)
-                if isinstance(file_stream, UploadFile):
-                    # Đảm bảo con trỏ file ở vị trí đầu tiên
-                    await file_stream.seek(0)
-                    while chunk := await file_stream.read(chunk_size):
-                        yield chunk
-                
-                # Trường hợp 2: Nếu đầu vào là một file-like object đồng bộ (Standard Python file/BytesIO)
-                else:
-                    if hasattr(file_stream, "seek"):
-                        file_stream.seek(0)
-                    # Vì đọc từ stream đồng bộ, ta lặp thông thường nhưng vẫn yield ra cho httpx stream tiếp
-                    while chunk := file_stream.read(chunk_size):
-                        yield chunk
-
-            # Gemini resumable upload finalization uses POST plus the
-            # X-Goog-Upload-Offset and X-Goog-Upload-Command headers.
-            upload_response = await http_client.request(
-                method="POST",
-                url=upload_url,
-                content=stream_chunk_generator(),  # Truyền async generator vào đây
-                headers={
-                    "Content-Length": str(file_size),
-                    "Content-Type": mime_type
-                    ,"X-Goog-Upload-Offset": "0"
-                    ,"X-Goog-Upload-Command": "upload, finalize"
-                },
-                timeout=timeout if timeout else 300.0
+        provider_file_id = getattr(
+            attachment, "provider_file_id", None
+        )
+        if (
+            not isinstance(provider_file_id, str)
+            or not provider_file_id.strip()
+        ):
+            return ProviderUploadOutcome.remote_outcome_unknown(
+                metadata={
+                    "provider": "gemini",
+                    "phase": "response_adaptation",
+                    "error_type": "MissingStableProviderIdentity",
+                }
             )
 
-            upload_response.raise_for_status()
+        return ProviderUploadOutcome.remote_success_known(
+            provider_file_id=provider_file_id,
+            provider_uri=getattr(attachment, "uri", None),
+            metadata={
+                "provider": "gemini",
+                "phase": "response_adaptation",
+            },
+        )
 
-            logger.info(
-                "Successfully completed stream upload to Gemini",
-                provider=self.provider.name,
-                status_code=upload_response.status_code
-            )
+    async def upload_file(self, **kwargs) -> Any:
+        """
+        Backward-compatible generic Gemini File API upload.
 
-            return await self.response.adapt_file_upload_response(upload_response)
-
-        except Exception as e:
+        This preserves the existing exception-returning behavior used by
+        /v1/files and other provider APIs. CAS-F5 uses upload_file_outcome()
+        instead and does not change this compatibility surface.
+        """
+        state = _GeminiUploadAttemptState()
+        try:
+            return await self._upload_file_once(state, **kwargs)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             logger.error(
                 "Unexpected error during stream upload process",
                 provider=self.provider.name,
-                file_name=resolved_display_name,
-                error=str(e)
+                phase=state.phase,
+                remote_mutation_attempted=state.remote_mutation_attempted,
+                error=str(exc),
             )
-            raise e
+            raise
