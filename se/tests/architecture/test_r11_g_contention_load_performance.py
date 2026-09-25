@@ -23,8 +23,9 @@ def test_r11_g0_freezes_exact_entry_and_workload_matrix():
 
     for phrase in (
         "main@e68fd96e701d90c4707a067487fe374234b11749",
-        "main@d36b7e090c4b349ad6270e34752db9b29fe7e962",
+        "main@bf3e15800905a105eb3d14a7578f2daee308bcc8",
         "Architecture #1315 GREEN/GREEN",
+        "Architecture #1327 GREEN/GREEN",
         "TaskBudget contention",
         "Long transcript / many-checkpoint workload",
         "Multi-branch workload",
@@ -40,6 +41,7 @@ def test_r11_g0_measures_canonical_production_surfaces():
 
     surfaces = {
         "TaskBudgetService.reserve_branch_slot()": TaskBudgetService.reserve_branch_slot,
+        "TaskBudgetService.consume_fork_plan()": TaskBudgetService.consume_fork_plan,
         "DurableAgentStore.commit_waiting_checkpoint()": (
             DurableAgentStore.commit_waiting_checkpoint
         ),
@@ -58,6 +60,25 @@ def test_r11_g0_measures_canonical_production_surfaces():
     for name, method in surfaces.items():
         assert name in contract
         assert inspect.iscoroutinefunction(method)
+
+
+def test_r11_g0_freezes_atomic_branch_creation_authority():
+    contract = CONTRACT.read_text(encoding="utf-8")
+    source = inspect.getsource(TaskBudgetService.consume_fork_plan)
+
+    assert "build_fork_plan() -> consume_fork_plan() -> list_task_branches()" in contract
+    assert "`reserve_branch_slot()` is a contention/accounting primitive" in contract
+
+    for authority_step in (
+        "revalidate_fork_plan_in_uow",
+        "compare_and_set_task_budget",
+        "save_execution",
+        "save_task_branch",
+        "save_task_branch_context",
+        "save_task_budget_reservation",
+        "await uow.commit()",
+    ):
+        assert authority_step in source
 
 
 def test_r11_g0_preserves_batched_pending_invocation_authority():
