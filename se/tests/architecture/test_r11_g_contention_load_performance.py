@@ -72,10 +72,10 @@ def test_r11_g0_freezes_atomic_branch_creation_authority():
     for authority_step in (
         "revalidate_fork_plan_in_uow",
         "compare_and_set_task_budget",
-        "save_execution",
-        "save_task_branch",
-        "save_task_branch_context",
-        "save_task_budget_reservation",
+        "save_execution(",
+        "save_task_branch(",
+        "save_task_branch_context(",
+        "save_task_budget_reservation(",
         "await uow.commit()",
     ):
         assert authority_step in source
