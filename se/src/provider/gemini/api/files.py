@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import dataclass
-from typing import List, Any, Union, BinaryIO
+from typing import AsyncIterable, List, Any, Union, BinaryIO
 from urllib.parse import urljoin
 from fastapi import UploadFile
 
@@ -190,7 +190,9 @@ class GeminiFiles(FileProvider):
         mutating request has been attempted so CAS-F5-B never infers outcome
         authority from exception strings.
         """
-        file_stream: Union[UploadFile, BinaryIO] = kwargs.get("file_stream")
+        file_stream: Union[UploadFile, BinaryIO, AsyncIterable[bytes]] = kwargs.get(
+            "file_stream"
+        )
         file_size: int = kwargs.get("file_size")
         mime_type: str = kwargs.get(
             "mime_type", "application/octet-stream"
@@ -201,8 +203,11 @@ class GeminiFiles(FileProvider):
 
         if not file_stream:
             raise ValueError("Parameter 'file_stream' is required.")
-        if not hasattr(file_stream, "read"):
-            raise ValueError("Parameter 'file_stream' must be readable.")
+        is_async_stream = hasattr(file_stream, "__aiter__")
+        if not is_async_stream and not hasattr(file_stream, "read"):
+            raise ValueError(
+                "Parameter 'file_stream' must be readable or async iterable."
+            )
         if not file_size or file_size <= 0:
             raise ValueError(
                 "A valid 'file_size' (bytes) is required when uploading via stream."
@@ -223,7 +228,9 @@ class GeminiFiles(FileProvider):
         # Perform local stream preparation before any remote mutation so
         # failures here are safely classifiable as SAFE_NO_REMOTE_COMMIT.
         state.phase = "stream_preparation"
-        if isinstance(file_stream, UploadFile):
+        if is_async_stream:
+            pass
+        elif isinstance(file_stream, UploadFile):
             await file_stream.seek(0)
         elif hasattr(file_stream, "seek"):
             file_stream.seek(0)
@@ -289,7 +296,12 @@ class GeminiFiles(FileProvider):
 
         async def stream_chunk_generator():
             chunk_size = 64 * 1024
-            if isinstance(file_stream, UploadFile):
+            if is_async_stream:
+                async for chunk in file_stream:
+                    payload = bytes(chunk)
+                    if payload:
+                        yield payload
+            elif isinstance(file_stream, UploadFile):
                 await file_stream.seek(0)
                 while chunk := await file_stream.read(chunk_size):
                     yield chunk
