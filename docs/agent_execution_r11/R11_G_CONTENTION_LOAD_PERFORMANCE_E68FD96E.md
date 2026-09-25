@@ -3,11 +3,12 @@
 **Repository:** `boxs-51/assistant`  
 **Issue authority:** #31  
 **Canonical claim baseline:** `main@e68fd96e701d90c4707a067487fe374234b11749`  
-**Current integration baseline:** `main@d36b7e090c4b349ad6270e34752db9b29fe7e962`  
+**Current integration baseline:** `main@bf3e15800905a105eb3d14a7578f2daee308bcc8`  
 **Claim-entry health:** post-merge Architecture #1315 GREEN/GREEN  
-**Integration refresh reason:** CTX PR #89 landed; previous G0 HEAD/Architecture #1317 superseded  
+**Current canonical health:** post-CTX-F5-3A Architecture #1327 GREEN/GREEN  
+**Integration refresh reason:** G0 landed after CTX PR #89; G0.1 closes post-merge branch-creation-surface P1  
 **Branch:** `work/ae-r11-g-e68fd96e`  
-**Status:** G0 CONTRACT / MEASUREMENT MATRIX FREEZE
+**Status:** G0.1 CONTRACT REPAIR / MEASUREMENT MATRIX FREEZE
 
 ---
 
@@ -41,8 +42,11 @@ Every R11-G completion candidate must publish exact-head evidence for all five s
      the historical full-prefix O(N²) copied-byte shape.
 
 3. **Multi-branch workload**
-   - create/list multiple durable Task branches through canonical branch/TaskBudget paths;
+   - plan through `AgentForkPlanningService.build_fork_plan()`;
+   - atomically create the durable execution + branch + branch context through `TaskBudgetService.consume_fork_plan()`;
+   - verify/read the resulting branch set through `DurableAgentStore.list_task_branches()`;
    - preserve deterministic branch ordering and shared TaskBudget accounting;
+   - `reserve_branch_slot()` is a contention/accounting primitive, not the canonical branch-creation authority;
    - no branch may obtain a fresh/reset TaskBudget.
 
 4. **Large pending invocation batch**
@@ -64,6 +68,7 @@ Every R11-G completion candidate must publish exact-head evidence for all five s
 R11-G measures existing production authority rather than synthetic substitutes:
 
 - `TaskBudgetService.reserve_branch_slot()`
+- `TaskBudgetService.consume_fork_plan()`
 - `DurableAgentStore.commit_waiting_checkpoint()`
 - `DurableAgentStore.list_task_branches()`
 - `AgentResumePlanningService.build_resume_plan()`
@@ -72,6 +77,13 @@ R11-G measures existing production authority rather than synthetic substitutes:
 
 The exact APIs above may be wrapped by deterministic test fixtures, but the measured
 operations themselves must remain the production methods.
+
+For branch creation, the frozen canonical sequence is:
+
+`build_fork_plan() -> consume_fork_plan() -> list_task_branches()`
+
+`reserve_branch_slot()` may still be used for direct TaskBudget contention measurement,
+but it must not stand in for durable branch creation.
 
 ---
 
@@ -140,11 +152,19 @@ The CLAIM remains historically valid from:
 
 `e68fd96e701d90c4707a067487fe374234b11749`.
 
-The current G0 integration candidate is refreshed from:
+The landed G0 integration baseline was:
 
-`d36b7e090c4b349ad6270e34752db9b29fe7e962`.
+`912cf1ac0386f765a5d6324a337b84b5ae928715`.
 
-The prior exact-head Architecture #1317 RED was a deterministic Markdown-whitespace assertion mismatch only; it is superseded by this refreshed replacement candidate.
+G0.1 is refreshed from current accepted canonical main:
+
+`bf3e15800905a105eb3d14a7578f2daee308bcc8`.
+
+Post-merge Architecture #1327 is GREEN/GREEN on that exact main.
+
+The prior exact-head Architecture #1317 RED was a deterministic Markdown-whitespace assertion mismatch only and was superseded before G0 landed.
+
+After G0 merged, review thread `PRRT_kwDOTCp7S86mD65h` identified a valid contract gap: the frozen production surface omitted `TaskBudgetService.consume_fork_plan()`, even though the required multi-branch workload must create real durable branches. G0.1 closes only that contract/test gap; it changes no production behavior.
 
 If canonical main advances before a production integration gate:
 
@@ -175,10 +195,10 @@ G0 closes only when:
 
 - exact claimed baseline is frozen;
 - all five required workload surfaces are named;
-- production measurement APIs are frozen;
+- production measurement APIs are frozen, including the atomic `consume_fork_plan()` branch-creation authority;
 - deterministic-vs-timing evidence rules are frozen;
 - cross-track authority boundaries are frozen;
 - exact-head Linux + Windows Architecture is GREEN;
 - independent audit reports no blocking R11-G0 P0/P1.
 
-G1 then implements/runs the full deterministic load matrix against these frozen surfaces.
+G1 then implements/runs the full deterministic load matrix against these frozen surfaces. G1 remains closed until the G0.1 repair is canonically landed and independently accepted.
