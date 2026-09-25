@@ -175,21 +175,26 @@ def test_r11_f1c_repair_c_contract_freezes_absent_key_and_r6_boundary():
 
 
 
-def test_r11_f1c_capability_repository_has_no_runtime_agent_model_import():
+def test_r11_f1c_capability_repository_defers_agent_model_import():
     source = (
         ROOT
         / "se/src/infrastructure/storage/repositories/"
         "capability_invocations.py"
     ).read_text(encoding="utf-8")
 
-    module_prefix = source.split(
-        "async def list_agent_tool_call_bindings",
-        maxsplit=1,
-    )[0]
-    assert "from ..models.sql.agent" not in module_prefix
+    assert "if TYPE_CHECKING:" in source
+    assert (
+        source.count(
+            "from ..models.sql.agent.tool_call import AgentToolCallRecord"
+        )
+        == 2
+    )
+    method_source = inspect.getsource(
+        CapabilityInvocationRepository.list_agent_tool_call_bindings
+    )
     assert (
         "from ..models.sql.agent.tool_call import AgentToolCallRecord"
-        in source
+        in method_source
     )
 
 
