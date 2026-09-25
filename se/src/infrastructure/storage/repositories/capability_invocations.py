@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from sqlalchemy import func, select, update
+from hashlib import sha256
+
+from sqlalchemy import false, func, select, update
 from fastapi.encoders import jsonable_encoder
 from sqlalchemy.exc import IntegrityError
 
@@ -17,10 +19,22 @@ from ....runtimes.capability.contracts.invocation import (
     RemoteOutcomeState,
     TERMINAL_INVOCATION_STATES,
 )
+from ..models.sql.agent import AgentToolCallRecord
 from ..models.sql.capability import (
     CapabilityInvocationAttemptRecord,
     CapabilityInvocationRecord,
 )
+
+
+class InvocationSerializationConflictError(RuntimeError):
+    """Invocation id ownership could not be serialized safely."""
+
+
+def _invocation_advisory_lock_key(invocation_id: str) -> int:
+    digest = sha256(
+        ("capability-invocation:" + str(invocation_id)).encode("utf-8")
+    ).digest()
+    return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 
 class CapabilityInvocationRepository:
@@ -39,17 +53,55 @@ class CapabilityInvocationRepository:
         )
 
 
+    async def lock_invocation_id_serialization_key(
+        self,
+        invocation_id: str,
+    ) -> None:
+        """Lock one invocation id even when no CapabilityInvocation row exists.
+
+        PostgreSQL uses a transaction-scoped advisory lock derived from a
+        stable signed 64-bit SHA-256 key. SQLite has no per-key advisory lock,
+        so a semantic no-op UPDATE with an always-false predicate deliberately
+        acquires SQLite's database writer lock without mutating any row.
+        Unsupported SQL dialects fail closed instead of silently providing an
+        absent-key race.
+        """
+
+        dialect = self.session.get_bind().dialect.name
+        if dialect == "postgresql":
+            key = _invocation_advisory_lock_key(invocation_id)
+            await self.session.execute(
+                select(func.pg_advisory_xact_lock(key))
+            )
+            return
+        if dialect == "sqlite":
+            await self.session.execute(
+                update(CapabilityInvocationRecord)
+                .where(false())
+                .values(
+                    revision=CapabilityInvocationRecord.revision,
+                    updated_at=CapabilityInvocationRecord.updated_at,
+                )
+            )
+            return
+        raise RuntimeError(
+            "Invocation-id serialization is unsupported for SQL dialect "
+            f"{dialect!r}."
+        )
+
     async def lock_invocation_gc_serialization_fence(
         self,
         invocation_id: str,
     ) -> CapabilityInvocationRecord | None:
-        """Serialize semantic Agent writers with R11 invocation GC.
+        """Serialize invocation-id writers with R11 invocation GC.
 
-        This method only establishes serialization authority; it does not
-        transfer R6 lifecycle ownership. Row-locking dialects lock the existing
-        invocation row. SQLite uses a semantic no-op UPDATE to obtain a real
-        writer lock because FOR UPDATE is not enforced there.
+        The shared key authority is acquired first and works even when the R6
+        row is absent. Existing-row locking is retained as an additional fence;
+        this operation remains serialization-only and does not take R6
+        lifecycle ownership.
         """
+
+        await self.lock_invocation_id_serialization_key(invocation_id)
 
         dialect = self.session.get_bind().dialect.name
         if dialect == "sqlite":
@@ -75,6 +127,17 @@ class CapabilityInvocationRepository:
             .with_for_update()
         )
         return result.scalar_one_or_none()
+
+    async def list_agent_tool_call_bindings(
+        self,
+        invocation_id: str,
+    ) -> list[AgentToolCallRecord]:
+        result = await self.session.execute(
+            select(AgentToolCallRecord)
+            .where(AgentToolCallRecord.invocation_id == invocation_id)
+            .order_by(AgentToolCallRecord.id.asc())
+        )
+        return list(result.scalars().all())
 
     async def list_records_for_execution(
         self,
@@ -189,8 +252,52 @@ class SqlCapabilityInvocationStore:
 
     async def create(self, invocation: CapabilityInvocation) -> None:
         async with self._uow_factory() as uow:
-            uow.session.add(CapabilityInvocationRecord(**self._values(invocation)))
-            await uow.commit()
+            repository = getattr(uow, "capability_invocations", None)
+            if repository is None:
+                repository = CapabilityInvocationRepository(uow.session)
+
+            invocation_id = str(invocation.invocation_id)
+            existing = await repository.lock_invocation_gc_serialization_fence(
+                invocation_id
+            )
+            if existing is not None:
+                raise InvocationSerializationConflictError(
+                    "CapabilityInvocation id is already durably owned."
+                )
+
+            bindings = await repository.list_agent_tool_call_bindings(
+                invocation_id
+            )
+            if len(bindings) > 1:
+                raise InvocationSerializationConflictError(
+                    "CapabilityInvocation id has ambiguous AgentToolCall ownership."
+                )
+            if bindings:
+                binding = bindings[0]
+                expected = {
+                    "execution_id": binding.execution_id,
+                    "tool_call_id": binding.tool_call_id,
+                    "capability_id": binding.capability_id,
+                }
+                supplied = {
+                    "execution_id": invocation.execution_id,
+                    "tool_call_id": invocation.tool_call_id,
+                    "capability_id": invocation.capability_id,
+                }
+                if supplied != expected:
+                    raise InvocationSerializationConflictError(
+                        "CapabilityInvocation id conflicts with durable "
+                        "AgentToolCall ownership."
+                    )
+
+            uow.session.add(
+                CapabilityInvocationRecord(**self._values(invocation))
+            )
+            try:
+                await uow.commit()
+            except IntegrityError:
+                await uow.rollback()
+                raise
 
     async def get(
         self, invocation_id: str

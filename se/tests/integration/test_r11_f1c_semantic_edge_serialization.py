@@ -7,6 +7,15 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
+from se.src.runtimes.capability.contracts.definition import (
+    CapabilityExecutionMode,
+    CapabilityIdempotency,
+    CapabilityKind,
+)
+from se.src.runtimes.capability.contracts.invocation import (
+    CapabilityInvocation,
+    CapabilityInvocationState,
+)
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
@@ -19,6 +28,8 @@ from se.src.infrastructure.storage.models.sql.capability.invocation import (
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.capability_invocations import (
     CapabilityInvocationRepository,
+    InvocationSerializationConflictError,
+    SqlCapabilityInvocationStore,
 )
 from se.src.runtimes.agent.persistence import (
     DurableAgentStore,
@@ -465,6 +476,219 @@ async def test_r11_f1c_sqlite_invocation_fence_blocks_writer_across_gc(tmp_path)
                 if gc_uow.session.in_transaction():
                     await gc_uow.rollback()
                 await gc_uow.__aexit__(None, None, None)
+            except Exception:
+                pass
+        if writer is not None and not writer.done():
+            writer.cancel()
+            await asyncio.gather(writer, return_exceptions=True)
+        await engine.dispose()
+
+
+
+def _domain_invocation(
+    invocation_id: str,
+    *,
+    execution_id: str,
+    tool_call_id: str,
+) -> CapabilityInvocation:
+    return CapabilityInvocation(
+        invocation_id=invocation_id,
+        capability_id="tool.remote",
+        kind=CapabilityKind.TOOL,
+        execution_mode=CapabilityExecutionMode.ONE_SHOT,
+        idempotency=CapabilityIdempotency.IDEMPOTENT,
+        state=CapabilityInvocationState.CREATED,
+        execution_id=execution_id,
+        tool_call_id=tool_call_id,
+        arguments={},
+    )
+
+
+@pytest.mark.asyncio
+async def test_r11_f1c_absent_key_blocks_conflicting_r6_create_until_agent_owner_commits(
+    tmp_path,
+):
+    engine, sessions, _service, _store = await _setup(tmp_path)
+    owner_uow = _Uow(sessions)
+    r6_create = None
+    exited = False
+    try:
+        await _seed_execution(
+            sessions,
+            execution_id="exec-absent-agent-owner",
+            task_id="task-absent-agent-owner",
+            branch_id="branch-absent-agent-owner",
+        )
+        await _seed_iteration(
+            sessions,
+            "exec-absent-agent-owner",
+            "iter-absent-agent-owner",
+        )
+
+        await owner_uow.__aenter__()
+        assert (
+            await owner_uow.capability_invocations
+            .lock_invocation_gc_serialization_fence("inv-absent-shared")
+            is None
+        )
+
+        r6_store = SqlCapabilityInvocationStore(lambda: _Uow(sessions))
+        r6_create = asyncio.create_task(
+            r6_store.create(
+                _domain_invocation(
+                    "inv-absent-shared",
+                    execution_id="unrelated-r6-exec",
+                    tool_call_id="unrelated-r6-call",
+                )
+            )
+        )
+        await asyncio.sleep(0.1)
+        assert not r6_create.done()
+
+        await owner_uow.agents.save_tool_call(
+            {
+                "execution_id": "exec-absent-agent-owner",
+                "iteration_id": "iter-absent-agent-owner",
+                "invocation_id": "inv-absent-shared",
+                "tool_call_id": "agent-owner-call",
+                "capability_id": "tool.remote",
+                "arguments": {},
+                "status": "PENDING",
+            }
+        )
+        await owner_uow.commit()
+        await owner_uow.__aexit__(None, None, None)
+        exited = True
+
+        with pytest.raises(
+            InvocationSerializationConflictError,
+            match="conflicts with durable AgentToolCall ownership",
+        ):
+            await r6_create
+
+        async with sessions() as session:
+            repo = AgentRepository(session)
+            assert (
+                await repo.get_tool_call(
+                    "exec-absent-agent-owner",
+                    "agent-owner-call",
+                )
+                is not None
+            )
+            assert (
+                await session.get(
+                    CapabilityInvocationRecord,
+                    "inv-absent-shared",
+                )
+                is None
+            )
+    finally:
+        if (
+            not exited
+            and owner_uow._ctx is not None
+            and owner_uow.session is not None
+        ):
+            try:
+                if owner_uow.session.in_transaction():
+                    await owner_uow.rollback()
+                await owner_uow.__aexit__(None, None, None)
+            except Exception:
+                pass
+        if r6_create is not None and not r6_create.done():
+            r6_create.cancel()
+            await asyncio.gather(r6_create, return_exceptions=True)
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r11_f1c_absent_key_blocks_agent_writer_until_r6_owner_commits(
+    tmp_path,
+):
+    engine, sessions, _service, store = await _setup(tmp_path)
+    owner_uow = _Uow(sessions)
+    writer = None
+    exited = False
+    try:
+        await _seed_execution(
+            sessions,
+            execution_id="exec-absent-agent-writer",
+            task_id="task-absent-agent-writer",
+            branch_id="branch-absent-agent-writer",
+        )
+        await _seed_iteration(
+            sessions,
+            "exec-absent-agent-writer",
+            "iter-absent-agent-writer",
+        )
+
+        await owner_uow.__aenter__()
+        assert (
+            await owner_uow.capability_invocations
+            .lock_invocation_gc_serialization_fence("inv-r6-wins-absent")
+            is None
+        )
+
+        writer = asyncio.create_task(
+            store.save_tool_call(
+                {
+                    "execution_id": "exec-absent-agent-writer",
+                    "iteration_id": "iter-absent-agent-writer",
+                    "invocation_id": "inv-r6-wins-absent",
+                    "tool_call_id": "agent-writer-call",
+                    "capability_id": "tool.remote",
+                    "arguments": {},
+                    "status": "PENDING",
+                }
+            )
+        )
+        await asyncio.sleep(0.1)
+        assert not writer.done()
+
+        owner_uow.session.add(
+            CapabilityInvocationRecord(
+                **_invocation_values(
+                    "inv-r6-wins-absent",
+                    execution_id="unrelated-r6-owner",
+                    tool_call_id="unrelated-r6-call",
+                )
+            )
+        )
+        await owner_uow.commit()
+        await owner_uow.__aexit__(None, None, None)
+        exited = True
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="invocation_id is already bound",
+        ):
+            await writer
+
+        async with sessions() as session:
+            repo = AgentRepository(session)
+            assert (
+                await repo.get_tool_call(
+                    "exec-absent-agent-writer",
+                    "agent-writer-call",
+                )
+                is None
+            )
+            assert (
+                await session.get(
+                    CapabilityInvocationRecord,
+                    "inv-r6-wins-absent",
+                )
+                is not None
+            )
+    finally:
+        if (
+            not exited
+            and owner_uow._ctx is not None
+            and owner_uow.session is not None
+        ):
+            try:
+                if owner_uow.session.in_transaction():
+                    await owner_uow.rollback()
+                await owner_uow.__aexit__(None, None, None)
             except Exception:
                 pass
         if writer is not None and not writer.done():
