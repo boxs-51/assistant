@@ -337,10 +337,22 @@ class MemoryRecordRepository(Protocol):
         ...
 
 
+def _canonical_replay_datetime(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        return value.isoformat()
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
 def _immutable_record_canonical_bytes(record: MemoryRecord) -> bytes:
-    return canonical_memory_bytes(
-        record.model_dump(mode="json", exclude={"created_at"})
-    )
+    material = record.model_dump(mode="python", exclude={"created_at"})
+    source_snapshot = material.get("source_ref_snapshot")
+    if isinstance(source_snapshot, dict):
+        source_created_at = source_snapshot.get("source_created_at")
+        if isinstance(source_created_at, datetime):
+            source_snapshot["source_created_at"] = _canonical_replay_datetime(
+                source_created_at
+            )
+    return canonical_memory_bytes(material)
 
 
 def _same_immutable_record(left: MemoryRecord, right: MemoryRecord) -> bool:
