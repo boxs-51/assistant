@@ -337,9 +337,15 @@ class MemoryRecordRepository(Protocol):
         ...
 
 
+def _immutable_record_canonical_bytes(record: MemoryRecord) -> bytes:
+    return canonical_memory_bytes(
+        record.model_dump(mode="json", exclude={"created_at"})
+    )
+
+
 def _same_immutable_record(left: MemoryRecord, right: MemoryRecord) -> bool:
-    return left.model_dump(exclude={"created_at"}) == right.model_dump(
-        exclude={"created_at"}
+    return _immutable_record_canonical_bytes(left) == _immutable_record_canonical_bytes(
+        right
     )
 
 
