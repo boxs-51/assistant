@@ -1,0 +1,182 @@
+name: "Repository work / roadmap issue"
+description: "Open implementation, architecture, migration, audit, roadmap, or governance work under canonical policy #85."
+title: "[ACTIVE] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ## Repository governance
+
+        All repository work opened with this form is governed by the canonical
+        **Repository Stacked Development & Integration Policy — Issue #85**.
+
+        - Future / unclaimed stages: `FOLLOW-LATEST`.
+        - At production CLAIM: record the effective #85 policy version.
+        - Local overrides may be stricter, never broader.
+        - Merge authorization remains separate from stage/development progression.
+
+  - type: checkboxes
+    id: policy_ack
+    attributes:
+      label: "Canonical policy acknowledgement"
+      options:
+        - label: "I have read and will follow canonical stacked-development policy #85."
+          required: true
+        - label: "I understand that this issue does not gain runtime/schema/lifecycle/destructive authority merely by referencing #85."
+          required: true
+        - label: "I understand that production merge authorization remains a separate gate."
+          required: true
+
+  - type: dropdown
+    id: reference_mode
+    attributes:
+      label: "Policy reference mode"
+      description: "New/unclaimed work normally uses FOLLOW-LATEST. CLAIM-PINNED is for an already claimed production candidate whose effective policy version is being recorded."
+      options:
+        - "FOLLOW-LATEST"
+        - "CLAIM-PINNED"
+    validations:
+      required: true
+
+  - type: input
+    id: policy_version
+    attributes:
+      label: "Effective #85 policy version"
+      description: "Use the current #85 version. At production CLAIM this becomes the recorded candidate policy version."
+      placeholder: "v1"
+      value: "v1"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: work_class
+    attributes:
+      label: "Work classification"
+      options:
+        - "Production implementation / runtime behavior"
+        - "Schema / migration / persistence"
+        - "Contract / evidence / architecture tests only"
+        - "Audit / dependency / coordination"
+        - "Roadmap / design / governance"
+        - "Mixed / not yet classified"
+    validations:
+      required: true
+
+  - type: textarea
+    id: objective
+    attributes:
+      label: "Objective / requested outcome"
+      description: "State the concrete result this issue owns."
+      placeholder: |
+        What must be implemented, repaired, audited, frozen, or delivered?
+    validations:
+      required: true
+
+  - type: textarea
+    id: authority
+    attributes:
+      label: "Owned authority / allowed scope"
+      description: "List the authority this issue is explicitly allowed to own. Do not infer adjacent authority."
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: closed_authorities
+    attributes:
+      label: "Explicitly CLOSED / non-goals"
+      description: "List runtime, schema, lifecycle, destructive, cross-track, or integration authority that remains closed."
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: "Dependencies / cross-issue boundaries"
+      description: "Identify parent issues/PRs, cross-track ownership, migrations, or canonical-main dependencies. Write NONE if truly independent."
+      placeholder: |
+        Parent/dependency:
+        Cross-track watch:
+        Migration/lineage:
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stack_role
+    attributes:
+      label: "Initial stacked-development role"
+      options:
+        - "Root / no production parent"
+        - "Depth 1 production candidate"
+        - "Proposed depth 2 child — PRE-CLAIM only"
+        - "Released depth 2 child"
+        - "Non-production / governance / audit"
+    validations:
+      required: true
+
+  - type: textarea
+    id: stack_checkpoint
+    attributes:
+      label: "Stack checkpoint"
+      description: "Required for any production parent/child. Use N/A for non-production work."
+      value: |
+        STACK_POLICY_ISSUE    = #85
+        STACK_POLICY_VERSION  = v1
+        STACK_MODE            = <ROOT | STACKED_DEVELOPMENT | N/A>
+        STACK_DEPTH           = <0 | 1 | 2 | N/A>
+        CANONICAL_MAIN_FORK   = <sha | N/A>
+        STACK_PARENT_PR       = <number | none | N/A>
+        STACK_PARENT_HEAD     = <exact sha | none | N/A>
+        CHILD_CLAIM           = <released scope | PRE-CLAIM | N/A>
+        CLOSED_AUTHORITIES    = <summary>
+        MERGE_ORDER           = <parent first | N/A>
+        INTEGRATION_STATUS    = <NOT_CANONICAL / REQUIRES_POST-PARENT_REFRESH | N/A>
+    validations:
+      required: true
+
+  - type: textarea
+    id: gates
+    attributes:
+      label: "Initial gates / stop conditions"
+      description: "List P0/P1, CI, independent audit, authority-release, migration, parent, or drift gates that must stop progression."
+      placeholder: |
+        - ...
+        - ...
+    validations:
+      required: true
+
+  - type: checkboxes
+    id: progression_ack
+    attributes:
+      label: "Stage / integration discipline"
+      options:
+        - label: "I will not treat an unmerged stacked candidate as LANDED or canonical authority."
+          required: true
+        - label: "A depth-2 child will not merge before its production parent."
+          required: true
+        - label: "After parent landing, a stacked child must refresh/re-anchor to exact current main, rerun CI, and receive independent re-audit before its merge gate."
+          required: true
+        - label: "I will stop on a blocking P0/P1, unopened authority, semantic parent change, migration conflict, ownership conflict, or applicable stack-depth limit."
+          required: true
+
+  - type: textarea
+    id: local_override
+    attributes:
+      label: "Local stricter override to #85"
+      description: "Optional. Use NONE if this issue does not narrow the repository default. Local rules may be stricter but may not silently broaden authority."
+      value: "NONE"
+
+  - type: textarea
+    id: first_action
+    attributes:
+      label: "First executable action"
+      description: "State the first action after issue creation, including whether it is PRE-CLAIM, audit, branch creation, implementation, or HOLD."
+      placeholder: |
+        Example: PRE-CLAIM only; production branch remains closed pending independent release.
+    validations:
+      required: true
