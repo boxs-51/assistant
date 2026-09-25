@@ -15,6 +15,17 @@ class _Agents:
     def __init__(self):
         self.saved = []
 
+    async def get_execution_checkpoint(self, checkpoint_id):
+        assert checkpoint_id == "cp-parent"
+        return SimpleNamespace(
+            checkpoint_id="cp-parent",
+            execution_id="exec-r11-d",
+            execution_revision=3,
+            session_id="session-r11-d",
+            task_id=None,
+            branch_id=None,
+        )
+
     async def save_execution_checkpoint(self, values):
         self.saved.append(dict(values))
 

@@ -634,6 +634,17 @@ class TaskBudgetService:
                 )
 
         async with self._uow_factory() as uow:
+            parent_task_id = normalized_task.get("parent_task_id")
+            if parent_task_id is not None:
+                parent_task_id = str(parent_task_id)
+                parent = await uow.agents.lock_task_gc_serialization_fence(
+                    parent_task_id
+                )
+                if parent is None:
+                    raise TaskBudgetConflictError(
+                        f"Parent AgentTask not found: {parent_task_id}"
+                    )
+
             if await uow.agents.get_task(task_id) is not None:
                 raise TaskBudgetConflictError(
                     f"AgentTask already exists: {task_id}"

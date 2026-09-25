@@ -17,6 +17,48 @@ class WaitingCheckpointConflictError(RuntimeError):
     """Normalized WAITING safe point cannot be proven against durable state."""
 
 
+async def validate_checkpoint_parent_lineage_in_uow(
+    uow,
+    *,
+    execution,
+    parent_checkpoint_id: str | None,
+    child_checkpoint_id: str | None = None,
+    child_execution_revision: int | None = None,
+):
+    """Fail closed unless a semantic checkpoint parent is same-lineage."""
+
+    if parent_checkpoint_id is None:
+        return None
+    parent_id = str(parent_checkpoint_id)
+    if child_checkpoint_id is not None and parent_id == str(child_checkpoint_id):
+        raise WaitingCheckpointConflictError(
+            "Checkpoint parent_checkpoint_id may not self-reference."
+        )
+
+    parent = await uow.agents.get_execution_checkpoint(parent_id)
+    if parent is None:
+        raise WaitingCheckpointConflictError(
+            f"Unknown parent checkpoint: {parent_id}"
+        )
+    if (
+        parent.execution_id != execution.id
+        or parent.session_id != execution.session_id
+        or parent.task_id != execution.task_id
+        or parent.branch_id != execution.branch_id
+    ):
+        raise WaitingCheckpointConflictError(
+            "Checkpoint parent belongs to another execution/task/branch lineage."
+        )
+    if (
+        child_execution_revision is not None
+        and int(parent.execution_revision) >= int(child_execution_revision)
+    ):
+        raise WaitingCheckpointConflictError(
+            "Checkpoint parent revision must precede the child checkpoint."
+        )
+    return parent
+
+
 def _pending_identity(items: Sequence[dict[str, Any]]) -> tuple[tuple[Any, ...], ...]:
     return tuple(
         (
@@ -172,6 +214,23 @@ async def stage_waiting_checkpoint(
         "parent_checkpoint_id",
         getattr(execution, "current_checkpoint_id", None),
     )
+    expected_parent_checkpoint_id = getattr(
+        execution,
+        "current_checkpoint_id",
+        None,
+    )
+    if checkpoint.get("parent_checkpoint_id") != expected_parent_checkpoint_id:
+        raise WaitingCheckpointConflictError(
+            "Checkpoint parent_checkpoint_id must match the execution current checkpoint."
+        )
+    await validate_checkpoint_parent_lineage_in_uow(
+        uow,
+        execution=execution,
+        parent_checkpoint_id=checkpoint.get("parent_checkpoint_id"),
+        child_checkpoint_id=checkpoint_id,
+        child_execution_revision=target_revision,
+    )
+
     snapshot = checkpoint.get("transcript_snapshot")
     if snapshot is not None:
         checkpoint["transcript_snapshot"] = to_json_safe(

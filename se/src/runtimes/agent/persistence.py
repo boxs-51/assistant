@@ -9,6 +9,9 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from ...domain.schemas.identity import Identity
 from ...infrastructure.storage.repositories.agent import AgentRepository
+from ...infrastructure.storage.repositories.capability_invocations import (
+    CapabilityInvocationRepository,
+)
 from ...infrastructure.storage.transcript_representation import (
     canonical_transcript_messages,
 )
@@ -70,6 +73,7 @@ from .task_budget import (
 from .waiting_checkpoint import (
     WaitingCheckpointConflictError,
     stage_waiting_checkpoint,
+    validate_checkpoint_parent_lineage_in_uow,
     verify_committed_waiting_checkpoint,
 )
 from .waiting_ticket import build_waiting_ticket_payload
@@ -2056,6 +2060,20 @@ class DurableAgentStore:
                 self._validate_existing_tool_call_identity(existing, values)
                 record = existing
             else:
+                repository = getattr(uow, "capability_invocations", None)
+                if repository is None:
+                    repository = CapabilityInvocationRepository(uow.session)
+                invocation_id = str(values["invocation_id"])
+                collision = (
+                    await repository.lock_invocation_gc_serialization_fence(
+                        invocation_id
+                    )
+                )
+                if collision is not None:
+                    raise ExecutionConflictError(
+                        "Fresh AgentToolCall invocation_id is already bound "
+                        "to an existing CapabilityInvocation."
+                    )
                 record = await uow.agents.save_tool_call(values)
             await uow.commit()
             return record
@@ -4222,6 +4240,20 @@ class DurableAgentStore:
                         source.transcript,
                         active_tool_call_ids=ordered_tool_call_ids,
                     )
+                    try:
+                        await validate_checkpoint_parent_lineage_in_uow(
+                            uow,
+                            execution=execution,
+                            parent_checkpoint_id=source.parent_checkpoint_id,
+                            child_checkpoint_id=source.checkpoint_id,
+                            child_execution_revision=execution.revision,
+                        )
+                    except WaitingCheckpointConflictError as exc:
+                        raise LegacyCheckpointMaterializationError(
+                            "LEGACY_CHECKPOINT_UNSAFE",
+                            str(exc),
+                        ) from exc
+
                     proven = await write_transcript_representation_in_uow(
                         uow,
                         messages=list(transcript_snapshot),

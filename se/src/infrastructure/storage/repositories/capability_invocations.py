@@ -39,6 +39,43 @@ class CapabilityInvocationRepository:
         )
 
 
+    async def lock_invocation_gc_serialization_fence(
+        self,
+        invocation_id: str,
+    ) -> CapabilityInvocationRecord | None:
+        """Serialize semantic Agent writers with R11 invocation GC.
+
+        This method only establishes serialization authority; it does not
+        transfer R6 lifecycle ownership. Row-locking dialects lock the existing
+        invocation row. SQLite uses a semantic no-op UPDATE to obtain a real
+        writer lock because FOR UPDATE is not enforced there.
+        """
+
+        dialect = self.session.get_bind().dialect.name
+        if dialect == "sqlite":
+            result = await self.session.execute(
+                update(CapabilityInvocationRecord)
+                .where(
+                    CapabilityInvocationRecord.invocation_id == invocation_id
+                )
+                .values(
+                    revision=CapabilityInvocationRecord.revision,
+                    updated_at=CapabilityInvocationRecord.updated_at,
+                )
+            )
+            if result.rowcount != 1:
+                return None
+            return await self.get_record(invocation_id)
+
+        result = await self.session.execute(
+            select(CapabilityInvocationRecord)
+            .where(
+                CapabilityInvocationRecord.invocation_id == invocation_id
+            )
+            .with_for_update()
+        )
+        return result.scalar_one_or_none()
+
     async def list_records_for_execution(
         self,
         execution_id: str,

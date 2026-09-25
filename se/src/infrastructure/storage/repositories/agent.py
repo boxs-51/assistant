@@ -168,6 +168,33 @@ class AgentRepository(BaseRepository):
         )
         return result.scalar_one_or_none()
 
+    async def lock_task_gc_serialization_fence(
+        self,
+        task_id: str,
+    ) -> Optional[AgentTaskRecord]:
+        """Serialize semantic Task writers with task-scoped GC.
+
+        Row-locking dialects use the canonical Task FOR UPDATE row lock.
+        SQLite ignores FOR UPDATE, so acquire its real write lock with a
+        semantic no-op UPDATE while preserving revision/timestamp values.
+        """
+
+        dialect = self.session.get_bind().dialect.name
+        if dialect == "sqlite":
+            result = await self.session.execute(
+                update(AgentTaskRecord)
+                .where(AgentTaskRecord.id == task_id)
+                .values(
+                    revision=AgentTaskRecord.revision,
+                    updated_at=AgentTaskRecord.updated_at,
+                )
+            )
+            if result.rowcount != 1:
+                return None
+            return await self.get_task(task_id)
+
+        return await self.get_task_for_update(task_id)
+
     async def compare_and_set_task(
         self,
         task_id: str,
