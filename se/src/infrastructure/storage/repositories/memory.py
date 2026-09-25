@@ -315,6 +315,7 @@ def _ensure_in_memory_physical_monitor(
         if normalized.startswith(
             (
                 "BEGIN",
+                "SAVEPOINT",
                 "INSERT",
                 "UPDATE",
                 "DELETE",
