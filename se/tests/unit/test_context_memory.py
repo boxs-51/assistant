@@ -269,6 +269,38 @@ async def test_ctx_f5_1_replay_normalizes_equivalent_source_datetime_offsets():
 
 
 @pytest.mark.asyncio
+async def test_ctx_f5_1_replay_rejects_genuinely_different_source_instant():
+    repository = InMemoryMemoryRecordRepository()
+    first_source = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+        session_id="session-1",
+        source_created_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        source_state="active",
+        metadata={"label": "canonical"},
+    )
+    changed_instant_source = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+        session_id="session-1",
+        source_created_at=datetime(2026, 1, 1, 0, 0, 1, tzinfo=timezone.utc),
+        source_state="active",
+        metadata={"label": "canonical"},
+    )
+
+    first = _record(source=first_source)
+    replay = _record(source=changed_instant_source)
+
+    assert first.memory_id == replay.memory_id
+    await repository.put(first)
+
+    with pytest.raises(MemoryRecordConflictError, match="memory_id"):
+        await repository.put(replay)
+
+
+@pytest.mark.asyncio
 async def test_ctx_f5_1_repository_revalidates_unvalidated_record_copy():
     repository = InMemoryMemoryRecordRepository()
     record = _record()
