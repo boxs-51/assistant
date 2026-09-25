@@ -1,11 +1,15 @@
 from __future__ import annotations
 
 import inspect
+import os
 from pathlib import Path
+import subprocess
+import sys
 
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.capability_invocations import (
     CapabilityInvocationRepository,
+    SqlCapabilityInvocationStore,
 )
 from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.task_budget import TaskBudgetService
@@ -109,3 +113,114 @@ def test_r11_f1c_semantic_edge_contract_freezes_exact_baseline_and_boundaries():
         "R11-F1-C destructive implementation remains HOLD",
     ):
         assert phrase in text
+
+
+REPAIR_C_CONTRACT = (
+    ROOT
+    / "docs/agent_execution_r11/"
+    "R11_F1C_ABSENT_INVOCATION_FENCE_CCD6B64C.md"
+)
+
+
+def test_r11_f1c_absent_invocation_key_has_cross_process_sql_authority():
+    key_source = inspect.getsource(
+        CapabilityInvocationRepository.lock_invocation_id_serialization_key
+    )
+    fence_source = inspect.getsource(
+        CapabilityInvocationRepository.lock_invocation_gc_serialization_fence
+    )
+
+    assert 'dialect == "postgresql"' in key_source
+    assert "pg_advisory_xact_lock" in key_source
+    assert "_invocation_advisory_lock_key" in key_source
+    assert 'dialect == "sqlite"' in key_source
+    assert "where(false())" in key_source
+    assert "unsupported" in key_source.lower()
+    assert "lock_invocation_id_serialization_key" in fence_source
+    assert fence_source.index("lock_invocation_id_serialization_key") < fence_source.index(
+        ".with_for_update()"
+    )
+
+
+def test_r11_f1c_r6_create_shares_invocation_key_and_rechecks_agent_binding():
+    source = inspect.getsource(SqlCapabilityInvocationStore.create)
+
+    assert "lock_invocation_gc_serialization_fence" in source
+    assert "list_agent_tool_call_bindings" in source
+    assert "CapabilityInvocation id conflicts with durable " in source
+    assert "AgentToolCall ownership." in source
+    assert source.index("lock_invocation_gc_serialization_fence") < source.index(
+        "list_agent_tool_call_bindings"
+    )
+    assert source.index("list_agent_tool_call_bindings") < source.index(
+        "CapabilityInvocationRecord(**self._values(invocation))"
+    )
+
+
+def test_r11_f1c_repair_c_contract_freezes_absent_key_and_r6_boundary():
+    text = REPAIR_C_CONTRACT.read_text(encoding="utf-8")
+
+    for phrase in (
+        "628f61fd7894e1425daf9a989f4c4494f7492a94",
+        "Architecture #1247",
+        "P1-R11-F1C-ABSENT-INVOCATION-FENCE-2",
+        "pg_advisory_xact_lock",
+        "SQLite",
+        "Agent fresh save_tool_call",
+        "SqlCapabilityInvocationStore.create",
+        "CapabilityInvocation lifecycle remains R6-owned",
+        "R11-F1-C destructive implementation remains HOLD",
+    ):
+        assert phrase in text
+
+
+
+def test_r11_f1c_capability_repository_defers_agent_model_import():
+    source = (
+        ROOT
+        / "se/src/infrastructure/storage/repositories/"
+        "capability_invocations.py"
+    ).read_text(encoding="utf-8")
+
+    assert "if TYPE_CHECKING:" in source
+    assert (
+        source.count(
+            "from ..models.sql.agent.tool_call import AgentToolCallRecord"
+        )
+        == 2
+    )
+    method_source = inspect.getsource(
+        CapabilityInvocationRepository.list_agent_tool_call_bindings
+    )
+    assert (
+        "from ..models.sql.agent.tool_call import AgentToolCallRecord"
+        in method_source
+    )
+
+
+def test_r11_f1c_capability_repository_clean_process_import_succeeds():
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(ROOT)
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import "
+                "se.src.infrastructure.storage.repositories."
+                "capability_invocations"
+            ),
+        ],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        "clean-process capability_invocations import failed:\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
