@@ -38,6 +38,7 @@ from se.src.infrastructure.storage.models.sql.chat_data import (
 from se.src.infrastructure.storage.models.sql import agent
 from se.src.infrastructure.storage.models.sql import capability
 from se.src.infrastructure.storage.models.sql import assets
+from se.src.infrastructure.storage.models.sql import memory
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---

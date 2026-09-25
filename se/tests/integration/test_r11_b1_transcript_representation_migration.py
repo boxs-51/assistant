@@ -29,7 +29,11 @@ def test_r11_b1_is_single_linear_migration_head(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["20a_cas_f5_binding_foundation"]
+    assert script.get_heads() == ["21a_ctx_f5_memory_foundation"]
+    assert (
+        script.get_revision("21a_ctx_f5_memory_foundation").down_revision
+        == "20a_cas_f5_binding_foundation"
+    )
     assert (
         script.get_revision("20a_cas_f5_binding_foundation").down_revision
         == "19a_r11_query_order_indexes"

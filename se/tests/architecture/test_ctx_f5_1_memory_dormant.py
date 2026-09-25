@@ -69,21 +69,20 @@ def test_ctx_f5_1_reference_repository_surface_is_minimal():
     }
 
 
-def test_ctx_f5_1_exact_delta_allocates_no_memory_migration_or_storage_model():
-    versions = Path("se/src/infrastructure/storage/migrations/sql/versions")
-    migration_names = [
-        path.name.lower()
-        for path in versions.glob("*.py")
-        if "memory" in path.name.lower() or "ctx_f5" in path.name.lower()
-    ]
-    assert migration_names == []
+def test_ctx_f5_1_domain_module_itself_has_no_durable_persistence_authority():
+    # Historical F5-1 evidence freezes what that released domain module owns;
+    # later independently released F5 stages may add separate persistence
+    # modules without rewriting F5-1 authority.
+    source = Path(memory.__file__).read_text(encoding="utf-8")
 
-    forbidden_paths = (
-        Path("se/src/infrastructure/storage/models/sql/memory.py"),
-        Path("se/src/infrastructure/storage/repositories/memory.py"),
-        Path("se/src/application/memory"),
-    )
-    assert all(not path.exists() for path in forbidden_paths)
+    for forbidden in (
+        "MemoryRecordRow",
+        "DurableMemoryRecordRepository",
+        "sqlalchemy",
+        "alembic",
+        "infrastructure.storage",
+    ):
+        assert forbidden not in source
 
 
 def test_ctx_f5_1_no_runtime_module_imports_memory_foundation():
