@@ -18,6 +18,7 @@ class MockScenario:
     fail_after_chunks: int | None = None
     stream_chunk_size: int = 1
     fixed_chat_response: str | None = None
+    file_upload_outcome: str = "REMOTE_SUCCESS_KNOWN"
 
     def clone(self) -> "MockScenario":
         return MockScenario(
@@ -32,4 +33,5 @@ class MockScenario:
             fail_after_chunks=self.fail_after_chunks,
             stream_chunk_size=self.stream_chunk_size,
             fixed_chat_response=self.fixed_chat_response,
+            file_upload_outcome=self.file_upload_outcome,
         )
