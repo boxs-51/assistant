@@ -32,6 +32,7 @@ class HydrationResult:
     binding_id: Optional[str] = None
     provider_file_id: Optional[str] = None
     provider_uri: Optional[str] = None
+    mime_type: Optional[str] = None
 
 
 class AssetHydrationError(RuntimeError):
@@ -316,6 +317,7 @@ class CanonicalAssetHydrationService:
             claim_id=claim_id,
             claim_revision=claim_revision,
             outcome=outcome,
+            mime_type=latest.mime_type,
         )
 
     def _resolve_exact_provider(self, provider_name: str):
@@ -479,6 +481,7 @@ class CanonicalAssetHydrationService:
                         binding_id=binding.id,
                         provider_file_id=binding.provider_file_id,
                         provider_uri=binding.provider_uri,
+                        mime_type=snapshot.mime_type,
                     )
             return None
         return HydrationResult(
@@ -748,6 +751,7 @@ class CanonicalAssetHydrationService:
         claim_id: str,
         claim_revision: int,
         outcome: ProviderUploadOutcome,
+        mime_type: str,
     ) -> HydrationResult:
         async with self.uow_factory() as uow:
             live = await self._load_owned_claim(
@@ -795,4 +799,5 @@ class CanonicalAssetHydrationService:
                 binding_id=updated.id,
                 provider_file_id=updated.provider_file_id,
                 provider_uri=updated.provider_uri,
+                mime_type=mime_type,
             )
