@@ -15,6 +15,7 @@ from se.src.provider.asset_projection import (
 from se.src.provider.exceptions import ProviderUnavailableError
 from se.src.provider.gemini.converters.chats.request import RequestChats
 from se.src.provider.handlers.chat_handler import ChatExecutionHandler
+from se.src.domain.schemas.message import GatewayMessage
 from se.src.runtimes.agent.adapters.inference import ProviderInferenceAdapter
 from se.src.runtimes.agent.contracts.inference import (
     InferenceMessage,
@@ -130,24 +131,61 @@ def _asset_body():
 
 
 def _flat_asset_body():
+    message = GatewayMessage.model_validate(
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "data": {
+                        "asset_id": "asset-f5d-flat",
+                        "source": "asset",
+                        "uri": "asset://asset-f5d-flat",
+                        "mime_type": "application/pdf",
+                    },
+                }
+            ],
+        }
+    )
+    dumped = message.model_dump(mode="json", exclude_none=True)
+    assert "attachment" not in dumped["content"][0]["data"]
     return {
         "model": "logical-model",
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "file",
-                        "data": {
-                            "asset_id": "asset-f5d-flat",
-                            "source": "asset",
-                            "uri": "asset://asset-f5d-flat",
-                            "mime_type": "application/pdf",
-                        },
-                    }
-                ],
-            }
-        ],
+        "messages": [dumped],
+    }
+
+
+def _flat_multi_asset_body():
+    message = GatewayMessage.model_validate(
+        {
+            "role": "user",
+            "content": [
+                {
+                    "type": "file",
+                    "data": {
+                        "asset_id": "asset-f5d-flat-a",
+                        "source": "asset",
+                        "uri": "asset://asset-f5d-flat-a",
+                        "mime_type": "application/pdf",
+                    },
+                },
+                {
+                    "type": "file",
+                    "data": {
+                        "asset_id": "asset-f5d-flat-b",
+                        "source": "asset",
+                        "uri": "asset://asset-f5d-flat-b",
+                        "mime_type": "application/pdf",
+                    },
+                },
+            ],
+        }
+    )
+    dumped = message.model_dump(mode="json", exclude_none=True)
+    assert all("attachment" not in part["data"] for part in dumped["content"])
+    return {
+        "model": "logical-model",
+        "messages": [dumped],
     }
 
 
@@ -246,6 +284,85 @@ async def test_f5d_flat_canonical_file_is_hydrated_and_projected_natively():
             "provider_name": "gemini",
         }
     ]
+
+
+@pytest.mark.asyncio
+async def test_f5d_flat_canonical_file_missing_uri_fails_closed():
+    provider = _Provider("gemini")
+    hydration = _Hydration(
+        provider,
+        HydrationResult(
+            status=HydrationStatus.HYDRATED,
+            provider_file_id="files/flat",
+            provider_uri=None,
+            mime_type="application/pdf",
+        ),
+    )
+    hook = CanonicalAssetProviderProjectionHook(hydration)
+
+    with pytest.raises(ProviderAssetProjectionError, match="provider_uri"):
+        await hook.project_attempt(
+            provider=provider,
+            body=_flat_asset_body(),
+            owner_user_id="owner-f5d",
+        )
+
+    assert hydration.calls == [
+        {
+            "owner_user_id": "owner-f5d",
+            "asset_id": "asset-f5d-flat",
+            "provider_name": "gemini",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_f5d_flat_multi_asset_later_failure_never_falls_back():
+    p1 = _Provider("gemini")
+    p2 = _Provider("second")
+    hydration = _SequenceHydration(
+        p1,
+        [
+            HydrationResult(
+                status=HydrationStatus.REUSED,
+                provider_file_id="files/flat-a",
+                provider_uri="https://provider.invalid/files/flat-a",
+                mime_type="application/pdf",
+            ),
+            HydrationResult(
+                status=HydrationStatus.HYDRATION_OUTCOME_UNKNOWN,
+            ),
+        ],
+    )
+    executor = _Executor(None)
+    handler = ChatExecutionHandler(
+        providers={"gemini": p1, "second": p2},
+        routing_policy=_Routing([p1, p2]),
+        executor=executor,
+        circuit_breaker_manager=SimpleNamespace(),
+        asset_projection_hook=CanonicalAssetProviderProjectionHook(hydration),
+    )
+    body = _flat_multi_asset_body()
+    original = deepcopy(body)
+
+    with pytest.raises(
+        ProviderAssetProjectionError,
+        match="HYDRATION_OUTCOME_UNKNOWN",
+    ):
+        await handler.execute_with_fallback(
+            object(),
+            body,
+            owner_user_id="owner-f5d",
+        )
+
+    assert body == original
+    assert [call["asset_id"] for call in hydration.calls] == [
+        "asset-f5d-flat-a",
+        "asset-f5d-flat-b",
+    ]
+    assert all(call["provider_name"] == "gemini" for call in hydration.calls)
+    assert executor.calls == []
+    assert p2.probes == 0
 
 
 @pytest.mark.asyncio
