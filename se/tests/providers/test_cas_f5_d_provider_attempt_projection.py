@@ -30,6 +30,17 @@ class _Registry:
         return self.provider if name == self.provider.name else None
 
 
+class _SequenceHydration:
+    def __init__(self, provider, results):
+        self.provider_registry = _Registry(provider)
+        self.results = list(results)
+        self.calls = []
+
+    async def hydrate(self, **kwargs):
+        self.calls.append(dict(kwargs))
+        return self.results[len(self.calls) - 1]
+
+
 class _Hydration:
     def __init__(self, provider, result):
         self.provider_registry = _Registry(provider)
@@ -189,6 +200,71 @@ async def test_f5d_gemini_missing_uri_fails_closed():
             body=_asset_body(),
             owner_user_id="owner-f5d",
         )
+
+
+
+
+@pytest.mark.asyncio
+async def test_f5d_partial_multi_asset_failure_is_terminal_on_same_provider():
+    p1 = _Provider("gemini")
+    p2 = _Provider("second")
+    hydration = _SequenceHydration(
+        p1,
+        [
+            HydrationResult(
+                status=HydrationStatus.REUSED,
+                provider_file_id="files/a",
+                provider_uri="https://provider.invalid/files/a",
+                mime_type="application/pdf",
+            ),
+            HydrationResult(
+                status=HydrationStatus.HYDRATION_OUTCOME_UNKNOWN,
+            ),
+        ],
+    )
+    hook = CanonicalAssetProviderProjectionHook(hydration)
+    executor = _Executor(None)
+    handler = ChatExecutionHandler(
+        providers={"gemini": p1, "second": p2},
+        routing_policy=_Routing([p1, p2]),
+        executor=executor,
+        circuit_breaker_manager=SimpleNamespace(),
+        asset_projection_hook=hook,
+    )
+    body = _asset_body()
+    body["messages"][0]["content"].append(
+        {
+            "type": "file",
+            "data": {
+                "attachment": {
+                    "asset_id": "asset-f5d-p1-b",
+                    "source": "asset",
+                    "uri": "asset://asset-f5d-p1-b",
+                    "mime_type": "application/pdf",
+                }
+            },
+        }
+    )
+    original = deepcopy(body)
+
+    with pytest.raises(
+        ProviderAssetProjectionError,
+        match="HYDRATION_OUTCOME_UNKNOWN",
+    ):
+        await handler.execute_with_fallback(
+            object(),
+            body,
+            owner_user_id="owner-f5d",
+        )
+
+    assert body == original
+    assert [call["asset_id"] for call in hydration.calls] == [
+        "asset-f5d-p1",
+        "asset-f5d-p1-b",
+    ]
+    assert all(call["provider_name"] == "gemini" for call in hydration.calls)
+    assert executor.calls == []
+    assert p2.probes == 0
 
 
 @pytest.mark.asyncio
