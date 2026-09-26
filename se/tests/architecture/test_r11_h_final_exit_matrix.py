@@ -17,12 +17,18 @@ def test_r11_h_is_pinned_to_exact_claim_and_final_gate():
     for phrase in (
         "main@ede34b9f495981684edb841d3a8f28aea074ff33",
         "post-wave Architecture #1355 GREEN/GREEN",
+        "Architecture #1356 / run `36231568069`",
+        "Linux SUCCESS",
+        "Windows SUCCESS",
         "No O(N²) checkpoint growth",
         "exact-head Architecture Linux + Windows GREEN",
         "independent exact-head audit",
         "no production/runtime/schema/migration",
     ):
         assert phrase in text
+
+    for stale_marker in ("PRE-CI", "PENDING candidate CI"):
+        assert stale_marker not in text
 
 
 def test_r11_h_disposes_every_r11_a_baseline_dimension():
