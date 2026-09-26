@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from copy import deepcopy
 from types import SimpleNamespace
 
@@ -12,7 +14,10 @@ from se.src.provider.asset_projection import (
     ProviderAttemptProjection,
     TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY,
 )
-from se.src.provider.exceptions import ProviderUnavailableError
+from se.src.provider.exceptions import (
+    ProviderDeadlineExceededError,
+    ProviderUnavailableError,
+)
 from se.src.provider.gemini.converters.chats.request import RequestChats
 from se.src.provider.handlers.chat_handler import ChatExecutionHandler
 from se.src.domain.schemas.message import GatewayMessage
@@ -92,6 +97,26 @@ class _Executor:
         if self.error is not None:
             raise self.error
         yield "ok"
+
+
+class _BlockingHook:
+    def __init__(self):
+        self.started = asyncio.Event()
+        self.cancelled = False
+
+    @staticmethod
+    def contains_canonical_assets(body):
+        return True
+
+    async def project_attempt(self, *, provider, body, owner_user_id):
+        self.started.set()
+        blocker = asyncio.Event()
+        try:
+            await blocker.wait()
+        except asyncio.CancelledError:
+            self.cancelled = True
+            raise
+        raise AssertionError("blocking hook unexpectedly resumed")
 
 
 class _EngagedHook:
@@ -587,6 +612,67 @@ async def test_f5d_stream_provider_failure_after_hook_never_falls_back():
             pass
 
     assert [name for name, _ in executor.calls] == ["gemini"]
+    assert p2.probes == 0
+
+
+@pytest.mark.asyncio
+async def test_f5d_nonstream_projection_uses_same_caller_bounded_provider_deadline():
+    p1 = _Provider("gemini")
+    p2 = _Provider("second")
+    hook = _BlockingHook()
+    executor = _Executor(None)
+    handler = ChatExecutionHandler(
+        providers={"gemini": p1, "second": p2},
+        routing_policy=_Routing([p1, p2]),
+        executor=executor,
+        circuit_breaker_manager=SimpleNamespace(),
+        timeout=60.0,
+        asset_projection_hook=hook,
+    )
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        await handler.execute_with_fallback(
+            object(),
+            _asset_body(),
+            owner_user_id="owner-f5d",
+            deadline_monotonic=time.monotonic() + 0.02,
+        )
+
+    assert hook.started.is_set()
+    assert hook.cancelled is True
+    assert executor.calls == []
+    assert p1.probes == 1
+    assert p2.probes == 0
+
+
+@pytest.mark.asyncio
+async def test_f5d_stream_projection_uses_same_caller_bounded_provider_deadline():
+    p1 = _Provider("gemini")
+    p2 = _Provider("second")
+    hook = _BlockingHook()
+    executor = _Executor(None)
+    handler = ChatExecutionHandler(
+        providers={"gemini": p1, "second": p2},
+        routing_policy=_Routing([p1, p2]),
+        executor=executor,
+        circuit_breaker_manager=SimpleNamespace(),
+        timeout=60.0,
+        asset_projection_hook=hook,
+    )
+
+    with pytest.raises(ProviderDeadlineExceededError):
+        async for _ in handler.stream_with_fallback(
+            object(),
+            _asset_body(),
+            owner_user_id="owner-f5d",
+            deadline_monotonic=time.monotonic() + 0.02,
+        ):
+            pass
+
+    assert hook.started.is_set()
+    assert hook.cancelled is True
+    assert executor.calls == []
+    assert p1.probes == 1
     assert p2.probes == 0
 
 
