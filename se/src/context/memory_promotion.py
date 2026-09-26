@@ -132,9 +132,9 @@ def _validate_frozen_metadata(value: Any, *, path: str = "$.metadata") -> None:
     )
 
 
-def _source_snapshot_material(ref: ContextSourceRef) -> dict[str, Any]:
+def _source_snapshot_material(ref: ContextSourceRef) -> bytes:
     validate_context_source_ref_integrity(ref)
-    return ref.model_dump(mode="json")
+    return canonical_memory_bytes(ref.model_dump(mode="json"))
 
 
 class SourcePromotionProof(BaseModel):
@@ -417,7 +417,9 @@ def validate_reservation_matches_intent(
     """Validate exact envelope equality only; this does not authorize promotion."""
     validate_promotion_reservation_integrity(reservation)
     validate_memory_promotion_intent_integrity(intent)
-    if reservation.intent.model_dump(mode="json") != intent.model_dump(mode="json"):
+    if canonical_memory_bytes(
+        reservation.intent.model_dump(mode="json")
+    ) != canonical_memory_bytes(intent.model_dump(mode="json")):
         raise PromotionReservationIntentMismatchError(
             "reservation does not bind the exact supplied intent"
         )
