@@ -92,11 +92,17 @@ class ProviderInferenceAdapter(InferencePort):
                 )
             caller_deadline = deadline_value
 
+        provider_call_kwargs = {
+            "deadline_monotonic": caller_deadline,
+        }
+        if request.owner_user_id:
+            provider_call_kwargs["owner_user_id"] = request.owner_user_id
+
         provider_task = asyncio.create_task(
             handler.execute_with_fallback(
                 self._http_client,
                 body,
-                deadline_monotonic=caller_deadline,
+                **provider_call_kwargs,
             ),
             name=f"inference:{request.execution_id}:{request.request_id}",
         )
