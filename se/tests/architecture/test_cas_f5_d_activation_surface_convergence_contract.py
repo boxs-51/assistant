@@ -131,7 +131,7 @@ def test_direct_and_agent_keep_trusted_owner_handoff_to_shared_handler():
     assert 'provider_call_kwargs["owner_user_id"]' in adapter
     assert "handler.execute_with_fallback(" in adapter
 
-    contract = CONTRACT.read_text(encoding="utf-8")
+    contract = _normalize_ws(CONTRACT.read_text(encoding="utf-8"))
     assert "DIRECT + AGENT only" in contract
     assert "passed separately from provider body/metadata" in contract
 
