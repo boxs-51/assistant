@@ -7,6 +7,7 @@ from ...file_extension import FileHelper
 from ....asset_projection import (
     ProviderAssetProjection,
     TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY,
+    canonical_attachment_from_content_part,
 )
 
 
@@ -26,20 +27,8 @@ class BaseAttachmentHandler(ABC):
         part: Dict[str, Any],
         part_type: str,
     ) -> Optional[Dict[str, Any]]:
-        data = part.get("data")
-        if isinstance(data, dict):
-            attachment = data.get("attachment")
-            if isinstance(attachment, dict):
-                return attachment
-
-        wrapped = part.get(part_type)
-        if isinstance(wrapped, dict):
-            nested = wrapped.get("attachment")
-            if isinstance(nested, dict):
-                return nested
-            if part_type == "file":
-                return wrapped
-        return None
+        del part_type
+        return canonical_attachment_from_content_part(part)
 
     @staticmethod
     def _hydrated_native_file(
