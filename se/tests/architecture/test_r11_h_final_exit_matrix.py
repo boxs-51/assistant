@@ -11,6 +11,19 @@ def _text(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _table_rows(text: str, header: str) -> dict[str, tuple[str, str]]:
+    lines = text.splitlines()
+    start = lines.index(header)
+    rows: dict[str, tuple[str, str]] = {}
+    for line in lines[start + 2 :]:
+        if not line.startswith("|"):
+            break
+        cells = [cell.strip() for cell in line.strip().strip("|").split("|")]
+        assert len(cells) == 3
+        rows[cells[0]] = (cells[1], cells[2])
+    return rows
+
+
 def test_r11_h_is_pinned_to_exact_claim_and_final_gate():
     text = EXIT.read_text(encoding="utf-8")
 
@@ -33,51 +46,87 @@ def test_r11_h_is_pinned_to_exact_claim_and_final_gate():
 
 def test_r11_h_disposes_every_r11_a_baseline_dimension():
     text = EXIT.read_text(encoding="utf-8")
-
-    dimensions = (
-        "checkpoint bytes written",
-        "resume latency p50/p95/p99",
-        "reconstruction latency p50/p95/p99",
-        "branch create latency",
-        "DB writes per Agent iteration",
-        "rows per Task",
-        "memory per active execution",
-        "TaskBudget contention",
-        "reconstruction depth",
-        "SQL statement count",
-        "flush count",
+    rows = _table_rows(
+        text,
+        "| R11-A dimension | Final disposition | Rationale / final evidence |",
     )
-    for dimension in dimensions:
-        assert f"**{dimension}**" in text
+    expected = {
+        "**checkpoint bytes written**": "**IMPROVED**",
+        "**resume latency p50/p95/p99**": (
+            "**NOT STABLY THRESHOLDABLE with retained measurement evidence**"
+        ),
+        "**reconstruction latency p50/p95/p99**": (
+            "**NOT STABLY THRESHOLDABLE with retained measurement evidence**"
+        ),
+        "**branch create latency**": (
+            "**NOT STABLY THRESHOLDABLE with retained measurement evidence**"
+        ),
+        "**DB writes per Agent iteration**": "**IMPROVED**",
+        "**rows per Task**": "**UNCHANGED / NON-REGRESSED**",
+        "**memory per active execution**": (
+            "**NOT STABLY THRESHOLDABLE with retained measurement evidence**"
+        ),
+        "**TaskBudget contention**": "**UNCHANGED / NON-REGRESSED**",
+        "**reconstruction depth**": "**IMPROVED**",
+        "**SQL statement count**": "**INTENTIONALLY TRADED OFF with rationale**",
+        "**flush count**": "**IMPROVED**",
+    }
 
-    for disposition in (
-        "IMPROVED",
-        "UNCHANGED / NON-REGRESSED",
-        "INTENTIONALLY TRADED OFF with rationale",
-        "NOT STABLY THRESHOLDABLE with retained measurement evidence",
-    ):
-        assert disposition in text
+    assert set(rows) == set(expected)
+    for dimension, disposition in expected.items():
+        actual_disposition, rationale = rows[dimension]
+        assert actual_disposition == disposition
+        assert rationale
 
     assert "No R11-A metric disappears from this final matrix." in text
 
 
 def test_r11_h_freezes_every_required_correctness_exit():
     text = EXIT.read_text(encoding="utf-8")
+    rows = _table_rows(
+        text,
+        "| Required exit evidence | Disposition | Canonical landed evidence |",
+    )
+    expected = {
+        "Linear/bounded checkpoint storage growth": (
+            "PASS",
+            "test_r11_g1_many_checkpoint_ref_backed_growth_is_bounded",
+        ),
+        "Bounded reconstruction depth": ("PASS", "max_delta_depth == 9"),
+        "Historical inline checkpoint compatibility": (
+            "PASS",
+            "test_r11_c_legacy_inline_is_canonicalized",
+        ),
+        "RESUME semantic equivalence": ("PASS", "concurrent RESUME read pressure"),
+        "RETRY semantic equivalence": ("PASS", "concurrent RETRY read pressure"),
+        "FORK semantic equivalence": (
+            "PASS",
+            "build_fork_plan() -> consume_fork_plan() -> list_task_branches()",
+        ),
+        "AGGREGATE semantic equivalence": (
+            "PASS / inherited",
+            "R9-F durable aggregate activation/restart tests",
+        ),
+        "Retention / GC safety": ("PASS", "R11-F0/F1/F1-B/F1-C"),
+        "Transaction atomicity": (
+            "PASS",
+            "test_r11_d_non_task_waiting_update_failure_rolls_back_dual_graph",
+        ),
+        "ClientInvocationLedger retention safety": (
+            "PASS",
+            "test_r11_f0_generic_ttl_collects_terminal_but_preserves_running",
+        ),
+        "Full Architecture Linux + Windows": (
+            "PASS",
+            "Architecture #1356 / run `36231568069`",
+        ),
+    }
 
-    for phrase in (
-        "Linear/bounded checkpoint storage growth",
-        "Bounded reconstruction depth",
-        "Historical inline checkpoint compatibility",
-        "RESUME semantic equivalence",
-        "RETRY semantic equivalence",
-        "FORK semantic equivalence",
-        "AGGREGATE semantic equivalence",
-        "Retention / GC safety",
-        "Transaction atomicity",
-        "ClientInvocationLedger retention safety",
-        "Full Architecture Linux + Windows",
-    ):
-        assert phrase in text
+    assert set(rows) == set(expected)
+    for requirement, (disposition, evidence_token) in expected.items():
+        actual_disposition, evidence = rows[requirement]
+        assert actual_disposition == disposition
+        assert evidence_token in evidence
 
 
 def test_r11_h_binds_to_landed_regression_surfaces():
@@ -87,6 +136,7 @@ def test_r11_h_binds_to_landed_regression_surfaces():
         ),
         "se/tests/architecture/test_r11_a_branch_budget_memory_baseline.py": (
             "test_r11_a_memory_per_active_execution_measurement_method",
+            "test_r11_a_branch_rows_and_synchronized_contention_red_probe",
             "test_r11_a_direct_task_budget_cas_contention_baseline",
         ),
         "se/tests/architecture/test_r11_a_resume_performance_baseline.py": (
@@ -96,6 +146,13 @@ def test_r11_h_binds_to_landed_regression_surfaces():
             "test_r11_c_legacy_inline_is_canonicalized",
             "test_r11_c_dual_compares_canonical_semantics_not_raw_shape",
             "test_r11_c_runtime_readers_do_not_require_inline_snapshot",
+        ),
+        "se/tests/architecture/test_r7_b_atomic_waiting.py": (
+            "test_r11_d_non_task_waiting_update_failure_rolls_back_dual_graph",
+        ),
+        "cl/tests/test_r11_f0_client_ledger_retention.py": (
+            "test_r11_f0_generic_ttl_collects_terminal_but_preserves_running",
+            "test_r11_f0_running_crash_evidence_survives_repeated_far_future_gc",
         ),
         "se/tests/architecture/test_r11_f1_gc_root_closure_contract.py": (
             "test_f1_preserves_r6_client_ledger_terminal_vs_running_fence",
