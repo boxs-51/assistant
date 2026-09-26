@@ -20,6 +20,12 @@ from se.src.infrastructure.storage.repositories.agent import AgentRepository
 ROOT = Path(__file__).resolve().parents[3]
 
 
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _config(database: Path) -> Config:
     config = Config(str(ROOT / "alembic.ini"))
     config.set_main_option(
@@ -281,6 +287,7 @@ async def test_r12_b_generic_repository_round_trip_and_revision_cas() -> None:
             assert updated.revision == 1
             assert updated.owner_instance_id == "worker-r12-b"
             assert updated.lease_expires_at is not None
+            assert _as_utc(updated.lease_expires_at) == expiry
             assert updated.lease_generation == 1
             await session.commit()
 
@@ -290,6 +297,7 @@ async def test_r12_b_generic_repository_round_trip_and_revision_cas() -> None:
             assert loaded is not None
             assert loaded.owner_instance_id == "worker-r12-b"
             assert loaded.lease_expires_at is not None
+            assert _as_utc(loaded.lease_expires_at) == expiry
             assert loaded.lease_generation == 1
 
             stale = await repository.compare_and_set_execution(
