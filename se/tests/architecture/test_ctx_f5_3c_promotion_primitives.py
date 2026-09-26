@@ -78,7 +78,7 @@ def test_ctx_f5_3c_keeps_structural_integrity_separate_from_authorization():
     required = (
         "structural/self-consistency integrity != trusted server authorization",
         "untrusted data envelope until a trusted verifier succeeds",
-        "structural validation does not authorize promotion",
+        "Structural validation does not authorize promotion",
         "trusted server state confirms issuance + exact intent match",
         "issuer/verifier implementation = CLOSED",
         "promotion orchestrator/service = CLOSED",
