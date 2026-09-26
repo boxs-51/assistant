@@ -72,8 +72,14 @@ def test_r12_a_freezes_current_durable_owner_and_lease_gap_without_future_absenc
     ):
         assert existing_field in sql
 
-    assert "owner_instance_id" not in sql
-    assert "lease_expires_at" not in sql
+
+    # Baseline absence is historical contract evidence, not a permanent live-source invariant.
+    assert (
+        "It does not currently store `owner_instance_id`, `lease_expires_at`, "
+        "or an equivalent durable distributed execution-owner lease surface."
+        in contract
+    )
+    assert "R12-B  durable owner/lease representation + migration" in contract
 
     for finding in (
         "P0-R12-A-OWNERSHIP-1",
