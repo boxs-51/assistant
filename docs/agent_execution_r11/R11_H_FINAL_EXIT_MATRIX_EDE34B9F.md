@@ -2,9 +2,10 @@
 
 **Primary authority:** Issue #31  
 **Stage:** R11-H  
-**Status:** H0 FINAL EXIT FREEZE CANDIDATE / PRE-CI  
+**Status:** H0 FINAL EXIT FREEZE CANDIDATE / EXACT-HEAD CI GREEN / PRE-FINAL-AUDIT  
 **Claim baseline:** `main@ede34b9f495981684edb841d3a8f28aea074ff33`  
 **Entry health:** post-wave Architecture #1355 GREEN/GREEN  
+**Candidate CI evidence:** Architecture #1356 / run `36231568069` — Linux SUCCESS / Windows SUCCESS  
 **Branch:** `work/ae-r11-h-final-exit-ede34b9f`  
 **Policy:** Issue #85 v2
 
@@ -45,7 +46,7 @@ Final roadmap gate:
 | Retention / GC safety | PASS | R11-F0/F1/F1-B/F1-C contracts and architecture/integration tests preserve live-root closure, deterministic fail-closed dry-run, transactional deletion, lineage fences and ownership boundaries. |
 | Transaction atomicity | PASS | G1 128-pending workload proves one checkpoint transaction, ordered identities, batched insert shape, no partial collection; F1-C injected-failure tests prove rollback to zero partial GC. |
 | ClientInvocationLedger retention safety | PASS | `test_f1_preserves_r6_client_ledger_terminal_vs_running_fence`: terminal-vs-RUNNING retention authority remains R6-owned and generic R11 GC cannot erase RUNNING crash/replay evidence. |
-| Full Architecture Linux + Windows | PENDING candidate CI | Entry main #1355 is GREEN/GREEN. R11-H candidate requires a fresh exact-head run before FINAL GREEN. |
+| Full Architecture Linux + Windows | PASS | Architecture #1356 / run `36231568069` completed GREEN/GREEN on exact pre-repair candidate `ffcddd7e0110a0237ad591618614e2f358aea0f4`: Linux SUCCESS, Windows SUCCESS. Any replacement evidence-only HEAD must also pass fresh Architecture before FINAL GREEN. |
 
 ## 3. R11-A metric disposition
 
@@ -121,7 +122,7 @@ MATERIAL drift invalidates the affected H gate and requires refresh/re-audit.
 R11-H may be declared FINAL GREEN only after:
 
 1. this exact docs/tests-only scope remains intact;
-2. fresh exact-head Architecture Linux + Windows is GREEN;
+2. Architecture #1356 / run `36231568069` is recorded GREEN/GREEN (Linux SUCCESS / Windows SUCCESS), and any replacement HEAD created by evidence repair also receives fresh exact-head Architecture GREEN;
 3. independent audit confirms every matrix row/evidence reference and finds no
    blocking R11 P0/P1/P2;
 4. review threads are resolved;
