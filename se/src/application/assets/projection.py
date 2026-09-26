@@ -9,6 +9,7 @@ from ...provider.asset_projection import (
     ProviderAssetProjectionError,
     ProviderAttemptProjection,
     TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY,
+    canonical_attachment_from_content_part,
 )
 from .hydration import HydrationStatus
 
@@ -45,31 +46,12 @@ class CanonicalAssetProviderProjectionHook:
             for part in content:
                 if not isinstance(part, dict):
                     continue
-                attachment = cls._attachment_from_part(part)
+                attachment = canonical_attachment_from_content_part(part)
                 if not isinstance(attachment, dict):
                     continue
                 asset_id = attachment.get("asset_id")
                 if isinstance(asset_id, str) and asset_id.strip():
                     yield attachment
-
-    @staticmethod
-    def _attachment_from_part(part: dict[str, Any]):
-        data = part.get("data")
-        if isinstance(data, dict):
-            attachment = data.get("attachment")
-            if isinstance(attachment, dict):
-                return attachment
-
-        part_type = part.get("type")
-        if isinstance(part_type, str):
-            wrapped = part.get(part_type)
-            if isinstance(wrapped, dict):
-                nested = wrapped.get("attachment")
-                if isinstance(nested, dict):
-                    return nested
-                if part_type == "file":
-                    return wrapped
-        return None
 
     def _require_exact_selected_provider(
         self,
