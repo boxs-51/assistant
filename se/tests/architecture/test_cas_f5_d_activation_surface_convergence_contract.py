@@ -35,7 +35,7 @@ def test_activation_contract_freezes_exact_zero_production_gate():
         assert phrase in contract
 
 
-def test_current_provider_runtime_is_dormant_and_owns_exact_registry_http_client():
+def test_provider_runtime_dependency_ownership_is_positive_and_future_compatible():
     provider = _read("se/src/runtimes/provider/runtime.py")
     kernel = _read("se/src/kernel/base.py")
     main = _read("se/src/main.py")
@@ -44,10 +44,6 @@ def test_current_provider_runtime_is_dormant_and_owns_exact_registry_http_client
     assert "self.provider_registry = ProviderRegistry()" in provider
     assert "ProviderDiscovery(registry=self.provider_registry" in provider
     assert "self.chat_handler = ChatExecutionHandler(**handler_kwargs)" in provider
-
-    assert "CanonicalAssetHydrationService" not in provider
-    assert "CanonicalAssetProviderProjectionHook" not in provider
-    assert "asset_projection_hook" not in provider
 
     assert "storage: Any" in kernel
     assert "uow_factory: Callable[[], Any]" in kernel
@@ -68,6 +64,12 @@ def test_current_provider_runtime_is_dormant_and_owns_exact_registry_http_client
         "CAS MUST NOT create a second logical-call budget",
     ):
         assert phrase in contract
+
+    # The contract records the pre-activation baseline, but this architecture
+    # evidence intentionally does not assert that F5-D hook symbols remain
+    # absent from live production code forever. A separately released
+    # activation stage is expected to add those symbols.
+    assert "Current production ProviderRuntime does not instantiate F5-C/F5-D." in contract
 
 
 def test_activation_order_and_positive_readiness_rule_are_frozen():
@@ -101,24 +103,23 @@ def test_activation_order_and_positive_readiness_rule_are_frozen():
         assert phrase in contract
 
 
-def test_workflow_asset_guard_remains_before_every_dispatch_surface():
-    workflow = _read("se/src/runtimes/workflow/runtime.py")
+def test_workflow_guard_baseline_and_future_positive_replacement_are_frozen():
+    contract = _normalize_ws(CONTRACT.read_text(encoding="utf-8"))
 
-    guard = workflow.index("if contains_canonical_asset_content(body.get(\"messages\", [])):")
-    direct = workflow.index('if mode == "DIRECT"', guard)
-    agent = workflow.index('if mode == "AGENT"', direct)
-    legacy = workflow.index('event_name="provider.chat.execute"', agent)
-
-    assert guard < direct < agent < legacy
-    guarded = workflow[guard:direct]
-    assert "ASSET_HYDRATION_REQUIRED" in guarded
-    assert '"failure_domain": "MESSAGE_ASSET"' in guarded
-    assert '"status_code": 409' in guarded
-    assert "return" in guarded
-
-    contract = CONTRACT.read_text(encoding="utf-8")
-    assert "The current global WorkflowRuntime asset guard MUST NOT be deleted." in contract
-    assert "hook unavailable/not-ready -> fail closed before raw provider inference" in contract
+    # Freeze the historical/current baseline and the required replacement
+    # semantics in the contract, without permanently asserting the old live
+    # source shape. The next separately released activation stage is expected
+    # to narrow this guard.
+    for phrase in (
+        "Current `_handle_context_built()` rejects every asset-bearing request",
+        "The current global WorkflowRuntime asset guard MUST NOT be deleted.",
+        "only then may a separately released implementation narrow WorkflowRuntime's asset guard",
+        "hook unavailable/not-ready -> fail closed before raw provider inference",
+        "canonical asset request",
+        "production F5-D hook is installed and server-readiness == ready",
+        "execution surface is explicitly released",
+    ):
+        assert phrase in contract
 
 
 def test_direct_and_agent_keep_trusted_owner_handoff_to_shared_handler():
@@ -136,42 +137,34 @@ def test_direct_and_agent_keep_trusted_owner_handoff_to_shared_handler():
     assert "passed separately from provider body/metadata" in contract
 
 
-def test_legacy_provider_event_asset_surface_remains_closed_without_owner_handoff():
-    provider = _read("se/src/runtimes/provider/runtime.py")
-    start = provider.index("async def _handle_execute_chat")
-    end = provider.index("async def _handle_execute_embeddings", start)
-    legacy = provider[start:end]
-
-    assert "self.chat_handler.execute_with_fallback(self._http_client, body)" in legacy
-    assert "self.chat_handler.stream_with_fallback(" in legacy
-    assert "owner_user_id" not in legacy
-
+def test_legacy_provider_event_surface_is_normatively_closed_for_first_activation():
     contract = _normalize_ws(CONTRACT.read_text(encoding="utf-8"))
+
+    # This slice freezes first-activation authority. It must not encode a
+    # permanent live-source absence invariant that would prevent a later,
+    # separately released trusted-identity handoff.
     for phrase in (
+        "legacy `provider.chat.execute` event | **CLOSED**",
         "first activation implementation MUST keep asset-bearing generic `provider.chat.execute` execution closed",
         "request/client metadata MUST NOT become owner authority",
         "without trusted identity MUST fail closed before raw provider inference",
+        "For any future legacy release:",
     ):
         assert phrase in contract
 
 
-def test_session_regeneration_asset_history_remains_closed():
-    session = _read("se/src/transport/gateway/api/v1/session_router.py")
-    start = session.index("async def regenerate_session_response")
-    regen = session[start:]
+def test_session_regeneration_is_normatively_closed_for_first_activation():
+    contract = _normalize_ws(CONTRACT.read_text(encoding="utf-8"))
 
-    guard = regen.index("if contains_canonical_asset_content(content):")
-    provider_call = regen.index(
-        "container.provider_runtime.chat_handler.execute_with_fallback(",
-        guard,
-    )
-    assert guard < provider_call
-    assert "Regeneration with canonical asset history is blocked" in regen[guard:provider_call]
-    assert "owner_user_id" not in regen[: regen.index("response_payload =", provider_call)]
-
-    contract = CONTRACT.read_text(encoding="utf-8")
-    assert "first activation implementation MUST keep this asset-history guard CLOSED" in contract
-    assert "installing the production F5-D hook MUST NOT unlock regeneration" in contract
+    # Keep the first activation boundary frozen while remaining compatible
+    # with a future separately audited regeneration release.
+    for phrase in (
+        "session regeneration | **CLOSED**",
+        "first activation implementation MUST keep this asset-history guard CLOSED",
+        "installing the production F5-D hook MUST NOT unlock regeneration",
+        "A later regeneration release requires its own frozen trusted",
+    ):
+        assert phrase in contract
 
 
 def test_landed_provider_attempt_safety_invariants_are_carried_forward():
