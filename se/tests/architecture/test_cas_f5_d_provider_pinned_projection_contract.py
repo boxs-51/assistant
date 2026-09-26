@@ -118,6 +118,27 @@ def test_f5d_stream_provider_authority_is_inside_the_eligible_attempt():
     assert "All providers failed before streaming output started." in stream
 
 
+def test_f5d_projection_uses_the_same_r10_provider_call_budget():
+    base = _read("se/src/provider/handlers/base.py")
+    chat = _read("se/src/provider/handlers/chat_handler.py")
+
+    assert "async def _await_provider_operation_with_budget(" in base
+    assert "await_with_provider_deadline(" in base
+    assert "call_budget=call_budget" in base
+
+    assert "call_budget: Any" in chat
+    assert "run_projection(_remaining: float)" in chat
+    assert "self._await_provider_operation_with_budget(" in chat
+    assert 'timeout_message=(' in chat
+
+    nonstream = chat[: chat.index("async def stream_with_fallback")]
+    stream = chat[chat.index("async def stream_with_fallback") :]
+    assert "call_budget=call_budget" in nonstream
+    assert "call_budget=call_budget" in stream
+    assert "except ProviderDeadlineExceededError:" in nonstream
+    assert "except ProviderDeadlineExceededError:" in stream
+
+
 def test_f5d_direct_and_agent_share_one_provider_inference_boundary():
     direct = _read("se/src/runtimes/chat/direct.py")
     agent = _read("se/src/runtimes/agent/runtime.py")
