@@ -279,7 +279,7 @@ async def test_r11_g1_large_pending_batch_is_atomic_ordered_and_batched(
             pending_count=pending_count,
         )
         async with _MeasuredUow(sessions, metrics) as authority_uow:
-            seeded_invocation = await authority_uow.capability_invocations.get(
+            seeded_invocation = await authority_uow.capability_invocations.get_record(
                 pending[0]["invocation_id"]
             )
             assert seeded_invocation is not None
