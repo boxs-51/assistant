@@ -58,9 +58,13 @@ def test_f5d_current_provider_authority_is_inside_the_eligible_attempt():
         "if not await self._has_required_capabilities(",
         loop,
     )
-    executor = source.index("return await self.executor.execute(", capability)
+    projection = source.index(
+        "attempt_body = await self._project_asset_attempt(",
+        capability,
+    )
+    executor = source.index("return await self.executor.execute(", projection)
 
-    assert routing < healthy < loop < capability < executor
+    assert routing < healthy < loop < capability < projection < executor
     assert "provider=provider" in source[executor : executor + 400]
 
     # Current generic fallback still continues after provider errors. F5-D's
@@ -88,9 +92,15 @@ def test_f5d_stream_provider_authority_is_inside_the_eligible_attempt():
         "base_capability=ModelCapability.CHAT_STREAM",
         capability,
     )
-    executor = stream.index("self.executor.execute_stream(", chat_stream)
+    projection = stream.index(
+        "attempt_body = await self._project_asset_attempt(",
+        chat_stream,
+    )
+    executor = stream.index("self.executor.execute_stream(", projection)
 
-    assert routing < healthy < loop < capability < chat_stream < executor
+    assert (
+        routing < healthy < loop < capability < chat_stream < projection < executor
+    )
     assert "provider=provider" in stream[executor : executor + 400]
 
     # Current generic streaming behavior falls back only before visible output:
@@ -113,6 +123,9 @@ def test_f5d_direct_and_agent_share_one_provider_inference_boundary():
     assert "self._inference.complete(InferenceRequest(" in direct
     assert "response = await self._inference.complete(" in agent
     assert "handler.execute_with_fallback(" in adapter
+    assert "owner_user_id=(" in direct
+    assert "str(context.identity.user_id)" in agent
+    assert 'provider_call_kwargs["owner_user_id"]' in adapter
 
     contract = _normalize_ws(CONTRACT.read_text(encoding="utf-8"))
     assert "DIRECT and AGENT must not implement separate hydration algorithms." in contract
@@ -198,7 +211,7 @@ def test_f5d_gemini_missing_provider_uri_is_fail_closed_and_terminal():
     for phrase in required:
         assert phrase in contract
 
-def test_f5d_gemini_native_projection_is_distinct_from_current_inline_reload_path():
+def test_f5d_gemini_native_projection_is_distinct_from_legacy_inline_reload_path():
     attachment = _read(
         "se/src/provider/gemini/converters/chats/acttachment.py"
     )
@@ -210,8 +223,9 @@ def test_f5d_gemini_native_projection_is_distinct_from_current_inline_reload_pat
     assert '"inlineData"' in current_request_projection
     assert "Path(" in current_request_projection
     assert "base64.b64encode" in current_request_projection
-    assert '"fileData"' not in current_request_projection
-    assert '"fileUri"' not in current_request_projection
+    assert '"fileData"' in current_request_projection
+    assert '"fileUri"' in current_request_projection
+    assert "TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY" in current_request_projection
 
     contract = CONTRACT.read_text(encoding="utf-8")
     assert '"fileData"' in contract
@@ -248,10 +262,17 @@ def test_f5d_contract_freezes_current_integration_baseline():
     assert "post-main Architecture #1337 = GREEN/GREEN" in contract
 
 
-def test_f5d_contract_is_explicitly_preimplementation_only():
+def test_f5d_first_production_slice_is_implemented_but_dormant():
     contract = CONTRACT.read_text(encoding="utf-8")
     chat_handler = _read("se/src/provider/handlers/chat_handler.py")
+    projection = _read("se/src/application/assets/projection.py")
+    workflow = _read("se/src/runtimes/workflow/runtime.py")
+    bootstrap = _read("se/src/main.py")
 
+    # The landed document remains the historical zero-production authority
+    # freeze; this follow-on slice realizes it without activating public flow.
     assert "production/runtime/schema/migration delta = 0" in contract
-    assert "F5-D production implementation remains CLOSED" in contract
-    assert "CanonicalAssetHydrationService" not in chat_handler
+    assert "CanonicalAssetProviderProjectionHook" in projection
+    assert "asset_projection_hook" in chat_handler
+    assert "ASSET_HYDRATION_REQUIRED" in workflow
+    assert "CanonicalAssetProviderProjectionHook" not in bootstrap
