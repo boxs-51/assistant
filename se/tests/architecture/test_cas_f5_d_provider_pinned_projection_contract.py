@@ -38,6 +38,7 @@ def test_f5d_contract_freezes_attempt_scoped_provider_handoff_and_fallback():
         "HYDRATION_PERSISTENCE_CONFLICT",
         "A SAFE local hydration failure is not permission to try another provider.",
         "fallback-terminal for the logical inference",
+        "entering the F5-D hydration/projection hook latches",
         "MUST NOT silently continue to the next provider",
         "MUST NOT hydrate/project the same canonical asset into a second provider",
         "Provider fallback remains ProviderRuntime/provider-handler authority **before**",
@@ -157,6 +158,45 @@ def test_f5d_canonical_asset_cannot_persist_provider_native_identity(payload):
     assert "persisted canonical `GatewayAttachment(asset_id=...)`" in contract
     assert "Provider identity is secondary execution state" in contract
 
+
+def test_f5d_asset_hook_terminal_latch_covers_partial_multi_asset_failure():
+    contract = _normalize_ws(CONTRACT.read_text(encoding="utf-8"))
+
+    required = (
+        "entering the F5-D hydration/projection hook latches that logical inference as fallback-terminal",
+        "before the first asset hydration result is processed",
+        "The latch MUST NOT be deferred until the complete transient request projection has been built.",
+        "the first `REUSED` or `HYDRATED` asset result cannot weaken or defer this latch",
+        "if asset A is reused/hydrated and any later asset B fails",
+        "MUST fail closed on the same exact provider attempt",
+        "MUST NOT restart hydration/projection on a different provider",
+        "applies equally to stream and non-stream execution",
+    )
+    for phrase in required:
+        assert phrase in contract
+
+
+def test_f5d_gemini_missing_provider_uri_is_fail_closed_and_terminal():
+    interface = _read("se/src/provider/core/interfaces/file.py")
+    hydration = _read("se/src/application/assets/hydration.py")
+    gemini = _read("se/src/provider/gemini/api/files.py")
+
+    assert "provider_uri: str | None = None" in interface
+    assert "provider_uri: Optional[str] = None" in hydration
+    assert 'provider_uri=getattr(attachment, "uri", None)' in gemini
+
+    contract = _normalize_ws(CONTRACT.read_text(encoding="utf-8"))
+    required = (
+        "provider-specific projection eligibility requires every provider-native field required by that provider",
+        "for Gemini, `provider_uri` / `fileUri` MUST be a server-proven non-blank string",
+        "with missing or blank `provider_uri` MUST fail closed before provider inference",
+        "remains fallback-terminal under the F5-D hook latch",
+        "MUST NOT be reconstructed from client metadata",
+        "guessed from `provider_file_id`",
+        "switching to another provider",
+    )
+    for phrase in required:
+        assert phrase in contract
 
 def test_f5d_gemini_native_projection_is_distinct_from_current_inline_reload_path():
     attachment = _read(

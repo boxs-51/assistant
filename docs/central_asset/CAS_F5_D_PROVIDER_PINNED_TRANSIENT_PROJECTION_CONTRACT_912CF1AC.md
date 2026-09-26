@@ -6,7 +6,7 @@ This document is the contract / authority freeze for CAS-F5-D.
 
 ```text
 primary workspace = Issue #74
-canonical stacked-development policy = Issue #85 v1
+canonical stacked-development policy = Issue #85 v2 / Integration Wave #99
 stage = CAS-F5-D
 mode = CONTRACT / AUTHORITY FREEZE
 canonical main = fd3c3a146f0775ce357b846341f99475af55c665
@@ -149,13 +149,24 @@ UNKNOWN is never automatic re-upload or automatic recovery authority.
 
 This contract deliberately chooses the conservative fail-closed policy.
 
-**Once an asset-bearing exact-provider attempt reaches REUSED or HYDRATED and a
-transient provider-native projection is built, that provider attempt is
-fallback-terminal for the logical inference.**
+**For an asset-bearing exact-provider attempt, entering the F5-D
+hydration/projection hook latches that logical inference as fallback-terminal
+before the first asset hydration result is processed.** The latch is
+attempt-scoped and applies equally to stream and non-stream execution.
 
-After that point:
+The latch MUST NOT be deferred until the complete transient request projection
+has been built. In particular:
+- the first `REUSED` or `HYDRATED` asset result cannot weaken or defer this
+  latch;
+- if asset A is reused/hydrated and any later asset B fails, is UNKNOWN, drifts,
+  loses persistence authority, lacks required provider-native projection
+  fields, or otherwise cannot be projected, the logical inference MUST fail
+  closed on the same exact provider attempt;
+- that partial multi-asset failure MUST NOT restart hydration/projection on a
+  different provider;
 - a `ProviderError`, transport error, HTTP status error, timeout, cancellation,
-  or provider inference failure MUST NOT silently continue to the next provider;
+  or provider inference failure MUST NOT silently continue to the next provider
+  after the F5-D hook has been entered;
 - the same logical inference MUST NOT hydrate/project the same canonical asset
   into a second provider;
 - F5-D MUST NOT create multi-provider remote asset state as an implicit
@@ -163,7 +174,9 @@ After that point:
 
 Provider fallback remains ProviderRuntime/provider-handler authority **before**
 the F5-D hook is engaged, for example when a provider is rejected by health or
-capability eligibility without asset hydration/projection.
+capability eligibility without entering asset hydration/projection. A SAFE
+hydration failure inside the hook is fail-closed on that attempt and is not
+provider-fallback authority.
 
 Changing this fallback-terminal rule requires a separately audited contract
 revision. F5-D production code must not invent a weaker rule.
@@ -193,11 +206,27 @@ request-copy projection equivalent to:
 
 Normative rules:
 - `fileUri` comes only from the exact successful/reused F5-C provider identity;
+- provider-specific projection eligibility requires every provider-native field
+  required by that provider, not merely a `REUSED` or `HYDRATED` status;
+- for Gemini, `provider_uri` / `fileUri` MUST be a server-proven non-blank
+  string before projection is eligible;
+- a Gemini `REUSED` or `HYDRATED` result with missing or blank
+  `provider_uri` MUST fail closed before provider inference and remains
+  fallback-terminal under the F5-D hook latch;
+- missing Gemini URI authority MUST NOT be reconstructed from client metadata,
+  guessed from `provider_file_id`, derived from a local path, or recovered by
+  switching to another provider;
 - mime type comes from trusted canonical/server state;
 - no local-path reload;
 - no base64 reload of an already hydrated provider file;
 - no provider URI copied back into canonical attachment/message persistence;
 - no client-supplied `fileData` becomes CAS authorization.
+
+Current source permits this missing-URI state: `ProviderUploadOutcome` and
+`HydrationResult` both model `provider_uri` as optional, and Gemini forwards
+the adapted attachment URI with `getattr(..., "uri", None)`. F5-D therefore
+must validate provider-native projection requirements separately from F5-C
+hydration success.
 
 Provider-specific shape belongs at the provider request conversion boundary,
 not in canonical domain persistence.
