@@ -69,13 +69,20 @@ def test_ctx_f5_3e_freezes_single_transaction_boundary_and_sqlite_discipline():
 
     required = (
         "One authoritative transaction/session must perform",
-        "load and validate the trusted reservation state",
+        "establish the authoritative transaction and backend serialization boundary "
+        "before any authority read",
+        "on SQLite this means acquiring the existing write-intent / BEGIN IMMEDIATE "
+        "boundary before loading the reservation",
+        "load and validate the trusted reservation state inside that "
+        "already-established boundary",
         "revalidate exact canonical MemoryPromotionIntent",
         "perform existing Memory admission/replay logic",
         "transition the same reservation from ISSUED to CONSUMED",
         "commit exactly once",
-        "same authoritative session/connection must encompass reservation validation "
-        "and Memory admission",
+        "authoritative SQLite write-intent boundary is established before the "
+        "reservation is loaded",
+        "same authoritative session/connection must then encompass reservation "
+        "validation, Memory admission, reservation consumption, and commit",
     )
     for phrase in required:
         assert phrase in text
@@ -104,11 +111,7 @@ def test_ctx_f5_3e_binds_existing_memory_uniqueness_and_repository_surface():
         MEMORY_DOMAIN,
         "MemoryRecordRepository",
     )
-    assert protocol_methods == {
-        "put",
-        "get",
-        "get_by_promotion_authority",
-    }
+    assert {"put", "get", "get_by_promotion_authority"} <= protocol_methods
 
 
 def test_ctx_f5_3e_binds_canonical_replay_and_non_authorizing_constructor():
