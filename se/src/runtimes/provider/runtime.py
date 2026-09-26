@@ -12,6 +12,8 @@ from ...provider.executor import ProviderExecutor
 from ...provider.exceptions import NoAvailableProviderError, ProviderError
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
+from ...application.assets.hydration import CanonicalAssetHydrationService
+from ...application.assets.projection import CanonicalAssetProviderProjectionHook
 
 # Import các Handlers mới tách
 from ...provider.handlers.chat_handler import ChatExecutionHandler
@@ -66,6 +68,14 @@ class ProviderRuntime(BaseRuntime):
         self.providers: Dict[str, Any] = {}
         self._http_client: Optional[httpx.AsyncClient] = None
 
+        # CAS-F5-D activation state. Readiness is server-owned and remains
+        # false until the exact hydration/projection dependency chain is
+        # constructed and injected into the production chat handler.
+        self._asset_hydration_service: Optional[CanonicalAssetHydrationService] = None
+        self._asset_projection_hook: Optional[CanonicalAssetProviderProjectionHook] = None
+        self._asset_projection_configured = False
+        self._asset_projection_ready = False
+
         # Handlers
         self.chat_handler: Optional[ChatExecutionHandler] = None
         self.embedding_handler: Optional[EmbeddingExecutionHandler] = None
@@ -74,6 +84,93 @@ class ProviderRuntime(BaseRuntime):
 
         self.event_bus: Optional[EventBus] = None
         self._subscribed = False
+
+    @property
+    def asset_projection_ready(self) -> bool:
+        return bool(
+            self._asset_projection_ready
+            and self._asset_projection_configured
+            and self.chat_handler is not None
+            and self._asset_projection_hook is not None
+            and getattr(self.chat_handler, "asset_projection_hook", None)
+            is self._asset_projection_hook
+        )
+
+    def _build_asset_projection_hook(
+        self,
+        context: RuntimeContext,
+    ) -> Optional[CanonicalAssetProviderProjectionHook]:
+        """Build the bounded CAS-F5-D activation chain or remain fail-closed."""
+
+        self._asset_hydration_service = None
+        self._asset_projection_hook = None
+        self._asset_projection_configured = False
+        self._asset_projection_ready = False
+
+        try:
+            storage_driver = context.config.assets.storage_driver
+            is_available = getattr(context.storage, "is_driver_available", None)
+            get_object_store = getattr(
+                context.storage,
+                "get_object_storage_driver",
+                None,
+            )
+            if not callable(is_available) or not is_available(storage_driver):
+                logger.warning(
+                    "CAS-F5-D asset projection remains unavailable: "
+                    "configured object storage is not ready.",
+                    driver=storage_driver,
+                )
+                return None
+            if not callable(get_object_store):
+                logger.warning(
+                    "CAS-F5-D asset projection remains unavailable: "
+                    "object storage lookup is not supported."
+                )
+                return None
+            if self.provider_registry is None:
+                logger.warning(
+                    "CAS-F5-D asset projection remains unavailable: "
+                    "provider registry is not initialized."
+                )
+                return None
+            if self._http_client is None:
+                logger.warning(
+                    "CAS-F5-D asset projection remains unavailable: "
+                    "shared application HTTP client is missing."
+                )
+                return None
+            if not callable(context.uow_factory):
+                logger.warning(
+                    "CAS-F5-D asset projection remains unavailable: "
+                    "application UoW factory is missing."
+                )
+                return None
+
+            object_store = get_object_store(storage_driver)
+            hydration = CanonicalAssetHydrationService(
+                uow_factory=context.uow_factory,
+                object_store=object_store,
+                provider_registry=self.provider_registry,
+                http_client=self._http_client,
+                timeout=getattr(context.config.provider, "timeout", None),
+            )
+            hook = CanonicalAssetProviderProjectionHook(hydration)
+            self._asset_hydration_service = hydration
+            self._asset_projection_hook = hook
+            return hook
+        except Exception as exc:
+            # Asset activation is optional for ordinary text inference. A
+            # dependency/configuration failure therefore degrades only the
+            # canonical-asset surface and must never fall through to raw
+            # provider inference.
+            logger.warning(
+                "CAS-F5-D asset projection initialization failed; "
+                "canonical assets remain fail-closed.",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return None
 
     async def initialize(self, context: RuntimeContext) -> None:
         """Khởi tạo Discovery, Registry & khởi tạo Handlers."""
@@ -91,6 +188,8 @@ class ProviderRuntime(BaseRuntime):
         self.routing_policy = RoutingPolicy(providers=self.providers, config=context.config.provider)
         self.executor = ProviderExecutor(self.circuit_breaker_manager, config=context.config)
 
+        asset_projection_hook = self._build_asset_projection_hook(context)
+
         # Khởi tạo các Sub-handlers
         handler_kwargs = {
             "providers": self.providers,
@@ -100,6 +199,11 @@ class ProviderRuntime(BaseRuntime):
             "timeout": context.config.provider.timeout,
         }
         self.chat_handler = ChatExecutionHandler(**handler_kwargs)
+        self.chat_handler.asset_projection_hook = asset_projection_hook
+        self._asset_projection_configured = bool(
+            asset_projection_hook is not None
+            and self.chat_handler.asset_projection_hook is asset_projection_hook
+        )
         self.embedding_handler = EmbeddingExecutionHandler(**handler_kwargs)
         self.model_handler = ModelOperationHandler(**handler_kwargs)
         self.file_handler = FileOperationHandler(**handler_kwargs)
@@ -119,10 +223,15 @@ class ProviderRuntime(BaseRuntime):
 
     async def start(self) -> None:
         self._is_running = True
-        logger.info("ProviderRuntime started.")
+        self._asset_projection_ready = self._asset_projection_configured
+        logger.info(
+            "ProviderRuntime started.",
+            asset_projection_ready=self.asset_projection_ready,
+        )
 
     async def stop(self) -> None:
         self._is_running = False
+        self._asset_projection_ready = False
         if self.event_bus is not None and self._subscribed:
             self.event_bus.unsubscribe("provider.chat.execute", self._handle_execute_chat)
             self.event_bus.unsubscribe("provider.embeddings.execute", self._handle_execute_embeddings)
