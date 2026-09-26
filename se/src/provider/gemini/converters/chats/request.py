@@ -11,6 +11,7 @@ from ....core.tool_contract import (
     ProviderToolNameMap,
     normalize_provider_tool_schema,
 )
+from ....core.asset_projection import ProviderAssetProjection
 from ....core.tool_request_context import build_request_tool_name_map
 from .....domain.schemas import GatewayToolDefinition
 from .acttachment import (
@@ -64,6 +65,38 @@ class RequestChats:
 
         # Preserve an explicit empty string, but never propagate None.
         return direct if isinstance(direct, str) else None
+
+    @staticmethod
+    def _provider_asset_part(part: Dict[str, Any]) -> Dict[str, Any] | None:
+        projection = part.get("_provider_asset_projection")
+        if projection is None:
+            return None
+        if not isinstance(projection, ProviderAssetProjection):
+            raise ProviderToolContractError(
+                "Provider asset projection marker must be execution-local authority."
+            )
+        if projection.provider_name != "gemini":
+            raise ProviderToolContractError(
+                "Gemini request received projection for a different provider."
+            )
+        if not projection.provider_namespace.strip():
+            raise ProviderToolContractError(
+                "Gemini provider asset projection requires server namespace."
+            )
+        if not projection.provider_uri or not projection.provider_uri.strip():
+            raise ProviderToolContractError(
+                "Gemini provider asset projection requires non-blank fileUri."
+            )
+        if not projection.mime_type.strip():
+            raise ProviderToolContractError(
+                "Gemini provider asset projection requires canonical mime type."
+            )
+        return {
+            "fileData": {
+                "mimeType": projection.mime_type,
+                "fileUri": projection.provider_uri,
+            }
+        }
 
     def _process_flat_text_content(self, text_content: str) -> List[Dict[str, Any]]:
         """
@@ -206,6 +239,10 @@ class RequestChats:
                         gemini_parts.extend(self._process_flat_text_content(content))
                     elif isinstance(content, list):
                         for part in content:
+                            provider_asset = self._provider_asset_part(part)
+                            if provider_asset is not None:
+                                gemini_parts.append(provider_asset)
+                                continue
                             if part.get("type") == "text" or "text" in part:
                                 text_val = self._extract_text_part(part)
                                 if text_val is None:
@@ -259,6 +296,10 @@ class RequestChats:
                     gemini_parts.extend(processed_parts)
                 elif isinstance(content, list):
                     for part in content:
+                        provider_asset = self._provider_asset_part(part)
+                        if provider_asset is not None:
+                            gemini_parts.append(provider_asset)
+                            continue
                         raw_type = part.get("type")
                         part_type = raw_type.value if hasattr(raw_type, "value") else str(raw_type)
                         

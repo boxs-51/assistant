@@ -129,6 +129,7 @@ class InferenceRequest(BaseModel):
         exclude=True,
     )
     cancellation_event: Any = None
+    owner_user_id: str | None = Field(default=None, exclude=True)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 

@@ -97,6 +97,7 @@ class ProviderInferenceAdapter(InferencePort):
                 self._http_client,
                 body,
                 deadline_monotonic=caller_deadline,
+                owner_user_id=request.owner_user_id,
             ),
             name=f"inference:{request.execution_id}:{request.request_id}",
         )

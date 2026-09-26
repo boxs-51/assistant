@@ -4,6 +4,9 @@ import structlog
 from typing import Dict, Any, Optional
 
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
+from ...application.assets.hydration import CanonicalAssetHydrationService
+from ...application.assets.projection import ProviderPinnedAssetProjector
+from ...domain.schemas.identity import Identity
 
 from ...provider.registry import ProviderRegistry
 from ...provider.discovery import ProviderDiscovery
@@ -65,6 +68,8 @@ class ProviderRuntime(BaseRuntime):
         self.routing_policy: Optional[RoutingPolicy] = None
         self.providers: Dict[str, Any] = {}
         self._http_client: Optional[httpx.AsyncClient] = None
+        self.asset_hydration_service: Optional[CanonicalAssetHydrationService] = None
+        self.asset_projector: Optional[ProviderPinnedAssetProjector] = None
 
         # Handlers
         self.chat_handler: Optional[ChatExecutionHandler] = None
@@ -91,6 +96,22 @@ class ProviderRuntime(BaseRuntime):
         self.routing_policy = RoutingPolicy(providers=self.providers, config=context.config.provider)
         self.executor = ProviderExecutor(self.circuit_breaker_manager, config=context.config)
 
+        # CAS-F5-D production slice is deliberately dormant. Build the real
+        # hydration/projector dependency when Central Asset Storage is available,
+        # but do not activate it until a separately audited integration release.
+        asset_service = getattr(context.container, "asset_service", None)
+        if asset_service is not None:
+            self.asset_hydration_service = CanonicalAssetHydrationService(
+                uow_factory=context.uow_factory,
+                object_store=asset_service.object_store,
+                provider_registry=self.provider_registry,
+                http_client=context.http_client,
+                timeout=context.config.provider.timeout,
+            )
+            self.asset_projector = ProviderPinnedAssetProjector(
+                self.asset_hydration_service
+            )
+
         # Khởi tạo các Sub-handlers
         handler_kwargs = {
             "providers": self.providers,
@@ -99,7 +120,11 @@ class ProviderRuntime(BaseRuntime):
             "circuit_breaker_manager": self.circuit_breaker_manager,
             "timeout": context.config.provider.timeout,
         }
-        self.chat_handler = ChatExecutionHandler(**handler_kwargs)
+        self.chat_handler = ChatExecutionHandler(
+            **handler_kwargs,
+            asset_projector=self.asset_projector,
+            asset_projection_enabled=False,
+        )
         self.embedding_handler = EmbeddingExecutionHandler(**handler_kwargs)
         self.model_handler = ModelOperationHandler(**handler_kwargs)
         self.file_handler = FileOperationHandler(**handler_kwargs)
@@ -137,6 +162,13 @@ class ProviderRuntime(BaseRuntime):
     # EVENT HANDLERS (Chỉ đóng vai trò Router điều hướng đến Handlers)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _trusted_owner_user_id(event: BaseEvent) -> str | None:
+        identity = event.payload.get("identity")
+        if not isinstance(identity, Identity):
+            return None
+        return identity.user_id
+
     async def _handle_execute_chat(self, event: BaseEvent) -> None:
         body = event.payload.get("request_body", {})
         config = body.get("config", {})
@@ -146,7 +178,11 @@ class ProviderRuntime(BaseRuntime):
 
         try:
             if not is_stream:
-                response = await self.chat_handler.execute_with_fallback(self._http_client, body)
+                response = await self.chat_handler.execute_with_fallback(
+                    self._http_client,
+                    body,
+                    owner_user_id=self._trusted_owner_user_id(event),
+                )
                 latency = time.time() - start_time
                 response_metadata = response.metadata.model_dump() if hasattr(response.metadata, "model_dump") else (response.metadata or {})
                 provider_name = response_metadata.get("provider", "unknown")
@@ -166,6 +202,7 @@ class ProviderRuntime(BaseRuntime):
                 stream = self.chat_handler.stream_with_fallback(
                     self._http_client,
                     body,
+                    owner_user_id=self._trusted_owner_user_id(event),
                 )
                 try:
                     async for chunk in stream:

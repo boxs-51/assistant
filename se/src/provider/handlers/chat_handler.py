@@ -1,10 +1,13 @@
+import asyncio
 from typing import Any, AsyncGenerator, Dict
 
 import httpx
 import structlog
 from opentelemetry import trace
 
+from ...application.assets.projection import AssetProjectionError
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
+from ...domain.schemas.message import contains_canonical_asset_content
 from ..exceptions import (
     NoAvailableProviderError,
     ProviderDeadlineExceededError,
@@ -19,6 +22,57 @@ tracer = trace.get_tracer(__name__)
 
 class ChatExecutionHandler(BaseExecutionHandler):
     """Execute chat requests with deterministic provider fallback."""
+
+    def __init__(
+        self,
+        *args,
+        asset_projector=None,
+        asset_projection_enabled: bool = False,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.asset_projector = asset_projector
+        self.asset_projection_enabled = bool(asset_projection_enabled)
+
+    def _asset_hook_engaged(self, body: Dict[str, Any]) -> bool:
+        return bool(
+            self.asset_projection_enabled
+            and self.asset_projector is not None
+            and contains_canonical_asset_content(body.get("messages", []))
+        )
+
+    async def _project_asset_attempt(
+        self,
+        *,
+        body: Dict[str, Any],
+        provider: Any,
+        owner_user_id: str | None,
+        call_budget: Any,
+    ) -> Dict[str, Any]:
+        if not isinstance(owner_user_id, str) or not owner_user_id.strip():
+            raise AssetProjectionError(
+                "CAS-F5-D asset projection requires trusted authenticated owner identity.",
+                provider_name=getattr(provider, "name", None),
+            )
+        remaining = self._remaining_timeout(
+            call_budget,
+            provider_name=getattr(provider, "name", None),
+        )
+        try:
+            projected = await asyncio.wait_for(
+                self.asset_projector.project(
+                    body=body,
+                    owner_user_id=owner_user_id,
+                    provider=provider,
+                ),
+                timeout=remaining,
+            )
+        except asyncio.TimeoutError as exc:
+            raise ProviderDeadlineExceededError(
+                "Provider asset hydration/projection deadline exceeded.",
+                provider_name=getattr(provider, "name", None),
+            ) from exc
+        return projected.body
 
     async def _has_required_capabilities(
         self,
@@ -58,6 +112,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         body: Dict[str, Any],
         *,
         deadline_monotonic: float | None = None,
+        owner_user_id: str | None = None,
     ) -> GatewayResponse:
         model = body.get("model")
         tools_present = bool(body.get("tools"))
@@ -86,6 +141,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         last_provider_name: str | None = None
 
         for provider in healthy_execution_chain:
+            asset_hook_entered = False
             with tracer.start_as_current_span(
                 f"provider_attempt:{provider.name}"
             ) as span:
@@ -101,10 +157,20 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     ):
                         continue
 
+                    attempt_body = body
+                    asset_hook_entered = self._asset_hook_engaged(body)
+                    if asset_hook_entered:
+                        attempt_body = await self._project_asset_attempt(
+                            body=body,
+                            provider=provider,
+                            owner_user_id=owner_user_id,
+                            call_budget=call_budget,
+                        )
+
                     return await self.executor.execute(
                         provider=provider,
                         http_client=http_client,
-                        body=body,
+                        body=attempt_body,
                         timeout=self.timeout,
                         call_budget=call_budget,
                     )
@@ -122,6 +188,10 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         error,
                         provider.name,
                     )
+                    if asset_hook_entered:
+                        if last_detail is error:
+                            raise
+                        raise last_detail from error
                     continue
 
         try:
@@ -163,6 +233,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         body: Dict[str, Any],
         *,
         deadline_monotonic: float | None = None,
+        owner_user_id: str | None = None,
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Stream with fallback allowed only before the first visible chunk."""
 
@@ -194,6 +265,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         for provider in healthy_execution_chain:
             stream_started = False
             provider_stream = None
+            asset_hook_entered = False
             try:
                 if not await self._has_required_capabilities(
                     provider,
@@ -205,10 +277,20 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 ):
                     continue
 
+                attempt_body = body
+                asset_hook_entered = self._asset_hook_engaged(body)
+                if asset_hook_entered:
+                    attempt_body = await self._project_asset_attempt(
+                        body=body,
+                        provider=provider,
+                        owner_user_id=owner_user_id,
+                        call_budget=call_budget,
+                    )
+
                 provider_stream = self.executor.execute_stream(
                     provider=provider,
                     http_client=http_client,
-                    body=body,
+                    body=attempt_body,
                     timeout=self.timeout,
                     call_budget=call_budget,
                 )
@@ -235,7 +317,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     error,
                     provider.name,
                 )
-                if stream_started:
+                if asset_hook_entered or stream_started:
                     if detail is error:
                         raise
                     raise detail from error
