@@ -88,6 +88,7 @@ def test_r12_a_freezes_current_durable_owner_and_lease_gap_without_future_absenc
         "P0-R12-A-RECONCILIATION-4",
         "P1-R12-A-RACE-5",
         "P1-R12-A-BUDGET-6",
+        "P1-R12-A-LEASE-LOSS-FENCING-2",
     ):
         assert finding in contract
 
@@ -127,6 +128,10 @@ def test_r12_a_freezes_inherited_authority_and_no_blind_replay() -> None:
         "R12A-I10",
         "R12A-I11",
         "R12A-I12",
+        "R12A-I13",
+        "R12A-I14",
+        "R12A-I15",
+        "R12A-I16",
     )
     for invariant in invariants:
         assert invariant in text
@@ -136,6 +141,9 @@ def test_r12_a_freezes_inherited_authority_and_no_blind_replay() -> None:
     assert "replay IN_FLIGHT or OUTCOME_UNKNOWN without R6 reconciliation" in text
     assert "Terminal executions are never recovered or resurrected." in text
     assert "RECOVERY remains a wait_reason" in text
+    assert "immediately before every externally visible provider/tool dispatch" in text
+    assert "revision CAS alone is not the external-side-effect fence" in text
+    assert "stop new external dispatch immediately" in text
 
 
 def test_r12_a_freezes_cross_track_boundaries() -> None:
@@ -158,7 +166,7 @@ def test_r12_a_staged_roadmap_and_final_exit_evidence_are_complete() -> None:
 
     stages = (
         "R12-A  HEAD audit + crash-recovery / lease contract freeze",
-        "R12-B  durable owner/lease representation + migration",
+        "R12-B  durable owner/lease/fence representation + migration",
         "R12-C  lease acquire / renew / release authority",
         "R12-D  stale-RUNNING classification + scanner",
         "R12-E  atomic recovery ownership + WAITING(RECOVERY) transition",
@@ -174,6 +182,8 @@ def test_r12_a_staged_roadmap_and_final_exit_evidence_are_complete() -> None:
         "kill worker during remote invocation",
         "restart with orphan durable RUNNING execution",
         "competing recovery workers",
+        "paused/partitioned old owner resumes after lease loss and newer recovery ownership",
+        "stale old owner cannot dispatch provider/tool side effects after fencing authority changes",
         "recovery vs user RESUME",
         "OUTCOME_UNKNOWN no-blind-replay behavior",
         "TaskBudget active-slot preservation",
