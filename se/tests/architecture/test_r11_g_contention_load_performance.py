@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import subprocess
+import sys
 from pathlib import Path
 
 from se.src.runtimes.agent.fork_planning import AgentForkPlanningService
@@ -72,10 +74,10 @@ def test_r11_g0_freezes_atomic_branch_creation_authority():
     for authority_step in (
         "revalidate_fork_plan_in_uow",
         "compare_and_set_task_budget",
-        "save_execution",
-        "save_task_branch",
-        "save_task_branch_context",
-        "save_task_budget_reservation",
+        "save_execution(",
+        "save_task_branch(",
+        "save_task_branch_context(",
+        "save_task_budget_reservation(",
         "await uow.commit()",
     ):
         assert authority_step in source
@@ -127,3 +129,19 @@ def test_r11_g0_keeps_timing_evidence_separate_from_correctness():
         "Any semantic/correctness failure is P0/P1 material regardless of timing",
     ):
         assert phrase in normalized
+
+
+def test_r11_g1_deterministic_matrix_runs_in_fresh_process():
+    target = ROOT / "se/tests/architecture/test_r11_g1_deterministic_load_matrix.py"
+    completed = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", str(target)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        completed.stdout + "\n" + completed.stderr
+    )
