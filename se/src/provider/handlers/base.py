@@ -27,12 +27,14 @@ class BaseExecutionHandler(ABC):
         executor: ProviderExecutor,
         circuit_breaker_manager: CircuitBreakerManager,
         timeout: float | None = None,
+        asset_projection_hook: Any = None,
     ):
         self.providers = providers
         self.routing_policy = routing_policy
         self.executor = executor
         self.circuit_breaker_manager = circuit_breaker_manager
         self.timeout = 60.0 if timeout is None else float(timeout)
+        self.asset_projection_hook = asset_projection_hook
 
     def _new_call_budget(
         self,
