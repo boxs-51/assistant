@@ -3,6 +3,7 @@ from __future__ import annotations
 from copy import deepcopy
 from typing import Any, Dict, Iterator
 
+from ...infrastructure.storage.repositories.assets import AssetRepository
 from ...provider.asset_projection import (
     ProviderAssetProjection,
     ProviderAssetProjectionError,
@@ -70,7 +71,10 @@ class CanonicalAssetProviderProjectionHook:
                     return wrapped
         return None
 
-    def _require_exact_selected_provider(self, provider: Any) -> str:
+    def _require_exact_selected_provider(
+        self,
+        provider: Any,
+    ) -> tuple[str, str]:
         provider_name = str(getattr(provider, "name", "") or "").strip()
         if not provider_name:
             raise ProviderAssetProjectionError(
@@ -83,7 +87,19 @@ class CanonicalAssetProviderProjectionHook:
             raise ProviderAssetProjectionError(
                 "CAS-F5-D selected provider does not match hydration registry authority."
             )
-        return provider_name
+
+        config = getattr(provider, "config", None)
+        try:
+            provider_namespace = (
+                AssetRepository.require_provider_binding_namespace(
+                    getattr(config, "file_binding_namespace", None)
+                )
+            )
+        except ValueError as exc:
+            raise ProviderAssetProjectionError(
+                "CAS-F5-D selected provider has no server binding namespace."
+            ) from exc
+        return provider_name, provider_namespace
 
     async def project_attempt(
         self,
@@ -101,7 +117,9 @@ class CanonicalAssetProviderProjectionHook:
                 "CAS-F5-D canonical asset projection requires trusted owner identity."
             )
 
-        provider_name = self._require_exact_selected_provider(provider)
+        provider_name, provider_namespace = (
+            self._require_exact_selected_provider(provider)
+        )
         if provider_name != "gemini":
             raise ProviderAssetProjectionError(
                 f"CAS-F5-D provider projection is not implemented for '{provider_name}'."
@@ -149,6 +167,7 @@ class CanonicalAssetProviderProjectionHook:
             attachment[TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY] = (
                 ProviderAssetProjection(
                     provider_name=provider_name,
+                    provider_namespace=provider_namespace,
                     provider_file_id=result.provider_file_id,
                     provider_uri=provider_uri,
                     mime_type=mime_type,
