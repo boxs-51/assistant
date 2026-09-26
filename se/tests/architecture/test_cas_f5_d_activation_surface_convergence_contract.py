@@ -69,7 +69,7 @@ def test_provider_runtime_dependency_ownership_is_positive_and_future_compatible
     # evidence intentionally does not assert that F5-D hook symbols remain
     # absent from live production code forever. A separately released
     # activation stage is expected to add those symbols.
-    assert "Current production ProviderRuntime does not instantiate F5-C/F5-D." in contract
+    assert "production ProviderRuntime bootstrap does not instantiate F5-C/F5-D services;" in contract
 
 
 def test_activation_order_and_positive_readiness_rule_are_frozen():
@@ -111,7 +111,7 @@ def test_workflow_guard_baseline_and_future_positive_replacement_are_frozen():
     # source shape. The next separately released activation stage is expected
     # to narrow this guard.
     for phrase in (
-        "Current `_handle_context_built()` rejects every asset-bearing request",
+        "WorkflowRuntime still publishes `ASSET_HYDRATION_REQUIRED` / `MESSAGE_ASSET` / 409 before DIRECT, AGENT or legacy dispatch for canonical assets;",
         "The current global WorkflowRuntime asset guard MUST NOT be deleted.",
         "only then may a separately released implementation narrow WorkflowRuntime's asset guard",
         "hook unavailable/not-ready -> fail closed before raw provider inference",
