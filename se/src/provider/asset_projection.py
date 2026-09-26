@@ -16,6 +16,7 @@ class ProviderAssetProjection:
     """Execution-local provider-native identity for one canonical asset."""
 
     provider_name: str
+    provider_namespace: str
     provider_file_id: str | None
     provider_uri: str
     mime_type: str
