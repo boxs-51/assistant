@@ -37,7 +37,7 @@ def test_f5d_contract_freezes_attempt_scoped_provider_handoff_and_fallback():
         "HYDRATION_FINGERPRINT_DRIFT",
         "HYDRATION_PERSISTENCE_CONFLICT",
         "A SAFE local hydration failure is not permission to try another provider.",
-        "fallback-terminal for the logical inference",
+        "logical inference as fallback-terminal before the first asset hydration result is processed",
         "entering the F5-D hydration/projection hook latches",
         "MUST NOT silently continue to the next provider",
         "MUST NOT hydrate/project the same canonical asset into a second provider",
