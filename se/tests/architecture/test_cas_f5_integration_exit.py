@@ -112,7 +112,15 @@ def test_f5_direct_agent_activation_positive_evidence_is_landed():
     ):
         assert phrase in provider
 
-    assert 'mode not in {"DIRECT", "AGENT"}' in workflow
+    # Exit evidence records DIRECT + AGENT as the initial released
+    # surfaces in the completion document, but must not permanently require
+    # the live WorkflowRuntime surface set to remain exactly two members.
+    document = EXIT.read_text(encoding="utf-8")
+    assert (
+        "DIRECT + AGENT are the only released asset-bearing execution "
+        "surfaces in this initial milestone."
+        in document
+    )
     assert "_canonical_asset_dispatch_ready" in workflow
     assert "owner_user_id=(" in direct
     assert "str(context.identity.user_id)" in agent
