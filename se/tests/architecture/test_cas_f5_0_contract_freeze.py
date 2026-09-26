@@ -113,12 +113,14 @@ def test_f5_0_current_workflow_guard_remains_closed_before_implementation():
 
     guard = asset_guards[0]
 
-    # The fail-closed gate must be the positive detector call itself.
-    # A negated or compound condition would invert/broaden the authority gate
-    # while still containing the helper name in rendered source.
-    assert isinstance(guard.test, ast.Call)
-    assert isinstance(guard.test.func, ast.Name)
-    assert guard.test.func.id == "contains_canonical_asset_content"
+    # F5-D-P2 is the separately released successor that narrows the
+    # historical global gate. Canonical assets still enter the fail-closed
+    # branch unless the positive DIRECT/AGENT activation gate is satisfied.
+    test_source = ast.get_source_segment(source, guard.test) or ""
+    assert isinstance(guard.test, ast.BoolOp)
+    assert isinstance(guard.test.op, ast.And)
+    assert "contains_canonical_asset_content" in test_source
+    assert "_canonical_asset_dispatch_ready" in test_source
 
     guard_source = ast.get_source_segment(source, guard) or ""
 

@@ -95,6 +95,39 @@ class WorkflowRuntime(BaseRuntime):
             payload=event.payload
         ))
 
+    def _canonical_asset_dispatch_ready(
+        self,
+        event: BaseEvent,
+        mode: str,
+    ) -> bool:
+        """Release canonical assets only onto explicitly activated surfaces."""
+
+        if mode not in {"DIRECT", "AGENT"}:
+            return False
+
+        runtime_attr = (
+            "direct_chat_runtime" if mode == "DIRECT" else "agent_runtime"
+        )
+        if getattr(self.container, runtime_attr, None) is None:
+            return False
+
+        provider_runtime = getattr(self.container, "provider_runtime", None)
+        if provider_runtime is None or not bool(
+            getattr(provider_runtime, "asset_projection_ready", False)
+        ):
+            return False
+
+        identity_data = event.payload.get("identity")
+        try:
+            identity = (
+                identity_data
+                if isinstance(identity_data, Identity)
+                else Identity.model_validate(identity_data)
+            )
+        except Exception:
+            return False
+        return bool(str(identity.user_id or "").strip())
+
     async def _handle_context_built(self, event: BaseEvent):
         """Bước 2: Sau khi Context dựng xong -> Yêu cầu Provider Runtime gọi LLM."""
         logger.debug(
@@ -106,7 +139,10 @@ class WorkflowRuntime(BaseRuntime):
         mode = body.pop("_chat_execution_mode", "DIRECT")
         event.payload["request_body"] = body
 
-        if contains_canonical_asset_content(body.get("messages", [])):
+        if (
+            contains_canonical_asset_content(body.get("messages", []))
+            and not self._canonical_asset_dispatch_ready(event, mode)
+        ):
             await self.event_bus.publish(
                 BaseEvent(
                     event_name="provider.failed",
