@@ -8,12 +8,12 @@ body:
         ## Repository governance
 
         All repository work opened with this form is governed by the canonical
-        **Repository Stacked Development & Integration Policy — Issue #85**.
+        **Repository Stacked Development & Integration Wave Policy — Issue #85**.
 
         - Future / unclaimed stages: `FOLLOW-LATEST`.
         - At production CLAIM: record the effective #85 policy version.
         - Local overrides may be stricter, never broader.
-        - Merge authorization remains separate from stage/development progression.
+        - Stable development baselines avoid re-anchor on unrelated NON_MATERIAL main drift.\n        - Merge authorization remains separate from stage/development progression and may be granted per PR or by one explicit READY Integration Wave command.
 
   - type: checkboxes
     id: policy_ack
@@ -24,7 +24,7 @@ body:
           required: true
         - label: "I understand that this issue does not gain runtime/schema/lifecycle/destructive authority merely by referencing #85."
           required: true
-        - label: "I understand that production merge authorization remains a separate gate."
+        - label: "I understand that production merge authorization remains a separate gate and may be granted by one explicit Integration Wave command for a frozen READY manifest."
           required: true
 
   - type: dropdown
@@ -43,8 +43,8 @@ body:
     attributes:
       label: "Effective #85 policy version"
       description: "Use the current #85 version. At production CLAIM this becomes the recorded candidate policy version."
-      placeholder: "v1"
-      value: "v1"
+      placeholder: "v2"
+      value: "v2"
     validations:
       required: true
 
@@ -126,8 +126,8 @@ body:
       description: "Required for any production parent/child. Use N/A for non-production work."
       value: |
         STACK_POLICY_ISSUE    = #85
-        STACK_POLICY_VERSION  = v1
-        STACK_MODE            = <ROOT | STACKED_DEVELOPMENT | N/A>
+        STACK_POLICY_VERSION  = v2
+        STACK_MODE            = <ROOT | STACKED_DEVELOPMENT | N/A>\n        INTEGRATION_MODE      = <SINGLE_LANE | PARALLEL_LANES | N/A>\n        DEVELOPMENT_BASE      = <sha | N/A>\n        WAVE_ID               = <not-assigned | IW-... | N/A>
         STACK_DEPTH           = <0 | 1 | 2 | N/A>
         CANONICAL_MAIN_FORK   = <sha | N/A>
         STACK_PARENT_PR       = <number | none | N/A>
@@ -135,7 +135,7 @@ body:
         CHILD_CLAIM           = <released scope | PRE-CLAIM | N/A>
         CLOSED_AUTHORITIES    = <summary>
         MERGE_ORDER           = <parent first | N/A>
-        INTEGRATION_STATUS    = <NOT_CANONICAL / REQUIRES_POST-PARENT_REFRESH | N/A>
+        DRIFT_CLASS           = <NON_MATERIAL | MATERIAL | N/A>\n        INTEGRATION_STATUS    = <NOT_CANONICAL | WAVE_CANDIDATE | HOLD | N/A>
     validations:
       required: true
 
