@@ -145,6 +145,9 @@ async def test_f5d_projection_is_transient_and_gemini_uses_native_file_data():
     projected_attachment = result.body["messages"][0]["content"][0]["data"]["attachment"]
     assert TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY not in original_attachment
     assert TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY in projected_attachment
+    transient = projected_attachment[TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY]
+    assert transient.provider_name == "gemini"
+    assert transient.provider_namespace == "gemini-scope"
     assert original_attachment["uri"] == "asset://asset-f5d-p1"
 
     gemini = RequestChats().adapt_chat(result.body)
