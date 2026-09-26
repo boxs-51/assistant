@@ -66,6 +66,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         provider: Any,
         body: Dict[str, Any],
         owner_user_id: str | None,
+        call_budget: Any,
     ) -> Dict[str, Any]:
         hook = self.asset_projection_hook
         project = getattr(hook, "project_attempt", None)
@@ -73,10 +74,20 @@ class ChatExecutionHandler(BaseExecutionHandler):
             raise RuntimeError(
                 "CAS-F5-D asset projection hook is not callable."
             )
-        result = await project(
-            provider=provider,
-            body=body,
-            owner_user_id=owner_user_id,
+        async def run_projection(_remaining: float):
+            return await project(
+                provider=provider,
+                body=body,
+                owner_user_id=owner_user_id,
+            )
+
+        result = await self._await_provider_operation_with_budget(
+            run_projection,
+            call_budget=call_budget,
+            provider_name=provider.name,
+            timeout_message=(
+                "Provider asset projection deadline exceeded."
+            ),
         )
         if not getattr(result, "engaged", False):
             raise RuntimeError(
@@ -149,6 +160,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                             provider=provider,
                             body=body,
                             owner_user_id=owner_user_id,
+                            call_budget=call_budget,
                         )
 
                     return await self.executor.execute(
@@ -270,6 +282,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         provider=provider,
                         body=body,
                         owner_user_id=owner_user_id,
+                        call_budget=call_budget,
                     )
 
                 provider_stream = self.executor.execute_stream(
