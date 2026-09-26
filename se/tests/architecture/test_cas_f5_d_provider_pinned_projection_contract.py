@@ -214,6 +214,19 @@ def test_f5d_gemini_missing_provider_uri_is_fail_closed_and_terminal():
     for phrase in required:
         assert phrase in contract
 
+def test_f5d_flat_canonical_file_uses_one_shared_f4_extractor():
+    shared = _read("se/src/provider/asset_projection.py")
+    hook = _read("se/src/application/assets/projection.py")
+    gemini = _read("se/src/provider/gemini/converters/chats/acttachment.py")
+    f4 = _read("se/src/application/messages/service.py")
+
+    canonical_rule = 'part_type == "file" and "attachment" not in data'
+    assert canonical_rule in f4
+    assert canonical_rule in shared
+    assert "canonical_attachment_from_content_part(part)" in hook
+    assert "canonical_attachment_from_content_part(part)" in gemini
+
+
 def test_f5d_gemini_native_projection_is_distinct_from_legacy_inline_reload_path():
     attachment = _read(
         "se/src/provider/gemini/converters/chats/acttachment.py"
