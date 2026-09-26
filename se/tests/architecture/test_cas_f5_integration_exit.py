@@ -136,6 +136,8 @@ def test_f5_exit_preserves_closed_surfaces_normatively_without_future_trap():
         "automatic UNKNOWN reconciliation/recovery",
         "automatic stale-PROCESSING recovery",
         "provider remote file delete/reclamation/cleanup",
+        "binding DELETING/DELETED production lifecycle",
+        "orphan provider-file cleanup",
         "READY FileAsset deletion/release",
         "FileBlob / physical CAS GC or reconciliation",
         "CTX Memory promotion/source-proof authority",
