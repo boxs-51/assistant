@@ -14,7 +14,7 @@ body:
         - At production CLAIM: record the effective #85 policy version.
         - Local overrides may be stricter, never broader.
         - Stable development baselines avoid re-anchor on unrelated NON_MATERIAL main drift.
-        - Merge authorization remains separate from stage/development progression and may be granted per PR or by one explicit READY Integration Wave command.
+        - Active issues may autonomously communicate, negotiate dependencies, and build/revise merge plans or Integration Waves through READY under Policy v2.5.\n        - Merge authorization remains separate from stage/development progression and may be granted per PR or by one explicit READY Integration Wave command.
 
   - type: checkboxes
     id: policy_ack
@@ -44,8 +44,8 @@ body:
     attributes:
       label: "Effective #85 policy version"
       description: "Use the current #85 version. At production CLAIM this becomes the recorded candidate policy version."
-      placeholder: "v2"
-      value: "v2"
+      placeholder: "v2.5"
+      value: "v2.5"
     validations:
       required: true
 
@@ -127,7 +127,7 @@ body:
       description: "Required for any production parent/child. Use N/A for non-production work."
       value: |
         STACK_POLICY_ISSUE    = #85
-        STACK_POLICY_VERSION  = v2
+        STACK_POLICY_VERSION  = v2.5
         STACK_MODE            = <ROOT | STACKED_DEVELOPMENT | N/A>
         INTEGRATION_MODE      = <SINGLE_LANE | PARALLEL_LANES | N/A>
         DEVELOPMENT_BASE      = <sha | N/A>
@@ -141,6 +141,22 @@ body:
         MERGE_ORDER           = <parent first | N/A>
         DRIFT_CLASS           = <NON_MATERIAL | MATERIAL | N/A>
         INTEGRATION_STATUS    = <NOT_CANONICAL | WAVE_CANDIDATE | HOLD | N/A>
+    validations:
+      required: true
+
+  - type: textarea
+    id: merge_planning
+    attributes:
+      label: "Autonomous merge-planning context"
+      description: "Record known merge peers, provisional ordering, blockers, or why this issue should stay outside the current wave. Policy #85 v2.5 allows this plan to evolve autonomously before authorization."
+      value: |
+        MERGE_CANDIDATE       = <PR | not-yet>
+        PEER_CANDIDATES       = <PR refs | NONE>
+        PROPOSED_ORDER        = <order | unresolved>
+        ORDER_RATIONALE       = <short reason>
+        BLOCKERS              = <NONE | refs>
+        NEXT_WAVE_IF_EXCLUDED = <yes/no/N/A>
+        AUTHORIZATION_MODE    = <wave command | local auto-merge exception | manual PR confirmation | unknown>
     validations:
       required: true
 
