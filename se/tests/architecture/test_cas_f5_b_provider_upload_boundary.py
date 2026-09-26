@@ -72,9 +72,11 @@ def test_f5b_workflow_guard_remains_exact_positive_fail_closed_boundary():
     assert len(asset_guards) == 1
 
     guard = asset_guards[0]
-    assert isinstance(guard.test, ast.Call)
-    assert isinstance(guard.test.func, ast.Name)
-    assert guard.test.func.id == "contains_canonical_asset_content"
+    test_source = ast.get_source_segment(source, guard.test) or ""
+    assert isinstance(guard.test, ast.BoolOp)
+    assert isinstance(guard.test.op, ast.And)
+    assert "contains_canonical_asset_content" in test_source
+    assert "_canonical_asset_dispatch_ready" in test_source
 
     guard_source = ast.get_source_segment(source, guard) or ""
     assert "ASSET_HYDRATION_REQUIRED" in guard_source
