@@ -1798,6 +1798,11 @@ class AgentRuntime:
                         ),
                         timeout_seconds=inference_timeout,
                         deadline_monotonic=inference_deadline_monotonic,
+                        owner_user_id=(
+                            str(context.identity.user_id)
+                            if context.identity.user_id
+                            else None
+                        ),
                         cancellation_event=context.cancellation_event,
                         metadata=dict(snapshot.metadata),
                     )
