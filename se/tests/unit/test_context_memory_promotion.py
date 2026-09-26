@@ -33,7 +33,12 @@ from se.src.context.source_identity import (
 NOW = datetime(2026, 9, 26, tzinfo=timezone.utc)
 
 
-def _source(*, authority_id: str = "session-1", owner: str = "user-1"):
+def _source(
+    *,
+    authority_id: str = "session-1",
+    owner: str = "user-1",
+    metadata=None,
+):
     return create_context_source_ref(
         source_kind=ContextSourceKind.SESSION,
         authority_id=authority_id,
@@ -41,7 +46,7 @@ def _source(*, authority_id: str = "session-1", owner: str = "user-1"):
         session_id=authority_id,
         source_created_at=NOW,
         source_state="active",
-        metadata={"label": "canonical"},
+        metadata={"label": "canonical"} if metadata is None else metadata,
     )
 
 
@@ -118,6 +123,21 @@ def test_ctx_f5_3c_intent_binds_exact_source_proof_owner_and_scope():
         _intent(source=source, proof=_proof(source=foreign))
 
 
+@pytest.mark.parametrize(("proof_value", "intent_value"), [(True, 1), (1, 1.0)])
+def test_ctx_f5_3c_source_snapshot_exact_binding_is_type_sensitive(
+    proof_value,
+    intent_value,
+):
+    intent_source = _source(metadata={"flag": intent_value})
+    proof_source = _source(metadata={"flag": proof_value})
+
+    with pytest.raises(ValidationError, match="exact source_ref_snapshot"):
+        _intent(
+            source=intent_source,
+            proof=_proof(source=proof_source),
+        )
+
+
 def test_ctx_f5_3c_intent_reuses_memory_json_canonicality_and_deep_freezes_metadata():
     source = _source()
     metadata = {"labels": [{"name": "alpha"}]}
@@ -167,6 +187,23 @@ def test_ctx_f5_3c_reservation_is_untrusted_envelope_and_exact_intent_match_only
     )
     with pytest.raises(PromotionReservationIntentMismatchError):
         validate_reservation_matches_intent(reservation, different_intent)
+
+
+@pytest.mark.parametrize(("reserved_value", "supplied_value"), [(True, 1), (1, 1.0)])
+def test_ctx_f5_3c_reservation_exact_intent_binding_is_type_sensitive(
+    reserved_value,
+    supplied_value,
+):
+    source = _source()
+    reserved_intent = _intent(source=source, metadata={"flag": reserved_value})
+    supplied_intent = _intent(source=source, metadata={"flag": supplied_value})
+    reservation = PromotionReservation(
+        promotion_authority_id="promotion-1",
+        intent=reserved_intent,
+    )
+
+    with pytest.raises(PromotionReservationIntentMismatchError):
+        validate_reservation_matches_intent(reservation, supplied_intent)
 
 
 def test_ctx_f5_3c_integrity_helpers_fail_closed_on_tampered_stored_values():
