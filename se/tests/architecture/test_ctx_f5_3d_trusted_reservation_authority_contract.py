@@ -183,11 +183,16 @@ def test_ctx_f5_3d_records_parent_first_integration_and_zero_production_scope():
     required = (
         "parent exact FINAL-GREEN HEAD = "
         "4ebaa775ec6ed779aaf2841da70489ff8ae7bc25",
-        "integration status = NOT_CANONICAL",
-        "merge order = #101 first",
+        "parent integration = Wave #102 / COMPLETE / LANDED / CANONICAL / HEALTHY",
+        "canonical integration base = "
+        "main@6228734ae7a380719bb14fa520e3307c5330aa31",
+        "parent-first prerequisite = SATISFIED",
+        "candidate integration state = REFRESHED / AWAITING FRESH CI + "
+        "INDEPENDENT FINAL GREEN",
+        "current PR base = main",
         "F5-3D does not alter se/src/** production code",
         "Issue #15's zero-production auto-merge policy may apply only after "
-        "that parent-first integration boundary is satisfied",
+        "this refreshed integration gate is satisfied",
     )
     for phrase in required:
         assert phrase in text
