@@ -27,12 +27,14 @@ class BaseExecutionHandler(ABC):
         executor: ProviderExecutor,
         circuit_breaker_manager: CircuitBreakerManager,
         timeout: float | None = None,
+        asset_projection_hook: Any = None,
     ):
         self.providers = providers
         self.routing_policy = routing_policy
         self.executor = executor
         self.circuit_breaker_manager = circuit_breaker_manager
         self.timeout = 60.0 if timeout is None else float(timeout)
+        self.asset_projection_hook = asset_projection_hook
 
     def _new_call_budget(
         self,
@@ -106,6 +108,24 @@ class BaseExecutionHandler(ABC):
                 provider_name=provider_name,
             )
         return remaining
+
+    async def _await_provider_operation_with_budget(
+        self,
+        operation,
+        *,
+        call_budget: ProviderCallBudget,
+        provider_name: str,
+        timeout_message: str,
+    ):
+        """Run handler-owned pre-execution work on the one R10 call budget."""
+
+        return await await_with_provider_deadline(
+            operation,
+            call_budget=call_budget,
+            provider_name=provider_name,
+            timeout_message=timeout_message,
+            now_monotonic=monotonic,
+        )
 
     async def _probe_capability_with_budget(
         self,

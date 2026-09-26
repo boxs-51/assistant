@@ -52,12 +52,61 @@ class ChatExecutionHandler(BaseExecutionHandler):
             call_budget=call_budget,
         )
 
+    def _asset_attempt_requires_projection(
+        self,
+        body: Dict[str, Any],
+    ) -> bool:
+        hook = self.asset_projection_hook
+        predicate = getattr(hook, "contains_canonical_assets", None)
+        return bool(hook is not None and callable(predicate) and predicate(body))
+
+    async def _project_asset_attempt(
+        self,
+        *,
+        provider: Any,
+        body: Dict[str, Any],
+        owner_user_id: str | None,
+        call_budget: Any,
+    ) -> Dict[str, Any]:
+        hook = self.asset_projection_hook
+        project = getattr(hook, "project_attempt", None)
+        if not callable(project):
+            raise RuntimeError(
+                "CAS-F5-D asset projection hook is not callable."
+            )
+        async def run_projection(_remaining: float):
+            return await project(
+                provider=provider,
+                body=body,
+                owner_user_id=owner_user_id,
+            )
+
+        result = await self._await_provider_operation_with_budget(
+            run_projection,
+            call_budget=call_budget,
+            provider_name=provider.name,
+            timeout_message=(
+                "Provider asset projection deadline exceeded."
+            ),
+        )
+        if not getattr(result, "engaged", False):
+            raise RuntimeError(
+                "CAS-F5-D asset-bearing attempt did not engage projection."
+            )
+        projected_body = getattr(result, "body", None)
+        if not isinstance(projected_body, dict):
+            raise RuntimeError(
+                "CAS-F5-D projection returned an invalid request copy."
+            )
+        return projected_body
+
     async def execute_with_fallback(
         self,
         http_client: httpx.AsyncClient,
         body: Dict[str, Any],
         *,
         deadline_monotonic: float | None = None,
+        owner_user_id: str | None = None,
     ) -> GatewayResponse:
         model = body.get("model")
         tools_present = bool(body.get("tools"))
@@ -90,6 +139,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 f"provider_attempt:{provider.name}"
             ) as span:
                 span.set_attribute("provider.name", provider.name)
+                asset_attempt_terminal = False
                 try:
                     if not await self._has_required_capabilities(
                         provider,
@@ -101,10 +151,22 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     ):
                         continue
 
+                    attempt_body = body
+                    asset_attempt_terminal = (
+                        self._asset_attempt_requires_projection(body)
+                    )
+                    if asset_attempt_terminal:
+                        attempt_body = await self._project_asset_attempt(
+                            provider=provider,
+                            body=body,
+                            owner_user_id=owner_user_id,
+                            call_budget=call_budget,
+                        )
+
                     return await self.executor.execute(
                         provider=provider,
                         http_client=http_client,
-                        body=body,
+                        body=attempt_body,
                         timeout=self.timeout,
                         call_budget=call_budget,
                     )
@@ -122,6 +184,10 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         error,
                         provider.name,
                     )
+                    if asset_attempt_terminal:
+                        if last_detail is error:
+                            raise
+                        raise last_detail from error
                     continue
 
         try:
@@ -163,6 +229,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         body: Dict[str, Any],
         *,
         deadline_monotonic: float | None = None,
+        owner_user_id: str | None = None,
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Stream with fallback allowed only before the first visible chunk."""
 
@@ -194,6 +261,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         for provider in healthy_execution_chain:
             stream_started = False
             provider_stream = None
+            asset_attempt_terminal = False
             try:
                 if not await self._has_required_capabilities(
                     provider,
@@ -205,10 +273,22 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 ):
                     continue
 
+                attempt_body = body
+                asset_attempt_terminal = (
+                    self._asset_attempt_requires_projection(body)
+                )
+                if asset_attempt_terminal:
+                    attempt_body = await self._project_asset_attempt(
+                        provider=provider,
+                        body=body,
+                        owner_user_id=owner_user_id,
+                        call_budget=call_budget,
+                    )
+
                 provider_stream = self.executor.execute_stream(
                     provider=provider,
                     http_client=http_client,
-                    body=body,
+                    body=attempt_body,
                     timeout=self.timeout,
                     call_budget=call_budget,
                 )
@@ -235,7 +315,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     error,
                     provider.name,
                 )
-                if stream_started:
+                if stream_started or asset_attempt_terminal:
                     if detail is error:
                         raise
                     raise detail from error

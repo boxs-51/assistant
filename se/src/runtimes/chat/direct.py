@@ -98,6 +98,9 @@ class DirectChatRuntime:
                 messages=request_messages,
                 tools=tools,
                 model=model,
+                owner_user_id=(
+                    str(identity.user_id) if identity.user_id else None
+                ),
                 metadata={**dict(metadata or {}), "chat_execution_mode": "DIRECT"},
             ))
             transcript.append(response.message)

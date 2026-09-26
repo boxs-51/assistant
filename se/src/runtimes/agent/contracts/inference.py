@@ -128,6 +128,7 @@ class InferenceRequest(BaseModel):
         default=None,
         exclude=True,
     )
+    owner_user_id: str | None = Field(default=None, exclude=True)
     cancellation_event: Any = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
