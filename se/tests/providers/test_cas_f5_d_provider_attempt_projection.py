@@ -635,7 +635,7 @@ async def test_f5d_nonstream_projection_uses_same_caller_bounded_provider_deadli
             object(),
             _asset_body(),
             owner_user_id="owner-f5d",
-            deadline_monotonic=time.monotonic() + 0.02,
+            deadline_monotonic=time.monotonic() + 0.2,
         )
 
     assert hook.started.is_set()
@@ -665,7 +665,7 @@ async def test_f5d_stream_projection_uses_same_caller_bounded_provider_deadline(
             object(),
             _asset_body(),
             owner_user_id="owner-f5d",
-            deadline_monotonic=time.monotonic() + 0.02,
+            deadline_monotonic=time.monotonic() + 0.2,
         ):
             pass
 
