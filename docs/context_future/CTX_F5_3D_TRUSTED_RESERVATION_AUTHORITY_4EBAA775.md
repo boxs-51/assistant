@@ -9,15 +9,18 @@ Canonical policy: Issue #85 v2.
 parent stage = CTX-F5-3C
 parent PR = #101
 parent exact FINAL-GREEN HEAD = 4ebaa775ec6ed779aaf2841da70489ff8ae7bc25
-parent integration = Wave #102 / READY / NOT AUTHORIZED
+parent integration = Wave #102 / COMPLETE / LANDED / CANONICAL / HEALTHY
+canonical integration base = main@6228734ae7a380719bb14fa520e3307c5330aa31
 F5-3D class = CONTRACT / AUTHORITY FREEZE ONLY
 production delta = ZERO
-integration state = NOT_CANONICAL
-parent-first integration = REQUIRED
+parent-first prerequisite = SATISFIED
+candidate integration state = REFRESHED / AWAITING FRESH CI + INDEPENDENT FINAL GREEN
 concrete supported source kinds = NONE
 ```
 
 F5-3D freezes the trusted server reservation authority semantics that a later implementation must satisfy. It does not implement that authority and does not make Memory promotion executable.
+
+Integration refresh note: parent PR #101 is now canonical through completed Wave #102, and this candidate has been retargeted onto exact `main@6228734ae7a380719bb14fa520e3307c5330aa31`. This metadata refresh does not change any F5-3D authority semantics.
 
 ## Critical operation separation
 
@@ -258,18 +261,19 @@ This document does not grant implementation authority to any of those Protocols.
 
 ## 13. Integration rule
 
-F5-3D is a stacked zero-production child of unmerged F5-3C.
+F5-3D was developed as a stacked zero-production child of F5-3C. The parent-first prerequisite is now satisfied because PR #101 landed through completed Wave #102.
 
 ```text
 development parent = PR #101 exact HEAD 4ebaa775...
-development PR base = parent branch
-integration status = NOT_CANONICAL
-merge order = #101 first
+parent canonical merge / integration main = 6228734ae7a380719bb14fa520e3307c5330aa31
+current PR base = main
+parent-first prerequisite = SATISFIED
+candidate integration status = AWAITING FRESH EXACT-BASE CI + INDEPENDENT FINAL GREEN
 ```
 
-After #101 lands, F5-3D must be refreshed or retargeted to exact canonical main, affected evidence rerun, and independent FINAL GREEN re-established before integration.
+The logical candidate delta remains exactly the two released zero-production F5-3D files. Fresh exact-base evidence and independent integration FINAL GREEN are required before merge eligibility is evaluated.
 
-Issue #15's zero-production auto-merge policy may apply only after that parent-first integration boundary is satisfied.
+Issue #15's zero-production auto-merge policy may apply only after this refreshed integration gate is satisfied.
 
 ## Non-authority statement
 
