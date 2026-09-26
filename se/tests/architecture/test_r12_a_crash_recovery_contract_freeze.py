@@ -79,7 +79,7 @@ def test_r12_a_freezes_current_durable_owner_and_lease_gap_without_future_absenc
         "or an equivalent durable distributed execution-owner lease surface."
         in contract
     )
-    assert "R12-B  durable owner/lease representation + migration" in contract
+    assert "R12-B  durable owner/lease/fence representation + migration" in contract
 
     for finding in (
         "P0-R12-A-OWNERSHIP-1",
