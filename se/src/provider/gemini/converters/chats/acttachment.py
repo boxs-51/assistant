@@ -4,6 +4,10 @@ from pathlib import Path
 from typing import Dict, Any, Optional
 
 from ...file_extension import FileHelper
+from ....asset_projection import (
+    ProviderAssetProjection,
+    TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY,
+)
 
 
 class BaseAttachmentHandler(ABC):
@@ -16,6 +20,44 @@ class BaseAttachmentHandler(ABC):
         Trả về Dictionary cấu trúc phần tử Gemini hoặc None nếu không xử lý được.
         """
         pass
+
+    @staticmethod
+    def _extract_attachment(
+        part: Dict[str, Any],
+        part_type: str,
+    ) -> Optional[Dict[str, Any]]:
+        data = part.get("data")
+        if isinstance(data, dict):
+            attachment = data.get("attachment")
+            if isinstance(attachment, dict):
+                return attachment
+
+        wrapped = part.get(part_type)
+        if isinstance(wrapped, dict):
+            nested = wrapped.get("attachment")
+            if isinstance(nested, dict):
+                return nested
+            if part_type == "file":
+                return wrapped
+        return None
+
+    @staticmethod
+    def _hydrated_native_file(
+        attachment: Dict[str, Any],
+    ) -> Optional[Dict[str, Any]]:
+        projection = attachment.get(
+            TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY
+        )
+        if not isinstance(projection, ProviderAssetProjection):
+            return None
+        if projection.provider_name != "gemini":
+            return None
+        return {
+            "fileData": {
+                "mimeType": projection.mime_type,
+                "fileUri": projection.provider_uri,
+            }
+        }
 
     def _helper_extract_base64_from_uri(self, attachment: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Hàm trợ giúp chung cho các handler để xử lý uri/path/data-url nếu không có base64_data sẵn."""
@@ -44,13 +86,13 @@ class MediaContentHandler(BaseAttachmentHandler):
     """Sub-Adapter chuyên trách xử lý các phân tầng Image, Audio, Video."""
     
     def handle(self, part: Dict[str, Any], part_type: str) -> Optional[Dict[str, Any]]:
-        media_content_obj = part.get(part_type)
-        if not media_content_obj:
-            return None
-            
-        attachment = media_content_obj.get("attachment")
+        attachment = self._extract_attachment(part, part_type)
         if not attachment:
             return None
+
+        hydrated = self._hydrated_native_file(attachment)
+        if hydrated is not None:
+            return hydrated
             
         # Kịch bản A: Khách hàng truyền base64 trực tiếp
         if "base64_data" in attachment and attachment.get("base64_data"):
@@ -77,9 +119,13 @@ class FlatFileHandler(BaseAttachmentHandler):
     """Sub-Adapter chuyên trách xử lý tài liệu đính kèm phẳng không bọc (Trường file)."""
     
     def handle(self, part: Dict[str, Any], part_type: str) -> Optional[Dict[str, Any]]:
-        attachment = part.get("file")
+        attachment = self._extract_attachment(part, part_type)
         if not attachment:
             return None
+
+        hydrated = self._hydrated_native_file(attachment)
+        if hydrated is not None:
+            return hydrated
             
         if "base64_data" in attachment and attachment.get("base64_data"):
             return {
