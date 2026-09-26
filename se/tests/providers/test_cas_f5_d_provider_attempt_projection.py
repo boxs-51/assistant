@@ -129,6 +129,28 @@ def _asset_body():
     }
 
 
+def _flat_asset_body():
+    return {
+        "model": "logical-model",
+        "messages": [
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "file",
+                        "data": {
+                            "asset_id": "asset-f5d-flat",
+                            "source": "asset",
+                            "uri": "asset://asset-f5d-flat",
+                            "mime_type": "application/pdf",
+                        },
+                    }
+                ],
+            }
+        ],
+    }
+
+
 @pytest.mark.asyncio
 async def test_f5d_projection_is_transient_and_gemini_uses_native_file_data():
     provider = _Provider("gemini")
@@ -178,6 +200,92 @@ async def test_f5d_projection_is_transient_and_gemini_uses_native_file_data():
         }
     ]
 
+
+
+@pytest.mark.asyncio
+async def test_f5d_flat_canonical_file_is_hydrated_and_projected_natively():
+    provider = _Provider("gemini")
+    hydration = _Hydration(
+        provider,
+        HydrationResult(
+            status=HydrationStatus.REUSED,
+            provider_file_id="files/flat",
+            provider_uri="https://provider.invalid/files/flat",
+            mime_type="application/pdf",
+        ),
+    )
+    hook = CanonicalAssetProviderProjectionHook(hydration)
+    original = _flat_asset_body()
+
+    assert hook.contains_canonical_assets(original) is True
+    result = await hook.project_attempt(
+        provider=provider,
+        body=original,
+        owner_user_id="owner-f5d",
+    )
+
+    assert result.engaged is True
+    assert result.body is not original
+    assert TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY not in (
+        original["messages"][0]["content"][0]["data"]
+    )
+    projected = result.body["messages"][0]["content"][0]["data"]
+    assert TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY in projected
+
+    gemini = RequestChats().adapt_chat(result.body)
+    assert gemini["contents"][0]["parts"][0] == {
+        "fileData": {
+            "mimeType": "application/pdf",
+            "fileUri": "https://provider.invalid/files/flat",
+        }
+    }
+    assert hydration.calls == [
+        {
+            "owner_user_id": "owner-f5d",
+            "asset_id": "asset-f5d-flat",
+            "provider_name": "gemini",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_f5d_flat_canonical_file_latches_before_provider_failure():
+    p1 = _Provider("gemini")
+    p2 = _Provider("second")
+    hydration = _Hydration(
+        p1,
+        HydrationResult(
+            status=HydrationStatus.REUSED,
+            provider_file_id="files/flat",
+            provider_uri="https://provider.invalid/files/flat",
+            mime_type="application/pdf",
+        ),
+    )
+    error = ProviderUnavailableError(
+        "failed after flat projection",
+        provider_name="gemini",
+    )
+    executor = _Executor(error)
+    handler = ChatExecutionHandler(
+        providers={"gemini": p1, "second": p2},
+        routing_policy=_Routing([p1, p2]),
+        executor=executor,
+        circuit_breaker_manager=SimpleNamespace(),
+        asset_projection_hook=CanonicalAssetProviderProjectionHook(hydration),
+    )
+    body = _flat_asset_body()
+    original = deepcopy(body)
+
+    with pytest.raises(ProviderUnavailableError):
+        await handler.execute_with_fallback(
+            object(),
+            body,
+            owner_user_id="owner-f5d",
+        )
+
+    assert body == original
+    assert [name for name, _ in executor.calls] == ["gemini"]
+    assert p2.probes == 0
 
 
 def test_f5d_client_supplied_projection_dict_is_not_provider_authority():
