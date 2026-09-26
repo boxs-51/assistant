@@ -7,6 +7,11 @@ from datetime import datetime, timezone
 import pytest
 from sqlalchemy import func, select
 
+# Import the agent runtime path before SQL transcript models. Direct-file pytest
+# starts from a fresh interpreter, and this ordering prevents storage -> agent
+# package initialization from re-entering transcript storage mid-import.
+from se.src.runtimes.agent.persistence import DurableAgentStore
+
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentTranscriptChunkRecord,
     AgentTranscriptRepresentationRecord,
@@ -18,7 +23,6 @@ from se.src.infrastructure.storage.transcript_representation import (
 from se.src.runtimes.agent.checkpoint_transcript_writer import (
     write_transcript_representation_in_uow,
 )
-from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.resume_planning import AgentResumePlanningService
 from se.src.runtimes.agent.retry_planning import AgentRetryPlanningService
 from se.tests.architecture.test_r11_a_branch_budget_memory_baseline import (
