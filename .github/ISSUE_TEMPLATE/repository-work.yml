@@ -13,7 +13,8 @@ body:
         - Future / unclaimed stages: `FOLLOW-LATEST`.
         - At production CLAIM: record the effective #85 policy version.
         - Local overrides may be stricter, never broader.
-        - Stable development baselines avoid re-anchor on unrelated NON_MATERIAL main drift.\n        - Merge authorization remains separate from stage/development progression and may be granted per PR or by one explicit READY Integration Wave command.
+        - Stable development baselines avoid re-anchor on unrelated NON_MATERIAL main drift.
+        - Merge authorization remains separate from stage/development progression and may be granted per PR or by one explicit READY Integration Wave command.
 
   - type: checkboxes
     id: policy_ack
@@ -127,7 +128,10 @@ body:
       value: |
         STACK_POLICY_ISSUE    = #85
         STACK_POLICY_VERSION  = v2
-        STACK_MODE            = <ROOT | STACKED_DEVELOPMENT | N/A>\n        INTEGRATION_MODE      = <SINGLE_LANE | PARALLEL_LANES | N/A>\n        DEVELOPMENT_BASE      = <sha | N/A>\n        WAVE_ID               = <not-assigned | IW-... | N/A>
+        STACK_MODE            = <ROOT | STACKED_DEVELOPMENT | N/A>
+        INTEGRATION_MODE      = <SINGLE_LANE | PARALLEL_LANES | N/A>
+        DEVELOPMENT_BASE      = <sha | N/A>
+        WAVE_ID               = <not-assigned | IW-... | N/A>
         STACK_DEPTH           = <0 | 1 | 2 | N/A>
         CANONICAL_MAIN_FORK   = <sha | N/A>
         STACK_PARENT_PR       = <number | none | N/A>
@@ -135,7 +139,8 @@ body:
         CHILD_CLAIM           = <released scope | PRE-CLAIM | N/A>
         CLOSED_AUTHORITIES    = <summary>
         MERGE_ORDER           = <parent first | N/A>
-        DRIFT_CLASS           = <NON_MATERIAL | MATERIAL | N/A>\n        INTEGRATION_STATUS    = <NOT_CANONICAL | WAVE_CANDIDATE | HOLD | N/A>
+        DRIFT_CLASS           = <NON_MATERIAL | MATERIAL | N/A>
+        INTEGRATION_STATUS    = <NOT_CANONICAL | WAVE_CANDIDATE | HOLD | N/A>
     validations:
       required: true
 
@@ -159,7 +164,11 @@ body:
           required: true
         - label: "A depth-2 child will not merge before its production parent."
           required: true
-        - label: "After parent landing, a stacked child must refresh/re-anchor to exact current main, rerun CI, and receive independent re-audit before its merge gate."
+        - label: "After parent or sibling landing, I will classify drift first; unrelated NON_MATERIAL main movement alone does not force re-anchor."
+          required: true
+        - label: "If drift is MATERIAL, I will refresh/re-anchor and rerun the affected CI/audit evidence before integration."
+          required: true
+        - label: "If this candidate is enrolled in an Integration Wave, it will not merge outside that frozen wave manifest."
           required: true
         - label: "I will stop on a blocking P0/P1, unopened authority, semantic parent change, migration conflict, ownership conflict, or applicable stack-depth limit."
           required: true
