@@ -107,11 +107,14 @@ def test_f5d_stream_provider_authority_is_inside_the_eligible_attempt():
     # once a chunk is visible it raises, otherwise it records the error and
     # continues. F5-D's stronger rule must fence that continue after projection.
     provider_errors = stream.index("except (", executor)
-    visible_guard = stream.index("if stream_started:", provider_errors)
-    fallback_continue = stream.index("continue", visible_guard)
+    terminal_guard = stream.index(
+        "if stream_started or asset_attempt_terminal:",
+        provider_errors,
+    )
+    fallback_continue = stream.index("continue", terminal_guard)
 
-    assert executor < provider_errors < visible_guard < fallback_continue
-    assert "raise detail from error" in stream[visible_guard:fallback_continue]
+    assert executor < provider_errors < terminal_guard < fallback_continue
+    assert "raise detail from error" in stream[terminal_guard:fallback_continue]
     assert "All providers failed before streaming output started." in stream
 
 
