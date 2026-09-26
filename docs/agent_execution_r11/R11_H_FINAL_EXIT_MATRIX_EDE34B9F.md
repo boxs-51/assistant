@@ -44,8 +44,8 @@ Final roadmap gate:
 | FORK semantic equivalence | PASS | R11-C fork-safe canonical materialization + G1 eight real durable forks through `build_fork_plan() -> consume_fork_plan() -> list_task_branches()`. |
 | AGGREGATE semantic equivalence | PASS / inherited | R11 does not redefine R9 aggregate semantics; R9-F durable aggregate activation/restart tests remain in full Architecture and R11-F0 preserves AggregateAdmission provenance/live-root authority. |
 | Retention / GC safety | PASS | R11-F0/F1/F1-B/F1-C contracts and architecture/integration tests preserve live-root closure, deterministic fail-closed dry-run, transactional deletion, lineage fences and ownership boundaries. |
-| Transaction atomicity | PASS | G1 128-pending workload proves one checkpoint transaction, ordered identities, batched insert shape, no partial collection; F1-C injected-failure tests prove rollback to zero partial GC. |
-| ClientInvocationLedger retention safety | PASS | `test_f1_preserves_r6_client_ledger_terminal_vs_running_fence`: terminal-vs-RUNNING retention authority remains R6-owned and generic R11 GC cannot erase RUNNING crash/replay evidence. |
+| Transaction atomicity | PASS | G1 128-pending workload proves one successful checkpoint transaction with ordered batched pending rows; `test_r11_d_non_task_waiting_update_failure_rolls_back_dual_graph` proves a failed checkpoint transition rolls back the checkpoint/pending/transcript dual graph; F1-C injected-failure tests separately preserve zero-partial GC. |
+| ClientInvocationLedger retention safety | PASS | Executable `cl/tests/test_r11_f0_client_ledger_retention.py` regressions `test_r11_f0_generic_ttl_collects_terminal_but_preserves_running` and `test_r11_f0_running_crash_evidence_survives_repeated_far_future_gc` prove terminal collection while RUNNING crash/replay evidence survives; `test_f1_preserves_r6_client_ledger_terminal_vs_running_fence` keeps that authority R6-owned. |
 | Full Architecture Linux + Windows | PASS | Architecture #1356 / run `36231568069` completed GREEN/GREEN on exact pre-repair candidate `ffcddd7e0110a0237ad591618614e2f358aea0f4`: Linux SUCCESS, Windows SUCCESS. Any replacement evidence-only HEAD must also pass fresh Architecture before FINAL GREEN. |
 
 ## 3. R11-A metric disposition
@@ -78,10 +78,12 @@ The final freeze depends on these landed regression surfaces:
 - `se/tests/architecture/test_r11_a_branch_budget_memory_baseline.py`
 - `se/tests/architecture/test_r11_a_resume_performance_baseline.py`
 - `se/tests/architecture/test_r11_c_checkpoint_materialization.py`
+- `se/tests/architecture/test_r7_b_atomic_waiting.py`
 - `se/tests/integration/test_r11_d_checkpoint_backfill.py`
 - `se/tests/integration/test_r11_d_checkpoint_cutover_migration.py`
 - `se/tests/architecture/test_r11_e2_query_plan_baseline.py`
 - `se/tests/architecture/test_r11_f0_retention_contract.py`
+- `cl/tests/test_r11_f0_client_ledger_retention.py`
 - `se/tests/architecture/test_r11_f1_gc_root_closure_contract.py`
 - `se/tests/architecture/test_r11_f1b_gc_dry_run.py`
 - `se/tests/architecture/test_r11_f1c_gc_executor.py`
