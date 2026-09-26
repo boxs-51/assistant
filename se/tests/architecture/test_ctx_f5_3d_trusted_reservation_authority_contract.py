@@ -17,7 +17,7 @@ def _contract() -> str:
 
 
 def _normalized_contract() -> str:
-    return " ".join(_contract().split())
+    return " ".join(_contract().replace("`", "").split())
 
 
 def _protocol_methods(name: str) -> dict[str, ast.AsyncFunctionDef]:
