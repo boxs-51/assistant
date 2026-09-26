@@ -47,8 +47,8 @@ Future reservation authority and durable Memory admission must be transaction-co
 
 One authoritative transaction/session must perform, in one durability boundary:
 
-1. load and validate the trusted reservation state;
-2. acquire the reservation serialization fence through lock, compare-and-swap, or backend-equivalent transactional authority;
+1. establish the authoritative transaction and backend serialization boundary **before any authority read**; on SQLite this means acquiring the existing write-intent / `BEGIN IMMEDIATE` boundary before loading the reservation;
+2. load and validate the trusted reservation state inside that already-established boundary, acquiring any row-lock/CAS semantics required by the backend as part of the authoritative reservation operation;
 3. revalidate exact canonical `MemoryPromotionIntent`;
 4. construct the exact `MemoryRecord` from already-authorized provenance;
 5. perform existing Memory admission/replay logic;
@@ -63,7 +63,7 @@ The implementation must not:
 - use a second connection/session that escapes the authoritative transaction boundary;
 - create another idempotency or Memory identity authority.
 
-For SQLite, future implementation must preserve the existing Memory admission discipline that acquires write intent before any read. The same authoritative session/connection must encompass reservation validation and Memory admission.
+For SQLite, future implementation must preserve the existing Memory admission discipline that acquires write intent before any read. The authoritative SQLite write-intent boundary is established **before the reservation is loaded**, and the same authoritative session/connection must then encompass reservation validation, Memory admission, reservation consumption, and commit.
 
 For other SQL backends, equivalent single-transaction serialization/CAS semantics are required.
 
