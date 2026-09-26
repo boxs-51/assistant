@@ -4,7 +4,7 @@
 **Canonical predecessor:** AE-R11 / Issue #31 CLOSED / COMPLETED  
 **Claim baseline:** `main@6228734ae7a380719bb14fa520e3307c5330aa31`  
 **Entry health:** Architecture #1383 GREEN/GREEN  
-**Policy:** Issue #85 v2  
+**Policy:** Issue #85 v2.5  
 **Stage class:** CONTRACT / EVIDENCE / DOCS / ARCHITECTURE-TEST ONLY  
 **Production/runtime/schema/migration delta:** ZERO
 
@@ -29,10 +29,10 @@ current main           = 6228734ae7a380719bb14fa520e3307c5330aa31
 post-wave Architecture = #1383 GREEN/GREEN
 blocking R11 P0/P1/P2  = NONE
 Issue                  = #107
-Policy                 = #85 v2
+Policy                 = #85 v2.5
 ```
 
-R12-A may remain on this stable development baseline while unrelated drift is NON_MATERIAL under Policy #85 v2. Drift that changes Agent execution identity, state-machine semantics, checkpoint/persistence authority, pending invocation reconciliation, TaskBudget authority, or lease/recovery ownership is MATERIAL and requires reclassification before integration.
+R12-A may remain on this stable development baseline while unrelated drift is NON_MATERIAL under Policy #85 v2.5. Drift that changes Agent execution identity, state-machine semantics, checkpoint/persistence authority, pending invocation reconciliation, TaskBudget authority, or lease/recovery ownership is MATERIAL and requires reclassification before integration.
 
 ## 3. Current implementation facts
 
@@ -113,6 +113,20 @@ Recovery must preserve remaining active execution budget, TaskBudget active exec
 
 Lease expiry alone does not authorize budget reset, new execution allocation, or TaskBudget slot duplication.
 
+### P1-R12-A-LEASE-LOSS-FENCING-2 — expired owner must be fenced before recovered activation
+
+Revision/CAS protects durable writes, but it is not sufficient to prevent an old process from issuing a new external provider/tool side effect after its lease expired and another worker acquired recovery authority.
+
+R12 therefore requires a durable fencing authority associated with execution ownership. The concrete representation may be an epoch, generation, token, or another independently audited mechanism with equivalent monotonic stale-owner rejection semantics.
+
+A runtime that owns a RUNNING execution must validate current lease/fence authority:
+- immediately before every externally visible provider/tool dispatch;
+- immediately before every durable state/checkpoint/terminal commit that depends on active ownership.
+
+If lease renewal fails or the current fencing authority is lost, that local runtime must immediately stop issuing new external dispatches and relinquish/park local execution ownership safely. A paused or partitioned old owner that resumes after a newer recovery owner wins must fail closed before any new external side effect.
+
+Fencing does not replace R6/R7 reconciliation or R10 no-replay authority. Unknown external outcomes still reconcile through the inherited invocation lifecycle before continuation.
+
 ## 5. Frozen authority inheritance
 
 R12 extends the landed Agent architecture; it does not replace it.
@@ -172,6 +186,18 @@ R12 preserves R11 checkpoint/transcript/retention/GC authority.
 
 R12A-I12
 R12 acquires no CAS asset lifecycle/GC or CTX Memory lifecycle authority.
+
+R12A-I13
+Durable execution ownership includes a fencing authority capable of rejecting an expired/stale owner after a newer recovery owner wins.
+
+R12A-I14
+Current lease/fence authority must be validated immediately before every externally visible provider/tool dispatch.
+
+R12A-I15
+Current lease/fence authority must be validated immediately before durable active-owner commits; revision CAS alone is not the external-side-effect fence.
+
+R12A-I16
+Lease-renewal loss or fence-authority loss requires the local runtime to stop new external dispatch immediately and relinquish/park ownership safely.
 ```
 
 ## 8. Proposed staged implementation
@@ -180,7 +206,7 @@ Only R12-A is claimed by this freeze.
 
 ```text
 R12-A  HEAD audit + crash-recovery / lease contract freeze
-R12-B  durable owner/lease representation + migration
+R12-B  durable owner/lease/fence representation + migration
 R12-C  lease acquire / renew / release authority
 R12-D  stale-RUNNING classification + scanner
 R12-E  atomic recovery ownership + WAITING(RECOVERY) transition
@@ -204,6 +230,8 @@ Before AE-R12 can close, the complete roadmap must prove at least:
 - lease acquire/renew/expiry boundaries;
 - clock/expiry boundary fail-closed behavior;
 - competing recovery workers;
+- paused/partitioned old owner resumes after lease loss and newer recovery ownership;
+- stale old owner cannot dispatch provider/tool side effects after fencing authority changes;
 - recovery vs user RESUME;
 - recovery vs terminalization;
 - pending IN_FLIGHT reconciliation;
@@ -236,6 +264,9 @@ Stop and return to contract review if an implementation would:
 - create a new execution_id merely because a lease expired;
 - reset active budget or TaskBudget merely because a lease expired;
 - let two workers own the same execution lease concurrently;
+- allow a stale/expired owner to dispatch externally visible provider/tool work after a newer fence authority wins;
+- continue new external dispatch after lease renewal or fencing-authority loss;
+- rely on revision CAS alone as protection against stale-owner external side effects;
 - transition RUNNING -> WAITING(RECOVERY) without durable revision/ownership CAS;
 - reinterpret R11 retention/GC as R12 recovery authority;
 - absorb CAS lifecycle/GC or CTX Memory lifecycle into R12;
