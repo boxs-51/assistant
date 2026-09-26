@@ -58,7 +58,7 @@ def test_r12_a_freezes_existing_recovery_primitives_without_claiming_distributed
     )
 
 
-def test_r12_a_freezes_current_durable_owner_and_lease_gap() -> None:
+def test_r12_a_freezes_current_durable_owner_and_lease_gap_without_future_absence_lock() -> None:
     sql = _read(SQL_EXECUTION)
     contract = _read(DOC)
 
