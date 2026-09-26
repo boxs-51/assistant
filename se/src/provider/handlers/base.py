@@ -109,6 +109,24 @@ class BaseExecutionHandler(ABC):
             )
         return remaining
 
+    async def _await_provider_operation_with_budget(
+        self,
+        operation,
+        *,
+        call_budget: ProviderCallBudget,
+        provider_name: str,
+        timeout_message: str,
+    ):
+        """Run handler-owned pre-execution work on the one R10 call budget."""
+
+        return await await_with_provider_deadline(
+            operation,
+            call_budget=call_budget,
+            provider_name=provider_name,
+            timeout_message=timeout_message,
+            now_monotonic=monotonic,
+        )
+
     async def _probe_capability_with_budget(
         self,
         *,
