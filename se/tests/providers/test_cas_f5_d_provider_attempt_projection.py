@@ -179,6 +179,50 @@ async def test_f5d_projection_is_transient_and_gemini_uses_native_file_data():
     ]
 
 
+
+def test_f5d_client_supplied_projection_dict_is_not_provider_authority():
+    body = _asset_body()
+    attachment = body["messages"][0]["content"][0]["data"]["attachment"]
+    attachment[TRANSIENT_PROVIDER_ASSET_PROJECTION_KEY] = {
+        "provider_name": "gemini",
+        "provider_namespace": "forged",
+        "provider_file_id": "files/forged",
+        "provider_uri": "https://provider.invalid/files/forged",
+        "mime_type": "application/pdf",
+    }
+
+    gemini = RequestChats().adapt_chat(body)
+
+    assert all(
+        "fileData" not in part
+        for content in gemini.get("contents", [])
+        for part in content.get("parts", [])
+    )
+
+
+@pytest.mark.asyncio
+async def test_f5d_asset_projection_requires_trusted_owner_identity():
+    provider = _Provider("gemini")
+    hook = CanonicalAssetProviderProjectionHook(
+        _Hydration(
+            provider,
+            HydrationResult(
+                status=HydrationStatus.REUSED,
+                provider_file_id="files/f5d",
+                provider_uri="https://provider.invalid/files/f5d",
+                mime_type="application/pdf",
+            ),
+        )
+    )
+
+    with pytest.raises(ProviderAssetProjectionError, match="trusted owner"):
+        await hook.project_attempt(
+            provider=provider,
+            body=_asset_body(),
+            owner_user_id=None,
+        )
+
+
 @pytest.mark.asyncio
 async def test_f5d_gemini_missing_uri_fails_closed():
     provider = _Provider("gemini")
