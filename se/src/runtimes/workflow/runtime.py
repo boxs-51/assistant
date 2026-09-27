@@ -1,6 +1,7 @@
 # src/runtimes/workflow/runtime.py
 from typing import Dict, Any
 import uuid
+import time
 import structlog
 
 from ...infrastructure.event_bus.bus import EventBus
@@ -8,7 +9,7 @@ from ...domain.schemas.event import BaseEvent
 from ...kernel.base import BaseRuntime, RuntimeContext, RuntimeManifest
 from ...domain.schemas.identity import Identity
 from ...domain.schemas.message import contains_canonical_asset_content
-from ...domain.schemas.agent_execution import AgentExecutionLimits
+from ...domain.schemas.agent_execution import AgentExecutionLimits, MAX_AGENT_PROPOSED_TASK_SECONDS
 from ..agent.contracts.context import AgentExecutionContext
 from ..agent.adapters.messages import jsonable
 from ..agent.ids import AgentExecutionIdFactory
@@ -311,13 +312,34 @@ class WorkflowRuntime(BaseRuntime):
                 identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
             messages = body.get("messages", [])
             prompt = next((item.get("content") for item in reversed(messages) if item.get("role") == "user"), "")
+            requested_limits = body.get("agent_limits")
+            limits = (
+                AgentExecutionLimits.model_validate(requested_limits)
+                if requested_limits is not None
+                else AgentExecutionLimits(
+                    timeout_seconds=120,
+                    iteration_timeout_seconds=60,
+                    inference_timeout_seconds=45,
+                    tool_timeout_seconds=30,
+                )
+            )
+            task_started_at = time.time()
+            task_max_timeout_seconds = (
+                limits.task_timeout_seconds
+                or (limits.timeout_seconds if requested_limits is not None else MAX_AGENT_PROPOSED_TASK_SECONDS)
+            )
+            task_deadline_at = (
+                task_started_at + limits.task_timeout_seconds
+                if limits.task_timeout_seconds is not None
+                else None
+            )
             context = AgentExecutionContext.create(
                 execution_id=self._execution_id_factory.new_id(),
                 agent_id=agent_id,
                 session_id=event.session_id,
                 correlation_id=event.turn_id or f"corr_{uuid.uuid4().hex}",
                 identity=identity,
-                limits=AgentExecutionLimits(),
+                limits=limits,
                 request_id=event.turn_id,
                 connection_id=body.get("connection_id"),
                 agent=agent,
@@ -325,6 +347,12 @@ class WorkflowRuntime(BaseRuntime):
                 metadata={
                     **body.get("metadata", {}),
                     "model": body.get("model", ""),
+                    "max_output_tokens": body.get("config", {}).get("max_tokens"),
+                    "agent_time_budget_enabled": True,
+                    "task_started_at": task_started_at,
+                    "task_max_timeout_seconds": task_max_timeout_seconds,
+                    "task_deadline_at": task_deadline_at,
+                    "task_proposed_seconds": limits.task_timeout_seconds,
                     "timezone": body.get("metadata", {}).get("user", {}).get("timezone"),
                 },
             )
@@ -430,6 +458,15 @@ class WorkflowRuntime(BaseRuntime):
                 return
             if result.final_message is None:
                 if result.error_code:
+                    timeout_fields = {
+                        "AGENT_TASK_TIMEOUT": ("task", "task_timeout_seconds"),
+                        "AGENT_EXECUTION_TIMEOUT": ("execution", "timeout_seconds"),
+                        "AGENT_ITERATION_TIMEOUT": ("iteration", "iteration_timeout_seconds"),
+                        "AGENT_INFERENCE_TIMEOUT": ("inference", "inference_timeout_seconds"),
+                        "AGENT_TOOL_TIMEOUT": ("tool", "tool_timeout_seconds"),
+                        "AGENT_CONTEXT_TIMEOUT": ("context", "iteration_timeout_seconds"),
+                    }
+                    timeout_info = timeout_fields.get(result.error_code)
                     await self.event_bus.publish(BaseEvent(
                         event_name="provider.failed",  # compatibility event name
                         session_id=event.session_id,
@@ -440,7 +477,18 @@ class WorkflowRuntime(BaseRuntime):
                             "failure_domain": result.failure_domain or "AGENT",
                             "retryable": result.retryable,
                             "execution_id": result.execution_id,
-                            "status_code": 500,
+                            "status_code": 504 if timeout_info else 500,
+                            **(
+                                {
+                                    "timeout_scope": timeout_info[0],
+                                    "timeout_seconds": (
+                                        context.metadata.get("task_proposed_seconds")
+                                        if timeout_info[0] == "task"
+                                        else getattr(context.limits, timeout_info[1])
+                                    ),
+                                }
+                                if timeout_info else {}
+                            ),
                         },
                     ))
                     return

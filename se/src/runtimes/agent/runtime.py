@@ -1639,6 +1639,13 @@ class AgentRuntime:
                 context.clear_iteration_budget()
 
         if self._execution_policy.check_start(context) is not PolicyDecision.ALLOW:
+            start_error_code = (
+                "AGENT_TASK_TIMEOUT"
+                if context.task_timed_out
+                else "AGENT_EXECUTION_TIMEOUT"
+                if context.timed_out
+                else "AGENT_EXECUTION_NOT_ALLOWED"
+            )
             rejected_state = (
                 AgentLoopState.CANCELLED
                 if context.cancelled
@@ -1653,7 +1660,7 @@ class AgentRuntime:
                     AgentLoopState.FAILED: AgentEventName.EXECUTION_FAILED,
                 }[rejected_state],
                 context,
-                payload={"error_code": "AGENT_EXECUTION_NOT_ALLOWED"},
+                payload={"error_code": start_error_code},
             )
             return AgentExecutionResult(
                 execution_id=context.execution_id,
@@ -1667,14 +1674,19 @@ class AgentRuntime:
                 ),
                 iterations=(),
                 usage=total_usage,
-                error_code="AGENT_EXECUTION_NOT_ALLOWED",
-                error_message="Agent execution was rejected by execution policy.",
+                error_code=start_error_code,
+                error_message=(
+                    "Task wall-clock time limit exceeded."
+                    if context.task_timed_out
+                    else "Agent execution was rejected by execution policy."
+                ),
             )
 
         for iteration_number in range(
             context.iteration + 1,
             context.limits.max_iterations + 1,
         ):
+            timeout_operation = "execution"
             try:
                 context.ensure_active()
                 context.next_iteration()
@@ -1716,6 +1728,7 @@ class AgentRuntime:
                 await self._persist_iteration(record)
                 record.state = transition(record.state, AgentLoopState.THINKING)
 
+                timeout_operation = "context"
                 snapshot = await self._await_contextual(
                     self._context_builder.build(
                         context,
@@ -1785,6 +1798,7 @@ class AgentRuntime:
                         request_id=request_id,
                     )
 
+                timeout_operation = "inference"
                 response = await self._inference.complete(
                     InferenceRequest(
                         request_id=request_id,
@@ -1796,6 +1810,7 @@ class AgentRuntime:
                             getattr(context.agent, "model", None)
                             or context.metadata.get("model")
                         ),
+                        max_output_tokens=context.metadata.get("max_output_tokens"),
                         timeout_seconds=inference_timeout,
                         deadline_monotonic=inference_deadline_monotonic,
                         owner_user_id=(
@@ -1843,6 +1858,7 @@ class AgentRuntime:
                         messages=list(snapshot.messages),
                         tools=list(snapshot.tools),
                         model=getattr(context.agent, "model", None),
+                        max_output_tokens=context.metadata.get("max_output_tokens"),
                         timeout_seconds=inference_timeout,
                         cancellation_event=None,
                         metadata=dict(snapshot.metadata),
@@ -1964,6 +1980,7 @@ class AgentRuntime:
                     tool_requests,
                 )
                 try:
+                    timeout_operation = "tool"
                     raw_tool_results = await self._await_contextual(
                         self._tool_execution.execute_many(
                             context,
@@ -2015,7 +2032,10 @@ class AgentRuntime:
                 uncommitted_tool_call_ids: set[str] = set()
                 for request, result in zip(tool_requests, latest_tool_results):
                     await self._persist_tool_result(result, iteration_id)
-                    if self._durable_store is None:
+                    if (
+                        self._durable_store is None
+                        or request.capability_id == "agent.budget.configure"
+                    ):
                         committed_batch.append(result)
                     else:
                         committed_result = await self._load_committed_tool_result(
@@ -2146,6 +2166,24 @@ class AgentRuntime:
                 )
 
                 transcript.extend(_tool_results_to_messages(latest_tool_results))
+                if context.task_id is None and context.metadata.get("agent_time_budget_enabled"):
+                    timed_out_tools = [
+                        item.capability_id
+                        for item in latest_tool_results
+                        if item.error_code in {"CAPABILITY_TIMEOUT", "TERMINAL_TIMEOUT"}
+                    ]
+                    if timed_out_tools:
+                        transcript.append(InferenceMessage(
+                            role="system",
+                            content=(
+                                "A tool call timed out: "
+                                + ", ".join(timed_out_tools)
+                                + ". Do not assume that the operation had no side effects. "
+                                "Use agent.budget.configure to reallocate operation time "
+                                "within the task deadline before deciding whether to retry. "
+                                f"Task time remaining: {context.remaining_seconds:.1f} seconds."
+                            ),
+                        ))
                 await self._persist_execution_checkpoint(context, transcript)
                 context.clear_iteration_budget()
 
@@ -2182,6 +2220,71 @@ class AgentRuntime:
                     last_tool_results=latest_tool_results,
                 )
             except (asyncio.TimeoutError, TimeoutError):
+                if context.task_timed_out:
+                    timeout_code = "AGENT_TASK_TIMEOUT"
+                    timeout_message = "Task wall-clock time limit exceeded."
+                elif context.timed_out:
+                    timeout_code = "AGENT_EXECUTION_TIMEOUT"
+                    timeout_message = "Agent execution time budget exceeded."
+                elif context.iteration_timed_out:
+                    timeout_code = "AGENT_ITERATION_TIMEOUT"
+                    timeout_message = "Agent iteration time budget exceeded."
+                else:
+                    timeout_code = {
+                        "context": "AGENT_ITERATION_TIMEOUT",
+                        "inference": "AGENT_INFERENCE_TIMEOUT",
+                        "tool": "AGENT_TOOL_TIMEOUT",
+                    }.get(timeout_operation, "AGENT_EXECUTION_TIMEOUT")
+                    timeout_scope = "iteration" if timeout_operation == "context" else timeout_operation
+                    timeout_message = f"Agent {timeout_scope} time budget exceeded."
+                if (
+                    timeout_code == "AGENT_INFERENCE_TIMEOUT"
+                    and context.task_id is None
+                    and context.metadata.get("agent_time_budget_enabled")
+                    and iteration_number < context.limits.max_iterations
+                    and context.remaining_seconds > 1.0
+                ):
+                    next_timeout = min(
+                        float(context.metadata["task_max_timeout_seconds"]),
+                        context.limits.inference_timeout_seconds * 2,
+                    )
+                    context.limits.inference_timeout_seconds = next_timeout
+                    context.limits.iteration_timeout_seconds = max(
+                        context.limits.iteration_timeout_seconds,
+                        next_timeout + 5,
+                    )
+                    record.close(
+                        AgentLoopState.TIMEOUT,
+                        error_code=timeout_code,
+                    )
+                    await self._persist_iteration(record)
+                    await self._publish(
+                        AgentEventName.ITERATION_COMPLETED,
+                        context,
+                        iteration=record.iteration,
+                        payload={"state": record.state.value, "error_code": timeout_code},
+                    )
+                    transcript.append(InferenceMessage(
+                        role="system",
+                        content=(
+                            "The previous model call timed out. Its limit was increased "
+                            f"to {next_timeout:g} seconds for this retry. "
+                            "If this task needs more time, call agent.budget.configure "
+                            "to propose a task deadline and allocate operation time."
+                        ),
+                    ))
+                    await self._publish(
+                        AgentEventName.PROGRESS,
+                        context,
+                        iteration=iteration_number,
+                        payload={
+                            "content": "Model call timed out; retrying within the task time budget.",
+                            "error_code": timeout_code,
+                        },
+                    )
+                    await self._persist_execution_checkpoint(context, transcript)
+                    context.clear_iteration_budget()
+                    continue
                 record = iterations[-1] if iterations else None
                 if record is not None and record.state not in {
                     AgentLoopState.COMPLETED,
@@ -2190,7 +2293,7 @@ class AgentRuntime:
                 }:
                     record.close(
                         AgentLoopState.TIMEOUT,
-                        error_code="AGENT_TIMEOUT",
+                        error_code=timeout_code,
                     )
                     await self._persist_iteration(record)
                     await self._publish(
@@ -2202,15 +2305,15 @@ class AgentRuntime:
                     await self._publish(
                         AgentEventName.EXECUTION_TIMEOUT,
                         context,
-                        payload={"error_code": "AGENT_TIMEOUT"},
+                        payload={"error_code": timeout_code},
                     )
                 return self._terminal_result(
                     context,
                     iterations,
                     context.usage,
                     AgentLoopState.TIMEOUT,
-                    "AGENT_TIMEOUT",
-                    "Agent execution timed out.",
+                    timeout_code,
+                    timeout_message,
                     last_tool_results=latest_tool_results,
                 )
             except Exception as exc:

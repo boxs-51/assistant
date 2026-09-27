@@ -282,3 +282,32 @@ def test_submit_prompt_can_disable_server_agent(monkeypatch):
     request = bridge._client_runtime.chat_calls[0]
     assert request.agent_enabled is False
     assert request.agent_id is None
+
+
+def test_submit_prompt_passes_configured_agent_time_budgets(monkeypatch):
+    bridge, _, _ = _bridge()
+
+    class ImmediateThread:
+        def __init__(self, target, daemon):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    monkeypatch.setattr("cl.src.ui.bridge.threading.Thread", ImmediateThread)
+    updated = bridge.set_chat_preferences({
+        "provider": "mock",
+        "model": "mock-chat",
+        "agent_limits": {
+            "timeout_seconds": 600,
+            "iteration_timeout_seconds": 420,
+            "inference_timeout_seconds": 90,
+            "tool_timeout_seconds": 330,
+        },
+    })
+    assert updated["success"] is True
+
+    bridge.submit_prompt("run a five minute task", conversation_id="conversation-1")
+    request = bridge._client_runtime.chat_calls[0]
+    assert request.agent_limits.timeout_seconds == 600
+    assert request.agent_limits.tool_timeout_seconds == 330

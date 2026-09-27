@@ -145,6 +145,36 @@ class ContextBuilderAdapter(ContextBuilderPort):
                     )
                 )
 
+        if context.task_id is None and context.metadata.get("agent_time_budget_enabled"):
+            task_deadline_set = context.metadata.get("task_deadline_at") is not None
+            properties = {
+                "iteration_seconds": {"type": "number", "exclusiveMinimum": 0},
+                "inference_seconds": {"type": "number", "exclusiveMinimum": 0},
+                "tool_seconds": {"type": "number", "exclusiveMinimum": 0},
+            }
+            if not task_deadline_set:
+                properties["task_seconds"] = {"type": "number", "exclusiveMinimum": 0}
+            deadline_instruction = (
+                "The task deadline is already set. "
+                if task_deadline_set
+                else "The first call requires task_seconds. "
+            )
+            tools.append(InferenceToolDefinition(
+                name="agent.budget.configure",
+                description=(
+                    deadline_instruction
+                    + "Allocate time for each Agent iteration, model call, and tool call. "
+                    + "Later calls may change operation budgets but cannot reset the deadline. "
+                    "Use enough time for commands such as sleep 300 seconds."
+                ),
+                parameters={
+                    "type": "object",
+                    "properties": properties,
+                    "required": ["task_seconds"] if not task_deadline_set else [],
+                    "additionalProperties": False,
+                },
+            ))
+
         metadata = {
             **context.metadata,
             **dict(request.metadata),

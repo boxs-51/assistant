@@ -537,7 +537,7 @@ async def test_agent_runtime_times_out_while_context_builder_is_running():
 
     assert started.is_set()
     assert result.state is AgentLoopState.TIMEOUT
-    assert result.error_code == "AGENT_TIMEOUT"
+    assert result.error_code == "AGENT_EXECUTION_TIMEOUT"
 
 
 @pytest.mark.asyncio

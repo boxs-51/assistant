@@ -9,6 +9,82 @@ from se.src.domain.schemas.event import BaseEvent
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.agent.stream import AGENT_STREAM_EVENT_NAMES, AgentStreamEvent
 from se.src.transport.gateway.api.v1.chat_router import chat_completions_proxy
+from fastapi import HTTPException
+
+
+@pytest.mark.asyncio
+async def test_nonstream_agent_response_wait_follows_execution_budget(monkeypatch):
+    import se.src.transport.gateway.api.v1.chat_router as chat_router
+
+    class Bus:
+        def subscribe(self, event_name, handler):
+            pass
+
+        def unsubscribe(self, event_name, handler):
+            pass
+
+        async def publish(self, event):
+            return True
+
+    observed = []
+
+    async def wait_for(future, timeout):
+        observed.append(timeout)
+        future.cancel()
+        return {"response": {"choices": []}}
+
+    monkeypatch.setattr(chat_router.asyncio, "wait_for", wait_for)
+    response = await chat_completions_proxy(
+        _Request({
+            "model": "mock",
+            "messages": [{"role": "user", "content": "hello"}],
+            "agent_enabled": True,
+            "agent_limits": {"timeout_seconds": 600},
+            "config": {"stream": False},
+        }),
+        identity=Identity(auth_type="guest", user_id="user-1"),
+        event_bus=Bus(),
+        config=SimpleNamespace(provider=SimpleNamespace(timeout=60)),
+        container=SimpleNamespace(connection_runtime=SimpleNamespace(registry=None)),
+    )
+    assert response == {"choices": []}
+    assert observed == [605]
+
+
+@pytest.mark.asyncio
+async def test_nonstream_response_wait_timeout_has_transport_scope(monkeypatch):
+    import se.src.transport.gateway.api.v1.chat_router as chat_router
+
+    class Bus:
+        def subscribe(self, event_name, handler):
+            pass
+
+        def unsubscribe(self, event_name, handler):
+            pass
+
+        async def publish(self, event):
+            return True
+
+    async def wait_for(future, timeout):
+        future.cancel()
+        raise asyncio.TimeoutError()
+
+    monkeypatch.setattr(chat_router.asyncio, "wait_for", wait_for)
+    with pytest.raises(HTTPException) as raised:
+        await chat_completions_proxy(
+            _Request({
+                "model": "mock",
+                "messages": [{"role": "user", "content": "hello"}],
+                "config": {"stream": False},
+            }),
+            identity=Identity(auth_type="guest", user_id="user-1"),
+            event_bus=Bus(),
+            config=SimpleNamespace(provider=SimpleNamespace(timeout=60)),
+            container=SimpleNamespace(connection_runtime=SimpleNamespace(registry=None)),
+        )
+    assert raised.value.status_code == 504
+    assert raised.value.detail["error_code"] == "GATEWAY_RESPONSE_TIMEOUT"
+    assert raised.value.detail["timeout_scope"] == "response_wait"
 
 
 class _Request:

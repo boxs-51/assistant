@@ -11,6 +11,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from .....domain.schemas import GatewayChatRequest
+from .....domain.schemas.agent_execution import AgentExecutionLimits, MAX_AGENT_PROPOSED_TASK_SECONDS
 from .....domain.schemas.identity import Identity
 from ...authentication.dependency import get_current_identity
 from .....domain.schemas.event import BaseEvent
@@ -36,6 +37,8 @@ _FAILURE_METADATA_FIELDS = (
     "retryable",
     "execution_id",
     "provider",
+    "timeout_scope",
+    "timeout_seconds",
 )
 
 
@@ -270,6 +273,13 @@ async def chat_completions_proxy(
             )
 
             timeout_val = config.provider.timeout or 60
+            if chat_request.agent_enabled:
+                limits = chat_request.agent_limits or AgentExecutionLimits()
+                task_cap = (
+                    limits.task_timeout_seconds
+                    or (limits.timeout_seconds if chat_request.agent_limits else MAX_AGENT_PROPOSED_TASK_SECONDS)
+                )
+                timeout_val = max(timeout_val, task_cap + 5)
             response_payload = await asyncio.wait_for(future, timeout=timeout_val)
 
             duration = round(time.perf_counter() - start_time, 4)
@@ -283,13 +293,18 @@ async def chat_completions_proxy(
         except asyncio.TimeoutError:
             duration = round(time.perf_counter() - start_time, 4)
             logger.error(
-                "Provider execution timed out",
+                "Gateway response wait timed out",
                 session_id=session_id,
                 duration_seconds=duration,
             )
             raise HTTPException(
                 status_code=status.HTTP_504_GATEWAY_TIMEOUT,
-                detail="Provider execution timed out.",
+                detail={
+                    "error": "Gateway response wait timed out.",
+                    "error_code": "GATEWAY_RESPONSE_TIMEOUT",
+                    "timeout_scope": "response_wait",
+                    "timeout_seconds": timeout_val,
+                },
             )
         except HTTPException as exc:
             duration = round(time.perf_counter() - start_time, 4)
