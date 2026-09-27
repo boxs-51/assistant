@@ -72,8 +72,8 @@ def test_shared_direct_agent_provider_boundary_is_positive_source_evidence():
 
     document = _normalize(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
-        "after ProviderExecutor.execute(...) returns a fully decoded GatewayResponse",
-        "before ChatExecutionHandler.execute_with_fallback(...) returns that response",
+        "after `ProviderExecutor.execute(...)` returns a fully decoded `GatewayResponse`",
+        "before `ChatExecutionHandler.execute_with_fallback(...)` returns that response",
         "serve both DIRECT and AGENT consumers",
         "MUST NOT persist CAS assets inside Gemini/OpenAI/Ollama-specific converters",
     ):
@@ -121,7 +121,7 @@ def test_existing_asset_service_is_frozen_as_canonical_ingestion_authority():
         "F7 MUST reuse this application authority",
         "AssetService.ingest_stream",
         "must not duplicate its SQL/ObjectStorage transaction protocol",
-        "current AssetService.ingest_stream generates new asset/blob IDs",
+        "current `AssetService.ingest_stream` generates new asset/blob IDs",
         "F7 production MUST NOT assume repeated calls are automatically idempotent",
     ):
         assert phrase in document
@@ -146,7 +146,7 @@ def test_tool_generated_media_preserves_existing_committed_result_authority():
     for phrase in (
         "AgentToolResult.commit_state != COMMITTED => MUST NOT establish durable/model-visible canonical asset references",
         "only after existing Agent authority has produced or loaded a COMMITTED tool result",
-        "F7 MUST NOT: - set or promote commit_state",
+        "F7 MUST NOT: - set or promote `commit_state`",
         "change checkpoint/resume/fork semantics",
     ):
         assert phrase in document
@@ -163,7 +163,7 @@ def test_f7_0_freezes_canonical_identity_owner_and_transport_neutrality():
         "provider URI",
         "object-store key",
         "Owner authority is derived from the already-authenticated request/execution context.",
-        "No provider field, tool output field, URL, provider file ID, filename, metadata scalar or client-supplied user field may mint or override owner_user_id.",
+        "No provider field, tool output field, URL, provider file ID, filename, metadata scalar or client-supplied user field may mint or override `owner_user_id`.",
         "If authenticated owner authority is unavailable at the canonicalization point, F7 fails closed",
     ):
         assert phrase in document
@@ -186,7 +186,7 @@ def test_f7_0_freezes_future_path_matrix_without_granting_production_edits():
 
     normalized = _normalize(document)
     for phrase in (
-        "This matrix is a future production-candidate map, not a production grant.",
+        "This matrix is a **future production-candidate map**, not a production grant.",
         "EXPECTED NEW / production authority not released",
         "EXPECT NO CHANGE for provider-response slice",
         "CONDITIONAL future change; separate tool-generated production slice may be required",
