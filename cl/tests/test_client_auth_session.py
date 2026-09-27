@@ -94,6 +94,42 @@ def test_stream_preserves_agent_fallback_notification(monkeypatch):
     assert chunks == [notice]
 
 
+def test_stream_preserves_agent_activity_before_answer(monkeypatch):
+    activity = {
+        "object": "agent_stream_event",
+        "event_id": "event-1",
+        "event_type": "agent.tool.started",
+        "execution_id": "exec-1",
+        "channel": "tool",
+        "data": {"name": "skill.load", "status": "started"},
+    }
+    answer = {
+        "id": "chunk-1",
+        "model": "mock",
+        "choices": [{"index": 0, "delta": {"content": "done"}}],
+    }
+
+    class StreamResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def raise_for_status(self):
+            return None
+
+        def iter_lines(self):
+            yield f"data: {json.dumps(activity)}".encode()
+            yield f"data: {json.dumps(answer)}".encode()
+            yield b"data: [DONE]"
+
+    monkeypatch.setattr(requests, "post", lambda *_args, **_kwargs: StreamResponse())
+    chunks = list(GatewayLLMClient("http://gateway")._stream_response({}))
+    assert chunks[0] == activity
+    assert chunks[1].choices[0].delta.content == "done"
+
+
 def test_start_creates_and_persists_guest_session(request):
     store = _store(request)
     runtime = ClientRuntime("http://gateway", _Registry(), session_store=store)

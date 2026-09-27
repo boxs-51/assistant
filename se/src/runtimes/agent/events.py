@@ -17,6 +17,7 @@ class EventBusAgentEventPublisher:
             event_id=event.event_id,
             event_name=event.event_name,
             session_id=event.correlation.session_id or event.correlation.execution_id,
+            turn_id=event.correlation.correlation_id,
             timestamp=event.timestamp,
             payload={
                 "correlation": event.correlation.model_dump(mode="json"),

@@ -44,12 +44,19 @@ def test_builtin_support_registers_skills_specialists_and_coordinator():
     assert {item.name for item in summaries} == set(result["agents"])
     assert container.agent_registry.list_all() == []
     coordinator = container.agent_registry.get("agent-coordinator")
-    assert coordinator.tools == ["agent-command-reviewer", "agent-web-researcher"]
+    assert coordinator.tools == [
+        "terminal.run", "terminal.launch", "file.read", "file.search",
+        "file.write", "file.append", "file.replace", "glob.find",
+        "web.search", "web.search_many", "web.read", "web.read_many",
+        "skill.load",
+    ]
+    assert coordinator.skills == []
     assert container.support_loader.is_loaded("agent-coordinator") is True
-    assert container.support_loader.is_loaded("agent-web-researcher") is False
+    assert container.support_loader.is_loaded("skill-command-safety") is False
     assert container.support_loader.is_loaded("skill-web-research") is False
+    assert container.support_loader.is_loaded("agent-web-researcher") is False
     container.agent_registry.get("agent-web-researcher")
-    assert container.support_loader.is_loaded("skill-web-research") is True
+    assert container.support_loader.is_loaded("skill-web-research") is False
     assert runtime.catalog.get_definition("skill-command-safety").kind.value == "SKILL"
     assert runtime.catalog.get_implementation(
         "server:agent:agent-coordinator"

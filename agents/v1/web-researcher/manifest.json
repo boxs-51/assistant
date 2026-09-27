@@ -6,9 +6,10 @@
     "web.search",
     "web.search_many",
     "web.read",
-    "web.read_many"
+    "web.read_many",
+    "skill.load"
   ],
-  "skills": ["skill-web-research"],
+  "skills": [],
   "required_scopes": [],
   "required_permissions": []
 }

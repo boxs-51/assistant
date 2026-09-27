@@ -31,7 +31,7 @@ def _manifest():
 def test_web_researcher_manifest_uses_only_logical_web_capabilities():
     manifest = _manifest()
 
-    assert manifest["tools"] == list(WEB_CAPABILITIES)
+    assert manifest["tools"] == [*WEB_CAPABILITIES, "skill.load"]
     assert "web_tool" not in manifest["tools"]
 
 

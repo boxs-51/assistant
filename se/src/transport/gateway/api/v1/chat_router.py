@@ -14,6 +14,7 @@ from .....domain.schemas import GatewayChatRequest
 from .....domain.schemas.identity import Identity
 from ...authentication.dependency import get_current_identity
 from .....domain.schemas.event import BaseEvent
+from .....runtimes.agent.stream import AGENT_STREAM_EVENT_NAMES, project_agent_event
 from ...dependencies import get_event_bus, get_config
 from .....infrastructure.config.core import ConfigSchema
 from .....infrastructure.event_bus.bus import EventBus
@@ -103,6 +104,11 @@ async def chat_completions_proxy(
     )
     turn_id = f"turn_{uuid.uuid4().hex}"
     is_stream = bool(chat_request.config and chat_request.config.stream)
+    agent_activity_stream = bool(
+        is_stream
+        and chat_request.agent_enabled
+        and chat_request.config.agent_activity_stream
+    )
     request_payload = chat_request.model_dump(exclude_none=True)
     request_payload["_chat_execution_mode"] = chat_request.execution_mode.value
     identity_data = identity.model_dump() if hasattr(identity, "model_dump") else str(identity)
@@ -136,12 +142,22 @@ async def chat_completions_proxy(
                         )
                     )
 
+            async def _on_agent_event(evt: BaseEvent):
+                if evt.session_id != session_id or evt.turn_id != turn_id:
+                    return
+                projected = project_agent_event(evt)
+                await queue.put(f"data: {projected.model_dump_json(exclude_none=True)}\n\n")
+
             yield ": ping\n\n"
+            last_heartbeat = time.monotonic()
 
             try:
                 event_bus.subscribe("provider.stream.chunk_emitted", _on_chunk)
                 event_bus.subscribe("provider.stream.completed", _on_complete)
                 event_bus.subscribe("provider.failed", _on_fail)
+                if agent_activity_stream:
+                    for event_name in AGENT_STREAM_EVENT_NAMES:
+                        event_bus.subscribe(event_name, _on_agent_event)
 
                 event_bus.publish(
                     BaseEvent(
@@ -169,6 +185,9 @@ async def chat_completions_proxy(
                     try:
                         item = await asyncio.wait_for(queue.get(), timeout=1.0)
                     except asyncio.TimeoutError:
+                        if time.monotonic() - last_heartbeat >= 15:
+                            yield ": ping\n\n"
+                            last_heartbeat = time.monotonic()
                         continue
 
                     if item == "[DONE]":
@@ -193,11 +212,15 @@ async def chat_completions_proxy(
                         break
                     else:
                         yield str(item) if str(item).startswith("data:") else f"data: {json.dumps(item)}\n\n"
+                        last_heartbeat = time.monotonic()
 
             finally:
                 event_bus.unsubscribe("provider.stream.chunk_emitted", _on_chunk)
                 event_bus.unsubscribe("provider.stream.completed", _on_complete)
                 event_bus.unsubscribe("provider.failed", _on_fail)
+                if agent_activity_stream:
+                    for event_name in AGENT_STREAM_EVENT_NAMES:
+                        event_bus.unsubscribe(event_name, _on_agent_event)
 
         return StreamingResponse(
             event_stream_bridge(), 

@@ -8,6 +8,7 @@ from typing import Any, Mapping
 
 from ...domain.schemas.agent import AgentDefinition
 from .contracts.context import CapabilityExecutionContext
+from .contracts.error import CapabilityError
 from .contracts.definition import (
     CapabilityDefinition,
     CapabilityExecutionMode,
@@ -48,6 +49,53 @@ class LazyAgentCapabilityDriver(BaseCapabilityDriver):
         return await delegate.execute(context, arguments)
 
 
+class SkillLoadDriver(BaseCapabilityDriver):
+    """Return one authorized skill instruction to the calling agent."""
+
+    def __init__(self, definition: CapabilityDefinition, loader: "LocalSupportLoader"):
+        super().__init__(definition)
+        self._loader = loader
+
+    async def execute(
+        self, context: CapabilityExecutionContext, arguments: Mapping[str, Any]
+    ) -> Any:
+        if context.caller_agent_execution_id != context.execution_id:
+            raise CapabilityError(
+                code="CAPABILITY_UNAUTHORIZED",
+                message="skill.load is available only inside an agent execution.",
+                category="AUTHORIZATION",
+                safe_for_client=True,
+            )
+        skill_id = arguments.get("skill_id")
+        if not isinstance(skill_id, str) or skill_id not in self._loader._skill_manifests:
+            raise CapabilityError(
+                code="CAPABILITY_INVALID_ARGUMENT",
+                message="Unknown skill_id.",
+                category="VALIDATION",
+                safe_for_client=True,
+            )
+        definition = self._loader.container.capability_runtime.catalog.get_definition(skill_id)
+        authorization = (
+            getattr(self._loader.container, "authorization_service", None)
+            or self._loader.container.capability_runtime.authorization
+        )
+        if not authorization.is_allowed(context.identity, definition):
+            raise CapabilityError(
+                code="CAPABILITY_UNAUTHORIZED",
+                message="Skill is not available to this identity.",
+                category="AUTHORIZATION",
+                safe_for_client=True,
+            )
+        loaded = self._loader.load_skill(skill_id)
+        return {
+            "skill_id": skill_id,
+            "name": loaded.name,
+            "description": loaded.description,
+            "version": loaded.version,
+            "instruction": loaded.metadata["instruction"],
+        }
+
+
 class LocalSupportLoader:
     """Discover lightweight manifests at startup and load content on first use."""
 
@@ -58,6 +106,7 @@ class LocalSupportLoader:
         self._skill_manifests: dict[str, tuple[Path, dict[str, Any]]] = {}
         self._agent_manifests: dict[str, tuple[Path, dict[str, Any]]] = {}
         self._loaded_skills: set[str] = set()
+        self._loaded_skill_definitions: dict[str, CapabilityDefinition] = {}
         self._loaded_agents: set[str] = set()
         self._lock = RLock()
 
@@ -104,6 +153,38 @@ class LocalSupportLoader:
             catalog.register_definition(definition)
             self.container.capability_runtime.registry.register_definition(definition)
             self._skill_manifests[name] = (path, manifest)
+
+        load_definition = CapabilityDefinition(
+            id="skill.load",
+            name="skill.load",
+            description="Load the full instructions for one available skill by skill_id.",
+            input_schema={
+                "type": "object",
+                "properties": {"skill_id": {"type": "string"}},
+                "required": ["skill_id"],
+                "additionalProperties": False,
+            },
+            metadata={"internal": True},
+        )
+        load_driver = SkillLoadDriver(load_definition, self)
+        self.container.capability_runtime.register_capability(load_driver)
+        catalog.register_definition(load_definition)
+        load_implementation_id = "server:skill.load"
+        implementation = CapabilityImplementation.from_definition(
+            load_definition,
+            implementation_id=load_implementation_id,
+            location=CapabilityExecutionLocation.SERVER,
+            driver_kind="SKILL_LOADER",
+            owner_type=CapabilityOwnerType.SYSTEM,
+            metadata={"internal": True},
+        )
+        catalog.register_implementation(implementation)
+        catalog.transition_implementation(
+            load_implementation_id, CapabilityImplementationState.ENABLED
+        )
+        self.container.capability_runtime.driver_registry.bind(
+            load_implementation_id, load_driver, replace=True
+        )
 
         pending_agents: list[tuple[Path, dict[str, Any], CapabilityDefinition]] = []
         for path in self._manifest_files(self.agents_dir):
@@ -186,9 +267,10 @@ class LocalSupportLoader:
     def load_skill(self, skill_id: str) -> CapabilityDefinition:
         with self._lock:
             path, manifest = self._skill_manifests[skill_id]
+            cached = self._loaded_skill_definitions.get(skill_id)
+            if cached is not None:
+                return cached
             definition = self.container.capability_runtime.catalog.get_definition(skill_id)
-            if skill_id in self._loaded_skills:
-                return definition
             loaded = definition.model_copy(
                 update={
                     "metadata": {
@@ -198,10 +280,7 @@ class LocalSupportLoader:
                     }
                 }
             )
-            self.container.capability_runtime.catalog.register_definition(
-                loaded, allow_update=True
-            )
-            self.container.capability_runtime.registry.register_definition(loaded)
+            self._loaded_skill_definitions[skill_id] = loaded
             self._loaded_skills.add(skill_id)
             return loaded
 
@@ -214,9 +293,6 @@ class LocalSupportLoader:
             if entry is None:
                 return None
             path, manifest = entry
-            for skill_id in manifest.get("skills", []):
-                if skill_id in self._skill_manifests:
-                    self.load_skill(skill_id)
             agent = self._agent_from_manifest(
                 manifest, instruction=self._instruction(path, manifest)
             )

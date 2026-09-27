@@ -18,6 +18,7 @@ from se.src.runtimes.agent.contracts import (
 )
 from se.src.runtimes.agent.events import EventBusAgentEventPublisher
 from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.agent.runtime import _public_tool_arguments
 from se.src.runtimes.agent.adapters.policy import DefaultAgentExecutionPolicy
 
 class Publisher:
@@ -64,6 +65,7 @@ class ToolInference:
         message = (
             InferenceMessage(
                 role="assistant",
+                content="Preparing calculator",
                 tool_calls=(
                     InferenceToolCall(
                         id="call-1",
@@ -139,6 +141,7 @@ async def test_agent_runtime_publishes_lifecycle_events():
     assert names == [
         AgentEventName.EXECUTION_STARTED,
         AgentEventName.ITERATION_STARTED,
+        AgentEventName.CONTEXT_READY,
         AgentEventName.INFERENCE_REQUESTED,
         AgentEventName.INFERENCE_COMPLETED,
         AgentEventName.ITERATION_COMPLETED,
@@ -184,6 +187,7 @@ async def test_tool_lifecycle_events_are_published():
     await runtime.execute(make_context())
     names = [event.event_name for event in publisher.events]
     assert AgentEventName.TOOL_REQUESTED in names
+    assert AgentEventName.PROGRESS in names
     assert AgentEventName.TOOL_STARTED in names
     assert AgentEventName.TOOL_COMPLETED in names
     tool_event = next(
@@ -192,6 +196,23 @@ async def test_tool_lifecycle_events_are_published():
     )
     assert tool_event.correlation.tool_call_id == "call-1"
     assert tool_event.correlation.invocation_id
+    progress = next(event for event in publisher.events if event.event_name == AgentEventName.PROGRESS)
+    assert progress.payload["content"] == "Preparing calculator"
+    for event in publisher.events:
+        if event.event_name.startswith("agent.tool."):
+            assert event.payload["capability_id"] == "calculator.add"
+            assert event.payload["arguments"] == {"left": 1}
+            assert event.payload["purpose"]
+
+
+def test_public_tool_arguments_redact_nested_secrets():
+    assert _public_tool_arguments({
+        "skill_id": "web-research",
+        "options": {"api_key": "private", "query": "public"},
+    }) == {
+        "skill_id": "web-research",
+        "options": {"api_key": "[redacted]", "query": "public"},
+    }
 
 
 @pytest.mark.asyncio
@@ -264,6 +285,7 @@ async def test_event_bus_adapter_maps_agent_envelope_to_base_event():
     await publisher.publish(event)
     assert bus.events[0].event_name == AgentEventName.EXECUTION_STARTED
     assert bus.events[0].session_id == "session-1"
+    assert bus.events[0].turn_id == "corr-1"
     assert bus.events[0].payload["correlation"]["execution_id"] == "exec-1"
 
 

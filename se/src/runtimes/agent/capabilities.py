@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from ...application.policy.authorization import AuthorizationService
 from .contracts.context_assembly import AgentCapabilityView, AgentSkillView
 from .contracts.policy import AgentToolPolicy, PolicyDecision
 from ..capability.catalog import CapabilityNotFoundError
@@ -84,9 +85,27 @@ class RegistryAgentCapabilityResolver:
 class RegistryAgentSkillResolver:
     """Resolve only the skills assigned to an agent when its context is built."""
 
-    def __init__(self, *, agent_registry, capability_catalog) -> None:
+    def __init__(self, *, agent_registry, capability_catalog, authorization=None) -> None:
         self._agents = agent_registry
         self._catalog = capability_catalog
+        self._authorization = authorization or AuthorizationService()
+
+    async def list_available(self, *, identity) -> tuple[AgentSkillView, ...]:
+        """Expose authorized skill metadata without reading instruction files."""
+        return tuple(
+            AgentSkillView(
+                skill_id=definition.capability_id,
+                name=definition.name,
+                description=definition.description,
+                instruction="",
+                version=definition.version,
+            )
+            for definition in self._catalog.list_definitions()
+            if str(definition.metadata.get("kind", "")).upper() == "SKILL"
+            and definition.metadata.get("server_managed") is True
+            and definition.metadata.get("lazy") is True
+            and self._authorization.is_allowed(identity, definition)
+        )
 
     async def resolve(self, *, agent_id: str, identity) -> tuple[AgentSkillView, ...]:
         agent = self._agents.get(agent_id)
