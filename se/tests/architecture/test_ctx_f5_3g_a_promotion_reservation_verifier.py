@@ -23,15 +23,18 @@ def test_ctx_f5_3g_a_verifier_is_protocol_compatible_and_exact_id_only():
     source = SERVICE.read_text(encoding="utf-8")
     tree = ast.parse(source)
 
-    assert issubclass(DurablePromotionReservationVerifier, PromotionReservationVerifier)
+    assert (
+        PromotionReservationVerifier
+        in DurablePromotionReservationVerifier.__mro__
+    )
     signature = inspect.signature(DurablePromotionReservationVerifier.verify)
     assert tuple(signature.parameters) == ("self", "reservation", "intent")
     assert signature.parameters["reservation"].kind is inspect.Parameter.KEYWORD_ONLY
     assert signature.parameters["intent"].kind is inspect.Parameter.KEYWORD_ONLY
 
     assert "validate_reservation_matches_intent(reservation, intent)" in source
-    assert "repository.get(" not in source
-    assert "self._repository.get(" in source
+    assert source.count("self._repository.get(") == 1
+    assert "reservation.promotion_authority_id" in source
     assert "get_by_intent" not in source
     assert "get_by_proof_authority" not in source
     assert "_get_by_digest" not in source
