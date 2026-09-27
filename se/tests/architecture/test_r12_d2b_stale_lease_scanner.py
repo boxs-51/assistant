@@ -102,6 +102,21 @@ class _GateStore:
         return []
 
 
+class _HangingStore:
+    def __init__(self) -> None:
+        self.entered = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.calls = 0
+
+    async def list_expired_execution_leases(self, **kwargs):
+        self.calls += 1
+        self.entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            self.cancelled.set()
+
+
 class _Uow:
     def __init__(self, sessions):
         self._sessions = sessions
@@ -335,6 +350,30 @@ async def test_r12_d2b_monotonic_budget_stops_further_fetches_without_new_cutoff
     assert clock.now_calls == 1
     assert len(store.calls) == 1
     assert store.calls[0]["cutoff_utc"] == cutoff
+
+
+@pytest.mark.asyncio
+async def test_r12_d2b_page_fetch_is_bounded_by_remaining_duration():
+    cutoff = datetime(2026, 9, 27, 13, 45, tzinfo=timezone.utc)
+    store = _HangingStore()
+    coordinator = StaleLeaseScanCoordinator(
+        store,
+        policy=StaleLeaseScanPolicy(
+            page_size=10,
+            max_pages=10,
+            max_rows=100,
+            max_duration_seconds=0.05,
+        ),
+    )
+
+    result = await asyncio.wait_for(coordinator.scan_once(), timeout=0.5)
+
+    assert store.calls == 1
+    assert store.entered.is_set()
+    assert store.cancelled.is_set()
+    assert result.stop_reason is StaleLeaseSweepStopReason.MAX_DURATION
+    assert result.pages_fetched == 0
+    assert result.observations == ()
 
 
 @pytest.mark.asyncio
