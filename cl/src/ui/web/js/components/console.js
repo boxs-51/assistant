@@ -133,6 +133,7 @@ function createPartBlock(part, role) {
 
     case 'document':
     case 'attachment':
+    case 'file':
       return createFileBlock(role, part.data?.attachment || part.data, triggerBlockCallback);
 
     case 'image':
