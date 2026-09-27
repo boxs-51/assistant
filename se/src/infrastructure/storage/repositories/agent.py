@@ -41,6 +41,9 @@ from ..models.sql.agent import (
 )
 
 
+MAX_EXPIRED_EXECUTION_LEASE_SCAN_LIMIT = 100
+
+
 _TASK_BRANCH_MUTABLE_FIELDS = frozenset({
     "current_execution_id",
     "resolution_state",
@@ -863,6 +866,79 @@ class AgentRepository(BaseRepository):
             .limit(1)
         )
         return result.scalar_one_or_none() is not None
+
+    async def list_expired_execution_leases(
+        self,
+        *,
+        cutoff_utc: datetime,
+        limit: int,
+        after_expiry: Optional[datetime] = None,
+        after_execution_id: Optional[str] = None,
+    ):
+        """List a bounded page of expired owned RUNNING lease observations.
+
+        R12-D1 is read-only observation authority only. The returned records are
+        snapshots for later revalidation; they are never takeover authority.
+        """
+
+        cutoff_utc = _require_lease_utc_datetime(
+            cutoff_utc,
+            field="cutoff_utc",
+        )
+        if (
+            isinstance(limit, bool)
+            or not isinstance(limit, int)
+            or limit <= 0
+            or limit > MAX_EXPIRED_EXECUTION_LEASE_SCAN_LIMIT
+        ):
+            raise ValueError(
+                "limit must be an integer between 1 and "
+                f"{MAX_EXPIRED_EXECUTION_LEASE_SCAN_LIMIT}"
+            )
+
+        cursor_has_expiry = after_expiry is not None
+        cursor_has_id = after_execution_id is not None
+        if cursor_has_expiry != cursor_has_id:
+            raise ValueError(
+                "after_expiry and after_execution_id must be provided together"
+            )
+
+        statement = select(AgentExecutionRecord).where(
+            AgentExecutionRecord.state == "RUNNING",
+            AgentExecutionRecord.owner_instance_id.is_not(None),
+            AgentExecutionRecord.lease_expires_at.is_not(None),
+            AgentExecutionRecord.lease_expires_at <= cutoff_utc,
+        )
+
+        if cursor_has_expiry:
+            after_expiry = _require_lease_utc_datetime(
+                after_expiry,
+                field="after_expiry",
+            )
+            if (
+                not isinstance(after_execution_id, str)
+                or not after_execution_id
+            ):
+                raise ValueError(
+                    "after_execution_id must be a non-empty string"
+                )
+            statement = statement.where(
+                or_(
+                    AgentExecutionRecord.lease_expires_at > after_expiry,
+                    and_(
+                        AgentExecutionRecord.lease_expires_at == after_expiry,
+                        AgentExecutionRecord.id > after_execution_id,
+                    ),
+                )
+            )
+
+        result = await self.session.execute(
+            statement.order_by(
+                AgentExecutionRecord.lease_expires_at.asc(),
+                AgentExecutionRecord.id.asc(),
+            ).limit(limit)
+        )
+        return list(result.scalars().all())
 
     async def compare_and_set_fork_activation(
         self,

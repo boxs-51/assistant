@@ -2035,6 +2035,26 @@ class DurableAgentStore:
             await uow.commit()
             return active
 
+    async def list_expired_execution_leases(
+        self,
+        *,
+        cutoff_utc: datetime,
+        limit: int,
+        after_expiry: Optional[datetime] = None,
+        after_execution_id: Optional[str] = None,
+    ):
+        """Read one bounded page of expired owned RUNNING lease snapshots."""
+
+        async with self.uow_factory() as uow:
+            observations = await uow.agents.list_expired_execution_leases(
+                cutoff_utc=cutoff_utc,
+                limit=limit,
+                after_expiry=after_expiry,
+                after_execution_id=after_execution_id,
+            )
+            await uow.commit()
+            return observations
+
     async def commit_waiting_checkpoint(
         self,
         execution_id: str,
