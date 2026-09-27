@@ -1,3 +1,4 @@
+import base64
 import json
 import uuid
 import logging
@@ -309,6 +310,144 @@ class UIBridge:
         if btype: payload["type"] = btype
         self._eval_js(f"window.renderBlock && window.renderBlock({json.dumps(payload, ensure_ascii=False)})")
 
+    @staticmethod
+    def _canonical_attachment_from_descriptor(descriptor: dict) -> dict:
+        asset_id = str(descriptor.get("asset_id") or "").strip()
+        if not asset_id:
+            raise ValueError("Canonical asset upload did not return asset_id.")
+        if str(descriptor.get("state") or "").upper() != "READY":
+            raise ValueError("Canonical asset upload did not reach READY state.")
+        return {
+            "asset_id": asset_id,
+            "source": "asset",
+            "uri": f"asset://{asset_id}",
+            "filename": descriptor.get("filename"),
+            "mime_type": descriptor.get("mime_type") or "application/octet-stream",
+            "size": descriptor.get("size_bytes"),
+        }
+
+    @classmethod
+    def _online_message_content(cls, text: str, files: list | None):
+        attachments = files or []
+        if not attachments:
+            return text
+
+        parts = []
+        if text:
+            parts.append({"type": "text", "text": text})
+
+        for item in attachments:
+            if not isinstance(item, dict):
+                raise ValueError("ONLINE attachment payload must be canonical asset metadata.")
+            asset_id = str(item.get("asset_id") or "").strip()
+            if not asset_id or item.get("source") != "asset":
+                raise ValueError(
+                    "ONLINE attachments must be READY canonical assets; re-attach failed or legacy files."
+                )
+            if any(item.get(field) not in (None, "") for field in (
+                "base64_data", "b64_data", "bytes_data", "provider_file_id", "path"
+            )):
+                raise ValueError(
+                    "ONLINE canonical attachments cannot carry local/base64/provider identity."
+                )
+
+            attachment = {
+                "asset_id": asset_id,
+                "source": "asset",
+                "uri": f"asset://{asset_id}",
+                "filename": item.get("filename"),
+                "mime_type": item.get("mime_type") or "application/octet-stream",
+                "size": item.get("size"),
+            }
+            mime_type = attachment["mime_type"]
+            if mime_type.startswith("image/"):
+                parts.append({
+                    "type": "image",
+                    "data": {"attachment": attachment, "detail": "auto"},
+                })
+            elif mime_type.startswith("audio/"):
+                parts.append({"type": "audio", "data": {"attachment": attachment}})
+            elif mime_type.startswith("video/"):
+                parts.append({"type": "video", "data": {"attachment": attachment}})
+            else:
+                parts.append({"type": "file", "data": {"attachment": attachment}})
+        return parts
+
+    def _upload_asset_worker(self, file_path: str) -> None:
+        progress = {"path": file_path, "progress": 5}
+        self._eval_js(
+            "window.onFilePrepareProgress && window.onFilePrepareProgress("
+            + json.dumps(progress, ensure_ascii=False)
+            + ")"
+        )
+        try:
+            descriptor = self._engine.gateway_client.upload_asset(file_path)
+            attachment = self._canonical_attachment_from_descriptor(descriptor)
+            payload = {"path": file_path, "payload": attachment}
+            self._eval_js(
+                "window.onFilePrepareComplete && window.onFilePrepareComplete("
+                + json.dumps(payload, ensure_ascii=False)
+                + ")"
+            )
+        except Exception as error:
+            logger.exception("Canonical asset upload failed: %s", file_path)
+            payload = {"path": file_path, "error": str(error)}
+            self._eval_js(
+                "window.onFilePrepareError && window.onFilePrepareError("
+                + json.dumps(payload, ensure_ascii=False)
+                + ")"
+            )
+
+    def prepare_files_async(self, files: list):
+        if not files:
+            return None
+        with self._state_lock:
+            execution_mode = self._chat_preferences.get("execution_mode")
+        if execution_mode == "LOCAL_OFFLINE":
+            return self.encoder.encode_async(files)
+        if not self._client_runtime.ready:
+            for file_path in files:
+                payload = {
+                    "path": file_path,
+                    "error": "Gateway authentication is not ready.",
+                }
+                self._eval_js(
+                    "window.onFilePrepareError && window.onFilePrepareError("
+                    + json.dumps(payload, ensure_ascii=False)
+                    + ")"
+                )
+            return None
+        for file_path in files:
+            threading.Thread(
+                target=self._upload_asset_worker,
+                args=(file_path,),
+                daemon=True,
+            ).start()
+        return None
+
+    def read_asset_content(self, asset_id: str, byte_range: str = None):
+        try:
+            metadata = self._engine.gateway_client.asset_metadata(asset_id)
+            content = self._engine.gateway_client.asset_content(
+                asset_id,
+                byte_range=byte_range,
+            )
+            return {
+                "success": True,
+                "data": {
+                    "asset_id": asset_id,
+                    "filename": metadata.get("filename"),
+                    "mime_type": (
+                        metadata.get("mime_type")
+                        or "application/octet-stream"
+                    ),
+                    "base64_data": base64.b64encode(content).decode("ascii"),
+                },
+            }
+        except Exception as error:
+            logger.exception("Canonical asset content read failed: %s", asset_id)
+            return {"success": False, "error": str(error)}
+
     def submit_prompt(self, text: str, files: list = None, conversation_id: str = None):
 
         if not self._client_runtime.ready:
@@ -346,14 +485,11 @@ class UIBridge:
                         provider_name=preferences["provider"], model_name=preferences["model"]
                     )
                 else:
-                    if files:
-                        raise ValueError(
-                            "Online Agent chua ho tro tep dinh kem; chon LOCAL_OFFLINE cho yeu cau nay."
-                        )
+                    message_content = self._online_message_content(text, files)
                     response = self._client_runtime.chat(
                         GatewayChatRequest(
                             model=preferences["model"],
-                            messages=[GatewayMessage(role="user", content=text)],
+                            messages=[GatewayMessage(role="user", content=message_content)],
                             session_id=cid,
                             agent_enabled=bool(preferences.get("agent_enabled")),
                             agent_id=(
