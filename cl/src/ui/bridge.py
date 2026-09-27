@@ -425,9 +425,44 @@ class UIBridge:
             ).start()
         return None
 
-    def read_asset_content(self, asset_id: str, byte_range: str = None):
+    def read_asset_content(
+        self,
+        asset_id: str,
+        byte_range: str = None,
+        max_bytes: int = None,
+    ):
         try:
             metadata = self._engine.gateway_client.asset_metadata(asset_id)
+
+            if max_bytes is not None:
+                try:
+                    bounded_max_bytes = int(max_bytes)
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        "Canonical asset content bound must be an integer."
+                    ) from error
+                if bounded_max_bytes <= 0:
+                    raise ValueError(
+                        "Canonical asset content bound must be positive."
+                    )
+
+                raw_size = metadata.get("size_bytes")
+                try:
+                    asset_size = int(raw_size)
+                except (TypeError, ValueError) as error:
+                    raise ValueError(
+                        "Canonical asset size metadata is unavailable or invalid."
+                    ) from error
+                if asset_size < 0:
+                    raise ValueError(
+                        "Canonical asset size metadata must be non-negative."
+                    )
+                if asset_size > bounded_max_bytes:
+                    raise ValueError(
+                        "Canonical asset exceeds the bounded in-memory content "
+                        f"limit ({asset_size} > {bounded_max_bytes} bytes)."
+                    )
+
             content = self._engine.gateway_client.asset_content(
                 asset_id,
                 byte_range=byte_range,
