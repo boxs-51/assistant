@@ -8,13 +8,18 @@ import { initEditor } from './components/editor.js';
 import { initResizers } from './components/resizer.js';
 import { initGatewayPanel } from './components/gatewayPanel.js';
 
-async function resolveCanonicalAssetContent(attachment) {
+async function resolveCanonicalAssetContent(attachment, options = {}) {
   const assetId = attachment?.asset_id;
   if (!assetId) return null;
   if (!window.pywebview?.api?.read_asset_content) {
     throw new Error('Canonical asset content resolver is unavailable.');
   }
-  const result = await window.pywebview.api.read_asset_content(assetId);
+  const maxBytes = options?.maxBytes ?? null;
+  const result = await window.pywebview.api.read_asset_content(
+    assetId,
+    null,
+    maxBytes,
+  );
   if (!result?.success) {
     throw new Error(result?.error || 'Unable to read canonical asset content.');
   }
@@ -29,8 +34,8 @@ function base64ToObjectUrl(base64Data, mimeType) {
   }));
 }
 
-async function createCanonicalAssetObjectUrl(attachment) {
-  const content = await resolveCanonicalAssetContent(attachment);
+async function createCanonicalAssetObjectUrl(attachment, options = {}) {
+  const content = await resolveCanonicalAssetContent(attachment, options);
   if (!content) return null;
   return {
     url: base64ToObjectUrl(content.base64_data, content.mime_type),
