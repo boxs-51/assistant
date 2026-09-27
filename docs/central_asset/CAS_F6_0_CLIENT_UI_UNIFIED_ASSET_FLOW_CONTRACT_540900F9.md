@@ -271,6 +271,21 @@ Renderer-specific browser URLs are derived ephemerally after authenticated conte
 
 ## 11. Python client surface contract
 
+The active desktop Web UI submission ownership chain at this baseline is:
+
+```text
+cl/src/ui/web/js/app.js
+  -> cl/src/ui/web/js/components/inputFrame.js
+  -> cl/src/ui/web/js/components/inputFrame/fileManager.js
+  -> window.pywebview.api.submit_prompt(...)
+  -> cl/src/ui/bridge.py::UIBridge.submit_prompt
+  -> ONLINE: canonical GatewayChatRequest / client runtime
+     LOCAL_OFFLINE: cl/src/core/agent_engine.py::run_agent_session
+                    -> process_attached_files(...)
+```
+
+The first production slice must own this chain coherently enough to implement canonical upload, per-file READY/FAILED state, explicit retry/continue semantics and canonical attachment submission without stepping outside its declared file matrix.
+
 The first production slice is expected to add canonical asset operations to `GatewayLLMClient` while retaining legacy file methods in parallel.
 
 Behavioral surface to implement:
@@ -352,6 +367,11 @@ This is the candidate matrix for the first production CLAIM. It is not a product
 |---|---|---|
 | `cl/src/core/gateway_client.py` | canonical /v1/assets client methods | EXPECTED CHANGE |
 | `cl/src/core/content_processor.py` | stop canonical send path from converting selected files directly to base64/data-URI | EXPECTED CHANGE |
+| `cl/src/ui/web/js/app.js` | application submit caller that bridges input-frame payloads to `UIBridge.submit_prompt` | EXPECTED CHANGE / WIRING OWNER |
+| `cl/src/ui/web/js/components/inputFrame.js` | selected-file queue submission, send gating, retry/restore orchestration | EXPECTED CHANGE |
+| `cl/src/ui/web/js/components/inputFrame/fileManager.js` | per-file upload state, progress, READY/FAILED payload ownership | EXPECTED CHANGE |
+| `cl/src/ui/bridge.py` | pywebview submission boundary; ONLINE DIRECT/AGENT attachment acceptance and canonical request construction | EXPECTED CHANGE |
+| `cl/src/core/agent_engine.py` | local/offline request-building caller that currently consumes `attached_files` through `process_attached_files` | EXPECTED CHANGE / COMPATIBILITY OWNER |
 | `cl/src/ui/web/js/components/console/normalizer.js` | preserve canonical asset identity | EXPECTED CHANGE |
 | `cl/src/ui/web/js/components/console/blocks/fileBlock.js` | authenticated canonical content resolution for view/download | EXPECTED CHANGE |
 | `cl/src/ui/web/js/components/console/blocks/imageBlock.js` | authenticated canonical image resolution | EXPECTED CHANGE |
