@@ -25,16 +25,44 @@ export function createFileBlock(role, attachment, triggerBlockCallback) {
     </div>
   `;
 
-  block.querySelector('.btn-view-file').addEventListener('click', (e) => {
+  block.querySelector('.btn-view-file').addEventListener('click', async (e) => {
     e.stopPropagation();
     if (triggerBlockCallback) triggerBlockCallback('file', 'view', attachment);
-    openFileInEditor(attachment.uri || null, fileName, true, attachment.base64_data || null);
+    try {
+      if (attachment.asset_id) {
+        const content = await window.resolveCanonicalAssetContent?.(attachment);
+        if (!content) throw new Error('Canonical asset content is unavailable.');
+        openFileInEditor(null, fileName, true, content.base64_data || null);
+        return;
+      }
+      openFileInEditor(attachment.uri || null, fileName, true, attachment.base64_data || null);
+    } catch (error) {
+      console.error('Unable to view file attachment:', error);
+    }
   });
 
-  block.querySelector('.btn-download-file').addEventListener('click', (e) => {
+  block.querySelector('.btn-download-file').addEventListener('click', async (e) => {
     e.stopPropagation();
     if (triggerBlockCallback) triggerBlockCallback('file', 'download', attachment);
-    triggerFileDownload(fileName, attachment.base64_data ? `base64:${attachment.base64_data}` : (attachment.uri || ''), attachment.mime_type || 'application/octet-stream');
+    try {
+      if (attachment.asset_id) {
+        const content = await window.resolveCanonicalAssetContent?.(attachment);
+        if (!content) throw new Error('Canonical asset content is unavailable.');
+        triggerFileDownload(
+          fileName,
+          `base64:${content.base64_data || ''}`,
+          content.mime_type || attachment.mime_type || 'application/octet-stream'
+        );
+        return;
+      }
+      triggerFileDownload(
+        fileName,
+        attachment.base64_data ? `base64:${attachment.base64_data}` : (attachment.uri || ''),
+        attachment.mime_type || 'application/octet-stream'
+      );
+    } catch (error) {
+      console.error('Unable to download file attachment:', error);
+    }
   });
 
   return block;
