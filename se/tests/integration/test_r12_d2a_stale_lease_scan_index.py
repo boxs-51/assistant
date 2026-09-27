@@ -11,6 +11,7 @@ from sqlalchemy import create_engine
 from se.src.infrastructure.storage.models.sql.agent.execution import (
     AgentExecutionRecord,
 )
+from se.src.infrastructure.storage.models.sql.base import Base
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -107,7 +108,7 @@ def test_r12_d2a_metadata_schema_exposes_exact_index_and_query_plan(
     database = tmp_path / "r12_d2a_metadata.sqlite"
     engine = create_engine(f"sqlite:///{database.as_posix()}")
     try:
-        AgentExecutionRecord.__table__.create(engine)
+        Base.metadata.create_all(engine)
     finally:
         engine.dispose()
 
