@@ -13,19 +13,48 @@ export function createMediaBlock(role, mediaType, mediaData) {
   const mediaSrc = rawSrc ? safeHttpUrl(rawSrc, { allowImageData: false }) : null;
   if (!isCanonicalAsset && !mediaSrc) return null;
 
-  block.innerHTML = `<div class="media-wrapper"><${mediaType} controls ${mediaSrc ? `src="${escapeHtml(mediaSrc)}"` : ''} class="custom-${mediaType}-player"></${mediaType}></div>`;
+  block.innerHTML = `<div class="media-wrapper">
+    <${mediaType} controls ${mediaSrc ? `src="${escapeHtml(mediaSrc)}"` : ''} class="custom-${mediaType}-player"></${mediaType}>
+    ${isCanonicalAsset ? '<button type="button" class="canonical-media-load">Tải media để phát</button>' : ''}
+  </div>`;
 
   if (isCanonicalAsset) {
-    window.createCanonicalAssetObjectUrl?.(mediaData)
-      .then((resolved) => {
-        if (!resolved?.url) throw new Error('Canonical media content is unavailable.');
-        const media = block.querySelector(`.custom-${mediaType}-player`);
+    const media = block.querySelector(`.custom-${mediaType}-player`);
+    const loadButton = block.querySelector('.canonical-media-load');
+    let loading = false;
+    let loaded = false;
+    let resolvedUrl = null;
+
+    const revoke = () => {
+      if (!resolvedUrl) return;
+      URL.revokeObjectURL(resolvedUrl);
+      resolvedUrl = null;
+    };
+
+    const resolveOnDemand = async () => {
+      if (loading || loaded) return;
+      loading = true;
+      if (loadButton) {
+        loadButton.disabled = true;
+        loadButton.innerText = 'Đang tải media...';
+      }
+
+      try {
+        const resolved = await window.createCanonicalAssetObjectUrl?.(mediaData);
+        if (!resolved?.url) {
+          throw new Error('Canonical media content is unavailable.');
+        }
         if (!media) {
           URL.revokeObjectURL(resolved.url);
           return;
         }
-        media.src = resolved.url;
-        const revoke = () => URL.revokeObjectURL(resolved.url);
+
+        resolvedUrl = resolved.url;
+        media.src = resolvedUrl;
+        loaded = true;
+        if (typeof media.load === 'function') media.load();
+        if (loadButton) loadButton.remove();
+
         media.addEventListener('error', revoke, { once: true });
         const observer = new MutationObserver(() => {
           if (!document.documentElement.contains(block)) {
@@ -34,8 +63,20 @@ export function createMediaBlock(role, mediaType, mediaData) {
           }
         });
         observer.observe(document.documentElement, { childList: true, subtree: true });
-      })
-      .catch((error) => console.error('Unable to resolve canonical media:', error));
+      } catch (error) {
+        console.error('Unable to resolve canonical media:', error);
+        if (loadButton) {
+          loadButton.disabled = false;
+          loadButton.innerText = 'Thử tải lại media';
+        }
+      } finally {
+        loading = false;
+      }
+    };
+
+    // Canonical media is resolved only after an explicit user action.
+    // Avoid eager full-buffer bytes -> base64 -> WebView -> Blob materialization.
+    loadButton?.addEventListener('click', resolveOnDemand);
   }
 
   return block;
