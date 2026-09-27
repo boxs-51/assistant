@@ -35,6 +35,10 @@ anything. Those authorities remain in later R12 stages.
 ### lease_expires_at
 
 - Durable UTC wall-clock expiry.
+- Domain values must be timezone-aware; naive values fail closed.
+- Aware non-UTC values are normalized to the same UTC instant.
+- SQL persistence normalizes before bind and restores SQLite naive readback as
+  UTC-aware, so generic repository save/load cannot shift the durable instant.
 - Monotonic-process clock values must never be persisted.
 - NULL means no current durable lease.
 - Runtime expiry interpretation is not implemented in R12-B.
@@ -113,7 +117,9 @@ Existing AgentRepository primitives are intentionally reused unchanged:
   existing revision CAS.
 
 R12-B therefore does not modify the Agent repository or DurableAgentStore merely
-to round-trip owner/lease/fence representation.
+to round-trip owner/lease/fence representation. UTC safety is enforced at the
+domain/SQL representation boundary instead: naive expiry inputs are rejected and
+aware offsets are normalized to UTC before durable storage.
 
 ## 6. Exact production scope
 
@@ -168,9 +174,11 @@ R12-B candidate may become FINAL GREEN only when:
 2. migration is linear at 22a -> 21a;
 3. legacy upgrade preserves prior durable execution values;
 4. generic repository save/load and revision CAS round-trip the new scalars;
-5. invalid pairing/negative generation is rejected;
-6. downgrade fails closed for non-default authority and succeeds for defaults;
-7. no runtime lease behavior is introduced by the production diff;
-8. R11 persistence/checkpoint behavior remains green;
-9. Linux + Windows full Architecture is GREEN;
-10. independent audit finds no blocking P0/P1 and confirms migration-head drift.
+5. lease expiry has unambiguous UTC meaning across SQLite: aware offsets preserve
+   the same instant and naive inputs fail closed;
+6. invalid pairing/negative generation is rejected;
+7. downgrade fails closed for non-default authority and succeeds for defaults;
+8. no runtime lease behavior is introduced by the production diff;
+9. R11 persistence/checkpoint behavior remains green;
+10. Linux + Windows full Architecture is GREEN;
+11. independent audit finds no blocking P0/P1 and confirms migration-head drift.
