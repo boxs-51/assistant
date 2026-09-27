@@ -5,7 +5,7 @@ from pathlib import Path
 
 CONTRACT = Path(
     "docs/central_asset/"
-    "CAS_F7_0_GENERATED_MEDIA_CANONICALIZATION_CONTRACT_4E1B276A.md"
+    "CAS_F7_0_GENERATED_MEDIA_CANONICALIZATION_CONTRACT_3D7FE844.md"
 )
 
 
@@ -14,14 +14,14 @@ def _read(path: str) -> str:
 
 
 def _normalize(value: str) -> str:
-    return " ".join(value.split())
+    return " ".join(value.replace("**", "").replace("`", "").split())
 
 
 def test_f7_0_contract_is_zero_production_and_baseline_locked():
     document = CONTRACT.read_text(encoding="utf-8")
 
     for phrase in (
-        "main@4e1b276aa2c3bbb481af923326c3a9cb73195906",
+        "main@3d7fe844a94332fb89c23b5d2984041dc14c3f63",
         "Issue #74 comment #5854440946",
         "production/runtime/schema/migration delta = ZERO",
         "CAS-F7-0 contract/evidence preparation = OPEN",
@@ -72,8 +72,8 @@ def test_shared_direct_agent_provider_boundary_is_positive_source_evidence():
 
     document = _normalize(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
-        "after `ProviderExecutor.execute(...)` returns a fully decoded `GatewayResponse`",
-        "before `ChatExecutionHandler.execute_with_fallback(...)` returns that response",
+        "after provider execution has succeeded",
+        "before the successful decoded response leaves ChatExecutionHandler",
         "serve both DIRECT and AGENT consumers",
         "MUST NOT persist CAS assets inside Gemini/OpenAI/Ollama-specific converters",
     ):
@@ -145,8 +145,8 @@ def test_tool_generated_media_preserves_existing_committed_result_authority():
     document = _normalize(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
         "AgentToolResult.commit_state != COMMITTED => MUST NOT establish durable/model-visible canonical asset references",
-        "only after existing Agent authority has produced or loaded a COMMITTED tool result",
-        "F7 MUST NOT: - set or promote `commit_state`",
+        "F7-T tool-generated canonicalization = DEFERRED / CLOSED",
+        "post-hoc rewrite of AgentToolResult.output",
         "change checkpoint/resume/fork semantics",
     ):
         assert phrase in document
@@ -189,7 +189,7 @@ def test_f7_0_freezes_future_path_matrix_without_granting_production_edits():
         "This matrix is a **future production-candidate map**, not a production grant.",
         "EXPECTED NEW / production authority not released",
         "EXPECT NO CHANGE for provider-response slice",
-        "CONDITIONAL future change; separate tool-generated production slice may be required",
+        "NO CHANGE in F7-P1",
         "No production file in this table may be edited under F7-0 authority.",
     ):
         assert phrase in normalized
@@ -200,7 +200,7 @@ def test_f7_0_freezes_cross_issue_and_closed_authority_boundaries():
 
     for phrase in (
         "CTX retains Memory/promotion/retrieval/source-discovery and ToolResponsePayload projection/storage authority.",
-        "Current AE-R12-D2A PR #130 is a separate Draft candidate",
+        "Agent/R12 retains execution lease/recovery/checkpoint and tool-result commitment authority.",
         "F7-0 migration delta = ZERO",
         "D2A is NON_BLOCKING to this zero-production F7-0 candidate",
         "CAS-F8 legacy cutover/backfill/removal = CLOSED",
@@ -217,8 +217,8 @@ def test_f7_0_exit_gate_requires_fresh_audit_before_any_production_claim():
 
     for phrase in (
         "exact current main",
-        "DIRECT + AGENT provider-response ownership",
-        "COMMITTED-only tool-result fence",
+        "F7-P1 is provider-response-only",
+        "tool-generated media is deferred to separate F7-T authority",
         "streaming terminal-object / no-partial-asset semantics",
         "explicit exactly-once/idempotency strategy requirement",
         "fresh exact-head Architecture Linux + Windows",
