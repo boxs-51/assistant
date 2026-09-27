@@ -1,9 +1,58 @@
-// Kho lưu trữ quản lý trạng thái file đính kèm: path -> { path, filename, status, progress, payload, chipEl }
+// Attachment queue: local path -> { path, filename, status, progress, payload, error, chipEl }
 const attachedFilesMap = new Map();
 
-/**
- * Kiểm tra xem có file nào đang mã hóa hay không
- */
+function setChipState(item, status, label = null) {
+  if (!item?.chipEl) return;
+  item.chipEl.classList.remove('encoding', 'ready', 'error');
+  item.chipEl.classList.add(status);
+
+  const statusEl = item.chipEl.querySelector('.chip-status');
+  const progressBar = item.chipEl.querySelector('.chip-progress-bar');
+  const fillEl = item.chipEl.querySelector('.chip-progress-fill');
+
+  if (status === 'encoding') {
+    if (statusEl) statusEl.innerText = label || `${item.progress || 0}%`;
+    if (progressBar) progressBar.style.display = '';
+    if (fillEl) fillEl.style.width = `${item.progress || 0}%`;
+  } else if (status === 'ready') {
+    if (statusEl) statusEl.innerText = '✓';
+    if (progressBar) progressBar.style.display = 'none';
+  } else if (status === 'error') {
+    if (statusEl) statusEl.innerText = label || '⚠️ Thử lại';
+    if (progressBar) progressBar.style.display = 'none';
+  }
+}
+
+function markPreparationUnavailable(paths, onStateChange) {
+  paths.forEach((path) => {
+    const item = attachedFilesMap.get(path);
+    if (!item) return;
+    item.status = 'error';
+    item.error = 'File preparation API is unavailable.';
+    setChipState(item, 'error');
+  });
+  if (onStateChange) onStateChange();
+}
+
+function preparePaths(paths, onStateChange) {
+  if (!paths.length) return;
+  if (window.pywebview?.api?.prepare_files_async) {
+    window.pywebview.api.prepare_files_async(paths).catch((error) => {
+      paths.forEach((path) => {
+        const item = attachedFilesMap.get(path);
+        if (!item) return;
+        item.status = 'error';
+        item.error = String(error);
+        setChipState(item, 'error');
+      });
+      if (onStateChange) onStateChange();
+    });
+    return;
+  }
+  // Fail closed. ONLINE must never fall back to the legacy base64 encoder.
+  markPreparationUnavailable(paths, onStateChange);
+}
+
 export function hasFilesEncoding() {
   for (const item of attachedFilesMap.values()) {
     if (item.status === 'encoding') return true;
@@ -11,33 +60,52 @@ export function hasFilesEncoding() {
   return false;
 }
 
-/**
- * Lấy danh sách payload file đã encode thành công
- */
+export function hasFileFailures() {
+  for (const item of attachedFilesMap.values()) {
+    if (item.status === 'error') return true;
+  }
+  return false;
+}
+
+export function getFailedFilePaths() {
+  const paths = [];
+  for (const item of attachedFilesMap.values()) {
+    if (item.status === 'error') paths.push(item.path);
+  }
+  return paths;
+}
+
 export function getReadyPayloads() {
   const payloads = [];
   for (const item of attachedFilesMap.values()) {
-    if (item.status === 'ready' && item.payload) {
-      payloads.push(item.payload);
-    }
+    if (item.status === 'ready' && item.payload) payloads.push(item.payload);
   }
   return payloads;
 }
 
-/**
- * Thêm file chip và đăng ký mã hóa async với Python
- */
+export function retryFile(filePath, onStateChange) {
+  const item = attachedFilesMap.get(filePath);
+  if (!item || item.status !== 'error') return;
+
+  item.status = 'encoding';
+  item.progress = 0;
+  item.payload = null;
+  item.error = null;
+  setChipState(item, 'encoding', '0%');
+  if (onStateChange) onStateChange();
+  preparePaths([filePath], onStateChange);
+}
+
 export function addFilesToQueue(filePaths, onStateChange) {
   if (!filePaths || !Array.isArray(filePaths)) return;
 
-  const newPathsToEncode = [];
+  const newPaths = [];
   const wrapper = document.getElementById('chips-wrapper');
 
   filePaths.forEach((path) => {
     if (attachedFilesMap.has(path)) return;
 
     const fileName = path.split(/[\\/]/).pop();
-
     const chip = document.createElement('div');
     chip.className = 'chip encoding';
     chip.dataset.path = path;
@@ -49,9 +117,14 @@ export function addFilesToQueue(filePaths, onStateChange) {
       <span class="remove" title="Xóa">✕</span>
     `;
 
-    chip.querySelector('.remove').addEventListener('click', (e) => {
-      e.stopPropagation();
+    chip.querySelector('.remove').addEventListener('click', (event) => {
+      event.stopPropagation();
       removeFileFromQueue(path, onStateChange);
+    });
+
+    chip.querySelector('.chip-status').addEventListener('click', (event) => {
+      event.stopPropagation();
+      retryFile(path, onStateChange);
     });
 
     if (wrapper) wrapper.appendChild(chip);
@@ -62,45 +135,30 @@ export function addFilesToQueue(filePaths, onStateChange) {
       status: 'encoding',
       progress: 0,
       payload: null,
+      error: null,
       chipEl: chip,
     });
-
-    newPathsToEncode.push(path);
+    newPaths.push(path);
   });
 
   if (onStateChange) onStateChange();
-
-  if (newPathsToEncode.length > 0 && window.pywebview?.api?.encode_files_async) {
-    window.pywebview.api.encode_files_async(newPathsToEncode);
-  }
+  preparePaths(newPaths, onStateChange);
 }
 
-/**
- * Xóa file khỏi hàng chờ
- */
 export function removeFileFromQueue(filePath, onStateChange) {
   const item = attachedFilesMap.get(filePath);
-  if (item) {
-    if (item.chipEl && item.chipEl.parentNode) {
-      item.chipEl.remove();
-    }
-    attachedFilesMap.delete(filePath);
-    if (onStateChange) onStateChange();
-  }
+  if (!item) return;
+  if (item.chipEl?.parentNode) item.chipEl.remove();
+  attachedFilesMap.delete(filePath);
+  if (onStateChange) onStateChange();
 }
 
-/**
- * Xóa sạch danh sách file đính kèm
- */
 export function clearAllFiles() {
   attachedFilesMap.clear();
   const wrapper = document.getElementById('chips-wrapper');
   if (wrapper) wrapper.innerHTML = '';
 }
 
-/**
- * Backup và Restore trạng thái khi gửi lỗi
- */
 export function backupFilesMap() {
   return new Map(attachedFilesMap);
 }
@@ -110,66 +168,53 @@ export function restoreFilesMap(backupMap, onStateChange) {
   const wrapper = document.getElementById('chips-wrapper');
   if (wrapper) wrapper.innerHTML = '';
 
-  backupMap.forEach((val, key) => {
-    attachedFilesMap.set(key, val);
-    if (val.chipEl && wrapper) wrapper.appendChild(val.chipEl);
+  backupMap.forEach((value, key) => {
+    attachedFilesMap.set(key, value);
+    if (value.chipEl && wrapper) wrapper.appendChild(value.chipEl);
   });
 
   if (onStateChange) onStateChange();
 }
 
-/**
- * Đăng ký callback toàn cục từ Python Bridge
- */
 export function initFileEncoderCallbacks(onStateChange) {
-  window.onFileEncodeProgress = function (data) {
+  const handleProgress = (data) => {
     const item = attachedFilesMap.get(data.path);
     if (!item) return;
-
     item.progress = data.progress;
-    if (item.chipEl) {
-      const statusEl = item.chipEl.querySelector('.chip-status');
-      const fillEl = item.chipEl.querySelector('.chip-progress-fill');
-      if (statusEl) statusEl.innerText = `${data.progress}%`;
-      if (fillEl) fillEl.style.width = `${data.progress}%`;
-    }
+    setChipState(item, 'encoding');
   };
 
-  window.onFileEncodeComplete = function (payload) {
-    const item = attachedFilesMap.get(payload.path);
+  const handleComplete = (event, legacy = false) => {
+    const path = event.path;
+    const item = attachedFilesMap.get(path);
     if (!item) return;
 
     item.status = 'ready';
-    item.payload = payload;
-
-    if (item.chipEl) {
-      item.chipEl.classList.remove('encoding', 'error');
-      item.chipEl.classList.add('ready');
-
-      const statusEl = item.chipEl.querySelector('.chip-status');
-      const progressBar = item.chipEl.querySelector('.chip-progress-bar');
-      if (statusEl) statusEl.innerText = '✓';
-      if (progressBar) progressBar.style.display = 'none';
-    }
-
+    item.progress = 100;
+    // Canonical ONLINE events wrap the attachment so the local path is queue-only.
+    // Legacy LOCAL_OFFLINE encoder events remain unchanged for compatibility.
+    item.payload = legacy ? event : event.payload;
+    item.error = null;
+    setChipState(item, 'ready');
     if (onStateChange) onStateChange();
   };
 
-  window.onFileEncodeError = function (data) {
+  const handleError = (data) => {
     const item = attachedFilesMap.get(data.path);
     if (!item) return;
-
     item.status = 'error';
+    item.payload = null;
     item.error = data.error;
-
-    if (item.chipEl) {
-      item.chipEl.classList.remove('encoding', 'ready');
-      item.chipEl.classList.add('error');
-
-      const statusEl = item.chipEl.querySelector('.chip-status');
-      if (statusEl) statusEl.innerText = '⚠️ Lỗi';
-    }
-
+    setChipState(item, 'error');
     if (onStateChange) onStateChange();
   };
+
+  window.onFilePrepareProgress = handleProgress;
+  window.onFilePrepareComplete = (event) => handleComplete(event, false);
+  window.onFilePrepareError = handleError;
+
+  // FileEncoder owns LOCAL_OFFLINE compatibility and still emits these callbacks.
+  window.onFileEncodeProgress = handleProgress;
+  window.onFileEncodeComplete = (event) => handleComplete(event, true);
+  window.onFileEncodeError = handleError;
 }
