@@ -1,9 +1,9 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
 
 from .base import GatewayBaseModel
-from pydantic import Field, model_validator
+from pydantic import Field, field_validator, model_validator
 
 
 class AgentExecutionState(str, Enum):
@@ -76,6 +76,9 @@ class AgentExecution(GatewayBaseModel):
     state: AgentExecutionState = AgentExecutionState.CREATED
     wait_reason: Optional[AgentExecutionWaitReason] = None
     revision: int = 0
+    owner_instance_id: Optional[str] = None
+    lease_expires_at: Optional[datetime] = None
+    lease_generation: int = Field(default=0, ge=0)
     current_checkpoint_id: Optional[str] = None
     bound_client_id: Optional[str] = None
     bound_connection_id: Optional[str] = None
@@ -100,6 +103,29 @@ class AgentExecution(GatewayBaseModel):
         values["state"] = state
         values["wait_reason"] = reason
         return values
+
+    @field_validator("lease_expires_at")
+    @classmethod
+    def _normalize_lease_expiry_utc(cls, value: datetime | None):
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("lease_expires_at must be timezone-aware")
+        return value.astimezone(timezone.utc)
+
+    @model_validator(mode="after")
+    def _validate_lease_representation(self):
+        owner_present = self.owner_instance_id is not None
+        expiry_present = self.lease_expires_at is not None
+        if owner_present != expiry_present:
+            raise ValueError(
+                "owner_instance_id and lease_expires_at must be both set or both null"
+            )
+        if owner_present and self.lease_generation <= 0:
+            raise ValueError(
+                "active durable lease requires lease_generation > 0"
+            )
+        return self
 
 
 class AgentExecutionLimits(GatewayBaseModel):

@@ -1,15 +1,57 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import JSON, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import JSON, CheckConstraint, DateTime, Float, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.types import TypeDecorator
 
 from ..base import Base
 from ..custom_types import default_uuid_str
 
 
+class UTCLeaseDateTime(TypeDecorator):
+    """Persist lease expiry as an unambiguous UTC instant across dialects."""
+
+    impl = DateTime(timezone=True)
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is None:
+            return None
+        if not isinstance(value, datetime):
+            raise TypeError("lease_expires_at must be a datetime")
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("lease_expires_at must be timezone-aware")
+        normalized = value.astimezone(timezone.utc)
+        if dialect.name == "sqlite":
+            return normalized.replace(tzinfo=None)
+        return normalized
+
+    def process_result_value(self, value, dialect):
+        if value is None:
+            return None
+        if value.tzinfo is None or value.utcoffset() is None:
+            return value.replace(tzinfo=timezone.utc)
+        return value.astimezone(timezone.utc)
+
+
 class AgentExecutionRecord(Base):
     __tablename__ = "agent_executions"
+    __table_args__ = (
+        CheckConstraint(
+            "(owner_instance_id IS NULL AND lease_expires_at IS NULL) OR "
+            "(owner_instance_id IS NOT NULL AND lease_expires_at IS NOT NULL)",
+            name="ck_agent_executions_lease_owner_expiry_pair",
+        ),
+        CheckConstraint(
+            "lease_generation >= 0",
+            name="ck_agent_executions_lease_generation_nonnegative",
+        ),
+        CheckConstraint(
+            "owner_instance_id IS NULL OR lease_generation > 0",
+            name="ck_agent_executions_lease_owner_generation_positive",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(255), primary_key=True, default=default_uuid_str)
     session_id: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
@@ -24,6 +66,15 @@ class AgentExecutionRecord(Base):
     state: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
     wait_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    owner_instance_id: Mapped[Optional[str]] = mapped_column(
+        String(255), nullable=True
+    )
+    lease_expires_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCLeaseDateTime(), nullable=True
+    )
+    lease_generation: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
+    )
     current_checkpoint_id: Mapped[Optional[str]] = mapped_column(
         String(255), nullable=True, index=True
     )
