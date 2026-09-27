@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import socket
+import time
 from dataclasses import dataclass
 from typing import Awaitable, Callable, Iterable
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -63,6 +64,7 @@ def _dedupe_bounded(values: Iterable[str]) -> tuple[str, ...]:
 
 async def _system_resolve(host: str, port: int) -> list[str]:
     loop = asyncio.get_running_loop()
+    deadline = time.monotonic() + DNS_TIMEOUT_SECONDS
     try:
         infos = await asyncio.wait_for(
             loop.getaddrinfo(
@@ -71,7 +73,7 @@ async def _system_resolve(host: str, port: int) -> list[str]:
                 family=socket.AF_UNSPEC,
                 type=socket.SOCK_STREAM,
             ),
-            timeout=DNS_TIMEOUT_SECONDS,
+            timeout=max(0.001, deadline - time.monotonic()),
         )
     except asyncio.TimeoutError as exc:
         raise WebToolError(
@@ -81,6 +83,14 @@ async def _system_resolve(host: str, port: int) -> list[str]:
             details={"host": host},
         ) from exc
     except socket.gaierror as exc:
+        try:
+            addresses = await _resolve_doh(host, deadline)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            addresses = []
+        if addresses:
+            return addresses
         raise WebToolError(
             "WEB_DNS_FAILED",
             "DNS resolution failed",
@@ -88,6 +98,45 @@ async def _system_resolve(host: str, port: int) -> list[str]:
             details={"host": host, "exception_type": type(exc).__name__},
         ) from exc
     return [str(info[4][0]) for info in infos]
+
+
+async def _resolve_doh(host: str, deadline: float) -> list[str]:
+    """Resolve through a pinned HTTPS endpoint if the OS resolver fails."""
+    from curl_cffi.requests import AsyncSession
+
+    addresses: list[str] = []
+    async with AsyncSession(trust_env=False) as session:
+        for record_type, family in (("A", 1), ("AAAA", 28)):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            response = await asyncio.wait_for(
+                session.get(
+                    "https://1.1.1.1/dns-query",
+                    params={"name": host, "type": record_type},
+                    headers={"Accept": "application/dns-json"},
+                    timeout=remaining,
+                    allow_redirects=False,
+                ),
+                timeout=remaining,
+            )
+            if response.status_code != 200 or getattr(response, "primary_ip", None) != "1.1.1.1":
+                return []
+            if len(response.content) > 16_384:
+                return []
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("Status") != 0:
+                return []
+            for answer in payload.get("Answer", []):
+                if not isinstance(answer, dict) or answer.get("type") != family:
+                    continue
+                value = answer.get("data")
+                try:
+                    if isinstance(value, str) and ipaddress.ip_address(value).version == (4 if family == 1 else 6):
+                        addresses.append(value)
+                except ValueError:
+                    continue
+    return addresses
 
 
 class NetworkPolicy:

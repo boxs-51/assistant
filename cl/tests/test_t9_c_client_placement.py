@@ -67,7 +67,7 @@ def test_real_window_desktop_top_level_v2_modules_load_without_physical_roots():
     assert set(T9_C_ALL_IDS).issubset(loaded)
     assert "window_tool" not in loaded
     assert "desktop_automation" not in loaded
-    assert not {"web.search", "web.read", "web.read_many"}.intersection(loaded)
+    assert not {"web.search", "web.search_many", "web.read", "web.read_many"}.intersection(loaded)
 
 
 def test_window_desktop_bound_execution_preserves_physical_provenance(monkeypatch):

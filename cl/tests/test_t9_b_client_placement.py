@@ -51,7 +51,7 @@ def test_real_top_level_t9_b_modules_load_as_logical_client_capabilities(tmp_pat
     assert set(T9_B_IDS).issubset(loaded)
     for physical_root in PHYSICAL_ROOTS:
         assert physical_root not in loaded
-    assert not {"web.search", "web.read", "web.read_many"}.intersection(loaded)
+    assert not {"web.search", "web.search_many", "web.read", "web.read_many"}.intersection(loaded)
 
     target = tmp_path / "append.txt"
     target.write_text("A", encoding="utf-8")

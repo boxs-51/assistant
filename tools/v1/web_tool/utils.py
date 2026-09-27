@@ -15,9 +15,28 @@ def clean_whitespace(text: str) -> str:
 def deduplicate_content(text: str) -> str:
     if not text:
         return ""
+    lines = text.splitlines()
+    # Some sites render the same compact summary card twice with different
+    # headings. Remove nearby repeated runs while preserving dated day cards.
+    duplicate_lines: set[int] = set()
+    recent_runs: dict[tuple[str, ...], int] = {}
+    run_width = 6
+    for index in range(max(0, len(lines) - run_width + 1)):
+        run = tuple(line.strip() for line in lines[index:index + run_width])
+        if any(not line or line.startswith("#") for line in run):
+            continue
+        if sum(len(line) for line in run) < 30:
+            continue
+        previous = recent_runs.get(run)
+        if previous is not None and run_width <= index - previous <= 20:
+            duplicate_lines.update(range(index, index + run_width))
+        else:
+            recent_runs[run] = index
     seen: set[str] = set()
     output: list[str] = []
-    for line in text.splitlines():
+    for index, line in enumerate(lines):
+        if index in duplicate_lines:
+            continue
         stripped = line.strip()
         if stripped and len(stripped) > 15:
             if stripped in seen:

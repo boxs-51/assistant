@@ -52,7 +52,7 @@ OWNER_ID = "t8-g-user"
 SESSION_ID = "t8-g-session"
 CLIENT_ID = "t8-g-client"
 LOGICAL_ID = "logical.echo"
-WEB_IDS = {"web.search", "web.read", "web.read_many"}
+WEB_IDS = {"web.search", "web.search_many", "web.read", "web.read_many"}
 
 
 def _identity() -> Identity:

@@ -49,6 +49,7 @@ NON_WEB_IDS = (
 
 WEB_IDS = (
     "web.search",
+    "web.search_many",
     "web.read",
     "web.read_many",
 )

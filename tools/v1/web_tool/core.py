@@ -5,7 +5,7 @@ import hashlib
 import math
 import random
 import time
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Any, Optional
 
 from bs4 import BeautifulSoup
@@ -19,6 +19,8 @@ from .config import (
     MAX_CONTENT_CHARS_MAX,
     MAX_CONTENT_CHARS_MIN,
     MAX_QUERY_CHARS,
+    MAX_SEARCH_BATCH,
+    MAX_SEARCH_FOCUS_CHARS,
     MAX_RETRIES,
     MAX_STATIC_RESPONSE_BYTES,
     MAX_TITLE_CHARS,
@@ -29,6 +31,7 @@ from .config import (
     SEARCH_RESULTS_DEFAULT,
     SEARCH_RESULTS_MAX,
     SEARCH_RESULTS_MIN,
+    SEARCH_FRESHNESS_VALUES,
     WEB_CONCURRENCY_DEFAULT,
     WEB_CONCURRENCY_MAX,
     WEB_CONCURRENCY_MIN,
@@ -36,7 +39,12 @@ from .config import (
     WEB_TOOL_VERSION,
 )
 from .errors import WebToolError
-from .extractors import extract_clean_content, extract_tables_and_charts
+from .extractors import (
+    extract_clean_content,
+    extract_displayed_date,
+    extract_published_date,
+    extract_tables_and_charts,
+)
 from .network_policy import NetworkPolicy
 from .proxy import ProxyManager
 from .scraper import WebScraper, remaining_timeout
@@ -142,6 +150,37 @@ def _validate_output_format(value: Any) -> None:
             "INVALID_ARGUMENT",
             "T6 returns structured ToolResult; only legacy output_format='markdown' is accepted",
         )
+
+
+def _validate_freshness(value: Any) -> Optional[str]:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value not in SEARCH_FRESHNESS_VALUES:
+        raise WebToolError(
+            "INVALID_ARGUMENT",
+            "freshness must be day, week, month, or year",
+        )
+    return value
+
+
+def _freshness_cutoff(value: str, today: date) -> date:
+    if value == "day":
+        return today - timedelta(days=1)
+    if value == "week":
+        return today - timedelta(days=7)
+    if value == "month":
+        year = today.year - (today.month == 1)
+        month = today.month - 1 or 12
+        for day in range(today.day, 0, -1):
+            try:
+                return date(year, month, day)
+            except ValueError:
+                continue
+        return date(year, month, 1)
+    try:
+        return today.replace(year=today.year - 1)
+    except ValueError:
+        return today.replace(year=today.year - 1, day=28)
 
 
 class WebTool:
@@ -280,6 +319,36 @@ class WebTool:
             details=error.details,
         )
 
+    def _batch_result(
+        self, action: str, results: list[dict[str, Any]]
+    ) -> dict[str, Any]:
+        succeeded = sum(item.get("ok") is True for item in results)
+        data = {
+            "requested_count": len(results),
+            "succeeded_count": succeeded,
+            "failed_count": len(results) - succeeded,
+            "results": results,
+        }
+        if succeeded:
+            warnings = (
+                [f"{data['failed_count']} batch item(s) failed; inspect results"]
+                if data["failed_count"] else None
+            )
+            return self._success(action, data, warnings=warnings)
+
+        errors = [item.get("error") or {} for item in results]
+        codes = {item.get("code") for item in errors}
+        code = codes.pop() if len(codes) == 1 else "WEB_BATCH_ALL_FAILED"
+        return self._failure(
+            action,
+            WebToolError(
+                code,
+                "all web batch items failed",
+                retryable=any(item.get("retryable") is True for item in errors),
+                details=data,
+            ),
+        )
+
     @staticmethod
     def _validate_legacy_options(
         *,
@@ -293,12 +362,58 @@ class WebTool:
                 "captcha_api_key is not accepted by T6 ordinary web read",
             )
 
+    async def _verify_search_dates(
+        self,
+        results: list[dict[str, str]],
+        freshness: str,
+        deadline: float,
+    ) -> list[dict[str, str]]:
+        if not results:
+            return []
+        today = datetime.now(timezone.utc).date()
+        cutoff = _freshness_cutoff(freshness, today)
+
+        async def verify(item: dict[str, str]) -> dict[str, str] | None:
+            try:
+                source = await self.scraper.fetch_static(
+                    url=item["url"], deadline=deadline, profile=self.profiles[0]
+                )
+                published, publication_source = await _await_deadline(
+                    asyncio.to_thread(extract_published_date, source["html"]),
+                    deadline,
+                    stage="freshness_metadata",
+                )
+            except WebToolError:
+                return None
+            if published is None or not cutoff <= date.fromisoformat(published) <= today + timedelta(days=1):
+                return None
+            return {**item, "published_date": published, "published_date_source": publication_source or "unknown"}
+
+        tasks = [asyncio.create_task(verify(item)) for item in results]
+        try:
+            done, pending = await asyncio.wait(
+                tasks, timeout=max(0, deadline - time.monotonic())
+            )
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            return [task.result() for task in tasks if task in done and task.result() is not None]
+        except BaseException:
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+
     async def search(
         self,
         query: str,
         max_results: int = SEARCH_RESULTS_DEFAULT,
         output_format: str = "markdown",
         timeout: Optional[float] = None,
+        focus: Optional[str] = None,
+        freshness: Optional[str] = None,
+        verify_freshness: bool = False,
     ) -> dict[str, Any]:
         action = "search"
         try:
@@ -309,6 +424,18 @@ class WebTool:
                 maximum=MAX_QUERY_CHARS,
             )
             assert clean_query is not None
+            clean_focus = _validate_string(
+                focus,
+                name="focus",
+                maximum=MAX_SEARCH_FOCUS_CHARS,
+                allow_none=True,
+            )
+            if clean_focus is not None and len(clean_query) + 1 + len(clean_focus) > MAX_QUERY_CHARS:
+                raise WebToolError("INVALID_ARGUMENT", "query and focus exceed the search length limit")
+            clean_freshness = _validate_freshness(freshness)
+            _validate_bool(verify_freshness, "verify_freshness")
+            if verify_freshness and clean_freshness is None:
+                raise WebToolError("INVALID_ARGUMENT", "verify_freshness requires freshness")
             result_limit = _validate_int(
                 max_results,
                 name="max_results",
@@ -325,20 +452,142 @@ class WebTool:
                     maximum=READ_TIMEOUT_MAX,
                 )
             )
-            results = await self.searcher.search(
-                query=clean_query,
-                max_results=result_limit,
-                timeout=timeout_seconds,
-            )
+            deadline = time.monotonic() + timeout_seconds
+            for attempt in range(2):
+                try:
+                    results = await self.searcher.search(
+                        query=clean_query,
+                        max_results=result_limit,
+                        timeout=remaining_timeout(deadline),
+                        focus=clean_focus,
+                        freshness=clean_freshness,
+                    )
+                    break
+                except WebToolError as exc:
+                    if (
+                        attempt
+                        or not exc.retryable
+                        or exc.code not in {"WEB_SEARCH_PROVIDER_FAILED", "WEB_DNS_FAILED"}
+                        or deadline - time.monotonic() <= 0.25
+                    ):
+                        raise
+                    await asyncio.sleep(0.1)
+            candidate_count = len(results)
+            if verify_freshness:
+                assert clean_freshness is not None
+                results = await self._verify_search_dates(results, clean_freshness, deadline)
+            data = {
+                "query": clean_query,
+                "returned_count": len(results),
+                "provider": self.searcher.PROVIDER,
+                "results": results,
+            }
+            if clean_focus is not None:
+                data["focus"] = clean_focus
+            if clean_freshness is not None:
+                data["freshness"] = clean_freshness
+                data["freshness_verification"] = (
+                    "source_metadata" if verify_freshness else "provider_only"
+                )
+                if verify_freshness:
+                    data["unverified_or_out_of_range_count"] = candidate_count - len(results)
             return self._success(
                 action,
-                {
-                    "query": clean_query,
-                    "returned_count": len(results),
-                    "provider": self.searcher.PROVIDER,
-                    "results": results,
-                },
+                data,
             )
+        except asyncio.CancelledError:
+            raise
+        except WebToolError as exc:
+            return self._failure(action, exc)
+
+    async def search_many(
+        self,
+        searches: list[dict[str, str]],
+        max_results: int = SEARCH_RESULTS_DEFAULT,
+        freshness: Optional[str] = None,
+        verify_freshness: bool = False,
+        timeout: Optional[float] = None,
+    ) -> dict[str, Any]:
+        action = "search_many"
+        try:
+            if not isinstance(searches, list) or not 1 <= len(searches) <= MAX_SEARCH_BATCH:
+                raise WebToolError(
+                    "INVALID_ARGUMENT",
+                    f"searches must contain 1 to {MAX_SEARCH_BATCH} items",
+                )
+            limit = _validate_int(
+                max_results,
+                name="max_results",
+                minimum=SEARCH_RESULTS_MIN,
+                maximum=SEARCH_RESULTS_MAX,
+            )
+            clean_freshness = _validate_freshness(freshness)
+            _validate_bool(verify_freshness, "verify_freshness")
+            if verify_freshness and clean_freshness is None:
+                raise WebToolError("INVALID_ARGUMENT", "verify_freshness requires freshness")
+            timeout_seconds = (
+                self.default_timeout
+                if timeout is None
+                else _validate_float(
+                    timeout,
+                    name="timeout",
+                    minimum=READ_TIMEOUT_MIN,
+                    maximum=READ_TIMEOUT_MAX,
+                )
+            )
+            validated: list[tuple[str, Optional[str]]] = []
+            for index, item in enumerate(searches):
+                if not isinstance(item, dict) or set(item) - {"query", "focus"}:
+                    raise WebToolError(
+                        "INVALID_ARGUMENT", f"searches[{index}] has invalid fields"
+                    )
+                query = _validate_string(item.get("query"), name="query", maximum=MAX_QUERY_CHARS)
+                focus = _validate_string(
+                    item.get("focus"),
+                    name="focus",
+                    maximum=MAX_SEARCH_FOCUS_CHARS,
+                    allow_none=True,
+                )
+                assert query is not None
+                if focus is not None and len(query) + 1 + len(focus) > MAX_QUERY_CHARS:
+                    raise WebToolError(
+                        "INVALID_ARGUMENT", "query and focus exceed the search length limit"
+                    )
+                validated.append((query, focus))
+
+            semaphore = asyncio.Semaphore(self.max_concurrency)
+
+            async def one(query: str, focus: Optional[str]) -> dict[str, Any]:
+                async with semaphore:
+                    return await self.search(
+                        query,
+                        max_results=limit,
+                        focus=focus,
+                        freshness=clean_freshness,
+                        verify_freshness=verify_freshness,
+                        timeout=timeout_seconds,
+                    )
+
+            tasks = [asyncio.create_task(one(query, focus)) for query, focus in validated]
+            try:
+                done, pending = await asyncio.wait(tasks, timeout=timeout_seconds)
+                for task in pending:
+                    task.cancel()
+                if pending:
+                    await asyncio.gather(*pending, return_exceptions=True)
+                results = [
+                    task.result() if task in done else self._failure(
+                        "search",
+                        WebToolError("WEB_TIMEOUT", "web search batch timed out", retryable=True),
+                    )
+                    for task in tasks
+                ]
+            except BaseException:
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                raise
+            return self._batch_result(action, results)
         except asyncio.CancelledError:
             raise
         except WebToolError as exc:
@@ -681,6 +930,8 @@ class WebTool:
                 title, title_truncated = self._extract_title(source["html"])
 
             full_content = content
+            published_date, published_date_source = extract_published_date(source["html"])
+            displayed_date, displayed_date_source = extract_displayed_date(source["html"])
             digest = hashlib.sha256(full_content.encode("utf-8")).hexdigest()
             truncated = len(full_content) > char_limit
             returned_content = full_content[:char_limit]
@@ -691,6 +942,8 @@ class WebTool:
                 "status_code": int(source["status_code"]),
                 "title": title,
                 "title_truncated": title_truncated,
+                "published_date": published_date,
+                "displayed_date": displayed_date,
                 "content": returned_content,
                 "content_format": "markdown",
                 "content_chars": len(full_content),
@@ -701,6 +954,8 @@ class WebTool:
                 "structured_data": structured_data,
                 "provenance": {
                     "fetched_at": datetime.now(timezone.utc).isoformat(),
+                    "published_date_source": published_date_source,
+                    "displayed_date_source": displayed_date_source,
                     "redirect_chain": source.get("redirect_chain", []),
                     "extractor": static_extractor,
                     "rendered": bool(source.get("rendered")),
@@ -780,20 +1035,41 @@ class WebTool:
                     maximum=MAX_CONTENT_CHARS_MAX,
                 )
 
-            validated_urls: list[str] = []
+            deadline = time.monotonic() + timeout_seconds
+            normalized_urls: list[str] = []
             for index, item in enumerate(urls):
                 if not isinstance(item, str) or not item.strip():
                     raise WebToolError(
                         "INVALID_ARGUMENT",
                         f"urls[{index}] must be a non-empty string",
                     )
-                preflight_deadline = time.monotonic() + timeout_seconds
-                target = await _await_deadline(
-                    self.network_policy.resolve_url(item),
-                    preflight_deadline,
+                normalized_urls.append(self.network_policy.normalize_url(item)[0])
+
+            preflight_slots = asyncio.Semaphore(self.max_concurrency)
+
+            async def preflight(item: str) -> str:
+                async with preflight_slots:
+                    target = await _await_deadline(
+                        self.network_policy.resolve_url(item),
+                        deadline,
+                        stage="batch_preflight_dns",
+                    )
+                    return target.url
+
+            preflight_tasks = [
+                asyncio.create_task(preflight(item)) for item in normalized_urls
+            ]
+            try:
+                validated_urls = await _await_deadline(
+                    asyncio.gather(*preflight_tasks),
+                    deadline,
                     stage="batch_preflight_dns",
                 )
-                validated_urls.append(target.url)
+            except BaseException:
+                for task in preflight_tasks:
+                    task.cancel()
+                await asyncio.gather(*preflight_tasks, return_exceptions=True)
+                raise
 
             queue: asyncio.Queue[tuple[int, str] | None] = asyncio.Queue()
             results: list[dict[str, Any] | None] = [None] * len(validated_urls)
@@ -814,7 +1090,7 @@ class WebTool:
                         url=item,
                         force_js=force_js,
                         wait_selector=selector,
-                        timeout=timeout,
+                        timeout=timeout_seconds,
                         max_chars=max_chars,
                         captcha_api_key=None,
                         output_format="markdown",
@@ -827,7 +1103,14 @@ class WebTool:
                 for _ in range(worker_count)
             ]
             try:
-                await asyncio.gather(*workers)
+                await asyncio.wait_for(
+                    asyncio.gather(*workers),
+                    timeout=max(0, deadline - time.monotonic()),
+                )
+            except asyncio.TimeoutError:
+                for task in workers:
+                    task.cancel()
+                await asyncio.gather(*workers, return_exceptions=True)
             except asyncio.CancelledError:
                 for task in workers:
                     task.cancel()
@@ -839,18 +1122,14 @@ class WebTool:
                 await asyncio.gather(*workers, return_exceptions=True)
                 raise
 
-            final_results = [item for item in results if item is not None]
-            succeeded = sum(1 for item in final_results if item.get("ok") is True)
-            failed = len(final_results) - succeeded
-            return self._success(
-                action,
-                {
-                    "requested_count": len(validated_urls),
-                    "succeeded_count": succeeded,
-                    "failed_count": failed,
-                    "results": final_results,
-                },
-            )
+            final_results = [
+                item if item is not None else self._failure(
+                    "scrape",
+                    WebToolError("WEB_TIMEOUT", "web read batch timed out", retryable=True),
+                )
+                for item in results
+            ]
+            return self._batch_result(action, final_results)
         except asyncio.CancelledError:
             raise
         except WebToolError as exc:
@@ -860,6 +1139,10 @@ class WebTool:
         self,
         action: str,
         query: Optional[str] = None,
+        focus: Optional[str] = None,
+        searches: Optional[list[dict[str, str]]] = None,
+        freshness: Optional[str] = None,
+        verify_freshness: bool = False,
         url: Optional[str] = None,
         urls: Optional[list[str]] = None,
         output_format: str = "markdown",
@@ -892,8 +1175,25 @@ class WebTool:
                 )
             return await self.search(
                 query=query,
+                focus=focus,
+                freshness=freshness,
+                verify_freshness=verify_freshness,
                 max_results=max_results,
                 output_format=output_format,
+                timeout=timeout,
+            )
+
+        if canonical == "search_many":
+            if searches is None:
+                return self._failure(
+                    canonical,
+                    WebToolError("INVALID_ARGUMENT", "searches is required for search_many"),
+                )
+            return await self.search_many(
+                searches=searches,
+                max_results=max_results,
+                freshness=freshness,
+                verify_freshness=verify_freshness,
                 timeout=timeout,
             )
 

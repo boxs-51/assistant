@@ -1,0 +1,987 @@
+{
+  "schema": "tools.v1.deep-validation/1",
+  "timestamp_utc": "2026-09-24T15:50:09.386119+00:00",
+  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "platform": "win32",
+  "cases": [
+    {
+      "name": "file_write",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "write",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/small.txt",
+          "mode": "w",
+          "created": true,
+          "changed": true,
+          "input_bytes": 17,
+          "final_size_bytes": 17,
+          "before_sha256": null,
+          "after_sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_page",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "read",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/small.txt",
+          "content": "beta\n",
+          "encoding": "utf-8",
+          "size_bytes": 17,
+          "sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953",
+          "is_symlink": false,
+          "start_line": 2,
+          "returned_line_count": 1,
+          "next_start_line": 3,
+          "eof": false
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_search_regex",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "search",
+        "data": {
+          "files": [
+            {
+              "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/small.txt",
+              "size_bytes": 17,
+              "sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953",
+              "is_symlink": false,
+              "match_count": 2,
+              "returned_count": 2,
+              "matches": [
+                {
+                  "line": 1,
+                  "query_index": 0,
+                  "match_start": 0,
+                  "match_end": 5,
+                  "text": "alpha",
+                  "snippet_start": 0,
+                  "snippet_end": 5
+                },
+                {
+                  "line": 3,
+                  "query_index": 0,
+                  "match_start": 0,
+                  "match_end": 5,
+                  "text": "alpha",
+                  "snippet_start": 0,
+                  "snippet_end": 5
+                }
+              ]
+            }
+          ],
+          "total_match_count": 2,
+          "returned_count": 2
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_replace",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "replace",
+        "data": {
+          "files": [
+            {
+              "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/small.txt",
+              "changed": true,
+              "replacement_count": 2,
+              "reported_change_count": 2,
+              "before_sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953",
+              "after_sha256": "18d29c2a6b66bbd07daff456b416bdf8841ee137ea3b92ac962f8382e1781acb",
+              "changes": [
+                {
+                  "line": 1,
+                  "query_index": 0,
+                  "replacement_count": 1,
+                  "before": "alpha",
+                  "after": "gamma"
+                },
+                {
+                  "line": 3,
+                  "query_index": 0,
+                  "replacement_count": 1,
+                  "before": "alpha",
+                  "after": "gamma"
+                }
+              ]
+            }
+          ],
+          "changed_files": 1,
+          "total_replacements": 2,
+          "reported_change_count": 2
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_after_replace",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "read",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/small.txt",
+          "content": "gamma\nbeta\ngamma\n",
+          "encoding": "utf-8",
+          "size_bytes": 17,
+          "sha256": "18d29c2a6b66bbd07daff456b416bdf8841ee137ea3b92ac962f8382e1781acb",
+          "is_symlink": false,
+          "start_line": 1,
+          "returned_line_count": 3,
+          "next_start_line": null,
+          "eof": true
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_missing",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "read",
+        "data": null,
+        "error": {
+          "code": "FILE_NOT_FOUND",
+          "message": "file does not exist",
+          "retryable": false,
+          "details": {
+            "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/missing.txt"
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_invalid_regex",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "search",
+        "data": null,
+        "error": {
+          "code": "FILE_REGEX_INVALID",
+          "message": "invalid regular expression",
+          "retryable": false,
+          "details": {
+            "query_index": 0
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "glob_600_limited",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "find_by_glob",
+        "action": "find",
+        "data": {
+          "root_dir": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data",
+          "pattern": "*.txt",
+          "recursive": false,
+          "returned_count": 25,
+          "matches": {
+            "length": 25,
+            "sample": [
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0000.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0001.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0002.txt",
+                "kind": "file",
+                "is_symlink": false
+              }
+            ]
+          }
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": true,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "glob_600_full",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "find_by_glob",
+        "action": "find",
+        "data": {
+          "root_dir": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data",
+          "pattern": "*.txt",
+          "recursive": false,
+          "returned_count": 600,
+          "matches": {
+            "length": 600,
+            "sample": [
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0000.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0001.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0002.txt",
+                "kind": "file",
+                "is_symlink": false
+              }
+            ]
+          }
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "glob_invalid_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "find_by_glob",
+        "action": "find",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "max_results must be within [1, 5000]",
+          "retryable": false,
+          "details": {
+            "exception_type": "ToolLimitConfigError"
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_search_80_files_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "search",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "file_paths must contain between 1 and 32 paths",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_search_32_files_320_hits",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "search",
+        "data": {
+          "files": {
+            "length": 32,
+            "sample": [
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0000.txt",
+                "size_bytes": 80,
+                "sha256": "2c3f175778d2b2c24ef6367409466b90ef8fe01ad06cad759af0f76224c8d62e",
+                "is_symlink": false,
+                "match_count": 10,
+                "returned_count": 5,
+                "matches": {
+                  "length": 5,
+                  "sample": [
+                    {
+                      "line": 1,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 2,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 3,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    }
+                  ]
+                }
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0001.txt",
+                "size_bytes": 80,
+                "sha256": "2c3f175778d2b2c24ef6367409466b90ef8fe01ad06cad759af0f76224c8d62e",
+                "is_symlink": false,
+                "match_count": 10,
+                "returned_count": 5,
+                "matches": {
+                  "length": 5,
+                  "sample": [
+                    {
+                      "line": 1,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 2,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 3,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    }
+                  ]
+                }
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/item-0002.txt",
+                "size_bytes": 80,
+                "sha256": "2c3f175778d2b2c24ef6367409466b90ef8fe01ad06cad759af0f76224c8d62e",
+                "is_symlink": false,
+                "match_count": 10,
+                "returned_count": 5,
+                "matches": {
+                  "length": 5,
+                  "sample": [
+                    {
+                      "line": 1,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 2,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 3,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "total_match_count": 320,
+          "returned_count": 160
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": true,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_write_1m",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "write",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/large.txt",
+          "mode": "w",
+          "created": true,
+          "changed": true,
+          "input_bytes": 900000,
+          "final_size_bytes": 900000,
+          "before_sha256": null,
+          "after_sha256": "5f76430825cb79355393da5e44236d8c0a236476af2decfd1e49ca8050de9c93"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_long_line_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "read",
+        "data": null,
+        "error": {
+          "code": "OUTPUT_LIMIT_EXCEEDED",
+          "message": "one selected line exceeds max_chars and cannot be returned whole",
+          "retryable": false,
+          "details": {
+            "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/large.txt",
+            "line": 1,
+            "max_chars": 4096
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_write_900k_multiline",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "write",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/multiline.txt",
+          "mode": "w",
+          "created": true,
+          "changed": true,
+          "input_bytes": 900000,
+          "final_size_bytes": 900000,
+          "before_sha256": null,
+          "after_sha256": "fabfbc499da9dc1c0e8f89653f5257522ec28f92e9bf820b03b80acd455efd6c"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_900k_cap",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "read",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-fegn0vy3/data/multiline.txt",
+          "content": {
+            "length": 3000,
+            "prefix": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          "encoding": "utf-8",
+          "size_bytes": 900000,
+          "sha256": "fabfbc499da9dc1c0e8f89653f5257522ec28f92e9bf820b03b80acd455efd6c",
+          "is_symlink": false,
+          "start_line": 1,
+          "returned_line_count": 1,
+          "next_start_line": 2,
+          "eof": false
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": true,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_nonzero",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": {
+          "exit_code": 7,
+          "stdout": "out\r\n",
+          "stderr": "err\r\n",
+          "stdout_bytes": 5,
+          "stderr_bytes": 5,
+          "encoding": "cp1252",
+          "duration_ms": 77,
+          "cwd": "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tools-v1-deep-fegn0vy3"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_timeout",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": null,
+        "error": {
+          "code": "TERMINAL_TIMEOUT",
+          "message": "terminal command exceeded the execution timeout",
+          "retryable": false,
+          "details": {
+            "timeout_seconds": 1,
+            "duration_ms": 1030
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_output_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": null,
+        "error": {
+          "code": "TERMINAL_OUTPUT_LIMIT",
+          "message": "terminal command exceeded the output byte limit",
+          "retryable": false,
+          "details": {
+            "overflow_stream": "stdout",
+            "stdout_bytes_observed": 4653056,
+            "stderr_bytes_observed": 0,
+            "max_stdout_bytes": 4194304,
+            "max_stderr_bytes": 4194304,
+            "max_total_output_bytes": 8388608,
+            "duration_ms": 157
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_invalid_cwd",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": null,
+        "error": {
+          "code": "TERMINAL_CWD_NOT_FOUND",
+          "message": "terminal working directory does not exist",
+          "retryable": false,
+          "details": {
+            "cwd": "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tools-v1-deep-fegn0vy3\\missing"
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "web_invalid_url",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "web_tool",
+        "action": "scrape",
+        "data": null,
+        "error": {
+          "code": "WEB_URL_BLOCKED",
+          "message": "only http and https URLs are allowed",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "web_invalid_action",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "web_tool",
+        "action": "not_an_action",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "unsupported web action",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "web_search_10",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "web_tool",
+        "action": "search",
+        "data": {
+          "query": "IANA example domain",
+          "returned_count": 10,
+          "provider": "duckduckgo_html",
+          "results": {
+            "length": 10,
+            "sample": [
+              {
+                "title": "IANA-managed Reserved Domains",
+                "url": "https://www.iana.org/domains/reserved",
+                "snippet": {
+                  "length": 401,
+                  "prefix": "IANA -managed Reserved Domains Certain domains are set aside, and nominally registered to \" IANA \", for specific policy or technical purposes. Example domains As described in RFC 2606 and RFC 6761, a number of domains such as example .com a"
+                }
+              },
+              {
+                "title": "Example Domains - Internet Assigned Numbers Authority",
+                "url": "https://www.iana.org/help/example-domains",
+                "snippet": {
+                  "length": 292,
+                  "prefix": "As described in RFC 2606 and RFC 6761, a number of domains such as example .com and example .org are maintained for documentation purposes. These domains may be used as illustrative examples in documents without prior coordination with us. "
+                }
+              },
+              {
+                "title": ".example - ICANNWiki",
+                "url": "https://icannwiki.org/.example",
+                "snippet": {
+                  "length": 251,
+                  "prefix": ". example is a reserved special-use top level domain name. It was first reserved for use in RFC 2606, which describes current practice. . example is accompanied by three sister second level domains that are similarly reserved for use in doc"
+                }
+              }
+            ]
+          }
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "web_scrape_many_2",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "web_tool",
+        "action": "scrape_many",
+        "data": {
+          "requested_count": 2,
+          "succeeded_count": 2,
+          "failed_count": 0,
+          "results": [
+            {
+              "ok": true,
+              "tool": "web_tool",
+              "action": "scrape",
+              "data": {
+                "requested_url": "https://example.com/",
+                "final_url": "https://example.com/",
+                "status_code": 200,
+                "title": "Example Domain",
+                "title_truncated": false,
+                "content": "This domain is for use in documentation examples without needing permission. Avoid use in operations.\n\nLearn more",
+                "content_format": "markdown",
+                "content_chars": 113,
+                "returned_chars": 113,
+                "content_sha256": "c98b4887d6d7251da51012d6341b698e028044d36909af5a2996b34922cb7c52",
+                "method": "dynamic",
+                "content_type": "text/html",
+                "structured_data": {
+                  "tables": [],
+                  "charts": []
+                },
+                "provenance": {
+                  "fetched_at": "2026-09-24T15:50:09.339057+00:00",
+                  "redirect_chain": [],
+                  "extractor": "trafilatura",
+                  "rendered": true,
+                  "proxy_used": false,
+                  "wait_selector_satisfied": null
+                }
+              },
+              "error": null,
+              "meta": {
+                "version": "2.0.0",
+                "truncated": false,
+                "warnings": []
+              }
+            },
+            {
+              "ok": true,
+              "tool": "web_tool",
+              "action": "scrape",
+              "data": {
+                "requested_url": "https://www.iana.org/domains/reserved",
+                "final_url": "https://www.iana.org/domains/reserved",
+                "status_code": 200,
+                "title": "IANA-managed Reserved Domains",
+                "title_truncated": false,
+                "content": {
+                  "length": 2279,
+                  "prefix": "# IANA-managed Reserved Domains\n\nCertain domains are set aside, and nominally registered to “IANA”, for specific policy or technical purposes.\n\n## Example domains\n\nAs described in [RFC 2606](https://www.iana.org/go/rfc2606) and [RFC 6761](h"
+                },
+                "content_format": "markdown",
+                "content_chars": 2279,
+                "returned_chars": 2279,
+                "content_sha256": "faaf1be32232bd1b4d29fd3ef3de987ef7e88f2016dae31e8aee5e813cabf483",
+                "method": "static",
+                "content_type": "text/html; charset=UTF-8",
+                "structured_data": {
+                  "tables": [
+                    {
+                      "length": 12,
+                      "sample": [
+                        {
+                          "length": 4,
+                          "sample": [
+                            "Domain",
+                            "Domain (A-label)",
+                            "Language"
+                          ]
+                        },
+                        {
+                          "length": 4,
+                          "sample": [
+                            "إختبار",
+                            "xn--kgbechtv",
+                            "Arabic"
+                          ]
+                        },
+                        {
+                          "length": 4,
+                          "sample": [
+                            "آزمایشی",
+                            "xn--hgbk6aj7f53bba",
+                            "Persian"
+                          ]
+                        }
+                      ]
+                    },
+                    {
+                      "length": 4,
+                      "sample": [
+                        [
+                          "Domain Names",
+                          "Root Zone Registry .INT Registry .ARPA Registry IDN Repository"
+                        ],
+                        [
+                          "Number Resources",
+                          "Number Registries RIR Allocation Data Abuse Information"
+                        ],
+                        [
+                          "Protocols",
+                          "Protocol Registries Time Zone Database"
+                        ]
+                      ]
+                    }
+                  ],
+                  "charts": []
+                },
+                "provenance": {
+                  "fetched_at": "2026-09-24T15:50:08.473043+00:00",
+                  "redirect_chain": [],
+                  "extractor": "trafilatura",
+                  "rendered": false,
+                  "proxy_used": false,
+                  "wait_selector_satisfied": null
+                }
+              },
+              "error": null,
+              "meta": {
+                "version": "2.0.0",
+                "truncated": false,
+                "warnings": []
+              }
+            }
+          ]
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "window_invalid_action",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "window_tool",
+        "action": "not_an_action",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "unsupported window action",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "desktop_invalid_action",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "desktop_automation",
+        "action": "not_an_action",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "unsupported desktop action",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    }
+  ],
+  "summary": {
+    "total": 26,
+    "passed": 26
+  }
+}

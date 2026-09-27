@@ -228,7 +228,8 @@ class WebScraper:
         return {
             CurlOpt.RESOLVE: [
                 f"{target.host}:{target.port}:{addresses}"
-            ]
+            ],
+            CurlOpt.CONNECTTIMEOUT_MS: 2000,
         }
 
     @staticmethod

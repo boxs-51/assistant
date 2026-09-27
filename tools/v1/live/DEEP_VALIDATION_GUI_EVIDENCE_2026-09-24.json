@@ -1,0 +1,1171 @@
+{
+  "schema": "tools.v1.deep-validation/1",
+  "timestamp_utc": "2026-09-24T15:50:41.616451+00:00",
+  "python": "3.12.10 (tags/v3.12.10:0cc8128, Apr  8 2025, 12:21:36) [MSC v.1943 64 bit (AMD64)]",
+  "platform": "win32",
+  "cases": [
+    {
+      "name": "file_write",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "write",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/small.txt",
+          "mode": "w",
+          "created": true,
+          "changed": true,
+          "input_bytes": 17,
+          "final_size_bytes": 17,
+          "before_sha256": null,
+          "after_sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_page",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "read",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/small.txt",
+          "content": "beta\n",
+          "encoding": "utf-8",
+          "size_bytes": 17,
+          "sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953",
+          "is_symlink": false,
+          "start_line": 2,
+          "returned_line_count": 1,
+          "next_start_line": 3,
+          "eof": false
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_search_regex",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "search",
+        "data": {
+          "files": [
+            {
+              "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/small.txt",
+              "size_bytes": 17,
+              "sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953",
+              "is_symlink": false,
+              "match_count": 2,
+              "returned_count": 2,
+              "matches": [
+                {
+                  "line": 1,
+                  "query_index": 0,
+                  "match_start": 0,
+                  "match_end": 5,
+                  "text": "alpha",
+                  "snippet_start": 0,
+                  "snippet_end": 5
+                },
+                {
+                  "line": 3,
+                  "query_index": 0,
+                  "match_start": 0,
+                  "match_end": 5,
+                  "text": "alpha",
+                  "snippet_start": 0,
+                  "snippet_end": 5
+                }
+              ]
+            }
+          ],
+          "total_match_count": 2,
+          "returned_count": 2
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_replace",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "replace",
+        "data": {
+          "files": [
+            {
+              "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/small.txt",
+              "changed": true,
+              "replacement_count": 2,
+              "reported_change_count": 2,
+              "before_sha256": "e95e9bf120a98ef0f8b759119af84542de7bb8495fb7c3da2cf3c168ecacb953",
+              "after_sha256": "18d29c2a6b66bbd07daff456b416bdf8841ee137ea3b92ac962f8382e1781acb",
+              "changes": [
+                {
+                  "line": 1,
+                  "query_index": 0,
+                  "replacement_count": 1,
+                  "before": "alpha",
+                  "after": "gamma"
+                },
+                {
+                  "line": 3,
+                  "query_index": 0,
+                  "replacement_count": 1,
+                  "before": "alpha",
+                  "after": "gamma"
+                }
+              ]
+            }
+          ],
+          "changed_files": 1,
+          "total_replacements": 2,
+          "reported_change_count": 2
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_after_replace",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "read",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/small.txt",
+          "content": "gamma\nbeta\ngamma\n",
+          "encoding": "utf-8",
+          "size_bytes": 17,
+          "sha256": "18d29c2a6b66bbd07daff456b416bdf8841ee137ea3b92ac962f8382e1781acb",
+          "is_symlink": false,
+          "start_line": 1,
+          "returned_line_count": 3,
+          "next_start_line": null,
+          "eof": true
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_missing",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "read",
+        "data": null,
+        "error": {
+          "code": "FILE_NOT_FOUND",
+          "message": "file does not exist",
+          "retryable": false,
+          "details": {
+            "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/missing.txt"
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_invalid_regex",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "search",
+        "data": null,
+        "error": {
+          "code": "FILE_REGEX_INVALID",
+          "message": "invalid regular expression",
+          "retryable": false,
+          "details": {
+            "query_index": 0
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "glob_600_limited",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "find_by_glob",
+        "action": "find",
+        "data": {
+          "root_dir": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data",
+          "pattern": "*.txt",
+          "recursive": false,
+          "returned_count": 25,
+          "matches": {
+            "length": 25,
+            "sample": [
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0000.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0001.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0002.txt",
+                "kind": "file",
+                "is_symlink": false
+              }
+            ]
+          }
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": true,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "glob_600_full",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "find_by_glob",
+        "action": "find",
+        "data": {
+          "root_dir": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data",
+          "pattern": "*.txt",
+          "recursive": false,
+          "returned_count": 600,
+          "matches": {
+            "length": 600,
+            "sample": [
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0000.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0001.txt",
+                "kind": "file",
+                "is_symlink": false
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0002.txt",
+                "kind": "file",
+                "is_symlink": false
+              }
+            ]
+          }
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "glob_invalid_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "find_by_glob",
+        "action": "find",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "max_results must be within [1, 5000]",
+          "retryable": false,
+          "details": {
+            "exception_type": "ToolLimitConfigError"
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_search_80_files_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "search",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "file_paths must contain between 1 and 32 paths",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_search_32_files_320_hits",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "search",
+        "data": {
+          "files": {
+            "length": 32,
+            "sample": [
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0000.txt",
+                "size_bytes": 80,
+                "sha256": "2c3f175778d2b2c24ef6367409466b90ef8fe01ad06cad759af0f76224c8d62e",
+                "is_symlink": false,
+                "match_count": 10,
+                "returned_count": 5,
+                "matches": {
+                  "length": 5,
+                  "sample": [
+                    {
+                      "line": 1,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 2,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 3,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    }
+                  ]
+                }
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0001.txt",
+                "size_bytes": 80,
+                "sha256": "2c3f175778d2b2c24ef6367409466b90ef8fe01ad06cad759af0f76224c8d62e",
+                "is_symlink": false,
+                "match_count": 10,
+                "returned_count": 5,
+                "matches": {
+                  "length": 5,
+                  "sample": [
+                    {
+                      "line": 1,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 2,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 3,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    }
+                  ]
+                }
+              },
+              {
+                "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/item-0002.txt",
+                "size_bytes": 80,
+                "sha256": "2c3f175778d2b2c24ef6367409466b90ef8fe01ad06cad759af0f76224c8d62e",
+                "is_symlink": false,
+                "match_count": 10,
+                "returned_count": 5,
+                "matches": {
+                  "length": 5,
+                  "sample": [
+                    {
+                      "line": 1,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 2,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    },
+                    {
+                      "line": 3,
+                      "query_index": 0,
+                      "match_start": 0,
+                      "match_end": 6,
+                      "text": "needle",
+                      "snippet_start": 0,
+                      "snippet_end": 6
+                    }
+                  ]
+                }
+              }
+            ]
+          },
+          "total_match_count": 320,
+          "returned_count": 160
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": true,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_write_1m",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "write",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/large.txt",
+          "mode": "w",
+          "created": true,
+          "changed": true,
+          "input_bytes": 900000,
+          "final_size_bytes": 900000,
+          "before_sha256": null,
+          "after_sha256": "5f76430825cb79355393da5e44236d8c0a236476af2decfd1e49ca8050de9c93"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_long_line_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "file_tool",
+        "action": "read",
+        "data": null,
+        "error": {
+          "code": "OUTPUT_LIMIT_EXCEEDED",
+          "message": "one selected line exceeds max_chars and cannot be returned whole",
+          "retryable": false,
+          "details": {
+            "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/large.txt",
+            "line": 1,
+            "max_chars": 4096
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_write_900k_multiline",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "write",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/multiline.txt",
+          "mode": "w",
+          "created": true,
+          "changed": true,
+          "input_bytes": 900000,
+          "final_size_bytes": 900000,
+          "before_sha256": null,
+          "after_sha256": "fabfbc499da9dc1c0e8f89653f5257522ec28f92e9bf820b03b80acd455efd6c"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "file_read_900k_cap",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "file_tool",
+        "action": "read",
+        "data": {
+          "path": "C:/Users/ADMIN/AppData/Local/Temp/tools-v1-deep-_ny_vkw_/data/multiline.txt",
+          "content": {
+            "length": 3000,
+            "prefix": "xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+          },
+          "encoding": "utf-8",
+          "size_bytes": 900000,
+          "sha256": "fabfbc499da9dc1c0e8f89653f5257522ec28f92e9bf820b03b80acd455efd6c",
+          "is_symlink": false,
+          "start_line": 1,
+          "returned_line_count": 1,
+          "next_start_line": 2,
+          "eof": false
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": true,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_nonzero",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": {
+          "exit_code": 7,
+          "stdout": "out\r\n",
+          "stderr": "err\r\n",
+          "stdout_bytes": 5,
+          "stderr_bytes": 5,
+          "encoding": "cp1252",
+          "duration_ms": 77,
+          "cwd": "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tools-v1-deep-_ny_vkw_"
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_timeout",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": null,
+        "error": {
+          "code": "TERMINAL_TIMEOUT",
+          "message": "terminal command exceeded the execution timeout",
+          "retryable": false,
+          "details": {
+            "timeout_seconds": 1,
+            "duration_ms": 1047
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_output_limit",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": null,
+        "error": {
+          "code": "TERMINAL_OUTPUT_LIMIT",
+          "message": "terminal command exceeded the output byte limit",
+          "retryable": false,
+          "details": {
+            "overflow_stream": "stdout",
+            "stdout_bytes_observed": 4587520,
+            "stderr_bytes_observed": 0,
+            "max_stdout_bytes": 4194304,
+            "max_stderr_bytes": 4194304,
+            "max_total_output_bytes": 8388608,
+            "duration_ms": 140
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "terminal_invalid_cwd",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "terminal_tool",
+        "action": "run",
+        "data": null,
+        "error": {
+          "code": "TERMINAL_CWD_NOT_FOUND",
+          "message": "terminal working directory does not exist",
+          "retryable": false,
+          "details": {
+            "cwd": "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tools-v1-deep-_ny_vkw_\\missing"
+          }
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "web_invalid_url",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "web_tool",
+        "action": "scrape",
+        "data": null,
+        "error": {
+          "code": "WEB_URL_BLOCKED",
+          "message": "only http and https URLs are allowed",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "web_invalid_action",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "web_tool",
+        "action": "not_an_action",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "unsupported web action",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "window_invalid_action",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "window_tool",
+        "action": "not_an_action",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "unsupported window action",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "desktop_invalid_action",
+      "pass": true,
+      "response": {
+        "ok": false,
+        "tool": "desktop_automation",
+        "action": "not_an_action",
+        "data": null,
+        "error": {
+          "code": "INVALID_ARGUMENT",
+          "message": "unsupported desktop action",
+          "retryable": false,
+          "details": {}
+        },
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_terminal",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "terminal_tool",
+        "action": "launch",
+        "data": {
+          "pid": 26484,
+          "cwd": "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tools-v1-live-5dec230d60da49bf9d5022022f850cd2-vffd8wmk",
+          "started": true
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "find",
+        "data": {
+          "returned_count": 0,
+          "total_count": 0,
+          "windows": []
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "find",
+        "data": {
+          "returned_count": 0,
+          "total_count": 0,
+          "windows": []
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "find",
+        "data": {
+          "returned_count": 0,
+          "total_count": 0,
+          "windows": []
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "find",
+        "data": {
+          "returned_count": 0,
+          "total_count": 0,
+          "windows": []
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "find",
+        "data": {
+          "returned_count": 1,
+          "total_count": 1,
+          "windows": [
+            {
+              "selector": {
+                "window_handle": 4196010,
+                "pid": 12608
+              },
+              "title": "TOOLS_V1_T10E_5dec230d60da49bf9d5022022f850cd2",
+              "title_truncated": false,
+              "app_name": "python.exe",
+              "app_name_truncated": false
+            }
+          ]
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "focus",
+        "data": {
+          "window": {
+            "selector": {
+              "window_handle": 4196010,
+              "pid": 12608
+            },
+            "title": "TOOLS_V1_T10E_5dec230d60da49bf9d5022022f850cd2",
+            "title_truncated": false,
+            "app_name": "python.exe",
+            "app_name_truncated": false
+          },
+          "confirmed": true
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "get_geometry",
+        "data": {
+          "window": {
+            "selector": {
+              "window_handle": 4196010,
+              "pid": 12608
+            },
+            "title": "TOOLS_V1_T10E_5dec230d60da49bf9d5022022f850cd2",
+            "title_truncated": false,
+            "app_name": "python.exe",
+            "app_name_truncated": false
+          },
+          "overall": {
+            "left": 120,
+            "top": 120,
+            "width": 496,
+            "height": 199,
+            "right": 616,
+            "bottom": 319
+          },
+          "client_area": {
+            "left": 128,
+            "top": 151,
+            "width": 480,
+            "height": 160,
+            "right": 608,
+            "bottom": 311
+          },
+          "frame_elements": {
+            "titlebar_height": 31,
+            "border_left": 8,
+            "border_right": 8,
+            "border_bottom": 8
+          }
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_desktop",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "desktop_automation",
+        "action": "mouse_click",
+        "data": {
+          "x": 368,
+          "y": 231,
+          "position_mode": "explicit",
+          "button": "left",
+          "clicks": 1
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_desktop",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "desktop_automation",
+        "action": "type_text",
+        "data": {
+          "character_count": 37,
+          "method": "pyautogui",
+          "clipboard_restored": null
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "find",
+        "data": {
+          "returned_count": 1,
+          "total_count": 1,
+          "windows": [
+            {
+              "selector": {
+                "window_handle": 4196010,
+                "pid": 12608
+              },
+              "title": "TOOLS_V1_T10E_5dec230d60da49bf9d5022022f850cd2_TYPED",
+              "title_truncated": false,
+              "app_name": "python.exe",
+              "app_name_truncated": false
+            }
+          ]
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_window",
+      "pass": true,
+      "response": {
+        "ok": true,
+        "tool": "window_tool",
+        "action": "close",
+        "data": {
+          "window": {
+            "selector": {
+              "window_handle": 4196010,
+              "pid": 12608
+            },
+            "title": "TOOLS_V1_T10E_5dec230d60da49bf9d5022022f850cd2_TYPED",
+            "title_truncated": false,
+            "app_name": "python.exe",
+            "app_name_truncated": false
+          },
+          "closed": true
+        },
+        "error": null,
+        "meta": {
+          "version": "2.0.0",
+          "truncated": false,
+          "warnings": []
+        }
+      }
+    },
+    {
+      "name": "gui_harness",
+      "pass": true,
+      "response": {
+        "schema": "tools.v1.live.evidence/1",
+        "run_id": "5dec230d60da49bf9d5022022f850cd2",
+        "category": "GUI",
+        "started_at": "2026-09-24T15:50:38Z",
+        "finished_at": "2026-09-24T15:50:41Z",
+        "status": "PASS",
+        "environment": {
+          "platform_system": "Windows",
+          "platform_release": "10",
+          "python_version": "3.12.10",
+          "python_executable": "E:\\assistant\\venv\\Scripts\\python.exe",
+          "artifact_directory": "C:\\Users\\ADMIN\\AppData\\Local\\Temp\\tools-v1-live-5dec230d60da49bf9d5022022f850cd2-vffd8wmk",
+          "enabled_gates": [
+            "RUN_TOOLS_V1_LIVE",
+            "RUN_TOOLS_V1_LIVE_GUI"
+          ]
+        },
+        "scenarios": [
+          {
+            "id": "gui-window-desktop-owned-target",
+            "category": "GUI",
+            "status": "PASS",
+            "steps": {
+              "length": 8,
+              "sample": [
+                {
+                  "id": "gui-target-launch",
+                  "status": "PASS",
+                  "tool": "terminal_tool",
+                  "action": "launch",
+                  "summary": "Launch the process that will create one unique scenario-owned Tkinter target.",
+                  "error": null
+                },
+                {
+                  "id": "window-discover-owned",
+                  "status": "PASS",
+                  "tool": "window_tool",
+                  "action": "find",
+                  "summary": "Discover the unique GUI target and bind it to the owned PID.",
+                  "error": null
+                },
+                {
+                  "id": "window-focus-owned",
+                  "status": "PASS",
+                  "tool": "window_tool",
+                  "action": "focus",
+                  "summary": "Focus only the exact owned window handle and PID.",
+                  "error": null
+                }
+              ]
+            },
+            "error": null
+          }
+        ],
+        "cleanup": {
+          "owned_pids": [
+            26484
+          ],
+          "terminated_pids": [
+            26484
+          ],
+          "still_alive_pids": [],
+          "errors": []
+        }
+      }
+    }
+  ],
+  "summary": {
+    "total": 37,
+    "passed": 37
+  }
+}

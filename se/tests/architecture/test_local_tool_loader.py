@@ -50,6 +50,7 @@ def test_tools_v1_are_discovered_and_executable_metadata_is_registered():
     for capability_id in T9_CAPABILITIES:
         assert result[capability_id] == "registered"
     assert result["web.search"] == "registered"
+    assert result["web.search_many"] == "registered"
     assert result["web.read"] == "registered"
     assert result["web.read_many"] == "registered"
 
@@ -66,7 +67,7 @@ def test_tools_v1_are_discovered_and_executable_metadata_is_registered():
         assert runtime.registry.get_driver(physical_root) is None
         assert tools.get(physical_root) is None
 
-    for capability_id in (*T9_CAPABILITIES, "web.search", "web.read", "web.read_many"):
+    for capability_id in (*T9_CAPABILITIES, "web.search", "web.search_many", "web.read", "web.read_many"):
         assert runtime.registry.get_driver(capability_id) is not None
         assert tools.get(capability_id) is not None
         implementation = runtime.catalog.get_implementation(

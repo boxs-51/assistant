@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import re
 import time
+import unicodedata
 from typing import Any
 
 from bs4 import BeautifulSoup
@@ -67,6 +69,31 @@ async def _await_deadline(
 class WebSearcher:
     PROVIDER = "duckduckgo_html"
     ENDPOINT = "https://html.duckduckgo.com/html/"
+    _QUERY_STOPWORDS = {
+        "a", "and", "at", "for", "in", "of", "on", "the", "to", "today",
+        "news", "latest", "current", "forecast", "weather", "day", "week",
+        "báo", "cho", "của", "dự", "hôm", "là", "mới", "ngày", "này",
+        "nhất", "tháng", "thời", "tiết", "tin", "tại", "và", "về",
+    }
+
+    @staticmethod
+    def _fold(text: str) -> str:
+        decomposed = unicodedata.normalize("NFD", text.casefold().replace("đ", "d"))
+        return "".join(char for char in decomposed if unicodedata.category(char) != "Mn")
+
+    @classmethod
+    def _query_terms(cls, query: str) -> set[str]:
+        return {
+            term for term in re.findall(r"\w+", cls._fold(query))
+            if len(term) >= 2 and not term.isdecimal()
+            and term not in {cls._fold(word) for word in cls._QUERY_STOPWORDS}
+        }
+
+    @staticmethod
+    def _focus_score(result: dict[str, str], terms: set[str]) -> int:
+        title = set(re.findall(r"\w+", WebSearcher._fold(result["title"])))
+        snippet = set(re.findall(r"\w+", WebSearcher._fold(result["snippet"])))
+        return 3 * len(title & terms) + len(snippet & terms)
 
     def __init__(
         self,
@@ -102,6 +129,8 @@ class WebSearcher:
         query: str,
         max_results: int,
         timeout: float,
+        focus: str | None = None,
+        freshness: str | None = None,
     ) -> list[dict[str, str]]:
         if self._session_factory is None:
             raise dependency_error("curl_cffi")
@@ -120,6 +149,9 @@ class WebSearcher:
             ),
             "Referer": "https://html.duckduckgo.com/",
         }
+        params = {"q": f"{query} {focus}" if focus else query}
+        if freshness is not None:
+            params["df"] = {"day": "d", "week": "w", "month": "m", "year": "y"}[freshness]
 
         try:
             async with self._session_factory(
@@ -128,9 +160,9 @@ class WebSearcher:
                 curl_options=self._curl_options(target),
             ) as session:
                 response = await _await_deadline(
-                    session.post(
+                    session.get(
                         target.url,
-                        data={"q": query},
+                        params=params,
                         headers=headers,
                         timeout=_remaining_timeout(deadline),
                         allow_redirects=False,
@@ -249,6 +281,19 @@ class WebSearcher:
             if not title or not url:
                 continue
             results.append({"title": title, "url": url, "snippet": snippet})
-            if len(results) >= max_results:
+            if len(results) >= min(25, max(max_results * 3, 10)):
                 break
-        return results
+        if focus:
+            terms = set(re.findall(r"\w+", self._fold(focus)))
+            results.sort(key=lambda item: self._focus_score(item, terms), reverse=True)
+        else:
+            terms = self._query_terms(query)
+            if terms:
+                scored = [(self._focus_score(item, terms), item) for item in results]
+                if any(score > 0 for score, _ in scored):
+                    results = [
+                        item for score, item in sorted(
+                            scored, key=lambda pair: pair[0], reverse=True
+                        ) if score > 0
+                    ]
+        return results[:max_results]

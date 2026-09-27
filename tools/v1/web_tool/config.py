@@ -12,6 +12,9 @@ DNS_TIMEOUT_SECONDS = 2.0
 MAX_REDIRECTS = 5
 
 MAX_QUERY_CHARS = 2048
+MAX_SEARCH_FOCUS_CHARS = 256
+MAX_SEARCH_BATCH = 5
+SEARCH_FRESHNESS_VALUES = ("day", "week", "month", "year")
 SEARCH_RESULTS_DEFAULT = 5
 SEARCH_RESULTS_MIN = 1
 SEARCH_RESULTS_MAX = 25
@@ -73,6 +76,14 @@ _SEARCH_INPUT_SCHEMA = {
             "minLength": 1,
             "maxLength": MAX_QUERY_CHARS,
         },
+        "focus": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_SEARCH_FOCUS_CHARS,
+            "description": "Optional topic to emphasize in the search query and result ranking.",
+        },
+        "freshness": {"type": "string", "enum": list(SEARCH_FRESHNESS_VALUES)},
+        "verify_freshness": {"type": "boolean"},
         "max_results": {
             "type": "integer",
             "minimum": SEARCH_RESULTS_MIN,
@@ -85,6 +96,32 @@ _SEARCH_INPUT_SCHEMA = {
         },
     },
     "required": ["query"],
+}
+
+_SEARCH_MANY_INPUT_SCHEMA = {
+    "type": "object",
+    "additionalProperties": False,
+    "properties": {
+        "searches": {
+            "type": "array",
+            "minItems": 1,
+            "maxItems": MAX_SEARCH_BATCH,
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "query": {"type": "string", "minLength": 1, "maxLength": MAX_QUERY_CHARS},
+                    "focus": {"type": "string", "minLength": 1, "maxLength": MAX_SEARCH_FOCUS_CHARS},
+                },
+                "required": ["query"],
+            },
+        },
+        "max_results": {"type": "integer", "minimum": SEARCH_RESULTS_MIN, "maximum": SEARCH_RESULTS_MAX},
+        "freshness": {"type": "string", "enum": list(SEARCH_FRESHNESS_VALUES)},
+        "verify_freshness": {"type": "boolean"},
+        "timeout": {"type": "number", "minimum": READ_TIMEOUT_MIN, "maximum": READ_TIMEOUT_MAX},
+    },
+    "required": ["searches"],
 }
 
 _READ_INPUT_SCHEMA = {
@@ -159,13 +196,21 @@ _PHYSICAL_PARAMETERS = {
     "properties": {
         "action": {
             "type": "string",
-            "enum": ["search", "scrape", "scrape_many"],
+            "enum": ["search", "search_many", "scrape", "scrape_many"],
         },
         "query": {
             "type": "string",
             "minLength": 1,
             "maxLength": MAX_QUERY_CHARS,
         },
+        "focus": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_SEARCH_FOCUS_CHARS,
+        },
+        "searches": _SEARCH_MANY_INPUT_SCHEMA["properties"]["searches"],
+        "freshness": {"type": "string", "enum": list(SEARCH_FRESHNESS_VALUES)},
+        "verify_freshness": {"type": "boolean"},
         "url": {
             "type": "string",
             "minLength": 1,
@@ -232,6 +277,23 @@ TOOL_METADATA = {
             ),
             "bind": {"action": "search"},
             "input_schema": _SEARCH_INPUT_SCHEMA,
+            "output_schema": tool_result_schema({}),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["READ", "EXTERNAL_SIDE_EFFECT"],
+            "base_risk": "MEDIUM",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+        },
+        {
+            "id": "web.search_many",
+            "version": "1.0",
+            "name": "web.search_many",
+            "description": "Tìm tối đa 5 truy vấn Web đồng thời, trả kết quả theo thứ tự đầu vào.",
+            "bind": {"action": "search_many"},
+            "input_schema": _SEARCH_MANY_INPUT_SCHEMA,
             "output_schema": tool_result_schema({}),
             "kind": "TOOL",
             "execution_mode": "ONE_SHOT",

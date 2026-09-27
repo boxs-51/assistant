@@ -912,7 +912,7 @@ def test_real_web_package_is_discoverable_but_not_selected_by_default():
     assert {
         export["id"]
         for export in module.TOOL_METADATA["exports"]
-    } == {"web.search", "web.read", "web.read_many"}
+    } == {"web.search", "web.search_many", "web.read", "web.read_many"}
 
     entries = manager._canonical_v2_entries(
         metadata=module.TOOL_METADATA,

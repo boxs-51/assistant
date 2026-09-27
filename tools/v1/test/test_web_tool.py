@@ -1,8 +1,10 @@
 import asyncio
 import hashlib
 import json
+import socket
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -17,6 +19,8 @@ from tools.v1.web_tool.config import (
     MAX_BATCH_URLS,
     MAX_CONTENT_CHARS_MAX,
     MAX_QUERY_CHARS,
+    MAX_SEARCH_BATCH,
+    MAX_SEARCH_FOCUS_CHARS,
     MAX_REDIRECTS,
     MAX_RENDERED_HTML_CHARS,
     MAX_RETRIES,
@@ -29,11 +33,17 @@ from tools.v1.web_tool.config import (
     WEB_TOOL_VERSION,
 )
 from tools.v1.web_tool.errors import WebToolError
-from tools.v1.web_tool.extractors import extract_tables_and_charts
-from tools.v1.web_tool.network_policy import NetworkPolicy, ResolvedTarget
+from tools.v1.web_tool.extractors import (
+    extract_clean_content,
+    extract_displayed_date,
+    extract_published_date,
+    extract_tables_and_charts,
+)
+from tools.v1.web_tool.network_policy import NetworkPolicy, ResolvedTarget, _resolve_doh
 from tools.v1.web_tool.proxy import ProxyManager
 from tools.v1.web_tool.scraper import WebScraper
 from tools.v1.web_tool.searcher import WebSearcher
+from tools.v1.web_tool.utils import deduplicate_content
 
 
 PUBLIC_IP = "93.184.216.34"
@@ -303,7 +313,117 @@ def static_source(
     }
 
 
+class TestContentExtraction(unittest.TestCase):
+    def test_published_date_uses_source_metadata_only(self):
+        self.assertEqual(
+            extract_published_date('<meta property="article:published_time" content="2026-09-24T10:30:00+07:00">'),
+            ("2026-09-24", "meta"),
+        )
+        self.assertEqual(
+            extract_published_date('<script type="application/ld+json">'
+                                   '{"@type":"NewsArticle","datePublished":"2026-09-23T00:00:00Z"}'
+                                   '</script>'),
+            ("2026-09-23", "jsonld"),
+        )
+        self.assertEqual(
+            extract_published_date('<p>Published September 24, 2026</p>'),
+            (None, None),
+        )
+        self.assertEqual(
+            extract_displayed_date('<time datetime="2026-09-24T10:30:00Z">24 Sep</time>'),
+            ("2026-09-24", "time_datetime"),
+        )
+        self.assertEqual(
+            extract_displayed_date('<div class="news-detail-header__modified">2026-09-24</div>'),
+            ("2026-09-24", "page_modified_label"),
+        )
+
+    def test_short_sidebar_extraction_yields_to_substantial_main_content(self):
+        paragraph = "Indexes speed up row retrieval while adding maintenance cost. " * 15
+        html = (
+            '<html><body><div id="docContent"><h1>Indexes</h1>'
+            f'<p>{paragraph}</p></div><footer>Send documentation feedback</footer>'
+            '</body></html>'
+        )
+        with patch("tools.v1.web_tool.extractors.trafilatura") as trafilatura:
+            trafilatura.extract.return_value = "Send documentation feedback"
+            content, extractor = extract_clean_content(
+                html, "https://www.postgresql.org/docs/current/indexes.html"
+            )
+        self.assertEqual(extractor, "beautifulsoup")
+        self.assertIn("Indexes speed up row retrieval", content)
+        self.assertNotIn("documentation feedback", content)
+
+
 class TestNetworkPolicy(unittest.IsolatedAsyncioTestCase):
+    async def test_system_dns_failure_uses_pinned_doh_fallback(self):
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror), patch(
+            "tools.v1.web_tool.network_policy._resolve_doh",
+            new_callable=AsyncMock,
+            return_value=[PUBLIC_IP],
+        ) as fallback:
+            target = await NetworkPolicy().resolve_url("https://example.com/")
+        self.assertEqual(target.addresses, (PUBLIC_IP,))
+        fallback.assert_awaited_once()
+
+    async def test_doh_fallback_keeps_private_address_block(self):
+        with patch("socket.getaddrinfo", side_effect=socket.gaierror), patch(
+            "tools.v1.web_tool.network_policy._resolve_doh",
+            new_callable=AsyncMock,
+            return_value=[PUBLIC_IP, "10.0.0.8"],
+        ):
+            with self.assertRaises(WebToolError) as ctx:
+                await NetworkPolicy().resolve_url("https://example.com/")
+        self.assertEqual(ctx.exception.code, "WEB_URL_BLOCKED")
+
+    async def test_doh_requires_pinned_connected_ip(self):
+        class DoHResponse:
+            status_code = 200
+            primary_ip = "8.8.8.8"
+            content = b"{}"
+
+            def json(self):
+                return {"Status": 0, "Answer": [{"type": 1, "data": PUBLIC_IP}]}
+
+        factory = FakeSessionFactory([DoHResponse()])
+        with patch("curl_cffi.requests.AsyncSession", factory):
+            self.assertEqual(
+                await _resolve_doh("example.com", time.monotonic() + 2), []
+            )
+        self.assertEqual(factory.calls[0][2]["allow_redirects"], False)
+        self.assertEqual(factory.calls[0][1], "https://1.1.1.1/dns-query")
+
+    async def test_doh_accepts_public_addresses_after_cname(self):
+        class DoHResponse:
+            status_code = 200
+            primary_ip = "1.1.1.1"
+            content = b"{}"
+
+            def __init__(self, answers):
+                self.answers = answers
+
+            def json(self):
+                return {"Status": 0, "Answer": self.answers}
+
+        factory = FakeSessionFactory(
+            [
+                DoHResponse([
+                    {"type": 5, "data": "cdn.example.net."},
+                    {"type": 1, "name": "cdn.example.net.", "data": PUBLIC_IP},
+                ]),
+                DoHResponse([{"type": 28, "data": PUBLIC_IPV6}]),
+            ]
+        )
+        with patch("curl_cffi.requests.AsyncSession", factory):
+            self.assertEqual(
+                await _resolve_doh("example.com", time.monotonic() + 2),
+                [PUBLIC_IP, PUBLIC_IPV6],
+            )
+        self.assertEqual(
+            [call[2]["params"]["type"] for call in factory.calls],
+            ["A", "AAAA"],
+        )
+
     async def test_blocks_non_global_literal_addresses(self):
         policy = make_policy()
         for url in (
@@ -545,7 +665,7 @@ class TestStaticFetcher(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             scraper_module,
             "CurlOpt",
-            SimpleNamespace(RESOLVE="RESOLVE"),
+            SimpleNamespace(RESOLVE="RESOLVE", CONNECTTIMEOUT_MS="CONNECTTIMEOUT_MS"),
         ):
             result = await scraper.fetch_static(
                 url="https://example.com/",
@@ -570,7 +690,7 @@ class TestStaticFetcher(unittest.IsolatedAsyncioTestCase):
         with patch.object(
             scraper_module,
             "CurlOpt",
-            SimpleNamespace(RESOLVE="RESOLVE"),
+            SimpleNamespace(RESOLVE="RESOLVE", CONNECTTIMEOUT_MS="CONNECTTIMEOUT_MS"),
         ):
             with self.assertRaises(WebToolError) as ctx:
                 await mismatch.fetch_static(
@@ -651,6 +771,9 @@ class TestBrowserFetcher(unittest.IsolatedAsyncioTestCase):
         search_options = WebSearcher._curl_options(target)
         search_entries = next(iter(search_options.values()))
         self.assertEqual(search_entries, entries)
+        self.assertEqual(
+            options[scraper_module.CurlOpt.CONNECTTIMEOUT_MS], 2000
+        )
 
     async def test_dynamic_http_binary_and_declared_size_fail_closed(self):
         cases = [
@@ -950,6 +1073,8 @@ class TestSearcherAndProxy(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+        self.assertEqual(factory.calls[0][0], "get")
+        self.assertEqual(factory.calls[0][2]["params"], {"q": "python"})
 
         empty_factory = FakeSessionFactory(
             [FakeResponse(body=b"<html><body>No results</body></html>")]
@@ -976,6 +1101,49 @@ class TestSearcherAndProxy(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(WebToolError) as ctx:
             await failed.search(query="x", max_results=5, timeout=5)
         self.assertEqual(ctx.exception.code, "WEB_SEARCH_PROVIDER_FAILED")
+
+    async def test_search_focus_reranks_candidate_content(self):
+        html = b"""
+        <div class="result"><a class="result__a" href="https://example.com/one">General guide</a>
+          <div class="result__snippet">General overview</div></div>
+        <div class="result"><a class="result__a" href="https://example.com/two">Python asyncio guide</a>
+          <div class="result__snippet">Event loop documentation</div></div>
+        <div class="result"><a class="result__a" href="https://example.com/three">Other topic</a>
+          <div class="result__snippet">asyncio is mentioned here</div></div>
+        """
+        factory = FakeSessionFactory([FakeResponse(body=html)])
+        searcher = WebSearcher(network_policy=make_policy(), session_factory=factory)
+        results = await searcher.search(
+            query="Python guide", focus="asyncio", max_results=2, timeout=5
+        )
+        self.assertEqual(
+            [item["url"] for item in results],
+            ["https://example.com/two", "https://example.com/three"],
+        )
+        self.assertEqual(
+            factory.calls[0][2]["params"], {"q": "Python guide asyncio"}
+        )
+
+    async def test_search_freshness_passes_provider_filter(self):
+        html = b'<div class="result"><a class="result__a" href="https://example.com/">One</a></div>'
+        factory = FakeSessionFactory([FakeResponse(body=html)])
+        searcher = WebSearcher(network_policy=make_policy(), session_factory=factory)
+        await searcher.search(query="news", max_results=5, timeout=5, freshness="week")
+        self.assertEqual(factory.calls[0][2]["params"], {"q": "news", "df": "w"})
+
+    async def test_search_ranks_and_discards_unrelated_results(self):
+        html = b"""
+        <div class="result"><a class="result__a" href="https://example.com/a">Weather Hanoi</a></div>
+        <div class="result"><a class="result__a" href="https://example.com/b">Nha Trang Khanh Hoa weather</a></div>
+        """
+        searcher = WebSearcher(
+            network_policy=make_policy(),
+            session_factory=FakeSessionFactory([FakeResponse(body=html)]),
+        )
+        results = await searcher.search(
+            query="thời tiết Nha Trang Khánh Hòa", max_results=5, timeout=5
+        )
+        self.assertEqual([item["url"] for item in results], ["https://example.com/b"])
 
     async def test_search_malformed_success_page_is_provider_failure(self):
         searcher = WebSearcher(
@@ -1104,7 +1272,7 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
         }
         self.assertEqual(
             set(exports),
-            {"web.search", "web.read", "web.read_many"},
+            {"web.search", "web.search_many", "web.read", "web.read_many"},
         )
         self.assertEqual(
             {
@@ -1113,6 +1281,7 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
             },
             {
                 "web.search": "search",
+                "web.search_many": "search_many",
                 "web.read": "scrape",
                 "web.read_many": "scrape_many",
             },
@@ -1120,6 +1289,7 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
 
         expected_required = {
             "web.search": ["query"],
+            "web.search_many": ["searches"],
             "web.read": ["url"],
             "web.read_many": ["urls"],
         }
@@ -1163,7 +1333,7 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
         # Root physical compatibility remains direct-only, not a V2 authority.
         self.assertEqual(
             TOOL_METADATA["parameters"]["properties"]["action"]["enum"],
-            ["search", "scrape", "scrape_many"],
+            ["search", "search_many", "scrape", "scrape_many"],
         )
         self.assertEqual(
             TOOL_METADATA["parameters"]["required"],
@@ -1176,6 +1346,14 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
         for query in ("", "x" * (MAX_QUERY_CHARS + 1)):
             result = await self.tool.search(query)
             self.assert_error(result, "search", "INVALID_ARGUMENT")
+
+        for focus in ("", "x" * (MAX_SEARCH_FOCUS_CHARS + 1)):
+            result = await self.tool.search("python", focus=focus)
+            self.assert_error(result, "search", "INVALID_ARGUMENT")
+        result = await self.tool.search("x" * MAX_QUERY_CHARS, focus="asyncio")
+        self.assert_error(result, "search", "INVALID_ARGUMENT")
+        result = await self.tool.search("news", freshness="yesterday")
+        self.assert_error(result, "search", "INVALID_ARGUMENT")
 
         for value in (0, True, SEARCH_RESULTS_MAX + 1):
             result = await self.tool.search("x", max_results=value)
@@ -1233,6 +1411,176 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["provider"], "duckduckgo_html")
         self.assertEqual(data["returned_count"], 1)
         self.assertEqual(data["results"][0]["url"], "https://example.com/a")
+
+    async def test_execute_search_passes_focus(self):
+        html = b"""
+        <div class="result"><a class="result__a" href="https://example.com/a">Python asyncio</a>
+          <div class="result__snippet">Event loop guide</div></div>
+        """
+        self.tool.searcher = WebSearcher(
+            network_policy=self.tool.network_policy,
+            session_factory=FakeSessionFactory([FakeResponse(body=html)]),
+        )
+        data = self.assert_ok(
+            await self.tool.execute(
+                action="search", query="Python", focus="asyncio", max_results=5
+            ),
+            "search",
+        )
+        self.assertEqual(data["focus"], "asyncio")
+        self.assertEqual(data["returned_count"], 1)
+
+    async def test_search_many_runs_concurrently_and_preserves_order(self):
+        active = 0
+        peak = 0
+
+        async def fake_search(*, query, max_results, timeout, focus=None, freshness=None):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return [{"title": query, "url": "https://example.com/", "snippet": ""}]
+
+        self.tool.searcher.search = AsyncMock(side_effect=fake_search)
+        data = self.assert_ok(
+            await self.tool.execute(
+                action="search_many",
+                searches=[{"query": "first"}, {"query": "second", "focus": "topic"}],
+                freshness="week",
+                max_results=5,
+            ),
+            "search_many",
+        )
+        self.assertEqual(peak, 2)
+        self.assertEqual(data["requested_count"], 2)
+        self.assertEqual(data["succeeded_count"], 2)
+        self.assertEqual(
+            [item["data"]["query"] for item in data["results"]],
+            ["first", "second"],
+        )
+        self.assertEqual(data["results"][1]["data"]["focus"], "topic")
+        self.assertEqual(data["results"][0]["data"]["freshness"], "week")
+
+    async def test_search_many_preflights_all_inputs_before_network(self):
+        self.tool.searcher.search = AsyncMock(return_value=[])
+        for searches in (
+            [],
+            [{"query": "x"}] * (MAX_SEARCH_BATCH + 1),
+            [{"query": "good"}, {"query": ""}],
+            [{"query": "good", "unexpected": "x"}],
+        ):
+            result = await self.tool.search_many(searches)
+            self.assert_error(result, "search_many", "INVALID_ARGUMENT")
+        self.tool.searcher.search.assert_not_awaited()
+
+    async def test_search_many_reports_partial_provider_failure(self):
+        async def fake_search(*, query, **kwargs):
+            if query == "bad":
+                raise WebToolError("WEB_SEARCH_PROVIDER_FAILED", "provider failed")
+            return [{"title": query, "url": "https://example.com/", "snippet": ""}]
+
+        self.tool.searcher.search = AsyncMock(side_effect=fake_search)
+        data = self.assert_ok(
+            await self.tool.search_many([{"query": "good"}, {"query": "bad"}]),
+            "search_many",
+        )
+        self.assertEqual(data["succeeded_count"], 1)
+        self.assertEqual(data["failed_count"], 1)
+        self.assertFalse(data["results"][1]["ok"])
+
+    async def test_search_many_all_failures_are_top_level_failure_with_item_details(self):
+        self.tool.searcher.search = AsyncMock(
+            side_effect=WebToolError(
+                "WEB_SEARCH_PROVIDER_FAILED", "provider unavailable", retryable=True
+            )
+        )
+        result = await self.tool.search_many([{"query": "a"}, {"query": "b"}])
+        self.assert_error(result, "search_many", "WEB_SEARCH_PROVIDER_FAILED")
+        self.assertEqual(result["error"]["details"]["failed_count"], 2)
+        self.assertEqual(len(result["error"]["details"]["results"]), 2)
+
+    async def test_search_many_timeout_preserves_completed_query(self):
+        async def search(*, query, **kwargs):
+            if query == "slow":
+                await asyncio.sleep(2)
+            return [{"title": query, "url": "https://example.com/", "snippet": ""}]
+
+        self.tool.searcher.search = AsyncMock(side_effect=search)
+        result = await self.tool.search_many(
+            [{"query": "fast"}, {"query": "slow"}], timeout=1
+        )
+        data = self.assert_ok(result, "search_many")
+        self.assertEqual((data["succeeded_count"], data["failed_count"]), (1, 1))
+        self.assertEqual(data["results"][1]["error"]["code"], "WEB_TIMEOUT")
+
+    async def test_verified_freshness_keeps_only_source_dated_results(self):
+        today = datetime.now(timezone.utc).date()
+        fresh = today.isoformat()
+        stale = (today - timedelta(days=20)).isoformat()
+        self.tool.searcher.search = AsyncMock(return_value=[
+            {"title": "new", "url": "https://example.com/new", "snippet": ""},
+            {"title": "old", "url": "https://example.com/old", "snippet": ""},
+            {"title": "unknown", "url": "https://example.com/unknown", "snippet": ""},
+        ])
+
+        async def fetch_static(*, url, **kwargs):
+            date_value = fresh if url.endswith("/new") else stale if url.endswith("/old") else None
+            html = (
+                f'<meta property="article:published_time" content="{date_value}">'
+                if date_value else "<html><body>no date</body></html>"
+            )
+            return {"html": html}
+
+        self.tool.scraper.fetch_static = AsyncMock(side_effect=fetch_static)
+        data = self.assert_ok(
+            await self.tool.search("news", freshness="week", verify_freshness=True),
+            "search",
+        )
+        self.assertEqual(data["returned_count"], 1)
+        self.assertEqual(data["results"][0]["published_date"], fresh)
+        self.assertEqual(data["unverified_or_out_of_range_count"], 2)
+        self.assertEqual(data["freshness_verification"], "source_metadata")
+
+    async def test_search_retries_one_transient_provider_failure(self):
+        self.tool.searcher.search = AsyncMock(side_effect=[
+            WebToolError("WEB_SEARCH_PROVIDER_FAILED", "temporary", retryable=True),
+            [{"title": "recovered", "url": "https://example.com/", "snippet": ""}],
+        ])
+        data = self.assert_ok(await self.tool.search("topic"), "search")
+        self.assertEqual(data["returned_count"], 1)
+        self.assertEqual(self.tool.searcher.search.await_count, 2)
+
+    async def test_search_many_enforces_total_timeout(self):
+        async def slow_search(**kwargs):
+            await asyncio.sleep(2)
+            return []
+
+        self.tool.searcher.search = AsyncMock(side_effect=slow_search)
+        result = await self.tool.search_many([{"query": "slow"}], timeout=1)
+        self.assert_error(result, "search_many", "WEB_TIMEOUT")
+
+    async def test_scrape_exposes_source_published_date(self):
+        html = (
+            '<html><head><meta property="article:published_time" '
+            'content="2026-09-24T10:30:00+07:00"></head>'
+            '<body><h1>Article</h1><p>Published content</p></body></html>'
+        )
+        with patch.object(
+            self.tool.scraper,
+            "fetch_static",
+            new_callable=AsyncMock,
+            return_value=static_source(html=html),
+        ), patch(
+            "tools.v1.web_tool.core.extract_clean_content",
+            return_value=("Published content", "beautifulsoup"),
+        ):
+            data = self.assert_ok(
+                await self.tool.scrape("https://example.com/"), "scrape"
+            )
+        self.assertEqual(data["published_date"], "2026-09-24")
+        self.assertEqual(data["provenance"]["published_date_source"], "meta")
+        self.assertIsNone(data["displayed_date"])
 
     async def test_structured_static_scrape_provenance_hash_and_truncation(self):
         source = static_source()
@@ -1521,6 +1869,44 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
         finally:
             await tool.close()
 
+    async def test_read_batch_has_total_deadline_and_preserves_completed_page(self):
+        async def scrape(*, url, **kwargs):
+            if url.endswith("/slow"):
+                await asyncio.sleep(2)
+            return self.tool._success("scrape", {"url": url})
+
+        with patch.object(self.tool, "scrape", side_effect=scrape):
+            result = await self.tool.scrape_many(
+                ["https://example.com/fast", "https://example.com/slow"], timeout=1
+            )
+        data = self.assert_ok(result, "scrape_many")
+        self.assertEqual((data["succeeded_count"], data["failed_count"]), (1, 1))
+        self.assertEqual(data["results"][1]["error"]["code"], "WEB_TIMEOUT")
+
+    async def test_read_batch_preflight_dns_is_concurrent(self):
+        active = 0
+        peak = 0
+
+        async def resolver(host, port):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            await asyncio.sleep(0.01)
+            active -= 1
+            return [PUBLIC_IP]
+
+        tool = WebTool(network_policy=NetworkPolicy(resolver))
+        try:
+            with patch.object(tool, "scrape", new_callable=AsyncMock) as scrape:
+                scrape.side_effect = lambda url, **kwargs: tool._success("scrape", {"url": url})
+                result = await tool.scrape_many([
+                    "https://one.example/", "https://two.example/", "https://three.example/"
+                ])
+            self.assert_ok(result, "scrape_many")
+            self.assertEqual(peak, 3)
+        finally:
+            await tool.close()
+
     async def test_batch_size_hard_limit(self):
         result = await self.tool.scrape_many(
             ["https://example.com/"] * (MAX_BATCH_URLS + 1)
@@ -1592,6 +1978,25 @@ class TestWebToolStructuredContract(unittest.IsolatedAsyncioTestCase):
 
 
 class TestExtractors(unittest.IsolatedAsyncioTestCase):
+    def test_near_duplicate_weather_summary_is_removed(self):
+        text = (
+            "Hôm nay\n25.5°C\n/\n32.9°C\nMưa vừa\n67%\n3.25 km/giờ\n"
+            "## Hôm nay\n25.5°C\n/\n32.9°C\nMưa vừa\n67%\n3.25 km/giờ\n"
+            "## Ngày mai\n24.3°C\n/\n33°C\nMưa vừa"
+        )
+        result = deduplicate_content(text)
+        self.assertEqual(result.count("25.5°C"), 1)
+        self.assertIn("24.3°C", result)
+
+    def test_article_promo_notebox_is_removed(self):
+        html = (
+            '<div class="the-article-body"><p>PUBG Vietnam Series has been postponed.</p>'
+            '<div class="notebox"><p>NVIDIA promotional book content.</p></div></div>'
+        )
+        content, _ = extract_clean_content(html, "https://example.com/")
+        self.assertIn("PUBG Vietnam Series", content)
+        self.assertNotIn("NVIDIA", content)
+
     async def test_structured_extractor_never_calls_page_content(self):
         page = SimpleNamespace(
             content=AsyncMock(side_effect=AssertionError("must not be called")),

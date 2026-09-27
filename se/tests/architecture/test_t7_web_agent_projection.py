@@ -16,6 +16,7 @@ from se.src.runtimes.capability.registry import CapabilityRegistry
 
 WEB_CAPABILITIES = (
     "web.search",
+    "web.search_many",
     "web.read",
     "web.read_many",
 )

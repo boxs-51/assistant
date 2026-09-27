@@ -4,6 +4,7 @@
   "instruction_file": "instruction.md",
   "tools": [
     "web.search",
+    "web.search_many",
     "web.read",
     "web.read_many"
   ],

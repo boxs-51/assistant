@@ -1,0 +1,457 @@
+{
+  "started_at_utc": "2026-09-27T03:54:04.681451+00:00",
+  "tool": "tools.v1.web_tool.run",
+  "queries": [
+    {
+      "query": "PUBG Việt Nam tin nổi bật tháng 9 2026"
+    },
+    {
+      "query": "PUBG esports Việt Nam 2026",
+      "focus": "giải đấu đội tuyển"
+    },
+    {
+      "query": "PUBG Vietnam September 2026 tournament"
+    },
+    {
+      "query": "PUBG Mobile Việt Nam tháng 9 2026",
+      "focus": "esports"
+    },
+    {
+      "query": "PUBG đội tuyển Việt Nam 2026",
+      "focus": "kết quả mới"
+    }
+  ],
+  "freshness": "week",
+  "search_seconds": 0.948,
+  "read_seconds": 12.271,
+  "total_seconds": 13.22,
+  "search": {
+    "ok": true,
+    "tool": "web_tool",
+    "action": "search_many",
+    "data": {
+      "requested_count": 5,
+      "succeeded_count": 5,
+      "failed_count": 0,
+      "results": [
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "search",
+          "data": {
+            "query": "PUBG Việt Nam tin nổi bật tháng 9 2026",
+            "returned_count": 5,
+            "provider": "duckduckgo_html",
+            "results": [
+              {
+                "title": "Giải đấu PUBG Việt Nam bất ngờ 'mất tích' khỏi trang chủ | Znews.vn",
+                "url": "https://tech.zingnews.vn/giai-dau-pubg-viet-nam-bat-ngo-mat-tich-khoi-trang-chu-post1685023.html",
+                "snippet": "Diễn biến mới sau vụ việc tại PUBG Asia Stars 2026 đang khiến cộng đồng xôn xao khi lịch thi đấu giải quốc nội khu vực Việt Nam âm thầm biến mất khỏi trang chủ của game."
+              },
+              {
+                "title": "Toàn cảnh drama PUBG Asia Stars 2026: Vì sao cộng đồng game thủ Việt có ...",
+                "url": "https://gace.store/drama-pubg-asia-stars-2026-game-thu-viet-nam",
+                "snippet": "PUBG Asia Stars 2026 là một giải showmatch do Krafton tổ chức, khởi tranh ngày 17/9, quy tụ 48 người chơi gồm tuyển thủ, streamer và PUBG Partner đến từ 6 khu vực: Việt Nam , Hàn Quốc, Trung Quốc, Nhật Bản, Thái Lan và Đài Bắc Trung Hoa."
+              },
+              {
+                "title": "Tuyển thủ xóa game, cộng đồng Việt Nam quay lưng với PUBG PC",
+                "url": "https://thanhnien.vn/tuyen-thu-xoa-game-cong-dong-viet-nam-quay-lung-voi-pubg-pc-185260923092425205.htm",
+                "snippet": "Hai động thái liên tiếp xuất hiện trong bối cảnh PUBG đang đối mặt với tranh luận gay gắt tại Việt Nam sau sự cố tại PUBG Asia Stars 2026 . Việc hai tuyển thủ có những hành động liên quan đến một tựa game khác lập tức trở thành chủ đề được cộng đồng bàn luận."
+              },
+              {
+                "title": "Tin Tức - Pubg: Battlegrounds",
+                "url": "https://pubg.com/vi/news/11136",
+                "snippet": "Theo dõi tất cả các bản cập nhật, hợp tác và vật phẩm mới nhất của PUBG : BATTLEGROUNDS."
+              },
+              {
+                "title": "Động thái lạ của nhà phát hành PUBG giữa bão chỉ trích",
+                "url": "https://baomoi.com/dong-thai-la-cua-nha-phat-hanh-pubg-giua-bao-chi-trich-c56112646.epi",
+                "snippet": "Diễn biến mới sau vụ việc tại PUBG Asia Stars 2026 đang khiến cộng đồng xôn xao khi lịch thi đấu giải quốc nội khu vực Việt Nam âm thầm biến mất khỏi trang chủ của game."
+              }
+            ],
+            "freshness": "week"
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        },
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "search",
+          "data": {
+            "query": "PUBG esports Việt Nam 2026",
+            "returned_count": 5,
+            "provider": "duckduckgo_html",
+            "results": [
+              {
+                "title": "Đội tuyển PUGB của TanVuu rút lui, Himass tuyên bố giải nghệ | Znews.vn",
+                "url": "https://tech.zingnews.vn/doi-tuyen-pugb-cua-tanvuu-rut-lui-himass-tuyen-bo-giai-nghe-post1685541.html",
+                "snippet": "Sau quyết định xử phạt từ KRAFTON, tổ chức The Expendables chính thức giải thể đội tuyển PUBG . Tuyển thủ Himass cũng vừa tuyên bố khép lại sự nghiệp thi đấ u ."
+              },
+              {
+                "title": "Tuyển thủ PUBG Việt Nam giải nghệ sau án cấm vĩnh viễn",
+                "url": "https://docnhanh.vn/the-thao/tuyen-thu-pubg-viet-nam-giai-nghe-sau-an-cam-vinh-vien-tintuc1052619",
+                "snippet": "Chiều ngày 25/9, tổ chức The Expendables (hiện đã đổi tên thành TE Esports ) chính thức công bố kết thúc mối quan hệ hợp tác với GAM Esports , đồng thời đưa ra quyết định giải thể toàn bộ đội tuyển PUBG . Himass tuyên bố giải nghệ sau án ..."
+              },
+              {
+                "title": "Giải đấu PUBG Vietnam Series 2026 Phase 2 bất ngờ hoãn, tương lai ...",
+                "url": "https://www.techz.vn/223-926-1-giai-dau-pubg-vietnam-series-2026-phase-2-bat-ngo-hoan-tuong-lai-esports-viet-nam-bo-ngo-ylt710448.html",
+                "snippet": "PUBG Vietnam Series 2026 Phase 2 bất ngờ bị hoãn toàn bộ các trận đấu còn lại và chưa có thời điểm trở lại cụ thể, trong bối cảnh PUBG Việt Nam liên tiếp xuất hiện nhiều diễn biến đáng chú ý."
+              },
+              {
+                "title": "Himass và TanVuu - hai tuyển thủ PUBG Việt Nam có thành tích khủng thế ...",
+                "url": "https://baomoi.com/himass-va-tanvuu-hai-tuyen-thu-pubg-viet-nam-co-thanh-tich-khung-the-nao-c56102138.epi",
+                "snippet": "Tóm tắt nhanh: Bối cảnh: Hai tuyển thủ PUBG Việt Nam là Himass và TanVuu trở thành tâm điểm chú ý liên quan đến những tranh cãi tại giải đấu PUBG Asia Stars 2026 ."
+              },
+              {
+                "title": "PUBG: Krafton Đưa Ra Thông Báo Chính Thức Về Sự Cố Tại PUBG Asia Stars 2026",
+                "url": "https://lag.vn/tin/esports/pubg-krafton-dua-ra-thong-bao-chinh-thuc-ve-su-co-tai-pubg-asia-stars-2026.html",
+                "snippet": "Sau một thời gian bùng nổ sự cố ở giải đấu giao hữu PUBG Asia Stars 2026 , mới đây đội ngũ vận hành đã chính thức lên tiếng và đưa ra hình thức xử phạt dành riêng cho hai tuyển thủ PUBG Esports Việt Nam Cách đây vài ngày, tại giải ..."
+              }
+            ],
+            "focus": "giải đấu đội tuyển",
+            "freshness": "week"
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        },
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "search",
+          "data": {
+            "query": "PUBG Vietnam September 2026 tournament",
+            "returned_count": 5,
+            "provider": "duckduckgo_html",
+            "results": [
+              {
+                "title": "Why did the PUBG Asia tournament quickly become a 'disaster'? - vietnam.vn",
+                "url": "https://www.vietnam.vn/en/vi-sao-giai-pubg-chau-a-nhanh-chong-tro-thanh-tham-hoa",
+                "snippet": "The controversy surrounding two Vietnamese PUBG players, Himass (left) and TanVuu (right), is still ongoing - Photo: PUBG The controversy surrounding the PUBG Asia Stars 2026 tournament (an esports competition ) began on September 17th, when La Phuong Tien Dat (Himass) and Tran Tan Vu (TanVuu) were accused of using outside information during matches via livestream. KRAFTON later confirmed that ..."
+              },
+              {
+                "title": "Is PUBG Banned in Vietnam? PVS 2026 Removed, Channels Go Dark - TalkEsport",
+                "url": "https://www.talkesport.com/news/pubg-banned-in-vietnam-pvs-2026-removed/",
+                "snippet": "The 2026 Phase 2 event is an online A-Tier tournament run by PUBG Corporation and 500Bros, with 16 teams competing for a $44,000 prize pool starting September 4."
+              },
+              {
+                "title": "The Complete PUBG Asia Stars 2026 Drama: How TanVuu & Himass Got ...",
+                "url": "https://steamcommunity.com/app/578080/discussions/1/594068102506940840/",
+                "snippet": "FULL DRAMA SUMMARY - PUBG Asia Stars 2026 & The Final Outcome (Complete English version for posting) 1. Origin of the Drama - A Casual Showmatch With Loose Rules PUBG Asia Stars 2026 was a showmatch event hosted by KRAFTON starting on September 17. It featured 48 players from six regions: Vietnam , Korea, China, Japan, Thailand, and Chinese Taipei. Because it was meant to be fun and casual ..."
+              },
+              {
+                "title": "Vật Vờ Studio - TOÀN BỘ DRAMA PUBG ASIA STARS 2026 VÀ CÁI... | Facebook",
+                "url": "https://www.facebook.com/VatVoStudio69/posts/toàn-bộ-drama-pubg-asia-stars-2026-và-cái-kết-1-nguồn-gốc-giải-giao-hữu-luật-lệ-/1608344704422145/",
+                "snippet": "1. NGUỒN GỐC: GIẢI GIAO HỮU, LUẬT LỆ THOẢI MÁI PUBG Asia Stars 2026 là giải showmatch do KRAFTON tổ chức, khởi tranh ngày 17/9, quy tụ 48 người chơi gồm tuyển thủ, streamer, PUBG Partner đến từ 6 khu vực: Việt Nam, Hàn Quốc, Trung Quốc, Nhật Bản, Thái"
+              },
+              {
+                "title": "The Complete PUBG Asia Stars 2026 Drama: How TanVuu & Himass Got ...",
+                "url": "https://steamcommunity.com/app/578080/discussions/1/594068102506943493/",
+                "snippet": "PUBG Asia Stars 2026 was a showmatch event hosted by KRAFTON starting on September 17. It featured 48 players from six regions: Vietnam , Korea, China, Japan, Thailand, and Chinese Taipei. Because it was meant to be fun and casual, the rules were much more relaxed compared to official esports tournaments ."
+              }
+            ],
+            "freshness": "week"
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        },
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "search",
+          "data": {
+            "query": "PUBG Mobile Việt Nam tháng 9 2026",
+            "returned_count": 5,
+            "provider": "duckduckgo_html",
+            "results": [
+              {
+                "title": "Nhà phát hành chính thức... - PUBG Mobile Esports Việt Nam | Facebook",
+                "url": "https://www.facebook.com/PUBGMobileESPORTSVN/posts/-nhà-phát-hành-chính-thức-của-pubg-mobile-tại-thị-trường-việt-nam-vnggames-sẽ-lu/1424079373190298/",
+                "snippet": "🤝 Nhà phát hành chính thức của PUBG Mobile tại thị trường Việt Nam - VNGGames sẽ luôn đồng hành cùng các VĐV nội dung PUBG Mobile về mọi mặt để có thể thi đấu và mang về thành tích cho Đoàn Thể thao Việt Nam 🇻🇳"
+              },
+              {
+                "title": "Yêu Esports - CĂNG: đờ-ra-ma liên quan đến ... - Facebook",
+                "url": "https://www.facebook.com/Play.esportsVN/posts/căng-đờ-ra-ma-liên-quan-đến-giải-đấu-pubg-asia-stars-2026-lại-có-thêm-tình-tiết-/1557251066445637/",
+                "snippet": "Tôi sẽ kêu gọi anh em chan. Nhưng anh em hãy nhắn tin cho PUBG là sớm công bố kết quả. Còn chỉ nhắn tin cho PUBG thôi là hãy sớm công bố kết quả cùng với tất cả những cái gì mà người ta nghĩ là bằng chứng một cách công khai, giống như là các tuyển thủ họ đang cần. [...]"
+              },
+              {
+                "title": "PUBG MOBILE Esports - YouTube",
+                "url": "https://www.youtube.com/c/PUBGMOBILEEsports​",
+                "snippet": "All players who reported feeling unwell during the PMWC at EWC were evaluated by medical staff and returned to their hotels yesterday. Players are being reassessed this morning ahead of..."
+              },
+              {
+                "title": "Giải đấu PUBG Vietnam Series 2026 Phase 2 bất ngờ hoãn, tương lai ...",
+                "url": "https://www.techz.vn/223-926-1-giai-dau-pubg-vietnam-series-2026-phase-2-bat-ngo-hoan-tuong-lai-esports-viet-nam-bo-ngo-ylt710448.html",
+                "snippet": "PUBG Vietnam Series 2026 Phase 2 bất ngờ bị hoãn toàn bộ các trận đấu còn lại và chưa có thời điểm trở lại cụ thể, trong bối cảnh PUBG Việt Nam liên tiếp xuất hiện nhiều diễn biến đáng chú ý. Ngày 24/9, PUBG Esports chính thức thông báo ..."
+              },
+              {
+                "title": "CHÍNH THỨC: PUBG gỡ kênh PUBG Việt Nam khỏi nền tảng Facebook",
+                "url": "https://thethao247.vn/esports/426-chinh-thuc-pubg-go-kenh-pubg-viet-nam-khoi-nen-tang-facebook-c180-d437496.html",
+                "snippet": "Ngày 24/9, PUBG Esports chính thức thông báo toàn bộ những trận đấu còn lại của PUBG Vietnam Series 2026 Phase 2 bị hoãn vô thời hạn. Nhà tổ chức cho biết lịch thi đấu mới chỉ được công bố khi các thông tin liên quan được xác nhận, nhưng không đưa ra nguyên nhân cụ thể dẫn tới quyết định này."
+              }
+            ],
+            "focus": "esports",
+            "freshness": "week"
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        },
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "search",
+          "data": {
+            "query": "PUBG đội tuyển Việt Nam 2026",
+            "returned_count": 5,
+            "provider": "duckduckgo_html",
+            "results": [
+              {
+                "title": "Kết quả thi đấu FIFA ASEAN Cup 2026, kết quả đội tuyển Việt Nam mới nhất",
+                "url": "https://www.24h.com.vn/bong-da/ket-qua-thi-dau-fifa-asean-cup-2026-ket-qua-doi-tuyen-viet-nam-moi-nhat-c48a1782267.html",
+                "snippet": "Kết quả FIFA ASEAN Cup 2026 được cập nhật liên tục và chính xác sau mỗi lượt trận. Độ i tuyển Việt Nam thi đấu tại bảng B Division 1 cùng Thái Lan, Pakistan và Philippines, hướng đến mục tiêu cạnh tranh ngôi đầu và tích lũy điểm số trên bảng xếp hạng FIFA."
+              },
+              {
+                "title": "Kết quả bóng đá Việt Nam vs Philippines - FIFA ASEAN Cup 2026",
+                "url": "https://vietnamnet.vn/ket-qua-bong-da-viet-nam-vs-philippines-fifa-asean-cup-2026-2559020.html",
+                "snippet": "Kết quả bóng đá FIFA ASEAN Cup 2026 : Tuyển Việt Nam vất vả đánh bại Philippines nhờ pha ghi bàn duy nhất của Đình Bắc, ở lượt trận ra quân tại bảng B FIFA ASEAN Cup 2026 ."
+              },
+              {
+                "title": "PVS 2026 PHASE 2: HOÃN, KHÔNG... - PUBG Anti-Fan Việt Nam | Facebook",
+                "url": "https://www.facebook.com/PUBG.AntiFan.VietNam/posts/-pvs-2026-phase-2-hoãn-không-phải-hủypubg-esports-đã-chính-thức-xác-nhận-tối-240/122114376345468366/",
+                "snippet": "PVS 2026 PHASE 2: HOÃN, KHÔNG PHẢI HỦY. PUBG Esports đã chính thức xác nhận tối 24/09 rằng toàn bộ các trận còn lại của PUBG Vietnam Series 2026 Phase 2 bị hoãn cho tới khi có thông báo mới . Lịch..."
+              },
+              {
+                "title": "Toàn cảnh drama PUBG nóng nhất ngay lúc này - Kenh14.vn",
+                "url": "https://kenh14.vn/toan-canh-drama-pubg-nong-nhat-ngay-luc-nay-215260922091541508.chn",
+                "snippet": "Từ một sân chơi giao hữu quy tụ dàn streamer và tuyển thủ hàng đầu châu Á, PUBG Asia Stars 2026 đã kết thúc khi ban tổ chức buộc phải hủy bỏ ngày thi đấu cuối. Sự kiện này sau đó đã trở thành tâm điểm của các cáo buộc gian lận, tẩy chay từ khán giả và vẫn đang tiếp tục gây tranh cãi."
+              },
+              {
+                "title": "Giải PUBG châu Á bị hủy sau cách xử lý gây tranh cãi của KRAFTON",
+                "url": "https://thanhnien.vn/giai-pubg-chau-a-bi-huy-sau-cach-xu-ly-gay-tranh-cai-cua-krafton-18526092217065291.htm",
+                "snippet": "PUBG Asia Stars 2026 kết thúc sớm giữa tranh cãi về cách KRAFTON xử lý sự cố liên quan hai đại diện Việt Nam và những thiếu sót trong khâu tổ chức."
+              }
+            ],
+            "focus": "kết quả mới",
+            "freshness": "week"
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        }
+      ]
+    },
+    "error": null,
+    "meta": {
+      "version": "2.0.0",
+      "truncated": false,
+      "warnings": []
+    }
+  },
+  "selected_urls": [
+    "https://tech.zingnews.vn/giai-dau-pubg-viet-nam-bat-ngo-mat-tich-khoi-trang-chu-post1685023.html",
+    "https://thanhnien.vn/tuyen-thu-xoa-game-cong-dong-viet-nam-quay-lung-voi-pubg-pc-185260923092425205.htm",
+    "https://www.techz.vn/223-926-1-giai-dau-pubg-vietnam-series-2026-phase-2-bat-ngo-hoan-tuong-lai-esports-viet-nam-bo-ngo-ylt710448.html",
+    "https://lag.vn/tin/esports/pubg-krafton-dua-ra-thong-bao-chinh-thuc-ve-su-co-tai-pubg-asia-stars-2026.html"
+  ],
+  "read": {
+    "ok": true,
+    "tool": "web_tool",
+    "action": "scrape_many",
+    "data": {
+      "requested_count": 4,
+      "succeeded_count": 3,
+      "failed_count": 1,
+      "results": [
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "scrape",
+          "data": {
+            "requested_url": "https://tech.zingnews.vn/giai-dau-pubg-viet-nam-bat-ngo-mat-tich-khoi-trang-chu-post1685023.html",
+            "final_url": "https://tech.zingnews.vn/giai-dau-pubg-viet-nam-bat-ngo-mat-tich-khoi-trang-chu-post1685023.html",
+            "status_code": 200,
+            "title": "Giải đấu PUBG Việt Nam bất ngờ 'mất tích' khỏi trang chủ | Znews.vn",
+            "title_truncated": false,
+            "published_date": "2026-09-23",
+            "displayed_date": null,
+            "content": "| PVS là hệ thống giải đấu của Việt Nam nhằm tranh suất tham dự giải quốc tế. Ảnh: *PUBG eSports* . |\n\nChưa dừng lại ở vụ hủy giải [PUBG](https://znews.vn/tieu-diem/pubg.html) Asia Stars 2026, cộng đồng PUBG Việt Nam mới đây tiếp tục xôn xao trước động thái lạ từ nhà phát hành. Lịch trình của giải đấu PUBG Vietnam Series (PVS) bất ngờ bị gỡ bỏ hoàn toàn khỏi trang chủ chính thức của *PUBG Esports*.\n\nPVS là hệ thống giải đấu chuyên nghiệp cấp cao nhất của khu vực Việt Nam. Sân chơi quyết định nhà vô địch quốc nội, con đường duy nhất giúp các đội tuyển tích lũy điểm PGC Points. Những điểm số này trực tiếp quyết định suất tham dự giải đấu lớn nhất năm PUBG Global Championship.\n\nTheo kế hoạch ban đầu, giai đoạn hai của PVS sẽ khởi tranh vào cuối tháng 9 để chuẩn bị cho chuỗi giải quốc tế cuối năm. Tuy nhiên, mọi thông tin liên quan đến lịch thi đấu của khu vực Việt Nam hiện đã không còn xuất hiện trên hệ thống dữ liệu toàn cầu.\n\nĐộng thái âm thầm gỡ lịch diễn ra ngay giữa thời điểm KRAFTON đang xử lý các vấn đề truyền thông liên quan. Việc hệ thống giải quốc nội bị tạm dừng ảnh hưởng trực tiếp đến kế hoạch tập luyện của các đội tuyển lớn như GAM TE hay Anyone's Legend.\n\nHiện tại, phía KRAFTON vẫn chưa đưa ra bất kỳ tuyên bố chính thức nào về lý do điều chỉnh. Sự im lặng này khiến nhiều đội tuyển chuyên nghiệp và người hâm mộ lo ngại về số phận suất tham dự giải thế giới của khu vực Việt Nam trong thời gian tới.\n\nSự việc tại giải giao hữu châu Á tưởng chừng đơn giản, lại bị đẩy đi xa, thổi bùng tranh cãi và làn sóng tấn công giữa người hâm mộ các khu vực. Đồng thời, những người chơi hàng đầu của khu vực Việt Nam đứng trước nguy cơ bị cấm thi đấu dài hạn bởi sự thiếu minh bạch của ban tổ chức và nhà phát hành.\n\nViệc Ban tổ chức phạt nặng Himass và Tan Vu khi luật chưa quy định cụ thể bị nhiều khán giả đánh giá là xử ép và thiên vị. Dù vậy, một bộ phận người hâm mộ vẫn cho rằng hành vi xem thông tin bên ngoài làm tổn hại đến tinh thần thể thao. Đến nay, người hâm mộ eSports Việt Nam vẫn chờ đợi phương án xử lý công bằng từ nhà phát hành game Hàn Quốc.\n\n**NVIDIA từng được cứu bởi cộng đồng game thủ**\n\nNgay cả khi giá cổ phiếu rơi xuống đáy, NVIDIA vẫn xuất xưởng những con chip silicon phức tạp nhất từng được chế tạo. Những con chip này kết hợp sự bùng nổ của internet băng thông rộng tại gia và sự phát triển của máy tính đa phương tiện gia đình đã mở ra điều mà một số nhà phê bình sau này gọi là Thời kỳ Hoàng kim của game PC.\n\nCuốn sách [NVIDIA - Cỗ máy tư duy vĩ đại](https://znews.vn/nvidia-tung-duoc-cuu-boi-cong-dong-game-thu-post1550420.html) thuật lại câu chuyện đầy lôi cuốn của Jensen Huang và NVIDIA và cách ông dẫn dắt công ty trở thành một đế chế công nghệ.",
+            "content_format": "markdown",
+            "content_chars": 2703,
+            "returned_chars": 2703,
+            "content_sha256": "6625bda8cf4e0419e6d417e84ae614a84e9645f4510e31d748e37a228eb353f4",
+            "method": "static",
+            "content_type": "text/html;charset=utf-8",
+            "structured_data": {
+              "tables": [
+                [
+                  [
+                    ""
+                  ],
+                  [
+                    "PVS là hệ thống giải đấu của Việt Nam nhằm tranh suất tham dự giải quốc tế. Ảnh: PUBG eSports ."
+                  ]
+                ],
+                [
+                  [
+                    "Hai siêu sao eSports Việt Nam trước nguy cơ bị cấm thi đấu oan uổng Giải đấu giao hữu PUBG Asia Stars 2026 bất ngờ bị hủy bỏ, nhà phát hành KRAFTON phải lên tiếng xin lỗi sau drama ồn ào liên quan đến 2 tuyển thủ Việt Nam. 12:41 22/9/2026"
+                  ]
+                ],
+                [
+                  [
+                    "LMHT Việt Nam làm nên lịch sử trước Faker và tuyển Hàn Quốc Dù để thua với tỉ số 1-3 chung cuộc, đội tuyển Liên Minh Huyền Thoại Việt Nam vẫn tạo nên cột mốc lịch sử khi ngược dòng đánh bại Hàn Quốc ở ván thi đấu mở màn. 06:04 21/9/2026"
+                  ]
+                ],
+                [
+                  [
+                    "GAM lại lỡ hẹn với Chung kết Thế giới Thất bại ở nhánh thua LCP Split 3 cùng chiến thắng của CFO khiến GAM Esports chính thức mất vé dự CKTG 2026, đánh dấu năm thứ hai liên tiếp vắng mặt ở giải đấu lớn nhất hành tinh. 07:27 30/8/2026"
+                  ]
+                ]
+              ],
+              "charts": []
+            },
+            "provenance": {
+              "fetched_at": "2026-09-27T03:54:06.157151+00:00",
+              "published_date_source": "meta",
+              "displayed_date_source": null,
+              "redirect_chain": [],
+              "extractor": "trafilatura",
+              "rendered": false,
+              "proxy_used": false,
+              "wait_selector_satisfied": null
+            }
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        },
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "scrape",
+          "data": {
+            "requested_url": "https://thanhnien.vn/tuyen-thu-xoa-game-cong-dong-viet-nam-quay-lung-voi-pubg-pc-185260923092425205.htm",
+            "final_url": "https://thanhnien.vn/tuyen-thu-xoa-game-cong-dong-viet-nam-quay-lung-voi-pubg-pc-185260923092425205.htm",
+            "status_code": 200,
+            "title": "Tuyển thủ xóa game, cộng đồng Việt Nam quay lưng với PUBG PC",
+            "title_truncated": false,
+            "published_date": "2026-09-23",
+            "displayed_date": "2026-09-23",
+            "content": "Sau cuộc họp với đội tuyển GAMxTE PUBG (GTE) vào tối 22.9, TanVuu - tuyển thủ chuyên nghiệp *[PUBG](https://thanhnien.vn/giai-pubg-chau-a-bi-huy-sau-cach-xu-ly-gay-tranh-cai-cua-krafton-18526092217065291.htm)*gây chú ý khi xóa *PUBG* ngay trên sóng livestream. Khoảnh khắc này nhanh chóng được cộng đồng game thủ Việt Nam quan tâm. Ngay sau đó, các đồng đội đã động viên TanVuu trong thời điểm sự nghiệp thi đấu của anh đang đứng trước nhiều dấu hỏi.\n\nKhông lâu sau động thái của TanVuu, Himass - một trong những tuyển thủ *PUBG* nổi tiếng nhất Việt Nam cũng tải *Delta Force*, tựa game bắn súng khác đang nhận được sự quan tâm của cộng đồng FPS.\n\nHai động thái liên tiếp xuất hiện trong bối cảnh *PUBG* đang đối mặt với tranh luận gay gắt tại Việt Nam sau sự cố tại PUBG Asia Stars 2026. Việc hai tuyển thủ có những hành động liên quan đến một tựa game khác lập tức trở thành chủ đề được cộng đồng bàn luận.\n\n## Từ sự cố tại PUBG Asia Stars 2026\n\nDrama bắt đầu từ ngày 17.9, trong ngày thi đấu đầu tiên của PUBG Asia Stars 2026. KRAFTON xác nhận hai đại diện Việt Nam là Himass và TanVuu đã tiếp nhận thông tin bên ngoài thông qua nội dung phát trực tiếp trong thời gian thi đấu. Sau đó, hai tuyển thủ bị loại khỏi các trận đấu còn lại của giải.\n\nVụ việc nhanh chóng trở thành tâm điểm tranh cãi khi cách KRAFTON xử lý và truyền đạt thông tin bị cộng đồng đặt dấu hỏi. Các tuyển thủ Hàn Quốc sau đó không tham gia ngày thi đấu thứ hai. Đến ngày 20.9, KRAFTON quyết định hủy ngày thi đấu cuối và không xác nhận thứ hạng chung cuộc của giải.\n\nNgày 21.9, KRAFTON tiếp tục đưa ra lời xin lỗi chính thức. Yoon Soo-jin, người đứng đầu bộ phận PUBG Publishing, thừa nhận nhà phát hành đã không xây dựng đầy đủ các biện pháp phòng ngừa, tiêu chí phân định và mức xử phạt liên quan đến việc sử dụng thông tin bên ngoài trước khi giải đấu diễn ra. KRAFTON cũng nhận trách nhiệm về những thiếu sót trong quá trình xử lý và truyền thông vụ việc.\n\nĐáng chú ý, KRAFTON xác nhận hành vi của Himass và TanVuu thuộc nhóm stream sniping, đồng thời cho biết thủ tục kỷ luật đối với hai tuyển thủ đang được tiến hành và kết quả sẽ được công bố riêng. Hai người cũng bị tước tư cách PUBG Partner tại Việt Nam.\n\n## **Tanvuu xóa *PUBG*, Himass tải *Delta**Force***\n\n*PUBG*, Himass tải\n\n*Delta*\n\n*Force*\n\nTrong bối cảnh quyết định kỷ luật vẫn chưa được công bố, TanVuu có động thái gây chú ý khi trực tiếp xóa *PUBG* khỏi máy tính trong buổi livestream ngày 22.9. Hình ảnh TanVuu xóa *PUBG* ngay trên sóng vì thế nhanh chóng được cộng đồng chia sẻ.\n\nKhông lâu sau đó, Himass được cộng đồng phát hiện tải *Delta**Force*, một tựa game FPS khác. *Delta Force* hiện cũng có hệ thống Esports riêng tại Việt Nam, do Garena phát hành, với các giải đấu PC được tổ chức theo mùa.\n\nĐộng thái của Himass lập tức được đặt cạnh việc TanVuu xóa *PUBG*, khiến cộng đồng đặt câu hỏi liệu đây có phải dấu hiệu cho một hướng đi mới của hai tuyển thủ sau sự cố tại PUBG Asia Stars 2026.\n\nKhông chỉ TanVuu hay Himass có những động thái liên quan đến *PUBG PC*, làn sóng phản ứng trong cộng đồng game thủ Việt Nam cũng đang tiếp tục lan rộng. Hàng loạt KOL, streamer và người chơi công khai xóa *PUBG PC*, thậm chí có những quán net vốn đang kinh doanh dựa trên lượng người chơi tựa game này cũng tham gia vào làn sóng này. Những động thái trên được xem như cách cộng đồng thể hiện sự ủng hộ đối với các tuyển thủ mà họ yêu thích sau những tranh cãi tại PUBG Asia Stars 2026.\n\n## Tương lai nào cho hai tuyển thủ?\n\nTrong môi trường Esports chuyên nghiệp, tuyển thủ thường chịu những ràng buộc nhất định liên quan đến hợp đồng, hoạt động livestream, hình ảnh thương mại và quyền lợi của đội tuyển, nhà phát hành hoặc đối tác. Vì vậy, việc một tuyển thủ công khai từ bỏ hoặc chuyển sang trải nghiệm một sản phẩm cạnh tranh có thể tạo ra những hệ quả nhất định, tùy thuộc vào các điều khoản mà tuyển thủ đã ký kết.\n\nVới trường hợp TanVuu và Himass, những động thái mới nhất càng khiến câu hỏi về tương lai của hai tuyển thủ trong hệ thống *PUBG*Esports được quan tâm.\n\nỞ thời điểm hiện tại, chưa có thông báo chính thức cho thấy TanVuu hoặc Himass bị cấm thi đấu *PUBG PC* trong một khoảng thời gian cụ thể. [KRAFTON](https://thanhnien.vn/giai-pubg-chau-a-bi-huy-sau-cach-xu-ly-gay-tranh-cai-cua-krafton-18526092217065291.htm) mới xác nhận thủ tục kỷ luật đang được tiến hành và sẽ công bố kết quả sau. Vì vậy, những suy đoán về việc hai tuyển thủ bị cấm thi đấu vẫn cần chờ quyết định chính thức từ KRAFTON.\n\nDù kết quả cuối cùng ra sao, việc TanVuu xóa *PUBG* ngay trên livestream và Himass tải *Delta**Force* đã tạo nên một trong những hình ảnh đáng chú ý nhất của *PUBG*Esports Việt Nam trong những ngày qua. Những động thái này cũng cho thấy sức ảnh hưởng của sự cố PUBG Asia Stars 2026 đối với các tuyển thủ trực tiếp liên quan vẫn chưa dừng lại.\n\nBình luận (0)",
+            "content_format": "markdown",
+            "content_chars": 4819,
+            "returned_chars": 4819,
+            "content_sha256": "063d26ae955f5ca3308e691923117273d0c2f28538173ca24eb6bf6d5add457d",
+            "method": "static",
+            "content_type": "text/html; charset=utf-8",
+            "structured_data": {
+              "tables": [],
+              "charts": []
+            },
+            "provenance": {
+              "fetched_at": "2026-09-27T03:54:06.343653+00:00",
+              "published_date_source": "meta",
+              "displayed_date_source": "time_datetime",
+              "redirect_chain": [],
+              "extractor": "trafilatura",
+              "rendered": false,
+              "proxy_used": false,
+              "wait_selector_satisfied": null
+            }
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        },
+        {
+          "ok": true,
+          "tool": "web_tool",
+          "action": "scrape",
+          "data": {
+            "requested_url": "https://www.techz.vn/223-926-1-giai-dau-pubg-vietnam-series-2026-phase-2-bat-ngo-hoan-tuong-lai-esports-viet-nam-bo-ngo-ylt710448.html",
+            "final_url": "https://www.techz.vn/223-926-1-giai-dau-pubg-vietnam-series-2026-phase-2-bat-ngo-hoan-tuong-lai-esports-viet-nam-bo-ngo-ylt710448.html",
+            "status_code": 200,
+            "title": "Giải đấu PUBG Vietnam Series 2026 Phase 2 bất ngờ hoãn, tương lai Esports Việt Nam bỏ ngỏ",
+            "title_truncated": false,
+            "published_date": "2026-09-25",
+            "displayed_date": null,
+            "content": "# Giải đấu PUBG Vietnam Series 2026 Phase 2 bất ngờ hoãn, tương lai Esports Việt Nam bỏ ngỏ\n\n**PUBG Vietnam Series 2026 Phase 2 bất ngờ bị hoãn toàn bộ các trận đấu còn lại và chưa có thời điểm trở lại cụ thể, trong bối cảnh PUBG Việt Nam liên tiếp xuất hiện nhiều diễn biến đáng chú ý.**\n\nNgày 24/9, PUBG Esports chính thức thông báo PUBG Vietnam Series (PVS) 2026 Phase 2 sẽ tạm hoãn toàn bộ những trận đấu còn lại. Ban tổ chức cho biết lịch thi đấu mới cùng các thông tin liên quan sẽ được cập nhật sau khi hoàn tất xác nhận.\n\nHiện chưa có thời điểm cụ thể để giải đấu trở lại. PUBG Esports cũng gửi lời xin lỗi tới khán giả, tuyển thủ và các đội tham dự nhưng không công bố nguyên nhân dẫn tới quyết định tạm dừng.\n\nĐáng chú ý, PVS 2026 Phase 2 chưa bị hủy. Tuy nhiên, việc chưa có lịch thi đấu mới khiến các đội đang tham dự rơi vào trạng thái chờ đợi, đặc biệt khi giải đấu đóng vai trò quan trọng trong quá trình tích lũy điểm hướng tới PUBG Global Championship 2026 (PGC 2026).\n\n**PVS bất ngờ biến mất khỏi lịch thi đấu**\n\nTrước thông báo chính thức về việc tạm hoãn, cộng đồng PUBG Việt Nam đã nhận thấy một số dấu hiệu bất thường. PVS 2026 Phase 2 từng bất ngờ biến mất khỏi lịch thi đấu trên hệ thống PUBG Esports dù giải vẫn chưa hoàn thành.\n\nĐộng thái này lập tức khiến người hâm mộ đặt câu hỏi về số phận của những trận đấu còn lại. Không lâu sau đó, PUBG Esports xác nhận giải đấu thực sự được tạm dừng nhưng chưa đưa ra thời gian tổ chức trở lại.\n\nTrong khi chờ thông báo mới, một số thay đổi khác liên quan đến hệ sinh thái PUBG tại Việt Nam cũng thu hút sự chú ý.\n\nMột số kênh truyền thông dành cho người chơi Việt Nam được cho là không còn hoạt động hoặc không thể truy cập. Trên Steam, PUBG: BATTLEGROUNDS hiện liệt kê 17 ngôn ngữ được hỗ trợ và tiếng Việt không nằm trong danh sách này, dù các đánh giá bằng tiếng Việt của người dùng vẫn còn trên trang game.\n\nTuy nhiên, website PUBG vẫn duy trì một số nội dung tiếng Việt, trong đó có ghi chú cập nhật phiên bản 43.1 được đăng ngày 9/9. Vì vậy, những dấu hiệu trên chưa đủ để kết luận PUBG hay KRAFTON đã rút khỏi thị trường Việt Nam.\n\n**Diễn biến xảy ra sau án phạt Himass và TanVuu**\n\nViệc PVS bị hoãn diễn ra chỉ một ngày sau khi KRAFTON công bố kết quả điều tra vụ việc tại PUBG Asia Stars 2026.\n\nHai tuyển thủ sau đó bị khóa vĩnh viễn tài khoản PUBG: BATTLEGROUNDS và mất quyền tham dự các giải đấu Esports chính thức do KRAFTON tổ chức hoặc phê duyệt trên toàn cầu. Hai tuyển thủ vẫn có quyền thực hiện quy trình giải trình theo quy định của PUBG Esports.\n\nMức phạt này nhanh chóng gây tranh luận trong cộng đồng PUBG Việt Nam. Anyone's Legend cho biết đang rà soát các quy định và quy trình để hỗ trợ Himass thực hiện quyền khiếu nại. Trong khi đó, GAM x TE cũng đề nghị xem xét lại mức độ xử phạt đối với TanVuu.\n\nPhía GAM x TE không phủ nhận việc tuyển thủ mở phần chat livestream trong trận đấu, nhưng cho rằng hình thức cấm thi đấu vĩnh viễn là quá nghiêm khắc.\n\nDù án phạt Himass và TanVuu cùng những tranh luận sau PUBG Asia Stars xảy ra ngay trước thời điểm PVS bị hoãn, hiện chưa có thông tin chính thức nào xác nhận hai sự việc có liên quan trực tiếp.\n\nThông báo về việc tạm hoãn PVS 2026 Phase 2 không đề cập đến PUBG Asia Stars hay án phạt dành cho hai tuyển thủ. Vì vậy, việc cho rằng tranh cãi này là nguyên nhân khiến giải đấu bị dừng hiện vẫn chỉ là suy đoán.\n\n**Tương lai PUBG Esports Việt Nam vẫn chưa rõ ràng**\n\nĐiều khiến cộng đồng đặc biệt quan tâm lúc này là hàng loạt thay đổi xuất hiện trong thời gian ngắn: PVS 2026 Phase 2 biến mất khỏi lịch thi đấu rồi được xác nhận tạm hoãn, một số kênh truyền thông tiếng Việt không còn hoạt động, trong khi tiếng Việt cũng không còn nằm trong danh sách ngôn ngữ được hỗ trợ trên Steam.\n\nDù vậy, website PUBG vẫn còn nội dung tiếng Việt và KRAFTON chưa công bố bất kỳ kế hoạch nào về việc rút khỏi thị trường Việt Nam. Do đó, chưa thể khẳng định PUBG đang chuẩn bị chấm dứt hoạt động tại Việt Nam.\n\nTrước mắt, các đội tuyển đang tranh tài tại PVS 2026 Phase 2 sẽ phải tiếp tục chờ lịch thi đấu mới. Đặc biệt, khi điểm số tại giải có liên quan tới cuộc đua hướng đến PGC 2026, thời điểm PVS trở lại sẽ có ảnh hưởng trực tiếp tới kế hoạch thi đấu của các đội.\n\nPUBG Esports hiện chưa công bố thời gian cụ thể cho phần còn lại của PVS 2026 Phase 2. Người hâm mộ và các đội tuyển vì thế vẫn phải chờ thông báo tiếp theo để biết giải đấu sẽ trở lại theo lịch cũ hay có những điều chỉnh về thể thức và kế hoạch tổ chức.",
+            "content_format": "markdown",
+            "content_chars": 4454,
+            "returned_chars": 4454,
+            "content_sha256": "4c8c898d60baa272836fc2fdcd9319adcce07a9ac491439f8ac18f5d3fbc7db4",
+            "method": "static",
+            "content_type": "text/html",
+            "structured_data": {
+              "tables": [],
+              "charts": []
+            },
+            "provenance": {
+              "fetched_at": "2026-09-27T03:54:06.478663+00:00",
+              "published_date_source": "meta",
+              "displayed_date_source": null,
+              "redirect_chain": [],
+              "extractor": "trafilatura",
+              "rendered": false,
+              "proxy_used": false,
+              "wait_selector_satisfied": null
+            }
+          },
+          "error": null,
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        },
+        {
+          "ok": false,
+          "tool": "web_tool",
+          "action": "scrape",
+          "data": null,
+          "error": {
+            "code": "WEB_TIMEOUT",
+            "message": "web operation timed out",
+            "retryable": true,
+            "details": {}
+          },
+          "meta": {
+            "version": "2.0.0",
+            "truncated": false,
+            "warnings": []
+          }
+        }
+      ]
+    },
+    "error": null,
+    "meta": {
+      "version": "2.0.0",
+      "truncated": false,
+      "warnings": []
+    }
+  }
+}

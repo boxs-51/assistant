@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import json
+import re
+from datetime import date
 from typing import Any, Optional
 from urllib.parse import urljoin
 
@@ -37,6 +40,96 @@ NOISE_TAGS = [
     "iframe",
     "dialog",
 ]
+NOISE_SELECTORS = (
+    ".the-article-body .notebox, .related-articles, .recommendation, "
+    ".advertisement, [class*='related-news']"
+)
+
+
+def _soup_text(soup: BeautifulSoup, base_url: str, deduplicate: bool) -> str:
+    for anchor in soup.find_all("a", href=True):
+        href = anchor.get("href")
+        if not isinstance(href, str):
+            continue
+        label = anchor.get_text(strip=True)
+        full = urljoin(base_url, href.strip())
+        if label and full.startswith(("http://", "https://")):
+            anchor.replace_with(f"[{label}]({full})")
+    result = clean_whitespace(soup.get_text(separator="\n"))
+    return deduplicate_content(result) if deduplicate else result
+
+
+def _valid_iso_date(value: Any) -> str | None:
+    if not isinstance(value, str) or not re.match(r"^\d{4}-\d{2}-\d{2}(?:\D|$)", value):
+        return None
+    try:
+        return date.fromisoformat(value[:10]).isoformat()
+    except ValueError:
+        return None
+
+
+def extract_published_date(raw_html: str) -> tuple[str | None, str | None]:
+    """Return a source-declared publication date, never a date guessed from prose."""
+    if not raw_html:
+        return None, None
+
+    try:
+        soup = BeautifulSoup(raw_html, "html.parser")
+        for meta in soup.find_all("meta"):
+            key = str(meta.get("property") or meta.get("name") or meta.get("itemprop") or "").lower()
+            if key in {"article:published_time", "datepublished", "pubdate", "publishdate"}:
+                published = _valid_iso_date(meta.get("content"))
+                if published:
+                    return published, "meta"
+
+        for script in soup.find_all("script", type="application/ld+json"):
+            raw = script.string or script.get_text()
+            if not raw or len(raw) > 65_536:
+                continue
+            try:
+                stack = [json.loads(raw)]
+            except (TypeError, ValueError):
+                continue
+            examined = 0
+            while stack and examined < 64:
+                item = stack.pop()
+                examined += 1
+                if isinstance(item, list):
+                    stack.extend(item[:64])
+                elif isinstance(item, dict):
+                    types = item.get("@type", [])
+                    if isinstance(types, str):
+                        types = [types]
+                    if any(str(kind).lower() in {"article", "newsarticle", "blogposting"} for kind in types):
+                        published = _valid_iso_date(item.get("datePublished"))
+                        if published:
+                            return published, "jsonld"
+                    graph = item.get("@graph")
+                    if isinstance(graph, (list, dict)):
+                        stack.append(graph)
+    except Exception:
+        return None, None
+    return None, None
+
+
+def extract_displayed_date(raw_html: str) -> tuple[str | None, str | None]:
+    """Return an explicitly marked page date without calling it publication."""
+    if not raw_html:
+        return None, None
+    try:
+        soup = BeautifulSoup(raw_html, "html.parser")
+        for tag in soup.select("time[datetime]"):
+            value = _valid_iso_date(tag.get("datetime"))
+            if value:
+                return value, "time_datetime"
+        marker = soup.select_one(".news-detail-header__modified")
+        if marker is not None:
+            value = _valid_iso_date(marker.get_text(" ", strip=True))
+            if value:
+                return value, "page_modified_label"
+    except Exception:
+        return None, None
+    return None, None
 
 
 def extract_clean_content(
@@ -53,6 +146,8 @@ def extract_clean_content(
         try:
             soup = BeautifulSoup(raw_html, "html.parser")
             for tag in soup.find_all(NOISE_TAGS):
+                tag.decompose()
+            for tag in soup.select(NOISE_SELECTORS):
                 tag.decompose()
             processed_html = str(soup)
         except Exception:
@@ -74,21 +169,21 @@ def extract_clean_content(
             result = clean_whitespace(extracted)
             if deduplicate:
                 result = deduplicate_content(result)
+            if len(result) < 500:
+                try:
+                    soup = BeautifulSoup(processed_html, "html.parser")
+                    main = soup.select_one("#docContent, main, article, [role=main]")
+                    if main is not None:
+                        candidate = _soup_text(main, base_url, deduplicate)
+                        if len(candidate) > max(500, len(result) * 2):
+                            return candidate, "beautifulsoup"
+                except Exception:
+                    pass
             return result, "trafilatura"
 
     try:
         soup = BeautifulSoup(processed_html, "html.parser")
-        for anchor in soup.find_all("a", href=True):
-            href = anchor.get("href")
-            if not isinstance(href, str):
-                continue
-            text = anchor.get_text(strip=True)
-            full = urljoin(base_url, href.strip())
-            if text and full.startswith(("http://", "https://")):
-                anchor.replace_with(f"[{text}]({full})")
-        result = clean_whitespace(soup.get_text(separator="\n"))
-        if deduplicate:
-            result = deduplicate_content(result)
+        result = _soup_text(soup, base_url, deduplicate)
         return (result or None), "beautifulsoup"
     except Exception:
         return None, "beautifulsoup"
