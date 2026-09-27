@@ -196,11 +196,14 @@ def test_f6_0_freezes_first_production_slice_matrix():
         "UIBridge.submit_prompt",
         "UIBridge.encode_files_async",
         "FileEncoder.encode_async/_worker",
-        "COMPATIBILITY / EXPECT NO CHANGE",
+        "LOCAL_OFFLINE COMPATIBILITY / EXPECT NO CHANGE",
         "ONLINE canonical path MUST bypass the legacy",
         "LOCAL_OFFLINE compatibility path",
-        "run_agent_session",
+        "ONLINE desktop canonical path MUST construct canonical GatewayAttachment/request state",
+        "MUST NOT route attachment preparation through",
+        "AgentEngine.run_agent_session",
         "process_attached_files",
+        "active baseline compatibility owners",
     ):
         assert phrase in normalized
 
