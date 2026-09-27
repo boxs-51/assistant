@@ -297,11 +297,12 @@ def test_bounded_media_content_read_rejects_oversized_before_body(monkeypatch):
 
     result = bridge.read_asset_content(
         "asset-1",
-        max_bytes=32 * 1024 * 1024,
+        max_bytes=256 * 1024 * 1024,
     )
 
     assert result["success"] is False
     assert "bounded in-memory content limit" in result["error"]
+    assert "33554432" in result["error"]
     assert gateway.content_calls == []
 
 
