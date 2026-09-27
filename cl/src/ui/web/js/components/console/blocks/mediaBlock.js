@@ -19,7 +19,7 @@ export function createMediaBlock(role, mediaType, mediaData) {
     window.createCanonicalAssetObjectUrl?.(mediaData)
       .then((resolved) => {
         if (!resolved?.url) throw new Error('Canonical media content is unavailable.');
-        const media = block.querySelector(`.${'custom-'}${mediaType}-player`);
+        const media = block.querySelector(`.custom-${mediaType}-player`);
         if (!media) {
           URL.revokeObjectURL(resolved.url);
           return;
