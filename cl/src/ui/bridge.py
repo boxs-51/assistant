@@ -14,6 +14,8 @@ from ..schemas.request import GatewayChatRequest, RequestConfig
 
 logger = logging.getLogger(__name__)
 
+MAX_CANONICAL_IN_MEMORY_CONTENT_BYTES = 32 * 1024 * 1024
+
 class UIBridge:
     def __init__(self, engine, hitl, client_runtime):
         self._engine = engine
@@ -445,6 +447,10 @@ class UIBridge:
                     raise ValueError(
                         "Canonical asset content bound must be positive."
                     )
+                bounded_max_bytes = min(
+                    bounded_max_bytes,
+                    MAX_CANONICAL_IN_MEMORY_CONTENT_BYTES,
+                )
 
                 raw_size = metadata.get("size_bytes")
                 try:
