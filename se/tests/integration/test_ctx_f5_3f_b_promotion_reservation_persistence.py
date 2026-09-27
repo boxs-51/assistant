@@ -13,6 +13,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy import CheckConstraint, UniqueConstraint, text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from se.src.context.memory import canonical_memory_bytes
 from se.src.context.memory_promotion import (
     MemoryPromotionIntent,
     MemoryPromotionProofScope,
@@ -294,6 +295,24 @@ async def test_ctx_f5_3f_b_same_intent_retry_recovers_one_durable_winner():
 
 @pytest.mark.asyncio
 async def test_ctx_f5_3f_b_exact_intent_round_trip_preserves_json_type_identity():
+    base = _intent(suffix="typed")
+    same_authority_variants = [
+        MemoryPromotionIntent(
+            owner_user_id=base.owner_user_id,
+            source_ref_snapshot=base.source_ref_snapshot,
+            source_proof=base.source_proof,
+            content_digest=base.content_digest,
+            metadata={"value": value},
+            memory_schema_version=base.memory_schema_version,
+        )
+        for value in (True, 1, 1.0)
+    ]
+    canonical_variants = {
+        canonical_memory_bytes(intent.model_dump(mode="json"))
+        for intent in same_authority_variants
+    }
+    assert len(canonical_variants) == 3
+
     engine, sessions = await _memory_database()
     try:
         variants = [
@@ -367,7 +386,14 @@ async def test_ctx_f5_3f_b_proof_tuple_reuse_for_different_intent_fails_closed()
         proof_receipt_id="shared-receipt",
         authority_state_token="shared-token",
     )
-    second = first.model_copy(update={"metadata": {"version": 2}})
+    second = MemoryPromotionIntent(
+        owner_user_id=first.owner_user_id,
+        source_ref_snapshot=first.source_ref_snapshot,
+        source_proof=first.source_proof,
+        content_digest=first.content_digest,
+        metadata={"version": 2},
+        memory_schema_version=first.memory_schema_version,
+    )
     try:
         async with sessions() as session:
             repository = DurablePromotionReservationRepository(session)
