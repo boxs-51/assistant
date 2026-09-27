@@ -427,10 +427,22 @@ async def test_ctx_f5_3f_b_only_allows_issued_to_terminal_transitions():
                 promotion_authority_id="authority-consume",
                 intent=_intent(suffix="consume"),
             )
+            resident_consume = await session.get(
+                PromotionReservationRow,
+                "authority-consume",
+            )
+            assert resident_consume is not None
+            assert resident_consume.state == DurablePromotionReservationState.ISSUED.value
+            loaded_consume = await repository.get("authority-consume")
+            assert loaded_consume is not None
+            assert loaded_consume.state is DurablePromotionReservationState.ISSUED
+
             consumed = await repository.mark_consumed("authority-consume")
             assert consumed.state is DurablePromotionReservationState.CONSUMED
+            assert resident_consume.state == DurablePromotionReservationState.CONSUMED.value
             with pytest.raises(PromotionReservationAlreadyConsumedError):
                 await repository.mark_revoked("authority-consume")
+            assert session.in_transaction()
             await session.commit()
 
         async with sessions() as session:
@@ -439,11 +451,59 @@ async def test_ctx_f5_3f_b_only_allows_issued_to_terminal_transitions():
                 promotion_authority_id="authority-revoke",
                 intent=_intent(suffix="revoke"),
             )
+            resident_revoke = await session.get(
+                PromotionReservationRow,
+                "authority-revoke",
+            )
+            assert resident_revoke is not None
+            assert resident_revoke.state == DurablePromotionReservationState.ISSUED.value
+            loaded_revoke = await repository.get("authority-revoke")
+            assert loaded_revoke is not None
+            assert loaded_revoke.state is DurablePromotionReservationState.ISSUED
+
             revoked = await repository.mark_revoked("authority-revoke")
             assert revoked.state is DurablePromotionReservationState.REVOKED
+            assert resident_revoke.state == DurablePromotionReservationState.REVOKED.value
             with pytest.raises(PromotionReservationRevokedError):
                 await repository.mark_consumed("authority-revoke")
+            assert session.in_transaction()
             await session.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3f_b_terminal_transition_never_commits_caller_transaction():
+    engine, sessions = await _memory_database()
+    try:
+        async with sessions() as session:
+            repository = DurablePromotionReservationRepository(session)
+            await repository.insert_or_converge_issued_candidate(
+                promotion_authority_id="authority-transition-rollback",
+                intent=_intent(suffix="transition-rollback"),
+            )
+            await session.commit()
+
+            resident = await session.get(
+                PromotionReservationRow,
+                "authority-transition-rollback",
+            )
+            assert resident is not None
+            assert resident.state == DurablePromotionReservationState.ISSUED.value
+            loaded = await repository.get("authority-transition-rollback")
+            assert loaded is not None
+            assert loaded.state is DurablePromotionReservationState.ISSUED
+
+            consumed = await repository.mark_consumed(
+                "authority-transition-rollback"
+            )
+            assert consumed.state is DurablePromotionReservationState.CONSUMED
+            assert session.in_transaction()
+
+            await session.rollback()
+            restored = await repository.get("authority-transition-rollback")
+            assert restored is not None
+            assert restored.state is DurablePromotionReservationState.ISSUED
     finally:
         await engine.dispose()
 
