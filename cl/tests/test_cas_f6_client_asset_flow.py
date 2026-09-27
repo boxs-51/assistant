@@ -1,5 +1,7 @@
 import base64
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -331,3 +333,373 @@ def test_ui_source_freezes_partial_failure_retry_and_canonical_rendering():
     assert "resolveCanonicalAssetContent" in file_block
     assert "createCanonicalAssetObjectUrl" in image_block
     assert "createCanonicalAssetObjectUrl" in media_block
+
+
+def test_file_queue_executes_multifile_failure_retry_and_explicit_continue(tmp_path):
+    node = shutil.which("node")
+    assert node is not None, (
+        "Node.js is required for CAS-F6 executable UI state-machine evidence."
+    )
+
+    source_root = Path("cl/src/ui/web/js")
+    harness_root = tmp_path / "cas_f6_js_harness"
+    component_root = harness_root / "components"
+    input_root = component_root / "inputFrame"
+    input_root.mkdir(parents=True)
+
+    shutil.copyfile(
+        source_root / "components/inputFrame.js",
+        component_root / "inputFrame.js",
+    )
+    shutil.copyfile(
+        source_root / "components/inputFrame/fileManager.js",
+        input_root / "fileManager.js",
+    )
+
+    (input_root / "inputLayout.js").write_text(
+        "\n".join([
+            "export function isElementVisible() { return true; }",
+            "export function updateInputLayout() {}",
+            "export function toggleExpand() {}",
+            "",
+        ]),
+        encoding="utf-8",
+    )
+    (input_root / "mentionDetector.js").write_text(
+        "export function handleMentionDetection() {}\n",
+        encoding="utf-8",
+    )
+    (harness_root / "package.json").write_text(
+        '{"type":"module"}\n',
+        encoding="utf-8",
+    )
+
+    harness = r"""
+const assert = (condition, message) => {
+  if (!condition) throw new Error(message);
+};
+
+class FakeClassList {
+  constructor() {
+    this.values = new Set();
+  }
+  add(...names) {
+    names.forEach((name) => this.values.add(name));
+  }
+  remove(...names) {
+    names.forEach((name) => this.values.delete(name));
+  }
+  contains(name) {
+    return this.values.has(name);
+  }
+}
+
+class FakeElement {
+  constructor(id = null) {
+    this.id = id;
+    this.listeners = {};
+    this.classList = new FakeClassList();
+    this.style = {};
+    this.dataset = {};
+    this.children = [];
+    this.parentNode = null;
+    this.value = "";
+    this.disabled = false;
+    this.innerText = "";
+    this._innerHTML = "";
+    this._selectors = new Map();
+  }
+
+  addEventListener(type, callback) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(callback);
+  }
+
+  async trigger(type, event = {}) {
+    const payload = {
+      preventDefault() {},
+      stopPropagation() {},
+      ...event,
+    };
+    for (const callback of this.listeners[type] || []) {
+      await callback(payload);
+    }
+  }
+
+  dispatchEvent(event) {
+    const type = event?.type || event;
+    for (const callback of this.listeners[type] || []) {
+      callback(event);
+    }
+  }
+
+  querySelector(selector) {
+    if (!this._selectors.has(selector)) {
+      this._selectors.set(selector, new FakeElement());
+    }
+    return this._selectors.get(selector);
+  }
+
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter(
+      (child) => child !== this,
+    );
+    this.parentNode = null;
+  }
+
+  set innerHTML(value) {
+    this._innerHTML = value;
+    if (value === "") {
+      this.children.forEach((child) => {
+        child.parentNode = null;
+      });
+      this.children = [];
+    }
+  }
+
+  get innerHTML() {
+    return this._innerHTML;
+  }
+}
+
+const elements = new Map();
+for (const id of [
+  "user-input",
+  "btn-send",
+  "btn-attach",
+  "input-main-area",
+  "btn-expand-input",
+  "input-container",
+  "chips-wrapper",
+]) {
+  elements.set(id, new FakeElement(id));
+}
+
+globalThis.document = {
+  getElementById(id) {
+    return elements.get(id) || null;
+  },
+  createElement() {
+    return new FakeElement();
+  },
+  addEventListener() {},
+};
+
+globalThis.Event = class {
+  constructor(type) {
+    this.type = type;
+  }
+};
+
+globalThis.alert = () => {};
+
+const prepareCalls = [];
+const legacyEncodeCalls = [];
+let selectedPaths = ["C:/tmp/ready-a.txt", "C:/tmp/fail-b.txt"];
+
+globalThis.window = {
+  pywebview: {
+    api: {
+      async open_file_picker() {
+        return selectedPaths;
+      },
+      async prepare_files_async(paths) {
+        prepareCalls.push([...paths]);
+      },
+      async encode_files_async(paths) {
+        legacyEncodeCalls.push([...paths]);
+      },
+    },
+  },
+  confirm() {
+    return false;
+  },
+};
+
+const inputFrame = await import("./components/inputFrame.js");
+const fileManager = await import("./components/inputFrame/fileManager.js");
+
+const submissions = [];
+inputFrame.initInputFrame(async (text, files) => {
+  submissions.push({ text, files });
+});
+
+const attachButton = elements.get("btn-attach");
+const sendButton = elements.get("btn-send");
+const textInput = elements.get("user-input");
+
+await attachButton.trigger("click");
+assert(
+  prepareCalls.length === 1
+    && JSON.stringify(prepareCalls[0]) === JSON.stringify(selectedPaths),
+  "two selected files must enter canonical preparation together",
+);
+
+const readyA = {
+  asset_id: "asset-a",
+  source: "asset",
+  uri: "asset://asset-a",
+  filename: "ready-a.txt",
+  mime_type: "text/plain",
+};
+window.onFilePrepareComplete({
+  path: selectedPaths[0],
+  payload: readyA,
+});
+window.onFilePrepareError({
+  path: selectedPaths[1],
+  error: "upload failed",
+});
+
+assert(
+  submissions.length === 0,
+  "READY+FAILED partial state must never auto-submit",
+);
+assert(
+  JSON.stringify(fileManager.getFailedFilePaths()) ===
+    JSON.stringify([selectedPaths[1]]),
+  "failed file must remain in queue",
+);
+assert(
+  fileManager.getReadyPayloads().length === 1,
+  "READY payload must remain available beside a failed item",
+);
+
+window.confirm = () => false;
+textInput.value = "cancelled partial send";
+await sendButton.trigger("click");
+
+assert(
+  submissions.length === 0,
+  "Cancel must not submit a reduced READY subset",
+);
+assert(
+  JSON.stringify(fileManager.getFailedFilePaths()) ===
+    JSON.stringify([selectedPaths[1]]),
+  "Cancel must preserve the failed item for retry",
+);
+
+fileManager.retryFile(selectedPaths[1], inputFrame.updateSendButtonState);
+assert(
+  prepareCalls.length === 2
+    && JSON.stringify(prepareCalls[1]) ===
+      JSON.stringify([selectedPaths[1]]),
+  "retry must invoke canonical preparation again for only the failed path",
+);
+assert(
+  fileManager.hasFilesEncoding(),
+  "retry must transition ERROR back into preparing/encoding state",
+);
+
+const readyB = {
+  asset_id: "asset-b",
+  source: "asset",
+  uri: "asset://asset-b",
+  filename: "fail-b.txt",
+  mime_type: "text/plain",
+};
+window.onFilePrepareComplete({
+  path: selectedPaths[1],
+  payload: readyB,
+});
+
+assert(
+  fileManager.getFailedFilePaths().length === 0,
+  "successful retry must clear FAILED state",
+);
+assert(
+  fileManager.getReadyPayloads().length === 2,
+  "successful retry must reach READY alongside the original READY file",
+);
+
+textInput.value = "retry succeeded";
+await sendButton.trigger("click");
+assert(
+  submissions.length === 1 && submissions[0].files.length === 2,
+  "after retry success, submit must carry both canonical READY payloads",
+);
+
+submissions.length = 0;
+fileManager.clearAllFiles();
+selectedPaths = ["C:/tmp/ready-c.txt", "C:/tmp/fail-d.txt"];
+await attachButton.trigger("click");
+
+const readyC = {
+  asset_id: "asset-c",
+  source: "asset",
+  uri: "asset://asset-c",
+  filename: "ready-c.txt",
+  mime_type: "text/plain",
+};
+window.onFilePrepareComplete({
+  path: selectedPaths[0],
+  payload: readyC,
+});
+window.onFilePrepareError({
+  path: selectedPaths[1],
+  error: "upload failed again",
+});
+
+assert(
+  submissions.length === 0,
+  "second READY+FAILED partial state must also wait for explicit user action",
+);
+
+let confirmCalls = 0;
+window.confirm = () => {
+  confirmCalls += 1;
+  return true;
+};
+textInput.value = "explicit partial continue";
+await sendButton.trigger("click");
+
+assert(confirmCalls === 1, "partial continue must require explicit confirmation");
+assert(submissions.length === 1, "confirmed partial continue must submit once");
+assert(
+  submissions[0].files.length === 1
+    && submissions[0].files[0].asset_id === "asset-c",
+  "confirmed partial continue must send exactly the READY canonical payload",
+);
+assert(
+  submissions[0].files.every((item) => item.asset_id !== "asset-d"),
+  "failed file must never appear in the submitted payload",
+);
+assert(
+  legacyEncodeCalls.length === 0,
+  "ONLINE failure/retry must never invoke legacy encode_files_async fallback",
+);
+
+console.log(JSON.stringify({
+  ok: true,
+  prepareCalls,
+  legacyEncodeCalls,
+}));
+"""
+
+    harness_path = harness_root / "cas_f6_state_machine.mjs"
+    harness_path.write_text(harness, encoding="utf-8")
+
+    completed = subprocess.run(
+        [node, str(harness_path)],
+        cwd=harness_root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        "CAS-F6 executable UI state-machine harness failed.\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+    result = json.loads(completed.stdout.strip().splitlines()[-1])
+    assert result["ok"] is True
+    assert result["legacyEncodeCalls"] == []
