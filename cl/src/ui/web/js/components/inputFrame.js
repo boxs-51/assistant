@@ -1,6 +1,7 @@
 import {
   hasFilesEncoding,
   getReadyPayloads,
+  getFailedFilePaths,
   addFilesToQueue,
   clearAllFiles,
   backupFilesMap,
@@ -130,11 +131,23 @@ async function handleSend(onSubmit) {
   const text = tx.value.trim();
 
   if (hasFilesEncoding()) {
-    alert('Vui lòng chờ các file hoàn tất mã hóa Base64!');
+    alert('Vui lòng chờ các tệp hoàn tất xử lý!');
     return;
   }
 
   const filePayloads = getReadyPayloads();
+  const failedFilePaths = getFailedFilePaths();
+
+  if (failedFilePaths.length > 0) {
+    const failedNames = failedFilePaths
+      .map((path) => path.split(/[\\/]/).pop())
+      .join(', ');
+    const continueWithoutFailed = window.confirm(
+      `Có ${failedFilePaths.length} tệp chưa tải thành công: ${failedNames}.\n\n` +
+      'Chọn OK để tiếp tục chỉ với nội dung/tệp READY. Chọn Cancel để giữ hàng chờ và nhấn "Thử lại" trên tệp lỗi.'
+    );
+    if (!continueWithoutFailed) return;
+  }
 
   if (!text && filePayloads.length === 0) return;
 

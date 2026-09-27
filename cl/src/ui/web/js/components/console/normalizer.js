@@ -1,19 +1,28 @@
 // Helper chuẩn hóa object file đính kèm thành GatewayAttachment đúng Schema Python
 function buildGatewayAttachment(fileObj) {
   if (!fileObj) return null;
-  const path = fileObj.path || fileObj.uri || null;
-  const filename = fileObj.filename || (path ? path.split(/[\\\/]/).pop() : 'Attachment');
+
+  const assetId = fileObj.asset_id || null;
+  const legacyPath = fileObj.path || fileObj.uri || null;
+  const filename = fileObj.filename || (legacyPath ? legacyPath.split(/[\\/]/).pop() : 'Attachment');
+  const canonicalUri = assetId ? `asset://${assetId}` : legacyPath;
+  const isCanonicalAsset = Boolean(assetId);
 
   return {
     id: fileObj.id || null,
-    filename: filename,
+    asset_id: assetId,
+    filename,
     mime_type: fileObj.mime_type || fileObj.type || 'application/octet-stream',
-    size: fileObj.size || 0,
+    size: fileObj.size ?? fileObj.size_bytes ?? 0,
     extension: fileObj.extension || (filename.includes('.') ? filename.split('.').pop() : null),
-    uri: path,
-    base64_data: fileObj.b64_data || fileObj.base64_data || fileObj.content || null,
-    provider_file_id: fileObj.provider_file_id || null,
-    source: fileObj.source || (path ? 'local' : (fileObj.b64_data || fileObj.base64_data) ? 'base64' : 'local')
+    uri: canonicalUri,
+    base64_data: isCanonicalAsset
+      ? null
+      : (fileObj.b64_data || fileObj.base64_data || fileObj.content || null),
+    provider_file_id: isCanonicalAsset ? null : (fileObj.provider_file_id || null),
+    source: isCanonicalAsset
+      ? 'asset'
+      : (fileObj.source || (legacyPath ? 'local' : (fileObj.b64_data || fileObj.base64_data) ? 'base64' : 'local'))
   };
 }
 
