@@ -23,6 +23,8 @@ def _positive_int(value: int, *, field: str, maximum: int | None = None) -> int:
 
 
 def _positive_finite(value: float, *, field: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ValueError(f"{field} must be a positive finite number")
     normalized = float(value)
     if not math.isfinite(normalized) or normalized <= 0.0:
         raise ValueError(f"{field} must be a positive finite number")
