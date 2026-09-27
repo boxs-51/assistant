@@ -5,7 +5,7 @@ from pathlib import Path
 
 CONTRACT = Path(
     "docs/central_asset/"
-    "CAS_F7_0_GENERATED_MEDIA_CANONICALIZATION_CONTRACT_3D7FE844.md"
+    "CAS_F7_0_GENERATED_MEDIA_CANONICALIZATION_CONTRACT_ECB7E5DC.md"
 )
 
 
@@ -21,7 +21,7 @@ def test_replacement_contract_is_zero_production_and_current_main_locked():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     for phrase in (
-        "main@3d7fe844a94332fb89c23b5d2984041dc14c3f63",
+        "main@ecb7e5dc5c61aba9772d9f6ebfec303ce8a01755",
         "production/runtime/schema/migration delta = ZERO",
         "first future production slice = F7-P1 / PROVIDER-RESPONSE MEDIA ONLY",
         "CAS-F7-P1 production CLAIM = CLOSED",
@@ -228,16 +228,31 @@ def test_tool_generated_media_is_deferred_without_committed_result_rewrite():
         assert phrase in document
 
 
-def test_current_main_agent_activity_stream_is_not_asset_commit_authority():
+def test_current_main_public_agent_stream_is_response_tool_only_and_not_asset_authority():
     stream = _read("se/src/runtimes/agent/stream.py")
-    assert stream
+    runtime = _read("se/src/runtimes/agent/runtime.py")
+    docs = _read("docs/agent_activity_stream.md")
+
+    assert "AGENT_STREAM_EVENT_NAMES = (" in stream
+    assert "AgentEventName.PROGRESS" in stream
+    assert "AgentEventName.TOOL_REQUESTED" in stream
+    assert "AgentEventName.TOOL_STARTED" in stream
+    assert "AgentEventName.TOOL_COMPLETED" in stream
+    assert "AgentEventName.TOOL_FAILED" in stream
+    assert 'event_type="agent.response" if name == AgentEventName.PROGRESS else name' in stream
+    assert 'channel: Literal["response", "tool"]' in stream
+    assert "CONTEXT_READY" not in runtime
+    assert "No lifecycle or private model" in docs
+    assert "reasoning is sent to the UI." in docs
 
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
-        "Agent activity streaming as external execution/transport context",
-        "Agent activity event != generated object commitment authority",
+        "CONTEXT_READY public lifecycle event = REMOVED / NOT CANONICAL",
+        "public Agent stream = response/tool only",
+        "AgentEventName.PROGRESS -> public agent.response",
+        "lifecycle/private reasoning -> NOT SENT TO UI",
         "NO CHANGE / NOT ASSET COMMITMENT AUTHORITY",
-        "Agent activity event -> CAS generated-asset commitment = NEVER",
+        "public Agent response/tool activity event -> CAS generated-asset commitment = NEVER",
     ):
         assert phrase in document
 
@@ -295,7 +310,7 @@ def test_cross_issue_and_closed_authority_boundaries_are_explicit():
         "CTX retains Memory/promotion/retrieval/source-discovery and ToolResponsePayload authority.",
         "Agent/R12 retains execution lease/recovery/checkpoint and tool-result commitment authority.",
         "F7-P1 is provider-response-only and does not depend on modifying AgentToolResult persistence.",
-        "Agent activity event -> CAS generated-asset commitment = NEVER",
+        "public Agent response/tool activity event -> CAS generated-asset commitment = NEVER",
         "CAS-F7-T tool-generated media = CLOSED",
         "CAS-F8 legacy cutover/backfill/removal = CLOSED",
         "provider routing/fallback/deadline/model selection = CLOSED",
@@ -315,9 +330,27 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
         "AssetStorageSettings.max_upload_bytes is the authoritative server ingestion bound",
         'origin_type="ASSISTANT" for F7-P1 provider-generated assistant media',
         "one-ingest-attempt/no-internal-retry rule",
-        "fresh exact-head Architecture Linux + Windows GREEN",
+        "exact current-main health GREEN/GREEN and fresh exact-head Architecture Linux + Windows GREEN",
         "independent replacement audit PASS",
         "blocking F7-0 P0/P1/P2 = NONE",
         "CAS-F7-P1 production CLAIM = CLOSED",
+    ):
+        assert phrase in document
+
+
+def test_issue_134_and_reserved_agent_asset_grants_do_not_transfer_cas_authority():
+    roadmap = _read("docs/central_asset/CAS_AGENT_ASSET_GRANTS_ROADMAP.md")
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+
+    assert "State:** `RESERVED / NOT OPEN`" in roadmap
+    assert "Implementation authority:** none" in roadmap
+    assert "without altering active CAS-F6/F7/F8 authority" in roadmap
+
+    for phrase in (
+        "Issue #134 is CLOSED with resolution RESOLVED BY SUPERSEDING CANONICAL CONTRACT.",
+        "State = RESERVED / NOT OPEN",
+        "Implementation authority = none",
+        "effect on active CAS-F7/F8 authority = NONE",
+        "It does not open grant APIs, schema, provider behavior, or any production path.",
     ):
         assert phrase in document
