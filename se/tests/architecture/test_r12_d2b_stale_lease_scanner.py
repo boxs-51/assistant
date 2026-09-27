@@ -196,6 +196,8 @@ def _durable_snapshot(record) -> dict:
         ({"max_pages": 0}, "max_pages"),
         ({"max_rows": 0}, "max_rows"),
         ({"max_duration_seconds": 0}, "max_duration_seconds"),
+        ({"max_duration_seconds": True}, "max_duration_seconds"),
+        ({"max_duration_seconds": "5"}, "max_duration_seconds"),
         ({"max_duration_seconds": float("inf")}, "max_duration_seconds"),
         ({"max_duration_seconds": float("nan")}, "max_duration_seconds"),
     ],
