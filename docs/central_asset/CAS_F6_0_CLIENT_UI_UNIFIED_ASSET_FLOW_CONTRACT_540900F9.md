@@ -296,8 +296,10 @@ The F6 production split is frozen as follows:
 
 - **ONLINE canonical DIRECT/AGENT path:** selected local files MUST be uploaded through authenticated `POST /v1/assets`; canonical send state is built from READY AssetDescriptor/GatewayAttachment values. The ONLINE canonical path MUST bypass the legacy `FileEncoder` base64 transformation and MUST NOT persist or submit its `b64_data` as canonical attachment identity.
 - **LOCAL_OFFLINE compatibility path:** `cl/src/ui/encoder.py::FileEncoder` remains the existing local/base64 preparation mechanism unless a later separately released stage changes it. F6 does not require changing offline base64 behavior.
-- Therefore `cl/src/ui/encoder.py` is an active baseline owner but is classified `COMPATIBILITY / EXPECT NO CHANGE` for the first F6 production slice. Client/UI wiring around it may change so ONLINE bypasses it while LOCAL_OFFLINE continues to use it.
-- If implementation proves that `encoder.py` itself must change rather than be bypassed for ONLINE, the production CLAIM must re-audit that scope before editing it.
+- `cl/src/core/agent_engine.py::AgentEngine.run_agent_session` and `cl/src/core/content_processor.py::process_attached_files` remain LOCAL_OFFLINE compatibility owners for this first ONLINE canonical slice.
+- The ONLINE desktop canonical path MUST construct canonical GatewayAttachment/request state in the UI bridge/client path and MUST NOT route attachment preparation through `AgentEngine.run_agent_session(... attached_files=...)` or `process_attached_files()`.
+- Therefore `cl/src/ui/encoder.py`, `cl/src/core/agent_engine.py`, and `cl/src/core/content_processor.py` are active baseline compatibility owners but are classified `LOCAL_OFFLINE COMPATIBILITY / EXPECT NO CHANGE` for the first F6 production slice. Client/UI wiring around them may change so ONLINE bypasses that base64 path while LOCAL_OFFLINE continues to use it unchanged.
+- If implementation proves that any of those LOCAL_OFFLINE compatibility files must change rather than be bypassed for ONLINE, the production CLAIM must re-audit that scope before editing them.
 
 The first production slice is expected to add canonical asset operations to `GatewayLLMClient` while retaining legacy file methods in parallel.
 
@@ -379,13 +381,13 @@ This is the candidate matrix for the first production CLAIM. It is not a product
 | Path | Expected role | Initial disposition |
 |---|---|---|
 | `cl/src/core/gateway_client.py` | canonical /v1/assets client methods | EXPECTED CHANGE |
-| `cl/src/core/content_processor.py` | stop canonical send path from converting selected files directly to base64/data-URI | EXPECTED CHANGE |
+| `cl/src/core/content_processor.py` | LOCAL_OFFLINE `process_attached_files` compatibility owner; not on first ONLINE canonical desktop path | LOCAL_OFFLINE COMPATIBILITY / EXPECT NO CHANGE |
 | `cl/src/ui/web/js/app.js` | application submit caller that bridges input-frame payloads to `UIBridge.submit_prompt` | EXPECTED CHANGE / WIRING OWNER |
 | `cl/src/ui/web/js/components/inputFrame.js` | selected-file queue submission, send gating, retry/restore orchestration | EXPECTED CHANGE |
 | `cl/src/ui/web/js/components/inputFrame/fileManager.js` | per-file upload state, progress, READY/FAILED payload ownership | EXPECTED CHANGE |
 | `cl/src/ui/bridge.py` | pywebview upload/submission boundary; routes ONLINE canonical upload vs LOCAL_OFFLINE compatibility | EXPECTED CHANGE |
 | `cl/src/ui/encoder.py` | active baseline local-file -> base64 FileEncoder used by LOCAL_OFFLINE compatibility; ONLINE canonical path bypasses it | COMPATIBILITY / EXPECT NO CHANGE |
-| `cl/src/core/agent_engine.py` | local/offline request-building caller that currently consumes `attached_files` through `process_attached_files` | EXPECTED CHANGE / COMPATIBILITY OWNER |
+| `cl/src/core/agent_engine.py` | LOCAL_OFFLINE request-building owner that consumes `attached_files` through `process_attached_files`; preserved by first ONLINE canonical slice | LOCAL_OFFLINE COMPATIBILITY / EXPECT NO CHANGE |
 | `cl/src/ui/web/js/components/console/normalizer.js` | preserve canonical asset identity | EXPECTED CHANGE |
 | `cl/src/ui/web/js/components/console/blocks/fileBlock.js` | authenticated canonical content resolution for view/download | EXPECTED CHANGE |
 | `cl/src/ui/web/js/components/console/blocks/imageBlock.js` | authenticated canonical image resolution | EXPECTED CHANGE |
