@@ -168,6 +168,11 @@ def test_f6_0_freezes_first_production_slice_matrix():
     expected_paths = (
         "cl/src/core/gateway_client.py",
         "cl/src/core/content_processor.py",
+        "cl/src/ui/web/js/app.js",
+        "cl/src/ui/web/js/components/inputFrame.js",
+        "cl/src/ui/web/js/components/inputFrame/fileManager.js",
+        "cl/src/ui/bridge.py",
+        "cl/src/core/agent_engine.py",
         "cl/src/ui/web/js/components/console/normalizer.js",
         "cl/src/ui/web/js/components/console/blocks/fileBlock.js",
         "cl/src/ui/web/js/components/console/blocks/imageBlock.js",
@@ -187,6 +192,9 @@ def test_f6_0_freezes_first_production_slice_matrix():
         "CTX/R11/R12 ownership",
         "This is the candidate matrix for the first production CLAIM.",
         "It is not a production ownership grant.",
+        "UIBridge.submit_prompt",
+        "run_agent_session",
+        "process_attached_files",
     ):
         assert phrase in normalized
 
