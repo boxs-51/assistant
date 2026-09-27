@@ -1,5 +1,6 @@
 import requests
 import json
+import mimetypes
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 from ..schemas.request import GatewayChatRequest
@@ -60,6 +61,9 @@ class GatewayLLMClient:
         headers = self.headers.copy()
         if not authenticated:
             headers.pop("Authorization", None)
+        request_headers = kwargs.pop("headers", None)
+        if request_headers:
+            headers.update(request_headers)
         if "files" in kwargs:
             headers.pop("Content-Type", None)
         response = requests.request(
@@ -264,6 +268,46 @@ class GatewayLLMClient:
 
     def delete_file(self, provider_name: str, file_id: str) -> None:
         self._request("DELETE", f"/v1/files/{file_id}", params={"provider_name": provider_name})
+
+    def upload_asset(
+        self,
+        file_path: Union[str, Path],
+        mime_type: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        path = Path(file_path)
+        detected_mime = (
+            mime_type
+            or mimetypes.guess_type(path.name)[0]
+            or "application/octet-stream"
+        )
+        with path.open("rb") as file_handle:
+            files = {"file": (path.name, file_handle, detected_mime)}
+            return self._request("POST", "/v1/assets", files=files).json()
+
+    def list_assets(
+        self,
+        limit: Optional[int] = None,
+        offset: int = 0,
+    ) -> Any:
+        params: Dict[str, Any] = {"offset": offset}
+        if limit is not None:
+            params["limit"] = limit
+        return self._request("GET", "/v1/assets", params=params).json()
+
+    def asset_metadata(self, asset_id: str) -> Dict[str, Any]:
+        return self._request("GET", f"/v1/assets/{asset_id}").json()
+
+    def asset_content(
+        self,
+        asset_id: str,
+        byte_range: Optional[str] = None,
+    ) -> bytes:
+        headers = {"Range": byte_range} if byte_range else None
+        return self._request(
+            "GET",
+            f"/v1/assets/{asset_id}/content",
+            headers=headers,
+        ).content
 
     def register_agent(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         return self._request("POST", "/v1/agents/", json=payload).json()
