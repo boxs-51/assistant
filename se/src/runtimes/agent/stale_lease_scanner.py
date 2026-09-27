@@ -191,13 +191,26 @@ class StaleLeaseScanCoordinator:
                 break
 
             request_limit = min(self._policy.page_size, remaining_rows)
-            rows = await self._store.list_expired_execution_leases(
-                cutoff_utc=scan_cutoff_utc,
-                limit=request_limit,
-                after_expiry=after_expiry,
-                after_execution_id=after_execution_id,
-            )
+            remaining_duration = self._policy.max_duration_seconds - elapsed
+            try:
+                rows = await asyncio.wait_for(
+                    self._store.list_expired_execution_leases(
+                        cutoff_utc=scan_cutoff_utc,
+                        limit=request_limit,
+                        after_expiry=after_expiry,
+                        after_execution_id=after_execution_id,
+                    ),
+                    timeout=remaining_duration,
+                )
+            except asyncio.TimeoutError:
+                stop_reason = StaleLeaseSweepStopReason.MAX_DURATION
+                break
             pages_fetched += 1
+
+            elapsed = self._clock.monotonic() - started_monotonic
+            if elapsed >= self._policy.max_duration_seconds:
+                stop_reason = StaleLeaseSweepStopReason.MAX_DURATION
+                break
 
             page = tuple(
                 StaleLeaseObservation.from_record(record)
