@@ -59,27 +59,10 @@ function renderAgentEvent(event, consoleElem) {
     return;
   }
 
-  const block = document.createElement('div');
-  block.className = `agent-activity agent-activity-${event.channel || 'lifecycle'}`;
-  const statusText = {
-    'agent.execution.created': 'Đã tạo tác vụ Agent',
-    'agent.execution.started': 'Agent bắt đầu xử lý',
-    'agent.context.ready': `Đã chuẩn bị ngữ cảnh · kỹ năng: ${(detail.skill_ids || []).join(', ') || 'không có'} · tool: ${(detail.capability_ids || []).join(', ') || 'không có'}`,
-    'agent.iteration.started': 'Agent bắt đầu bước xử lý',
-    'agent.iteration.completed': 'Agent hoàn thành bước xử lý',
-    'agent.inference.requested': 'AI đang xử lý',
-    'agent.inference.completed': 'AI đã xử lý xong bước này',
-    'agent.execution.completed': 'Agent đã hoàn thành',
-    'agent.execution.failed': 'Agent xử lý thất bại',
-    'agent.execution.cancelled': 'Agent đã dừng',
-    'agent.execution.timeout': 'Agent hết thời gian',
-  };
-  const content = event.channel === 'progress'
-    ? detail.content
-    : statusText[event.event_type];
-  if (!content) return;
-  block.textContent = content;
-  consoleElem.appendChild(block);
+  if (event.channel === 'response' && detail.content) {
+    const block = createTextBlock('assistant', detail.content, null, null, false, triggerBlockCallback);
+    if (block) consoleElem.appendChild(block);
+  }
 }
 
 export function showPendingIndicator() {

@@ -11,6 +11,7 @@ from .hitl import HitlManager
 from .encoder import FileEncoder
 from ..schemas.message import GatewayMessage
 from ..schemas.request import GatewayChatRequest, RequestConfig
+from ..schemas.agent_execution import AgentExecutionLimits
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +179,16 @@ class UIBridge:
             if "agent_id" in payload
             else self._chat_preferences.get("agent_id") or ""
         ).strip() or None
+        requested_limits = payload.get(
+            "agent_limits", self._chat_preferences.get("agent_limits")
+        )
+        if requested_limits is not None:
+            try:
+                agent_limits = AgentExecutionLimits.model_validate(requested_limits).model_dump()
+            except (TypeError, ValueError):
+                return {"success": False, "error": "agent_limits khong hop le."}
+        else:
+            agent_limits = None
         with self._state_lock:
             self._chat_preferences = {
                 "provider": provider,
@@ -185,6 +196,7 @@ class UIBridge:
                 "execution_mode": execution_mode,
                 "agent_enabled": agent_enabled,
                 "agent_id": agent_id,
+                "agent_limits": agent_limits,
             }
         return {"success": True, "data": dict(self._chat_preferences)}
 
@@ -541,6 +553,11 @@ class UIBridge:
                             config=RequestConfig(
                                 stream=True,
                                 agent_activity_stream=bool(preferences.get("agent_enabled")),
+                            ),
+                            agent_limits=(
+                                preferences.get("agent_limits")
+                                if preferences.get("agent_enabled")
+                                else None
                             ),
                         )
                     )

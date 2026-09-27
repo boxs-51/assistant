@@ -10,7 +10,6 @@ class AgentEventName:
     EXECUTION_CREATED = "agent.execution.created"
     EXECUTION_STARTED = "agent.execution.started"
     ITERATION_STARTED = "agent.iteration.started"
-    CONTEXT_READY = "agent.context.ready"
     INFERENCE_REQUESTED = "agent.inference.requested"
     INFERENCE_COMPLETED = "agent.inference.completed"
     PROGRESS = "agent.progress"

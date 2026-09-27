@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 
 from ....domain.schemas.agent import AgentDefinition
-from ....domain.schemas.agent_execution import AgentExecutionLimits
+from ....domain.schemas.agent_execution import AgentExecutionLimits, MAX_AGENT_PROPOSED_TASK_SECONDS
 from ....domain.schemas.identity import Identity
 from .clock import ExecutionClock, SystemExecutionClock
 from .inference import InferenceUsage
@@ -304,17 +304,86 @@ class AgentExecutionContext:
 
     @property
     def remaining_seconds(self) -> float:
-        """Backward-compatible execution remaining-time facade.
+        """Remaining execution time clamped by the task wall-clock deadline.
 
         Unknown legacy budget fails closed as zero instead of becoming
         unbounded or regenerating ``limits.timeout_seconds``.
         """
         remaining = self.remaining_active_seconds
-        return 0.0 if remaining is None else remaining
+        if remaining is None:
+            return 0.0
+        task_deadline = self.metadata.get("task_deadline_at")
+        if task_deadline is not None:
+            task_remaining = float(task_deadline) - self.clock.now_utc().timestamp()
+            remaining = min(remaining, max(0.0, task_remaining))
+        return remaining
+
+    def configure_time_budget(self, values: dict[str, Any]) -> dict[str, float]:
+        """Apply an Agent proposal without extending the task's hard deadline."""
+        if self.task_id is not None or not self.metadata.get("agent_time_budget_enabled"):
+            raise ValueError("Agent time budget proposals are unavailable.")
+
+        configured_deadline = self.metadata.get("task_deadline_at")
+        proposal = values.get("task_seconds")
+        if configured_deadline is None:
+            if proposal is None:
+                raise ValueError("The first proposal requires task_seconds.")
+            task_seconds = float(proposal)
+            maximum = min(MAX_AGENT_PROPOSED_TASK_SECONDS, float(self.metadata["task_max_timeout_seconds"]))
+            if not math.isfinite(task_seconds) or not 0 < task_seconds <= maximum:
+                raise ValueError("task_seconds exceeds the allowed task time.")
+            started_at = float(self.metadata["task_started_at"])
+            configured_deadline = started_at + task_seconds
+            if configured_deadline <= self.clock.now_utc().timestamp():
+                raise ValueError("The proposed task deadline has already passed.")
+        elif proposal is not None:
+            raise ValueError("The task deadline cannot be reset.")
+
+        allocations: dict[str, float] = {}
+        for argument, field_name in (
+            ("iteration_seconds", "iteration_timeout_seconds"),
+            ("inference_seconds", "inference_timeout_seconds"),
+            ("tool_seconds", "tool_timeout_seconds"),
+        ):
+            if argument not in values:
+                continue
+            amount = float(values[argument])
+            if not math.isfinite(amount) or amount <= 0:
+                raise ValueError(f"{argument} must be positive and finite.")
+            if amount > min(MAX_AGENT_PROPOSED_TASK_SECONDS, float(self.metadata["task_max_timeout_seconds"])):
+                raise ValueError(f"{argument} exceeds the allowed task time.")
+            allocations[field_name] = amount
+
+        if self.metadata.get("task_deadline_at") is None:
+            self.metadata["task_deadline_at"] = configured_deadline
+            self.metadata["task_proposed_seconds"] = task_seconds
+        self.limits.timeout_seconds = float(self.metadata["task_proposed_seconds"])
+        for field_name, amount in allocations.items():
+            setattr(self.limits, field_name, amount)
+
+        task_remaining = max(
+            0.0, float(configured_deadline) - self.clock.now_utc().timestamp()
+        )
+        self.deadline = self.clock.monotonic() + task_remaining
+        self.remaining_active_budget_seconds = task_remaining
+        return {
+            "task_remaining_seconds": task_remaining,
+            "iteration_seconds": self.limits.iteration_timeout_seconds,
+            "inference_seconds": self.limits.inference_timeout_seconds,
+            "tool_seconds": self.limits.tool_timeout_seconds,
+        }
 
     @property
     def timed_out(self) -> bool:
         return self.remaining_seconds <= 0.0
+
+    @property
+    def task_timed_out(self) -> bool:
+        deadline = self.metadata.get("task_deadline_at")
+        return (
+            deadline is not None
+            and self.clock.now_utc().timestamp() >= float(deadline)
+        )
 
     @property
     def cancelled(self) -> bool:

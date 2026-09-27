@@ -62,6 +62,7 @@ async def test_agent_stream_chunk_payload_is_json_serializable():
 
     class _AgentRuntime:
         async def execute(self, context):
+            observed_contexts.append(context)
             return AgentExecutionResult(
                 execution_id=context.execution_id,
                 agent_id=context.agent_id,
@@ -74,6 +75,7 @@ async def test_agent_stream_chunk_payload_is_json_serializable():
         def is_allowed(self, identity, definition):
             return True
 
+    observed_contexts = []
     bus = _RecordingBus()
     runtime = WorkflowRuntime()
     runtime.event_bus = bus
@@ -97,9 +99,21 @@ async def test_agent_stream_chunk_payload_is_json_serializable():
             "model": "mock",
             "messages": [{"role": "user", "content": "hello"}],
             "metadata": {},
-            "config": {"stream": True},
+            "config": {"stream": True, "max_tokens": 64},
+            "agent_limits": {
+                "timeout_seconds": 600,
+                "iteration_timeout_seconds": 420,
+                "inference_timeout_seconds": 90,
+                "tool_timeout_seconds": 330,
+            },
         },
     )
+
+    assert observed_contexts[0].limits.timeout_seconds == 600
+    assert observed_contexts[0].limits.inference_timeout_seconds == 90
+    assert observed_contexts[0].metadata["agent_time_budget_enabled"] is True
+    assert observed_contexts[0].metadata["task_max_timeout_seconds"] == 600
+    assert observed_contexts[0].metadata["max_output_tokens"] == 64
 
     chunk_event = next(
         event
@@ -114,6 +128,57 @@ async def test_agent_stream_chunk_payload_is_json_serializable():
     content = chunk["choices"][0]["delta"]["content"]
     assert isinstance(content, str)
     assert content == "hello"
+
+
+@pytest.mark.asyncio
+async def test_agent_timeout_failure_exposes_budget_scope():
+    agent = AgentDefinition(name="timeout-agent", goal="test", instruction="test")
+
+    class _AgentRegistry:
+        def get(self, name):
+            return agent if name == agent.name else None
+
+    class _AgentRuntime:
+        async def execute(self, context):
+            return AgentExecutionResult(
+                execution_id=context.execution_id,
+                agent_id=context.agent_id,
+                state=AgentLoopState.TIMEOUT,
+                error_code="AGENT_INFERENCE_TIMEOUT",
+                error_message="Agent inference time budget exceeded.",
+                usage=InferenceUsage(),
+            )
+
+    bus = _RecordingBus()
+    runtime = WorkflowRuntime()
+    runtime.event_bus = bus
+    runtime.container = SimpleNamespace(
+        capability_runtime=None,
+        agent_registry=_AgentRegistry(),
+        agent_runtime=_AgentRuntime(),
+        agent_execution_supervisor=None,
+    )
+    await runtime._execute_agent(
+        BaseEvent(
+            event_name="context.event.built",
+            session_id="session-1",
+            turn_id="turn-1",
+            payload={"identity": Identity(auth_type="guest", user_id="user-1").model_dump()},
+        ),
+        {
+            "agent_id": agent.name,
+            "model": "mock",
+            "messages": [{"role": "user", "content": "hello"}],
+            "metadata": {},
+            "config": {"stream": True},
+            "agent_limits": {"inference_timeout_seconds": 90},
+        },
+    )
+    failure = next(event for event in bus.events if event.event_name == "provider.failed")
+    assert failure.payload["error_code"] == "AGENT_INFERENCE_TIMEOUT"
+    assert failure.payload["timeout_scope"] == "inference"
+    assert failure.payload["timeout_seconds"] == 90
+    assert failure.payload["status_code"] == 504
 
 
 class _DispatcherContainer:

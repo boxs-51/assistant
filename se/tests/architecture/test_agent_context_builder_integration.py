@@ -87,6 +87,31 @@ def make_adapter(context):
 
 
 @pytest.mark.asyncio
+async def test_agent_time_budget_tool_is_visible_when_enabled():
+    context = make_context()
+    context.metadata["agent_time_budget_enabled"] = True
+    snapshot = await make_adapter(context).build(
+        context,
+        AgentContextRequest(execution_id=context.execution_id, iteration=1),
+    )
+    budget_tool = next(
+        item for item in snapshot.tools if item.name == "agent.budget.configure"
+    )
+    assert "task_seconds" in budget_tool.parameters["properties"]
+    assert list(budget_tool.parameters["required"]) == ["task_seconds"]
+
+    context.metadata["task_deadline_at"] = context.clock.now_utc().timestamp() + 600
+    next_snapshot = await make_adapter(context).build(
+        context,
+        AgentContextRequest(execution_id=context.execution_id, iteration=2),
+    )
+    allocated_tool = next(
+        item for item in next_snapshot.tools if item.name == "agent.budget.configure"
+    )
+    assert "task_seconds" not in allocated_tool.parameters["properties"]
+
+
+@pytest.mark.asyncio
 async def test_context_snapshot_is_loaded_per_iteration_and_immutable():
     context = make_context(tools=["calculator.add"])
     adapter = make_adapter(context)

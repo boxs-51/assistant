@@ -19,6 +19,9 @@ This document prevents phase-name collisions across independent roadmap tracks. 
 | `CAS-F*` | Central Asset Storage | `CAS-F0` through `CAS-F8+` | Central Asset Storage checkpoint/contracts |
 | `PTC-*` | Provider Tool Contract Convergence | `PTC-1` through `PTC-3+` | Issue #8 and future PTC freeze/completion documents |
 | `CTX-F*` | Context / Memory / Personalization / CompactContext | `CTX-F0` through `CTX-F12+` | Issue #15 and `docs/context_future/**` |
+| `TBO-*` | Task Budget & Orchestration | `TBO-0` through `TBO-8+` — RESERVED / NOT OPEN | `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md` |
+| `AAT-*` | Agent Automation & Triggers | `AAT-0` through `AAT-6+` — RESERVED / NOT OPEN | `docs/agent_automation/AAT_ROADMAP.md` |
+| `AIC-*` | Agent Interconnect & Communication | `AIC-0` through `AIC-6+` — RESERVED / NOT OPEN | `docs/agent_interconnect/AIC_ROADMAP.md` |
 
 Bare historical phase IDs remain valid aliases only inside their original track context.
 
@@ -33,6 +36,8 @@ F5  -> CAS-F5
 New provider-tool work MUST use `PTC-*`; it must not allocate bare `R*` IDs.
 
 Future Context/Memory/Personalization work MUST use `CTX-F*`; it must not reuse `CAS-F*` or bare `F*` identifiers.
+
+Task budget renewal and bounded Agent allocation work MUST use `TBO-*`. Agent-owned tool publication, scheduling and event-triggered activation use `AAT-*`. Communication between connected Agent instances uses `AIC-*`. These reservations do not reopen or renumber AE-R4/R5/R9 budget work.
 
 ---
 
@@ -51,6 +56,9 @@ CAS-F5
 CAS-F5-0
 PTC-1
 CTX-F0
+TBO-0
+AAT-0
+AIC-0
 ```
 
 Avoid ambiguous standalone forms in cross-track coordination:
@@ -185,6 +193,8 @@ F7   -> CAS-F7
 F8   -> CAS-F8
 ```
 
+Future per-Agent access grants for user-owned assets are planned in `docs/central_asset/CAS_AGENT_ASSET_GRANTS_ROADMAP.md`. This is an addendum inside CAS authority, not a new namespace or an opened CAS-F* stage. Issue #74 must allocate an exact stage before implementation.
+
 Current dependency freeze:
 
 ```text
@@ -279,6 +289,73 @@ EARLY-ACTIVE / CTX-F0 CONTRACT-FIRST / constrained by active AE ownership
 The original AE-R14 production gate has been explicitly re-frozen earlier by the user. Early CTX work is allowed only when additive/isolated and non-owning with respect to active AE-R11/R12+ and Central Asset authorities. Cross-cutting Context/Asset integration still requires a fresh CAS audit.
 
 During early activation, do not wire Memory, Personalization, future durable ContextSnapshot, CompactContext, or automatic persistent-context retrieval into the current Agent runtime until their stage-specific ownership gates are explicitly opened.
+
+`docs/context_future/CTX_USER_AGENT_MEMORY_SCOPE_ROADMAP.md` reserves a three-zone user/Agent memory model: user profile, user-wide session history and Agent-private history/Memory. It inherits CTX-F3/F4 source authority; Issue #15 must assign a new substage for cross-session search and separate releases for F5/F6/F9 integration. It opens no automatic Memory promotion, personalization retrieval or per-Agent schema change.
+
+---
+
+## 7A. Task Budget & Orchestration namespace — TBO-*
+
+`TBO-0` through `TBO-8+` are reserved for the single Task Budget & Orchestration roadmap in `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md`.
+
+```text
+TBO-0  exact-head audit and contract freeze
+TBO-1  Task identity and policy DTO
+TBO-2  durable horizon and periodic ledger
+TBO-3  exhaustion and allocation feedback
+TBO-4  renewal coordinator
+TBO-5  budget eligibility handoff to future AAT activation
+TBO-6  Gateway/UI response projection
+TBO-7  AE integration and fault matrix
+TBO-8  exit audit and rollout plan
+```
+
+**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. No TBO production, schema, migration, scheduler, or API authority is claimed. A future `TBO-0` opening requires a fresh exact-main audit, dedicated issue/owner and claim under Issue #85, plus an overlap and Agent stream-contract check. Each later production stage needs separate authority and gates.
+
+TBO owns only the proposed Task-level horizon, renewable period policy/ledger, exhaustion feedback and budget admission. AAT owns generic wakeup delivery, event subscriptions and Agent-owned tool publication. AE-R4/R5/R6-R12 retain their existing execution budget, cumulative TaskBudget, retry, reconciliation, persistence and recovery authority. Shared changes require explicit overlap disposition.
+
+---
+
+## 7B. Agent Automation & Triggers namespace — AAT-*
+
+`AAT-0` through `AAT-6+` are reserved by `docs/agent_automation/AAT_ROADMAP.md` for Agent-owned tool interface publication, durable schedules, event subscriptions and deduplicated activation. AAT consumes TBO budget admission and AE execution admission; it owns neither budget grants nor Capability registration authority.
+
+```text
+AAT-0  identity/Capability/event/AE/TBO contract audit
+AAT-1  automation and Agent-owned tool interface DTO
+AAT-2  durable one-time scheduler
+AAT-3  event subscription and deduplication
+AAT-4  tool publication/invocation handoff
+AAT-5  AE/TBO activation and user controls
+AAT-6  fault and exit gates
+```
+
+**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. AAT-0 requires a dedicated issue/claim, stable Agent-instance identity contract and exact-head overlap audit with Capability/TV1/PTC/AE/TBO. No production authority is claimed.
+
+---
+
+## 7C. Agent Interconnect & Communication namespace — AIC-*
+
+`AIC-0` through `AIC-6+` are reserved by `docs/agent_interconnect/AIC_ROADMAP.md` for a user-owned `agent_instance_id` contract, authorized Agent directory and communication between connected Agent instances. AIC does not own CTX Memory, CAS assets, AAT triggers, TBO grants or AE Task/Execution transitions.
+
+```text
+AIC-0  user-owned Agent-instance identity contract
+AIC-1  directory and communication permissions
+AIC-2  envelope and delivery receipts
+AIC-3  connected request/response/notification API
+AIC-4  capability invocation handoff
+AIC-5  CTX/CAS/TBO/AE integration
+AIC-6  fault, migration and exit gates
+```
+
+**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. AIC-0 requires a dedicated issue/claim and exact-head audit of Agent registration, current `agent_id` consumers, ownership and migration compatibility. No production authority is claimed.
+
+### Cross-track prerequisites
+
+- AIC-0's stable Agent-instance identity contract and Agent-registration ownership decision precede any Agent-private CTX Memory schema, CAS Agent grant, or AAT Agent-owned automation implementation. User-wide CTX planning can proceed independently.
+- CAS owns grant decisions; CTX only consumes authorized asset evidence. AIC messages and AAT triggers do not carry asset or Memory read authority.
+- TBO owns renewal and budget admission; AAT owns due-time/event delivery. AIC communication requests pass through both relevant admission paths when they activate an Agent.
+- These are dependency contracts, not a global implementation or merge order. Issue #85 and each owning issue still control claims and integration gates.
 
 ---
 
@@ -407,6 +484,9 @@ T -> TV1-T*   Tools V1
 F -> CAS-F*   Central Asset Storage
 PTC -> PTC-*  Provider Tool Contract
 CTX -> CTX-F*  Context / Memory / Personalization
+TBO -> TBO-*  Task Budget & Orchestration
+AAT -> AAT-*  Agent Automation & Triggers
+AIC -> AIC-*  Agent Interconnect & Communication
 ```
 
 Do not allocate a second independent `R10`, `T8`, or `F5` roadmap meaning.
@@ -482,6 +562,9 @@ AE-R10    != PTC-1
 AE-R12    != PTC-3
 AE-R8-F7  != CAS-F7
 CTX-F5    != CAS-F5
+TBO-0     != AE-R4 / AE-R5 / AE-R9
+AAT-0     != TBO-5
+AIC-0     != AAT-0
 ```
 
 If a proposed identifier cannot be resolved unambiguously through this registry, stop and assign a qualified namespace before implementation starts.

@@ -10,7 +10,6 @@
   overflow-wrap: anywhere;
 }
 
-.agent-activity-progress { font-style: italic; }
 .agent-tool-activity[data-status="failed"] { border-left-color: #d96a6a; }
 .agent-tool-activity[data-status="completed"] { border-left-color: #55a777; }
 .agent-activity-title { font-weight: 600; }

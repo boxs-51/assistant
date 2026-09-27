@@ -70,6 +70,29 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 "Tool request connection_id does not match execution context."
             )
 
+        if request.capability_id == "agent.budget.configure":
+            if not await context.reserve_tool_call():
+                return self._denied(request, AGENT_TOOL_BUDGET_EXCEEDED)
+            try:
+                allocation = context.configure_time_budget(dict(request.arguments))
+            except (KeyError, TypeError, ValueError) as exc:
+                return self._failure(
+                    request,
+                    code="AGENT_BUDGET_INVALID",
+                    message=str(exc),
+                    retryable=True,
+                    pre_dispatch=True,
+                )
+            return ToolExecutionResult(
+                execution_id=context.execution_id,
+                iteration=request.iteration,
+                invocation_id=request.invocation_id,
+                tool_call_id=request.tool_call_id,
+                capability_id=request.capability_id,
+                success=True,
+                output=allocation,
+            )
+
         if (
             self._execution_policy.check_tool_call(context, request)
             is not PolicyDecision.ALLOW
