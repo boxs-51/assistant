@@ -95,6 +95,7 @@ def test_ctx_f5_3g_a_owns_no_session_transaction_memory_or_runtime_wiring():
 
 def test_ctx_f5_3g_a_contract_freezes_non_consuming_zero_migration_scope():
     text = " ".join(CONTRACT.read_text(encoding="utf-8").split())
+    text = text.replace("`", "").replace("*", "")
 
     required = (
         "Production scope is exactly",
