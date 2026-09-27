@@ -314,6 +314,7 @@ def test_ui_source_freezes_partial_failure_retry_and_canonical_rendering():
     file_block = (root / "components/console/blocks/fileBlock.js").read_text(encoding="utf-8")
     image_block = (root / "components/console/blocks/imageBlock.js").read_text(encoding="utf-8")
     media_block = (root / "components/console/blocks/mediaBlock.js").read_text(encoding="utf-8")
+    console_js = (root / "components/console.js").read_text(encoding="utf-8")
 
     assert "api.prepare_files_async" in file_manager
     assert "api.encode_files_async" not in file_manager
@@ -333,6 +334,9 @@ def test_ui_source_freezes_partial_failure_retry_and_canonical_rendering():
     assert "resolveCanonicalAssetContent" in file_block
     assert "createCanonicalAssetObjectUrl" in image_block
     assert "createCanonicalAssetObjectUrl" in media_block
+    assert "case \'file\':" in console_js
+    assert "canonical-media-load" in media_block
+    assert "TextDecoder" in file_block
 
 
 def test_file_queue_executes_multifile_failure_retry_and_explicit_continue(tmp_path):
@@ -703,3 +707,274 @@ console.log(JSON.stringify({
     result = json.loads(completed.stdout.strip().splitlines()[-1])
     assert result["ok"] is True
     assert result["legacyEncodeCalls"] == []
+
+
+def test_renderer_executes_file_dispatch_text_decode_and_lazy_media(tmp_path):
+    node = shutil.which("node")
+    assert node is not None, "Node.js is required for CAS-F6 renderer evidence."
+
+    source_root = Path("cl/src/ui/web/js")
+    root = tmp_path / "renderer"
+    components = root / "components"
+    console_dir = components / "console"
+    blocks = console_dir / "blocks"
+    utils = root / "utils"
+    blocks.mkdir(parents=True)
+    utils.mkdir(parents=True)
+
+    shutil.copyfile(source_root / "components/console.js", components / "console.js")
+    shutil.copyfile(
+        source_root / "components/console/blocks/fileBlock.js",
+        blocks / "fileBlock.js",
+    )
+    shutil.copyfile(
+        source_root / "components/console/blocks/mediaBlock.js",
+        blocks / "mediaBlock.js",
+    )
+
+    (console_dir / "normalizer.js").write_text(
+        "export function normalizeToContentParts(data) { return data.parts || [data]; }\n",
+        encoding="utf-8",
+    )
+    (console_dir / "streamHandler.js").write_text(
+        "export class StreamManager { constructor() {} flushStream() {} handleStreamChunk() {} }\n",
+        encoding="utf-8",
+    )
+    (blocks / "textBlock.js").write_text(
+        "export function createTextBlock() { return null; }\n",
+        encoding="utf-8",
+    )
+    (blocks / "urlBlock.js").write_text(
+        "export function createUrlBlock() { return null; }\n",
+        encoding="utf-8",
+    )
+    (blocks / "imageBlock.js").write_text(
+        "export function createImageBlock() { return null; }\n",
+        encoding="utf-8",
+    )
+    (blocks / "thoughtBlock.js").write_text(
+        "export function createThoughtBlock() { return null; }\n"
+        "export function finishThoughtBlock() {}\n",
+        encoding="utf-8",
+    )
+    (utils / "security.js").write_text(
+        "export function escapeHtml(v) { return String(v ?? ''); }\n"
+        "export function safeHttpUrl(v) { return v || null; }\n",
+        encoding="utf-8",
+    )
+    (utils / "download.js").write_text(
+        "export function triggerFileDownload(...args) { globalThis.downloadCalls.push(args); }\n",
+        encoding="utf-8",
+    )
+    (utils / "fileIcons.js").write_text(
+        "export function getFileIcon() { return 'FILE'; }\n",
+        encoding="utf-8",
+    )
+    (components / "editor.js").write_text(
+        "export function openFileInEditor(...args) { globalThis.editorCalls.push(args); }\n",
+        encoding="utf-8",
+    )
+    (root / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
+
+    harness = r"""
+import { TextDecoder as NodeTextDecoder } from "node:util";
+
+function assert(condition, message) {
+  if (!condition) throw new Error(message);
+}
+
+globalThis.TextDecoder = globalThis.TextDecoder || NodeTextDecoder;
+globalThis.atob = globalThis.atob || function(value) {
+  return Buffer.from(value, "base64").toString("binary");
+};
+
+class FakeElement {
+  constructor(id) {
+    this.id = id || null;
+    this.className = "";
+    this.listeners = {};
+    this.children = [];
+    this.parentNode = null;
+    this.scrollTop = 0;
+    this.scrollHeight = 0;
+    this.disabled = false;
+    this.innerText = "";
+    this.src = "";
+    this.selectors = new Map();
+  }
+  addEventListener(type, callback) {
+    if (!this.listeners[type]) this.listeners[type] = [];
+    this.listeners[type].push(callback);
+  }
+  async trigger(type) {
+    const event = { preventDefault() {}, stopPropagation() {} };
+    for (const callback of this.listeners[type] || []) {
+      await callback(event);
+    }
+  }
+  querySelector(selector) {
+    if (!this.selectors.has(selector)) {
+      this.selectors.set(selector, new FakeElement());
+    }
+    return this.selectors.get(selector);
+  }
+  appendChild(child) {
+    child.parentNode = this;
+    this.children.push(child);
+    return child;
+  }
+  remove() {
+    if (!this.parentNode) return;
+    this.parentNode.children = this.parentNode.children.filter(
+      function(child) { return child !== this; }.bind(this)
+    );
+    this.parentNode = null;
+  }
+  load() {
+    this.loadCalls = (this.loadCalls || 0) + 1;
+  }
+  set innerHTML(value) {
+    this.html = value;
+    [
+      ".btn-view-file",
+      ".btn-download-file",
+      ".custom-audio-player",
+      ".custom-video-player",
+      ".canonical-media-load"
+    ].forEach((selector) => {
+      if (value.includes(selector.slice(1))) {
+        this.selectors.set(selector, new FakeElement());
+      }
+    });
+  }
+  get innerHTML() {
+    return this.html || "";
+  }
+}
+
+const consoleElement = new FakeElement("console");
+const documentRoot = new FakeElement("root");
+documentRoot.contains = function() { return true; };
+
+globalThis.document = {
+  documentElement: documentRoot,
+  getElementById(id) {
+    if (id === "console") return consoleElement;
+    return null;
+  },
+  createElement() {
+    return new FakeElement();
+  },
+  addEventListener() {},
+  querySelectorAll() {
+    return [];
+  }
+};
+
+globalThis.MutationObserver = class {
+  observe() {}
+  disconnect() {}
+};
+globalThis.URL = { revokeObjectURL() {} };
+globalThis.editorCalls = [];
+globalThis.downloadCalls = [];
+
+const textBase64 = Buffer.from("hello ✓", "utf8").toString("base64");
+let mediaResolveCalls = 0;
+globalThis.window = {
+  async resolveCanonicalAssetContent() {
+    return {
+      base64_data: textBase64,
+      mime_type: "text/plain; charset=utf-8"
+    };
+  },
+  async createCanonicalAssetObjectUrl() {
+    mediaResolveCalls += 1;
+    return { url: "blob:canonical-media", content: { mime_type: "video/mp4" } };
+  }
+};
+
+const consoleModule = await import("./components/console.js");
+consoleModule.renderBlock({
+  role: "user",
+  type: "file",
+  data: {
+    attachment: {
+      asset_id: "asset-text",
+      source: "asset",
+      uri: "asset://asset-text",
+      filename: "note.txt",
+      mime_type: "text/plain; charset=utf-8",
+      size: 9
+    }
+  }
+});
+
+assert(consoleElement.children.length === 1, "file part must render");
+const fileBlock = consoleElement.children[0];
+assert(fileBlock.className.includes("msg-file-part"), "file must use file renderer");
+
+await fileBlock.querySelector(".btn-view-file").trigger("click");
+assert(editorCalls.length === 1, "text preview must open once");
+assert(editorCalls[0][3] === "hello ✓", "text preview must decode UTF-8 base64");
+
+await fileBlock.querySelector(".btn-download-file").trigger("click");
+assert(downloadCalls.length === 1, "download must execute once");
+assert(
+  downloadCalls[0][1] === "base64:" + textBase64,
+  "download must retain base64 transport"
+);
+
+const mediaModule = await import("./components/console/blocks/mediaBlock.js");
+const mediaBlock = mediaModule.createMediaBlock("assistant", "video", {
+  asset_id: "asset-video",
+  source: "asset",
+  uri: "asset://asset-video",
+  filename: "large.mp4",
+  mime_type: "video/mp4",
+  size: 268435456
+});
+
+assert(mediaBlock !== null, "canonical media block must render");
+assert(mediaResolveCalls === 0, "media must not resolve eagerly on render");
+
+const loadButton = mediaBlock.querySelector(".canonical-media-load");
+const player = mediaBlock.querySelector(".custom-video-player");
+await loadButton.trigger("click");
+assert(mediaResolveCalls === 1, "explicit load must resolve once");
+assert(player.src === "blob:canonical-media", "resolved media must attach on demand");
+assert((player.loadCalls || 0) === 1, "player must load once");
+
+await loadButton.trigger("click");
+assert(mediaResolveCalls === 1, "repeat load must not duplicate resolution");
+
+console.log(JSON.stringify({
+  ok: true,
+  editorCalls: editorCalls.length,
+  downloadCalls: downloadCalls.length,
+  mediaResolveCalls: mediaResolveCalls
+}));
+"""
+
+    harness_path = root / "renderer.mjs"
+    harness_path.write_text(harness, encoding="utf-8")
+    completed = subprocess.run(
+        [node, str(harness_path)],
+        cwd=root,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        check=False,
+    )
+
+    assert completed.returncode == 0, (
+        "CAS-F6 renderer harness failed.\n"
+        f"stdout:\n{completed.stdout}\n"
+        f"stderr:\n{completed.stderr}"
+    )
+    assert json.loads(completed.stdout.strip().splitlines()[-1]) == {
+        "ok": True,
+        "editorCalls": 1,
+        "downloadCalls": 1,
+        "mediaResolveCalls": 1,
+    }
