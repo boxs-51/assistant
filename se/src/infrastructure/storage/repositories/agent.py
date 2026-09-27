@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
 from sqlalchemy import and_, case, insert, or_, select, update
@@ -45,6 +45,28 @@ _TASK_BRANCH_MUTABLE_FIELDS = frozenset({
     "current_execution_id",
     "resolution_state",
 })
+
+
+def _require_lease_utc_datetime(value: datetime, *, field: str) -> datetime:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() != timedelta(0)
+    ):
+        raise ValueError(f"{field} must be a timezone-aware UTC datetime")
+    return value
+
+
+def _require_lease_owner(value: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("owner_instance_id must be a non-empty string")
+    return value
+
+
+def _require_lease_generation(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise ValueError("lease_generation must be a positive integer")
+    return value
 
 
 class AgentRepository(BaseRepository):
@@ -698,6 +720,149 @@ class AgentRepository(BaseRepository):
             .with_for_update()
         )
         return result.scalar_one_or_none()
+
+    async def acquire_execution_lease(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        now_utc: datetime,
+        lease_expires_at: datetime,
+    ):
+        """Atomically acquire one unowned RUNNING execution lease.
+
+        R12-C lease-only mutations deliberately do not touch the semantic
+        AgentExecution revision. Expired-owner takeover is not authority of
+        this primitive; any non-null owner/expiry pair makes acquisition lose.
+        """
+
+        owner_instance_id = _require_lease_owner(owner_instance_id)
+        now_utc = _require_lease_utc_datetime(now_utc, field="now_utc")
+        lease_expires_at = _require_lease_utc_datetime(
+            lease_expires_at,
+            field="lease_expires_at",
+        )
+        if lease_expires_at <= now_utc:
+            raise ValueError("lease_expires_at must be later than now_utc")
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.owner_instance_id.is_(None),
+                AgentExecutionRecord.lease_expires_at.is_(None),
+            )
+            .values(
+                owner_instance_id=owner_instance_id,
+                lease_expires_at=lease_expires_at,
+                lease_generation=AgentExecutionRecord.lease_generation + 1,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
+    async def renew_execution_lease(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        lease_generation: int,
+        now_utc: datetime,
+        new_lease_expires_at: datetime,
+    ):
+        """Extend an active exact-owner lease without changing its generation."""
+
+        owner_instance_id = _require_lease_owner(owner_instance_id)
+        lease_generation = _require_lease_generation(lease_generation)
+        now_utc = _require_lease_utc_datetime(now_utc, field="now_utc")
+        new_lease_expires_at = _require_lease_utc_datetime(
+            new_lease_expires_at,
+            field="new_lease_expires_at",
+        )
+        if new_lease_expires_at <= now_utc:
+            raise ValueError(
+                "new_lease_expires_at must be later than now_utc"
+            )
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.owner_instance_id == owner_instance_id,
+                AgentExecutionRecord.lease_generation == lease_generation,
+                AgentExecutionRecord.lease_expires_at.is_not(None),
+                AgentExecutionRecord.lease_expires_at > now_utc,
+                AgentExecutionRecord.lease_expires_at < new_lease_expires_at,
+            )
+            .values(lease_expires_at=new_lease_expires_at)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
+    async def release_execution_lease(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        lease_generation: int,
+    ):
+        """Release an exact-owner lease while retaining its fencing generation."""
+
+        owner_instance_id = _require_lease_owner(owner_instance_id)
+        lease_generation = _require_lease_generation(lease_generation)
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.owner_instance_id == owner_instance_id,
+                AgentExecutionRecord.lease_generation == lease_generation,
+                AgentExecutionRecord.lease_expires_at.is_not(None),
+            )
+            .values(
+                owner_instance_id=None,
+                lease_expires_at=None,
+            )
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
+    async def has_active_execution_lease_fence(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        lease_generation: int,
+        now_utc: datetime,
+    ) -> bool:
+        """Validate one active durable execution fence without mutating state."""
+
+        owner_instance_id = _require_lease_owner(owner_instance_id)
+        lease_generation = _require_lease_generation(lease_generation)
+        now_utc = _require_lease_utc_datetime(now_utc, field="now_utc")
+
+        result = await self.session.execute(
+            select(AgentExecutionRecord.id)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.owner_instance_id == owner_instance_id,
+                AgentExecutionRecord.lease_generation == lease_generation,
+                AgentExecutionRecord.lease_expires_at.is_not(None),
+                AgentExecutionRecord.lease_expires_at > now_utc,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def compare_and_set_fork_activation(
         self,

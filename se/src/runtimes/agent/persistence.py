@@ -134,6 +134,14 @@ class ExecutionConflictError(RuntimeError):
     """A durable execution create or revision compare-and-set lost a race."""
 
 
+class LeaseAuthorityConflictError(RuntimeError):
+    """An atomic durable execution lease authority predicate lost a race."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
+
+
 class TaskConflictError(RuntimeError):
     """A durable AgentTask revision compare-and-set lost a race."""
 
@@ -1931,6 +1939,101 @@ class DurableAgentStore:
                 )
             await uow.commit()
             return record
+
+    async def acquire_execution_lease(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        now_utc: datetime,
+        lease_expires_at: datetime,
+    ):
+        """Acquire one unowned RUNNING execution lease without revision churn."""
+
+        async with self.uow_factory() as uow:
+            record = await uow.agents.acquire_execution_lease(
+                execution_id,
+                owner_instance_id=owner_instance_id,
+                now_utc=now_utc,
+                lease_expires_at=lease_expires_at,
+            )
+            if record is None:
+                raise LeaseAuthorityConflictError(
+                    "LEASE_ACQUIRE_REJECTED",
+                    "Execution is not an unowned RUNNING lease candidate.",
+                )
+            await uow.commit()
+            return record
+
+    async def renew_execution_lease(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        lease_generation: int,
+        now_utc: datetime,
+        new_lease_expires_at: datetime,
+    ):
+        """Renew an exact active lease without changing generation/revision."""
+
+        async with self.uow_factory() as uow:
+            record = await uow.agents.renew_execution_lease(
+                execution_id,
+                owner_instance_id=owner_instance_id,
+                lease_generation=lease_generation,
+                now_utc=now_utc,
+                new_lease_expires_at=new_lease_expires_at,
+            )
+            if record is None:
+                raise LeaseAuthorityConflictError(
+                    "LEASE_RENEW_REJECTED",
+                    "Lease owner/generation/expiry predicate did not match.",
+                )
+            await uow.commit()
+            return record
+
+    async def release_execution_lease(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        lease_generation: int,
+    ):
+        """Release an exact lease while retaining its durable generation."""
+
+        async with self.uow_factory() as uow:
+            record = await uow.agents.release_execution_lease(
+                execution_id,
+                owner_instance_id=owner_instance_id,
+                lease_generation=lease_generation,
+            )
+            if record is None:
+                raise LeaseAuthorityConflictError(
+                    "LEASE_RELEASE_REJECTED",
+                    "Lease owner/generation predicate did not match.",
+                )
+            await uow.commit()
+            return record
+
+    async def has_active_execution_lease_fence(
+        self,
+        execution_id: str,
+        *,
+        owner_instance_id: str,
+        lease_generation: int,
+        now_utc: datetime,
+    ) -> bool:
+        """Read-only durable active-fence predicate for later runtime wiring."""
+
+        async with self.uow_factory() as uow:
+            active = await uow.agents.has_active_execution_lease_fence(
+                execution_id,
+                owner_instance_id=owner_instance_id,
+                lease_generation=lease_generation,
+                now_utc=now_utc,
+            )
+            await uow.commit()
+            return active
 
     async def commit_waiting_checkpoint(
         self,
