@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -9,8 +9,10 @@ from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 from sqlalchemy import text
+from sqlalchemy.exc import StatementError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from se.src.domain.schemas.agent_execution import AgentExecution
 from se.src.infrastructure.storage.models.sql.agent.execution import (
     AgentExecutionRecord,
 )
@@ -310,5 +312,114 @@ async def test_r12_b_generic_repository_round_trip_and_revision_cas() -> None:
                 },
             )
             assert stale is None
+    finally:
+        await engine.dispose()
+
+
+def test_r12_b_domain_normalizes_aware_lease_expiry_to_utc_and_rejects_naive():
+    offset_expiry = datetime(
+        2026,
+        9,
+        27,
+        8,
+        0,
+        tzinfo=timezone(timedelta(hours=7)),
+    )
+    execution = AgentExecution(
+        execution_id="exec-r12-b-domain",
+        session_id="session-r12-b",
+        agent_id="agent-r12-b",
+        correlation_id="corr-r12-b",
+        state="RUNNING",
+        owner_instance_id="worker-r12-b",
+        lease_expires_at=offset_expiry,
+        lease_generation=1,
+        created_at=0.0,
+        updated_at=0.0,
+    )
+    assert execution.lease_expires_at == datetime(
+        2026,
+        9,
+        27,
+        1,
+        0,
+        tzinfo=timezone.utc,
+    )
+
+    with pytest.raises(ValueError, match="timezone-aware"):
+        AgentExecution(
+            execution_id="exec-r12-b-domain-naive",
+            session_id="session-r12-b",
+            agent_id="agent-r12-b",
+            correlation_id="corr-r12-b-naive",
+            state="RUNNING",
+            owner_instance_id="worker-r12-b",
+            lease_expires_at=datetime(2026, 9, 27, 1, 0),
+            lease_generation=1,
+            created_at=0.0,
+            updated_at=0.0,
+        )
+
+
+@pytest.mark.asyncio
+async def test_r12_b_generic_repository_normalizes_non_utc_and_rejects_naive():
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as connection:
+        await connection.run_sync(AgentExecutionRecord.__table__.create)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    local_expiry = datetime(
+        2026,
+        9,
+        27,
+        8,
+        0,
+        tzinfo=timezone(timedelta(hours=7)),
+    )
+    expected_utc = datetime(2026, 9, 27, 1, 0, tzinfo=timezone.utc)
+    try:
+        async with sessions() as session:
+            repository = AgentRepository(session)
+            stored = await repository.save_execution(
+                {
+                    "id": "exec-r12-b-offset",
+                    "session_id": "session-r12-b",
+                    "agent_id": "agent-r12-b",
+                    "correlation_id": "corr-r12-b-offset",
+                    "state": "RUNNING",
+                    "revision": 0,
+                    "owner_instance_id": "worker-r12-b",
+                    "lease_expires_at": local_expiry,
+                    "lease_generation": 1,
+                    "request": {},
+                }
+            )
+            assert stored.lease_expires_at == expected_utc
+            await session.commit()
+
+        async with sessions() as session:
+            repository = AgentRepository(session)
+            loaded = await repository.get_execution("exec-r12-b-offset")
+            assert loaded is not None
+            assert loaded.lease_expires_at == expected_utc
+
+        async with sessions() as session:
+            repository = AgentRepository(session)
+            with pytest.raises(StatementError, match="timezone-aware"):
+                await repository.save_execution(
+                    {
+                        "id": "exec-r12-b-naive",
+                        "session_id": "session-r12-b",
+                        "agent_id": "agent-r12-b",
+                        "correlation_id": "corr-r12-b-naive",
+                        "state": "RUNNING",
+                        "revision": 0,
+                        "owner_instance_id": "worker-r12-b",
+                        "lease_expires_at": datetime(2026, 9, 27, 1, 0),
+                        "lease_generation": 1,
+                        "request": {},
+                    }
+                )
+            await session.rollback()
     finally:
         await engine.dispose()
