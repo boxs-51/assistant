@@ -1,6 +1,8 @@
 // mediaBlock.js
 import { escapeHtml, safeHttpUrl } from '../../../utils/security.js';
 
+const MAX_CANONICAL_MEDIA_INLINE_BYTES = 32 * 1024 * 1024;
+
 export function createMediaBlock(role, mediaType, mediaData) {
   if (!mediaData || !['audio', 'video'].includes(mediaType)) return null;
   const block = document.createElement('div');
@@ -40,7 +42,10 @@ export function createMediaBlock(role, mediaType, mediaData) {
       }
 
       try {
-        const resolved = await window.createCanonicalAssetObjectUrl?.(mediaData);
+        const resolved = await window.createCanonicalAssetObjectUrl?.(
+          mediaData,
+          { maxBytes: MAX_CANONICAL_MEDIA_INLINE_BYTES },
+        );
         if (!resolved?.url) {
           throw new Error('Canonical media content is unavailable.');
         }
