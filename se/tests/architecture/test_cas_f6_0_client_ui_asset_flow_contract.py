@@ -153,7 +153,10 @@ def test_f6_0_freezes_legacy_f8_boundary_without_live_source_absence_trap():
         "READY FileAsset deletion/release",
         "FileBlob/ObjectStorage physical GC/reconciliation",
         "automatic UNKNOWN/stale PROCESSING recovery",
+        "CTX Memory promotion/source-proof/retrieval ownership",
+        "R11 retention/destructive-GC ownership",
         "R12 lease/recovery/checkpoint ownership",
+        "provider routing/fallback/deadline/model-selection ownership",
         "must not encode permanent live-source absence assertions",
     ):
         assert phrase in document
@@ -181,6 +184,7 @@ def test_f6_0_freezes_first_production_slice_matrix():
         "already-landed downstream execution",
         "storage schema/migrations",
         "outside first F6 slice",
+        "CTX/R11/R12 ownership",
         "This is the candidate matrix for the first production CLAIM.",
         "It is not a production ownership grant.",
     ):
