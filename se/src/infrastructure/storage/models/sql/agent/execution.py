@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-from sqlalchemy import JSON, CheckConstraint, DateTime, Float, Integer, String, Text, func
+from sqlalchemy import JSON, CheckConstraint, DateTime, Float, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 from sqlalchemy.types import TypeDecorator
 
@@ -38,6 +38,12 @@ class UTCLeaseDateTime(TypeDecorator):
 class AgentExecutionRecord(Base):
     __tablename__ = "agent_executions"
     __table_args__ = (
+        Index(
+            "ix_agent_executions_state_lease_expiry_id",
+            "state",
+            "lease_expires_at",
+            "id",
+        ),
         CheckConstraint(
             "(owner_instance_id IS NULL AND lease_expires_at IS NULL) OR "
             "(owner_instance_id IS NOT NULL AND lease_expires_at IS NOT NULL)",
