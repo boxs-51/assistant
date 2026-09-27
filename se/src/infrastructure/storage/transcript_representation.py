@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Sequence
+from typing import TYPE_CHECKING, Any, Sequence
 
-from ...runtimes.agent.contracts.inference import InferenceMessage
+if TYPE_CHECKING:
+    from ...runtimes.agent.contracts.inference import InferenceMessage
 
 
 HARD_MAX_DELTA_DEPTH = 9
@@ -30,6 +31,8 @@ def _sha256_domain(domain: str, payload: Any) -> str:
 def canonical_transcript_messages(
     messages: Sequence[InferenceMessage | dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    from ...runtimes.agent.contracts.inference import InferenceMessage
+
     return [
         item.model_dump(mode="json")
         if isinstance(item, InferenceMessage)

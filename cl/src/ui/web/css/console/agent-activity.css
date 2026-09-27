@@ -1,0 +1,24 @@
+.agent-activity {
+  margin: 6px 12px;
+  padding: 7px 10px;
+  border-left: 2px solid var(--accent-color, #6b8afd);
+  border-radius: 4px;
+  background: rgba(120, 140, 180, 0.08);
+  color: var(--text-secondary, #87909c);
+  font-size: 0.85em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.agent-activity-progress { font-style: italic; }
+.agent-tool-activity[data-status="failed"] { border-left-color: #d96a6a; }
+.agent-tool-activity[data-status="completed"] { border-left-color: #55a777; }
+.agent-activity-title { font-weight: 600; }
+.agent-activity-purpose { margin-top: 3px; }
+.agent-activity-arguments {
+  margin: 4px 0 0;
+  max-height: 120px;
+  overflow: auto;
+  font-size: 0.8em;
+  white-space: pre-wrap;
+}

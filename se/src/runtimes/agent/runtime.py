@@ -1736,6 +1736,16 @@ class AgentRuntime:
                     timeout_seconds=context.remaining_iteration_seconds,
                 )
 
+                await self._publish(
+                    AgentEventName.CONTEXT_READY,
+                    context,
+                    iteration=iteration_number,
+                    payload={
+                        "capability_ids": [item.name for item in snapshot.tools],
+                        "skill_ids": list(snapshot.metadata.get("skill_ids", ())),
+                    },
+                )
+
                 # The first snapshot contains the authoritative session/system
                 # history. Seed the canonical transcript exactly once.
                 if (
@@ -1830,6 +1840,15 @@ class AgentRuntime:
                 )
 
                 transcript.append(response.message)
+                if response.message.tool_calls and isinstance(response.message.content, str):
+                    public_progress = response.message.content.strip()
+                    if public_progress:
+                        await self._publish(
+                            AgentEventName.PROGRESS,
+                            context,
+                            iteration=iteration_number,
+                            payload={"content": public_progress},
+                        )
                 total_usage = _add_usage(total_usage, response.usage)
                 context.usage = total_usage
 
@@ -1894,14 +1913,30 @@ class AgentRuntime:
                 record.state = transition(record.state, AgentLoopState.WAITING_TOOL)
                 await self._persist_iteration(record)
                 iteration_id = f"{record.execution_id}:iteration:{record.iteration}"
+                tool_activities: dict[str, dict[str, Any]] = {}
                 for request in tool_requests:
+                    tool_definition = next(
+                        (item for item in snapshot.tools if item.name == request.capability_id),
+                        None,
+                    )
+                    purpose = (
+                        f"Load instructions for skill {request.arguments.get('skill_id', '')}"
+                        if request.capability_id == "skill.load"
+                        else (tool_definition.description if tool_definition else request.capability_id)
+                    )
+                    activity = {
+                        "capability_id": request.capability_id,
+                        "purpose": purpose,
+                        "arguments": _public_tool_arguments(request.arguments),
+                    }
+                    tool_activities[request.tool_call_id] = activity
                     await self._publish(
                         AgentEventName.TOOL_REQUESTED,
                         context,
                         iteration=iteration_number,
                         tool_call_id=request.tool_call_id,
                         invocation_id=request.invocation_id,
-                        payload={"capability_id": request.capability_id},
+                        payload=activity,
                     )
                     await self._publish(
                         AgentEventName.TOOL_STARTED,
@@ -1909,7 +1944,7 @@ class AgentRuntime:
                         iteration=iteration_number,
                         tool_call_id=request.tool_call_id,
                         invocation_id=request.invocation_id,
-                        payload={"capability_id": request.capability_id},
+                        payload=activity,
                     )
                     await self._persist_tool_call(request, iteration_id)
                 await self._reserve_task_tool_calls(
@@ -1940,7 +1975,7 @@ class AgentRuntime:
                             tool_call_id=request.tool_call_id,
                             invocation_id=request.invocation_id,
                             payload={
-                                "capability_id": request.capability_id,
+                                **tool_activities[request.tool_call_id],
                                 "error_code": error_code,
                                 "error_message": str(exc),
                             },
@@ -1955,7 +1990,7 @@ class AgentRuntime:
                             tool_call_id=request.tool_call_id,
                             invocation_id=request.invocation_id,
                             payload={
-                                "capability_id": request.capability_id,
+                                **tool_activities[request.tool_call_id],
                                 "error_code": getattr(exc, "code", type(exc).__name__),
                                 "error_message": str(exc),
                             },
@@ -1987,7 +2022,7 @@ class AgentRuntime:
                         tool_call_id=result.tool_call_id,
                         invocation_id=result.invocation_id,
                         payload={
-                            "capability_id": result.capability_id,
+                            **tool_activities.get(result.tool_call_id, {"capability_id": result.capability_id}),
                             "error_code": result.error_code,
                             "error_message": result.error_message,
                         },
@@ -2297,6 +2332,33 @@ class AgentRuntime:
             failure_domain=failure_domain,
             retryable=retryable,
         )
+
+
+def _public_tool_arguments(arguments: Mapping[str, Any]) -> dict[str, Any]:
+    """Bound and redact tool arguments before publishing UI activity."""
+    sensitive = ("password", "secret", "token", "credential", "authorization", "api_key", "base64", "content", "data")
+
+    def clean(value: Any, *, depth: int = 0) -> Any:
+        if depth >= 3:
+            return "[nested value]"
+        if isinstance(value, Mapping):
+            return {
+                str(key): (
+                    "[redacted]"
+                    if any(mark in str(key).lower() for mark in sensitive)
+                    else clean(item, depth=depth + 1)
+                )
+                for key, item in list(value.items())[:20]
+            }
+        if isinstance(value, (list, tuple)):
+            return [clean(item, depth=depth + 1) for item in value[:20]]
+        if isinstance(value, str):
+            return value[:300] + ("…" if len(value) > 300 else "")
+        if isinstance(value, (int, float, bool)) or value is None:
+            return value
+        return "[value]"
+
+    return clean(arguments)
 
 
 def _tool_results_to_messages(

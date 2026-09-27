@@ -7,10 +7,21 @@ import pytest
 
 from se.src.agent.registry import AgentRegistry
 from se.src.application.policy.authorization import AuthorizationService
+from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.adapters.policy import RegistryAgentToolPolicy
+from se.src.runtimes.agent.assembly import DefaultAgentContextAssembler
+from se.src.runtimes.agent.capabilities import (
+    RegistryAgentCapabilityResolver,
+    RegistryAgentSkillResolver,
+)
+from se.src.runtimes.agent.contracts.context import AgentExecutionContext
+from se.src.runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
 from se.src.runtimes.capability.builtins import register_builtin_support
 from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.contracts.error import CapabilityError
 from se.src.runtimes.capability.local_tool_loader import register_local_tools
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.runtimes.capability.registry import CapabilityRegistry
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.tool.registry import ToolRegistry
@@ -180,7 +191,7 @@ async def test_real_projection_exposes_only_logical_ids_and_public_provenance():
         assert runtime.registry.get_driver(physical_root) is None
 
 
-def test_real_support_loader_projects_frozen_agent_tools_only():
+def test_real_support_loader_projects_logical_agent_tools_only():
     runtime, catalog, _result, container = _runtime_and_container()
     container.agent_registry = AgentRegistry()
     container.agent_runtime = SimpleNamespace()
@@ -212,12 +223,24 @@ def test_real_support_loader_projects_frozen_agent_tools_only():
         "file.append",
         "file.replace",
         "glob.find",
+        "skill.load",
     ]
-    assert web_researcher.tools == list(WEB_IDS)
+    assert web_researcher.tools == [*WEB_IDS, "skill.load"]
     assert coordinator.tools == [
-        "agent-command-reviewer",
-        "agent-web-researcher",
+        "terminal.run",
+        "terminal.launch",
+        "file.read",
+        "file.search",
+        "file.write",
+        "file.append",
+        "file.replace",
+        "glob.find",
+        *WEB_IDS,
+        "skill.load",
     ]
+    assert coordinator.skills == []
+    assert command_reviewer.skills == []
+    assert web_researcher.skills == []
 
     loaded_agents = {
         agent.name: agent
@@ -233,25 +256,14 @@ def test_real_support_loader_projects_frozen_agent_tools_only():
             if capability_id.startswith(("window.", "desktop."))
         }.intersection(agent.tools)
 
-    for tool_id in (*command_reviewer.tools, *web_researcher.tools):
+    for tool_id in (*command_reviewer.tools, *web_researcher.tools, *coordinator.tools):
         assert catalog.contains_definition(tool_id)
         assert catalog.list_implementations(
             tool_id,
             routable_only=True,
         )
 
-    for agent_id in coordinator.tools:
-        assert catalog.contains_definition(agent_id)
-        definition = catalog.get_definition(agent_id)
-        assert definition.kind.value == "AGENT"
-        implementations = catalog.list_implementations(
-            agent_id,
-            routable_only=True,
-        )
-        assert len(implementations) == 1
-        assert implementations[0].implementation_id == (
-            f"server:agent:{agent_id}"
-        )
+    assert not any(tool_id.startswith("agent-") for tool_id in coordinator.tools)
 
     summaries = container.support_loader.list_agent_summaries(_guest())
     summary_by_name = {item.name: item for item in summaries}
@@ -263,4 +275,125 @@ def test_real_support_loader_projects_frozen_agent_tools_only():
         web_researcher.tools
     )
     assert summary_by_name["agent-coordinator"].tools == coordinator.tools
+
+
+@pytest.mark.asyncio
+async def test_coordinator_context_has_direct_tools_and_skill_descriptions():
+    runtime, catalog, _result, container = _runtime_and_container()
+    container.agent_registry = AgentRegistry()
+    container.agent_runtime = SimpleNamespace()
+    register_builtin_support(container)
+
+    agent = container.agent_registry.get("agent-coordinator")
+    assert agent is not None
+    assert not container.support_loader.is_loaded("skill-command-safety")
+    assert not container.support_loader.is_loaded("skill-web-research")
+
+    policy = RegistryAgentToolPolicy(
+        container.agent_registry,
+        runtime.registry,
+        runtime.authorization,
+        capability_catalog=catalog,
+    )
+    assembler = DefaultAgentContextAssembler(
+        DefaultAgentSystemPromptProvider(),
+        RegistryAgentCapabilityResolver(
+            agent_registry=container.agent_registry,
+            capability_registry=runtime.registry,
+            capability_catalog=catalog,
+            tool_policy=policy,
+        ),
+        RegistryAgentSkillResolver(
+            agent_registry=container.agent_registry,
+            capability_catalog=catalog,
+        ),
+    )
+    context = AgentExecutionContext.create(
+        execution_id="coordinator-direct-tools",
+        agent_id=agent.name,
+        session_id="session-direct-tools",
+        correlation_id="correlation-direct-tools",
+        identity=_guest(),
+        limits=AgentExecutionLimits(),
+        agent=agent,
+    )
+    assembled = await assembler.assemble(context=context, prior_messages=[])
+
+    assert [tool.name for tool in assembled.tools] == agent.tools
+    assert assembled.skills == ()
+    assert "[AVAILABLE SKILLS]" in assembled.system_prompt.content
+    assert "skill-command-safety: Review shell" in assembled.system_prompt.content
+    assert "skill-web-research: Collect web" in assembled.system_prompt.content
+    assert "Before proposing or running a command" not in assembled.system_prompt.content
+    assert "Use the web capability" not in assembled.system_prompt.content
+    assert not container.support_loader.is_loaded("skill-command-safety")
+    assert not container.support_loader.is_loaded("skill-web-research")
+    assert "Do not call another agent" in assembled.system_prompt.content
+
+
+@pytest.mark.asyncio
+async def test_skill_load_reads_only_requested_skill_for_agent():
+    runtime, catalog, _result, container = _runtime_and_container()
+    runtime.routing_policy = CapabilityRoutingPolicy()
+    container.agent_registry = AgentRegistry()
+    container.agent_runtime = SimpleNamespace()
+    register_builtin_support(container)
+
+    agent = container.agent_registry.get("agent-coordinator")
+    assert agent is not None
+    assert agent.skills == []
+    assert not container.support_loader.is_loaded("skill-command-safety")
+    assert not container.support_loader.is_loaded("skill-web-research")
+
+    result = await runtime.execute_capability(
+        capability_id="skill.load",
+        arguments={"skill_id": "skill-command-safety"},
+        identity=_guest(),
+        execution_id="exec-skill-load",
+        caller_agent_execution_id="exec-skill-load",
+    )
+    assert result.output["skill_id"] == "skill-command-safety"
+    assert "Before proposing or running a command" in result.output["instruction"]
+    assert container.support_loader.is_loaded("skill-command-safety")
+    assert not container.support_loader.is_loaded("skill-web-research")
+    assert "instruction" not in catalog.get_definition("skill-command-safety").metadata
+
+    with pytest.raises(CapabilityError) as denied:
+        await runtime.execute_capability(
+            capability_id="skill.load",
+            arguments={"skill_id": "skill-web-research"},
+            identity=_guest(),
+        )
+    assert denied.value.code == "CAPABILITY_UNAUTHORIZED"
+    assert not container.support_loader.is_loaded("skill-web-research")
+
+    with pytest.raises(CapabilityError) as unknown:
+        await runtime.execute_capability(
+            capability_id="skill.load",
+            arguments={"skill_id": "missing-skill"},
+            identity=_guest(),
+            execution_id="exec-skill-load",
+            caller_agent_execution_id="exec-skill-load",
+        )
+    assert unknown.value.code == "CAPABILITY_INVALID_ARGUMENT"
+
+    protected = catalog.get_definition("skill-web-research").model_copy(
+        update={"required_scopes": ["skill:private"]}
+    )
+    catalog.register_definition(protected, allow_update=True)
+    available = await RegistryAgentSkillResolver(
+        agent_registry=container.agent_registry,
+        capability_catalog=catalog,
+    ).list_available(identity=_guest())
+    assert "skill-web-research" not in {item.skill_id for item in available}
+    with pytest.raises(CapabilityError) as forbidden:
+        await runtime.execute_capability(
+            capability_id="skill.load",
+            arguments={"skill_id": "skill-web-research"},
+            identity=_guest(),
+            execution_id="exec-skill-load",
+            caller_agent_execution_id="exec-skill-load",
+        )
+    assert forbidden.value.code == "CAPABILITY_UNAUTHORIZED"
+    assert not container.support_loader.is_loaded("skill-web-research")
 

@@ -538,7 +538,10 @@ class UIBridge:
                                 if preferences.get("agent_enabled")
                                 else None
                             ),
-                            config=RequestConfig(stream=True),
+                            config=RequestConfig(
+                                stream=True,
+                                agent_activity_stream=bool(preferences.get("agent_enabled")),
+                            ),
                         )
                     )
                     if isinstance(response, dict):
@@ -550,9 +553,14 @@ class UIBridge:
                     else:
                         for chunk in response:
                             if isinstance(chunk, dict):
+                                block_type = (
+                                    "agent_event"
+                                    if chunk.get("object") == "agent_stream_event"
+                                    else "execution_status"
+                                )
                                 self.render_block(
                                     role="system",
-                                    btype="execution_status",
+                                    btype=block_type,
                                     data=chunk,
                                 )
                             else:

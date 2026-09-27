@@ -20,6 +20,67 @@ function triggerBlockCallback(blockType, actionType, payload) {
 }
 
 const streamManager = new StreamManager(createPartBlock);
+const seenAgentEvents = new Set();
+
+function renderAgentEvent(event, consoleElem) {
+  if (!event || event.object !== 'agent_stream_event' || seenAgentEvents.has(event.event_id)) return;
+  seenAgentEvents.add(event.event_id);
+  const detail = event.data || {};
+
+  if (event.channel === 'tool') {
+    const toolId = String(detail.tool_call_id || event.event_id);
+    const executionId = String(event.execution_id || '');
+    let block = Array.from(consoleElem.querySelectorAll('.agent-tool-activity')).find(
+      item => item.dataset.toolCallId === toolId && item.dataset.executionId === executionId
+    );
+    if (!block) {
+      block = document.createElement('div');
+      block.className = 'agent-activity agent-tool-activity';
+      block.dataset.toolCallId = toolId;
+      block.dataset.executionId = executionId;
+      const title = document.createElement('div');
+      title.className = 'agent-activity-title';
+      block.appendChild(title);
+      const purpose = document.createElement('div');
+      purpose.className = 'agent-activity-purpose';
+      block.appendChild(purpose);
+      const args = document.createElement('pre');
+      args.className = 'agent-activity-arguments';
+      block.appendChild(args);
+      consoleElem.appendChild(block);
+    }
+    const status = String(detail.status || 'requested');
+    const labels = { requested: 'Đã yêu cầu', started: 'Đang chạy', completed: 'Hoàn thành', failed: 'Thất bại' };
+    block.dataset.status = status;
+    block.querySelector('.agent-activity-title').textContent = `${labels[status] || status}: ${detail.name || 'tool'}`;
+    if (detail.purpose) block.querySelector('.agent-activity-purpose').textContent = detail.purpose;
+    if (detail.arguments) block.querySelector('.agent-activity-arguments').textContent = JSON.stringify(detail.arguments, null, 2);
+    if (detail.error_code) block.querySelector('.agent-activity-purpose').textContent += ` (${detail.error_code})`;
+    return;
+  }
+
+  const block = document.createElement('div');
+  block.className = `agent-activity agent-activity-${event.channel || 'lifecycle'}`;
+  const statusText = {
+    'agent.execution.created': 'Đã tạo tác vụ Agent',
+    'agent.execution.started': 'Agent bắt đầu xử lý',
+    'agent.context.ready': `Đã chuẩn bị ngữ cảnh · kỹ năng: ${(detail.skill_ids || []).join(', ') || 'không có'} · tool: ${(detail.capability_ids || []).join(', ') || 'không có'}`,
+    'agent.iteration.started': 'Agent bắt đầu bước xử lý',
+    'agent.iteration.completed': 'Agent hoàn thành bước xử lý',
+    'agent.inference.requested': 'AI đang xử lý',
+    'agent.inference.completed': 'AI đã xử lý xong bước này',
+    'agent.execution.completed': 'Agent đã hoàn thành',
+    'agent.execution.failed': 'Agent xử lý thất bại',
+    'agent.execution.cancelled': 'Agent đã dừng',
+    'agent.execution.timeout': 'Agent hết thời gian',
+  };
+  const content = event.channel === 'progress'
+    ? detail.content
+    : statusText[event.event_type];
+  if (!content) return;
+  block.textContent = content;
+  consoleElem.appendChild(block);
+}
 
 export function showPendingIndicator() {
   const consoleElem = document.getElementById('console');
@@ -77,6 +138,12 @@ export function renderBlock(data) {
     timeEl.className = 'msg-time-divider';
     timeEl.innerText = data.text || data.content;
     consoleElem.appendChild(timeEl);
+    return;
+  }
+
+  if (data.type === 'agent_event') {
+    renderAgentEvent(data.data, consoleElem);
+    consoleElem.scrollTop = consoleElem.scrollHeight;
     return;
   }
 

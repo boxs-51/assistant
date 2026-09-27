@@ -35,7 +35,7 @@ def _manifest():
 def test_command_reviewer_manifest_uses_only_t9_b_logical_capabilities():
     manifest = _manifest()
 
-    assert manifest["tools"] == list(COMMAND_REVIEWER_CAPABILITIES)
+    assert manifest["tools"] == [*COMMAND_REVIEWER_CAPABILITIES, "skill.load"]
     assert not {"terminal_tool", "file_tool", "find_by_glob"}.intersection(
         manifest["tools"]
     )

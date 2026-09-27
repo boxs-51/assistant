@@ -1,8 +1,22 @@
 {
   "name": "agent-coordinator",
-  "goal": "Coordinate general requests and delegate specialist work when useful.",
+  "goal": "Plan and complete requests using the tools and skills available to this agent.",
   "instruction_file": "instruction.md",
-  "tools": ["agent-command-reviewer", "agent-web-researcher"],
+  "tools": [
+    "terminal.run",
+    "terminal.launch",
+    "file.read",
+    "file.search",
+    "file.write",
+    "file.append",
+    "file.replace",
+    "glob.find",
+    "web.search",
+    "web.search_many",
+    "web.read",
+    "web.read_many",
+    "skill.load"
+  ],
   "skills": [],
   "required_scopes": [],
   "required_permissions": []

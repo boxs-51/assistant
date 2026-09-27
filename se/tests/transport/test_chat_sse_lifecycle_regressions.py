@@ -7,6 +7,7 @@ import pytest
 
 from se.src.domain.schemas.event import BaseEvent
 from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.agent.stream import AGENT_STREAM_EVENT_NAMES
 from se.src.transport.gateway.api.v1.chat_router import chat_completions_proxy
 
 
@@ -23,10 +24,11 @@ class _Request:
 
 
 class _SseBus:
-    def __init__(self):
+    def __init__(self, *, agent_activity=False):
         self.handlers = defaultdict(list)
         self.tasks = []
         self.futures = []
+        self.agent_activity = agent_activity
 
     def subscribe(self, event_name, handler):
         self.handlers[event_name].append(handler)
@@ -47,6 +49,31 @@ class _SseBus:
         async def run():
             try:
                 if event.event_name == "transport.event.request_received":
+                    if self.agent_activity:
+                        await self._emit(BaseEvent(
+                            event_name="agent.tool.requested",
+                            session_id="other-session",
+                            turn_id=event.turn_id,
+                            payload={"correlation": {"execution_id": "other"}},
+                        ))
+                        await self._emit(BaseEvent(
+                            event_name="agent.tool.requested",
+                            session_id=event.session_id,
+                            turn_id="other-turn",
+                            payload={"correlation": {"execution_id": "other"}},
+                        ))
+                        for name in ("agent.inference.requested", "agent.tool.requested", "agent.tool.started", "agent.tool.completed"):
+                            await self._emit(BaseEvent(
+                                event_name=name,
+                                session_id=event.session_id,
+                                turn_id=event.turn_id,
+                                payload={
+                                    "correlation": {"execution_id": "exec-1", "tool_call_id": "call-1"},
+                                    "capability_id": "skill.load",
+                                    "purpose": "Load instructions for skill web-research",
+                                    "arguments": {"skill_id": "web-research"},
+                                },
+                            ))
                     await self._emit(
                         BaseEvent(
                             event_name="provider.stream.chunk_emitted",
@@ -128,3 +155,39 @@ async def test_sse_bridge_emits_chunk_done_and_unsubscribes():
     assert not bus.handlers["provider.stream.chunk_emitted"]
     assert not bus.handlers["provider.stream.completed"]
     assert not bus.handlers["provider.failed"]
+
+
+@pytest.mark.asyncio
+async def test_agent_activity_is_separate_from_final_chunk_and_scoped_to_turn():
+    bus = _SseBus(agent_activity=True)
+    request = _Request({
+        "model": "mock",
+        "messages": [{"role": "user", "content": "research"}],
+        "agent_enabled": True,
+        "config": {"stream": True, "agent_activity_stream": True},
+    })
+    response = await chat_completions_proxy(
+        request,
+        identity=Identity(auth_type="guest", user_id="user-1"),
+        event_bus=bus,
+        config=SimpleNamespace(provider=SimpleNamespace(timeout=5)),
+        container=SimpleNamespace(connection_runtime=SimpleNamespace(registry=None)),
+    )
+    frames = [part async for part in response.body_iterator]
+    await asyncio.gather(*bus.tasks)
+    payloads = [json.loads(part[6:]) for part in frames if part.startswith("data: {")]
+    activities = [item for item in payloads if item.get("object") == "agent_stream_event"]
+    assert [item["event_type"] for item in activities] == [
+        "agent.inference.requested", "agent.tool.requested", "agent.tool.started", "agent.tool.completed",
+    ]
+    assert all(item["execution_id"] == "exec-1" for item in activities)
+    assert activities[1]["data"] == {
+        "tool_call_id": "call-1",
+        "name": "skill.load",
+        "purpose": "Load instructions for skill web-research",
+        "arguments": {"skill_id": "web-research"},
+        "status": "requested",
+    }
+    assert payloads[-1]["choices"][0]["delta"]["content"] == "hello"
+    assert frames[-1] == "data: [DONE]\n\n"
+    assert all(not bus.handlers[name] for name in AGENT_STREAM_EVENT_NAMES)

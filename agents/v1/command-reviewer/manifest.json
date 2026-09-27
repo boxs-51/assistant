@@ -10,11 +10,10 @@
     "file.write",
     "file.append",
     "file.replace",
-    "glob.find"
+    "glob.find",
+    "skill.load"
   ],
-  "skills": [
-    "skill-command-safety"
-  ],
+  "skills": [],
   "required_scopes": [],
   "required_permissions": []
 }

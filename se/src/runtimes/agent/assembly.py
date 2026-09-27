@@ -50,6 +50,29 @@ class DefaultAgentContextAssembler:
                 source=f"{system_prompt.source}+skills",
                 version=system_prompt.version,
             )
+        if self._skill_resolver is not None and any(
+            item.capability_id == "skill.load" for item in capabilities
+        ):
+            available = await self._skill_resolver.list_available(
+                identity=context.identity,
+            )
+            if available:
+                summaries = "\n".join(
+                    f"- {skill.skill_id}: {skill.description}"
+                    for skill in available
+                )
+                system_prompt = AgentSystemPrompt(
+                    content=(
+                        f"{system_prompt.content}\n\n"
+                        "[AVAILABLE SKILLS]\n"
+                        f"{summaries}\n"
+                        "Call skill.load with a skill_id when its instructions are needed. "
+                        "Use the returned instruction; do not assume a description "
+                        "contains the skill body."
+                    ),
+                    source=f"{system_prompt.source}+skill_catalog",
+                    version=system_prompt.version,
+                )
         conversation = tuple(
             InferenceMessage.model_validate(item)
             for item in prior_messages

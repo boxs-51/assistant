@@ -15,6 +15,7 @@ class RequestConfig(GatewayBaseModel):
     top_p: Optional[float] = Field(default=None, description="Nucleus sampling")
     max_tokens: Optional[int] = Field(default=None, description="Số lượng token tối đa sinh ra")
     stream: bool = Field(default=False, description="Bật/Tắt chế độ streaming")
+    agent_activity_stream: bool = Field(default=False, description="Include public Agent activity events in SSE.")
     presence_penalty: Optional[float] = Field(default=None, description="Phạt dựa trên sự xuất hiện của từ")
     frequency_penalty: Optional[float] = Field(default=None, description="Phạt dựa trên tần suất của từ")
     response_format: Dict[str, Any] = Field(default=None, description="Chọn định dạng trả về của LLM")

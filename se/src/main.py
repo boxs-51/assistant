@@ -998,6 +998,7 @@ async def bootstrap_runtime_kernel(
         RegistryAgentSkillResolver(
             agent_registry=container.agent_registry,
             capability_catalog=capability_catalog,
+            authorization=container.authorization_service,
         ),
     )
     container.context_builder_port = ContextBuilderAdapter(

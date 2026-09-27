@@ -84,7 +84,7 @@ class GatewayLLMClient:
             )
         return response
 
-    def send_request(self, payload: GatewayChatRequest) -> Union[GatewayResponse, Dict[str, Any], Generator[GatewayStreamChunk, None, None]]:
+    def send_request(self, payload: GatewayChatRequest) -> Union[GatewayResponse, Dict[str, Any], Generator[Union[GatewayStreamChunk, Dict[str, Any]], None, None]]:
         # Chuyển Pydantic Model thành JSON Dict
         json_data = payload.model_dump(exclude_none=True)
 
@@ -109,6 +109,9 @@ class GatewayLLMClient:
                         if data_str == "[DONE]":
                             break
                         chunk_dict = json.loads(data_str)
+                        if isinstance(chunk_dict, dict) and chunk_dict.get("object") == "agent_stream_event":
+                            yield chunk_dict
+                            continue
                         if isinstance(chunk_dict, dict) and chunk_dict.get("status") in {
                             "WAITING",
                             "WAITING_FOR_CONNECTION",
