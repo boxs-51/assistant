@@ -37,7 +37,7 @@ function markPreparationUnavailable(paths, onStateChange) {
 function preparePaths(paths, onStateChange) {
   if (!paths.length) return;
   if (window.pywebview?.api?.prepare_files_async) {
-    window.pywebview.api.prepare_files_async(paths).catch((error) => {
+    Promise.resolve(window.pywebview.api.prepare_files_async(paths)).catch((error) => {
       paths.forEach((path) => {
         const item = attachedFilesMap.get(path);
         if (!item) return;
