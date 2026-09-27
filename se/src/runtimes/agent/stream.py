@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ...domain.schemas.event import BaseEvent
 from .contracts.events import AgentEventName
@@ -30,6 +30,22 @@ class AgentStreamEvent(BaseModel):
     channel: Literal["response", "tool"]
     data: dict[str, Any] = Field(default_factory=dict)
 
+    @model_validator(mode="after")
+    def require_tool_purpose(self) -> "AgentStreamEvent":
+        calls = (
+            [self.data]
+            if self.channel == "tool"
+            else self.data.get("tool_calls", [])
+        )
+        if not isinstance(calls, list) or any(
+            not isinstance(call, dict)
+            or not isinstance(call.get("purpose"), str)
+            or not call["purpose"].strip()
+            for call in calls
+        ):
+            raise ValueError("Every public tool call requires a non-empty purpose")
+        return self
+
 
 def project_agent_event(event: BaseEvent) -> AgentStreamEvent:
     correlation = event.payload.get("correlation") or {}
@@ -48,7 +64,11 @@ def project_agent_event(event: BaseEvent) -> AgentStreamEvent:
         }
     elif name == AgentEventName.PROGRESS:
         channel = "response"
-        data = {"content": str(event.payload.get("content") or ""), "final": False}
+        data = {
+            "content": str(event.payload.get("content") or ""),
+            "tool_calls": event.payload.get("tool_calls") or [],
+            "final": False,
+        }
     else:
         raise ValueError(f"Unsupported public agent event: {name}")
     return AgentStreamEvent(

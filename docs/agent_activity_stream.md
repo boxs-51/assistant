@@ -16,7 +16,16 @@ An intermediate response looks like:
   "execution_id": "exec-1",
   "turn_id": "turn_...",
   "channel": "response",
-  "data": {"content": "I will load the skill first.", "final": false}
+  "data": {
+    "content": "I will load the skill first.",
+    "tool_calls": [{
+      "tool_call_id": "call-1",
+      "name": "skill.load",
+      "purpose": "Load instructions for skill web-research",
+      "arguments": {"skill_id": "web-research"}
+    }],
+    "final": false
+  }
 }
 ```
 
@@ -45,7 +54,9 @@ A tool event looks like:
 Tool status progresses through `requested`, `started`, and `completed` or
 `failed`. The same `execution_id` and `tool_call_id` identify updates to one
 tool call. The `response` channel carries assistant text supplied alongside
-tool calls, when the model provides it. An execution can alternate response,
+tool calls, when the model provides it. A response containing tool calls always
+includes a nonempty `purpose` for each call, even when the model supplies no
+text. An execution can alternate response,
 tool events, response, and more tool events. No lifecycle or private model
 reasoning is sent to the UI.
 

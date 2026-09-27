@@ -1830,15 +1830,6 @@ class AgentRuntime:
                 )
 
                 transcript.append(response.message)
-                if response.message.tool_calls:
-                    public_progress = _extract_text(response.message.content).strip()
-                    if public_progress:
-                        await self._publish(
-                            AgentEventName.PROGRESS,
-                            context,
-                            iteration=iteration_number,
-                            payload={"content": public_progress},
-                        )
                 total_usage = _add_usage(total_usage, response.usage)
                 context.usage = total_usage
 
@@ -1904,22 +1895,53 @@ class AgentRuntime:
                 await self._persist_iteration(record)
                 iteration_id = f"{record.execution_id}:iteration:{record.iteration}"
                 tool_activities: dict[str, dict[str, Any]] = {}
+                assistant_text = _extract_text(response.message.content).strip()
                 for request in tool_requests:
                     tool_definition = next(
-                        (item for item in snapshot.tools if item.name == request.capability_id),
+                        (
+                            item for item in snapshot.tools
+                            if (
+                                item.get("name") if isinstance(item, Mapping)
+                                else getattr(item, "name", None)
+                            ) == request.capability_id
+                        ),
                         None,
+                    )
+                    description = (
+                        tool_definition.get("description")
+                        if isinstance(tool_definition, Mapping)
+                        else getattr(tool_definition, "description", None)
                     )
                     purpose = (
                         f"Load instructions for skill {request.arguments.get('skill_id', '')}"
                         if request.capability_id == "skill.load"
-                        else (tool_definition.description if tool_definition else request.capability_id)
+                        else (assistant_text or description or f"Use {request.capability_id}")
                     )
                     activity = {
                         "capability_id": request.capability_id,
-                        "purpose": purpose,
+                        "purpose": str(purpose).strip()[:500] or f"Use {request.capability_id}",
                         "arguments": _public_tool_arguments(request.arguments),
                     }
                     tool_activities[request.tool_call_id] = activity
+                await self._publish(
+                    AgentEventName.PROGRESS,
+                    context,
+                    iteration=iteration_number,
+                    payload={
+                        "content": assistant_text,
+                        "tool_calls": [
+                            {
+                                "tool_call_id": request.tool_call_id,
+                                "name": request.capability_id,
+                                "purpose": tool_activities[request.tool_call_id]["purpose"],
+                                "arguments": tool_activities[request.tool_call_id]["arguments"],
+                            }
+                            for request in tool_requests
+                        ],
+                    },
+                )
+                for request in tool_requests:
+                    activity = tool_activities[request.tool_call_id]
                     await self._publish(
                         AgentEventName.TOOL_REQUESTED,
                         context,

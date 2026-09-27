@@ -7,7 +7,7 @@ import pytest
 
 from se.src.domain.schemas.event import BaseEvent
 from se.src.domain.schemas.identity import Identity
-from se.src.runtimes.agent.stream import AGENT_STREAM_EVENT_NAMES
+from se.src.runtimes.agent.stream import AGENT_STREAM_EVENT_NAMES, AgentStreamEvent
 from se.src.transport.gateway.api.v1.chat_router import chat_completions_proxy
 
 
@@ -62,6 +62,7 @@ class _SseBus:
                             turn_id="other-turn",
                             payload={"correlation": {"execution_id": "other"}},
                         ))
+                        progress_count = 0
                         for name in (
                             "agent.inference.requested",
                             "agent.progress",
@@ -71,6 +72,8 @@ class _SseBus:
                             "agent.progress",
                             "agent.execution.completed",
                         ):
+                            if name == "agent.progress":
+                                progress_count += 1
                             await self._emit(BaseEvent(
                                 event_name=name,
                                 session_id=event.session_id,
@@ -80,7 +83,16 @@ class _SseBus:
                                     "capability_id": "skill.load",
                                     "purpose": "Load instructions for skill web-research",
                                     "arguments": {"skill_id": "web-research"},
-                                    "content": "I will load the skill first." if name == "agent.progress" else None,
+                                    "content": (
+                                        "I will load the skill first."
+                                        if progress_count == 1 else "The skill is ready."
+                                    ) if name == "agent.progress" else None,
+                                    "tool_calls": ([{
+                                        "tool_call_id": "call-1",
+                                        "name": "skill.load",
+                                        "purpose": "Load instructions for skill web-research",
+                                        "arguments": {"skill_id": "web-research"},
+                                    }] if progress_count == 1 else []) if name == "agent.progress" else None,
                                 },
                             ))
                     await self._emit(
@@ -120,6 +132,27 @@ class _SseBus:
 
         self.tasks.append(asyncio.create_task(run()))
         return future
+
+
+def test_tool_activity_dto_requires_purpose():
+    with pytest.raises(ValueError, match="non-empty purpose"):
+        AgentStreamEvent(
+            event_id="event-1",
+            event_type="agent.tool.requested",
+            timestamp=1.0,
+            execution_id="exec-1",
+            channel="tool",
+            data={"tool_call_id": "call-1", "purpose": ""},
+        )
+    with pytest.raises(ValueError, match="non-empty purpose"):
+        AgentStreamEvent(
+            event_id="event-2",
+            event_type="agent.response",
+            timestamp=1.0,
+            execution_id="exec-1",
+            channel="response",
+            data={"content": "", "tool_calls": [{"name": "skill.load"}]},
+        )
 
 
 @pytest.mark.asyncio
@@ -196,7 +229,19 @@ async def test_agent_activity_is_separate_from_final_chunk_and_scoped_to_turn():
     ]
     assert all(item["execution_id"] == "exec-1" for item in activities)
     assert activities[0]["channel"] == "response"
-    assert activities[0]["data"] == {"content": "I will load the skill first.", "final": False}
+    assert activities[0]["data"] == {
+        "content": "I will load the skill first.",
+        "tool_calls": [{
+            "tool_call_id": "call-1",
+            "name": "skill.load",
+            "purpose": "Load instructions for skill web-research",
+            "arguments": {"skill_id": "web-research"},
+        }],
+        "final": False,
+    }
+    assert activities[-1]["data"] == {
+        "content": "The skill is ready.", "tool_calls": [], "final": False,
+    }
     assert activities[1]["data"] == {
         "tool_call_id": "call-1",
         "name": "skill.load",

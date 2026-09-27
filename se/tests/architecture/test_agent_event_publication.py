@@ -57,15 +57,16 @@ class Tools:
 
 
 class ToolInference:
-    def __init__(self):
+    def __init__(self, content="Preparing calculator"):
         self.calls = 0
+        self.content = content
 
     async def complete(self, request):
         self.calls += 1
         message = (
             InferenceMessage(
                 role="assistant",
-                content="Preparing calculator",
+                content=self.content,
                 tool_calls=(
                     InferenceToolCall(
                         id="call-1",
@@ -198,11 +199,33 @@ async def test_tool_lifecycle_events_are_published():
     assert tool_event.correlation.invocation_id
     progress = next(event for event in publisher.events if event.event_name == AgentEventName.PROGRESS)
     assert progress.payload["content"] == "Preparing calculator"
+    assert progress.payload["tool_calls"] == [{
+        "tool_call_id": "call-1",
+        "name": "calculator.add",
+        "purpose": "Preparing calculator",
+        "arguments": {"left": 1},
+    }]
     for event in publisher.events:
         if event.event_name.startswith("agent.tool."):
             assert event.payload["capability_id"] == "calculator.add"
             assert event.payload["arguments"] == {"left": 1}
             assert event.payload["purpose"]
+
+
+@pytest.mark.asyncio
+async def test_tool_call_without_assistant_text_still_has_a_described_response():
+    publisher = Publisher()
+    runtime = AgentRuntime(
+        context_builder=ContextBuilder(),
+        inference=ToolInference(content=None),
+        tool_execution=ToolPort(),
+        execution_policy=DefaultAgentExecutionPolicy(),
+        event_publisher=publisher,
+    )
+    await runtime.execute(make_context())
+    response = next(event for event in publisher.events if event.event_name == AgentEventName.PROGRESS)
+    assert response.payload["content"] == ""
+    assert response.payload["tool_calls"][0]["purpose"] == "Use calculator.add"
 
 
 def test_public_tool_arguments_redact_nested_secrets():
