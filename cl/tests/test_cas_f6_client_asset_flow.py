@@ -214,6 +214,27 @@ def test_online_prepare_uploads_asset_and_emits_canonical_payload_only():
     assert "provider_file_id" not in event["payload"]
 
 
+def test_online_prepare_surfaces_upload_failure_without_legacy_fallback(monkeypatch):
+    bridge, gateway, _runtime = _bridge()
+    js_calls = []
+    bridge._eval_js = js_calls.append
+    monkeypatch.setattr(
+        gateway,
+        "upload_asset",
+        lambda _path: (_ for _ in ()).throw(RuntimeError("upload failed")),
+    )
+    encoded = []
+    monkeypatch.setattr(bridge.encoder, "encode_async", lambda files: encoded.extend(files))
+
+    bridge._upload_asset_worker("C:/tmp/broken.txt")
+
+    assert encoded == []
+    error_call = next(call for call in js_calls if "onFilePrepareError" in call)
+    event = json.loads(error_call[error_call.index("(") + 1: error_call.rindex(")")])
+    assert event["path"] == "C:/tmp/broken.txt"
+    assert "upload failed" in event["error"]
+
+
 def test_local_offline_file_preparation_preserves_file_encoder(monkeypatch):
     bridge, gateway, _runtime = _bridge()
     encoded = []
