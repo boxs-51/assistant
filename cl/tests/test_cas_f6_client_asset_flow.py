@@ -267,6 +267,44 @@ def test_authenticated_asset_content_resolution_is_transient_base64():
     assert gateway.content_calls == [("asset-1", None)]
 
 
+def test_bounded_media_content_read_allows_small_asset():
+    bridge, gateway, _runtime = _bridge()
+
+    result = bridge.read_asset_content(
+        "asset-1",
+        max_bytes=32 * 1024 * 1024,
+    )
+
+    assert result["success"] is True
+    assert gateway.metadata_calls == ["asset-1"]
+    assert gateway.content_calls == [("asset-1", None)]
+
+
+def test_bounded_media_content_read_rejects_oversized_before_body(monkeypatch):
+    bridge, gateway, _runtime = _bridge()
+    monkeypatch.setattr(
+        gateway,
+        "asset_metadata",
+        lambda asset_id: {
+            "asset_id": asset_id,
+            "filename": "large.mp4",
+            "mime_type": "video/mp4",
+            "size_bytes": (32 * 1024 * 1024) + 1,
+            "state": "READY",
+            "uri": f"asset://{asset_id}",
+        },
+    )
+
+    result = bridge.read_asset_content(
+        "asset-1",
+        max_bytes=32 * 1024 * 1024,
+    )
+
+    assert result["success"] is False
+    assert "bounded in-memory content limit" in result["error"]
+    assert gateway.content_calls == []
+
+
 def test_submit_prompt_sends_canonical_attachment_online(monkeypatch):
     bridge, _gateway, runtime = _bridge()
 
@@ -336,6 +374,8 @@ def test_ui_source_freezes_partial_failure_retry_and_canonical_rendering():
     assert "createCanonicalAssetObjectUrl" in media_block
     assert "case \'file\':" in console_js
     assert "canonical-media-load" in media_block
+    assert "MAX_CANONICAL_MEDIA_INLINE_BYTES" in media_block
+    assert "maxBytes" in app
     assert "TextDecoder" in file_block
 
 
@@ -881,6 +921,7 @@ globalThis.downloadCalls = [];
 
 const textBase64 = Buffer.from("hello ✓", "utf8").toString("base64");
 let mediaResolveCalls = 0;
+let mediaResolveOptions = null;
 globalThis.window = {
   async resolveCanonicalAssetContent() {
     return {
@@ -888,8 +929,9 @@ globalThis.window = {
       mime_type: "text/plain; charset=utf-8"
     };
   },
-  async createCanonicalAssetObjectUrl() {
+  async createCanonicalAssetObjectUrl(_attachment, options) {
     mediaResolveCalls += 1;
+    mediaResolveOptions = options;
     return { url: "blob:canonical-media", content: { mime_type: "video/mp4" } };
   }
 };
@@ -942,6 +984,10 @@ const loadButton = mediaBlock.querySelector(".canonical-media-load");
 const player = mediaBlock.querySelector(".custom-video-player");
 await loadButton.trigger("click");
 assert(mediaResolveCalls === 1, "explicit load must resolve once");
+assert(
+  mediaResolveOptions && mediaResolveOptions.maxBytes === 33554432,
+  "canonical media load must pass the fixed 32 MiB in-memory bound"
+);
 assert(player.src === "blob:canonical-media", "resolved media must attach on demand");
 assert((player.loadCalls || 0) === 1, "player must load once");
 
