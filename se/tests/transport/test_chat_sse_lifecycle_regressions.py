@@ -62,7 +62,15 @@ class _SseBus:
                             turn_id="other-turn",
                             payload={"correlation": {"execution_id": "other"}},
                         ))
-                        for name in ("agent.inference.requested", "agent.tool.requested", "agent.tool.started", "agent.tool.completed"):
+                        for name in (
+                            "agent.inference.requested",
+                            "agent.progress",
+                            "agent.tool.requested",
+                            "agent.tool.started",
+                            "agent.tool.completed",
+                            "agent.progress",
+                            "agent.execution.completed",
+                        ):
                             await self._emit(BaseEvent(
                                 event_name=name,
                                 session_id=event.session_id,
@@ -72,6 +80,7 @@ class _SseBus:
                                     "capability_id": "skill.load",
                                     "purpose": "Load instructions for skill web-research",
                                     "arguments": {"skill_id": "web-research"},
+                                    "content": "I will load the skill first." if name == "agent.progress" else None,
                                 },
                             ))
                     await self._emit(
@@ -159,6 +168,10 @@ async def test_sse_bridge_emits_chunk_done_and_unsubscribes():
 
 @pytest.mark.asyncio
 async def test_agent_activity_is_separate_from_final_chunk_and_scoped_to_turn():
+    assert AGENT_STREAM_EVENT_NAMES == (
+        "agent.progress", "agent.tool.requested", "agent.tool.started",
+        "agent.tool.completed", "agent.tool.failed",
+    )
     bus = _SseBus(agent_activity=True)
     request = _Request({
         "model": "mock",
@@ -178,9 +191,12 @@ async def test_agent_activity_is_separate_from_final_chunk_and_scoped_to_turn():
     payloads = [json.loads(part[6:]) for part in frames if part.startswith("data: {")]
     activities = [item for item in payloads if item.get("object") == "agent_stream_event"]
     assert [item["event_type"] for item in activities] == [
-        "agent.inference.requested", "agent.tool.requested", "agent.tool.started", "agent.tool.completed",
+        "agent.response", "agent.tool.requested", "agent.tool.started",
+        "agent.tool.completed", "agent.response",
     ]
     assert all(item["execution_id"] == "exec-1" for item in activities)
+    assert activities[0]["channel"] == "response"
+    assert activities[0]["data"] == {"content": "I will load the skill first.", "final": False}
     assert activities[1]["data"] == {
         "tool_call_id": "call-1",
         "name": "skill.load",

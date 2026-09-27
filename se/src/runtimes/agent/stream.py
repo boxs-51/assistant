@@ -1,4 +1,4 @@
-"""Public, bounded projection of Agent lifecycle events for chat SSE."""
+"""Public assistant responses and tool calls for chat SSE."""
 from __future__ import annotations
 
 from typing import Any, Literal
@@ -10,22 +10,11 @@ from .contracts.events import AgentEventName
 
 
 AGENT_STREAM_EVENT_NAMES = (
-    AgentEventName.EXECUTION_CREATED,
-    AgentEventName.EXECUTION_STARTED,
-    AgentEventName.CONTEXT_READY,
-    AgentEventName.ITERATION_STARTED,
-    AgentEventName.INFERENCE_REQUESTED,
-    AgentEventName.INFERENCE_COMPLETED,
-    AgentEventName.ITERATION_COMPLETED,
     AgentEventName.PROGRESS,
     AgentEventName.TOOL_REQUESTED,
     AgentEventName.TOOL_STARTED,
     AgentEventName.TOOL_COMPLETED,
     AgentEventName.TOOL_FAILED,
-    AgentEventName.EXECUTION_COMPLETED,
-    AgentEventName.EXECUTION_FAILED,
-    AgentEventName.EXECUTION_CANCELLED,
-    AgentEventName.EXECUTION_TIMEOUT,
 )
 
 
@@ -38,7 +27,7 @@ class AgentStreamEvent(BaseModel):
     timestamp: float
     execution_id: str
     turn_id: str | None = None
-    channel: Literal["lifecycle", "progress", "tool"]
+    channel: Literal["response", "tool"]
     data: dict[str, Any] = Field(default_factory=dict)
 
 
@@ -58,19 +47,13 @@ def project_agent_event(event: BaseEvent) -> AgentStreamEvent:
             "error_code": event.payload.get("error_code"),
         }
     elif name == AgentEventName.PROGRESS:
-        channel = "progress"
-        data = {"content": str(event.payload.get("content") or "")[:1000]}
+        channel = "response"
+        data = {"content": str(event.payload.get("content") or ""), "final": False}
     else:
-        channel = "lifecycle"
-        data = {
-            "status": name.rsplit(".", 1)[-1],
-            "capability_ids": event.payload.get("capability_ids") if name == AgentEventName.CONTEXT_READY else None,
-            "skill_ids": event.payload.get("skill_ids") if name == AgentEventName.CONTEXT_READY else None,
-            "error_code": event.payload.get("error_code"),
-        }
+        raise ValueError(f"Unsupported public agent event: {name}")
     return AgentStreamEvent(
         event_id=event.event_id,
-        event_type=name,
+        event_type="agent.response" if name == AgentEventName.PROGRESS else name,
         timestamp=event.timestamp,
         execution_id=str(correlation.get("execution_id") or ""),
         turn_id=event.turn_id,

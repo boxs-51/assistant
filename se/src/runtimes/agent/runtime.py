@@ -1736,16 +1736,6 @@ class AgentRuntime:
                     timeout_seconds=context.remaining_iteration_seconds,
                 )
 
-                await self._publish(
-                    AgentEventName.CONTEXT_READY,
-                    context,
-                    iteration=iteration_number,
-                    payload={
-                        "capability_ids": [item.name for item in snapshot.tools],
-                        "skill_ids": list(snapshot.metadata.get("skill_ids", ())),
-                    },
-                )
-
                 # The first snapshot contains the authoritative session/system
                 # history. Seed the canonical transcript exactly once.
                 if (
@@ -1840,8 +1830,8 @@ class AgentRuntime:
                 )
 
                 transcript.append(response.message)
-                if response.message.tool_calls and isinstance(response.message.content, str):
-                    public_progress = response.message.content.strip()
+                if response.message.tool_calls:
+                    public_progress = _extract_text(response.message.content).strip()
                     if public_progress:
                         await self._publish(
                             AgentEventName.PROGRESS,

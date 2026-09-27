@@ -141,7 +141,6 @@ async def test_agent_runtime_publishes_lifecycle_events():
     assert names == [
         AgentEventName.EXECUTION_STARTED,
         AgentEventName.ITERATION_STARTED,
-        AgentEventName.CONTEXT_READY,
         AgentEventName.INFERENCE_REQUESTED,
         AgentEventName.INFERENCE_COMPLETED,
         AgentEventName.ITERATION_COMPLETED,
@@ -190,6 +189,7 @@ async def test_tool_lifecycle_events_are_published():
     assert AgentEventName.PROGRESS in names
     assert AgentEventName.TOOL_STARTED in names
     assert AgentEventName.TOOL_COMPLETED in names
+    assert names.index(AgentEventName.PROGRESS) < names.index(AgentEventName.TOOL_REQUESTED)
     tool_event = next(
         event for event in publisher.events
         if event.event_name == AgentEventName.TOOL_COMPLETED
