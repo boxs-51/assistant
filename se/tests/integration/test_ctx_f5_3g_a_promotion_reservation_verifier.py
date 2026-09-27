@@ -96,8 +96,10 @@ async def test_ctx_f5_3g_a_same_session_verify_is_non_consuming_and_caller_owned
             await session.commit()
 
             verifier = DurablePromotionReservationVerifier(repository)
-            await verifier.verify(reservation=reservation, intent=intent)
+            transaction = await session.begin()
             assert session.in_transaction()
+
+            await verifier.verify(reservation=reservation, intent=intent)
             await verifier.verify(reservation=reservation, intent=intent)
 
             current = await repository.get(authority_id)
@@ -105,7 +107,8 @@ async def test_ctx_f5_3g_a_same_session_verify_is_non_consuming_and_caller_owned
             assert current.state is DurablePromotionReservationState.ISSUED
             assert session.in_transaction()
 
-            await session.rollback()
+            await transaction.rollback()
+            assert not session.in_transaction()
 
         async with sessions() as session:
             current = await DurablePromotionReservationRepository(session).get(
