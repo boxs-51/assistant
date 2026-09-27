@@ -268,6 +268,7 @@ class DurablePromotionReservationRepository:
                 PromotionReservationRow.promotion_authority_id == authority_id
             )
             .limit(1)
+            .execution_options(populate_existing=True)
         )
         if row is None:
             return None
