@@ -277,14 +277,27 @@ The active desktop Web UI submission ownership chain at this baseline is:
 cl/src/ui/web/js/app.js
   -> cl/src/ui/web/js/components/inputFrame.js
   -> cl/src/ui/web/js/components/inputFrame/fileManager.js
+     -> current baseline preparation:
+        window.pywebview.api.encode_files_async(...)
+        -> cl/src/ui/bridge.py::UIBridge.encode_files_async
+        -> cl/src/ui/encoder.py::FileEncoder.encode_async/_worker
+        -> local bytes -> base64 payload -> onFileEncodeComplete(...)
   -> window.pywebview.api.submit_prompt(...)
   -> cl/src/ui/bridge.py::UIBridge.submit_prompt
-  -> ONLINE: canonical GatewayChatRequest / client runtime
-     LOCAL_OFFLINE: cl/src/core/agent_engine.py::run_agent_session
+  -> ONLINE: canonical /v1/assets upload result -> GatewayAttachment -> GatewayChatRequest / client runtime
+     LOCAL_OFFLINE: retain FileEncoder/base64 compatibility
+                    -> cl/src/core/agent_engine.py::run_agent_session
                     -> process_attached_files(...)
 ```
 
 The first production slice must own this chain coherently enough to implement canonical upload, per-file READY/FAILED state, explicit retry/continue semantics and canonical attachment submission without stepping outside its declared file matrix.
+
+The F6 production split is frozen as follows:
+
+- **ONLINE canonical DIRECT/AGENT path:** selected local files MUST be uploaded through authenticated `POST /v1/assets`; canonical send state is built from READY AssetDescriptor/GatewayAttachment values. The ONLINE canonical path MUST bypass the legacy `FileEncoder` base64 transformation and MUST NOT persist or submit its `b64_data` as canonical attachment identity.
+- **LOCAL_OFFLINE compatibility path:** `cl/src/ui/encoder.py::FileEncoder` remains the existing local/base64 preparation mechanism unless a later separately released stage changes it. F6 does not require changing offline base64 behavior.
+- Therefore `cl/src/ui/encoder.py` is an active baseline owner but is classified `COMPATIBILITY / EXPECT NO CHANGE` for the first F6 production slice. Client/UI wiring around it may change so ONLINE bypasses it while LOCAL_OFFLINE continues to use it.
+- If implementation proves that `encoder.py` itself must change rather than be bypassed for ONLINE, the production CLAIM must re-audit that scope before editing it.
 
 The first production slice is expected to add canonical asset operations to `GatewayLLMClient` while retaining legacy file methods in parallel.
 
@@ -370,7 +383,8 @@ This is the candidate matrix for the first production CLAIM. It is not a product
 | `cl/src/ui/web/js/app.js` | application submit caller that bridges input-frame payloads to `UIBridge.submit_prompt` | EXPECTED CHANGE / WIRING OWNER |
 | `cl/src/ui/web/js/components/inputFrame.js` | selected-file queue submission, send gating, retry/restore orchestration | EXPECTED CHANGE |
 | `cl/src/ui/web/js/components/inputFrame/fileManager.js` | per-file upload state, progress, READY/FAILED payload ownership | EXPECTED CHANGE |
-| `cl/src/ui/bridge.py` | pywebview submission boundary; ONLINE DIRECT/AGENT attachment acceptance and canonical request construction | EXPECTED CHANGE |
+| `cl/src/ui/bridge.py` | pywebview upload/submission boundary; routes ONLINE canonical upload vs LOCAL_OFFLINE compatibility | EXPECTED CHANGE |
+| `cl/src/ui/encoder.py` | active baseline local-file -> base64 FileEncoder used by LOCAL_OFFLINE compatibility; ONLINE canonical path bypasses it | COMPATIBILITY / EXPECT NO CHANGE |
 | `cl/src/core/agent_engine.py` | local/offline request-building caller that currently consumes `attached_files` through `process_attached_files` | EXPECTED CHANGE / COMPATIBILITY OWNER |
 | `cl/src/ui/web/js/components/console/normalizer.js` | preserve canonical asset identity | EXPECTED CHANGE |
 | `cl/src/ui/web/js/components/console/blocks/fileBlock.js` | authenticated canonical content resolution for view/download | EXPECTED CHANGE |
