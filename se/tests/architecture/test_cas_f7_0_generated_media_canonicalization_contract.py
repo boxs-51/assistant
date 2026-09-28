@@ -24,7 +24,7 @@ def test_replacement_contract_is_zero_production_and_current_main_locked():
     for phrase in (
         "main@ecb7e5dc5c61aba9772d9f6ebfec303ce8a01755",
         "production/runtime/schema/migration delta = ZERO",
-        "first future production slice = F7-P1 / PROVIDER-RESPONSE MEDIA ONLY",
+        "first future production slice = F7-P1 / NON-STREAM PROVIDER-RESPONSE MEDIA ONLY",
         "CAS-F7-P1 production CLAIM = CLOSED",
         "tool-generated media production = DEFERRED / CLOSED",
         "CAS-F8 = CLOSED",
@@ -207,20 +207,26 @@ def test_f7_p1_freezes_one_ingest_attempt_no_internal_retry():
         assert phrase in document
 
 
-def test_streaming_requires_terminal_complete_bounded_object():
+def test_streaming_generated_media_is_explicitly_deferred_from_first_slice():
     handler = _read("se/src/provider/handlers/chat_handler.py")
+    gemini = _read("se/src/provider/gemini/converters/chats/response.py")
+
     assert "async def stream_with_fallback(" in handler
-    assert "stream_started = False" in handler
-    assert "stream_started = True" in handler
+    assert 'candidate = obj["candidates"][0]' in gemini
+    assert 'type="url"' in gemini
+    assert "UrlContent(url=url_str, crawl=True)" in gemini
 
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
+        "The initial F7-P1 production slice is non-stream only.",
+        "F7-S streaming generated media = DEFERRED / CLOSED",
+        "selects only obj[\"candidates\"][0]",
+        "extensionless Gemini fileData.fileUri may be lowered to generic UrlContent",
+        "no streaming generated-media response is eligible for CAS canonicalization under the first F7-P1 production slice",
+        "MUST NOT rely on a downstream canonicalizer to reconstruct candidate cardinality or media identity",
+        "REQUIRED future F7-S change before streaming generated media may open",
         "partial provider chunk != terminal generated object != durable FileAsset authority",
         "public Agent response/tool activity event != generated object commitment authority",
-        "object completion",
-        "deterministic object boundary within the response",
-        "content size not exceeding configured AssetStorageSettings.max_upload_bytes",
-        "No partially assembled FileAsset may become READY or model/history visible.",
         "MUST NOT trigger provider fallback/regeneration",
     ):
         assert phrase in document
@@ -341,7 +347,7 @@ def test_future_path_matrix_is_explicit_and_zero_production():
     for phrase in (
         "This is a future production-candidate map, not a production grant.",
         "EXPECTED NEW / production authority not released",
-        "shared post-provider response hook and terminal no-fallback boundary",
+        "non-stream post-provider response hook and terminal no-fallback boundary",
         "NO CHANGE in F7-P1",
         "NO CHANGE / NOT ASSET COMMITMENT AUTHORITY",
         "No production file in this table may be edited under F7-0 authority.",
