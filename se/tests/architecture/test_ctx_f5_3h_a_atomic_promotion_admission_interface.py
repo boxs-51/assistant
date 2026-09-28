@@ -113,7 +113,7 @@ def test_ctx_f5_3h_a_freezes_issued_split_brain_and_consumed_read_only_replay():
 
     for phrase in (
         "ISSUED + existing durable Memory => ADMISSION_MEMORY_REPLAY_CONFLICT",
-        "no healing",
+        'no "healing"',
         "This path is strictly read-only",
         "It must NOT call MemoryRecordRepository.put(...)",
         "ADMISSION_CONSUMED_MEMORY_MISSING",
