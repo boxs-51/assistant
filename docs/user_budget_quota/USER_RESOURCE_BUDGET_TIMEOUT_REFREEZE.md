@@ -130,6 +130,49 @@ AE-R10 retry/fallback semantics remain authoritative. A logical provider call ma
 
 ---
 
+## 3A. Exact-head implementation inventory
+
+**Inventory baseline:** `main@206334044308a532f70384a1eeb4860cc9439f86`  
+**Scope:** executable production/client surfaces plus immutable SQL migrations. Historical docs/tests are evidence but are not counted as live authority in this inventory.
+
+This inventory freezes where the existing TaskBudget and timeout/deadline semantics are consumed before any UBQ production migration. A later stage MUST re-run this inventory against its exact claimed main.
+
+### 3A.1 TaskBudget authority and consumers
+
+| Surface | Exact current-head paths | UBQ-0 disposition |
+|---|---|---|
+| Domain representation | `se/src/domain/schemas/task_budget.py` | **MIGRATE later**; current TaskBudget representation remains executable compatibility authority |
+| SQL model/repository | `se/src/infrastructure/storage/models/sql/agent/task_budget.py`, `se/src/infrastructure/storage/models/sql/agent/__init__.py`, `se/src/infrastructure/storage/repositories/agent.py` | **MIGRATE later**; no destructive change in UBQ-0 |
+| Immutable migrations | `se/src/infrastructure/storage/migrations/sql/versions/11a_r5_task_budget.py`, `12a_r6_remote_reconciliation.py`, `14b_r8_root_branch_accounting.py` | **KEEP** immutable history |
+| Configuration / composition root | `se/src/infrastructure/config/schemas.py`, `se/src/infrastructure/config/__init__.py`, `se/src/application/container.py`, `se/src/main.py` | **MIGRATE later** through dual accounting/DI |
+| TaskBudget service/runtime | `se/src/runtimes/agent/task_budget.py`, `se/src/runtimes/agent/runtime.py`, `se/src/runtimes/agent/coordinator.py`, `se/src/runtimes/agent/persistence.py`, `se/src/runtimes/agent/waiting_checkpoint.py`, `se/src/runtimes/agent/__init__.py` | **MIGRATE later**; existing execution semantics remain active |
+| Fork/retry/branch/aggregate contracts | `se/src/runtimes/agent/contracts/fork.py`, `retry.py`, `branch_resolution.py`, `aggregate.py`, `se/src/runtimes/agent/fork_planning.py`, `retry_planning.py` | **KEEP semantics / MIGRATE resource authority later** |
+| Capability / nested Agent path | `se/src/runtimes/capability/drivers/agent_driver.py` | **MIGRATE later**; nested work cannot mint UBQ |
+| GC / retention | `se/src/runtimes/agent/gc_dry_run.py`, `se/src/runtimes/agent/gc_executor.py` | **KEEP until durable UBQ retention contract exists** |
+| Gateway multi-Agent path | `se/src/transport/gateway/api/v1/multi_agent_router.py` | **MIGRATE later** if it projects TaskBudget state/resource data |
+
+The current TaskBudget system therefore remains a cross-cutting compatibility authority. UBQ-0 does not rename, remove, rewrite, or reinterpret persisted TaskBudget rows.
+
+### 3A.2 Timeout/deadline authority and call sites
+
+| Surface | Exact current-head paths | Frozen boundary |
+|---|---|---|
+| Server DTO/request limits | `se/src/domain/schemas/agent_execution.py`, `se/src/domain/schemas/request.py`, `se/src/domain/schemas/capability.py`, `se/src/infrastructure/config/schemas.py`, `se/src/main.py` | current `AgentExecutionLimits` and `timeout_seconds` fields remain compatibility API |
+| Agent runtime/context | `se/src/runtimes/agent/contracts/context.py`, `policy.py`, `inference.py`, `se/src/runtimes/agent/runtime.py`, `coordinator.py`, `persistence.py`, `resume_planning.py`, `fork_planning.py`, `retry_planning.py`, `task_budget.py`, `system_prompt.py` | execution/iteration/task time controls are guards/deadlines, not renewable quota |
+| Agent adapters/tool errors | `se/src/runtimes/agent/adapters/inference.py`, `se/src/runtimes/agent/adapters/tool.py`, `se/src/runtimes/agent/tool_execution/errors.py`, `se/src/runtimes/agent/tool_execution/__init__.py` | legacy timeout/error codes remain compatibility surfaces until UBQ-5 |
+| Provider logical-call deadline | `se/src/provider/retry_contracts.py`, `se/src/provider/executor.py`, `se/src/provider/policies/retry.py`, `se/src/provider/handlers/base.py`, `se/src/provider/handlers/chat_handler.py` | AE-R10 remains owner of retry/fallback and `ProviderCallBudget` behavior |
+| Capability runtime/drivers | `se/src/runtimes/capability/runtime.py`, `composition.py`, `contracts/context.py`, `drivers/agent_driver.py`, `drivers/skill_driver.py` | current capability hard timeout remains executable compatibility behavior |
+| Workflow/Gateway response | `se/src/runtimes/workflow/runtime.py`, `se/src/transport/gateway/api/v1/chat_router.py`, `se/src/transport/gateway/api/v1/capability_router.py` | current Agent timeout projection and `GATEWAY_RESPONSE_TIMEOUT` remain public compatibility behavior |
+| Client DTO/runtime/UI | `cl/src/schemas/agent_execution.py`, `cl/src/schemas/request.py`, `cl/src/core/agent_engine.py`, `cl/src/core/tool_executor.py`, `cl/src/mcp_client/mcp_adapter.py`, `cl/src/ui/bridge.py` | client fields remain compatible until server/client migration is released together |
+
+Known executable timeout/error vocabulary at this baseline includes `AGENT_TASK_TIMEOUT`, `AGENT_EXECUTION_TIMEOUT`, `AGENT_ITERATION_TIMEOUT`, `AGENT_INFERENCE_TIMEOUT`, `AGENT_TOOL_TIMEOUT`, `AGENT_CONTEXT_TIMEOUT`, `CAPABILITY_TIMEOUT`, and `GATEWAY_RESPONSE_TIMEOUT`.
+
+### 3A.3 Inventory gate
+
+UBQ-1/UBQ-5 claims MUST fail closed if exact-main introduces a new TaskBudget consumer, timeout/deadline owner, or public error projection not dispositioned here. This inventory is evidence for UBQ-0 only; it is not permission to edit these production paths.
+
+---
+
 ## 4. Usage-window reset contract
 
 User resource quota resets through a durable **anchored usage window**.
@@ -684,29 +727,76 @@ Before UBQ can close:
 
 ---
 
-## 16. Error/result vocabulary to freeze at UBQ-0
+## 16. Frozen public/internal error vocabulary
 
-Proposed semantic codes:
+UBQ-0 freezes the vocabulary boundary below. These decisions are semantic/API authority for later stages; **UBQ-0 itself changes no executable error behavior**.
 
-```text
-USER_BUDGET_EXHAUSTED
-USER_COMPUTE_QUOTA_EXHAUSTED
-USER_TOKEN_QUOTA_EXHAUSTED
-USER_INFERENCE_QUOTA_EXHAUSTED
-USER_TOOL_QUOTA_EXHAUSTED
-USER_TOOL_CAPABILITY_QUOTA_EXHAUSTED
-USER_COST_QUOTA_EXHAUSTED
+### 16.1 Canonical future public quota codes
 
-PROVIDER_FIRST_RESPONSE_TIMEOUT
-PROVIDER_STREAM_IDLE_TIMEOUT
-PROVIDER_CALL_TIMEOUT
-TOOL_IDLE_TIMEOUT
-TOOL_CALL_TIMEOUT
-RESPONSE_IDLE_TIMEOUT
-RESPONSE_HARD_TIMEOUT
-```
+When UBQ becomes the admitting authority for the named resource, the public `error_code` MUST be one of:
 
-Exact public DTO/error mapping is not production-frozen until UBQ-0 audit.
+| Public `error_code` | Exact meaning |
+|---|---|
+| `USER_BUDGET_EXHAUSTED` | generic fallback only when a more specific exhausted dimension cannot be projected safely |
+| `USER_COMPUTE_QUOTA_EXHAUSTED` | normalized compute-unit admission failed |
+| `USER_TOKEN_QUOTA_EXHAUSTED` | token admission failed; API may add a structured token dimension without inventing another top-level code |
+| `USER_INFERENCE_QUOTA_EXHAUSTED` | logical inference-call admission failed |
+| `USER_TOOL_QUOTA_EXHAUSTED` | total logical tool-call quota admission failed |
+| `USER_TOOL_CAPABILITY_QUOTA_EXHAUSTED` | per-`capability_id` logical tool-call quota admission failed |
+| `USER_COST_QUOTA_EXHAUSTED` | optional normalized cost admission failed |
+
+The canonical public code is determined by the authority that actually denied admission. A Task, client, session, branch, execution, retry, reconnect, or lease expiry MUST NOT manufacture one of these codes unless UBQ admission rejected the resource.
+
+### 16.2 Canonical future public timeout codes
+
+When the corresponding explicit timeout is implemented under UBQ-5, public `error_code` is frozen as:
+
+| Public `error_code` | `timeout_scope` |
+|---|---|
+| `PROVIDER_FIRST_RESPONSE_TIMEOUT` | `provider_first_response` |
+| `PROVIDER_STREAM_IDLE_TIMEOUT` | `provider_stream_idle` |
+| `PROVIDER_CALL_TIMEOUT` | `provider_call` |
+| `TOOL_IDLE_TIMEOUT` | `tool_idle` |
+| `TOOL_CALL_TIMEOUT` | `tool_call` |
+| `RESPONSE_IDLE_TIMEOUT` | `response_idle` |
+| `RESPONSE_HARD_TIMEOUT` | `response_hard` |
+
+For timeout projections, `timeout_seconds` names the configured bound for the expired scope. Heartbeats do not change the semantic scope.
+
+### 16.3 Existing executable vocabulary disposition
+
+| Existing code/family on `main@2063340...` | Disposition | Exact rule |
+|---|---|---|
+| `TASK_BUDGET_ERROR` | **INTERNAL-ONLY / KEEP COMPAT** | base TaskBudget service exception; never becomes the canonical public UBQ exhaustion code |
+| `FORK_TASK_BUDGET_REQUIRED`, `FORK_TASK_BUDGET_CLOSED` and other fork TaskBudget rejection codes | **INTERNAL-ONLY / KEEP** | fork planning/structural rejection; not an alias for user quota exhaustion |
+| `RETRY_TASK_BUDGET_REQUIRED` and retry TaskBudget rejection codes | **INTERNAL-ONLY / KEEP** | retry planning/structural rejection; not an alias for user quota exhaustion |
+| `AGENT_TOOL_BUDGET_EXCEEDED` | **PUBLIC-COMPAT / KEEP LEGACY MEANING** | legacy Agent execution-local tool-call guard. It MUST NOT be silently redefined as user UBQ exhaustion. UBQ denial projects `USER_TOOL_QUOTA_EXHAUSTED` or `USER_TOOL_CAPABILITY_QUOTA_EXHAUSTED` |
+| `CAPABILITY_TIMEOUT` | **PUBLIC-COMPAT** | remains valid for the existing capability runtime. After explicit UBQ-5 migration, newly distinguished hard/idle tool timeout surfaces project `TOOL_CALL_TIMEOUT`/`TOOL_IDLE_TIMEOUT`; compatibility adapters may preserve the legacy code only as a legacy projection |
+| `CAPABILITY_EXECUTION_FAILED` | **KEEP** | generic capability execution failure; MUST NOT swallow a known UBQ exhaustion or canonical timeout scope |
+| `AGENT_TASK_TIMEOUT` | **PUBLIC-COMPAT / KEEP** | current Task wall-clock/lifecycle deadline projection; it is not a quota error and is not automatically renamed by UBQ |
+| `AGENT_EXECUTION_TIMEOUT` | **PUBLIC-COMPAT / KEEP** | current active-execution timeout/guard projection |
+| `AGENT_ITERATION_TIMEOUT` | **PUBLIC-COMPAT / KEEP** | current iteration timeout projection |
+| `AGENT_INFERENCE_TIMEOUT` | **PUBLIC-COMPAT / KEEP UNTIL UBQ-5** | current Agent inference timeout. Explicit provider first-response/idle/hard scopes supersede only when that migration is released |
+| `AGENT_TOOL_TIMEOUT` | **PUBLIC-COMPAT / KEEP UNTIL UBQ-5** | current Agent tool timeout. Explicit tool hard/idle scopes supersede only when released |
+| `AGENT_CONTEXT_TIMEOUT` | **PUBLIC-COMPAT / KEEP** | current context/iteration-derived timeout projection |
+| `GATEWAY_RESPONSE_TIMEOUT` | **PUBLIC-COMPAT / SUPERSEDE LATER** | current non-streaming Gateway response-wait timeout; explicit response idle/hard codes supersede it only after UBQ-5 response migration |
+
+### 16.4 Public projection invariants
+
+1. **No semantic aliasing across authorities.** TaskBudget structural rejection, UBQ quota denial, timeout expiry, retry exhaustion and generic capability failure remain distinguishable.
+2. **Specific beats generic.** A known per-capability tool quota failure uses `USER_TOOL_CAPABILITY_QUOTA_EXHAUSTED`, not `USER_BUDGET_EXHAUSTED`.
+3. **Timeout is not quota.** No timeout code may reset/mint/refund UBQ by itself.
+4. **Legacy codes are not silently repurposed.** Compatibility means preserving old meaning while new canonical fields/codes are introduced.
+5. **Known canonical failure must not collapse to `CAPABILITY_EXECUTION_FAILED`.** Generic normalization is allowed only when the underlying semantic code is genuinely unavailable/unsafe to expose.
+6. **Public identity boundary.** Error projection does not expose `user_id`, `client_id`, session/task/branch/execution identifiers merely to explain quota ownership. Such identifiers remain server-side attribution unless another API contract explicitly authorizes them.
+7. **Production switch requires dual compatibility evidence.** A later stage changing the emitted `error_code` must test server, client/UI and durable/retry consumers before removing a legacy projection.
+
+### 16.5 Internal-only accounting/recovery reasons
+
+Reservation state, epoch rollover races, reconciliation reasons, lease-expiry reasons and provider-attempt diagnostics remain internal structured reasons/events unless separately promoted to a public contract. They MUST NOT invent public quota or timeout codes.
+
+This section is the UBQ-0 vocabulary freeze. Later stages may add structured detail fields, but changing the meaning of these codes requires a new contract change and overlap audit.
+
 
 ---
 
