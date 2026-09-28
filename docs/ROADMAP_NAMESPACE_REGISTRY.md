@@ -19,7 +19,8 @@ This document prevents phase-name collisions across independent roadmap tracks. 
 | `CAS-F*` | Central Asset Storage | `CAS-F0` through `CAS-F8+` | Central Asset Storage checkpoint/contracts |
 | `PTC-*` | Provider Tool Contract Convergence | `PTC-1` through `PTC-3+` | Issue #8 and future PTC freeze/completion documents |
 | `CTX-F*` | Context / Memory / Personalization / CompactContext | `CTX-F0` through `CTX-F12+` | Issue #15 and `docs/context_future/**` |
-| `UBQ-*` | User Budget & Quota | `UBQ-0` through `UBQ-7+` — CONTRACT ACTIVE / PRODUCTION CLOSED | `docs/user_budget_quota/USER_RESOURCE_BUDGET_TIMEOUT_REFREEZE.md` |\n| `TBO-*` | Task Orchestration | `TBO-0` through `TBO-8+` — RESERVED / NOT OPEN | `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md` |
+| `UBQ-*` | User Budget & Quota | `UBQ-0` through `UBQ-7+` — CONTRACT ACTIVE / PRODUCTION CLOSED | `docs/user_budget_quota/USER_RESOURCE_BUDGET_TIMEOUT_REFREEZE.md` |
+| `TBO-*` | Task Orchestration | `TBO-0` through `TBO-8+` — RESERVED / NOT OPEN | `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md` |
 | `AAT-*` | Agent Automation & Triggers | `AAT-0` through `AAT-6+` — RESERVED / NOT OPEN | `docs/agent_automation/AAT_ROADMAP.md` |
 | `AIC-*` | Agent Interconnect & Communication | `AIC-0` through `AIC-6+` — RESERVED / NOT OPEN | `docs/agent_interconnect/AIC_ROADMAP.md` |
 
@@ -512,7 +513,8 @@ T -> TV1-T*   Tools V1
 F -> CAS-F*   Central Asset Storage
 PTC -> PTC-*  Provider Tool Contract
 CTX -> CTX-F*  Context / Memory / Personalization
-UBQ -> UBQ-*  User Budget & Quota\nTBO -> TBO-*  Task Orchestration
+UBQ -> UBQ-*  User Budget & Quota
+TBO -> TBO-*  Task Orchestration
 AAT -> AAT-*  Agent Automation & Triggers
 AIC -> AIC-*  Agent Interconnect & Communication
 ```
@@ -590,7 +592,8 @@ AE-R10    != PTC-1
 AE-R12    != PTC-3
 AE-R8-F7  != CAS-F7
 CTX-F5    != CAS-F5
-UBQ-0     != AE-R4 / AE-R5 / AE-R9\nTBO-0     != UBQ-0
+UBQ-0     != AE-R4 / AE-R5 / AE-R9
+TBO-0     != UBQ-0
 AAT-0     != TBO-5
 AIC-0     != AAT-0
 ```
