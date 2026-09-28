@@ -192,7 +192,7 @@ def test_streaming_requires_terminal_complete_bounded_object():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
         "partial provider chunk != terminal generated object != durable FileAsset authority",
-        "Agent activity event != generated object commitment authority",
+        "public Agent response/tool activity event != generated object commitment authority",
         "object completion",
         "deterministic object boundary within the response",
         "content size not exceeding configured AssetStorageSettings.max_upload_bytes",
