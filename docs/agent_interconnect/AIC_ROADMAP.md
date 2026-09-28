@@ -28,7 +28,7 @@ AgentEnvelope:
 
 Message kinds include request, response, notification and cancellation. Tool requests keep the mandatory purpose/description and parameters in their own DTO. Large payloads and assets use references; receipt of an `asset_id`, Context ref or Memory ref is never authorization to read it. AIC evaluates CTX/CAS rights at recipient retrieval/use time. Agent communication cannot silently copy another Agent's private Memory.
 
-Connection loss preserves delivery state. At-least-once transport delivery may be deduplicated by `message_id`; result correlation and admission are durable. A message may ask AE/AAT to activate an Agent, but only those owners admit the activation, and TBO charges its budget. Unknown tool side effects follow AE-R6 reconciliation, not blind message replay. AIC delivery is not a second Task/Execution state machine.
+Connection loss preserves delivery state. At-least-once transport delivery may be deduplicated by `message_id`; result correlation and admission are durable. A message may ask AE/AAT to activate an Agent, but TBO first determines Task lifecycle eligibility, UBQ admits/charges renewable user resources, and AE owns Execution activation. Unknown tool side effects follow AE-R6 reconciliation, not blind message replay. AIC delivery is not a second Task/Execution state machine.
 
 ## 4. Reserved stages
 
@@ -39,11 +39,11 @@ Connection loss preserves delivery state. At-least-once transport delivery may b
 | `AIC-2` | Versioned envelope, delivery receipts, ordering/correlation and dedupe | Duplicate/out-of-order/reconnect/restart tests |
 | `AIC-3` | Connected request/response and notification API, bounded streaming | Disconnect, expiry, backpressure and cancellation tests |
 | `AIC-4` | Agent capability discovery/invocation handoff through AAT/Capability | Mandatory purpose/parameters, permission and no recursion bypass tests |
-| `AIC-5` | CTX/CAS/TBO/AE integration and user-facing conversation controls | Private Memory, asset grant and Task budget isolation tests |
+| `AIC-5` | CTX/CAS/UBQ/TBO/AE integration and user-facing conversation controls | Private Memory, asset grant, user-resource quota and Task-lifecycle isolation tests |
 | `AIC-6` | Full multi-worker fault, migration and exit audit | Linux/Windows Architecture, independent audit and compatibility evidence |
 
 ## 5. Ownership and opening gate
 
-The Agent registration/Capability owner retains definition registration; AIC freezes the stable instance identity and communication contract. AE owns Task/Branch/Execution and remote side-effect reconciliation. AAT owns automated wakeups and Agent-owned tool publication. CTX owns Memory and personalization. CAS owns asset grants and content. TBO owns budget admission.
+The Agent registration/Capability owner retains definition registration; AIC freezes the stable instance identity and communication contract. AE owns Task/Branch/Execution and remote side-effect reconciliation. AAT owns automated wakeups and Agent-owned tool publication. CTX owns Memory and personalization. CAS owns asset grants and content. UBQ owns renewable user-resource admission. TBO owns Task lifecycle eligibility/orchestration and cannot mint UBQ quota.
 
 `AIC-*` remains `RESERVED / NOT OPEN`. AIC-0 requires an explicit opening record, current-main identity/path audit, dedicated issue, migration/compatibility plan for current `agent_id`/name consumers, independent review and Issue #85 claim. Listing these stages grants no implementation or merge authority.
