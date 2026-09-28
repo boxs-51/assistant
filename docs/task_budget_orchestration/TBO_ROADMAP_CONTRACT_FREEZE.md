@@ -1,135 +1,241 @@
-# TBO — Task Budget & Orchestration roadmap
+# TBO — Task Orchestration roadmap
 
-**Namespace:** `TBO-*`
-**Baseline for this planning document:** `main@a524ba870aec3ac73be7311d068d43fc1c963cda` (2026-09-27)
-**State:** `RESERVED / NOT OPEN`
-**Opening date:** not assigned
-**Authority now:** contract and coordination only; no production, schema, migration, scheduler, or API implementation claim.
+**Namespace:** `TBO-*`  
+**Baseline for this superseding planning document:** `main@206334044308a532f70384a1eeb4860cc9439f86` (2026-09-28)  
+**State:** `RESERVED / NOT OPEN`  
+**Authority now:** contract and coordination only; no production, schema, migration, scheduler, API or user-budget implementation claim.  
+**Superseding dependency:** `docs/user_budget_quota/USER_RESOURCE_BUDGET_TIMEOUT_REFREEZE.md`
 
-## 1. Objective and fixed decisions
+## 1. Superseding scope decision
 
-TBO gives a logical Task a durable, bounded way to continue through many Agent executions and periods of inactivity. The Agent can propose a task horizon and allocate time to individual operations. An authorized policy can replenish a periodic allowance without resetting cumulative Task limits. AAT owns future event subscriptions, Agent-owned tools, and generic wakeup scheduling; TBO supplies only budget eligibility and renewal decisions to that scheduler.
+TBO no longer means **Task Budget & Orchestration** for future work.
 
-The following decisions are frozen for this roadmap:
+Future meaning:
 
-1. `Task` is the logical objective; `Execution` is one runtime activation. The Task can outlive an Execution. A chat turn that participates in TBO needs a durable Task identity before it can use shared TaskBudget authority.
-2. Four clocks/limits are distinct: transport connection idle timeout, per-operation timeout, active Execution allowance, and Task horizon. A periodic allowance is an additional quota, not a replacement for these clocks.
-3. Existing TaskBudget cumulative counters and hard ceilings span retries, forks, child work where policy says so, and restarts. Periodic allowances use a separate durable ledger/epoch and never zero cumulative counters.
-4. When the user does not set a Task horizon, the Agent proposes one within a server-owned maximum. The system grants a bounded proposal before long-running work. An initial bounded bootstrap inference may be used to obtain that proposal. The Agent cannot grant itself a larger user/system ceiling.
-5. A finite Task has a completion horizon. A recurring Task has a bounded review/authorization horizon and per-activation allowance; it need not keep an Execution RUNNING while awaiting its next trigger. Renewal of periodic allowance does not silently extend either horizon.
-6. Only a policy explicitly granting periodic replenishment may replenish it automatically. The Agent may adjust future operation slices inside remaining Task authority. An exhausted Execution is never silently refilled; a later activation needs normal admission. Exhaustion of cumulative user/system limits requires an authorized increase or terminal disposition.
-7. An expired operation/allowance and an unknown external side effect are different facts. Timeout feedback must not imply a tool did nothing; R6 invocation reconciliation decides whether replay is safe.
-8. Budget renewal is a server-side durable decision guarded by revision/CAS, ownership fences, idempotency keys, and policy. AAT may request activation when the eligibility time arrives, but only TBO can grant a new budget epoch. Agent calls request changes; they do not directly mint authority.
-9. Public UI delivery reuses the agreed response and tool-call event surfaces. Budget state and timeout scope are fields of those responses; TBO does not add a broad lifecycle event stream by implication.
+```text
+TBO = Task Orchestration
+UBQ = User Budget & Quota
+```
 
-## 2. Baseline and gap
+Historical AE-R4/R5/R8/R9 TaskBudget evidence remains unchanged. This document does not retroactively rename historical schema/classes or migrations.
 
-At the planning baseline, `AgentExecutionLimits` has active, iteration, inference, tool, and optional task timeout fields. Chat startup places the proposed Task deadline in Execution metadata. `agent.budget.configure` can set the first deadline and adjust operation allocations for chat executions without a `task_id`. `TaskBudget` has durable cumulative execution/tool/inference/token/cost counters but no periodic epoch or Task horizon. RETRY creates a new Execution budget. Execution `WAITING` has reasons, but no released budget-window contract.
+TBO MUST NOT mint renewable user resource quota. It consumes UBQ admission when orchestration activates work.
 
-Consequently, a metadata-only deadline cannot govern all retries, forks, resumes, workers, and recurring wakeups. This roadmap adds Task-level authority without redefining AE-R4 active time, AE-R5 TaskBudget counters, or AE-R9 retry semantics.
+## 2. TBO objective
 
-## 3. Budget model
+TBO gives a logical Task a durable lifecycle across many Agent executions and periods of inactivity without requiring one HTTP/SSE response or one RUNNING Execution to remain alive.
 
-| Layer | Authority and accounting | Exhaustion disposition |
-|---|---|---|
-| Transport idle/response wait | Gateway/client connection; does not grant execution time | Disconnect or reconnect transport; Task state is decided separately |
-| Operation slice | One inference, tool call, or iteration; Agent may request a different next slice within higher bounds | Structured timeout feedback with `scope`, `remaining`, and safe retry guidance |
-| Active Execution allowance | Durable active time consumed while RUNNING; WAITING time follows the AE-R4 rule | Park or end this Execution according to resumability; a fresh Execution requires ordinary admission |
-| Periodic Task allowance | Durable epoch with start/end, granted quota, used/reserved quota, renewal rule, and next eligibility | `WAITING` for renewal only if policy allows; otherwise wait for authority or finish |
-| Task horizon and cumulative ceilings | User/system authorization, with bounded Agent proposal when omitted; existing TaskBudget totals remain monotone | No automatic top-up; request authorized extension or make a truthful terminal result |
+TBO may define:
 
-Quota dimensions are explicit: active compute time, inference calls, tool calls, tokens, and cost. A policy may enable renewal for some dimensions and not others. A window can replenish only up to the remaining cumulative ceiling. Parallel branches reserve from the same Task authority; a periodic window cannot grant more than its remaining quota through concurrent admissions.
+- finite vs recurring Task policy;
+- Task horizon/review horizon;
+- activation eligibility and lifecycle coordination;
+- durable WAITING reasons owned by existing AE contracts;
+- handoff to AAT timers/events;
+- user-visible Task continuation state;
+- Task-level structural policy that is not renewable resource quota.
 
-The effective upper bound for a dispatch is the minimum of its operation slice, remaining active Execution allowance, remaining period allowance where applicable, Task horizon, and any inherited parent/subtask cap. Provider retry stays inside the same logical inference call and its AE-R10 deadline.
+TBO does not own:
 
-## 4. Task modes and state transitions
+- user token/compute/tool/inference/cost quota;
+- per-capability tool allowance;
+- user budget reset windows;
+- provider retry/fallback;
+- capability registration;
+- CTX/CAS lifecycle;
+- AE execution lease/recovery.
 
-### Finite Task
+## 3. Canonical separation
 
-- User deadline wins when supplied. Otherwise the Agent proposes `task_horizon` within server policy; the proposal is stored once with its source and policy version.
-- The Task may enter WAITING for an event, connection, user action, or a permitted periodic refill. Waiting does not consume active Execution time, but the finite Task horizon continues as wall time unless the user explicitly selected a different policy.
-- At the horizon, block new dispatch/admission and settle in-flight work safely. Return a partial result and reason when possible. An authorized extension is a new revisioned policy change, not a silent reset.
+```text
+UserResourceBudget (UBQ)
+        |
+        v
+Task orchestration admission (TBO)
+        |
+        v
+Agent execution (AE)
+        |
+        +--> provider inference
+        +--> capability/tool invocation
+```
 
-### Recurring Task
+A Task may outlive one response and one Execution.
 
-- The user or server authorizes recurrence and an outer review/expiry horizon. An Agent may propose intervals and a narrower horizon; it cannot turn a finite Task into indefinite recurrence by itself.
-- An AAT-owned trigger may request activation. TBO admits it with an allowance for that occurrence or period. Completion of one occurrence does not close the recurring Task. Idle periods hold no RUNNING Execution.
-- At review expiry or cumulative exhaustion, stop future triggers and request renewal or close according to the policy. No missed trigger creates unlimited catch-up work.
+A new Task, retry, fork, resume, client, session or connection does not create fresh user quota.
 
-### Exhaustion decision table
+## 4. Task policy vs user resource budget
 
-| Condition | Agent-visible result | Durable action |
-|---|---|---|
-| Operation timeout, Task authority remains | `OPERATION_TIMEOUT`, `scope`, `remaining`, invocation outcome | Feed result to Agent; it may reallocate and continue after reconciliation |
-| Execution allowance exhausted | `EXECUTION_BUDGET_EXHAUSTED` | Preserve checkpoint and use legal RESUME/RETRY admission; never refill the same exhausted Execution implicitly |
-| Period allowance exhausted, renewable | `WINDOW_EXHAUSTED`, `next_eligible_at` | Durable `WAITING` with a budget wait reason and eligibility record; AAT may schedule the wakeup; release active ownership |
-| Period allowance exhausted, not renewable | `WINDOW_LIMIT_REACHED` | Wait for authorized allocation or terminate according to Task policy |
-| Cumulative ceiling or horizon reached | `TASK_LIMIT_REACHED` / `TASK_HORIZON_REACHED` | Block new admissions/triggers; request authorized extension or settle Task |
-| Unknown tool outcome at any boundary | `OUTCOME_UNKNOWN` with invocation reference | Reconcile through AE-R6 before any replay |
+TBO may own Task policy such as:
 
-These names are proposed stable semantic codes; the exact DTO mapping and whether a particular wait resumes the same Execution or starts a new one must be frozen against the live R7/R9 state machine in TBO-0. `WAITING` remains the only resumable Execution state. Do not introduce an unowned terminal-to-RUNNING transition.
+```text
+task_mode = finite | recurring
+task_horizon / review_horizon
+activation cadence/eligibility references
+completion/renewal authorization state
+Task-level execution/branch/delegation guard references
+```
 
-## 5. Durable representation and authority
+UBQ separately owns renewable user resource dimensions such as:
 
-TBO-0 must choose the exact schema after auditing the current migration head. The intended representation is:
+```text
+compute units
+logical inference calls
+input/output/total tokens
+logical tool calls total
+logical tool calls by capability_id
+optional cost
+```
 
-- Task budget policy: mode, horizon, source (`user`, `agent_proposal`, `system`), policy version/fingerprint, renewal permission, dimensions and hard ceilings, revision.
-- Period ledger: `task_id`, epoch identity, `[starts_at, ends_at)`, grants, used/reserved values, `next_eligible_at`, renewal receipt/idempotency key, revision. Cumulative TaskBudget counters remain authoritative for lifetime totals.
-- Renewal eligibility: `task_id`, due time, period identity, policy revision and idempotency key. Generic wakeup/subscription records and trigger receipts belong to AAT.
-- Timeout feedback: stable code, scope, configured limit, elapsed/remaining amount, task/window status, next eligible time if any, and external invocation outcome when relevant.
+TBO may surface UBQ denial/exhaustion to the Task state machine but may not reset or refill UBQ itself.
 
-Use a server clock for durable wall-time decisions and a monotonic clock for in-process elapsed measurement. Persist absolute UTC boundaries and consumed duration, not process-local monotonic values. Reservations, renewal and admission must be atomic with TaskBudget/Task state and use the established lock/CAS ordering. Replayed requests return the original receipt; a concurrent contender cannot mint a second epoch.
+## 5. Task horizon is not resource budget
 
-Legacy TaskBudget rows without TBO policy keep their present one-shot behavior until an explicit migration/adoption path is approved. Missing policy must never be interpreted as unlimited renewal.
+A Task horizon is a lifecycle/deadline policy.
 
-## 6. Budget interface and AAT handoff
+It may determine whether new activations are permitted, but it is not:
 
-TBO may expose `agent.budget.propose` and `agent.budget.allocate` for Task horizon proposals and future operation slices. These are proposed budget-specific tools; every call carries the required purpose/description and parameters, and returns a committed budget receipt or structured denial. Existing `agent.budget.configure` needs an explicit migration decision at TBO-0.
+- token quota;
+- compute quota;
+- tool quota;
+- inference quota;
+- response timeout;
+- provider timeout.
 
-TBO publishes only durable renewal eligibility and an idempotent budget-admission decision. AAT owns generic timers, event subscriptions, Agent-owned tool publication and wakeup delivery. AAT cannot treat due time as a budget grant: every activation must ask TBO for the current policy/epoch decision. AAT downtime must not cause TBO to mint multiple epochs or silently restart an expired Task.
+Renewal of an UBQ usage window MUST NOT silently extend a Task horizon. Extending a Task horizon MUST NOT mint a new UBQ window.
 
-## 7. Ownership and dependencies
+## 6. WAITING and activation
 
-| Existing authority | TBO relationship |
+A durable Task may wait for:
+
+- connection;
+- human approval;
+- dependency;
+- resource eligibility;
+- explicit pause;
+- recovery;
+- retry backoff;
+- future event/timer through AAT.
+
+TBO coordinates lifecycle only through legal AE state-machine transitions. `WAITING` remains AE-owned execution state semantics.
+
+When a future activation is due:
+
+```text
+AAT/event/user request
+  -> TBO Task eligibility
+  -> UBQ resource admission
+  -> AE execution admission/activation
+```
+
+No layer may infer budget authority merely because another layer says the Task is due.
+
+## 7. Timeout boundary
+
+TBO does not define provider/tool/response timeout taxonomy.
+
+Canonical timeout contract:
+
+```text
+docs/agent_timeout_contract.md
+```
+
+Task lifetime may exceed synchronous response lifetime.
+
+```text
+Task lifetime != Response lifetime
+```
+
+A Task may checkpoint/WAIT and later continue after the original response closes.
+
+## 8. Existing authority relationships
+
+| Existing authority | TBO relationship after re-freeze |
 |---|---|
-| AE-R4/R5 | Reuse active-time/WAITING TTL semantics and TaskBudget cumulative counters; TBO owns only new period/horizon policy and renewal ledger |
-| AE-R6/R7 | Reuse invocation reconciliation, checkpoint, ResumeClaim and legal WAITING transitions; do not replay unknown side effects |
-| AE-R8/R9 | Reuse Task/Branch/Execution identity, fork/retry admission and aggregate accounting; period grants remain shared across branches |
-| AE-R10 | Reuse provider retry/fallback deadline and logical-call accounting; TBO does not create provider retry policy |
-| AE-R11/R12 | Reuse checkpoint storage and lease/fencing/recovery; stale owner cannot renew, dispatch, or activate a trigger |
-| AAT/AIC | AAT owns generic timers, subscriptions and Agent-owned tool activation; AIC owns communication between connected Agents; both consume TBO budget admission without owning grants or renewal |
-| TV1/PTC/Capability/CTX/CAS | Tool declarations/routing, context and assets remain with their owners; TBO defines budget attribution only; shared paths require fresh overlap audit |
+| UBQ | user resource quota/reset/reservation authority; TBO consumes admission |
+| AE-R4/R5 | historical active-time and TaskBudget implementation evidence; future terminology/migration coordinated through UBQ |
+| AE-R6/R7 | invocation reconciliation, checkpoint, ResumeClaim and legal WAITING transitions |
+| AE-R8/R9 | Task/Branch/Execution identity, fork/retry and aggregation |
+| AE-R10 | provider retry/fallback/deadline |
+| AE-R11/R12 | persistence, lease/fencing/recovery |
+| AAT | generic timer/event delivery; requests TBO/UBQ/AE activation |
+| AIC | Agent communication; cannot bypass TBO/UBQ/AE admission |
+| CTX/CAS/Capability | retain their own authority; TBO consumes their contracts only |
 
-Issue #85 repository policy controls CLAIM, CI, independent audit and merge/wave authorization. An issue discussing TBO or listing files does not transfer implementation authority from an active AE stage.
+Issue #85 v2.5 controls CLAIM, stable baseline, independent audit and Integration Wave governance.
 
-## 8. Reserved stages and gates
+## 9. Revised reserved stages
 
-| Stage | Deliverable | Evidence to release next stage |
+| Stage | Deliverable | Gate |
 |---|---|---|
-| `TBO-0` | Fresh HEAD audit, exact ownership/DTO/state-machine/schema contract, existing tests inventory, risk matrix; docs and architecture contract tests only | Independent contract review; exact stage CLAIM |
-| `TBO-1` | Task identity for long-running chat and finite/recurring policy DTO; bounded first Agent proposal and user override rules | API/serialization/permission tests; no Task with unowned authority |
-| `TBO-2` | Durable Task horizon and periodic ledger, migration and legacy adoption; atomic grant/reservation/renewal | Migration up/down, concurrent CAS/idempotency, restart and cumulative-counter tests |
-| `TBO-3` | Exhaustion classification, Agent feedback, allocation tool and legal WAITING transition | Fake-clock operation/window/horizon matrix; one visible result and no hidden top-up |
-| `TBO-4` | Renewal decision service with bounded eligibility lookup, lease/fence and idempotent epoch grant | Two-worker race, restart, backpressure, clock-boundary and no-double-grant tests |
-| `TBO-5` | Durable budget-eligibility handoff and admission contract for future AAT wakeups | Duplicate/replayed due request, cancellation, expiry, no budget minted by AAT; standalone TBO grant remains correct before AAT opens |
-| `TBO-6` | Gateway/UI response/tool-call DTO projection, reconnect and long-task experience | Stream/reconnect and live chat tests; no unexpected event taxonomy expansion |
-| `TBO-7` | Cross-track integration: RETRY/FORK/RESUME/R12 recovery/R6 unknown invocation/provider fallback | Multi-worker/fault matrix and exact-head Linux/Windows Architecture |
-| `TBO-8` | Full exit audit, operational metrics and rollout/rollback plan | Independent audit, full suite, migration-head proof and issue checkpoint |
+| `TBO-0` | exact-head Task lifecycle/orchestration audit; remove old budget ownership assumptions; freeze Task horizon/mode/activation contract | docs/tests-only independent review |
+| `TBO-1` | durable finite/recurring Task policy representation | migration/API/permission tests |
+| `TBO-2` | Task horizon/review-horizon enforcement and legal lifecycle transitions | fake-clock/state-machine tests |
+| `TBO-3` | resource-exhaustion handoff from UBQ into Task continuation policy | UBQ compatibility + no-mint tests |
+| `TBO-4` | activation eligibility service and idempotent orchestration decision | multi-worker/CAS/restart tests |
+| `TBO-5` | AAT timer/event handoff | duplicate/replay/cancellation tests |
+| `TBO-6` | Gateway/UI Task continuation projection | reconnect/stream/API tests |
+| `TBO-7` | RETRY/FORK/RESUME/R12/AAT/AIC integration matrix | multi-worker fault matrix |
+| `TBO-8` | exit audit, operations, rollout/rollback | full CI + independent audit |
 
-Each stage needs its own exact-head claim, owned paths, migration-head check where relevant, targeted tests and applicable repository CI. Later stages do not gain production authority merely by appearing here. The stage boundaries may be refined at TBO-0 only with an explicit recorded contract change; the namespace and safety invariants above remain reserved.
+Later production stages do not gain authority merely by appearing in this roadmap.
 
-## 9. Required acceptance scenarios
+## 10. Required acceptance scenarios
 
-1. A five-minute tool call fits an authorized slice and does not fail because the transport briefly goes idle; reconnect observes the same durable Task.
-2. A slow inference times out with `scope=inference`; the Agent receives feedback, reallocates within remaining authority and continues without resetting cumulative usage.
-3. A period ends during a long Task. Exactly one renewal is granted when policy allows; otherwise Task waits for authority. No branch receives a duplicate grant.
-4. A Task holds durable renewal eligibility over a server restart. Once AAT is available, a replayed timer/event requests activation at most once. No Execution consumes active budget while dormant.
-5. A finite horizon or user cap ends. Automatic period renewal does not extend it. Agent reports partial progress and the required next authorization.
-6. An external tool outcome is unknown when budget expires. The system reconciles before any repeated side effect.
-7. Retry, fork, resume and R12 recovery all preserve the same Task horizon, cumulative totals and period ledger.
-8. Duplicate eligibility requests, stale lease holders and cancelled Tasks cannot create new budget epochs or admissions.
-9. AAT and AIC activations are charged to the correct Task and cannot grant their own budget.
+1. One user may have several Tasks but all consume one applicable UBQ window.
+2. A Task can WAIT without keeping a synchronous response alive.
+3. Task horizon expiry blocks new Task activation but does not rewrite UBQ history.
+4. UBQ window rollover does not extend Task horizon.
+5. TBO resource waiting never mints or resets UBQ quota.
+6. AAT due delivery asks TBO, UBQ and AE rather than assuming admission.
+7. R12 recovery preserves Task lifecycle and UBQ accounting.
+8. Retry/fork/resume preserve Task identity/lineage without creating resource authority.
+9. Unknown external tool outcome is reconciled through AE-R6 before replay.
+10. Multiple workers converge on one Task activation decision where required.
 
-## 10. Opening gate and current decision
+## 11. Migration from the prior TBO draft
 
-`TBO-*` is reserved now and has **no opening date**. Before opening `TBO-0`, record a current-main HEAD audit, verify active AE-R12 ownership and the Agent response/tool stream contract (including Issue #134 disposition), identify a dedicated TBO issue/owner, and post an exact docs/tests-only CLAIM under Issue #85 policy. Before any production stage, resolve shared-file/schema ownership and obtain that stage's release and CI/audit gate. The activation decision must be recorded explicitly; this reservation is not permission to start implementation or publish a scheduler.
+The previous TBO draft proposed:
+
+- periodic Task allowance;
+- Task-owned renewable budget epochs;
+- TaskBudget cumulative ceilings as the renewal base.
+
+Those future-planning semantics are superseded.
+
+Migration classification:
+
+```text
+Task lifecycle/horizon concepts       KEEP / REHOME IN TBO
+AAT wakeup handoff                    KEEP / REHOME IN TBO
+timeout feedback concept              KEEP / OWNED BY timeout contract
+periodic Task resource allowance      SUPERSEDED BY UBQ USER WINDOW
+Task-owned renewable resource epoch   SUPERSEDED BY UBQ USER WINDOW
+Task resource quota minting           PROHIBITED
+TaskBudget historical evidence        KEEP
+```
+
+No historical completion file or SQL migration is deleted by this change.
+
+## 12. Opening gate
+
+`TBO-*` remains `RESERVED / NOT OPEN`.
+
+Before TBO-0 opens:
+
+1. UBQ-0 contract must be independently reviewed or its unresolved conflicts explicitly recorded;
+2. current-main AE-R12/TBO shared ownership must be audited;
+3. exact Task state-machine and timeout boundaries must be refreshed;
+4. a dedicated TBO issue/owner must record exact CLAIM scope;
+5. no production code may be changed under a docs-only claim.
+
+## 13. Final invariant
+
+```text
+TBO orchestrates Tasks.
+UBQ owns renewable user resource quota.
+AE executes and recovers work.
+AAT delivers timers/events.
+Timeout contracts bound waiting and response lifetimes.
+No Task/client/session/execution mints user quota.
+```

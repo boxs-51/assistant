@@ -19,7 +19,8 @@ This document prevents phase-name collisions across independent roadmap tracks. 
 | `CAS-F*` | Central Asset Storage | `CAS-F0` through `CAS-F8+` | Central Asset Storage checkpoint/contracts |
 | `PTC-*` | Provider Tool Contract Convergence | `PTC-1` through `PTC-3+` | Issue #8 and future PTC freeze/completion documents |
 | `CTX-F*` | Context / Memory / Personalization / CompactContext | `CTX-F0` through `CTX-F12+` | Issue #15 and `docs/context_future/**` |
-| `TBO-*` | Task Budget & Orchestration | `TBO-0` through `TBO-8+` — RESERVED / NOT OPEN | `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md` |
+| `UBQ-*` | User Budget & Quota | `UBQ-0` through `UBQ-7+` — CONTRACT ACTIVE / PRODUCTION CLOSED | `docs/user_budget_quota/USER_RESOURCE_BUDGET_TIMEOUT_REFREEZE.md` |
+| `TBO-*` | Task Orchestration | `TBO-0` through `TBO-8+` — RESERVED / NOT OPEN | `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md` |
 | `AAT-*` | Agent Automation & Triggers | `AAT-0` through `AAT-6+` — RESERVED / NOT OPEN | `docs/agent_automation/AAT_ROADMAP.md` |
 | `AIC-*` | Agent Interconnect & Communication | `AIC-0` through `AIC-6+` — RESERVED / NOT OPEN | `docs/agent_interconnect/AIC_ROADMAP.md` |
 
@@ -37,7 +38,7 @@ New provider-tool work MUST use `PTC-*`; it must not allocate bare `R*` IDs.
 
 Future Context/Memory/Personalization work MUST use `CTX-F*`; it must not reuse `CAS-F*` or bare `F*` identifiers.
 
-Task budget renewal and bounded Agent allocation work MUST use `TBO-*`. Agent-owned tool publication, scheduling and event-triggered activation use `AAT-*`. Communication between connected Agent instances uses `AIC-*`. These reservations do not reopen or renumber AE-R4/R5/R9 budget work.
+Renewable user resource quota, anchored usage windows, token/compute/inference/tool accounting and per-capability tool quota MUST use `UBQ-*`. Task lifecycle/orchestration work MUST use `TBO-*`. Agent-owned tool publication, scheduling and event-triggered activation use `AAT-*`. Communication between connected Agent instances uses `AIC-*`. These reservations do not reopen or renumber historical AE-R4/R5/R9 budget work.
 
 ---
 
@@ -294,49 +295,77 @@ During early activation, do not wire Memory, Personalization, future durable Con
 
 ---
 
-## 7A. Task Budget & Orchestration namespace — TBO-*
+## 7A. User Budget & Quota namespace — UBQ-*
 
-`TBO-0` through `TBO-8+` are reserved for the single Task Budget & Orchestration roadmap in `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md`.
+`UBQ-0` through `UBQ-7+` are allocated by `docs/user_budget_quota/USER_RESOURCE_BUDGET_TIMEOUT_REFREEZE.md`.
 
 ```text
-TBO-0  exact-head audit and contract freeze
-TBO-1  Task identity and policy DTO
-TBO-2  durable horizon and periodic ledger
-TBO-3  exhaustion and allocation feedback
-TBO-4  renewal coordinator
-TBO-5  budget eligibility handoff to future AAT activation
-TBO-6  Gateway/UI response projection
-TBO-7  AE integration and fault matrix
-TBO-8  exit audit and rollout plan
+UBQ-0  exact-head audit + user resource budget/timeout contract freeze
+UBQ-1  durable user budget policy/window/per-tool/reservation representation
+UBQ-2  dual accounting with existing TaskBudget compatibility
+UBQ-3  total + per-capability logical tool-call quota authority
+UBQ-4  inference/token/compute/cost quota authority
+UBQ-5  explicit provider/tool/response timeout semantic migration
+UBQ-6  TaskBudget resource-authority demotion to Task execution guards
+UBQ-7  cross-track fault/integration/rollout exit
 ```
 
-**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. No TBO production, schema, migration, scheduler, or API authority is claimed. A future `TBO-0` opening requires a fresh exact-main audit, dedicated issue/owner and claim under Issue #85, plus an overlap and Agent stream-contract check. Each later production stage needs separate authority and gates.
+**Current state:** contract/coordination active; production/schema/migration/runtime authority CLOSED until a stage-specific CLAIM is independently released.
 
-TBO owns only the proposed Task-level horizon, renewable period policy/ledger, exhaustion feedback and budget admission. AAT owns generic wakeup delivery, event subscriptions and Agent-owned tool publication. AE-R4/R5/R6-R12 retain their existing execution budget, cumulative TaskBudget, retry, reconciliation, persistence and recovery authority. Shared changes require explicit overlap disposition.
+Canonical ownership:
+- renewable quota is user-owned through server-resolved `budget_owner_user_id`; trusted `Identity.user_id` is direct when present, standard API-key principals resolve through their durable organization owner, and principals without one uniquely resolvable user fail closed;
+- `client_id`, session, Task, branch and Execution are attribution/optional sub-limit dimensions and do not mint quota;
+- an anchored usage window resets renewable resource quota from first admitted use according to policy;
+- UBQ owns compute, logical inference, token, total tool-call, per-`capability_id` tool-call and optional cost accounting;
+- timeout/deadline is explicitly not resource budget.
+
+Historical AE-R4/R5/R8/R9/R10 documents and migrations remain immutable evidence. Migration uses compatibility/dual accounting before any authority removal.
+
+---
+
+## 7A.1 Task Orchestration namespace — TBO-*
+
+`TBO-0` through `TBO-8+` remain reserved by `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md`, but the future canonical meaning is now **Task Orchestration**, not User Resource Budget.
+
+```text
+TBO-0  exact-head Task lifecycle/orchestration re-freeze
+TBO-1  finite/recurring Task policy representation
+TBO-2  Task horizon/review-horizon lifecycle enforcement
+TBO-3  UBQ exhaustion handoff into Task continuation
+TBO-4  activation eligibility/orchestration decision
+TBO-5  AAT timer/event handoff
+TBO-6  Gateway/UI Task continuation projection
+TBO-7  AE/UBQ/AAT/AIC integration matrix
+TBO-8  exit audit and rollout
+```
+
+**Current state:** `RESERVED / NOT OPEN`.
+
+TBO consumes UBQ admission and may not mint/reset user quota. Task horizon is lifecycle policy, not token/compute/tool quota and not synchronous response timeout.
 
 ---
 
 ## 7B. Agent Automation & Triggers namespace — AAT-*
 
-`AAT-0` through `AAT-6+` are reserved by `docs/agent_automation/AAT_ROADMAP.md` for Agent-owned tool interface publication, durable schedules, event subscriptions and deduplicated activation. AAT consumes TBO budget admission and AE execution admission; it owns neither budget grants nor Capability registration authority.
+`AAT-0` through `AAT-6+` are reserved by `docs/agent_automation/AAT_ROADMAP.md` for Agent-owned tool interface publication, durable schedules, event subscriptions and deduplicated activation. AAT consumes TBO Task eligibility/orchestration, UBQ resource admission, and AE execution admission; it owns neither quota grants nor Capability registration authority.
 
 ```text
-AAT-0  identity/Capability/event/AE/TBO contract audit
+AAT-0  identity/Capability/event/AE/TBO/UBQ contract audit
 AAT-1  automation and Agent-owned tool interface DTO
 AAT-2  durable one-time scheduler
 AAT-3  event subscription and deduplication
 AAT-4  tool publication/invocation handoff
-AAT-5  AE/TBO activation and user controls
+AAT-5  AE/TBO/UBQ activation and user controls
 AAT-6  fault and exit gates
 ```
 
-**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. AAT-0 requires a dedicated issue/claim, stable Agent-instance identity contract and exact-head overlap audit with Capability/TV1/PTC/AE/TBO. No production authority is claimed.
+**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. AAT-0 requires a dedicated issue/claim, stable Agent-instance identity contract and exact-head overlap audit with Capability/TV1/PTC/AE/TBO/UBQ. No production authority is claimed.
 
 ---
 
 ## 7C. Agent Interconnect & Communication namespace — AIC-*
 
-`AIC-0` through `AIC-6+` are reserved by `docs/agent_interconnect/AIC_ROADMAP.md` for a user-owned `agent_instance_id` contract, authorized Agent directory and communication between connected Agent instances. AIC does not own CTX Memory, CAS assets, AAT triggers, TBO grants or AE Task/Execution transitions.
+`AIC-0` through `AIC-6+` are reserved by `docs/agent_interconnect/AIC_ROADMAP.md` for a user-owned `agent_instance_id` contract, authorized Agent directory and communication between connected Agent instances. AIC does not own CTX Memory, CAS assets, AAT triggers, UBQ quota grants, TBO Task policy or AE Task/Execution transitions.
 
 ```text
 AIC-0  user-owned Agent-instance identity contract
@@ -344,7 +373,7 @@ AIC-1  directory and communication permissions
 AIC-2  envelope and delivery receipts
 AIC-3  connected request/response/notification API
 AIC-4  capability invocation handoff
-AIC-5  CTX/CAS/TBO/AE integration
+AIC-5  CTX/CAS/UBQ/TBO/AE integration
 AIC-6  fault, migration and exit gates
 ```
 
@@ -354,7 +383,7 @@ AIC-6  fault, migration and exit gates
 
 - AIC-0's stable Agent-instance identity contract and Agent-registration ownership decision precede any Agent-private CTX Memory schema, CAS Agent grant, or AAT Agent-owned automation implementation. User-wide CTX planning can proceed independently.
 - CAS owns grant decisions; CTX only consumes authorized asset evidence. AIC messages and AAT triggers do not carry asset or Memory read authority.
-- TBO owns renewal and budget admission; AAT owns due-time/event delivery. AIC communication requests pass through both relevant admission paths when they activate an Agent.
+- UBQ owns renewable user-resource admission; TBO owns Task eligibility/orchestration; AAT owns due-time/event delivery. AIC communication requests pass through UBQ plus the applicable TBO/AE admission paths when they activate an Agent.
 - These are dependency contracts, not a global implementation or merge order. Issue #85 and each owning issue still control claims and integration gates.
 
 ---
@@ -484,7 +513,8 @@ T -> TV1-T*   Tools V1
 F -> CAS-F*   Central Asset Storage
 PTC -> PTC-*  Provider Tool Contract
 CTX -> CTX-F*  Context / Memory / Personalization
-TBO -> TBO-*  Task Budget & Orchestration
+UBQ -> UBQ-*  User Budget & Quota
+TBO -> TBO-*  Task Orchestration
 AAT -> AAT-*  Agent Automation & Triggers
 AIC -> AIC-*  Agent Interconnect & Communication
 ```
@@ -562,7 +592,8 @@ AE-R10    != PTC-1
 AE-R12    != PTC-3
 AE-R8-F7  != CAS-F7
 CTX-F5    != CAS-F5
-TBO-0     != AE-R4 / AE-R5 / AE-R9
+UBQ-0     != AE-R4 / AE-R5 / AE-R9
+TBO-0     != UBQ-0
 AAT-0     != TBO-5
 AIC-0     != AAT-0
 ```

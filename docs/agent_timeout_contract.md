@@ -1,39 +1,353 @@
-# Agent timeout contract
+# Agent / Provider / Tool / Response Timeout Contract
 
-`agent_limits` in `POST /v1/chat/completions` controls Agent execution budgets. It does not configure the TCP connection, HTTP client, or SSE idle timeout. In Agent chat mode without explicit limits, the initial negotiation window is 120 seconds, with 60 seconds per iteration, 45 seconds per model call, and 30 seconds per ordinary tool. The Agent may then propose a task duration.
+**Superseding semantic baseline:** `main@206334044308a532f70384a1eeb4860cc9439f86` (2026-09-28)  
+**Related re-freeze:** `docs/user_budget_quota/USER_RESOURCE_BUDGET_TIMEOUT_REFREEZE.md`  
+**State:** contract target + compatibility map; production behavior changes require separate CLAIM.
 
-| Field | Meaning | Default |
-| --- | --- | ---: |
-| `agent_limits.timeout_seconds` | Total active Agent execution time. Durable `WAITING` time is excluded. | 60 s |
-| `agent_limits.iteration_timeout_seconds` | One Agent loop iteration, including context, inference, and tools. Also bounded by the total budget. | 20 s |
-| `agent_limits.inference_timeout_seconds` | One model call. Also bounded by the iteration and total budgets. | 15 s |
-| `agent_limits.tool_timeout_seconds` | One ordinary tool call. Also bounded by the iteration and total budgets. Long running capabilities use the remaining iteration and total budgets instead. | 10 s |
-| `agent_limits.task_timeout_seconds` | Optional hard wall-clock limit for the task. It keeps running during durable `WAITING` and cannot be reset by the Agent. | Agent proposes |
+## 1. Core rule
 
-The first budget that expires ends or fails that operation. A synchronous five minute tool call exceeds the initial tool, iteration, and execution budgets. Its own tool implementation may impose another limit.
+Timeout/deadline is a safety bound on waiting/execution duration. It is **not renewable resource budget**.
 
-In Agent chat mode, the Agent can call the internal `agent.budget.configure` tool to propose `task_seconds` and set `iteration_seconds`, `inference_seconds`, and `tool_seconds`. The first proposal starts a hard task deadline measured from the request start. Later calls can reallocate operation budgets but cannot reset that deadline. Without a user supplied task limit, the server caps the first proposal at 24 hours. If the user supplies `agent_limits.task_timeout_seconds`, that is the hard limit. If the user supplies other `agent_limits` without a task limit, `timeout_seconds` is the maximum the Agent may propose. The deadline and allocations are saved with the Agent execution checkpoint for durable resume.
+Future terminology MUST distinguish:
 
-Ordinary tool failures such as `CAPABILITY_TIMEOUT` are returned as tool results in the next model context. A model call that times out before responding is retried in the next Agent iteration with a larger inference allowance and a system message describing the failure. Retry still consumes an iteration and the task clock keeps running. An expired task deadline ends the task with `AGENT_TASK_TIMEOUT`; the Agent cannot renew it.
-
-To allow a five minute tool call in one iteration, the user may send an explicit budget with some margin:
-
-```json
-{
-  "model": "gemma3-tools-v3:latest",
-  "messages": [{"role": "user", "content": "Run the requested five minute command."}],
-  "agent_enabled": true,
-  "agent_limits": {
-    "timeout_seconds": 600,
-    "task_timeout_seconds": 600,
-    "iteration_timeout_seconds": 420,
-    "inference_timeout_seconds": 90,
-    "tool_timeout_seconds": 330
-  },
-  "config": {"stream": true, "agent_activity_stream": true}
-}
+```text
+RESOURCE QUOTA  -> UBQ
+TIMEOUT         -> operation/response waiting bound
+DEADLINE        -> absolute/logical hard stop
+RETRY GUARD     -> retry/fallback allowance
+EXECUTION GUARD -> loop/concurrency/structure
 ```
 
-The UI bridge accepts the same `agent_limits` object in `set_chat_preferences` and sends it with Agent chat requests. The nonstreaming Gateway response wait follows the maximum task budget plus five seconds. Streaming responses use SSE; Gateway sends a `: ping` heartbeat roughly every 15 seconds while waiting. A client or reverse proxy can still close an idle connection according to its own settings. The bundled Python Gateway client currently does not set a separate HTTP connect or read timeout.
+Historical AE-R4/R10 wording that calls time a "budget" remains historical evidence only.
 
-Agent timeout failures carry `error_code`, `timeout_scope`, and `timeout_seconds` in the public error payload. The scopes are `task`, `execution`, `iteration`, `inference`, and `tool`. `timeout_seconds` names the configured budget for that scope; it is not the total elapsed time. The Gateway's nonstreaming response wait has `GATEWAY_RESPONSE_TIMEOUT` and `timeout_scope=response_wait`. A capability can also return its own `CAPABILITY_TIMEOUT` result, which the Agent may receive as a tool result and handle in a later iteration.
+## 2. Current compatibility fields
+
+Current runtime/API still exposes:
+
+| Compatibility field | Current behavior | Future semantic category |
+|---|---|---|
+| `agent_limits.timeout_seconds` | active Agent execution time excluding durable WAITING | execution timeout/guard |
+| `agent_limits.iteration_timeout_seconds` | one Agent loop iteration | iteration timeout |
+| `agent_limits.inference_timeout_seconds` | one model call bound | compatibility inference timeout |
+| `agent_limits.tool_timeout_seconds` | ordinary tool-call bound | compatibility tool timeout |
+| `agent_limits.task_timeout_seconds` | optional Task wall-clock horizon | Task lifecycle deadline, owned with TBO/AE boundary |
+| `remaining_active_budget_seconds` | durable remaining active execution duration | compatibility execution-time field |
+| `ProviderCallBudget.deadline_monotonic` | one logical provider-call deadline | provider logical-call deadline |
+| `ProviderCallBudget.max_retries` | provider retry allowance | retry guard |
+
+These names are not deleted by this contract. They are compatibility surfaces to be migrated under UBQ-5 or a separately released timeout stage.
+
+## 3. Canonical provider timeout taxonomy
+
+### 3.1 First response
+
+```text
+provider_first_response_timeout_seconds
+```
+
+Meaning: maximum elapsed time from owned provider dispatch until the first valid provider response/progress is observed.
+
+Examples of qualifying progress:
+- response headers/body data proving provider response started;
+- first model token/chunk;
+- a provider-native progress event explicitly accepted by the adapter contract.
+
+Transport heartbeat generated by Gateway/client does not qualify.
+
+Expiry result:
+
+```text
+PROVIDER_FIRST_RESPONSE_TIMEOUT
+```
+
+### 3.2 Stream idle
+
+```text
+provider_stream_idle_timeout_seconds
+```
+
+Meaning: after provider response/stream has started, maximum interval without meaningful provider progress.
+
+Every qualifying provider progress event resets the idle timer. Gateway SSE ping/heartbeat does not.
+
+Expiry result:
+
+```text
+PROVIDER_STREAM_IDLE_TIMEOUT
+```
+
+### 3.3 Logical provider-call hard deadline
+
+```text
+provider_call_timeout_seconds
+```
+
+Meaning: hard deadline for one logical inference call across provider retry/fallback attempts.
+
+```text
+logical inference I1
+  provider A attempt
+  retry A
+  fallback B
+  ...
+all bounded by the same provider_call_timeout_seconds
+```
+
+AE-R10 remains owner of retry/fallback ordering, deadline propagation, cancellation/drain and late-error deadline dominance.
+
+Expiry result:
+
+```text
+PROVIDER_CALL_TIMEOUT
+```
+
+A timeout before a provider attempt starts is not a provider failure. A started attempt that times out follows the frozen AE-R10 breaker/accounting rules.
+
+## 4. Tool timeout taxonomy
+
+### 4.1 Tool hard timeout
+
+```text
+tool_call_timeout_seconds
+```
+
+Meaning: hard bound for one logical tool invocation.
+
+Expiry result:
+
+```text
+TOOL_CALL_TIMEOUT
+```
+
+A tool timeout never proves the external side effect did not occur.
+
+Remote/uncertain outcome MUST flow through AE-R6 reconciliation before automatic replay.
+
+### 4.2 Tool idle timeout
+
+```text
+tool_idle_timeout_seconds
+```
+
+Meaning: maximum interval without meaningful tool progress for tools/protocols that expose trustworthy progress.
+
+Expiry result:
+
+```text
+TOOL_IDLE_TIMEOUT
+```
+
+A tool implementation that cannot expose meaningful progress may use only the hard call timeout.
+
+## 5. Synchronous response timeout taxonomy
+
+### 5.1 Response idle timeout
+
+```text
+response_idle_timeout_seconds
+```
+
+Meaning: maximum interval in one synchronous response lifecycle without meaningful progress.
+
+Meaningful progress may include:
+- provider model output;
+- committed tool activity/result surfaced on the canonical response/tool stream;
+- a legal durable state transition that is intentionally surfaced;
+- other explicitly frozen progress events.
+
+Keepalive/SSE ping alone MUST NOT reset this timer.
+
+Expiry result:
+
+```text
+RESPONSE_IDLE_TIMEOUT
+```
+
+The response handler must cancel/drain owned process-local children or hand off to durable continuation according to the owning AE contract.
+
+### 5.2 Response hard timeout
+
+```text
+response_hard_timeout_seconds
+```
+
+Meaning: absolute wall-clock ceiling for one synchronous HTTP/SSE response lifecycle even if progress continues.
+
+Expiry result:
+
+```text
+RESPONSE_HARD_TIMEOUT
+```
+
+This prevents a progressing request from monopolizing one response indefinitely.
+
+## 6. Task lifetime is independent
+
+```text
+Task lifetime != synchronous response lifetime
+```
+
+A Task may:
+1. start in one response;
+2. execute/checkpoint;
+3. enter legal durable WAITING;
+4. close the HTTP/SSE response;
+5. later resume from user action, reconnect, AAT event or recovery.
+
+Closing/expiring a response does not by itself cancel a durable Task unless the Task policy explicitly says so.
+
+A Task horizon is lifecycle policy, not resource budget and not response timeout.
+
+## 7. Execution and iteration guards
+
+Existing execution/iteration timeout controls may remain for runtime safety:
+
+```text
+execution_timeout_seconds
+iteration_timeout_seconds
+```
+
+The current `agent_limits.timeout_seconds` is a compatibility alias for the former concept until migration.
+
+Durable WAITING handling remains governed by AE execution semantics; a future rename must not silently change whether WAITING consumes active execution duration.
+
+## 8. Precedence
+
+For a synchronous operation, effective hard stop is the earliest applicable deadline.
+
+Examples:
+
+### Inference
+
+```text
+min(
+    response_hard_deadline,
+    execution_deadline if applicable,
+    iteration_deadline if applicable,
+    provider_call_deadline
+)
+```
+
+First-response and stream-idle timers are additional liveness fences inside that hard bound.
+
+### Tool
+
+```text
+min(
+    response_hard_deadline,
+    execution_deadline if applicable,
+    iteration_deadline if applicable,
+    tool_call_deadline
+)
+```
+
+Tool idle is an additional liveness fence where supported.
+
+The public error/result must identify the semantic scope that actually expired, subject to an already-expired stronger outer deadline.
+
+## 9. Budget independence
+
+UBQ resource-window rollover:
+- does not extend provider/tool/response deadlines;
+- does not reset provider retries;
+- does not reset an iteration;
+- does not resurrect a timed-out/terminal execution.
+
+Timeout:
+- does not reset UBQ;
+- does not create a new UBQ epoch;
+- does not grant extra tokens/compute/tool calls;
+- settles/refunds resource reservations only according to durable accounting and known outcome.
+
+## 10. Provider retry/fallback compatibility
+
+Current `ProviderCallBudget` behavior from AE-R10 remains frozen until a dedicated migration.
+
+Future preferred conceptual name:
+
+```text
+ProviderCallGuard
+```
+
+or equivalent.
+
+A compatibility alias may remain indefinitely if changing the class name creates disproportionate churn. Semantic separation is more important than immediate rename.
+
+## 11. Agent budget configuration compatibility
+
+Current `agent.budget.configure` may adjust/propose time fields in the current implementation.
+
+After UBQ re-freeze it MUST NOT be interpreted as authority to mint:
+- user tokens;
+- compute units;
+- inference calls;
+- total tool calls;
+- per-capability tool calls;
+- cost allowance;
+- a new UBQ window.
+
+Any future agent-facing resource request must be an authorization request to UBQ policy, not direct quota mutation by the Agent.
+
+## 12. Long-running tools
+
+A long-running tool may legitimately exceed old ordinary-tool defaults if:
+- a separately authorized hard timeout permits it;
+- the synchronous response hard/idle rules are satisfied or execution transitions to durable continuation;
+- the tool's external outcome remains reconcilable;
+- UBQ resource/tool-call admission was already obtained.
+
+Transport disconnect alone does not prove tool cancellation.
+
+## 13. Cancellation and cleanup
+
+On timeout/cancellation:
+- cancel owned in-process child work when safe;
+- retrieve/drain child completion according to AE-R10/AE runtime invariants;
+- preserve caller cancellation authority;
+- never allow cleanup failure to mask the authoritative timeout/cancellation;
+- never replay an unknown external side effect solely because a timer expired.
+
+## 14. Compatibility migration plan
+
+### Stage T-0 / UBQ-5A
+Freeze exact current call sites and public fields. Add contract tests proving terminology only; production behavior unchanged.
+
+### Stage T-1 / UBQ-5B
+Introduce explicit provider first-response, stream-idle and hard-call settings behind compatibility defaults.
+
+### Stage T-2 / UBQ-5C
+Introduce tool hard/idle settings and explicit unknown-outcome tests.
+
+### Stage T-3 / UBQ-5D
+Introduce response idle/hard timeout at Gateway/stream lifecycle with deterministic cancellation/drain.
+
+### Stage T-4 / UBQ-5E
+Map legacy `agent_limits.*` fields to canonical timeout fields; maintain compatibility serialization as required.
+
+### Stage T-5 / UBQ-5F
+Audit/deprecate terminology such as `remaining_active_budget_seconds` and `ProviderCallBudget` only when all durable/checkpoint/API consumers are compatible.
+
+No stage may weaken AE-R6 reconciliation, AE-R7 resume, AE-R10 hard deadline, or AE-R12 recovery.
+
+## 15. Acceptance matrix
+
+1. Provider never responds -> first-response timeout.
+2. Provider responds then stalls -> stream-idle timeout.
+3. Provider continuously streams beyond hard call deadline -> provider hard timeout.
+4. Retry/fallback cannot exceed logical provider deadline.
+5. Tool never finishes -> tool hard timeout.
+6. Tool emits progress then stalls -> tool idle timeout where supported.
+7. Timed-out remote tool with unknown outcome is not blindly replayed.
+8. Response receives no meaningful progress -> response idle timeout.
+9. Response continuously progresses beyond hard ceiling -> response hard timeout.
+10. SSE ping alone never prevents idle timeout.
+11. Durable Task can outlive response hard timeout through legal continuation.
+12. UBQ rollover does not extend any running timeout.
+13. Timeout does not create/reset UBQ window.
+14. R12 recovery preserves the original resource accounting and does not treat lease expiry as timeout-quota reset.
+
+## 16. Current implementation note
+
+Until the migration stages land, the current runtime behavior and current API names remain the executable authority. This document freezes the target semantics and migration boundary; it does not claim that every new timeout field already exists in code.
+
+Any code change must be released through the owning issue/stage under Issue #85 v2.5.
