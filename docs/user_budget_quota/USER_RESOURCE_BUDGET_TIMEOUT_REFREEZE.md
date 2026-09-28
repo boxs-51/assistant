@@ -39,26 +39,40 @@ Historical documents, migrations, completion evidence, finding IDs and checkpoin
 
 ### 2.1 Budget owner
 
-The canonical resource-budget owner is the authenticated user:
+The canonical renewable resource-budget domain is still **user-owned**, but raw `Identity.user_id` is not a universal authentication invariant. Current API-key authentication may produce a trusted `Identity` with `api_key_id` / `organization_id` and no `user_id`.
+
+UBQ therefore freezes a server-resolved owner:
 
 ```text
-owner_user_id = Identity.user_id
+budget_owner_user_id = resolve_budget_owner(identity)
 ```
 
-A future organization/application/API-key policy may impose an additional higher-level ceiling, but it must not silently replace user ownership.
+Resolution MUST be fail-closed and MUST NOT trust client-supplied owner identifiers:
+
+1. If trusted `Identity.user_id` is present, it is the `budget_owner_user_id`.
+2. For a standard user API key without `Identity.user_id`, resolve the authenticated `api_key_id -> application -> organization -> Organization.owner_id` relationship from server-side durable data. The result is the `budget_owner_user_id`. The authenticated organization/application relation must match the resolved chain.
+3. For `admin_key`, guest, service, or any other principal that has no uniquely resolvable user owner, UBQ-governed resource admission MUST fail closed with `USER_BUDGET_OWNER_UNRESOLVED` until a separately frozen non-user/service-principal budget contract exists.
+4. `api_key_id`, `organization_id`, `application_id`, client/session/task/branch/execution IDs, and the literal value `null` MUST NOT silently become independent renewable user-budget owners.
+5. An organization/application/API-key policy may impose an additional higher-level ceiling, but it is additive policy and does not silently replace the resolved user owner.
+
+This rule preserves user ownership while keeping API-key authentication compatible through trusted server-side owner resolution.
 
 ### 2.2 Attribution dimensions
 
 ```text
-user_id        = resource quota owner
-client_id      = consumer / attribution / optional sub-limit
-connection_id  = transport affinity only
-session_id     = conversation attribution
-task_id        = workload attribution
-branch_id      = branch attribution
-execution_id   = runtime attribution
-invocation_id  = logical tool/inference idempotency attribution
-capability_id  = canonical per-tool quota key
+budget_owner_user_id = canonical renewable resource-quota owner
+Identity.user_id     = direct trusted owner candidate when present
+api_key_id           = authenticated credential attribution / owner-resolution input
+organization_id      = trusted organization attribution / optional higher-level ceiling
+application_id       = application attribution / optional higher-level ceiling
+client_id            = consumer / attribution / optional sub-limit
+connection_id        = transport affinity only
+session_id           = conversation attribution
+task_id              = workload attribution
+branch_id            = branch attribution
+execution_id         = runtime attribution
+invocation_id        = logical tool/inference idempotency attribution
+capability_id        = canonical per-tool quota key
 ```
 
 Opening another client, connection, session, Task, branch or Execution MUST NOT mint a fresh user resource allowance.
@@ -144,7 +158,7 @@ This inventory freezes where the existing TaskBudget and timeout/deadline semant
 | Domain representation | `se/src/domain/schemas/task_budget.py` | **MIGRATE later**; current TaskBudget representation remains executable compatibility authority |
 | SQL model/repository | `se/src/infrastructure/storage/models/sql/agent/task_budget.py`, `se/src/infrastructure/storage/models/sql/agent/__init__.py`, `se/src/infrastructure/storage/repositories/agent.py` | **MIGRATE later**; no destructive change in UBQ-0 |
 | Immutable migrations | `se/src/infrastructure/storage/migrations/sql/versions/11a_r5_task_budget.py`, `12a_r6_remote_reconciliation.py`, `14b_r8_root_branch_accounting.py` | **KEEP** immutable history |
-| Configuration / composition root | `se/src/infrastructure/config/schemas.py`, `se/src/infrastructure/config/__init__.py`, `se/src/application/container.py`, `se/src/main.py` | **MIGRATE later** through dual accounting/DI |
+| Configuration / composition root | `se/config/default.yaml`, `se/src/infrastructure/config/schemas.py`, `se/src/infrastructure/config/__init__.py`, `se/src/application/container.py`, `se/src/main.py` | **MIGRATE later**; split live `agent.task_budget` resource defaults from Task execution guards during dual accounting/DI |
 | TaskBudget service/runtime | `se/src/runtimes/agent/task_budget.py`, `se/src/runtimes/agent/runtime.py`, `se/src/runtimes/agent/coordinator.py`, `se/src/runtimes/agent/persistence.py`, `se/src/runtimes/agent/waiting_checkpoint.py`, `se/src/runtimes/agent/__init__.py` | **MIGRATE later**; existing execution semantics remain active |
 | Fork/retry/branch/aggregate contracts | `se/src/runtimes/agent/contracts/fork.py`, `retry.py`, `branch_resolution.py`, `aggregate.py`, `se/src/runtimes/agent/fork_planning.py`, `retry_planning.py` | **KEEP semantics / MIGRATE resource authority later** |
 | Capability / nested Agent path | `se/src/runtimes/capability/drivers/agent_driver.py` | **MIGRATE later**; nested work cannot mint UBQ |
@@ -238,7 +252,11 @@ Exact SQL names are frozen only at the implementation stage after a fresh migrat
 
 ### 5.1 UserBudgetPolicy
 
+Policy records referenced by an active or historical window are immutable/versioned authority. A user may have a mutable pointer to the policy selected for the **next** window, but recovery/admission for an existing epoch must resolve the exact durable policy identity captured by that window.
+
 ```text
+policy_id
+owner_user_id
 policy_version
 policy_fingerprint
 window_duration_seconds
@@ -262,10 +280,16 @@ revision
 
 ### 5.2 UserBudgetWindow
 
+Every window is durably bound to the policy that governed creation of that epoch. A later policy edit MUST NOT make crash recovery consult mutable current configuration and reinterpret an existing window.
+
 ```text
-user_id
+owner_user_id
 epoch
 state = ACTIVE | CLOSED
+
+governing_policy_id
+governing_policy_version
+governing_policy_fingerprint
 
 started_at
 expires_at
@@ -310,13 +334,20 @@ revision
 
 Display name, provider-native function name, alias, UI label or connection-local handle MUST NOT be the quota key.
 
+Policy/window invariants:
+- `owner_user_id` on policy/window MUST equal the resolved canonical budget owner;
+- a window captures `governing_policy_id/version/fingerprint` atomically with epoch creation;
+- a policy record referenced by a window is immutable or content-addressed/versioned so its fingerprint remains reproducible;
+- normal policy changes apply to the next created epoch by default; changing limits of an already-active epoch requires a separately frozen explicit override/revocation contract;
+- R12 recovery, retry/reconnect and reservation settlement always use the window's captured governing policy identity, never a mutable default policy.
+
 ### 5.4 Reservation receipt
 
 Resource reservation and settlement need an idempotent receipt carrying attribution:
 
 ```text
 reservation_id
-user_id
+owner_user_id
 window_epoch
 
 client_id optional
@@ -344,8 +375,10 @@ revision
 Resource-consuming execution MUST be admitted before dispatch.
 
 ```text
-resolve authenticated user
-  -> resolve/create active budget window
+resolve authenticated principal
+  -> resolve canonical budget_owner_user_id or fail closed
+  -> resolve immutable governing policy
+  -> resolve/create active budget window bound to policy identity
   -> evaluate user quota
   -> evaluate optional client sub-limit
   -> evaluate Task/Execution guards
@@ -613,11 +646,14 @@ The labels below describe future treatment, not immediate deletion of historical
 | `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md` | **SUPERSEDE/REWRITE** | TBO becomes Task Orchestration; UBQ owns user resource quota |
 | `docs/agent_timeout_contract.md` | **SUPERSEDE/REWRITE** | timeout-only taxonomy + compatibility mapping |
 | `docs/ROADMAP_NAMESPACE_REGISTRY.md` | **MIGRATE** | add UBQ namespace; redefine future TBO name |
+| `docs/agent_automation/AAT_ROADMAP.md` | **MIGRATE** | AAT uses TBO for Task eligibility/orchestration and UBQ for resource admission; no TBO quota minting |
+| `docs/agent_interconnect/AIC_ROADMAP.md` | **MIGRATE** | AIC activation uses AE/TBO plus UBQ resource admission; TBO does not own renewable quota |
 | `se/src/domain/schemas/task_budget.py` | **MIGRATE** | remain compatibility authority during dual-accounting; resource fields later demoted |
 | `se/src/runtimes/agent/task_budget.py` | **MIGRATE** | dual-accounting/admission handoff before resource authority removal |
 | `se/src/infrastructure/storage/models/sql/agent/task_budget.py` | **MIGRATE** | no destructive removal until compatibility stage |
 | `11a_r5_task_budget.py` migration | **KEEP** | immutable migration history |
 | `AgentTaskBudgetSettings` | **MIGRATE** | split user resource policy from Task execution guards |
+| `se/config/default.yaml::agent.task_budget` | **MIGRATE** | current live defaults include tool/inference/token/cost and structural ceilings; UBQ stages must split resource defaults from Task guards without leaving duplicate authority |
 | `AgentExecutionLimits` | **MIGRATE** | retain structural guards/timeouts; remove resource-budget terminology |
 | `ProviderCallBudget` | **MIGRATE NAME/KEEP SEMANTICS** | retain R10 deadline/retry behavior; future compatibility alias |
 | current `agent.budget.configure` | **SUPERSEDE** | future interface must not let Agent mint user quota |
@@ -733,6 +769,12 @@ UBQ-0 freezes the vocabulary boundary below. These decisions are semantic/API au
 
 ### 16.1 Canonical future public quota codes
 
+Before resource-dimension admission, failure to resolve a unique canonical user owner projects:
+
+| Public `error_code` | Exact meaning |
+|---|---|
+| `USER_BUDGET_OWNER_UNRESOLVED` | the authenticated principal cannot be mapped by trusted server authority to exactly one user-owned UBQ account; admission fails before a quota window is created or consumed |
+
 When UBQ becomes the admitting authority for the named resource, the public `error_code` MUST be one of:
 
 | Public `error_code` | Exact meaning |
@@ -783,13 +825,15 @@ For timeout projections, `timeout_seconds` names the configured bound for the ex
 
 ### 16.4 Public projection invariants
 
-1. **No semantic aliasing across authorities.** TaskBudget structural rejection, UBQ quota denial, timeout expiry, retry exhaustion and generic capability failure remain distinguishable.
-2. **Specific beats generic.** A known per-capability tool quota failure uses `USER_TOOL_CAPABILITY_QUOTA_EXHAUSTED`, not `USER_BUDGET_EXHAUSTED`.
-3. **Timeout is not quota.** No timeout code may reset/mint/refund UBQ by itself.
-4. **Legacy codes are not silently repurposed.** Compatibility means preserving old meaning while new canonical fields/codes are introduced.
-5. **Known canonical failure must not collapse to `CAPABILITY_EXECUTION_FAILED`.** Generic normalization is allowed only when the underlying semantic code is genuinely unavailable/unsafe to expose.
-6. **Public identity boundary.** Error projection does not expose `user_id`, `client_id`, session/task/branch/execution identifiers merely to explain quota ownership. Such identifiers remain server-side attribution unless another API contract explicitly authorizes them.
-7. **Production switch requires dual compatibility evidence.** A later stage changing the emitted `error_code` must test server, client/UI and durable/retry consumers before removing a legacy projection.
+1. **No semantic aliasing across authorities.** Owner-resolution failure, TaskBudget structural rejection, UBQ quota denial, timeout expiry, retry exhaustion and generic capability failure remain distinguishable.
+2. **Owner resolution precedes quota mutation.** `USER_BUDGET_OWNER_UNRESOLVED` is not quota exhaustion and MUST be emitted before creating/rolling/reserving a budget window.
+3. **Credential IDs are not quota owners.** Public or internal code MUST NOT silently substitute `api_key_id`, `organization_id`, `application_id`, or `null` for `owner_user_id`.
+4. **Specific beats generic.** A known per-capability tool quota failure uses `USER_TOOL_CAPABILITY_QUOTA_EXHAUSTED`, not `USER_BUDGET_EXHAUSTED`.
+5. **Timeout is not quota.** No timeout code may reset/mint/refund UBQ by itself.
+6. **Legacy codes are not silently repurposed.** Compatibility means preserving old meaning while new canonical fields/codes are introduced.
+7. **Known canonical failure must not collapse to `CAPABILITY_EXECUTION_FAILED`.** Generic normalization is allowed only when the underlying semantic code is genuinely unavailable/unsafe to expose.
+8. **Public identity boundary.** Error projection does not expose `user_id`, `client_id`, session/task/branch/execution identifiers merely to explain quota ownership. Such identifiers remain server-side attribution unless another API contract explicitly authorizes them.
+9. **Production switch requires dual compatibility evidence.** A later stage changing the emitted `error_code` must test server, client/UI and durable/retry consumers before removing a legacy projection.
 
 ### 16.5 Internal-only accounting/recovery reasons
 
