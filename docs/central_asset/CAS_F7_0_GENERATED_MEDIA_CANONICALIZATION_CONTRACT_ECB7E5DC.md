@@ -498,7 +498,7 @@ lifecycle/private reasoning -> NOT SENT TO UI
 
 F7 classification:
 ```text
-public Agent response/tool stream -> F7-P1 provider-response semantics = NO authority transfer
+public Agent response/tool stream -> F7-P1 non-stream provider-response semantics = NO authority transfer
 public Agent response/tool activity event -> CAS generated-asset commitment = NEVER
 ```
 
@@ -520,6 +520,7 @@ F7-0 records this roadmap only as a future reserved dependency. It does not open
 
 ```text
 CAS-F7-P1 production implementation = CLOSED
+CAS-F7-S streaming generated media = CLOSED
 CAS-F7-T tool-generated media = CLOSED
 CAS-F8 legacy cutover/backfill/removal = CLOSED
 provider routing/fallback/deadline/model selection = CLOSED
@@ -542,23 +543,24 @@ A first provider-response production PRE-CLAIM may be considered only when the z
 
 1. exact current main;
 2. DIRECT + AGENT shared provider-response ownership;
-3. F7-P1 is provider-response-only;
-4. tool-generated media is deferred to separate F7-T authority;
-5. provider success -> CAS canonicalization failure is terminal/no-fallback/no-breaker;
-6. `AssetStorageSettings.max_upload_bytes` is the authoritative server ingestion bound;
-7. F6 32 MiB render-memory limit is explicitly not the F7 server ingest bound;
-8. `origin_type="ASSISTANT"` for F7-P1 provider-generated assistant media;
-9. non-stream complete-object boundary;
-10. streaming terminal-object/no-partial-asset semantics;
-11. authenticated owner/canonical identity rules;
-12. `AssetService.ingest_stream` atomicity/failure behavior;
-13. one-ingest-attempt/no-internal-retry rule;
-14. exact future production path matrix;
-15. F8/destructive/session/provider-routing exclusions;
-16. CTX/Agent/current-main dependency disposition;
-17. exact current-main health GREEN/GREEN and fresh exact-head Architecture Linux + Windows GREEN;
-18. independent replacement audit PASS;
-19. blocking F7-0 P0/P1/P2 = NONE.
+3. F7-P1 is non-stream provider-response-only;
+4. streaming generated media is deferred to separate F7-S authority;
+5. tool-generated media is deferred to separate F7-T authority;
+6. provider success -> CAS canonicalization failure is terminal/no-fallback/no-breaker;
+7. `AssetStorageSettings.max_upload_bytes` is the authoritative server ingestion bound;
+8. F6 32 MiB render-memory limit is explicitly not the F7 server ingest bound;
+9. `origin_type="ASSISTANT"` for F7-P1 provider-generated assistant media;
+10. non-stream complete-object boundary and response-wide cardinality fence;
+11. current streaming generated-media exclusion is explicit and future F7-S requires full candidate/media identity preservation;
+12. authenticated owner/canonical identity rules;
+13. `AssetService.ingest_stream` atomicity/failure behavior;
+14. one-ingest-attempt/no-internal-retry rule;
+15. exact future production path matrix;
+16. F8/destructive/session/provider-routing exclusions;
+17. CTX/Agent/current-main dependency disposition;
+18. exact current-main health GREEN/GREEN and fresh exact-head Architecture Linux + Windows GREEN;
+19. independent replacement audit PASS;
+20. blocking F7-0 P0/P1/P2 = NONE.
 
 Before that gate:
 
@@ -566,6 +568,7 @@ Before that gate:
 CAS-F6 = COMPLETE / CANONICAL / HEALTHY
 CAS-F7-0 = REPLACEMENT CONTRACT CANDIDATE
 CAS-F7-P1 production CLAIM = CLOSED
+CAS-F7-S = CLOSED
 CAS-F7-T = CLOSED
 CAS-F8 = CLOSED
 ```
