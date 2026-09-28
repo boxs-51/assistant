@@ -350,22 +350,22 @@ TBO consumes UBQ admission and may not mint/reset user quota. Task horizon is li
 `AAT-0` through `AAT-6+` are reserved by `docs/agent_automation/AAT_ROADMAP.md` for Agent-owned tool interface publication, durable schedules, event subscriptions and deduplicated activation. AAT consumes TBO Task eligibility/orchestration, UBQ resource admission, and AE execution admission; it owns neither quota grants nor Capability registration authority.
 
 ```text
-AAT-0  identity/Capability/event/AE/TBO contract audit
+AAT-0  identity/Capability/event/AE/TBO/UBQ contract audit
 AAT-1  automation and Agent-owned tool interface DTO
 AAT-2  durable one-time scheduler
 AAT-3  event subscription and deduplication
 AAT-4  tool publication/invocation handoff
-AAT-5  AE/TBO activation and user controls
+AAT-5  AE/TBO/UBQ activation and user controls
 AAT-6  fault and exit gates
 ```
 
-**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. AAT-0 requires a dedicated issue/claim, stable Agent-instance identity contract and exact-head overlap audit with Capability/TV1/PTC/AE/TBO. No production authority is claimed.
+**Current state:** `RESERVED / NOT OPEN`; opening date unassigned. AAT-0 requires a dedicated issue/claim, stable Agent-instance identity contract and exact-head overlap audit with Capability/TV1/PTC/AE/TBO/UBQ. No production authority is claimed.
 
 ---
 
 ## 7C. Agent Interconnect & Communication namespace — AIC-*
 
-`AIC-0` through `AIC-6+` are reserved by `docs/agent_interconnect/AIC_ROADMAP.md` for a user-owned `agent_instance_id` contract, authorized Agent directory and communication between connected Agent instances. AIC does not own CTX Memory, CAS assets, AAT triggers, TBO grants or AE Task/Execution transitions.
+`AIC-0` through `AIC-6+` are reserved by `docs/agent_interconnect/AIC_ROADMAP.md` for a user-owned `agent_instance_id` contract, authorized Agent directory and communication between connected Agent instances. AIC does not own CTX Memory, CAS assets, AAT triggers, UBQ quota grants, TBO Task policy or AE Task/Execution transitions.
 
 ```text
 AIC-0  user-owned Agent-instance identity contract
@@ -373,7 +373,7 @@ AIC-1  directory and communication permissions
 AIC-2  envelope and delivery receipts
 AIC-3  connected request/response/notification API
 AIC-4  capability invocation handoff
-AIC-5  CTX/CAS/TBO/AE integration
+AIC-5  CTX/CAS/UBQ/TBO/AE integration
 AIC-6  fault, migration and exit gates
 ```
 
