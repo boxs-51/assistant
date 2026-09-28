@@ -341,3 +341,53 @@ async def test_ctx_f5_3g_b_each_invocation_owns_exactly_one_session(monkeypatch)
         ("candidate-one", intent),
         ("candidate-two", intent),
     ]
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3g_b_persistence_failure_propagates_without_commit(
+    monkeypatch,
+):
+    intent = _intent(suffix="persistence-failure")
+    failure = PromotionReservationPersistenceUnavailableError("unavailable")
+    repository = _Repository(failure=failure)
+    _install_repository(monkeypatch, repository)
+    session = _FakeSession()
+    sessions = _SessionFactory(session)
+    issuer = DurablePromotionReservationIssuer(
+        sessions,
+        authority_id_factory=lambda: "authority-persistence-failure",
+    )
+
+    with pytest.raises(PromotionReservationPersistenceUnavailableError):
+        await issuer.reserve(intent=intent)
+
+    assert len(repository.calls) == 1
+    assert session.commit_calls == 0
+    assert sessions.contexts[0].exited
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3g_b_commit_cancellation_propagates_without_false_success(
+    monkeypatch,
+):
+    intent = _intent(suffix="commit-cancel")
+    winner = _record(
+        authority_id="authority-commit-cancel",
+        intent=intent,
+        state=DurablePromotionReservationState.ISSUED,
+    )
+    repository = _Repository(winner=winner)
+    _install_repository(monkeypatch, repository)
+    session = _FakeSession(commit_failure=asyncio.CancelledError())
+    sessions = _SessionFactory(session)
+    issuer = DurablePromotionReservationIssuer(
+        sessions,
+        authority_id_factory=lambda: "authority-commit-cancel",
+    )
+
+    with pytest.raises(asyncio.CancelledError):
+        await issuer.reserve(intent=intent)
+
+    assert len(repository.calls) == 1
+    assert session.commit_calls == 1
+    assert sessions.contexts[0].exited
