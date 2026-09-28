@@ -237,6 +237,37 @@ Provider name, model, provider response ID and MIME/filename are metadata/proven
 
 ## 10. F7-P1 ingestion and exactly-once attempt rule
 
+### Response-wide first-slice cardinality fence
+
+Before any CAS ingest, the first F7-P1 production slice MUST perform a response-wide generated-media cardinality preflight over the fully decoded successful provider response, or over the terminally assembled provider stream.
+
+The initial production contract deliberately admits **at most ONE durable generated-media object per provider response**.
+
+Normative behavior:
+
+```text
+0 durable generated-media objects
+-> no generated-media CAS ingest
+
+1 durable generated-media object
+-> validate the sole object completely
+-> exactly one CAS ingest may begin
+
+more than 1 durable generated-media object
+-> unsupported in the first F7-P1 slice
+-> fail closed BEFORE first CAS ingest
+-> ZERO CAS ingest attempts
+-> ZERO READY assets created for that logical response
+```
+
+The cardinality preflight counts every provider-produced attachment/object that would require durable CAS canonicalization, including multiple Gemini `inlineData` parts or candidates. It is response-level, not per-object.
+
+For the sole admitted object, all deterministic pre-ingest validation that can be completed without storage side effects MUST complete before `AssetService.ingest_stream(...)` begins: authenticated owner, complete terminal object boundary, transport decode/resolution, MIME/metadata requirements, and configured size bound.
+
+Multi-object canonicalization is deferred to a separate later contract/audit that proves either an atomic batch primitive or independently authorized compensation/rollback authority. F7-P1 MUST NOT infer READY deletion, cleanup or rollback authority to compensate a partially ingested multi-object response.
+
+This fence ensures an unsupported multi-object response cannot leave an earlier READY asset orphaned when a later object fails. Provider success remains consumed: cardinality rejection or later CAS failure is terminal and MUST NOT trigger provider fallback/regeneration.
+
 Future application composition:
 
 ```text
@@ -264,11 +295,14 @@ GeneratedAssetCanonicalizer
 Current `AssetService.ingest_stream` allocates new asset/blob IDs and is not a content-idempotency primitive.
 
 Therefore the first F7-P1 slice freezes:
-- one canonicalization pass per successful provider response object;
+- at most ONE durable generated-media object is eligible per successful provider response;
+- response cardinality greater than one fails closed before the first CAS ingest with ZERO CAS ingest attempts;
+- one canonicalization pass for the sole admitted generated-media object;
 - no automatic CAS canonicalization retry after ingest has begun;
 - no provider regeneration on CAS failure;
 - ambiguous post-ingest outcome fails closed;
-- no second ingest attempt unless a separately audited replay/idempotency authority can prove the prior canonical result.
+- no second ingest attempt unless a separately audited replay/idempotency authority can prove the prior canonical result;
+- multi-object canonicalization requires a separately audited atomic-batch or compensation authority.
 
 A later request initiated by the user is a new logical provider execution and is not treated as an internal F7 retry.
 
@@ -312,7 +346,10 @@ public Agent response/tool activity event
 != generated object commitment authority
 ```
 
+For the first F7-P1 production slice, the terminal assembler MUST identify the complete logical response and count all durable generated-media candidates before the first CAS ingest. More than one candidate fails closed with ZERO CAS ingest attempts.
+
 A streaming generated object may be canonicalized only after a provider-neutral terminal assembler proves:
+- response-level generated-media cardinality is at most one;
 - object completion;
 - deterministic object boundary within the response;
 - complete bytes;
@@ -377,6 +414,7 @@ Session regeneration remains CLOSED.
 ## 15. Failure semantics
 
 F7-P1 fails closed on:
+- more than one durable generated-media object in one provider response or terminally assembled provider stream;
 - missing authenticated owner;
 - incomplete/ambiguous generated object;
 - invalid base64/byte transport;
@@ -387,6 +425,7 @@ F7-P1 fails closed on:
 - ambiguous ingest replay without proven canonical result.
 
 Failure MUST NOT:
+- perform any CAS ingest when response cardinality is greater than one;
 - expose provider/base64 identity as substitute durable canonical message state;
 - fall back to legacy `/v1/files`;
 - create partial READY FileAsset state;
