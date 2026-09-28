@@ -313,7 +313,7 @@ UBQ-7  cross-track fault/integration/rollout exit
 **Current state:** contract/coordination active; production/schema/migration/runtime authority CLOSED until a stage-specific CLAIM is independently released.
 
 Canonical ownership:
-- `user_id` owns renewable resource quota;
+- renewable quota is user-owned through server-resolved `budget_owner_user_id`; trusted `Identity.user_id` is direct when present, standard API-key principals resolve through their durable organization owner, and principals without one uniquely resolvable user fail closed;
 - `client_id`, session, Task, branch and Execution are attribution/optional sub-limit dimensions and do not mint quota;
 - an anchored usage window resets renewable resource quota from first admitted use according to policy;
 - UBQ owns compute, logical inference, token, total tool-call, per-`capability_id` tool-call and optional cost accounting;
@@ -347,7 +347,7 @@ TBO consumes UBQ admission and may not mint/reset user quota. Task horizon is li
 
 ## 7B. Agent Automation & Triggers namespace — AAT-*
 
-`AAT-0` through `AAT-6+` are reserved by `docs/agent_automation/AAT_ROADMAP.md` for Agent-owned tool interface publication, durable schedules, event subscriptions and deduplicated activation. AAT consumes TBO budget admission and AE execution admission; it owns neither budget grants nor Capability registration authority.
+`AAT-0` through `AAT-6+` are reserved by `docs/agent_automation/AAT_ROADMAP.md` for Agent-owned tool interface publication, durable schedules, event subscriptions and deduplicated activation. AAT consumes TBO Task eligibility/orchestration, UBQ resource admission, and AE execution admission; it owns neither quota grants nor Capability registration authority.
 
 ```text
 AAT-0  identity/Capability/event/AE/TBO contract audit
@@ -383,7 +383,7 @@ AIC-6  fault, migration and exit gates
 
 - AIC-0's stable Agent-instance identity contract and Agent-registration ownership decision precede any Agent-private CTX Memory schema, CAS Agent grant, or AAT Agent-owned automation implementation. User-wide CTX planning can proceed independently.
 - CAS owns grant decisions; CTX only consumes authorized asset evidence. AIC messages and AAT triggers do not carry asset or Memory read authority.
-- TBO owns renewal and budget admission; AAT owns due-time/event delivery. AIC communication requests pass through both relevant admission paths when they activate an Agent.
+- UBQ owns renewable user-resource admission; TBO owns Task eligibility/orchestration; AAT owns due-time/event delivery. AIC communication requests pass through UBQ plus the applicable TBO/AE admission paths when they activate an Agent.
 - These are dependency contracts, not a global implementation or merge order. Issue #85 and each owning issue still control claims and integration gates.
 
 ---
