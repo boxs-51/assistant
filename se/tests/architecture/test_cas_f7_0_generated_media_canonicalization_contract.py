@@ -361,8 +361,9 @@ def test_cross_issue_and_closed_authority_boundaries_are_explicit():
     for phrase in (
         "CTX retains Memory/promotion/retrieval/source-discovery and ToolResponsePayload authority.",
         "Agent/R12 retains execution lease/recovery/checkpoint and tool-result commitment authority.",
-        "F7-P1 is provider-response-only and does not depend on modifying AgentToolResult persistence.",
+        "F7-P1 is non-stream provider-response-only and does not depend on modifying AgentToolResult persistence. F7-S streaming generated media remains separately CLOSED.",
         "public Agent response/tool activity event -> CAS generated-asset commitment = NEVER",
+        "CAS-F7-S streaming generated media = CLOSED",
         "CAS-F7-T tool-generated media = CLOSED",
         "CAS-F8 legacy cutover/backfill/removal = CLOSED",
         "provider routing/fallback/deadline/model selection = CLOSED",
@@ -376,7 +377,8 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
 
     for phrase in (
         "exact current main",
-        "F7-P1 is provider-response-only",
+        "F7-P1 is non-stream provider-response-only",
+        "streaming generated media is deferred to separate F7-S authority",
         "tool-generated media is deferred to separate F7-T authority",
         "provider success -> CAS canonicalization failure is terminal/no-fallback/no-breaker",
         "AssetStorageSettings.max_upload_bytes is the authoritative server ingestion bound",
