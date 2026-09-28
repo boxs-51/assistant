@@ -139,7 +139,7 @@ def test_ctx_f5_3h_a_requires_non_mutating_canonical_replay_helper():
         "ignores only created_at",
         "cannot create a missing record",
         "H-A does not implement or expose this helper",
-        "before a production atomic orchestrator may be CLAIMED",
+        "Before a production atomic orchestrator may be CLAIMED",
     ):
         assert phrase in contract
 
