@@ -324,7 +324,7 @@ Per-tool accounting is keyed by canonical `capability_id`:
 ```text
 UserToolBudgetUsage
 -------------------
-user_id
+owner_user_id
 window_epoch
 capability_id
 used_calls
