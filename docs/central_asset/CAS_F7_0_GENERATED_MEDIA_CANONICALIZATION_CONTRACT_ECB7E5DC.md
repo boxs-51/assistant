@@ -15,7 +15,7 @@ This document freezes the CAS-F7-0 generated-media convergence contract only.
 ```text
 production/runtime/schema/migration delta = ZERO
 CAS-F7-0 contract/evidence preparation = OPEN
-first future production slice = F7-P1 / PROVIDER-RESPONSE MEDIA ONLY
+first future production slice = F7-P1 / NON-STREAM PROVIDER-RESPONSE MEDIA ONLY
 CAS-F7-P1 production CLAIM = CLOSED
 tool-generated media production = DEFERRED / CLOSED (future F7-T substage)
 CAS-F8 = CLOSED
@@ -27,11 +27,12 @@ CAS-F6 is LANDED / CANONICAL / HEALTHY. F7 starts from the canonical user-upload
 The F7 family has two distinct generated-content authorities:
 
 ```text
-F7-P1 = provider-response generated media canonicalization
+F7-P1 = non-stream provider-response generated media canonicalization
+F7-S  = streaming provider-response generated media canonicalization (DEFERRED / CLOSED)
 F7-T  = tool-generated media canonicalization after Agent COMMITTED authority
 ```
 
-F7-0 freezes both boundaries, but only F7-P1 may become the first production PRE-CLAIM after this contract exits. F7-T requires a separate later contract/audit because AgentToolResult output is already durable before CAS may consume it.
+F7-0 freezes these boundaries, but only the non-stream F7-P1 slice may become the first production PRE-CLAIM after this contract exits. F7-S streaming generated media requires a separate later contract/audit because current stream decoding does not preserve response-wide generated-media cardinality/identity. F7-T requires a separate later contract/audit because AgentToolResult output is already durable before CAS may consume it.
 
 Provider/base64/URL/object-store/tool transport identity is never canonical CAS identity.
 
@@ -324,20 +325,28 @@ For provider `fileData`, URL or remote handle:
 
 Provider remote cleanup/delete remains CLOSED.
 
-## 12. Streaming terminal-object boundary
+## 12. Streaming generated-media boundary — deferred F7-S
 
-Current `ChatExecutionHandler.stream_with_fallback(...)` yields provider chunks as they arrive.
+The initial F7-P1 production slice is **non-stream only**.
 
-Current canonical Agent public activity streaming is explicitly response/tool only:
+```text
+F7-P1 non-stream provider-response generated media = eligible for first production slice
+F7-S streaming generated media = DEFERRED / CLOSED
+```
+
+Current `ChatExecutionHandler.stream_with_fallback(...)` yields provider chunks as they arrive. Current Gemini stream decoding is insufficient for the response-wide cardinality/identity guarantee required by F7-P1:
+- `ResponseChats.adapt_chat_stream(...)` selects only `obj["candidates"][0]`, so additional candidates are not preserved for a downstream provider-neutral preflight;
+- extensionless Gemini `fileData.fileUri` may be lowered to generic `UrlContent`, so generated-media identity may become indistinguishable from ordinary URL content after decoding.
+
+Therefore no streaming generated-media response is eligible for CAS canonicalization under the first F7-P1 production slice. The first slice MUST NOT claim support for streaming generated media and MUST NOT rely on a downstream canonicalizer to reconstruct candidate cardinality or media identity after those details have been discarded.
+
+The existing public Agent stream remains response/tool activity only:
+
 ```text
 agent.progress -> public event_type = agent.response / channel = response
 agent.tool.requested|started|completed|failed -> channel = tool
 public lifecycle events -> not emitted to UI
-```
 
-F7-P1 MUST NOT create a durable asset from an incomplete provider chunk, public agent response activity, or tool activity event.
-
-```text
 partial provider chunk
 != terminal generated object
 != durable FileAsset authority
@@ -346,23 +355,22 @@ public Agent response/tool activity event
 != generated object commitment authority
 ```
 
-For the first F7-P1 production slice, the terminal assembler MUST identify the complete logical response and count all durable generated-media candidates before the first CAS ingest. More than one candidate fails closed with ZERO CAS ingest attempts.
+A future F7-S streaming release must first freeze and independently prove a provider-neutral terminal envelope/assembler that preserves, before any CAS ingest:
+- the complete logical provider response boundary;
+- all provider candidates relevant to generated-media cardinality;
+- every generated-media object identity, including extensionless remote/fileData forms;
+- response-wide generated-media cardinality;
+- deterministic terminal object boundaries;
+- complete bounded bytes or an authenticated resolver capable of obtaining them;
+- MIME/type classification without losing generated-media identity;
+- authenticated owner authority;
+- cancellation state.
 
-A streaming generated object may be canonicalized only after a provider-neutral terminal assembler proves:
-- response-level generated-media cardinality is at most one;
-- object completion;
-- deterministic object boundary within the response;
-- complete bytes;
-- content size not exceeding configured `AssetStorageSettings.max_upload_bytes`;
-- MIME available or safely defaulted;
-- authenticated owner authority remains valid;
-- cancellation has not invalidated the terminal object.
+Only after those facts are preserved may a streaming generated object become eligible for CAS canonicalization.
 
-If a provider cannot supply a complete bounded generated object with deterministic terminal identity, binary/media canonicalization fails closed.
+For future F7-S, cardinality greater than one must still fail closed before first CAS ingest unless a separately audited atomic-batch/compensation authority is released. Provider success followed by CAS canonicalization failure remains terminal and MUST NOT trigger provider fallback/regeneration.
 
-No partially assembled FileAsset may become READY or model/history visible.
-
-After a provider stream has emitted output or reached terminal generated-object success, a later F7 canonicalization failure is terminal and MUST NOT trigger provider fallback/regeneration.
+No partially assembled FileAsset may become READY or model/history visible under F7 authority.
 
 ## 13. Tool-generated media boundary — deferred F7-T
 
@@ -413,14 +421,15 @@ Session regeneration remains CLOSED.
 
 ## 15. Failure semantics
 
-F7-P1 fails closed on:
-- more than one durable generated-media object in one provider response or terminally assembled provider stream;
+F7-P1 non-stream fails closed on:
+- more than one durable generated-media object in one non-stream provider response;
 - missing authenticated owner;
 - incomplete/ambiguous generated object;
 - invalid base64/byte transport;
 - content exceeding configured `AssetStorageSettings.max_upload_bytes`;
 - provider URL/handle that cannot resolve to complete bounded bytes;
 - AssetService ingest/storage/finalize failure;
+- any attempt to treat streaming generated media as eligible under the first F7-P1 slice;
 - cancellation before terminal canonicalization;
 - ambiguous ingest replay without proven canonical result.
 
@@ -443,9 +452,9 @@ This is a **future production-candidate map**, not a production grant.
 | `se/src/application/assets/service.py` | existing ingest/finalize authority | EXPECT NO CHANGE |
 | `se/src/infrastructure/config/schemas.py` | authoritative `AssetStorageSettings.max_upload_bytes` definition | EXPECT NO CHANGE |
 | `se/src/infrastructure/storage/models/sql/assets/file.py` | existing valid `origin_type` enum/check | EXPECT NO CHANGE |
-| `se/src/provider/handlers/chat_handler.py` | shared post-provider response hook and terminal no-fallback boundary | EXPECTED future F7-P1 change |
-| `se/src/provider/gemini/converters/chats/response.py` | provider decoding/lowering only | EXPECT NO CHANGE for first slice; CONDITIONAL only if terminal-object metadata is insufficient |
-| other provider response converters | decoding/lowering only | AUDIT-ONLY / EXPECT NO CHANGE initially |
+| `se/src/provider/handlers/chat_handler.py` | non-stream post-provider response hook and terminal no-fallback boundary | EXPECTED future F7-P1 non-stream change; streaming generated-media path excluded from first slice |
+| `se/src/provider/gemini/converters/chats/response.py` | provider decoding/lowering; current stream loses full candidate/media identity | NO CHANGE for first non-stream F7-P1 slice; REQUIRED future F7-S change before streaming generated media may open |
+| other provider response converters | decoding/lowering only | NON-STREAM audit for F7-P1; streaming eligibility CLOSED until each provider preserves full terminal cardinality/media identity |
 | `se/src/runtimes/agent/adapters/inference.py` | AGENT consumer already uses shared chat handler | EXPECT NO CHANGE |
 | `se/src/runtimes/agent/runtime.py` | Agent execution/tool-result authority | NO CHANGE in F7-P1 |
 | `se/src/runtimes/agent/persistence.py` | COMMITTED/PROVISIONAL durable authority | NO CHANGE |
@@ -470,7 +479,7 @@ Current CTX verifier work is zero-migration and transfers no CAS authority.
 
 Agent/R12 retains execution lease/recovery/checkpoint and tool-result commitment authority.
 
-F7-P1 is provider-response-only and does not depend on modifying AgentToolResult persistence.
+F7-P1 is non-stream provider-response-only and does not depend on modifying AgentToolResult persistence. F7-S streaming generated media remains separately CLOSED.
 
 The COMMITTED fence is retained as the prerequisite for any future F7-T design, but F7-T remains CLOSED.
 
