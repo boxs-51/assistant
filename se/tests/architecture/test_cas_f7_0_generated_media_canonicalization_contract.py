@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 
@@ -169,11 +170,34 @@ def test_provider_response_origin_type_mapping_is_exact_and_schema_compatible():
         assert phrase in document
 
 
+def test_f7_p1_rejects_multi_object_response_before_first_ingest():
+    gemini = _read("se/src/provider/gemini/converters/chats/response.py")
+    assert "for part in parts:" in gemini
+    assert 'elif "inlineData" in part:' in gemini
+    assert "content_parts.append(MessageContentPart(" in gemini
+
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    for phrase in (
+        "response-wide generated-media cardinality preflight",
+        "at most ONE durable generated-media object per provider response",
+        "fail closed BEFORE first CAS ingest",
+        "ZERO CAS ingest attempts",
+        "ZERO READY assets created for that logical response",
+        "multiple Gemini inlineData parts or candidates",
+        "multi-object canonicalization requires a separately audited atomic-batch or compensation authority",
+        "MUST NOT infer READY deletion, cleanup or rollback authority",
+        "MUST NOT trigger provider fallback/regeneration",
+    ):
+        assert phrase in document
+
+
 def test_f7_p1_freezes_one_ingest_attempt_no_internal_retry():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     for phrase in (
-        "one canonicalization pass per successful provider response object",
+        "at most ONE durable generated-media object is eligible per successful provider response",
+        "response cardinality greater than one fails closed before the first CAS ingest with ZERO CAS ingest attempts",
+        "one canonicalization pass for the sole admitted generated-media object",
         "no automatic CAS canonicalization retry after ingest has begun",
         "no provider regeneration on CAS failure",
         "ambiguous post-ingest outcome fails closed",
@@ -233,12 +257,34 @@ def test_current_main_public_agent_stream_is_response_tool_only_and_not_asset_au
     runtime = _read("se/src/runtimes/agent/runtime.py")
     docs = _read("docs/agent_activity_stream.md")
 
-    assert "AGENT_STREAM_EVENT_NAMES = (" in stream
-    assert "AgentEventName.PROGRESS" in stream
-    assert "AgentEventName.TOOL_REQUESTED" in stream
-    assert "AgentEventName.TOOL_STARTED" in stream
-    assert "AgentEventName.TOOL_COMPLETED" in stream
-    assert "AgentEventName.TOOL_FAILED" in stream
+    tree = ast.parse(stream)
+    assignments = [
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name)
+            and target.id == "AGENT_STREAM_EVENT_NAMES"
+            for target in node.targets
+        )
+    ]
+    assert len(assignments) == 1
+    value = assignments[0].value
+    assert isinstance(value, ast.Tuple)
+    actual_members = tuple(
+        f"{element.value.id}.{element.attr}"
+        if isinstance(element, ast.Attribute)
+        and isinstance(element.value, ast.Name)
+        else None
+        for element in value.elts
+    )
+    assert actual_members == (
+        "AgentEventName.PROGRESS",
+        "AgentEventName.TOOL_REQUESTED",
+        "AgentEventName.TOOL_STARTED",
+        "AgentEventName.TOOL_COMPLETED",
+        "AgentEventName.TOOL_FAILED",
+    )
     assert 'event_type="agent.response" if name == AgentEventName.PROGRESS else name' in stream
     assert 'channel: Literal["response", "tool"]' in stream
     assert "CONTEXT_READY" not in runtime
