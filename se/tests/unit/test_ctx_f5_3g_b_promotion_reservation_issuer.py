@@ -183,7 +183,7 @@ async def test_ctx_f5_3g_b_implements_protocol_and_returns_durable_winner(
         authority_id_factory=_candidate_id,
     )
 
-    assert isinstance(issuer, PromotionReservationIssuer)
+    assert PromotionReservationIssuer in DurablePromotionReservationIssuer.__mro__
     reservation = await issuer.reserve(intent=intent)
 
     assert reservation.promotion_authority_id == "authority-canonical"
