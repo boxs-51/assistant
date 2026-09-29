@@ -950,7 +950,7 @@ async def test_r12_e_competing_recoverers_advance_generation_once(tmp_path):
 async def test_r12_e_task_budget_release_once_and_cumulative_usage_preserved(
     tmp_path,
 ):
-    engine, sessions, factory, _, budget_service = await _setup(
+    engine, sessions, factory, store, budget_service = await _setup(
         tmp_path, "r12_e_task_budget.sqlite"
     )
     expiry = datetime(2026, 9, 29, 5, 0, tzinfo=timezone.utc)
@@ -989,8 +989,22 @@ async def test_r12_e_task_budget_release_once_and_cumulative_usage_preserved(
             assert budget.used_tokens == 1234
             assert budget.used_cost_usd == Decimal("2.50000000")
             assert reservation is not None
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-task-r12-e:checkpoint:9"
+            )
+            assert checkpoint is not None
+            metadata = dict(checkpoint.metadata_json or {})
+            assert metadata["r12_recovery_iteration_id"] == (
+                "exec-task-r12-e:iteration:1"
+            )
+            assert metadata["r12_recovery_active_tool_call_ids"] == []
             first_budget_revision = budget.revision
             await uow.commit()
+
+        resumed = await store.resume_execution("exec-task-r12-e")
+        assert resumed is not None
+        assert resumed.iteration == 1
+        assert resumed.resume_pending_tool_calls == []
 
         replay_revision = (
             await budget_service.recover_task_scoped_execution(
