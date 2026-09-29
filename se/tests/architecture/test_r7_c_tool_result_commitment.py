@@ -961,3 +961,65 @@ async def test_r7_c_terminal_committed_reserved_error_code_does_not_enter_waitin
     assert result.state.value == "COMPLETED"
     assert result.error_code is None
     assert inference.calls == 2
+
+
+@pytest.mark.asyncio
+async def test_r7_c_local_pre_dispatch_resume_does_not_require_r6_row(tmp_path):
+    engine, sessions = await _schema(
+        tmp_path,
+        "r7c-local-pre-dispatch-resume.sqlite",
+    )
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r7-c",
+                    session_id="session-r7-c",
+                    agent_id="agent-r7-c",
+                    correlation_id="corr-r7-c-local",
+                    state="RUNNING",
+                    revision=1,
+                    request={},
+                    transcript=[
+                        {"role": "user", "content": "local pending"},
+                    ],
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="iter-local-r7-c",
+                    execution_id="exec-r7-c",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-local"],
+                )
+            )
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="row-call-local",
+                    execution_id="exec-r7-c",
+                    iteration_id="iter-local-r7-c",
+                    invocation_id="inv-local",
+                    tool_call_id="call-local",
+                    capability_id="tool.local",
+                    arguments={"value": 1},
+                    status="PENDING",
+                )
+            )
+            # Local/pre-dispatch compatibility shape: AgentToolCall exists
+            # before any R6 CapabilityInvocation row and before a tool result.
+            await uow.commit()
+
+        context = await store.resume_execution("exec-r7-c")
+        assert context is not None
+        assert context.resume_transcript == [
+            {"role": "user", "content": "local pending"}
+        ]
+        assert [
+            item["tool_call_id"]
+            for item in context.resume_pending_tool_calls
+        ] == ["call-local"]
+        assert context.resume_pending_tool_calls[0]["invocation_id"] == "inv-local"
+    finally:
+        await engine.dispose()
