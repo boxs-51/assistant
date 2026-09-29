@@ -139,12 +139,15 @@ async def _sanitize_transcript_in_uow(
         sanitized.append(_committed_tool_message(result))
 
     try:
-        canonical = canonical_transcript_messages(sanitized)
+        # Canonicalization is a validation/storage-proof boundary only.  Keep
+        # the pre-existing R7-C outward resume projection shape for ordinary
+        # non-tool mappings instead of leaking canonical default fields.
+        canonical_transcript_messages(sanitized)
     except Exception as exc:
         raise SafePointReconstructionError(
             "SAFE_POINT_TRANSCRIPT_CORRUPT: transcript is not canonicalizable."
         ) from exc
-    return tuple(dict(item) for item in canonical)
+    return tuple(dict(item) for item in sanitized)
 
 
 async def reconstruct_r7c_safe_point_in_uow(
@@ -387,10 +390,31 @@ async def reconstruct_r7c_safe_point_in_uow(
             raw_messages=checkpoint_messages,
             active_tool_call_ids=active_set,
         )
+        try:
+            canonical_safe_transcript = tuple(
+                dict(item)
+                for item in canonical_transcript_messages(
+                    list(safe_transcript)
+                )
+            )
+            canonical_checkpoint_prefix = tuple(
+                dict(item)
+                for item in canonical_transcript_messages(
+                    list(safe_checkpoint_prefix)
+                )
+            )
+        except Exception as exc:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_TRANSCRIPT_CORRUPT: transcript prefix proof is "
+                "not canonicalizable."
+            ) from exc
         if (
-            len(safe_transcript) < len(safe_checkpoint_prefix)
-            or safe_transcript[: len(safe_checkpoint_prefix)]
-            != safe_checkpoint_prefix
+            len(canonical_safe_transcript)
+            < len(canonical_checkpoint_prefix)
+            or canonical_safe_transcript[
+                : len(canonical_checkpoint_prefix)
+            ]
+            != canonical_checkpoint_prefix
         ):
             raise SafePointReconstructionError(
                 "SAFE_POINT_TRANSCRIPT_DIVERGENCE: durable RUNNING transcript "
