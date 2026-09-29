@@ -642,6 +642,46 @@ async def test_r12_e_terminalization_before_final_recovery_cas_wins(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r12_e_repository_rejects_noncanonical_recovery_checkpoint_id(
+    tmp_path,
+):
+    engine, sessions, factory, _, _ = await _setup(
+        tmp_path, "r12_e_checkpoint_fence.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 7, 30, tzinfo=timezone.utc)
+    try:
+        await _seed_non_task(factory, expiry=expiry)
+
+        async with factory() as uow:
+            with pytest.raises(
+                ValueError,
+                match="deterministic checkpoint identity",
+            ):
+                await uow.agents.compare_and_set_recovery_waiting_execution(
+                    "exec-r12-e",
+                    5,
+                    observed_owner_instance_id="worker-old",
+                    observed_lease_generation=3,
+                    observed_lease_expires_at=expiry,
+                    takeover_now_utc=expiry,
+                    values={
+                        "current_checkpoint_id": "exec-r12-e:checkpoint:wrong",
+                    },
+                )
+            await uow.rollback()
+
+        async with factory() as uow:
+            loaded = await uow.agents.get_execution("exec-r12-e")
+            assert loaded.state == "RUNNING"
+            assert loaded.revision == 5
+            assert loaded.lease_generation == 3
+            assert loaded.current_checkpoint_id is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r12_e_semantic_revision_race_loses_exact_final_cas(tmp_path):
     engine, sessions, factory, _, _ = await _setup(
         tmp_path, "r12_e_revision_race.sqlite"
