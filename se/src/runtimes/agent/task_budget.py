@@ -3664,6 +3664,13 @@ class TaskBudgetService:
                                 checkpoint_fingerprint
                             ),
                             "r12_recovery_receipt": payload,
+                            "r12_recovery_iteration_id": (
+                                safe_point.iteration_id
+                            ),
+                            "r12_recovery_active_tool_call_ids": [
+                                str(item.tool_call_id)
+                                for item in safe_point.ordered_tool_calls
+                            ],
                         },
                     }
                     transition_values = {
