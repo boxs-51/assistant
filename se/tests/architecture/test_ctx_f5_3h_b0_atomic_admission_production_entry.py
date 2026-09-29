@@ -171,7 +171,7 @@ def test_ctx_f5_3h_b0_freezes_exit_evidence_and_closed_authority() -> None:
         "H-B2 production CLAIM remains CLOSED",
         "runtime/API/source/non-SQLite authority = CLOSED",
         "No se/src/** file changes are permitted in H-B0",
-        "production/runtime/schema/migration delta = ZERO",
+        "Production/runtime/schema/migration delta = ZERO",
         "baseline = 73714a4405f9ed10f16117b763215467d0a3e607",
         "canonical migration head = 25a_ubq1_user_budget_foundation",
     ):
