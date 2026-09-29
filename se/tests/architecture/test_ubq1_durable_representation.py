@@ -4,6 +4,8 @@ import inspect
 from decimal import Decimal
 
 import pytest
+from sqlalchemy.dialects import postgresql
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from se.src.domain.schemas.user_budget import (
     USER_BUDGET_INT64_MAX,
@@ -14,6 +16,7 @@ from se.src.domain.schemas.user_budget import (
     decimal_to_atomic,
 )
 from se.src.infrastructure.storage.models.sql.user_budget import (
+    UserBudgetAccountRecord,
     UserBudgetReservationRecord,
     UserBudgetWindowRecord,
 )
@@ -132,3 +135,35 @@ def test_ubq1_repository_has_named_mutations_and_write_intent_before_rollover_re
     assert 'text("BEGIN IMMEDIATE")' in inspect.getsource(
         repository_module._begin_sqlite_write_intent
     )
+
+
+def test_ubq1_postgresql_ddl_keeps_native_composite_fks_and_active_index() -> None:
+    window_ddl = str(
+        CreateTable(UserBudgetWindowRecord.__table__).compile(
+            dialect=postgresql.dialect()
+        )
+    )
+    account_ddl = str(
+        CreateTable(UserBudgetAccountRecord.__table__).compile(
+            dialect=postgresql.dialect()
+        )
+    )
+    active_index = next(
+        item
+        for item in UserBudgetWindowRecord.__table__.indexes
+        if item.name == "uq_user_budget_windows_one_active_owner"
+    )
+    index_ddl = str(
+        CreateIndex(active_index).compile(dialect=postgresql.dialect())
+    )
+
+    assert "fk_user_budget_window_exact_policy" in window_ddl
+    assert "FOREIGN KEY(owner_user_id, governing_policy_id, governing_policy_version, governing_policy_fingerprint)" in window_ddl
+    assert "ON DELETE RESTRICT" in window_ddl
+
+    assert "fk_user_budget_account_next_policy" in account_ddl
+    assert "fk_user_budget_account_active_window" in account_ddl
+    assert account_ddl.count("ON DELETE RESTRICT") >= 3
+
+    assert "CREATE UNIQUE INDEX uq_user_budget_windows_one_active_owner" in index_ddl
+    assert "WHERE state = 'ACTIVE'" in index_ddl
