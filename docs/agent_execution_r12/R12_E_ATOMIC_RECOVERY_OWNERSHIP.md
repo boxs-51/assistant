@@ -113,8 +113,27 @@ Two durable write-order crash windows are part of the R12-E recovery boundary:
    authority.
 
 These rules preserve the core R7-C invariant that
-`AgentIteration.tool_call_ids` is the only active-batch ordering authority and
-prevent a recovery checkpoint from orphaning assistant tool requests.
+`AgentIteration.tool_call_ids` is the only live active-batch ordering authority
+before a recovery cut. At the R12-E cut itself, the checkpoint freezes that
+authority into immutable checkpoint metadata:
+
+- `r12_recovery_iteration_id`
+- `r12_recovery_active_tool_call_ids`
+
+A current R12-E `WAITING(RECOVERY)` checkpoint must reconstruct its active batch
+from that frozen metadata rather than rereading a subsequently mutable
+`AgentIteration.tool_call_ids` row. This prevents an expired worker's late
+iteration update from adding abandoned calls to an already-published safe point.
+
+For any current normalized checkpoint, if the sanitized/COMMITTED transcript
+still declares an unresolved assistant tool batch while the authoritative active
+ID set is empty, reconstruction fails closed with
+`SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING`. The only special recovery case is
+the exact R12-E iteration-zero safe point, whose empty batch is still validated
+against the same sanitized transcript rule.
+
+These rules prevent a recovery or ordinary R7-C checkpoint from orphaning
+assistant tool requests.
 
 ## Checkpoint publication
 
