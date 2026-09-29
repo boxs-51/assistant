@@ -642,13 +642,16 @@ async def test_r12_e_stale_recovery_checkpoint_ignores_same_iteration_late_write
                 "exec-r12-e-stale:iteration:0"
             )
             assert metadata["r12_recovery_active_tool_call_ids"] == []
-            assert "call-late-same-iteration" not in repr(
-                await store.load_committed_checkpoint_transcript(
-                    "exec-r12-e-stale",
-                    checkpoint.checkpoint_id,
-                )
-            )
+            checkpoint_id = checkpoint.checkpoint_id
             await uow.commit()
+
+        committed_transcript = await store.load_committed_checkpoint_transcript(
+            "exec-r12-e-stale",
+            checkpoint_id,
+        )
+        assert "call-late-same-iteration" not in repr(
+            committed_transcript
+        )
     finally:
         await engine.dispose()
 
