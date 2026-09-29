@@ -17,6 +17,7 @@ from ..repositories.chat_data.attachments import AttachmentRepository
 from ..repositories.agent import AgentRepository
 from ..repositories.capability_invocations import CapabilityInvocationRepository
 from ..repositories.assets import AssetRepository
+from ..repositories.user_budget import UserBudgetRepository
 
 from .events import StorageEventFactory
 from ....transport.gateway.authentication.permission import PermissionHelper
@@ -41,6 +42,7 @@ class AbstractUnitOfWork(ABC):
     agents: AgentRepository
     capability_invocations: CapabilityInvocationRepository
     assets: AssetRepository
+    user_budgets: UserBudgetRepository
 
     async def __aenter__(self):
         raise NotImplementedError
@@ -80,6 +82,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.agents = AgentRepository(self.session)
         self.capability_invocations = CapabilityInvocationRepository(self.session)
         self.assets = AssetRepository(self.session)
+        self.user_budgets = UserBudgetRepository(self.session)
         return self
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
