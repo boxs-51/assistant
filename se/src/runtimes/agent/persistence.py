@@ -2205,6 +2205,7 @@ class DurableAgentStore:
                 safe_point = await reconstruct_r7c_safe_point_in_uow(
                     uow,
                     execution,
+                    require_pending_invocation_authority=True,
                 )
             except SafePointReconstructionError as exc:
                 raise ExecutionConflictError(str(exc)) from exc
