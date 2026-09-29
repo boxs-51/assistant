@@ -259,11 +259,11 @@ def _policy() -> UserBudgetPolicy:
     )
 
 
-@pytest.mark.asyncio
-async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
+@pytest.fixture
+def ubq1_concurrency_database(
     tmp_path: Path,
     monkeypatch,
-) -> None:
+) -> Path:
     database = tmp_path / "ubq1-concurrency.sqlite"
     monkeypatch.setenv(
         "ASSISTANT_ALEMBIC_DATABASE_URL",
@@ -277,6 +277,14 @@ async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
         raw.commit()
     finally:
         raw.close()
+    return database
+
+
+@pytest.mark.asyncio
+async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
+    ubq1_concurrency_database: Path,
+) -> None:
+    database = ubq1_concurrency_database
 
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{database.as_posix()}",
