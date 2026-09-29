@@ -643,17 +643,14 @@ async def test_r12_e_active_batch_membership_mismatch_fails_closed(tmp_path):
                     arguments={"value": "B"},
                 )
             )
-            uow.session.add(
-                CapabilityInvocationRecord(
-                    invocation_id="inv-authority-b",
-                    execution_id="exec-r12-e-mismatch",
-                    tool_call_id="call-authority-b",
-                    capability_id="tool.remote.b",
-                    arguments={"value": "B"},
-                    status="PENDING",
-                    revision=0,
-                )
+            invocation = _invocation(
+                "inv-authority-b",
+                "call-authority-b",
+                capability_id="tool.remote.b",
             )
+            invocation.execution_id = "exec-r12-e-mismatch"
+            invocation.arguments = {"value": "B"}
+            uow.session.add(invocation)
             await uow.commit()
 
         with pytest.raises(
