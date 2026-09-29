@@ -515,6 +515,15 @@ class UserBudgetRepository:
         cost_used_atomic: int | None = None,
         cost_reserved_atomic: int | None = None,
     ) -> UserBudgetWindowRecord:
+        current = await self.session.get(
+            UserBudgetWindowRecord,
+            (owner_user_id, window_epoch),
+        )
+        if current is None:
+            raise KeyError("unknown user budget window")
+        if current.revision != expected_revision:
+            raise UserBudgetConflictError("user budget window usage CAS is stale")
+
         supplied = {
             "compute_used_atomic": compute_used_atomic,
             "compute_reserved_atomic": compute_reserved_atomic,
@@ -536,6 +545,22 @@ class UserBudgetRepository:
         }
         if not values:
             raise ValueError("window usage mutation requires at least one target value")
+
+        monotonic_used_fields = (
+            "compute_used_atomic",
+            "inference_used",
+            "input_tokens_used",
+            "output_tokens_used",
+            "total_tokens_used",
+            "tool_calls_used",
+            "cost_used_atomic",
+        )
+        for field in monotonic_used_fields:
+            if field in values and values[field] < getattr(current, field):
+                raise UserBudgetIntegrityError(
+                    f"committed user budget usage cannot decrease: {field}"
+                )
+
         values.update(
             revision=expected_revision + 1,
             updated_at=func.now(),
@@ -546,7 +571,6 @@ class UserBudgetRepository:
                 UserBudgetWindowRecord.owner_user_id == owner_user_id,
                 UserBudgetWindowRecord.epoch == window_epoch,
                 UserBudgetWindowRecord.revision == expected_revision,
-                UserBudgetWindowRecord.state == "ACTIVE",
             )
             .values(**values)
             .returning(UserBudgetWindowRecord)
@@ -616,6 +640,22 @@ class UserBudgetRepository:
         used_calls: int,
         reserved_calls: int,
     ) -> UserToolBudgetUsageRecord:
+        current = await self.get_tool_usage(
+            owner_user_id,
+            window_epoch,
+            capability_id,
+        )
+        if current is None:
+            raise KeyError("unknown per-capability user budget usage")
+        if current.revision != expected_revision:
+            raise UserBudgetConflictError("per-capability user budget CAS is stale")
+        normalized_used = _require_atomic_counter(used_calls)
+        normalized_reserved = _require_atomic_counter(reserved_calls)
+        if normalized_used < current.used_calls:
+            raise UserBudgetIntegrityError(
+                "committed per-capability tool usage cannot decrease"
+            )
+
         result = await self.session.execute(
             update(UserToolBudgetUsageRecord)
             .where(
@@ -625,8 +665,8 @@ class UserBudgetRepository:
                 UserToolBudgetUsageRecord.revision == expected_revision,
             )
             .values(
-                used_calls=_require_atomic_counter(used_calls),
-                reserved_calls=_require_atomic_counter(reserved_calls),
+                used_calls=normalized_used,
+                reserved_calls=normalized_reserved,
                 revision=expected_revision + 1,
                 updated_at=func.now(),
             )
