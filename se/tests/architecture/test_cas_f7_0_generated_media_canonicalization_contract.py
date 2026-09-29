@@ -209,13 +209,20 @@ def test_f7_p1_nonstream_filedata_requires_preserve_or_reject_compatibility():
         "For provider fileData, generic URL or remote handle in the initial F7-P1 slice:",
         "support = EXCLUDED / CLOSED",
         "F7-P1 MUST NOT silently treat a generic UrlContent as ordinary non-generated content when the provider source was generated fileData",
-        "future Gemini F7-P1 production CLAIM requires a bounded converter/envelope compatibility change",
-        "preserves generated fileData provenance/identity through decoding",
-        "rejects unsupported generated fileData responses before that provenance is lost",
-        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior",
+        "MUST ALWAYS fail closed before the first CAS ingest in the initial F7-P1 slice, even when generated-media provenance is preserved",
+        "provenance preservation != admission",
+        "provenance preservation != canonicalization authority",
+        "ZERO CAS ingest attempts / ZERO READY assets",
+        "no raw provider URI may escape as durable message/history identity or as a substitute for canonical CAS identity",
+        "preserve generated fileData provenance/identity through decoding so the downstream provider-neutral F7-P1 preflight can identify the source class and reject it before any CAS ingest",
+        "reject unsupported generated fileData responses in the provider/envelope layer before that provenance is lost",
+        "Preservation determines only where/how rejection occurs.",
+        "A separate future source-class release is required before any of those transports may be canonicalized.",
+        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior while fileData remains EXCLUDED/CLOSED",
     ):
         assert phrase in document
 
+    assert "whose provenance is not preserved before generic lowering" not in document
     assert "provider URL/handle that cannot resolve to complete bounded bytes" not in document
 
 
@@ -404,7 +411,7 @@ def test_future_path_matrix_is_explicit_and_zero_production():
         "This is a future production-candidate map, not a production grant.",
         "EXPECTED NEW / production authority not released",
         "non-stream post-provider response hook and terminal no-fallback boundary",
-        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior",
+        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior while fileData remains EXCLUDED/CLOSED",
         "NO CHANGE / NOT ASSET COMMITMENT AUTHORITY",
         "No production file in this table may be edited under F7-0 authority.",
     ):
@@ -435,7 +442,7 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
         "exact current main",
         "F7-P1 is non-stream provider-response-only",
         "non-stream complete-object boundary, selected-choice-0 fence and response-wide cardinality fence",
-        "unsupported generated fileData/URL forms require provider-envelope preserve-or-reject compatibility before F7-P1 production CLAIM",
+        "generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED and must be rejected before first CAS ingest even when provenance is preserved",
         "streaming generated media is deferred to separate F7-S authority",
         "tool-generated media is deferred to separate F7-T authority",
         "provider success -> CAS canonicalization failure is terminal/no-fallback/no-breaker",
