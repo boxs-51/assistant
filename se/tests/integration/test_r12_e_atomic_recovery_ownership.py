@@ -421,10 +421,11 @@ async def test_r12_e_nonzero_recovery_freezes_active_batch_against_late_update(
         resumed = await store.resume_execution("exec-r12-e-frozen")
         assert resumed is not None
         assert resumed.iteration == 1
-        assert resumed.resume_transcript == [
-            {"role": "user", "content": "freeze"}
-        ]
+        assert len(resumed.resume_transcript) == 1
+        assert resumed.resume_transcript[0]["role"] == "user"
+        assert resumed.resume_transcript[0]["content"] == "freeze"
         assert resumed.resume_pending_tool_calls == []
+        assert "call-late" not in repr(resumed.resume_transcript)
     finally:
         await engine.dispose()
 
