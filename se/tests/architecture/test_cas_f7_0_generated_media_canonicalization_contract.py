@@ -205,6 +205,15 @@ def test_f7_p1_nonstream_filedata_requires_preserve_or_reject_compatibility():
         assert phrase in gemini
 
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    executor = _read("se/src/provider/executor.py")
+    handler = _read("se/src/provider/handlers/chat_handler.py")
+    assert "except Exception as e:" in executor
+    assert "await breaker.on_failure()" in executor
+    assert "normalized = wrap_provider_exception(e, provider.name)" in executor
+    assert "except (" in handler
+    assert "ProviderError," in handler
+    assert "continue" in handler
+
     for phrase in (
         "For provider fileData, generic URL or remote handle in the initial F7-P1 slice:",
         "support = EXCLUDED / CLOSED",
@@ -214,14 +223,20 @@ def test_f7_p1_nonstream_filedata_requires_preserve_or_reject_compatibility():
         "provenance preservation != canonicalization authority",
         "ZERO CAS ingest attempts / ZERO READY assets",
         "no raw provider URI may escape as durable message/history identity or as a substitute for canonical CAS identity",
-        "preserve generated fileData provenance/identity through decoding so the downstream provider-neutral F7-P1 preflight can identify the source class and reject it before any CAS ingest",
-        "reject unsupported generated fileData responses in the provider/envelope layer before that provenance is lost",
-        "Preservation determines only where/how rejection occurs.",
+        "converter-side rejection is not a safe terminal boundary",
+        "breaker.on_failure()",
+        "continue to another provider",
+        "preserve generated fileData provenance/identity through successful provider decoding",
+        "run the shared provider-neutral generated-media preflight after provider SUCCESS and outside provider fallback",
+        "converter-side rejection before provenance loss is NOT an allowed implementation shortcut",
+        "not to affect provider breaker health and not to trigger fallback/regeneration",
         "A separate future source-class release is required before any of those transports may be canonicalized.",
-        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior while fileData remains EXCLUDED/CLOSED",
+        "REQUIRED future F7-P1 compatibility change to preserve non-stream generated fileData provenance through successful decode",
+        "downstream provider-neutral preflight performs terminal rejection while fileData remains EXCLUDED/CLOSED",
     ):
         assert phrase in document
 
+    assert "reject unsupported generated fileData responses in the provider/envelope layer before that provenance is lost" not in document
     assert "whose provenance is not preserved before generic lowering" not in document
     assert "provider URL/handle that cannot resolve to complete bounded bytes" not in document
 
@@ -411,7 +426,7 @@ def test_future_path_matrix_is_explicit_and_zero_production():
         "This is a future production-candidate map, not a production grant.",
         "EXPECTED NEW / production authority not released",
         "non-stream post-provider response hook and terminal no-fallback boundary",
-        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior while fileData remains EXCLUDED/CLOSED",
+        "REQUIRED future F7-P1 compatibility change to preserve non-stream generated fileData provenance through successful decode",
         "NO CHANGE / NOT ASSET COMMITMENT AUTHORITY",
         "No production file in this table may be edited under F7-0 authority.",
     ):
@@ -442,7 +457,7 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
         "exact current main",
         "F7-P1 is non-stream provider-response-only",
         "non-stream complete-object boundary, selected-choice-0 fence and response-wide cardinality fence",
-        "generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED and must be rejected before first CAS ingest even when provenance is preserved",
+        "generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED, provenance must survive successful decode, and terminal rejection occurs only in provider-neutral post-success preflight before first CAS ingest",
         "streaming generated media is deferred to separate F7-S authority",
         "tool-generated media is deferred to separate F7-T authority",
         "provider success -> CAS canonicalization failure is terminal/no-fallback/no-breaker",
