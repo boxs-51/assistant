@@ -2254,6 +2254,47 @@ class DurableAgentStore:
                         safe_point.ordered_pending_invocations
                     ),
                 )
+            except IntegrityError as exc:
+                # A competing recoverer can stage the same deterministic
+                # checkpoint before our final execution CAS.  Roll back every
+                # local staged write, then re-read and accept only the exact
+                # durable winner for this frozen receipt.
+                await uow.rollback()
+                replay = await uow.agents.get_execution(execution_id)
+                if (
+                    replay is not None
+                    and str(replay.state) == "WAITING"
+                    and str(replay.wait_reason) == "RECOVERY"
+                    and int(replay.revision) == target_revision
+                    and replay.owner_instance_id is None
+                    and replay.lease_expires_at is None
+                    and int(replay.lease_generation)
+                    == observed_lease_generation + 1
+                    and replay.current_checkpoint_id == checkpoint_id
+                ):
+                    replay_checkpoint = (
+                        await uow.agents.get_execution_checkpoint(
+                            checkpoint_id
+                        )
+                    )
+                    if (
+                        replay_checkpoint is not None
+                        and replay_checkpoint.execution_id == execution_id
+                        and int(replay_checkpoint.execution_revision)
+                        == target_revision
+                        and replay_checkpoint.wait_reason == "RECOVERY"
+                        and dict(
+                            replay_checkpoint.metadata_json or {}
+                        ).get("r12_recovery_fingerprint")
+                        == fingerprint
+                    ):
+                        await uow.commit()
+                        return replay
+                raise LeaseAuthorityConflictError(
+                    "RECOVERY_TAKEOVER_REJECTED",
+                    "Competing recovery changed the deterministic recovery "
+                    "safe point before final fenced CAS.",
+                ) from exc
             except WaitingCheckpointConflictError as exc:
                 raise ExecutionConflictError(str(exc)) from exc
 
