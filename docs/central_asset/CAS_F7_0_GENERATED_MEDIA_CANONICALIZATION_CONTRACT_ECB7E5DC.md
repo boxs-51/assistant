@@ -125,7 +125,7 @@ Provider `fileData` may remain URL/provider transport state. In current Gemini n
 
 Therefore provider-generated binary/media can leave provider decoding without first receiving canonical CAS identity.
 
-Provider converters remain provider decoding/lowering owners. They do not gain CAS persistence authority. However, an admitted F7-P1 provider converter/envelope MUST preserve explicit generated-media provenance for every source class that F7-P1 claims to support, or fail closed/reject that unsupported provider response before the provenance is discarded.
+Provider converters remain provider decoding/lowering owners. They do not gain CAS persistence authority. For the initial F7-P1 slice, a provider converter/envelope MUST preserve explicit generated-media provenance through successful decoding for every generated source class that downstream F7-P1 preflight must identify. Converter-side rejection of generated `fileData` under the current executor/fallback path is NOT an admitted fail-closed mechanism because converter exceptions are accounted as provider failures and may trigger fallback/regeneration.
 
 ## 6. Shared DIRECT + AGENT provider-response boundary
 
@@ -341,11 +341,17 @@ For provider `fileData`, generic URL or remote handle in the initial F7-P1 slice
 - rejection of this excluded source class produces ZERO CAS ingest attempts / ZERO READY assets;
 - no raw provider URI may escape as durable message/history identity or as a substitute for canonical CAS identity.
 
-Current Gemini non-stream `adapt_chat(...)` also uses `_parse_gemini_parts_to_content(...)`, where extensionless `fileData.fileUri` may become indistinguishable `UrlContent`. Therefore a future Gemini F7-P1 compatibility change must choose one of two safe rejection paths while the source class remains CLOSED:
-1. preserve generated `fileData` provenance/identity through decoding so the downstream provider-neutral F7-P1 preflight can identify the source class and reject it before any CAS ingest; or
-2. reject unsupported generated `fileData` responses in the provider/envelope layer before that provenance is lost.
+Current Gemini non-stream `adapt_chat(...)` also uses `_parse_gemini_parts_to_content(...)`, where extensionless `fileData.fileUri` may become indistinguishable `UrlContent`. Under the current execution topology, converter-side rejection is not a safe terminal boundary: `ProviderExecutor.execute(...)` accounts generic converter exceptions through `breaker.on_failure()`, and `ChatExecutionHandler.execute_with_fallback(...)` may consume the resulting `ProviderError` and continue to another provider.
 
-Preservation determines only where/how rejection occurs. It does not make `fileData`, generic URL or remote handle eligible for F7-P1 ingestion. A separate future source-class release is required before any of those transports may be canonicalized.
+Therefore the initial F7-P1 compatibility path is singular and mandatory:
+1. preserve generated `fileData` provenance/identity through successful provider decoding;
+2. allow `ProviderExecutor.execute(...)` to complete successfully without charging breaker failure;
+3. run the shared provider-neutral generated-media preflight after provider SUCCESS and outside provider fallback;
+4. identify `fileData` / generic URL / remote handle as EXCLUDED / CLOSED and reject terminally before any CAS ingest.
+
+For initial F7-P1, converter-side rejection before provenance loss is NOT an allowed implementation shortcut. If a future design wants provider-layer rejection, it requires a separately frozen terminal exception boundary that is independently proven not to affect provider breaker health and not to trigger fallback/regeneration.
+
+Preservation determines where the downstream terminal rejection can occur. It does not make `fileData`, generic URL or remote handle eligible for F7-P1 ingestion. A separate future source-class release is required before any of those transports may be canonicalized.
 
 That compatibility change remains provider decoding/envelope authority only; it does not grant the converter CAS persistence authority.
 
@@ -482,7 +488,7 @@ This is a **future production-candidate map**, not a production grant.
 | `se/src/infrastructure/config/schemas.py` | authoritative `AssetStorageSettings.max_upload_bytes` definition | EXPECT NO CHANGE |
 | `se/src/infrastructure/storage/models/sql/assets/file.py` | existing valid `origin_type` enum/check | EXPECT NO CHANGE |
 | `se/src/provider/handlers/chat_handler.py` | non-stream post-provider response hook and terminal no-fallback boundary | EXPECTED future F7-P1 non-stream change; streaming generated-media path excluded from first slice |
-| `se/src/provider/gemini/converters/chats/response.py` | provider decoding/lowering; current non-stream extensionless fileData and stream paths can lose generated-media provenance/cardinality | REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior while fileData remains EXCLUDED/CLOSED; separate REQUIRED future F7-S change for streaming |
+| `se/src/provider/gemini/converters/chats/response.py` | provider decoding/lowering; current non-stream extensionless fileData and stream paths can lose generated-media provenance/cardinality | REQUIRED future F7-P1 compatibility change to preserve non-stream generated fileData provenance through successful decode; downstream provider-neutral preflight performs terminal rejection while fileData remains EXCLUDED/CLOSED; separate REQUIRED future F7-S change for streaming |
 | other provider response converters | decoding/lowering only | NON-STREAM audit for F7-P1; streaming eligibility CLOSED until each provider preserves full terminal cardinality/media identity |
 | `se/src/runtimes/agent/adapters/inference.py` | AGENT consumer projects response.choices[0] | EXPECT NO CHANGE; F7-P1 preflight must reject generated media in choice index >0 before ingest |
 | `se/src/runtimes/agent/runtime.py` | Agent execution/tool-result authority | NO CHANGE in F7-P1 |
@@ -580,7 +586,7 @@ A first provider-response production PRE-CLAIM may be considered only when the z
 8. F6 32 MiB render-memory limit is explicitly not the F7 server ingest bound;
 9. `origin_type="ASSISTANT"` for F7-P1 provider-generated assistant media;
 10. non-stream complete-object boundary, selected-choice-0 fence and response-wide cardinality fence;
-11. non-stream admitted source provenance is explicit; generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED and must be rejected before first CAS ingest even when provenance is preserved;
+11. non-stream admitted source provenance is explicit; generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED, provenance must survive successful decode, and terminal rejection occurs only in provider-neutral post-success preflight before first CAS ingest;
 12. current streaming generated-media exclusion is explicit and future F7-S requires full candidate/media identity preservation;
 13. authenticated owner/canonical identity rules;
 14. `AssetService.ingest_stream` atomicity/failure behavior;
