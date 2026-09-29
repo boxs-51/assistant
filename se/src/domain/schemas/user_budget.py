@@ -7,7 +7,7 @@ from decimal import Decimal, ROUND_HALF_EVEN
 from enum import Enum
 from typing import Any, Mapping
 
-from pydantic import Field, field_validator, model_validator
+from pydantic import ConfigDict, Field, field_validator, model_validator
 
 from .base import GatewayBaseModel
 
@@ -131,6 +131,8 @@ def normalize_authoritative_utc(value: datetime) -> datetime:
 
 
 class UserBudgetPolicy(GatewayBaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     policy_id: str = Field(min_length=1, max_length=255)
     owner_user_id: str = Field(min_length=1, max_length=255)
     policy_version: str = Field(min_length=1, max_length=64)
@@ -222,6 +224,8 @@ class UserBudgetPolicy(GatewayBaseModel):
 
 
 class UserBudgetReservationIntent(GatewayBaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     reservation_id: str = Field(min_length=1, max_length=255)
     owner_user_id: str = Field(min_length=1, max_length=255)
     window_epoch: int = Field(gt=0, le=USER_BUDGET_INT64_MAX)
@@ -265,9 +269,11 @@ def _canonicalize_json(value: Any) -> Any:
     if isinstance(value, Decimal):
         return canonical_decimal_string(value)
     if isinstance(value, Mapping):
+        if not all(isinstance(key, str) for key in value):
+            raise TypeError("canonical UBQ attribution object keys must be strings")
         return {
-            str(key): _canonicalize_json(value[key])
-            for key in sorted(value, key=lambda item: str(item))
+            key: _canonicalize_json(value[key])
+            for key in sorted(value)
         }
     if isinstance(value, (list, tuple)):
         return [_canonicalize_json(item) for item in value]
