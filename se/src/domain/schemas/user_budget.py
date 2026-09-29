@@ -244,13 +244,19 @@ class UserBudgetReservationIntent(GatewayBaseModel):
             raise ValueError("non-tool reservation cannot carry capability_id")
         return self
 
+    def canonical_attribution(self) -> dict[str, Any]:
+        canonical = _canonicalize_json(self.attribution)
+        if not isinstance(canonical, dict):
+            raise TypeError("UBQ reservation attribution must canonicalize to an object")
+        return canonical
+
     @property
     def payload_fingerprint(self) -> str:
         payload = {
             "resource_kind": self.resource_kind.value,
             "reserved_amount_atomic": self.reserved_amount_atomic,
             "capability_id": self.capability_id,
-            "attribution": _canonicalize_json(self.attribution),
+            "attribution": self.canonical_attribution(),
         }
         encoded = json.dumps(
             payload,
