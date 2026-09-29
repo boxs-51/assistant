@@ -260,11 +260,35 @@ async def reconstruct_r7c_safe_point_in_uow(
         checkpoint_iteration = iteration_by_number.get(
             checkpoint_iteration_number
         )
+        checkpoint_metadata = dict(
+            getattr(checkpoint, "metadata_json", None) or {}
+        )
+        execution_state = str(
+            getattr(
+                getattr(execution, "state", None),
+                "value",
+                getattr(execution, "state", None),
+            )
+            or ""
+        )
+        execution_wait_reason = str(
+            getattr(
+                getattr(execution, "wait_reason", None),
+                "value",
+                getattr(execution, "wait_reason", None),
+            )
+            or ""
+        )
         initial_recovery_safe_point = (
             checkpoint_iteration is None
             and checkpoint_iteration_number == 0
-            and not iteration_by_number
             and str(checkpoint.wait_reason) == "RECOVERY"
+            and execution_state == "WAITING"
+            and execution_wait_reason == "RECOVERY"
+            and int(checkpoint.execution_revision) == int(execution.revision)
+            and str(getattr(execution, "current_checkpoint_id", "") or "")
+            == str(checkpoint.checkpoint_id)
+            and bool(checkpoint_metadata.get("r12_recovery_fingerprint"))
         )
         if checkpoint_iteration is None and not initial_recovery_safe_point:
             raise SafePointReconstructionError(
@@ -441,11 +465,23 @@ async def reconstruct_r7c_safe_point_in_uow(
             or checkpoint_messages
         )
 
+    safe_transcript = await _sanitize_transcript_in_uow(
+        uow,
+        execution_id=execution_id,
+        raw_messages=raw_source,
+        active_tool_call_ids=active_set,
+    )
+
     if (
         (require_pending_invocation_authority or initial_recovery_safe_point)
         and not active_ids
     ):
-        unresolved_declared = _unresolved_declared_tool_call_ids(raw_source)
+        # Resolve transcript declarations only against the committed/sanitized
+        # projection. Raw/provisional tool messages are transport evidence,
+        # never proof that an assistant tool request has been durably resolved.
+        unresolved_declared = _unresolved_declared_tool_call_ids(
+            safe_transcript
+        )
         if unresolved_declared:
             raise SafePointReconstructionError(
                 "SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING: durable "
@@ -453,13 +489,6 @@ async def reconstruct_r7c_safe_point_in_uow(
                 "AgentIteration.tool_call_ids provides no active-batch "
                 "authority."
             )
-
-    safe_transcript = await _sanitize_transcript_in_uow(
-        uow,
-        execution_id=execution_id,
-        raw_messages=raw_source,
-        active_tool_call_ids=active_set,
-    )
 
     if checkpoint is not None and (
         int(checkpoint.execution_revision) < int(execution.revision)
