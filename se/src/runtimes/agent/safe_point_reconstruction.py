@@ -235,6 +235,9 @@ async def reconstruct_r7c_safe_point_in_uow(
 
     checkpoint = None
     checkpoint_messages: tuple[dict[str, Any], ...] = ()
+    checkpoint_metadata: dict[str, Any] = {}
+    current_checkpoint_authority = False
+    r12_recovery_checkpoint_authority = False
     initial_recovery_safe_point = False
     checkpoint_id = getattr(execution, "current_checkpoint_id", None)
     if checkpoint_id:
@@ -279,16 +282,22 @@ async def reconstruct_r7c_safe_point_in_uow(
             )
             or ""
         )
-        initial_recovery_safe_point = (
-            checkpoint_iteration is None
-            and checkpoint_iteration_number == 0
+        current_checkpoint_authority = (
+            int(checkpoint.execution_revision) == int(execution.revision)
+            and str(getattr(execution, "current_checkpoint_id", "") or "")
+            == str(checkpoint.checkpoint_id)
+        )
+        r12_recovery_checkpoint_authority = (
+            current_checkpoint_authority
             and str(checkpoint.wait_reason) == "RECOVERY"
             and execution_state == "WAITING"
             and execution_wait_reason == "RECOVERY"
-            and int(checkpoint.execution_revision) == int(execution.revision)
-            and str(getattr(execution, "current_checkpoint_id", "") or "")
-            == str(checkpoint.checkpoint_id)
             and bool(checkpoint_metadata.get("r12_recovery_fingerprint"))
+        )
+        initial_recovery_safe_point = (
+            checkpoint_iteration is None
+            and checkpoint_iteration_number == 0
+            and r12_recovery_checkpoint_authority
         )
         if checkpoint_iteration is None and not initial_recovery_safe_point:
             raise SafePointReconstructionError(
@@ -340,9 +349,38 @@ async def reconstruct_r7c_safe_point_in_uow(
     ordered_pending: list[dict[str, Any]] = []
     active_ids: tuple[str, ...] = ()
     if active_iteration is not None:
-        active_ids = tuple(
-            str(item) for item in (active_iteration.tool_call_ids or ())
-        )
+        if r12_recovery_checkpoint_authority:
+            if "r12_recovery_active_tool_call_ids" not in checkpoint_metadata:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_MISSING: current "
+                    "R12-E recovery checkpoint has no frozen active-batch "
+                    "identity."
+                )
+            frozen_ids = checkpoint_metadata.get(
+                "r12_recovery_active_tool_call_ids"
+            )
+            if not isinstance(frozen_ids, (list, tuple)):
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CORRUPT: frozen "
+                    "active-batch identity is not a sequence."
+                )
+            active_ids = tuple(str(item) for item in frozen_ids)
+            frozen_iteration_id = checkpoint_metadata.get(
+                "r12_recovery_iteration_id"
+            )
+            if (
+                frozen_iteration_id is not None
+                and str(frozen_iteration_id) != str(active_iteration.id)
+            ):
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CONFLICT: frozen "
+                    "iteration identity differs from durable checkpoint "
+                    "iteration."
+                )
+        else:
+            active_ids = tuple(
+                str(item) for item in (active_iteration.tool_call_ids or ())
+            )
         if any(not item for item in active_ids) or len(set(active_ids)) != len(active_ids):
             raise SafePointReconstructionError(
                 "SAFE_POINT_ACTIVE_BATCH_AMBIGUOUS: tool_call_ids must be "
@@ -473,7 +511,11 @@ async def reconstruct_r7c_safe_point_in_uow(
     )
 
     if (
-        (require_pending_invocation_authority or initial_recovery_safe_point)
+        (
+            require_pending_invocation_authority
+            or current_checkpoint_authority
+            or initial_recovery_safe_point
+        )
         and not active_ids
     ):
         # Resolve transcript declarations only against the committed/sanitized
