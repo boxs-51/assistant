@@ -143,6 +143,24 @@ membership as the authoritative ID set. Equality is set-based proof only:
 sole ordering authority. Missing or extra transcript IDs fail closed with
 `SAFE_POINT_ACTIVE_BATCH_MEMBERSHIP_MISMATCH` before any recovery mutation.
 
+
+After a recovery checkpoint is later consumed and the execution semantic
+revision advances, that checkpoint may remain the durable prefix named by
+`current_checkpoint_id`. While it remains an R12-E recovery checkpoint:
+
+- a durable iteration whose number is equal to the frozen checkpoint iteration
+  is not post-resume progress and must not replace the frozen batch snapshot;
+- same-iteration late transcript/tool-call/invocation writes from the expired
+  worker are ignored in favor of the immutable checkpoint transcript and frozen
+  active-batch metadata;
+- only a durable iteration with a number strictly greater than the frozen
+  checkpoint iteration may become the newer current batch candidate;
+- until such strictly-later progress exists, repeated R12-E recovery republishes
+  the frozen recovery safe point rather than promoting stale same-iteration
+  writes.
+
+This is a provenance rule, not R12-F activation authority.
+
 ## Checkpoint publication
 
 R12-E reuses canonical `stage_waiting_checkpoint(...)` inside the same winning
