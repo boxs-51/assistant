@@ -346,6 +346,89 @@ async def test_r12_e_iteration_zero_recovery_checkpoint_can_resume(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r12_e_nonzero_recovery_freezes_active_batch_against_late_update(
+    tmp_path,
+):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_nonzero_frozen_batch.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 0, 32, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-frozen",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-frozen",
+                    state="RUNNING",
+                    revision=5,
+                    owner_instance_id="worker-frozen",
+                    lease_expires_at=expiry,
+                    lease_generation=3,
+                    remaining_active_budget_seconds=21.0,
+                    request={"prompt": "freeze"},
+                    transcript=[{"role": "user", "content": "freeze"}],
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-frozen:iteration:1",
+                    execution_id="exec-r12-e-frozen",
+                    iteration=1,
+                    state="THINKING",
+                    tool_call_ids=[],
+                )
+            )
+            await uow.commit()
+
+        recovered = await store.commit_recovery_waiting_checkpoint(
+            "exec-r12-e-frozen",
+            observed_owner_instance_id="worker-frozen",
+            observed_lease_generation=3,
+            observed_lease_expires_at=expiry,
+            takeover_now_utc=expiry,
+        )
+        assert recovered.state == "WAITING"
+        assert recovered.revision == 6
+
+        async with factory() as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-frozen:checkpoint:6"
+            )
+            assert checkpoint is not None
+            assert dict(checkpoint.metadata_json or {}).get(
+                "r12_recovery_active_tool_call_ids"
+            ) == []
+            iteration = await uow.agents.get_iteration(
+                "exec-r12-e-frozen:iteration:1"
+            )
+            iteration.tool_call_ids = ["call-late"]
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="tool-call-late",
+                    execution_id="exec-r12-e-frozen",
+                    iteration_id="exec-r12-e-frozen:iteration:1",
+                    invocation_id="inv-late",
+                    tool_call_id="call-late",
+                    capability_id="tool.remote",
+                    arguments={"late": True},
+                )
+            )
+            await uow.commit()
+
+        resumed = await store.resume_execution("exec-r12-e-frozen")
+        assert resumed is not None
+        assert resumed.iteration == 1
+        assert resumed.resume_transcript == [
+            {"role": "user", "content": "freeze"}
+        ]
+        assert resumed.resume_pending_tool_calls == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r12_e_iteration_zero_recovery_ignores_late_expired_worker_iteration(
     tmp_path,
 ):
