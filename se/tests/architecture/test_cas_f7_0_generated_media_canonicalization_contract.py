@@ -179,11 +179,13 @@ def test_f7_p1_rejects_multi_object_response_before_first_ingest():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
         "response-wide generated-media cardinality preflight",
-        "at most ONE durable generated-media object per provider response",
+        "at most ONE durable generated-media object in the consumer-selected choice of a non-stream provider response",
         "fail closed BEFORE first CAS ingest",
         "ZERO CAS ingest attempts",
         "ZERO READY assets created for that logical response",
         "multiple Gemini inlineData parts or candidates",
+        "choice index 0 as the only consumer-selected choice eligible to carry canonicalized generated media",
+        "If any generated-media candidate is present in choice index >0, the response fails closed before the first CAS ingest",
         "multi-object canonicalization requires a separately audited atomic-batch or compensation authority",
         "MUST NOT infer READY deletion, cleanup or rollback authority",
         "MUST NOT trigger provider fallback/regeneration",
@@ -191,11 +193,63 @@ def test_f7_p1_rejects_multi_object_response_before_first_ingest():
         assert phrase in document
 
 
+def test_f7_p1_nonstream_filedata_requires_preserve_or_reject_compatibility():
+    gemini = _read("se/src/provider/gemini/converters/chats/response.py")
+
+    for phrase in (
+        "async def adapt_chat(",
+        "_parse_gemini_parts_to_content(",
+        '"fileData" in part',
+        "UrlContent(url=url_str, crawl=True)",
+    ):
+        assert phrase in gemini
+
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    for phrase in (
+        "For provider fileData, generic URL or remote handle in the initial F7-P1 slice:",
+        "support = EXCLUDED / CLOSED",
+        "F7-P1 MUST NOT silently treat a generic UrlContent as ordinary non-generated content when the provider source was generated fileData",
+        "future Gemini F7-P1 production CLAIM requires a bounded converter/envelope compatibility change",
+        "preserves generated fileData provenance/identity through decoding",
+        "rejects unsupported generated fileData responses before that provenance is lost",
+        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior",
+    ):
+        assert phrase in document
+
+
+def test_f7_p1_rejects_generated_media_outside_selected_choice_before_ingest():
+    inference = _read("se/src/runtimes/agent/adapters/inference.py")
+    gemini = _read("se/src/provider/gemini/converters/chats/response.py")
+
+    assert "choice = response.choices[0]" in inference
+    assert "for idx, candidate in enumerate(response_data.get(\"candidates\", [])):" in gemini
+    assert "choices.append(GatewayChoice(" in gemini
+
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    for phrase in (
+        "choice index 0 as the only consumer-selected choice eligible to carry canonicalized generated media",
+        "If any generated-media candidate is present in choice index >0, the response fails closed before the first CAS ingest",
+        "ZERO CAS ingest attempts",
+        "F7-P1 MUST NOT create a READY asset that the current consumer projection would immediately discard",
+        "F7-P1 preflight must reject generated media in choice index >0 before ingest",
+    ):
+        assert phrase in document
+
+
+def test_f7_p1_preflight_is_nonstream_only_without_terminal_stream_option():
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    assert (
+        "response-wide generated-media cardinality preflight over the fully decoded successful "
+        "NON-STREAM provider response only"
+    ) in document
+    assert "or over the terminally assembled provider stream" not in document
+
+
 def test_f7_p1_freezes_one_ingest_attempt_no_internal_retry():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     for phrase in (
-        "at most ONE durable generated-media object is eligible per successful provider response",
+        "at most ONE durable generated-media object is eligible per successful non-stream provider response and it must be in choice index 0",
         "response cardinality greater than one fails closed before the first CAS ingest with ZERO CAS ingest attempts",
         "one canonicalization pass for the sole admitted generated-media object",
         "no automatic CAS canonicalization retry after ingest has begun",
@@ -348,7 +402,7 @@ def test_future_path_matrix_is_explicit_and_zero_production():
         "This is a future production-candidate map, not a production grant.",
         "EXPECTED NEW / production authority not released",
         "non-stream post-provider response hook and terminal no-fallback boundary",
-        "NO CHANGE in F7-P1",
+        "REQUIRED future F7-P1 compatibility change for non-stream generated fileData preserve-or-reject behavior",
         "NO CHANGE / NOT ASSET COMMITMENT AUTHORITY",
         "No production file in this table may be edited under F7-0 authority.",
     ):
@@ -378,6 +432,8 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
     for phrase in (
         "exact current main",
         "F7-P1 is non-stream provider-response-only",
+        "non-stream complete-object boundary, selected-choice-0 fence and response-wide cardinality fence",
+        "unsupported generated fileData/URL forms require provider-envelope preserve-or-reject compatibility before F7-P1 production CLAIM",
         "streaming generated media is deferred to separate F7-S authority",
         "tool-generated media is deferred to separate F7-T authority",
         "provider success -> CAS canonicalization failure is terminal/no-fallback/no-breaker",
