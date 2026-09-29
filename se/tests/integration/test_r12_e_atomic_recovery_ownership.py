@@ -509,6 +509,151 @@ async def test_r12_e_iteration_zero_recovery_ignores_late_expired_worker_iterati
 
 
 @pytest.mark.asyncio
+async def test_r12_e_stale_recovery_checkpoint_ignores_same_iteration_late_write(
+    tmp_path,
+):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_stale_recovery_same_iteration.sqlite"
+    )
+    first_expiry = datetime(2026, 9, 29, 0, 38, tzinfo=timezone.utc)
+    second_expiry = datetime(2026, 9, 29, 0, 39, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-stale",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-stale",
+                    state="RUNNING",
+                    revision=2,
+                    owner_instance_id="worker-old",
+                    lease_expires_at=first_expiry,
+                    lease_generation=1,
+                    remaining_active_budget_seconds=19.0,
+                    request={"prompt": "start"},
+                    transcript=[],
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-stale:iteration:0",
+                    execution_id="exec-r12-e-stale",
+                    iteration=0,
+                    state="THINKING",
+                    tool_call_ids=[],
+                )
+            )
+            await uow.commit()
+
+        recovered = await store.commit_recovery_waiting_checkpoint(
+            "exec-r12-e-stale",
+            observed_owner_instance_id="worker-old",
+            observed_lease_generation=1,
+            observed_lease_expires_at=first_expiry,
+            takeover_now_utc=first_expiry,
+        )
+        assert recovered.state == "WAITING"
+        assert recovered.revision == 3
+        assert recovered.current_checkpoint_id == (
+            "exec-r12-e-stale:checkpoint:3"
+        )
+
+        # Model a future recovery activation without opening R12-F behavior:
+        # the same recovery checkpoint remains the durable prefix while the
+        # semantic execution revision advances and a new owner holds the lease.
+        async with factory() as uow:
+            activated = await uow.agents.compare_and_set_execution(
+                "exec-r12-e-stale",
+                3,
+                {
+                    "state": "RUNNING",
+                    "wait_reason": None,
+                    "owner_instance_id": "worker-new",
+                    "lease_expires_at": second_expiry,
+                    "lease_generation": 3,
+                },
+            )
+            assert activated is not None
+            await uow.commit()
+
+        # Expired worker publishes the same frozen iteration after resume.
+        # Those writes cannot become authority for the next recovery.
+        async with factory() as uow:
+            execution = await uow.agents.get_execution("exec-r12-e-stale")
+            execution.transcript = [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-late-same-iteration",
+                            "name": "tool.remote",
+                            "arguments": {"late": True},
+                        }
+                    ],
+                }
+            ]
+            iteration = await uow.agents.get_iteration(
+                "exec-r12-e-stale:iteration:0"
+            )
+            iteration.tool_call_ids = ["call-late-same-iteration"]
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="tool-call-late-same-iteration",
+                    execution_id="exec-r12-e-stale",
+                    iteration_id="exec-r12-e-stale:iteration:0",
+                    invocation_id="inv-late-same-iteration",
+                    tool_call_id="call-late-same-iteration",
+                    capability_id="tool.remote",
+                    arguments={"late": True},
+                )
+            )
+            invocation = _invocation(
+                "inv-late-same-iteration",
+                "call-late-same-iteration",
+            )
+            invocation.execution_id = "exec-r12-e-stale"
+            invocation.arguments = {"late": True}
+            uow.session.add(invocation)
+            await uow.commit()
+
+        recovered_again = await store.commit_recovery_waiting_checkpoint(
+            "exec-r12-e-stale",
+            observed_owner_instance_id="worker-new",
+            observed_lease_generation=3,
+            observed_lease_expires_at=second_expiry,
+            takeover_now_utc=second_expiry,
+        )
+        assert recovered_again.state == "WAITING"
+        assert recovered_again.revision == 5
+        assert recovered_again.current_checkpoint_id == (
+            "exec-r12-e-stale:checkpoint:5"
+        )
+
+        async with factory() as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-stale:checkpoint:5"
+            )
+            assert checkpoint is not None
+            assert checkpoint.iteration == 0
+            metadata = dict(checkpoint.metadata_json or {})
+            assert metadata["r12_recovery_iteration_id"] == (
+                "exec-r12-e-stale:iteration:0"
+            )
+            assert metadata["r12_recovery_active_tool_call_ids"] == []
+            assert "call-late-same-iteration" not in repr(
+                await store.load_committed_checkpoint_transcript(
+                    "exec-r12-e-stale",
+                    checkpoint.checkpoint_id,
+                )
+            )
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r12_e_half_persisted_tool_batch_fails_closed(tmp_path):
     engine, sessions, factory, store, _ = await _setup(
         tmp_path, "r12_e_half_persisted_batch.sqlite"
