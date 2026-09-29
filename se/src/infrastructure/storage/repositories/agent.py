@@ -893,6 +893,14 @@ class AgentRepository(BaseRepository):
             raise ValueError(
                 "recovery transition requires current_checkpoint_id"
             )
+        expected_checkpoint_id = (
+            f"{execution_id}:checkpoint:{expected_revision + 1}"
+        )
+        if checkpoint_id != expected_checkpoint_id:
+            raise ValueError(
+                "recovery current_checkpoint_id must equal deterministic "
+                f"checkpoint identity {expected_checkpoint_id!r}"
+            )
 
         next_values = {
             key: value
