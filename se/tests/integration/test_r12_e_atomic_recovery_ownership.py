@@ -8,6 +8,7 @@ import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.models.sql.agent import (
+    AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
     AgentIterationRecord,
     AgentTaskRecord,
@@ -676,6 +677,71 @@ async def test_r12_e_provisional_tool_projection_remains_unresolved(tmp_path):
             assert execution.owner_instance_id == "worker-provisional"
             assert checkpoint is None
             await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r7c_current_checkpoint_missing_active_order_fails_closed(tmp_path):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r7c_current_checkpoint_missing_order.sqlite"
+    )
+    try:
+        async with factory() as uow:
+            execution = AgentExecutionRecord(
+                id="exec-r7c-missing-order",
+                session_id="session-r7c",
+                agent_id="agent-r7c",
+                correlation_id="corr-r7c-missing-order",
+                state="WAITING",
+                wait_reason="CONNECTION",
+                revision=2,
+                current_checkpoint_id="exec-r7c-missing-order:checkpoint:2",
+                request={},
+                transcript=[],
+            )
+            uow.session.add(execution)
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r7c-missing-order:iteration:1",
+                    execution_id="exec-r7c-missing-order",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=[],
+                )
+            )
+            uow.session.add(
+                AgentExecutionCheckpointRecord(
+                    checkpoint_id="exec-r7c-missing-order:checkpoint:2",
+                    execution_id="exec-r7c-missing-order",
+                    execution_revision=2,
+                    session_id="session-r7c",
+                    iteration=1,
+                    wait_reason="CONNECTION",
+                    transcript_snapshot=[
+                        {"role": "user", "content": "hello"},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-missing-order",
+                                    "name": "tool.remote",
+                                    "arguments": {"value": 1},
+                                }
+                            ],
+                        },
+                    ],
+                    metadata_json={},
+                )
+            )
+            await uow.commit()
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING",
+        ):
+            await store.resume_execution("exec-r7c-missing-order")
     finally:
         await engine.dispose()
 
