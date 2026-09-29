@@ -39,6 +39,7 @@ from se.src.infrastructure.storage.models.sql import agent
 from se.src.infrastructure.storage.models.sql import capability
 from se.src.infrastructure.storage.models.sql import assets
 from se.src.infrastructure.storage.models.sql import memory
+from se.src.infrastructure.storage.models.sql import user_budget
 target_metadata = Base.metadata
 
 # --- CẤU HÌNH DATABASE URL ---
