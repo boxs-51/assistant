@@ -37,8 +37,9 @@ from se.src.runtimes.agent.task_budget import (
 
 
 class _Uow:
-    def __init__(self, sessions):
+    def __init__(self, sessions, repository_cls=AgentRepository):
         self._sessions = sessions
+        self._repository_cls = repository_cls
         self._ctx = None
         self.session = None
         self.agents = None
@@ -47,7 +48,7 @@ class _Uow:
     async def __aenter__(self):
         self._ctx = self._sessions()
         self.session = await self._ctx.__aenter__()
-        self.agents = AgentRepository(self.session)
+        self.agents = self._repository_cls(self.session)
         self.capability_invocations = CapabilityInvocationRepository(
             self.session
         )
@@ -67,7 +68,7 @@ class _Uow:
         await self.session.rollback()
 
 
-async def _setup(tmp_path, name: str):
+async def _setup(tmp_path, name: str, *, repository_cls=AgentRepository):
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{(tmp_path / name).as_posix()}",
         connect_args={"timeout": 5},
@@ -75,7 +76,7 @@ async def _setup(tmp_path, name: str):
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    factory = lambda: _Uow(sessions)
+    factory = lambda: _Uow(sessions, repository_cls)
     return (
         engine,
         sessions,
@@ -593,6 +594,174 @@ async def test_r12_e_task_receipt_mismatch_has_zero_budget_mutation(tmp_path):
                 )
                 is None
             )
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+class _RejectRecoveryRepository(AgentRepository):
+    async def compare_and_set_recovery_waiting_execution(self, *args, **kwargs):
+        return None
+
+
+@pytest.mark.asyncio
+async def test_r12_e_terminalization_before_final_recovery_cas_wins(tmp_path):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_terminal_race.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 7, 0, tzinfo=timezone.utc)
+    try:
+        await _seed_non_task(factory, expiry=expiry)
+
+        # This models a semantic lifecycle winner after stale observation.
+        await store.compare_and_set_execution(
+            "exec-r12-e",
+            5,
+            {
+                "state": "COMPLETED",
+                "wait_reason": None,
+                "completed_at": expiry,
+            },
+        )
+
+        with pytest.raises(LeaseAuthorityConflictError):
+            await store.commit_recovery_waiting_checkpoint(
+                "exec-r12-e",
+                observed_owner_instance_id="worker-old",
+                observed_lease_generation=3,
+                observed_lease_expires_at=expiry,
+                takeover_now_utc=expiry,
+            )
+
+        loaded = await store.load_execution("exec-r12-e")
+        assert loaded.state == "COMPLETED"
+        assert loaded.revision == 6
+        assert loaded.lease_generation == 3
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_e_semantic_revision_race_loses_exact_final_cas(tmp_path):
+    engine, sessions, factory, _, _ = await _setup(
+        tmp_path, "r12_e_revision_race.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 8, 0, tzinfo=timezone.utc)
+    try:
+        await _seed_non_task(factory, expiry=expiry)
+
+        # Recovery has observed source revision 5. A user/lifecycle writer
+        # advances that semantic revision while leaving the lease tuple intact.
+        async with factory() as winner_uow:
+            winner = await winner_uow.agents.compare_and_set_execution(
+                "exec-r12-e",
+                5,
+                {"context_state": {"lifecycle": "user-won"}},
+            )
+            assert winner is not None
+            await winner_uow.commit()
+
+        async with factory() as recovery_uow:
+            stale = (
+                await recovery_uow.agents.compare_and_set_recovery_waiting_execution(
+                    "exec-r12-e",
+                    5,
+                    observed_owner_instance_id="worker-old",
+                    observed_lease_generation=3,
+                    observed_lease_expires_at=expiry,
+                    takeover_now_utc=expiry,
+                    values={
+                        "current_checkpoint_id": "exec-r12-e:checkpoint:6",
+                    },
+                )
+            )
+            assert stale is None
+            await recovery_uow.rollback()
+
+        async with factory() as uow:
+            loaded = await uow.agents.get_execution("exec-r12-e")
+            assert loaded.state == "RUNNING"
+            assert loaded.revision == 6
+            assert loaded.context_state == {"lifecycle": "user-won"}
+            assert loaded.lease_generation == 3
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_e_non_task_final_cas_loss_rolls_back_staged_checkpoint(tmp_path):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path,
+        "r12_e_non_task_rollback.sqlite",
+        repository_cls=_RejectRecoveryRepository,
+    )
+    expiry = datetime(2026, 9, 29, 9, 0, tzinfo=timezone.utc)
+    try:
+        await _seed_non_task(factory, expiry=expiry)
+
+        with pytest.raises(LeaseAuthorityConflictError):
+            await store.commit_recovery_waiting_checkpoint(
+                "exec-r12-e",
+                observed_owner_instance_id="worker-old",
+                observed_lease_generation=3,
+                observed_lease_expires_at=expiry,
+                takeover_now_utc=expiry,
+            )
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution("exec-r12-e")
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e:checkpoint:6"
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 5
+            assert execution.lease_generation == 3
+            assert checkpoint is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_e_task_final_cas_loss_rolls_back_budget_and_checkpoint(tmp_path):
+    engine, sessions, factory, _, budget_service = await _setup(
+        tmp_path,
+        "r12_e_task_rollback.sqlite",
+        repository_cls=_RejectRecoveryRepository,
+    )
+    expiry = datetime(2026, 9, 29, 10, 0, tzinfo=timezone.utc)
+    try:
+        await _seed_task_scoped(factory, expiry=expiry)
+
+        with pytest.raises(TaskBudgetConflictError):
+            await budget_service.recover_task_scoped_execution(
+                "task-r12-e",
+                execution_id="exec-task-r12-e",
+                observed_owner_instance_id="worker-task-old",
+                observed_lease_generation=4,
+                observed_lease_expires_at=expiry,
+                takeover_now_utc=expiry,
+            )
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution("exec-task-r12-e")
+            budget = await uow.agents.get_task_budget("task-r12-e")
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-task-r12-e:checkpoint:9"
+            )
+            reservation = await uow.agents.get_task_budget_reservation(
+                "task-r12-e",
+                "RELEASE_EXECUTION",
+                "exec-task-r12-e:9",
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 8
+            assert execution.lease_generation == 4
+            assert budget.active_executions == 1
+            assert budget.revision == 0
+            assert checkpoint is None
+            assert reservation is None
             await uow.commit()
     finally:
         await engine.dispose()
