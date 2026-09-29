@@ -150,6 +150,8 @@ async def _sanitize_transcript_in_uow(
 async def reconstruct_r7c_safe_point_in_uow(
     uow,
     execution,
+    *,
+    require_pending_invocation_authority: bool = False,
 ) -> R7CSafePoint:
     """Reconstruct the canonical R7-C safe prefix inside a caller-owned UoW.
 
@@ -315,18 +317,25 @@ async def reconstruct_r7c_safe_point_in_uow(
                 continue
 
             if invocation_repository is None:
-                raise SafePointReconstructionError(
-                    "SAFE_POINT_INVOCATION_REPOSITORY_MISSING: shared UoW "
-                    "cannot prove unresolved invocation authority."
-                )
+                if require_pending_invocation_authority:
+                    raise SafePointReconstructionError(
+                        "SAFE_POINT_INVOCATION_REPOSITORY_MISSING: shared UoW "
+                        "cannot prove unresolved invocation authority."
+                    )
+                continue
             invocation = await invocation_repository.get_record(
                 str(call.invocation_id)
             )
             if invocation is None:
-                raise SafePointReconstructionError(
-                    "SAFE_POINT_INVOCATION_MISSING: unresolved active slot "
-                    "has no durable CapabilityInvocation."
-                )
+                if require_pending_invocation_authority:
+                    raise SafePointReconstructionError(
+                        "SAFE_POINT_INVOCATION_MISSING: unresolved active slot "
+                        "has no durable CapabilityInvocation."
+                    )
+                # Preserve ordinary R7-C/local pre-dispatch resume behavior.
+                # R12-E passes require_pending_invocation_authority=True and
+                # therefore never accepts this compatibility branch.
+                continue
             if (
                 str(invocation.execution_id) != execution_id
                 or str(invocation.tool_call_id) != tool_call_id
