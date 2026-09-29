@@ -216,6 +216,8 @@ def test_f7_p1_nonstream_filedata_requires_preserve_or_reject_compatibility():
     ):
         assert phrase in document
 
+    assert "provider URL/handle that cannot resolve to complete bounded bytes" not in document
+
 
 def test_f7_p1_rejects_generated_media_outside_selected_choice_before_ingest():
     inference = _read("se/src/runtimes/agent/adapters/inference.py")
