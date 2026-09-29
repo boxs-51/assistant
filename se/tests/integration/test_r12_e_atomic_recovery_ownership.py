@@ -587,6 +587,105 @@ async def test_r12_e_half_persisted_tool_batch_fails_closed(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r12_e_active_batch_membership_mismatch_fails_closed(tmp_path):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_active_batch_mismatch.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 0, 48, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-mismatch",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-mismatch",
+                    state="RUNNING",
+                    revision=4,
+                    owner_instance_id="worker-mismatch",
+                    lease_expires_at=expiry,
+                    lease_generation=2,
+                    remaining_active_budget_seconds=23.0,
+                    request={"prompt": "mismatch"},
+                    transcript=[
+                        {"role": "user", "content": "mismatch"},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-transcript-a",
+                                    "name": "tool.remote.a",
+                                    "arguments": {"value": "A"},
+                                }
+                            ],
+                        },
+                    ],
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-mismatch:iteration:1",
+                    execution_id="exec-r12-e-mismatch",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-authority-b"],
+                )
+            )
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="tool-call-authority-b",
+                    execution_id="exec-r12-e-mismatch",
+                    iteration_id="exec-r12-e-mismatch:iteration:1",
+                    invocation_id="inv-authority-b",
+                    tool_call_id="call-authority-b",
+                    capability_id="tool.remote.b",
+                    arguments={"value": "B"},
+                )
+            )
+            uow.session.add(
+                CapabilityInvocationRecord(
+                    invocation_id="inv-authority-b",
+                    execution_id="exec-r12-e-mismatch",
+                    tool_call_id="call-authority-b",
+                    capability_id="tool.remote.b",
+                    arguments={"value": "B"},
+                    status="PENDING",
+                    revision=0,
+                )
+            )
+            await uow.commit()
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="SAFE_POINT_ACTIVE_BATCH_MEMBERSHIP_MISMATCH",
+        ):
+            await store.commit_recovery_waiting_checkpoint(
+                "exec-r12-e-mismatch",
+                observed_owner_instance_id="worker-mismatch",
+                observed_lease_generation=2,
+                observed_lease_expires_at=expiry,
+                takeover_now_utc=expiry,
+            )
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(
+                "exec-r12-e-mismatch"
+            )
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-mismatch:checkpoint:5"
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 4
+            assert execution.lease_generation == 2
+            assert execution.owner_instance_id == "worker-mismatch"
+            assert checkpoint is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r12_e_provisional_tool_projection_remains_unresolved(tmp_path):
     engine, sessions, factory, store, _ = await _setup(
         tmp_path, "r12_e_provisional_tool_projection.sqlite"
