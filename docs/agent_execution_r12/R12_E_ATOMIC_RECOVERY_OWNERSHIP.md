@@ -91,19 +91,26 @@ CapabilityInvocation query order.
 Two durable write-order crash windows are part of the R12-E recovery boundary:
 
 1. **Before the first iteration is durable.** A valid recovery may publish
-   `iteration=0` when there are no `AgentIteration` rows yet. On subsequent
-   resume, that exact shape is accepted only when the current checkpoint is a
-   `RECOVERY` checkpoint at iteration zero and durable iteration history is
-   still empty. It represents the initial safe point and does not synthesize an
-   iteration row.
+   `iteration=0` when there are no `AgentIteration` rows in the recovery
+   snapshot. On subsequent resume, that safe point is accepted only when the
+   execution is the exact current `WAITING(RECOVERY)` revision, the checkpoint
+   is `RECOVERY@0`, and the checkpoint carries the R12-E recovery fingerprint.
+   A stale expired worker may later publish an `AgentIteration` row; such a
+   post-snapshot row cannot retroactively redefine the already-published
+   recovery safe point and is ignored while this exact checkpoint remains the
+   current recovery authority. No iteration row is synthesized. Recovery
+   activation beyond this safe point remains R12-F authority.
 
 2. **Inference transcript persisted before active tool order.** Runtime persists
    the inference response into the durable execution transcript before the
    following `AgentIteration.tool_call_ids` update. If recovery observes an
    unresolved assistant tool-call declaration while the authoritative active
    iteration has no `tool_call_ids`, recovery fails closed before checkpoint,
-   lease, or TaskBudget mutation. Transcript-declared tool IDs are evidence of
-   an incomplete write only; they never become ordering authority.
+   lease, or TaskBudget mutation. Resolution is proved only against the
+   sanitized COMMITTED tool-result projection; a raw/provisional tool transcript
+   message never clears a pending assistant declaration. Transcript-declared
+   tool IDs are evidence of an incomplete write only; they never become ordering
+   authority.
 
 These rules preserve the core R7-C invariant that
 `AgentIteration.tool_call_ids` is the only active-batch ordering authority and
