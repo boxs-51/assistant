@@ -133,7 +133,7 @@ def test_r12_d2a_migration_is_linear_and_preserves_lease_authority(
     config = _config(database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["24a_r12_stale_lease_scan_index"]
+    assert script.get_heads() == ["25a_ubq1_user_budget_foundation"]
     assert (
         script.get_revision("24a_r12_stale_lease_scan_index").down_revision
         == "23a_ctx_f5_promotion_reservation"
