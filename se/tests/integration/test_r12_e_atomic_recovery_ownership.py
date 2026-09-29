@@ -509,6 +509,143 @@ async def test_r12_e_iteration_zero_recovery_ignores_late_expired_worker_iterati
 
 
 @pytest.mark.asyncio
+async def test_r12_e_stale_recovery_rejects_unproven_later_iteration(
+    tmp_path,
+):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_stale_recovery_unproven_later.sqlite"
+    )
+    first_expiry = datetime(2026, 9, 29, 0, 36, tzinfo=timezone.utc)
+    second_expiry = datetime(2026, 9, 29, 0, 37, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-unproven",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-unproven",
+                    state="RUNNING",
+                    revision=2,
+                    owner_instance_id="worker-old",
+                    lease_expires_at=first_expiry,
+                    lease_generation=1,
+                    remaining_active_budget_seconds=19.0,
+                    request={"prompt": "start"},
+                    transcript=[],
+                )
+            )
+            await uow.commit()
+
+        recovered = await store.commit_recovery_waiting_checkpoint(
+            "exec-r12-e-unproven",
+            observed_owner_instance_id="worker-old",
+            observed_lease_generation=1,
+            observed_lease_expires_at=first_expiry,
+            takeover_now_utc=first_expiry,
+        )
+        assert recovered.state == "WAITING"
+        assert recovered.revision == 3
+        assert recovered.current_checkpoint_id == (
+            "exec-r12-e-unproven:checkpoint:3"
+        )
+
+        async with factory() as uow:
+            activated = await uow.agents.compare_and_set_execution(
+                "exec-r12-e-unproven",
+                3,
+                {
+                    "state": "RUNNING",
+                    "wait_reason": None,
+                    "owner_instance_id": "worker-new",
+                    "lease_expires_at": second_expiry,
+                    "lease_generation": 3,
+                },
+            )
+            assert activated is not None
+            await uow.commit()
+
+        # A later row number alone is not provenance. The expired worker can
+        # publish its real next iteration after the recovery cut.
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(
+                "exec-r12-e-unproven"
+            )
+            execution.transcript = [
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call-unproven-later",
+                            "name": "tool.remote",
+                            "arguments": {"late": True},
+                        }
+                    ],
+                }
+            ]
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-unproven:iteration:1",
+                    execution_id="exec-r12-e-unproven",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-unproven-later"],
+                )
+            )
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="tool-call-unproven-later",
+                    execution_id="exec-r12-e-unproven",
+                    iteration_id="exec-r12-e-unproven:iteration:1",
+                    invocation_id="inv-unproven-later",
+                    tool_call_id="call-unproven-later",
+                    capability_id="tool.remote",
+                    arguments={"late": True},
+                )
+            )
+            invocation = _invocation(
+                "inv-unproven-later",
+                "call-unproven-later",
+            )
+            invocation.execution_id = "exec-r12-e-unproven"
+            invocation.arguments = {"late": True}
+            uow.session.add(invocation)
+            await uow.commit()
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="SAFE_POINT_POST_RECOVERY_PROGRESS_UNPROVEN",
+        ):
+            await store.commit_recovery_waiting_checkpoint(
+                "exec-r12-e-unproven",
+                observed_owner_instance_id="worker-new",
+                observed_lease_generation=3,
+                observed_lease_expires_at=second_expiry,
+                takeover_now_utc=second_expiry,
+            )
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(
+                "exec-r12-e-unproven"
+            )
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-unproven:checkpoint:5"
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 4
+            assert execution.owner_instance_id == "worker-new"
+            assert execution.lease_generation == 3
+            assert execution.current_checkpoint_id == (
+                "exec-r12-e-unproven:checkpoint:3"
+            )
+            assert checkpoint is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r12_e_stale_recovery_checkpoint_ignores_same_iteration_late_write(
     tmp_path,
 ):
