@@ -15,6 +15,7 @@ from se.src.domain.schemas.user_budget import (
     decimal_from_atomic,
     decimal_to_atomic,
 )
+from se.src.infrastructure.storage.models.sql.user_data.user import User  # noqa: F401
 from se.src.infrastructure.storage.models.sql.user_budget import (
     UserBudgetAccountRecord,
     UserBudgetReservationRecord,
