@@ -86,6 +86,29 @@ Rules:
 Ordinals are never inferred from SQL row order, timestamps, row ids or
 CapabilityInvocation query order.
 
+## Crash-window safe-point closure
+
+Two durable write-order crash windows are part of the R12-E recovery boundary:
+
+1. **Before the first iteration is durable.** A valid recovery may publish
+   `iteration=0` when there are no `AgentIteration` rows yet. On subsequent
+   resume, that exact shape is accepted only when the current checkpoint is a
+   `RECOVERY` checkpoint at iteration zero and durable iteration history is
+   still empty. It represents the initial safe point and does not synthesize an
+   iteration row.
+
+2. **Inference transcript persisted before active tool order.** Runtime persists
+   the inference response into the durable execution transcript before the
+   following `AgentIteration.tool_call_ids` update. If recovery observes an
+   unresolved assistant tool-call declaration while the authoritative active
+   iteration has no `tool_call_ids`, recovery fails closed before checkpoint,
+   lease, or TaskBudget mutation. Transcript-declared tool IDs are evidence of
+   an incomplete write only; they never become ordering authority.
+
+These rules preserve the core R7-C invariant that
+`AgentIteration.tool_call_ids` is the only active-batch ordering authority and
+prevent a recovery checkpoint from orphaning assistant tool requests.
+
 ## Checkpoint publication
 
 R12-E reuses canonical `stage_waiting_checkpoint(...)` inside the same winning
