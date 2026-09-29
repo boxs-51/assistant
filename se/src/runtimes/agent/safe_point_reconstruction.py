@@ -372,6 +372,37 @@ async def reconstruct_r7c_safe_point_in_uow(
     else:
         active_iteration = latest_iteration
 
+    if use_r12_recovery_frozen_batch:
+        frozen_iteration_id = checkpoint_metadata.get(
+            "r12_recovery_iteration_id"
+        )
+        frozen_ids = checkpoint_metadata.get(
+            "r12_recovery_active_tool_call_ids"
+        )
+        if not isinstance(frozen_ids, (list, tuple)):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CORRUPT: frozen "
+                "active-batch identity is not a sequence."
+            )
+        if frozen_iteration_id is None:
+            if int(checkpoint.iteration) != 0 or frozen_ids:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CORRUPT: recovery "
+                    "checkpoint without an iteration identity must be the "
+                    "empty iteration-zero safe point."
+                )
+            # A row inserted later at the same iteration number has no frozen
+            # provenance and must not be promoted into a subsequent recovery.
+            active_iteration = None
+        elif (
+            active_iteration is None
+            or str(active_iteration.id) != str(frozen_iteration_id)
+        ):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CONFLICT: frozen "
+                "iteration identity differs from durable checkpoint iteration."
+            )
+
     ordered_tool_calls: list[Any] = []
     ordered_pending: list[dict[str, Any]] = []
     active_ids: tuple[str, ...] = ()
@@ -392,18 +423,6 @@ async def reconstruct_r7c_safe_point_in_uow(
                     "active-batch identity is not a sequence."
                 )
             active_ids = tuple(str(item) for item in frozen_ids)
-            frozen_iteration_id = checkpoint_metadata.get(
-                "r12_recovery_iteration_id"
-            )
-            if (
-                frozen_iteration_id is not None
-                and str(frozen_iteration_id) != str(active_iteration.id)
-            ):
-                raise SafePointReconstructionError(
-                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CONFLICT: frozen "
-                    "iteration identity differs from durable checkpoint "
-                    "iteration."
-                )
         else:
             active_ids = tuple(
                 str(item) for item in (active_iteration.tool_call_ids or ())
