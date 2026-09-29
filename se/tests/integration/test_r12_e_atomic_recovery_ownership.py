@@ -535,15 +535,6 @@ async def test_r12_e_stale_recovery_checkpoint_ignores_same_iteration_late_write
                     transcript=[],
                 )
             )
-            uow.session.add(
-                AgentIterationRecord(
-                    id="exec-r12-e-stale:iteration:0",
-                    execution_id="exec-r12-e-stale",
-                    iteration=0,
-                    state="THINKING",
-                    tool_call_ids=[],
-                )
-            )
             await uow.commit()
 
         recovered = await store.commit_recovery_waiting_checkpoint(
@@ -594,10 +585,15 @@ async def test_r12_e_stale_recovery_checkpoint_ignores_same_iteration_late_write
                     ],
                 }
             ]
-            iteration = await uow.agents.get_iteration(
-                "exec-r12-e-stale:iteration:0"
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-stale:iteration:0",
+                    execution_id="exec-r12-e-stale",
+                    iteration=0,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-late-same-iteration"],
+                )
             )
-            iteration.tool_call_ids = ["call-late-same-iteration"]
             uow.session.add(
                 AgentToolCallRecord(
                     id="tool-call-late-same-iteration",
@@ -638,9 +634,7 @@ async def test_r12_e_stale_recovery_checkpoint_ignores_same_iteration_late_write
             assert checkpoint is not None
             assert checkpoint.iteration == 0
             metadata = dict(checkpoint.metadata_json or {})
-            assert metadata["r12_recovery_iteration_id"] == (
-                "exec-r12-e-stale:iteration:0"
-            )
+            assert metadata["r12_recovery_iteration_id"] is None
             assert metadata["r12_recovery_active_tool_call_ids"] == []
             checkpoint_id = checkpoint.checkpoint_id
             await uow.commit()
