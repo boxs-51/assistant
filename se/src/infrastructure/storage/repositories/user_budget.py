@@ -410,16 +410,16 @@ class UserBudgetRepository:
             raise UserBudgetIntegrityError(
                 "user budget account must exist before rollover"
             )
+        active = await self.get_active_window(owner_user_id)
+        if active is not None and now < _db_utc(active.expires_at):
+            return active
+
         if account.revision != expected_account_revision:
             raise UserBudgetConflictError("user budget account rollover CAS is stale")
         if account.next_policy_id is None:
             raise UserBudgetIntegrityError(
                 "user budget account has no selected policy for the next window"
             )
-
-        active = await self.get_active_window(owner_user_id)
-        if active is not None and now < _db_utc(active.expires_at):
-            return active
 
         policy = await self.get_policy(owner_user_id, account.next_policy_id)
         if policy is None:
