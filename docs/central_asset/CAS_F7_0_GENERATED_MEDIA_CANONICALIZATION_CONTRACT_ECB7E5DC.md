@@ -448,7 +448,6 @@ F7-P1 non-stream fails closed on:
 - incomplete/ambiguous generated object;
 - invalid base64/byte transport;
 - content exceeding configured `AssetStorageSettings.max_upload_bytes`;
-- provider URL/handle that cannot resolve to complete bounded bytes;
 - AssetService ingest/storage/finalize failure;
 - any attempt to treat streaming generated media as eligible under the first F7-P1 slice;
 - cancellation before terminal canonicalization;
