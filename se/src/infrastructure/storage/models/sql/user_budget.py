@@ -417,6 +417,11 @@ class UserBudgetReservationRecord(Base):
             name="ck_user_budget_reservation_state",
         ),
         CheckConstraint(
+            "(state = 'SETTLED' AND settled_amount_atomic IS NOT NULL AND settled_at IS NOT NULL) "
+            "OR (state != 'SETTLED' AND settled_amount_atomic IS NULL AND settled_at IS NULL)",
+            name="ck_user_budget_reservation_settlement_shape",
+        ),
+        CheckConstraint(
             "reserved_amount_atomic > 0 "
             "AND (settled_amount_atomic IS NULL OR settled_amount_atomic >= 0)",
             name="ck_user_budget_reservation_amounts",
