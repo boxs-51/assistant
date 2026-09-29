@@ -280,7 +280,7 @@ def test_streaming_generated_media_is_explicitly_deferred_from_first_slice():
         "extensionless Gemini fileData.fileUri may be lowered to generic UrlContent",
         "no streaming generated-media response is eligible for CAS canonicalization under the first F7-P1 production slice",
         "MUST NOT rely on a downstream canonicalizer to reconstruct candidate cardinality or media identity",
-        "REQUIRED future F7-S change before streaming generated media may open",
+        "separate REQUIRED future F7-S change for streaming",
         "partial provider chunk != terminal generated object != durable FileAsset authority",
         "public Agent response/tool activity event != generated object commitment authority",
         "MUST NOT trigger provider fallback/regeneration",
