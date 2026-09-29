@@ -778,16 +778,12 @@ class UserBudgetRepository:
             amount = _require_atomic_counter(settled_amount_atomic)
             when = normalize_authoritative_utc(settled_at)
         else:
-            if settled_amount_atomic is not None:
+            if settled_amount_atomic is not None or settled_at is not None:
                 raise ValueError(
-                    "non-SETTLED reservation transition cannot set settled amount"
+                    "non-SETTLED reservation transition cannot set settlement fields"
                 )
             amount = None
-            when = (
-                None
-                if settled_at is None
-                else normalize_authoritative_utc(settled_at)
-            )
+            when = None
 
         result = await self.session.execute(
             update(UserBudgetReservationRecord)
