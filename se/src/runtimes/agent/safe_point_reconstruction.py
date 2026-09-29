@@ -237,7 +237,10 @@ async def reconstruct_r7c_safe_point_in_uow(
     checkpoint_messages: tuple[dict[str, Any], ...] = ()
     checkpoint_metadata: dict[str, Any] = {}
     current_checkpoint_authority = False
+    r12_recovery_checkpoint_lineage = False
     r12_recovery_checkpoint_authority = False
+    stale_r12_recovery_checkpoint = False
+    use_r12_recovery_frozen_batch = False
     initial_recovery_safe_point = False
     checkpoint_id = getattr(execution, "current_checkpoint_id", None)
     if checkpoint_id:
@@ -282,22 +285,36 @@ async def reconstruct_r7c_safe_point_in_uow(
             )
             or ""
         )
+        checkpoint_pointer_matches = (
+            str(getattr(execution, "current_checkpoint_id", "") or "")
+            == str(checkpoint.checkpoint_id)
+        )
         current_checkpoint_authority = (
             int(checkpoint.execution_revision) == int(execution.revision)
-            and str(getattr(execution, "current_checkpoint_id", "") or "")
-            == str(checkpoint.checkpoint_id)
+            and checkpoint_pointer_matches
+        )
+        r12_recovery_checkpoint_lineage = (
+            checkpoint_pointer_matches
+            and str(checkpoint.wait_reason) == "RECOVERY"
+            and bool(checkpoint_metadata.get("r12_recovery_fingerprint"))
         )
         r12_recovery_checkpoint_authority = (
             current_checkpoint_authority
-            and str(checkpoint.wait_reason) == "RECOVERY"
+            and r12_recovery_checkpoint_lineage
             and execution_state == "WAITING"
             and execution_wait_reason == "RECOVERY"
-            and bool(checkpoint_metadata.get("r12_recovery_fingerprint"))
+        )
+        stale_r12_recovery_checkpoint = (
+            r12_recovery_checkpoint_lineage
+            and int(checkpoint.execution_revision) < int(execution.revision)
         )
         initial_recovery_safe_point = (
             checkpoint_iteration is None
             and checkpoint_iteration_number == 0
-            and r12_recovery_checkpoint_authority
+            and (
+                r12_recovery_checkpoint_authority
+                or stale_r12_recovery_checkpoint
+            )
         )
         if checkpoint_iteration is None and not initial_recovery_safe_point:
             raise SafePointReconstructionError(
@@ -332,15 +349,25 @@ async def reconstruct_r7c_safe_point_in_uow(
     else:
         checkpoint_iteration = None
 
-    # If the checkpoint is the current semantic revision, it pins the same
-    # active batch used by ordinary R7-C resume.  A stale RUNNING execution can
-    # legitimately be one or more semantic revisions beyond its prior WAITING
-    # checkpoint; in that case the highest durable iteration is the current
-    # batch authority while the checkpoint remains the immutable safe prefix.
-    if (
-        checkpoint is not None
-        and int(checkpoint.execution_revision) == int(execution.revision)
-    ):
+    # A current checkpoint pins its canonical batch.  For a stale R12-E
+    # recovery checkpoint retained across a later RUNNING revision, a durable
+    # row at the same frozen iteration is not post-resume progress: an expired
+    # worker can publish or mutate that row after the recovery cut.  Continue
+    # consuming the immutable recovery snapshot until durable progress is
+    # strictly beyond the frozen checkpoint iteration.
+    stale_recovery_has_strict_progress = (
+        stale_r12_recovery_checkpoint
+        and latest_iteration is not None
+        and int(latest_iteration.iteration) > int(checkpoint.iteration)
+    )
+    use_r12_recovery_frozen_batch = (
+        r12_recovery_checkpoint_authority
+        or (
+            stale_r12_recovery_checkpoint
+            and not stale_recovery_has_strict_progress
+        )
+    )
+    if current_checkpoint_authority or use_r12_recovery_frozen_batch:
         active_iteration = checkpoint_iteration
     else:
         active_iteration = latest_iteration
@@ -349,7 +376,7 @@ async def reconstruct_r7c_safe_point_in_uow(
     ordered_pending: list[dict[str, Any]] = []
     active_ids: tuple[str, ...] = ()
     if active_iteration is not None:
-        if r12_recovery_checkpoint_authority:
+        if use_r12_recovery_frozen_batch:
             if "r12_recovery_active_tool_call_ids" not in checkpoint_metadata:
                 raise SafePointReconstructionError(
                     "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_MISSING: current "
@@ -488,8 +515,12 @@ async def reconstruct_r7c_safe_point_in_uow(
 
     active_set = frozenset(active_ids)
 
-    if checkpoint is not None and (
-        int(checkpoint.execution_revision) == int(execution.revision)
+    if (
+        checkpoint is not None
+        and (
+            int(checkpoint.execution_revision) == int(execution.revision)
+            or use_r12_recovery_frozen_batch
+        )
     ):
         raw_source = checkpoint_messages
     else:
@@ -516,7 +547,7 @@ async def reconstruct_r7c_safe_point_in_uow(
 
     if active_ids and (
         require_pending_invocation_authority
-        or r12_recovery_checkpoint_authority
+        or use_r12_recovery_frozen_batch
     ):
         # R12-E freezes ordering authority from AgentIteration.tool_call_ids,
         # but the sanitized transcript must prove the same active-batch
@@ -533,6 +564,7 @@ async def reconstruct_r7c_safe_point_in_uow(
         (
             require_pending_invocation_authority
             or current_checkpoint_authority
+            or use_r12_recovery_frozen_batch
             or initial_recovery_safe_point
         )
         and not active_ids
