@@ -157,13 +157,20 @@ revision advances, that checkpoint may remain the durable prefix named by
   iteration-zero safe point), a later same-number row remains unfrozen and must
   not be promoted into the next recovery checkpoint's
   `r12_recovery_iteration_id`;
-- only a durable iteration with a number strictly greater than the frozen
-  checkpoint iteration may become the newer current batch candidate;
-- until such strictly-later progress exists, repeated R12-E recovery republishes
-  the frozen recovery safe point rather than promoting stale same-iteration
-  writes.
+- a numerically greater iteration is also **not** proof of resumed-owner
+  progress, because current `AgentIteration` rows do not carry lease-generation
+  or execution-revision provenance;
+- therefore, any durable iteration strictly beyond the frozen recovery
+  iteration fails closed with
+  `SAFE_POINT_POST_RECOVERY_PROGRESS_UNPROVEN` before checkpoint, semantic
+  revision, lease-generation, or TaskBudget mutation;
+- repeated R12-E recovery may republish the frozen recovery safe point only
+  while no unproven later iteration exists.
 
-This is a provenance rule, not R12-F activation authority.
+A future authority boundary may add explicit resumed-owner provenance or fence
+iteration publication. R12-E does not infer provenance from iteration number,
+timestamp, row identity, or SQL order. This is a provenance rule, not R12-F
+activation authority.
 
 ## Checkpoint publication
 
