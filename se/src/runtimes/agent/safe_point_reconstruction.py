@@ -226,9 +226,24 @@ async def reconstruct_r7c_safe_point_in_uow(
             )
         except CheckpointTranscriptMaterializationError as exc:
             raise SafePointReconstructionError(str(exc)) from exc
-        checkpoint_messages = tuple(
+        materialized_messages = tuple(
             _as_message_dict(item) for item in materialized
         )
+        if checkpoint.transcript_snapshot is not None:
+            # Preserve the historical R7-C outward projection for inline
+            # checkpoints.  Materialization above remains the durable proof;
+            # it must not rewrite ordinary message dictionaries by adding
+            # canonical default fields.
+            checkpoint_messages = tuple(
+                dict(item) for item in checkpoint.transcript_snapshot
+            )
+            if len(checkpoint_messages) != len(materialized_messages):
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_TRANSCRIPT_CORRUPT: checkpoint transcript "
+                    "length changed during materialization."
+                )
+        else:
+            checkpoint_messages = materialized_messages
     else:
         checkpoint_iteration = None
 
