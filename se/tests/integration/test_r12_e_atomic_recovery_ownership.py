@@ -28,6 +28,7 @@ from se.src.runtimes.agent.checkpoint_transcript import (
 )
 from se.src.runtimes.agent.persistence import (
     DurableAgentStore,
+    ExecutionConflictError,
     LeaseAuthorityConflictError,
 )
 from se.src.runtimes.agent.task_budget import (
@@ -285,6 +286,141 @@ async def _seed_task_scoped(factory, *, expiry: datetime):
             )
         )
         await uow.commit()
+
+
+@pytest.mark.asyncio
+async def test_r12_e_iteration_zero_recovery_checkpoint_can_resume(tmp_path):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_iteration_zero.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 0, 30, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-zero",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-zero",
+                    state="RUNNING",
+                    revision=2,
+                    owner_instance_id="worker-zero",
+                    lease_expires_at=expiry,
+                    lease_generation=1,
+                    remaining_active_budget_seconds=19.0,
+                    request={"prompt": "start"},
+                    transcript=[],
+                )
+            )
+            await uow.commit()
+
+        recovered = await store.commit_recovery_waiting_checkpoint(
+            "exec-r12-e-zero",
+            observed_owner_instance_id="worker-zero",
+            observed_lease_generation=1,
+            observed_lease_expires_at=expiry,
+            takeover_now_utc=expiry,
+        )
+        assert recovered.state == "WAITING"
+        assert recovered.wait_reason == "RECOVERY"
+        assert recovered.revision == 3
+        assert recovered.current_checkpoint_id == "exec-r12-e-zero:checkpoint:3"
+
+        resumed = await store.resume_execution("exec-r12-e-zero")
+        assert resumed is not None
+        assert resumed.iteration == 0
+        assert resumed.resume_transcript == []
+        assert resumed.resume_pending_tool_calls == []
+
+        async with factory() as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-zero:checkpoint:3"
+            )
+            assert checkpoint is not None
+            assert checkpoint.iteration == 0
+            assert checkpoint.wait_reason == "RECOVERY"
+            assert await uow.agents.list_iterations("exec-r12-e-zero") == []
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_e_half_persisted_tool_batch_fails_closed(tmp_path):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_half_persisted_batch.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 0, 45, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-half",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-half",
+                    state="RUNNING",
+                    revision=4,
+                    owner_instance_id="worker-half",
+                    lease_expires_at=expiry,
+                    lease_generation=2,
+                    remaining_active_budget_seconds=23.0,
+                    request={"prompt": "half"},
+                    transcript=[
+                        {"role": "user", "content": "half"},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-half",
+                                    "name": "tool.remote",
+                                    "arguments": {"value": 1},
+                                }
+                            ],
+                        },
+                    ],
+                )
+            )
+            # Mirrors the real crash window: the iteration was persisted in
+            # PREPARING/THINKING, then inference transcript was persisted,
+            # but tool_call_ids were not persisted yet.
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-half:iteration:1",
+                    execution_id="exec-r12-e-half",
+                    iteration=1,
+                    state="THINKING",
+                    tool_call_ids=[],
+                )
+            )
+            await uow.commit()
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING",
+        ):
+            await store.commit_recovery_waiting_checkpoint(
+                "exec-r12-e-half",
+                observed_owner_instance_id="worker-half",
+                observed_lease_generation=2,
+                observed_lease_expires_at=expiry,
+                takeover_now_utc=expiry,
+            )
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution("exec-r12-e-half")
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-half:checkpoint:5"
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 4
+            assert execution.lease_generation == 2
+            assert execution.owner_instance_id == "worker-half"
+            assert checkpoint is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
