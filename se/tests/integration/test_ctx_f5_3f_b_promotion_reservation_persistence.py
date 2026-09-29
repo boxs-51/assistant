@@ -163,7 +163,7 @@ def test_ctx_f5_3f_b_migration_is_linear_and_downgrade_is_fail_closed(
     config = _config(database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["24a_r12_stale_lease_scan_index"]
+    assert script.get_heads() == ["25a_ubq1_user_budget_foundation"]
     assert (
         script.get_revision("23a_ctx_f5_promotion_reservation").down_revision
         == "22a_r12_execution_lease_fence"
