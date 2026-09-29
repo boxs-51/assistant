@@ -678,7 +678,7 @@ class UserBudgetRepository:
             reserved_amount_atomic=intent.reserved_amount_atomic,
             settled_amount_atomic=None,
             state=UserBudgetReservationState.RESERVED.value,
-            attribution_json=dict(intent.attribution),
+            attribution_json=intent.canonical_attribution(),
             payload_fingerprint=intent.payload_fingerprint,
             revision=0,
         )
