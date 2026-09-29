@@ -153,6 +153,10 @@ revision advances, that checkpoint may remain the durable prefix named by
 - same-iteration late transcript/tool-call/invocation writes from the expired
   worker are ignored in favor of the immutable checkpoint transcript and frozen
   active-batch metadata;
+- if the original recovery cut had no durable iteration identity (the empty
+  iteration-zero safe point), a later same-number row remains unfrozen and must
+  not be promoted into the next recovery checkpoint's
+  `r12_recovery_iteration_id`;
 - only a durable iteration with a number strictly greater than the frozen
   checkpoint iteration may become the newer current batch candidate;
 - until such strictly-later progress exists, repeated R12-E recovery republishes
