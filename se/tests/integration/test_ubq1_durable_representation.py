@@ -19,6 +19,7 @@ from se.src.domain.schemas.user_budget import (
 )
 from se.src.infrastructure.storage.repositories.user_budget import (
     UserBudgetConflictError,
+    UserBudgetIntegrityError,
     UserBudgetRepository,
 )
 
@@ -333,6 +334,28 @@ async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
             assert account.active_window_epoch == 2
             assert account.next_window_epoch == 3
             assert active.epoch == 2
+
+            historical = await repository.mutate_window_usage(
+                "user-concurrency",
+                1,
+                expected_revision=1,
+                inference_used=1,
+                inference_reserved=0,
+            )
+            assert historical.state == "CLOSED"
+            assert historical.inference_used == 1
+            assert historical.revision == 2
+
+            with pytest.raises(
+                UserBudgetIntegrityError,
+                match="committed user budget usage cannot decrease",
+            ):
+                await repository.mutate_window_usage(
+                    "user-concurrency",
+                    1,
+                    expected_revision=2,
+                    inference_used=0,
+                )
 
             original = UserBudgetReservationIntent(
                 reservation_id="reservation-epoch-1",
