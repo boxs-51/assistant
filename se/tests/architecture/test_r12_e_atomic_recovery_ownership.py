@@ -67,7 +67,7 @@ def test_r12_e_task_budget_keeps_canonical_release_identity():
         TaskBudgetService.recover_task_scoped_execution
     )
     assert "TaskBudgetReservationKind.RELEASE_EXECUTION" in source
-    assert 'reservation_key=f"{execution_id}:{target_revision}"' in source
+    assert 'reservation_key = f"{execution_id}:{target_revision}"' in source
     assert "observed_lease_generation" in source
     assert "observed_lease_expires_at" in source
     assert "takeover_now_utc" in source
