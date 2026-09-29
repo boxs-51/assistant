@@ -349,23 +349,26 @@ async def reconstruct_r7c_safe_point_in_uow(
     else:
         checkpoint_iteration = None
 
-    # A current checkpoint pins its canonical batch.  For a stale R12-E
-    # recovery checkpoint retained across a later RUNNING revision, a durable
-    # row at the same frozen iteration is not post-resume progress: an expired
-    # worker can publish or mutate that row after the recovery cut.  Continue
-    # consuming the immutable recovery snapshot until durable progress is
-    # strictly beyond the frozen checkpoint iteration.
-    stale_recovery_has_strict_progress = (
+    # A current checkpoint pins its canonical batch.  A stale R12-E
+    # recovery checkpoint retained across a later RUNNING revision remains a
+    # provenance fence: AgentIteration rows do not carry lease-generation or
+    # execution-revision provenance, so even a numerically later iteration
+    # cannot prove that it belongs to the resumed owner.  Same-iteration rows
+    # remain excluded by the frozen snapshot; any later row fails closed until
+    # a future authority boundary can prove post-recovery progress.
+    if (
         stale_r12_recovery_checkpoint
         and latest_iteration is not None
         and int(latest_iteration.iteration) > int(checkpoint.iteration)
-    )
+    ):
+        raise SafePointReconstructionError(
+            "SAFE_POINT_POST_RECOVERY_PROGRESS_UNPROVEN: durable iteration "
+            "progress beyond the frozen recovery cut has no resumed-owner "
+            "provenance."
+        )
     use_r12_recovery_frozen_batch = (
         r12_recovery_checkpoint_authority
-        or (
-            stale_r12_recovery_checkpoint
-            and not stale_recovery_has_strict_progress
-        )
+        or stale_r12_recovery_checkpoint
     )
     if current_checkpoint_authority or use_r12_recovery_frozen_batch:
         active_iteration = checkpoint_iteration
