@@ -346,6 +346,84 @@ async def test_r12_e_iteration_zero_recovery_checkpoint_can_resume(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_r12_e_iteration_zero_recovery_ignores_late_expired_worker_iteration(
+    tmp_path,
+):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_iteration_zero_late_write.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 0, 35, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-zero-late",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-zero-late",
+                    state="RUNNING",
+                    revision=2,
+                    owner_instance_id="worker-zero-late",
+                    lease_expires_at=expiry,
+                    lease_generation=1,
+                    remaining_active_budget_seconds=19.0,
+                    request={"prompt": "start"},
+                    transcript=[],
+                )
+            )
+            await uow.commit()
+
+        recovered = await store.commit_recovery_waiting_checkpoint(
+            "exec-r12-e-zero-late",
+            observed_owner_instance_id="worker-zero-late",
+            observed_lease_generation=1,
+            observed_lease_expires_at=expiry,
+            takeover_now_utc=expiry,
+        )
+        assert recovered.state == "WAITING"
+        assert recovered.wait_reason == "RECOVERY"
+        assert recovered.current_checkpoint_id == (
+            "exec-r12-e-zero-late:checkpoint:3"
+        )
+
+        # Models an expired worker publishing its first durable iteration only
+        # after the recovery winner has already frozen the iteration-zero safe
+        # point. The late row cannot retroactively redefine that checkpoint.
+        async with factory() as uow:
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-zero-late:iteration:1",
+                    execution_id="exec-r12-e-zero-late",
+                    iteration=1,
+                    state="THINKING",
+                    tool_call_ids=[],
+                )
+            )
+            await uow.commit()
+
+        resumed = await store.resume_execution("exec-r12-e-zero-late")
+        assert resumed is not None
+        assert resumed.iteration == 0
+        assert resumed.resume_transcript == []
+        assert resumed.resume_pending_tool_calls == []
+
+        async with factory() as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-zero-late:checkpoint:3"
+            )
+            iterations = await uow.agents.list_iterations(
+                "exec-r12-e-zero-late"
+            )
+            assert checkpoint is not None
+            assert checkpoint.iteration == 0
+            assert checkpoint.wait_reason == "RECOVERY"
+            assert [item.iteration for item in iterations] == [1]
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r12_e_half_persisted_tool_batch_fails_closed(tmp_path):
     engine, sessions, factory, store, _ = await _setup(
         tmp_path, "r12_e_half_persisted_batch.sqlite"
@@ -417,6 +495,102 @@ async def test_r12_e_half_persisted_tool_batch_fails_closed(tmp_path):
             assert execution.revision == 4
             assert execution.lease_generation == 2
             assert execution.owner_instance_id == "worker-half"
+            assert checkpoint is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_e_provisional_tool_projection_remains_unresolved(tmp_path):
+    engine, sessions, factory, store, _ = await _setup(
+        tmp_path, "r12_e_provisional_tool_projection.sqlite"
+    )
+    expiry = datetime(2026, 9, 29, 0, 50, tzinfo=timezone.utc)
+    try:
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-e-provisional",
+                    session_id="session-r12-e",
+                    agent_id="agent-r12-e",
+                    correlation_id="corr-r12-e-provisional",
+                    state="RUNNING",
+                    revision=4,
+                    owner_instance_id="worker-provisional",
+                    lease_expires_at=expiry,
+                    lease_generation=2,
+                    remaining_active_budget_seconds=23.0,
+                    request={"prompt": "provisional"},
+                    transcript=[
+                        {"role": "user", "content": "provisional"},
+                        {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": "call-provisional",
+                                    "name": "tool.remote",
+                                    "arguments": {"value": 1},
+                                }
+                            ],
+                        },
+                        {
+                            "role": "tool",
+                            "tool_call_id": "call-provisional",
+                            "name": "tool.remote",
+                            "content": {"transport": "not committed"},
+                        },
+                    ],
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-e-provisional:iteration:1",
+                    execution_id="exec-r12-e-provisional",
+                    iteration=1,
+                    state="THINKING",
+                    tool_call_ids=[],
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id="result-call-provisional",
+                    execution_id="exec-r12-e-provisional",
+                    iteration_id="exec-r12-e-provisional:iteration:1",
+                    tool_call_id="call-provisional",
+                    invocation_id="inv-call-provisional",
+                    capability_id="tool.remote",
+                    success=True,
+                    output={"transport": "not committed"},
+                    commit_state="PROVISIONAL",
+                )
+            )
+            await uow.commit()
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING",
+        ):
+            await store.commit_recovery_waiting_checkpoint(
+                "exec-r12-e-provisional",
+                observed_owner_instance_id="worker-provisional",
+                observed_lease_generation=2,
+                observed_lease_expires_at=expiry,
+                takeover_now_utc=expiry,
+            )
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(
+                "exec-r12-e-provisional"
+            )
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                "exec-r12-e-provisional:checkpoint:5"
+            )
+            assert execution.state == "RUNNING"
+            assert execution.revision == 4
+            assert execution.lease_generation == 2
+            assert execution.owner_instance_id == "worker-provisional"
             assert checkpoint is None
             await uow.commit()
     finally:
