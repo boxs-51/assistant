@@ -359,6 +359,18 @@ def upgrade() -> None:
             "AND (max_cost_usd_atomic IS NULL OR max_cost_usd_atomic > 0)",
             name="ck_user_budget_policy_optional_limits_positive",
         ),
+        sa.CheckConstraint(
+            "window_duration_seconds <= 9223372036854775807 "
+            "AND (max_compute_atomic IS NULL OR max_compute_atomic <= 9223372036854775807) "
+            "AND (max_inference_calls IS NULL OR max_inference_calls <= 9223372036854775807) "
+            "AND (max_input_tokens IS NULL OR max_input_tokens <= 9223372036854775807) "
+            "AND (max_output_tokens IS NULL OR max_output_tokens <= 9223372036854775807) "
+            "AND (max_total_tokens IS NULL OR max_total_tokens <= 9223372036854775807) "
+            "AND (max_tool_calls_total IS NULL OR max_tool_calls_total <= 9223372036854775807) "
+            "AND (default_per_tool_limit IS NULL OR default_per_tool_limit <= 9223372036854775807) "
+            "AND (max_cost_usd_atomic IS NULL OR max_cost_usd_atomic <= 9223372036854775807)",
+            name="ck_user_budget_policy_bigint_bounds",
+        ),
     )
 
     op.create_table(
@@ -451,6 +463,22 @@ def upgrade() -> None:
             name="ck_user_budget_window_counters_nonnegative",
         ),
         sa.CheckConstraint(
+            "epoch <= 9223372036854775807 "
+            "AND compute_used_atomic <= 9223372036854775807 "
+            "AND compute_reserved_atomic <= 9223372036854775807 "
+            "AND inference_used <= 9223372036854775807 "
+            "AND inference_reserved <= 9223372036854775807 "
+            "AND input_tokens_used <= 9223372036854775807 "
+            "AND output_tokens_used <= 9223372036854775807 "
+            "AND total_tokens_used <= 9223372036854775807 "
+            "AND tokens_reserved <= 9223372036854775807 "
+            "AND tool_calls_used <= 9223372036854775807 "
+            "AND tool_calls_reserved <= 9223372036854775807 "
+            "AND cost_used_atomic <= 9223372036854775807 "
+            "AND cost_reserved_atomic <= 9223372036854775807",
+            name="ck_user_budget_window_bigint_bounds",
+        ),
+        sa.CheckConstraint(
             "(state = 'ACTIVE' AND closed_at IS NULL) "
             "OR (state = 'CLOSED' AND closed_at IS NOT NULL)",
             name="ck_user_budget_window_closed_at_state",
@@ -514,6 +542,11 @@ def upgrade() -> None:
             "active_window_epoch IS NULL OR next_window_epoch > active_window_epoch",
             name="ck_user_budget_account_epoch_monotonic",
         ),
+        sa.CheckConstraint(
+            "next_window_epoch <= 9223372036854775807 "
+            "AND (active_window_epoch IS NULL OR active_window_epoch <= 9223372036854775807)",
+            name="ck_user_budget_account_bigint_bounds",
+        ),
     )
 
     op.create_table(
@@ -546,6 +579,12 @@ def upgrade() -> None:
         sa.CheckConstraint(
             "used_calls >= 0 AND reserved_calls >= 0",
             name="ck_user_tool_budget_usage_nonnegative",
+        ),
+        sa.CheckConstraint(
+            "window_epoch <= 9223372036854775807 "
+            "AND used_calls <= 9223372036854775807 "
+            "AND reserved_calls <= 9223372036854775807",
+            name="ck_user_tool_budget_usage_bigint_bounds",
         ),
         sa.CheckConstraint(
             "revision >= 0",
@@ -607,6 +646,12 @@ def upgrade() -> None:
             "reserved_amount_atomic > 0 "
             "AND (settled_amount_atomic IS NULL OR settled_amount_atomic >= 0)",
             name="ck_user_budget_reservation_amounts",
+        ),
+        sa.CheckConstraint(
+            "window_epoch <= 9223372036854775807 "
+            "AND reserved_amount_atomic <= 9223372036854775807 "
+            "AND (settled_amount_atomic IS NULL OR settled_amount_atomic <= 9223372036854775807)",
+            name="ck_user_budget_reservation_bigint_bounds",
         ),
         sa.CheckConstraint(
             "(resource_kind = 'TOOL_CALL' AND capability_id IS NOT NULL) "
