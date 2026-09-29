@@ -510,6 +510,25 @@ async def reconstruct_r7c_safe_point_in_uow(
         active_tool_call_ids=active_set,
     )
 
+    unresolved_declared = _unresolved_declared_tool_call_ids(
+        safe_transcript
+    )
+
+    if active_ids and (
+        require_pending_invocation_authority
+        or r12_recovery_checkpoint_authority
+    ):
+        # R12-E freezes ordering authority from AgentIteration.tool_call_ids,
+        # but the sanitized transcript must prove the same active-batch
+        # membership. Transcript IDs never define order.
+        declared_set = frozenset(unresolved_declared)
+        if declared_set != active_set:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_ACTIVE_BATCH_MEMBERSHIP_MISMATCH: sanitized "
+                "transcript active tool-call membership differs from "
+                "authoritative active-batch identity."
+            )
+
     if (
         (
             require_pending_invocation_authority
@@ -517,20 +536,17 @@ async def reconstruct_r7c_safe_point_in_uow(
             or initial_recovery_safe_point
         )
         and not active_ids
+        and unresolved_declared
     ):
         # Resolve transcript declarations only against the committed/sanitized
         # projection. Raw/provisional tool messages are transport evidence,
         # never proof that an assistant tool request has been durably resolved.
-        unresolved_declared = _unresolved_declared_tool_call_ids(
-            safe_transcript
+        raise SafePointReconstructionError(
+            "SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING: durable "
+            "transcript declares unresolved assistant tool calls but "
+            "AgentIteration.tool_call_ids provides no active-batch "
+            "authority."
         )
-        if unresolved_declared:
-            raise SafePointReconstructionError(
-                "SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING: durable "
-                "transcript declares unresolved assistant tool calls but "
-                "AgentIteration.tool_call_ids provides no active-batch "
-                "authority."
-            )
 
     if checkpoint is not None and (
         int(checkpoint.execution_revision) < int(execution.revision)
