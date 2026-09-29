@@ -235,6 +235,7 @@ async def reconstruct_r7c_safe_point_in_uow(
 
     checkpoint = None
     checkpoint_messages: tuple[dict[str, Any], ...] = ()
+    initial_recovery_safe_point = False
     checkpoint_id = getattr(execution, "current_checkpoint_id", None)
     if checkpoint_id:
         checkpoint = await uow.agents.get_execution_checkpoint(
@@ -440,7 +441,10 @@ async def reconstruct_r7c_safe_point_in_uow(
             or checkpoint_messages
         )
 
-    if require_pending_invocation_authority and not active_ids:
+    if (
+        (require_pending_invocation_authority or initial_recovery_safe_point)
+        and not active_ids
+    ):
         unresolved_declared = _unresolved_declared_tool_call_ids(raw_source)
         if unresolved_declared:
             raise SafePointReconstructionError(
