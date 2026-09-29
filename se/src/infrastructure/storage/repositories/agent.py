@@ -874,8 +874,6 @@ class AgentRepository(BaseRepository):
 
         forbidden = {
             "revision",
-            "state",
-            "wait_reason",
             "owner_instance_id",
             "lease_expires_at",
             "lease_generation",
@@ -886,13 +884,21 @@ class AgentRepository(BaseRepository):
                 "recovery transition values may not override fenced fields: "
                 + ", ".join(sorted(overlap))
             )
+        if "state" in values and str(values["state"]) != "WAITING":
+            raise ValueError("recovery state is fixed to WAITING")
+        if "wait_reason" in values and str(values["wait_reason"]) != "RECOVERY":
+            raise ValueError("recovery wait_reason is fixed to RECOVERY")
         checkpoint_id = str(values.get("current_checkpoint_id") or "")
         if not checkpoint_id:
             raise ValueError(
                 "recovery transition requires current_checkpoint_id"
             )
 
-        next_values = dict(values)
+        next_values = {
+            key: value
+            for key, value in values.items()
+            if key not in {"state", "wait_reason"}
+        }
         next_values.update(
             {
                 "revision": expected_revision + 1,
