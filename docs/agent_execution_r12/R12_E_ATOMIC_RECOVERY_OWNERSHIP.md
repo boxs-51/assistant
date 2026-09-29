@@ -135,6 +135,14 @@ against the same sanitized transcript rule.
 These rules prevent a recovery or ordinary R7-C checkpoint from orphaning
 assistant tool requests.
 
+
+At an R12-E recovery cut with a non-empty authoritative active batch, the
+sanitized/COMMITTED transcript must prove the exact same unresolved tool-call
+membership as the authoritative ID set. Equality is set-based proof only:
+`AgentIteration.tool_call_ids` (or its frozen recovery snapshot) remains the
+sole ordering authority. Missing or extra transcript IDs fail closed with
+`SAFE_POINT_ACTIVE_BATCH_MEMBERSHIP_MISMATCH` before any recovery mutation.
+
 ## Checkpoint publication
 
 R12-E reuses canonical `stage_waiting_checkpoint(...)` inside the same winning
