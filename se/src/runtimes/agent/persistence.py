@@ -1,5 +1,5 @@
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import math
 from typing import Any, Dict, List, Mapping, Optional
 import uuid
@@ -66,6 +66,12 @@ from .contracts.retry import (
 )
 from .resume_claim import ResumeClaimDeferred, ResumeClaimError, ResumeClaimRejected
 from .serialization import to_json_safe
+from .safe_point_reconstruction import (
+    SafePointReconstructionError,
+    reconstruct_r7c_safe_point_in_uow,
+    recovery_receipt_payload,
+    recovery_safe_point_fingerprint,
+)
 from .task_budget import (
     prepare_resume_capacity_in_uow,
     reconcile_multibranch_task_activity_in_uow,
@@ -2054,6 +2060,231 @@ class DurableAgentStore:
             )
             await uow.commit()
             return observations
+
+    async def commit_recovery_waiting_checkpoint(
+        self,
+        execution_id: str,
+        *,
+        observed_owner_instance_id: str,
+        observed_lease_generation: int,
+        observed_lease_expires_at: datetime,
+        takeover_now_utc: datetime,
+    ):
+        """Publish one non-task stale RUNNING execution as WAITING(RECOVERY)."""
+
+        if (
+            not isinstance(takeover_now_utc, datetime)
+            or takeover_now_utc.tzinfo is None
+            or takeover_now_utc.utcoffset() != timedelta(0)
+        ):
+            raise ValueError(
+                "takeover_now_utc must be a timezone-aware UTC datetime"
+            )
+        if (
+            not isinstance(observed_lease_expires_at, datetime)
+            or observed_lease_expires_at.tzinfo is None
+            or observed_lease_expires_at.utcoffset() != timedelta(0)
+        ):
+            raise ValueError(
+                "observed_lease_expires_at must be a timezone-aware UTC datetime"
+            )
+        if (
+            not isinstance(observed_owner_instance_id, str)
+            or not observed_owner_instance_id.strip()
+        ):
+            raise ValueError(
+                "observed_owner_instance_id must be a non-empty string"
+            )
+        if (
+            isinstance(observed_lease_generation, bool)
+            or not isinstance(observed_lease_generation, int)
+            or observed_lease_generation <= 0
+        ):
+            raise ValueError(
+                "observed_lease_generation must be a positive integer"
+            )
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                raise LeaseAuthorityConflictError(
+                    "RECOVERY_TAKEOVER_REJECTED",
+                    f"Unknown AgentExecution: {execution_id}",
+                )
+            if execution.task_id is not None:
+                raise ExecutionConflictError(
+                    "Task-scoped R12-E recovery requires TaskBudgetService."
+                )
+
+            current_state = str(execution.state)
+            current_revision = int(execution.revision)
+
+            # Uncertain-commit replay: prove the exact already-committed winner
+            # and return it without a second mutation.
+            if (
+                current_state == "WAITING"
+                and str(execution.wait_reason) == "RECOVERY"
+                and execution.owner_instance_id is None
+                and execution.lease_expires_at is None
+                and int(execution.lease_generation)
+                == observed_lease_generation + 1
+            ):
+                target_revision = current_revision
+                source_revision = target_revision - 1
+                checkpoint_id = (
+                    f"{execution_id}:checkpoint:{target_revision}"
+                )
+                if execution.current_checkpoint_id != checkpoint_id:
+                    raise LeaseAuthorityConflictError(
+                        "RECOVERY_REPLAY_MISMATCH",
+                        "WAITING(RECOVERY) does not point at the deterministic checkpoint.",
+                    )
+                payload = recovery_receipt_payload(
+                    execution_id=execution_id,
+                    source_revision=source_revision,
+                    target_revision=target_revision,
+                    checkpoint_id=checkpoint_id,
+                    observed_owner_instance_id=observed_owner_instance_id,
+                    observed_lease_generation=observed_lease_generation,
+                    observed_lease_expires_at=observed_lease_expires_at,
+                    takeover_now_utc=takeover_now_utc,
+                )
+                fingerprint = recovery_safe_point_fingerprint(payload)
+                checkpoint = await uow.agents.get_execution_checkpoint(
+                    checkpoint_id
+                )
+                if (
+                    checkpoint is None
+                    or int(checkpoint.execution_revision) != target_revision
+                    or checkpoint.execution_id != execution_id
+                    or checkpoint.wait_reason != "RECOVERY"
+                    or dict(checkpoint.metadata_json or {}).get(
+                        "r12_recovery_fingerprint"
+                    )
+                    != fingerprint
+                ):
+                    raise LeaseAuthorityConflictError(
+                        "RECOVERY_REPLAY_MISMATCH",
+                        "Committed recovery checkpoint does not match the frozen receipt.",
+                    )
+                await uow.commit()
+                return execution
+
+            durable_expiry = _utc_datetime(execution.lease_expires_at)
+            if (
+                current_state != "RUNNING"
+                or execution.owner_instance_id
+                != observed_owner_instance_id
+                or int(execution.lease_generation)
+                != observed_lease_generation
+                or durable_expiry != observed_lease_expires_at
+                or durable_expiry is None
+                or durable_expiry > takeover_now_utc
+            ):
+                raise LeaseAuthorityConflictError(
+                    "RECOVERY_TAKEOVER_REJECTED",
+                    "Execution no longer matches the exact expired lease receipt.",
+                )
+
+            source_revision = current_revision
+            target_revision = source_revision + 1
+            checkpoint_id = f"{execution_id}:checkpoint:{target_revision}"
+            payload = recovery_receipt_payload(
+                execution_id=execution_id,
+                source_revision=source_revision,
+                target_revision=target_revision,
+                checkpoint_id=checkpoint_id,
+                observed_owner_instance_id=observed_owner_instance_id,
+                observed_lease_generation=observed_lease_generation,
+                observed_lease_expires_at=observed_lease_expires_at,
+                takeover_now_utc=takeover_now_utc,
+            )
+            fingerprint = recovery_safe_point_fingerprint(payload)
+
+            try:
+                safe_point = await reconstruct_r7c_safe_point_in_uow(
+                    uow,
+                    execution,
+                )
+            except SafePointReconstructionError as exc:
+                raise ExecutionConflictError(str(exc)) from exc
+
+            checkpoint_values = {
+                "checkpoint_id": checkpoint_id,
+                "execution_id": execution_id,
+                "execution_revision": target_revision,
+                "session_id": execution.session_id,
+                "task_id": execution.task_id,
+                "branch_id": execution.branch_id,
+                "iteration": safe_point.iteration_number,
+                "wait_reason": "RECOVERY",
+                "remaining_active_budget_seconds": (
+                    execution.remaining_active_budget_seconds
+                ),
+                "wait_expires_at": None,
+                "origin_client_id": execution.bound_client_id,
+                "origin_connection_id": execution.bound_connection_id,
+                "transcript_snapshot": list(
+                    safe_point.transcript_snapshot
+                ),
+                "metadata_json": {
+                    "r12_recovery_fingerprint": fingerprint,
+                    "r12_recovery_receipt": payload,
+                },
+            }
+            transition_values = {
+                "state": "WAITING",
+                "wait_reason": "RECOVERY",
+                "wait_expires_at": None,
+                "remaining_active_budget_seconds": (
+                    execution.remaining_active_budget_seconds
+                ),
+                "bound_connection_id": None,
+                "completed_at": None,
+            }
+            try:
+                staged_values = await stage_waiting_checkpoint(
+                    uow,
+                    execution=execution,
+                    source_revision=source_revision,
+                    transition_values=transition_values,
+                    checkpoint_values=checkpoint_values,
+                    pending_invocations=(
+                        safe_point.ordered_pending_invocations
+                    ),
+                )
+            except WaitingCheckpointConflictError as exc:
+                raise ExecutionConflictError(str(exc)) from exc
+
+            record = (
+                await uow.agents.compare_and_set_recovery_waiting_execution(
+                    execution_id,
+                    source_revision,
+                    observed_owner_instance_id=observed_owner_instance_id,
+                    observed_lease_generation=observed_lease_generation,
+                    observed_lease_expires_at=observed_lease_expires_at,
+                    takeover_now_utc=takeover_now_utc,
+                    values=staged_values,
+                )
+            )
+            if record is None:
+                await uow.rollback()
+                raise LeaseAuthorityConflictError(
+                    "RECOVERY_TAKEOVER_REJECTED",
+                    "Recovery receipt lost its final fenced CAS.",
+                )
+            if (
+                record.current_checkpoint_id != checkpoint_id
+                or int(record.revision) != target_revision
+                or int(record.lease_generation)
+                != observed_lease_generation + 1
+            ):
+                await uow.rollback()
+                raise ExecutionConflictError(
+                    "Recovery CAS did not publish the complete safe point."
+                )
+            await uow.commit()
+            return record
 
     async def commit_waiting_checkpoint(
         self,
@@ -4986,169 +5217,51 @@ class DurableAgentStore:
                 await uow.commit()
                 return None
 
-            iterations = await uow.agents.list_iterations(execution_id)
-            latest_iteration = max(
-                iterations,
-                key=lambda item: item.iteration,
-                default=None,
-            )
-            checkpoint = None
+            try:
+                safe_point = await reconstruct_r7c_safe_point_in_uow(
+                    uow,
+                    execution,
+                )
+            except SafePointReconstructionError as exc:
+                raise ExecutionConflictError(str(exc)) from exc
+
+            # Ordinary R7 resume still requires the current checkpoint to be
+            # the same semantic revision.  R12-E alone may consume an older
+            # checkpoint as an immutable prefix for a stale RUNNING revision.
             checkpoint_id = getattr(execution, "current_checkpoint_id", None)
-            if checkpoint_id:
-                checkpoint = await uow.agents.get_execution_checkpoint(checkpoint_id)
-                if (
-                    checkpoint is None
-                    or checkpoint.execution_id != execution.id
-                    or checkpoint.execution_revision != execution.revision
-                ):
-                    raise ExecutionConflictError(
-                        "AgentExecution current checkpoint is missing or stale."
-                    )
-                latest_iteration = next(
-                    (
-                        item for item in iterations
-                        if item.iteration == checkpoint.iteration
+            if (
+                checkpoint_id
+                and safe_point.checkpoint_revision
+                != int(execution.revision)
+            ):
+                raise ExecutionConflictError(
+                    "AgentExecution current checkpoint is missing or stale."
+                )
+
+            resume_transcript = [
+                dict(item) for item in safe_point.transcript_snapshot
+            ]
+            pending_tool_calls = [
+                {
+                    "execution_id": item.execution_id,
+                    "iteration": safe_point.iteration_number,
+                    "invocation_id": item.invocation_id,
+                    "tool_call_id": item.tool_call_id,
+                    "capability_id": item.capability_id,
+                    "arguments": item.arguments,
+                    "connection_id": (
+                        (getattr(item, "extra_metadata", None) or {}).get(
+                            "connection_id"
+                        )
                     ),
-                    None,
-                )
-                if latest_iteration is None:
-                    raise ExecutionConflictError(
-                        "Checkpoint iteration is missing from durable history."
-                    )
-
-            async def sanitize_transcript(raw):
-                sanitized = []
-                for message in list(raw or []):
-                    if message.get("role") != "tool":
-                        sanitized.append(message)
-                        continue
-                    tool_call_id = message.get("tool_call_id")
-                    if not tool_call_id:
-                        continue
-                    result = await uow.agents.get_tool_result(
-                        execution_id,
-                        tool_call_id,
-                    )
-                    if (
-                        result is None
-                        or getattr(result, "commit_state", "PROVISIONAL")
-                        != "COMMITTED"
-                    ):
-                        continue
-                    sanitized.append(
-                        {
-                            "role": "tool",
-                            "content": (
-                                result.output
-                                if result.success
-                                else {
-                                    "error_code": result.error_code,
-                                    "error_message": result.error_message,
-                                }
-                            ),
-                            "tool_calls": [],
-                            "name": result.capability_id,
-                            "tool_call_id": result.tool_call_id,
-                            "metadata": {
-                                "success": result.success,
-                                "retryable": result.retryable,
-                            },
-                        }
-                    )
-                return sanitized
-
-            if checkpoint is not None:
-                try:
-                    checkpoint_messages = (
-                        await materialize_checkpoint_transcript_in_uow(
-                            uow,
-                            checkpoint,
-                        )
-                    )
-                except CheckpointTranscriptMaterializationError as exc:
-                    raise ExecutionConflictError(str(exc)) from exc
-                transcript_source = (
-                    [dict(item) for item in checkpoint.transcript_snapshot]
-                    if checkpoint.transcript_snapshot is not None
-                    else [
-                        item.model_dump(mode="json")
-                        for item in checkpoint_messages
-                    ]
-                )
-                if len(transcript_source) != len(checkpoint_messages):
-                    raise ExecutionConflictError(
-                        "TRANSCRIPT_REPRESENTATION_CORRUPT: "
-                        "checkpoint transcript length changed during materialization."
-                    )
-            else:
-                transcript_source = getattr(execution, "transcript", None) or (
-                    getattr(latest_iteration, "transcript", None)
-                    if latest_iteration
-                    else []
-                )
-            resume_transcript = await sanitize_transcript(transcript_source)
-
-            pending_tool_calls = []
-            if latest_iteration is not None:
-                calls = await uow.agents.list_tool_calls(
-                    execution_id,
-                    latest_iteration.id,
-                )
-                by_id = {item.tool_call_id: item for item in calls}
-                canonical_ids = list(
-                    getattr(latest_iteration, "tool_call_ids", None) or []
-                )
-                if checkpoint is not None and not canonical_ids:
-                    raise ExecutionConflictError(
-                        "Checkpointed tool batch has no canonical tool_call_ids."
-                    )
-                ordered_calls = []
-                for tool_call_id in canonical_ids:
-                    item = by_id.get(tool_call_id)
-                    if item is None:
-                        raise ExecutionConflictError(
-                            f"Missing durable tool call {tool_call_id!r} "
-                            "referenced by checkpoint iteration."
-                        )
-                    ordered_calls.append(item)
-                if checkpoint is None and not canonical_ids:
-                    ordered_calls = calls
-
-                pending_tool_calls = [
-                    {
-                        "execution_id": item.execution_id,
-                        "iteration": latest_iteration.iteration,
-                        "invocation_id": item.invocation_id,
-                        "tool_call_id": item.tool_call_id,
-                        "capability_id": item.capability_id,
-                        "arguments": item.arguments,
-                        "connection_id": (
-                            (getattr(item, "extra_metadata", None) or {}).get(
-                                "connection_id"
-                            )
-                        ),
-                        "metadata": {
-                            **dict(getattr(item, "extra_metadata", None) or {}),
-                            "iteration_id": item.iteration_id,
-                            "persisted_status": item.status,
-                        },
-                    }
-                    for item in ordered_calls
-                ]
-
-            if latest_iteration is not None:
-                current_batch_ids = set(
-                    getattr(latest_iteration, "tool_call_ids", None) or []
-                )
-                if current_batch_ids:
-                    resume_transcript = [
-                        message
-                        for message in resume_transcript
-                        if not (
-                            message.get("role") == "tool"
-                            and message.get("tool_call_id") in current_batch_ids
-                        )
-                    ]
+                    "metadata": {
+                        **dict(getattr(item, "extra_metadata", None) or {}),
+                        "iteration_id": item.iteration_id,
+                        "persisted_status": item.status,
+                    },
+                }
+                for item in safe_point.ordered_tool_calls
+            ]
 
             state = getattr(execution, "context_state", None) or {}
             restored_limits = limits or AgentExecutionLimits.model_validate(
@@ -5196,7 +5309,7 @@ class DurableAgentStore:
                 # consume active budget until the WAITING -> RUNNING CAS wins.
                 activate_budget=False,
             )
-            context.iteration = latest_iteration.iteration if latest_iteration else 0
+            context.iteration = safe_point.iteration_number
             context.resume_transcript = resume_transcript
             context.resume_pending_tool_calls = pending_tool_calls
             context.resume_revision = getattr(execution, "revision", 0)
