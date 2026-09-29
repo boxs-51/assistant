@@ -13,6 +13,7 @@ from alembic.script import ScriptDirectory
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.domain.schemas.user_budget import (
+    USER_BUDGET_INT64_MAX,
     UserBudgetPolicy,
     UserBudgetReservationIntent,
     UserBudgetResourceKind,
@@ -21,6 +22,7 @@ from se.src.infrastructure.storage.repositories.user_budget import (
     UserBudgetConflictError,
     UserBudgetIntegrityError,
     UserBudgetRepository,
+    UserBudgetSerializationError,
 )
 
 
@@ -171,6 +173,34 @@ def test_ubq1_25a_is_linear_and_sqlite_triggers_hold_with_fk_pragma_off(
                 """
             )
 
+        connection.execute(
+            """
+            INSERT INTO user_budget_reservations (
+                reservation_id, owner_user_id, window_epoch,
+                idempotency_key, resource_kind, capability_id,
+                reserved_amount_atomic, state, attribution_json,
+                payload_fingerprint
+            ) VALUES (
+                'reservation-trigger', 'user-1', 1,
+                'logical-trigger', 'TOOL_CALL', 'tool.a',
+                1, 'RESERVED', '{}', ?
+            )
+            """,
+            ("c" * 64,),
+        )
+
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="UBQ_INTEGRITY_RESERVATION_PROVENANCE_IMMUTABLE",
+        ):
+            connection.execute(
+                """
+                UPDATE user_budget_reservations
+                SET idempotency_key = 'rewritten'
+                WHERE reservation_id = 'reservation-trigger'
+                """
+            )
+
         with pytest.raises(
             sqlite3.IntegrityError,
             match="UBQ_INTEGRITY_POLICY_IMMUTABLE",
@@ -288,7 +318,7 @@ async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
 
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{database.as_posix()}",
-        connect_args={"check_same_thread": False},
+        connect_args={"check_same_thread": False, "timeout": 0.01},
     )
     sessions = async_sessionmaker(engine, expire_on_commit=False)
 
@@ -327,6 +357,24 @@ async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
         assert first == [1, 1]
 
         second_now = started + timedelta(seconds=2)
+
+        locker = sqlite3.connect(database, timeout=0.01)
+        try:
+            locker.execute("BEGIN IMMEDIATE")
+            with pytest.raises(UserBudgetSerializationError):
+                await _roll(2, second_now)
+        finally:
+            locker.rollback()
+            locker.close()
+
+        async with sessions() as session:
+            repository = UserBudgetRepository(session)
+            after_busy = await repository.get_account("user-concurrency")
+            assert after_busy is not None
+            assert after_busy.active_window_epoch == 1
+            assert after_busy.next_window_epoch == 2
+            await session.rollback()
+
         second = await asyncio.gather(
             _roll(2, second_now),
             _roll(2, second_now),
@@ -363,6 +411,14 @@ async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
                     1,
                     expected_revision=2,
                     inference_used=0,
+                )
+
+            with pytest.raises(ValueError, match="signed BIGINT"):
+                await repository.mutate_window_usage(
+                    "user-concurrency",
+                    1,
+                    expected_revision=2,
+                    inference_used=USER_BUDGET_INT64_MAX + 1,
                 )
 
             original = UserBudgetReservationIntent(
@@ -404,6 +460,41 @@ async def test_ubq1_sqlite_rollover_converges_and_idempotency_crosses_epochs(
             )
             with pytest.raises(UserBudgetConflictError):
                 await repository.create_or_get_reservation(conflict)
+
+            settled_at = second_now + timedelta(seconds=1)
+            settled = await repository.transition_reservation(
+                "user-concurrency",
+                "logical-operation-1",
+                expected_revision=0,
+                target_state="SETTLED",
+                settled_amount_atomic=1,
+                settled_at=settled_at,
+            )
+            assert settled.state == "SETTLED"
+            assert settled.settled_amount_atomic == 1
+            assert settled.revision == 1
+
+            replay_settled = await repository.transition_reservation(
+                "user-concurrency",
+                "logical-operation-1",
+                expected_revision=0,
+                target_state="SETTLED",
+                settled_amount_atomic=1,
+                settled_at=settled_at,
+            )
+            assert replay_settled.reservation_id == settled.reservation_id
+            assert replay_settled.revision == 1
+
+            with pytest.raises(
+                UserBudgetConflictError,
+                match="cannot be reopened",
+            ):
+                await repository.transition_reservation(
+                    "user-concurrency",
+                    "logical-operation-1",
+                    expected_revision=1,
+                    target_state="RELEASED",
+                )
             await session.rollback()
     finally:
         await engine.dispose()
