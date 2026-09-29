@@ -98,6 +98,50 @@ def _committed_tool_message(result) -> dict[str, Any]:
     }
 
 
+def _unresolved_declared_tool_call_ids(
+    raw_messages,
+) -> tuple[str, ...]:
+    """Return the trailing transcript-declared tool batch still unresolved.
+
+    This is transcript evidence only.  It never becomes ordering authority;
+    AgentIteration.tool_call_ids remains the sole durable active-batch order.
+    """
+
+    pending: list[str] = []
+    for raw in list(raw_messages or ()):
+        message = _as_message_dict(raw)
+        role = str(message.get("role") or "")
+        if role == "assistant":
+            tool_calls = list(message.get("tool_calls") or ())
+            if not tool_calls:
+                continue
+            if pending:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_ACTIVE_BATCH_AMBIGUOUS: transcript declares "
+                    "a new assistant tool batch before the prior batch is "
+                    "resolved."
+                )
+            declared: list[str] = []
+            for item in tool_calls:
+                call = _as_message_dict(item)
+                call_id = str(call.get("id") or "")
+                if not call_id or call_id in declared:
+                    raise SafePointReconstructionError(
+                        "SAFE_POINT_ACTIVE_BATCH_AMBIGUOUS: transcript "
+                        "assistant tool_call ids must be non-empty and unique."
+                    )
+                declared.append(call_id)
+            pending = declared
+            continue
+
+        if role == "tool" and pending:
+            tool_call_id = str(message.get("tool_call_id") or "")
+            if tool_call_id in pending:
+                pending.remove(tool_call_id)
+
+    return tuple(pending)
+
+
 async def _sanitize_transcript_in_uow(
     uow,
     *,
@@ -211,10 +255,17 @@ async def reconstruct_r7c_safe_point_in_uow(
                 "SAFE_POINT_CHECKPOINT_LINEAGE_CONFLICT: current checkpoint "
                 "does not match the execution lineage/revision."
             )
+        checkpoint_iteration_number = int(checkpoint.iteration)
         checkpoint_iteration = iteration_by_number.get(
-            int(checkpoint.iteration)
+            checkpoint_iteration_number
         )
-        if checkpoint_iteration is None:
+        initial_recovery_safe_point = (
+            checkpoint_iteration is None
+            and checkpoint_iteration_number == 0
+            and not iteration_by_number
+            and str(checkpoint.wait_reason) == "RECOVERY"
+        )
+        if checkpoint_iteration is None and not initial_recovery_safe_point:
             raise SafePointReconstructionError(
                 "SAFE_POINT_CHECKPOINT_ITERATION_MISSING: checkpoint "
                 "iteration is absent from durable history."
@@ -388,6 +439,16 @@ async def reconstruct_r7c_safe_point_in_uow(
             )
             or checkpoint_messages
         )
+
+    if require_pending_invocation_authority and not active_ids:
+        unresolved_declared = _unresolved_declared_tool_call_ids(raw_source)
+        if unresolved_declared:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING: durable "
+                "transcript declares unresolved assistant tool calls but "
+                "AgentIteration.tool_call_ids provides no active-batch "
+                "authority."
+            )
 
     safe_transcript = await _sanitize_transcript_in_uow(
         uow,
