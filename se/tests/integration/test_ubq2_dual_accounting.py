@@ -23,6 +23,10 @@ from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.user_budget import UserBudgetRepository
 from se.src.infrastructure.storage.repositories.user_data.users import UserRepository
+from se.src.runtimes.agent.persistence import (
+    DurableAgentStore,
+    TaskBudgetConflictError,
+)
 from se.src.runtimes.agent.task_budget import TaskBudgetService
 
 
@@ -184,6 +188,64 @@ def _identity(user_id: str) -> Identity:
         auth_type="api_key",
         scopes={"*"},
     )
+
+
+@pytest.mark.asyncio
+async def test_ubq2_durable_store_forwards_taskbudget_incarnation_fence(
+    tmp_path: Path,
+) -> None:
+    _, engine, _, factory, service, _, _ = await _setup(tmp_path)
+    try:
+        task_id = "task-durable-store-incarnation-fence"
+        await service.create_task_with_budget(
+            _task(task_id, "user-a"),
+            identity=_identity("user-a"),
+        )
+        store = DurableAgentStore(factory)
+
+        # AgentTask CAS is not incarnation-scoped. This directly proves the
+        # wrapper does not reference or forward a TaskBudget-only fence.
+        updated_task = await store.compare_and_set_task(
+            task_id,
+            0,
+            {"output": {"wrapper_cas": "ok"}},
+        )
+        assert int(updated_task.revision) == 1
+        assert updated_task.output == {"wrapper_cas": "ok"}
+
+        budget = await store.load_task_budget(task_id)
+        assert budget is not None
+        revision = int(budget.revision)
+        generation = int(budget.incarnation_generation)
+        assert int(budget.used_inference_calls) == 0
+
+        # A stale/recreated incarnation must be rejected through the durable
+        # wrapper rather than being silently reduced to revision-only CAS.
+        with pytest.raises(TaskBudgetConflictError):
+            await store.compare_and_set_task_budget(
+                task_id,
+                revision,
+                {"used_inference_calls": 1},
+                expected_incarnation_generation=generation + 1,
+            )
+
+        unchanged = await store.load_task_budget(task_id)
+        assert unchanged is not None
+        assert int(unchanged.revision) == revision
+        assert int(unchanged.incarnation_generation) == generation
+        assert int(unchanged.used_inference_calls) == 0
+
+        updated_budget = await store.compare_and_set_task_budget(
+            task_id,
+            revision,
+            {"used_inference_calls": 1},
+            expected_incarnation_generation=generation,
+        )
+        assert int(updated_budget.revision) == revision + 1
+        assert int(updated_budget.incarnation_generation) == generation
+        assert int(updated_budget.used_inference_calls) == 1
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
