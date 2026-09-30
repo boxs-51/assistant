@@ -405,14 +405,15 @@ class UserBudgetReservationRecord(Base):
             "idempotency_key",
             name="uq_user_budget_reservation_owner_idempotency",
         ),
-        UniqueConstraint(
+        Index(
+            "uq_user_budget_reservation_exact_bridge_ref",
             "owner_user_id",
             "reservation_id",
             "window_epoch",
             "resource_kind",
             "idempotency_key",
             "payload_fingerprint",
-            name="uq_user_budget_reservation_exact_bridge_ref",
+            unique=True,
         ),
         CheckConstraint(
             "resource_kind IN ("
