@@ -398,9 +398,25 @@ def test_ubq2_26a_preserves_25a_sqlite_trigger_authority(
         assert before <= after
 
         # 25a parent-history protection still executes after 26a.
-        _seed_user(database, "trigger-user")
-        with pytest.raises(sqlite3.IntegrityError, match="UBQ_INTEGRITY_USER_HISTORY_RESTRICTED"):
+        raw.execute(
+            "INSERT INTO users (id, email, password_hash, status) "
+            "VALUES ('trigger-user', 'trigger-user@example.test', 'hash', 'active')"
+        )
+        raw.execute(
+            "INSERT INTO user_budget_policies ("
+            "policy_id, owner_user_id, policy_version, policy_fingerprint, "
+            "window_duration_seconds, tool_limits_json"
+            ") VALUES ("
+            "'trigger-policy', 'trigger-user', 'v1', ?, 3600, '{}'"
+            ")",
+            ("a" * 64,),
+        )
+        with pytest.raises(
+            sqlite3.IntegrityError,
+            match="UBQ_INTEGRITY_USER_HISTORY_RESTRICTED",
+        ):
             raw.execute("DELETE FROM users WHERE id='trigger-user'")
+        raw.rollback()
     finally:
         raw.close()
 
