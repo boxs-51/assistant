@@ -179,7 +179,7 @@ def test_f7_p1_rejects_multi_object_response_before_first_ingest():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
         "response-wide generated-media cardinality preflight",
-        "at most ONE durable generated-media object in the consumer-selected choice of a non-stream provider response",
+        "at most ONE durable generated-media object in the consumer-selected choice of a terminal non-stream assistant response with no tool calls",
         "fail closed BEFORE first CAS ingest",
         "ZERO CAS ingest attempts",
         "ZERO READY assets created for that logical response",
