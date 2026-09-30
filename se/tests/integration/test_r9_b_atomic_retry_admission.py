@@ -27,11 +27,13 @@ from se.src.runtimes.agent.retry_planning import (
 )
 from se.src.runtimes.agent.task_budget import (
     RetryConsumeConflict,
+    RetryConsumeError,
     TaskBudgetService,
 )
 from se.tests.integration.test_r8_d_atomic_fork_consume import (
     _Uow,
     _limits,
+    _recreate_task_budget_incarnation,
     _runtime_context_state,
 )
 
@@ -516,5 +518,46 @@ async def test_r9_b_receipt_insert_failure_rolls_back_entire_admission(tmp_path)
         assert after.used_executions == before.used_executions
         assert after.active_executions == before.active_executions
         assert after.active_branches == before.active_branches
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_retry_plan_rejects_recreated_taskbudget_incarnation(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        "ubq2_retry_incarnation_revalidation.sqlite",
+    )
+    try:
+        _root, plan = await _seed_failed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-ubq2-retry-incarnation",
+        )
+        old_generation, new_generation = await _recreate_task_budget_incarnation(
+            sessions,
+            plan.task_id,
+        )
+        assert int(plan.expected_task_budget_incarnation_generation) == old_generation
+        assert new_generation != old_generation
+
+        with pytest.raises(RetryConsumeError):
+            await service.consume_retry_plan(plan)
+
+        async with _Uow(sessions) as uow:
+            assert (
+                await uow.agents.get_task_retry_admission(
+                    plan.task_id,
+                    plan.retry_request_id,
+                )
+                is None
+            )
+            budget = await uow.agents.get_task_budget(plan.task_id)
+            assert budget is not None
+            assert int(budget.incarnation_generation) == new_generation
+            await uow.commit()
     finally:
         await engine.dispose()
