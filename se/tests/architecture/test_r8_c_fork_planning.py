@@ -90,6 +90,7 @@ class _Store:
         self.budget = SimpleNamespace(
             task_id="task-1",
             revision=5,
+            incarnation_generation=7,
             state="OPEN",
             policy_fingerprint="p" * 64,
             used_executions=1,
