@@ -8,7 +8,6 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
-import se.src.application.user_budget as user_budget_module
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -605,18 +604,34 @@ async def test_ubq2_mirror_failure_rolls_back_taskbudget_reservation_and_usage(
 @pytest.mark.asyncio
 async def test_ubq2_replay_precedes_expired_window_rollover(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
-    database, engine, _, factory, service, _, _ = await _setup(tmp_path)
+    database, engine, _, factory, service, enabled, _ = await _setup(tmp_path)
+
+    past_now = datetime.now(timezone.utc) - timedelta(days=2)
+
+    class _PastWindowDual(UserBudgetDualAccountingService):
+        async def mirror_resource_in_uow(self, *args, **kwargs):
+            kwargs.setdefault("now", past_now)
+            return await super().mirror_resource_in_uow(*args, **kwargs)
+
     try:
         await service.create_task_with_budget(
             _task("task-replay-window", "user-a"),
             identity=_identity("user-a"),
         )
+
+        # Create the original mirrored receipt/window through the authoritative
+        # time-at-creation boundary. With the default one-day shadow window,
+        # this window is already expired by the time replay runs below.
+        service._user_budget_dual_accounting = _PastWindowDual(
+            factory,
+            enabled.settings,
+        )
         await service.reserve_inference(
             "task-replay-window",
             request_id="req-original-window",
         )
+        service._user_budget_dual_accounting = enabled
 
         raw = sqlite3.connect(database)
         try:
@@ -625,31 +640,21 @@ async def test_ubq2_replay_precedes_expired_window_rollover(
                 "WHERE owner_user_id='user-a'"
             ).fetchone()[0]
             assert original_count == 1
-            expires_at_raw = raw.execute(
-                "SELECT expires_at FROM user_budget_windows "
+            started_at_raw, expires_at_raw = raw.execute(
+                "SELECT started_at, expires_at FROM user_budget_windows "
                 "WHERE owner_user_id='user-a' AND epoch=1"
-            ).fetchone()[0]
+            ).fetchone()
         finally:
             raw.close()
 
+        started_at = datetime.fromisoformat(str(started_at_raw))
         expires_at = datetime.fromisoformat(str(expires_at_raw))
+        if started_at.tzinfo is None:
+            started_at = started_at.replace(tzinfo=timezone.utc)
         if expires_at.tzinfo is None:
             expires_at = expires_at.replace(tzinfo=timezone.utc)
-        future_now = expires_at.astimezone(timezone.utc) + timedelta(seconds=1)
-
-        class _FutureDateTime(datetime):
-            @classmethod
-            def now(cls, tz=None):
-                if tz is None:
-                    return future_now.replace(tzinfo=None)
-                return future_now.astimezone(tz)
-
-        # Do not mutate immutable window provenance to simulate expiry.
-        # Move the authoritative UBQ application clock beyond the original
-        # window instead. A broken replay path that consults/rolls the active
-        # window would now create a new epoch; the frozen contract requires
-        # exact replay to return the original bridge first.
-        monkeypatch.setattr(user_budget_module, "datetime", _FutureDateTime)
+        assert started_at.astimezone(timezone.utc) == past_now
+        assert expires_at.astimezone(timezone.utc) < datetime.now(timezone.utc)
 
         replay = await service.reserve_inference(
             "task-replay-window",
