@@ -30,6 +30,11 @@ class APIKeyRepository(BaseRepository):
         logger.info("New API key added to session", key_id=new_key.id, prefix=new_key.prefix)
         return new_key
 
+    async def get_by_id(self, key_id: str) -> Optional[APIKey]:
+        stmt = select(APIKey).where(APIKey.id == key_id)
+        result = await self.session.execute(stmt)
+        return result.scalar_one_or_none()
+
     async def get_by_prefix(self, prefix: str) -> Optional[APIKey]:
         """Lấy một API key bằng prefix (phần đầu của key, ví dụ: 'sk_live')."""
         stmt = (
