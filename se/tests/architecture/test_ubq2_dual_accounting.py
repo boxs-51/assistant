@@ -128,3 +128,32 @@ def test_ubq2_all_task_budget_replay_and_cas_calls_are_incarnation_bound() -> No
         "incarnation generation; missing lines="
         f"{reservation_writes_missing_generation}"
     )
+
+def test_ubq2_postgresql_v7_parity_has_an_explicit_deployment_gate() -> None:
+    workflow = _text(".github/workflows/architecture-baseline.yml").lower()
+    requirements = _text("requirements-test.txt").lower()
+    gate = _text(
+        "docs/user_budget_quota/UBQ_2_POSTGRESQL_V7_EVIDENCE_GATE.md"
+    )
+
+    # Current CI has no executable PostgreSQL fixture/service. If one is
+    # introduced, this assertion forces the explicit gate to be revisited
+    # rather than silently treating SQLite as cross-dialect proof.
+    assert "postgres:" not in workflow
+    assert "asyncpg" not in requirements
+
+    required_evidence = (
+        "OPEN / REQUIRED BEFORE POSTGRESQL UBQ-2 PRODUCTION ENABLEMENT",
+        "monotonic allocator serialization",
+        "MAX_INT64-1",
+        "MAX_INT64",
+        "rollback of an uncommitted final allocation",
+        "(task_id, incarnation_generation)",
+        "parent TaskBudget delete is RESTRICTED",
+        "anti-delete/anti-reset/monotonicity",
+        "never reused after source GC/recreate",
+        "user_budget.dual_accounting.enabled = false",
+    )
+    for item in required_evidence:
+        assert item in gate
+
