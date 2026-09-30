@@ -77,6 +77,7 @@ def _plan(**updates):
         "source_checkpoint_id": "cp-7",
         "checkpoint_iteration": 4,
         "expected_task_budget_revision": 5,
+        "expected_task_budget_incarnation_generation": 7,
         "budget_policy_fingerprint": "c" * 64,
         "base_transcript": transcript,
         "base_transcript_fingerprint": fork_transcript_fingerprint(transcript),
@@ -139,6 +140,10 @@ def test_r8_c_semantic_revision_transcript_effect_and_overlay_changes_rehash():
     task_revision = replace(base, expected_task_revision=4)
     checkpoint_plan = replace(base, source_checkpoint_id="cp-8")
     budget_plan = replace(base, expected_task_budget_revision=6)
+    incarnation_plan = replace(
+        base,
+        expected_task_budget_incarnation_generation=8,
+    )
     policy_plan = replace(base, budget_policy_fingerprint="d" * 64)
 
     changed_effect_result = (
