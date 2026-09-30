@@ -1,6 +1,6 @@
 # UBQ-2 PostgreSQL V7 Evidence Gate
 
-Status: **OPEN / REQUIRED BEFORE POSTGRESQL UBQ-2 PRODUCTION ENABLEMENT**
+Status: **OPEN / REQUIRED BEFORE ANY POSTGRESQL 26a / UBQ-2 RUNTIME DEPLOYMENT**
 
 UBQ-2 V7 freezes equivalent logical TaskBudget-incarnation behavior for SQLite
 and PostgreSQL. The repository Architecture Baseline currently runs Python
@@ -14,8 +14,14 @@ The safe repository default remains:
 user_budget.dual_accounting.enabled = false
 ```
 
-PostgreSQL UBQ-2 production support MUST remain disabled/unclaimed until an
-executable PostgreSQL evidence run proves all of the following on the released
+That default does not satisfy this gate. Migration
+`26a_ubq2_dual_accounting_bridge` changes TaskBudget incarnation allocation,
+reservation identity and structural fencing unconditionally, even when UBQ
+resource mirroring is disabled.
+
+A PostgreSQL deployment MUST NOT apply 26a or run UBQ-2 runtime code that
+depends on V7 TaskBudget-incarnation semantics until an executable PostgreSQL
+evidence run proves all of the following on the exact released
 migration/runtime candidate:
 
 1. monotonic allocator serialization under concurrent TaskBudget creators;
@@ -37,3 +43,20 @@ or operator may claim PostgreSQL UBQ-2 runtime parity merely from SQLite CI.
 
 This is a deployment evidence gate, not authority to weaken V7 and not a
 request to introduce PostgreSQL CI infrastructure inside UBQ-2.
+
+
+## Deployment enforcement boundary
+
+Until this gate is closed for an exact release candidate:
+
+- PostgreSQL migration/upgrade to `26a_ubq2_dual_accounting_bridge` is BLOCKED;
+- deployment of runtime code that assumes `incarnation_generation`, the
+  monotonic allocator, incarnation-bound reservations, or V7 structural
+  fencing is BLOCKED;
+- setting `user_budget.dual_accounting.enabled=false` does not waive either
+  block, because those TaskBudget schema/runtime semantics are unconditional;
+- SQLite CI remains valid SQLite evidence only and MUST NOT be presented as
+  PostgreSQL parity.
+
+This repository-level deployment gate is intentionally stronger than a feature
+flag. It protects the unconditional 26a TaskBudget compatibility boundary.
