@@ -67,6 +67,10 @@ from .transport.gateway.api.v1 import (
 from .application.container import ApplicationContainer
 from .application.assets import AssetService
 from .application.messages import CanonicalMessageService
+from .application.user_budget import (
+    DualAccountingSettings,
+    UserBudgetDualAccountingService,
+)
 from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
@@ -857,10 +861,22 @@ async def bootstrap_runtime_kernel(
             task_budget_settings.deny_recursive_agent_cycle
         ),
     )
+    dual_accounting_settings = config.user_budget.dual_accounting
+    user_budget_dual_accounting = UserBudgetDualAccountingService(
+        eventing_manager.uow_factory,
+        DualAccountingSettings(
+            enabled=dual_accounting_settings.enabled,
+            policy_version=dual_accounting_settings.policy_version,
+            window_duration_seconds=(
+                dual_accounting_settings.window_duration_seconds
+            ),
+        ),
+    )
     task_budget_service = TaskBudgetService(
         eventing_manager.uow_factory,
         default_limits=task_budget_limits,
         default_policy=task_budget_policy,
+        user_budget_dual_accounting=user_budget_dual_accounting,
     )
 
     asset_service = None
@@ -899,6 +915,7 @@ async def bootstrap_runtime_kernel(
         agent_execution_supervisor=agent_execution_supervisor,
         task_budget_service=task_budget_service,
         task_budget_policy=task_budget_policy,
+        user_budget_dual_accounting=user_budget_dual_accounting,
         multi_agent_coordinator=MultiAgentCoordinator(
             agent_registry,
             durable_store=DurableAgentStore(eventing_manager.uow_factory),
