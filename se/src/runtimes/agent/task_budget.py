@@ -1872,11 +1872,26 @@ class TaskBudgetService:
             )
         execution_id = f"r9_aggregate_{uuid4().hex}"
         admitted_at = datetime.now(timezone.utc)
+        expected_task_budget_incarnation_generation: int | None = None
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
                     task = await uow.agents.get_task_for_update(task_id)
                     budget = await uow.agents.get_task_budget_for_update(task_id)
+                    if budget is not None:
+                        actual_generation = int(budget.incarnation_generation)
+                        if expected_task_budget_incarnation_generation is None:
+                            expected_task_budget_incarnation_generation = (
+                                actual_generation
+                            )
+                        elif (
+                            actual_generation
+                            != expected_task_budget_incarnation_generation
+                        ):
+                            raise AggregateAdmissionError(
+                                "AGGREGATE_TASK_BUDGET_INCARCATION_CHANGED",
+                                "TaskBudget incarnation changed during AGGREGATE.",
+                            )
                     branches = await uow.agents.list_task_branches_for_update(
                         task_id
                     )
@@ -1929,6 +1944,7 @@ class TaskBudgetService:
                             "AGGREGATE_INPUT_CONFLICT",
                             "Task or TaskBudget is missing.",
                         )
+                    assert expected_task_budget_incarnation_generation is not None
                     if str(task.created_by) != target_user_id:
                         raise AggregateAdmissionError(
                             "AGGREGATE_INPUT_CONFLICT",
@@ -2148,8 +2164,8 @@ class TaskBudgetService:
                         task_id,
                         int(budget.revision),
                         budget_updates,
-                        expected_incarnation_generation=int(
-                            budget.incarnation_generation
+                        expected_incarnation_generation=(
+                            expected_task_budget_incarnation_generation
                         ),
                     )
                     if updated_budget is None:
@@ -2179,8 +2195,8 @@ class TaskBudgetService:
                                 execution_id,
                                 reservation_payload,
                             ),
-                            "task_budget_incarnation_generation": int(
-                                budget.incarnation_generation
+                            "task_budget_incarnation_generation": (
+                                expected_task_budget_incarnation_generation
                             ),
                         }
                     )
