@@ -390,6 +390,7 @@ async def prepare_resume_capacity_in_uow(
         raise TaskBudgetRequiredError(f"TaskBudget missing: {task_id}")
 
     budget = _budget_from_record(budget_record)
+    expected_generation = int(budget_record.incarnation_generation)
     if budget.state is not TaskBudgetState.OPEN:
         raise TaskBudgetClosedError(f"TaskBudget is CLOSED: {task_id}")
 
@@ -408,6 +409,7 @@ async def prepare_resume_capacity_in_uow(
         task_id,
         TaskBudgetReservationKind.RESUME_EXECUTION.value,
         reservation_key,
+        expected_incarnation_generation=expected_generation,
     )
     if existing is not None:
         if existing.payload_fingerprint != fingerprint:
@@ -437,6 +439,7 @@ async def prepare_resume_capacity_in_uow(
                 else budget.active_parallel_agents
             ),
         },
+        expected_incarnation_generation=expected_generation,
     )
     if updated is None:
         raise TaskBudgetConflictError(
@@ -449,6 +452,7 @@ async def prepare_resume_capacity_in_uow(
             "kind": TaskBudgetReservationKind.RESUME_EXECUTION.value,
             "reservation_key": reservation_key,
             "payload_fingerprint": fingerprint,
+            "task_budget_incarnation_generation": expected_generation,
         }
     )
     return _budget_from_record(updated)
@@ -852,6 +856,9 @@ class TaskBudgetService:
                             f"TaskBudget missing: {task_id}"
                         )
                     budget = _budget_from_record(budget_record)
+                    expected_generation = int(
+                        budget_record.incarnation_generation
+                    )
                     current_state = str(task.status)
 
                     if current_state in _TASK_TERMINAL_STATES:
@@ -864,6 +871,9 @@ class TaskBudgetService:
                                         "state": TaskBudgetState.CLOSED.value,
                                         "closed_at": datetime.now(timezone.utc),
                                     },
+                                    expected_incarnation_generation=(
+                                        expected_generation
+                                    ),
                                 )
                             )
                             if closed is None:
@@ -915,6 +925,7 @@ class TaskBudgetService:
                                 "state": TaskBudgetState.CLOSED.value,
                                 "closed_at": datetime.now(timezone.utc),
                             },
+                            expected_incarnation_generation=expected_generation,
                         )
                     )
                     if updated_budget is None:
@@ -974,6 +985,9 @@ class TaskBudgetService:
                             f"TaskBudget missing: {task_id}"
                         )
                     budget = _budget_from_record(budget_record)
+                    expected_generation = int(
+                        budget_record.incarnation_generation
+                    )
                     current_state = str(task.status)
 
                     # A different terminal winner remains authoritative.
@@ -989,6 +1003,7 @@ class TaskBudgetService:
                                     "state": TaskBudgetState.CLOSED.value,
                                     "closed_at": datetime.now(timezone.utc),
                                 },
+                                expected_incarnation_generation=expected_generation,
                             )
                             if closed is None:
                                 await uow.rollback()
@@ -1234,6 +1249,7 @@ class TaskBudgetService:
                             task_id,
                             budget.revision,
                             budget_values,
+                            expected_incarnation_generation=expected_generation,
                         )
                     )
                     if updated_budget is None:
@@ -1457,6 +1473,9 @@ class TaskBudgetService:
                                 - release_parallel
                             ),
                         },
+                        expected_incarnation_generation=int(
+                            budget.incarnation_generation
+                        ),
                     )
                     if updated_budget is None:
                         await uow.rollback()
@@ -1743,6 +1762,9 @@ class TaskBudgetService:
                             ),
                             "error": None,
                         },
+                        expected_incarnation_generation=int(
+                            budget.incarnation_generation
+                        ),
                     )
                     if updated_task is None:
                         await uow.rollback()
@@ -1762,6 +1784,9 @@ class TaskBudgetService:
                                 - release_parallel
                             ),
                         },
+                        expected_incarnation_generation=int(
+                            budget.incarnation_generation
+                        ),
                     )
                     if updated_budget is None:
                         await uow.rollback()
@@ -2123,7 +2148,12 @@ class TaskBudgetService:
                             int(budget.active_parallel_agents) + 1
                         )
                     updated_budget = await uow.agents.compare_and_set_task_budget(
-                        task_id, int(budget.revision), budget_updates
+                        task_id,
+                        int(budget.revision),
+                        budget_updates,
+                        expected_incarnation_generation=int(
+                            budget.incarnation_generation
+                        ),
                     )
                     if updated_budget is None:
                         await uow.rollback()
@@ -4781,6 +4811,9 @@ class TaskBudgetService:
                         "state": TaskBudgetState.CLOSED.value,
                         "closed_at": datetime.now(timezone.utc),
                     },
+                    expected_incarnation_generation=int(
+                        record.incarnation_generation
+                    ),
                 )
                 if updated is None:
                     await uow.rollback()
