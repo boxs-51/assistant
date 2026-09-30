@@ -43,6 +43,12 @@ gateway:
   port: 8000
   debug: false
 
+user_budget:
+  dual_accounting:
+    enabled: false
+    policy_version: "ubq2-shadow-v1"
+    window_duration_seconds: 86400
+
 agent:
   task_budget:
     policy_version: "r5-v1"
