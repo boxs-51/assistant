@@ -294,6 +294,21 @@ class UserBudgetRepository:
         )
         return result.scalar_one_or_none()
 
+    async def list_dual_accounting_receipts(
+        self,
+        task_id: str,
+    ) -> list[UserBudgetDualAccountingReceiptRecord]:
+        result = await self.session.execute(
+            select(UserBudgetDualAccountingReceiptRecord)
+            .where(UserBudgetDualAccountingReceiptRecord.task_id == task_id)
+            .order_by(
+                UserBudgetDualAccountingReceiptRecord.task_budget_kind.asc(),
+                UserBudgetDualAccountingReceiptRecord.task_budget_reservation_key.asc(),
+                UserBudgetDualAccountingReceiptRecord.mirror_dimension.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
     async def create_or_get_dual_accounting_receipt(
         self,
         values: dict[str, Any],
