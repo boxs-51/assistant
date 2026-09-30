@@ -2276,6 +2276,9 @@ class TaskBudgetService:
             plan.task_id,
             TaskBudgetReservationKind.NEW_EXECUTION.value,
             receipt.execution_id,
+            expected_incarnation_generation=(
+                plan.expected_task_budget_incarnation_generation
+            ),
         )
 
         expected_base_checkpoint_id = (
@@ -2290,6 +2293,8 @@ class TaskBudgetService:
             or source is None
             or execution is None
             or reservation is None
+            or int(budget.incarnation_generation)
+            != int(plan.expected_task_budget_incarnation_generation)
             or branch.task_id != plan.task_id
             or source.task_id != plan.task_id
             or source.branch_id != plan.branch_id
@@ -2507,6 +2512,9 @@ class TaskBudgetService:
                             plan.task_id,
                             plan.expected_task_budget_revision,
                             budget_updates,
+                            expected_incarnation_generation=(
+                                plan.expected_task_budget_incarnation_generation
+                            ),
                         )
                     )
                     if updated_budget is None:
@@ -2532,6 +2540,9 @@ class TaskBudgetService:
                                 TaskBudgetReservationKind.NEW_EXECUTION.value,
                             "reservation_key": execution_id,
                             "payload_fingerprint": execution_fingerprint,
+                            "task_budget_incarnation_generation": (
+                                plan.expected_task_budget_incarnation_generation
+                            ),
                         }
                     )
                     await uow.agents.save_task_retry_admission(
@@ -2637,11 +2648,17 @@ class TaskBudgetService:
             plan.task_id,
             TaskBudgetReservationKind.BRANCH.value,
             receipt.branch_id,
+            expected_incarnation_generation=(
+                plan.expected_task_budget_incarnation_generation
+            ),
         )
         execution_reservation = await uow.agents.get_task_budget_reservation(
             plan.task_id,
             TaskBudgetReservationKind.NEW_EXECUTION.value,
             receipt.execution_id,
+            expected_incarnation_generation=(
+                plan.expected_task_budget_incarnation_generation
+            ),
         )
         task = await uow.agents.get_task(plan.task_id)
         budget = await uow.agents.get_task_budget(plan.task_id)
@@ -2654,6 +2671,8 @@ class TaskBudgetService:
             or execution_reservation is None
             or task is None
             or budget is None
+            or int(budget.incarnation_generation)
+            != int(plan.expected_task_budget_incarnation_generation)
             or branch.task_id != plan.task_id
             or branch.parent_branch_id != receipt.source_branch_id
             or branch.base_execution_id != receipt.source_execution_id
@@ -2858,6 +2877,9 @@ class TaskBudgetService:
                             plan.task_id,
                             plan.expected_task_budget_revision,
                             budget_updates,
+                            expected_incarnation_generation=(
+                                plan.expected_task_budget_incarnation_generation
+                            ),
                         )
                     )
                     if updated_budget is None:
@@ -2900,6 +2922,9 @@ class TaskBudgetService:
                                 TaskBudgetReservationKind.BRANCH.value,
                             "reservation_key": branch_id,
                             "payload_fingerprint": branch_fingerprint,
+                            "task_budget_incarnation_generation": (
+                                plan.expected_task_budget_incarnation_generation
+                            ),
                         }
                     )
                     await uow.agents.save_task_budget_reservation(
@@ -2909,6 +2934,9 @@ class TaskBudgetService:
                                 TaskBudgetReservationKind.NEW_EXECUTION.value,
                             "reservation_key": execution_id,
                             "payload_fingerprint": execution_fingerprint,
+                            "task_budget_incarnation_generation": (
+                                plan.expected_task_budget_incarnation_generation
+                            ),
                         }
                     )
                     await uow.agents.save_task_fork_admission(
@@ -3036,9 +3064,29 @@ class TaskBudgetService:
             {},
         )
 
+        expected_generation: int | None = None
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        if await uow.agents.has_execution_for_task(task_id):
+                            raise TaskBudgetLegacyUninitializedError(
+                                "Task has durable execution history but no TaskBudget."
+                            )
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    actual_generation = int(
+                        budget_record.incarnation_generation
+                    )
+                    if expected_generation is None:
+                        expected_generation = actual_generation
+                    elif actual_generation != expected_generation:
+                        raise TaskBudgetIncarnationChangedError(
+                            "TaskBudget incarnation changed during root admission"
+                        )
+
                     existing_branch = await uow.agents.get_task_branch(
                         branch_id
                     )
@@ -3050,6 +3098,7 @@ class TaskBudgetService:
                             task_id,
                             TaskBudgetReservationKind.BRANCH.value,
                             branch_id,
+                            expected_incarnation_generation=expected_generation,
                         )
                     )
                     existing_execution_reservation = (
@@ -3057,6 +3106,7 @@ class TaskBudgetService:
                             task_id,
                             TaskBudgetReservationKind.NEW_EXECUTION.value,
                             execution_id,
+                            expected_incarnation_generation=expected_generation,
                         )
                     )
                     any_existing = any(
@@ -3137,16 +3187,6 @@ class TaskBudgetService:
                             f"Unknown AgentTask: {task_id}"
                         )
 
-                    budget_record = await uow.agents.get_task_budget(task_id)
-                    if budget_record is None:
-                        if await uow.agents.has_execution_for_task(task_id):
-                            raise TaskBudgetLegacyUninitializedError(
-                                "Task has durable execution history but no "
-                                "TaskBudget."
-                            )
-                        raise TaskBudgetRequiredError(
-                            f"TaskBudget missing: {task_id}"
-                        )
                     budget = _budget_from_record(budget_record)
                     self._require_open(budget)
 
@@ -3203,6 +3243,7 @@ class TaskBudgetService:
                                 "active_executions":
                                     budget.active_executions + 1,
                             },
+                            expected_incarnation_generation=expected_generation,
                         )
                     )
                     if updated_budget is None:
@@ -3239,6 +3280,7 @@ class TaskBudgetService:
                             "kind": TaskBudgetReservationKind.BRANCH.value,
                             "reservation_key": branch_id,
                             "payload_fingerprint": branch_fingerprint,
+                            "task_budget_incarnation_generation": expected_generation,
                         }
                     )
                     await uow.agents.save_task_budget_reservation(
@@ -3248,6 +3290,7 @@ class TaskBudgetService:
                                 TaskBudgetReservationKind.NEW_EXECUTION.value,
                             "reservation_key": execution_id,
                             "payload_fingerprint": execution_fingerprint,
+                            "task_budget_incarnation_generation": expected_generation,
                         }
                     )
                     await uow.commit()
