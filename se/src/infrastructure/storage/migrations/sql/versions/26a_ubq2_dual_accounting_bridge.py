@@ -617,18 +617,24 @@ def upgrade() -> None:
             ondelete="RESTRICT",
         )
 
-    with op.batch_alter_table("user_budget_reservations") as batch:
-        batch.create_unique_constraint(
-            "uq_user_budget_reservation_exact_bridge_ref",
-            [
-                "owner_user_id",
-                "reservation_id",
-                "window_epoch",
-                "resource_kind",
-                "idempotency_key",
-                "payload_fingerprint",
-            ],
-        )
+    # Keep the landed 25a SQLite trigger authority intact.  A batch
+    # rebuild of user_budget_reservations temporarily removes the parent
+    # table and invalidates triggers that reference it.  A unique index is an
+    # equivalent FK parent key on PostgreSQL/SQLite without rebuilding the
+    # table.
+    op.create_index(
+        "uq_user_budget_reservation_exact_bridge_ref",
+        "user_budget_reservations",
+        [
+            "owner_user_id",
+            "reservation_id",
+            "window_epoch",
+            "resource_kind",
+            "idempotency_key",
+            "payload_fingerprint",
+        ],
+        unique=True,
+    )
 
     op.create_table(
         "user_budget_task_bindings",
@@ -808,11 +814,10 @@ def downgrade() -> None:
     op.drop_table("user_budget_dual_accounting_receipts")
     op.drop_table("user_budget_task_bindings")
 
-    with op.batch_alter_table("user_budget_reservations") as batch:
-        batch.drop_constraint(
-            "uq_user_budget_reservation_exact_bridge_ref",
-            type_="unique",
-        )
+    op.drop_index(
+        "uq_user_budget_reservation_exact_bridge_ref",
+        table_name="user_budget_reservations",
+    )
 
     with op.batch_alter_table("agent_task_budget_reservations") as batch:
         batch.drop_constraint(
