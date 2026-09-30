@@ -193,6 +193,45 @@ def test_f7_p1_rejects_multi_object_response_before_first_ingest():
         assert phrase in document
 
 
+def test_f7_p1_rejects_generated_media_on_nonterminal_tool_call_response():
+    direct = _read("se/src/runtimes/chat/direct.py")
+    agent = _read("se/src/runtimes/agent/runtime.py")
+
+    for phrase in (
+        "transcript.append(response.message)",
+        "calls = list(response.message.tool_calls)",
+        "if not calls:",
+        "return response",
+    ):
+        assert phrase in direct
+
+    for phrase in (
+        "if not response.message.tool_calls:",
+        "record.close(AgentLoopState.FINALIZING)",
+        "record.close(AgentLoopState.COMPLETED)",
+        "record.state = transition(record.state, AgentLoopState.TOOL_CALLING)",
+    ):
+        assert phrase in agent
+
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    for phrase in (
+        "terminal non-stream assistant response with no tool calls",
+        "AND response.message.tool_calls is empty",
+        "any durable generated-media object on a response with one or more tool_calls",
+        "nonterminal intermediate response in the initial F7-P1 slice",
+        "fail closed BEFORE first CAS ingest",
+        "ZERO CAS ingest attempts",
+        "ZERO READY assets created for that logical response",
+        "DIRECT appends each inference response but returns it only when response.message.tool_calls is empty",
+        "AGENT likewise transitions to FINALIZING and COMPLETED only when response.message.tool_calls is empty",
+        "F7-P1 MUST NOT create a READY asset from an intermediate tool-loop response",
+        "Supporting generated media on tool-call-bearing intermediate responses is deferred.",
+        "terminal response with empty tool_calls",
+        "generated media on any response with non-empty tool_calls fails closed before the first CAS ingest with ZERO CAS ingest attempts / ZERO READY assets",
+    ):
+        assert phrase in document
+
+
 def test_f7_p1_nonstream_filedata_requires_preserve_or_reject_compatibility():
     gemini = _read("se/src/provider/gemini/converters/chats/response.py")
 
@@ -414,6 +453,7 @@ def test_future_path_matrix_is_explicit_and_zero_production():
         "se/src/provider/handlers/chat_handler.py",
         "se/src/provider/gemini/converters/chats/response.py",
         "se/src/runtimes/agent/adapters/inference.py",
+        "se/src/runtimes/chat/direct.py",
         "se/src/runtimes/agent/runtime.py",
         "se/src/runtimes/agent/persistence.py",
         "se/src/runtimes/agent/stream.py",
@@ -456,7 +496,7 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
     for phrase in (
         "exact current main",
         "F7-P1 is non-stream provider-response-only",
-        "non-stream complete-object boundary, selected-choice-0 fence and response-wide cardinality fence",
+        "non-stream complete-object boundary, terminal-response empty-tool_calls fence, selected-choice-0 fence and response-wide cardinality fence",
         "generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED, provenance must survive successful decode, and terminal rejection occurs only in provider-neutral post-success preflight before first CAS ingest",
         "streaming generated media is deferred to separate F7-S authority",
         "tool-generated media is deferred to separate F7-T authority",
