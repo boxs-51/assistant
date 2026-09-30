@@ -53,7 +53,7 @@ def test_r12_b_migration_is_linear_and_preserves_legacy_execution(
     config = _config(database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["25a_ubq1_user_budget_foundation"]
+    assert script.get_heads() == ["26a_ubq2_dual_accounting_bridge"]
     assert (
         script.get_revision("22a_r12_execution_lease_fence").down_revision
         == "21a_ctx_f5_memory_foundation"
