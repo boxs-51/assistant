@@ -482,6 +482,10 @@ def test_future_path_matrix_is_explicit_and_zero_production():
     for path in (
         "se/src/application/assets/generated.py",
         "se/src/application/assets/service.py",
+        "se/src/runtimes/provider/runtime.py",
+        "se/src/kernel/base.py",
+        "se/src/application/container.py",
+        "se/src/main.py",
         "se/src/infrastructure/config/schemas.py",
         "se/src/infrastructure/storage/models/sql/assets/file.py",
         "se/src/provider/handlers/chat_handler.py",
@@ -499,12 +503,99 @@ def test_future_path_matrix_is_explicit_and_zero_production():
     for phrase in (
         "This is a future production-candidate map, not a production grant.",
         "EXPECTED NEW / production authority not released",
+        "F7-P1 composition/injection owner inside ProviderRuntime.initialize(context)",
+        "NO CHANGE for F7-P1",
+        "EXPECT NO CHANGE / READ-ONLY INPUT",
         "non-stream post-provider response hook and terminal no-fallback boundary",
         "REQUIRED future F7-P1 compatibility change to preserve non-stream generated fileData provenance through successful decode",
         "NO CHANGE / NOT ASSET COMMITMENT AUTHORITY",
         "No production file in this table may be edited under F7-0 authority.",
     ):
         assert phrase in normalized
+
+
+
+def test_f7_p1_composition_authority_reuses_runtime_context_and_asset_service():
+    runtime_source = _read("se/src/runtimes/provider/runtime.py")
+    kernel_source = _read("se/src/kernel/base.py")
+    container_source = _read("se/src/application/container.py")
+    settings_source = _read("se/src/infrastructure/config/schemas.py")
+
+    kernel_tree = ast.parse(kernel_source)
+    runtime_context = next(
+        node
+        for node in kernel_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "RuntimeContext"
+    )
+    runtime_context_fields = {
+        node.target.id
+        for node in runtime_context.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+    }
+    assert {"container", "config", "storage", "uow_factory", "http_client"} <= runtime_context_fields
+
+    container_tree = ast.parse(container_source)
+    application_container = next(
+        node
+        for node in container_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ApplicationContainer"
+    )
+    container_fields = {
+        node.target.id
+        for node in application_container.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+    }
+    assert "asset_service" in container_fields
+
+    settings_tree = ast.parse(settings_source)
+    asset_settings = next(
+        node
+        for node in settings_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "AssetStorageSettings"
+    )
+    settings_fields = {
+        node.target.id
+        for node in asset_settings.body
+        if isinstance(node, ast.AnnAssign)
+        and isinstance(node.target, ast.Name)
+    }
+    assert "max_upload_bytes" in settings_fields
+
+    runtime_tree = ast.parse(runtime_source)
+    provider_runtime = next(
+        node
+        for node in runtime_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ProviderRuntime"
+    )
+    initialize = next(
+        node
+        for node in provider_runtime.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "initialize"
+    )
+    assert any(
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "ChatExecutionHandler"
+        for node in ast.walk(initialize)
+    )
+    assert "asset_projection_hook = self._build_asset_projection_hook(context)" in runtime_source
+    assert "self.chat_handler = ChatExecutionHandler(**handler_kwargs)" in runtime_source
+    assert "self.chat_handler.asset_projection_hook = asset_projection_hook" in runtime_source
+
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    for phrase in (
+        "F7-P1 PRE-CLAIM composition re-freeze baseline: main@9031690d176f0cd82484c83a645b6ced05f21f3b / Architecture #1642 GREEN/GREEN",
+        "ProviderRuntime.initialize(context) is the frozen F7-P1 composition/injection owner",
+        "context.container.asset_service is the only application-owned CAS persistence service that F7-P1 may reuse",
+        "context.config.assets.max_upload_bytes is a read-only configuration input",
+        "se/src/application/container.py and se/src/main.py remain NO CHANGE for the first F7-P1 production slice",
+        "asset_projection_hook wiring remains unchanged and independent from the new response-side generated-media canonicalizer",
+        "MUST NOT cause provider fallback/reselection/regeneration",
+        "does not itself release F7-P1 production CLAIM",
+    ):
+        assert phrase in document
 
 
 def test_cross_issue_and_closed_authority_boundaries_are_explicit():
@@ -541,6 +632,7 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
         "exact current-main health GREEN/GREEN and fresh exact-head Architecture Linux + Windows GREEN",
         "independent replacement audit PASS",
         "blocking F7-0 P0/P1/P2 = NONE",
+        "F7-P1 composition authority is frozen to ProviderRuntime.initialize(context) reusing context.container.asset_service and read-only context.config.assets.max_upload_bytes, with application/container.py and main.py NO CHANGE",
         "CAS-F7-P1 production CLAIM = CLOSED",
     ):
         assert phrase in document
