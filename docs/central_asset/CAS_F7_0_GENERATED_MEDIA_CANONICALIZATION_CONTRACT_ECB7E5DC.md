@@ -518,7 +518,7 @@ This is a **future production-candidate map**, not a production grant.
 |---|---|---|
 | `se/src/application/assets/generated.py` | proposed provider-neutral F7-P1 canonicalizer | EXPECTED NEW / production authority not released |
 | `se/src/application/assets/service.py` | existing ingest/finalize authority exposed as application-owned `context.container.asset_service` | EXPECT NO CHANGE / REUSE ONLY |
-| `se/src/runtimes/provider/runtime.py` | F7-P1 composition/injection owner inside `ProviderRuntime.initialize(context)` | EXPECTED future F7-P1 composition change; reuse `context.container.asset_service`, pass `context.config.assets.max_upload_bytes` read-only, inject provider-neutral canonicalizer into `ChatExecutionHandler`, preserve existing F5 `asset_projection_hook` |
+| `se/src/runtimes/provider/runtime.py` | F7-P1 composition/injection owner inside `ProviderRuntime.initialize(context)` | EXPECTED future F7-P1 composition change; reuse `context.container.asset_service` when available, keep an explicit unavailable-persistence response fence otherwise, pass `context.config.assets.max_upload_bytes` read-only, inject provider-neutral canonicalizer into `ChatExecutionHandler`, preserve existing F5 `asset_projection_hook` independently |
 | `se/src/kernel/base.py` | existing `RuntimeContext` dependency boundary exposing `container` and `config` | EXPECT NO CHANGE |
 | `se/src/application/container.py` | existing application composition owner exposing `asset_service` | NO CHANGE; F7-P1 MUST NOT add a parallel CAS service or new bootstrap wiring here |
 | `se/src/main.py` | application bootstrap / container assembly | NO CHANGE for F7-P1 |
@@ -549,17 +549,35 @@ Normative composition path:
 ```text
 ProviderRuntime.initialize(context)
   -> RuntimeContext.container / RuntimeContext.config
-  -> require existing context.container.asset_service
-  -> read context.config.assets.max_upload_bytes
-  -> construct provider-neutral GeneratedAssetCanonicalizer
-       using existing application-owned AssetService
-       and the read-only configured max_upload_bytes bound
-  -> inject canonicalizer into ChatExecutionHandler
-  -> preserve existing CAS-F5 request-side asset_projection_hook unchanged
+  -> observe existing context.container.asset_service readiness
+  -> read context.config.assets.max_upload_bytes as read-only input
+  -> construct/install provider-neutral GeneratedAssetCanonicalizer boundary
+       persistence_state = AVAILABLE(existing application-owned AssetService)
+                           OR UNAVAILABLE(explicit no-persistence sentinel/state)
+  -> inject that response-side canonicalization boundary into ChatExecutionHandler
+       even when persistence_state = UNAVAILABLE
+  -> preserve existing CAS-F5 request-side asset_projection_hook readiness/wiring independently
   -> provider execution succeeds
   -> decoded non-stream GatewayResponse reaches shared provider-neutral post-success preflight
-  -> canonicalization succeeds OR fails terminally outside provider fallback/circuit-breaker accounting
-  -> only canonicalized response may return from ChatExecutionHandler
+
+     if generated_media_count == 0
+       -> ordinary text response passes through unchanged
+       -> no CAS ingest is required
+       -> ProviderRuntime ordinary text availability is preserved
+
+     if generated_media_count >= 1
+       AND persistence_state = UNAVAILABLE
+       -> terminal F7 canonicalization-unavailable error AFTER provider success
+       -> ZERO CAS ingest attempts / ZERO READY assets
+       -> raw/base64/provider URL identity MUST NOT escape as substitute output
+       -> NO provider fallback/reselection/regeneration
+       -> NO provider breaker failure accounting
+
+     if generated_media_count == 1
+       AND persistence_state = AVAILABLE
+       -> continue all existing F7-P1 admission/cardinality/terminal-response/source fences
+       -> canonicalize through existing application-owned AssetService
+       -> only canonicalized asset identity may return
 ```
 
 Authority rules:
@@ -567,9 +585,14 @@ Authority rules:
 - `context.container.asset_service` is the only application-owned CAS persistence service that F7-P1 may reuse. F7-P1 MUST NOT construct another `AssetService`, another storage/UoW authority, or another application container.
 - `context.config.assets.max_upload_bytes` is a read-only configuration input. F7-P1 does not own `AssetStorageSettings` schema or config bootstrap.
 - `se/src/application/container.py` and `se/src/main.py` remain NO CHANGE for the first F7-P1 production slice.
-- the landed F5 request-side `asset_projection_hook` wiring remains unchanged and independent from the new response-side generated-media canonicalizer.
-- missing/uninitialized `context.container.asset_service` at F7-P1 activation is fail-closed and MUST NOT be repaired by constructing a parallel persistence service inside ProviderRuntime.
-- canonicalizer failure after provider success is terminal F7 failure. It MUST NOT be charged to provider breaker health and MUST NOT cause provider fallback/reselection/regeneration.
+- the landed F5 request-side `asset_projection_hook` readiness/wiring remains unchanged and independent from the new response-side generated-media canonicalizer.
+- ProviderRuntime ordinary text inference MUST NOT depend on CAS asset-service readiness. A decoded non-stream response with zero generated-media objects remains ordinary pass-through and requires no CAS ingest.
+- the F7-P1 response-side canonicalization boundary MUST remain installed/semantically enforced even when `context.container.asset_service` is unavailable or not ready. It MUST represent that condition explicitly as an unavailable persistence state/sentinel rather than silently omit the response fence.
+- generated media present while persistence is unavailable/not-ready is a terminal F7 canonicalization error after provider success and before any CAS ingest. It produces ZERO CAS ingest attempts / ZERO READY assets.
+- unavailable persistence MUST NOT permit raw/base64/provider URL identity to return as a substitute canonical result.
+- missing/uninitialized `context.container.asset_service` MUST NOT be repaired by constructing a parallel persistence service inside ProviderRuntime.
+- canonicalizer failure after provider success, including persistence-unavailable generated media, is terminal F7 failure. It MUST NOT be charged to provider breaker health and MUST NOT cause provider fallback/reselection/regeneration.
+- F5 request-side asset projection readiness remains an independent concern; F7-P1 MUST NOT reinterpret F5 request hydration/projection readiness as permission to bypass the response-side generated-media fence.
 - this composition freeze opens no F7-S, F7-T, F8, READY deletion/GC, provider cleanup, session-regeneration, bootstrap, or configuration-schema authority.
 
 This addendum closes only the PRE-CLAIM composition-authority gap. It does not itself release F7-P1 production CLAIM.
