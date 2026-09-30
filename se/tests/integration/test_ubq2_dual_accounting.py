@@ -528,3 +528,118 @@ async def test_ubq2_reconciliation_retains_bridge_but_does_not_invent_gc_proof(
             await uow.commit()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_mirror_failure_rolls_back_taskbudget_reservation_and_usage(
+    tmp_path: Path,
+) -> None:
+    _, engine, _, factory, service, enabled, _ = await _setup(tmp_path)
+
+    class _FailingDual(UserBudgetDualAccountingService):
+        async def mirror_resource_in_uow(self, *args, **kwargs):
+            raise RuntimeError("forced UBQ mirror failure")
+
+    try:
+        await service.create_task_with_budget(
+            _task("task-rollback", "user-a"),
+            identity=_identity("user-a"),
+        )
+        service._user_budget_dual_accounting = _FailingDual(
+            factory,
+            enabled.settings,
+        )
+
+        with pytest.raises(RuntimeError, match="forced UBQ mirror failure"):
+            await service.reserve_inference(
+                "task-rollback",
+                request_id="req-rollback",
+            )
+
+        async with factory() as uow:
+            budget = await uow.agents.get_task_budget("task-rollback")
+            assert budget is not None
+            assert budget.used_inference_calls == 0
+            generation = int(budget.incarnation_generation)
+            assert (
+                await uow.agents.get_task_budget_reservation(
+                    "task-rollback",
+                    "INFERENCE",
+                    "req-rollback",
+                    expected_incarnation_generation=generation,
+                )
+                is None
+            )
+            assert (
+                await uow.user_budgets.get_dual_accounting_receipt(
+                    "task-rollback",
+                    "INFERENCE",
+                    "req-rollback",
+                    "INFERENCE_CALL",
+                )
+                is None
+            )
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_replay_precedes_expired_window_rollover(
+    tmp_path: Path,
+) -> None:
+    database, engine, _, factory, service, _, _ = await _setup(tmp_path)
+    try:
+        await service.create_task_with_budget(
+            _task("task-replay-window", "user-a"),
+            identity=_identity("user-a"),
+        )
+        await service.reserve_inference(
+            "task-replay-window",
+            request_id="req-original-window",
+        )
+
+        raw = sqlite3.connect(database)
+        try:
+            original_count = raw.execute(
+                "SELECT COUNT(*) FROM user_budget_windows "
+                "WHERE owner_user_id='user-a'"
+            ).fetchone()[0]
+            assert original_count == 1
+            raw.execute(
+                "UPDATE user_budget_windows "
+                "SET expires_at='2000-01-01 00:00:00' "
+                "WHERE owner_user_id='user-a'"
+            )
+            raw.commit()
+        finally:
+            raw.close()
+
+        replay = await service.reserve_inference(
+            "task-replay-window",
+            request_id="req-original-window",
+        )
+        assert replay.used_inference_calls == 1
+
+        raw = sqlite3.connect(database)
+        try:
+            after_count = raw.execute(
+                "SELECT COUNT(*) FROM user_budget_windows "
+                "WHERE owner_user_id='user-a'"
+            ).fetchone()[0]
+            assert after_count == original_count
+        finally:
+            raw.close()
+
+        async with factory() as uow:
+            bridge = await uow.user_budgets.get_dual_accounting_receipt(
+                "task-replay-window",
+                "INFERENCE",
+                "req-original-window",
+                "INFERENCE_CALL",
+            )
+            assert bridge is not None
+            assert bridge.window_epoch == 1
+            await uow.commit()
+    finally:
+        await engine.dispose()
