@@ -2182,6 +2182,9 @@ class TaskBudgetService:
                                 execution_id,
                                 reservation_payload,
                             ),
+                            "task_budget_incarnation_generation": int(
+                                budget.incarnation_generation
+                            ),
                         }
                     )
                     await uow.agents.save_task_aggregate_admission(
