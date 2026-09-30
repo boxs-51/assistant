@@ -69,6 +69,10 @@ def test_ctx_f5_3h_b2_detaches_payload_before_session_or_transaction() -> None:
 
     assert "create_memory_record(" in service
     assert "content=content_snapshot" in service
+    assert "durable.intent.model_dump_json()" in service
+    assert 'metadata_snapshot = durable_intent_json["metadata"]' in service
+    assert "metadata=metadata_snapshot" in service
+    assert "metadata=durable.intent.metadata" not in service
     assert "payload_digest != durable.intent.content_digest" in service
     assert "memory_content_digest(content)" not in service
 
