@@ -9,6 +9,8 @@ Canonical governance: Issue #85 v2.5.
 stage = CTX-F5-3H-B0
 class = CONTRACT / ARCHITECTURE EVIDENCE ONLY
 baseline = 73714a4405f9ed10f16117b763215467d0a3e607
+corrective baseline = fe608280c33e1471fd1fd84006de2e9e166a642c
+post-merge P1 = P1-CTX-HB0-MUTABLE-CONTENT-SNAPSHOT-1
 canonical migration head = 25a_ubq1_user_budget_foundation
 parent CTX-F5-3H-A = LANDED / CANONICAL / HEALTHY
 production delta = ZERO
@@ -153,20 +155,51 @@ failure.
 ## 4. Pure preflight before SQLite write intent
 
 Only pure/non-persistent work may occur before the authoritative SQLite
-transaction:
+transaction, and the caller-owned payload must be detached before the first
+await that can cross into session or transaction work.
+
+Required preflight shape:
 
 ```text
 validate_promotion_reservation_integrity(reservation)
-compute payload digest using existing memory_content_digest(content)
+
+canonicalize caller content to detached canonical JSON bytes
+materialize one detached canonical content_snapshot
+compute payload digest using existing memory_content_digest(content_snapshot)
 ```
 
-No repository read is allowed in preflight.
+One acceptable implementation shape is:
 
-Invalid canonical Memory JSON maps to
+```python
+canonical_payload_bytes = canonical_memory_bytes(content)
+content_snapshot = json.loads(canonical_payload_bytes.decode("utf-8"))
+payload_digest = memory_content_digest(content_snapshot)
+```
+
+An equivalent single-purpose domain helper is allowed only if it preserves the
+same canonical JSON domain and still produces a detached snapshot.
+
+Required authority invariant:
+
+```text
+AUTHORIZED PAYLOAD = detached canonical preflight snapshot
+NOT the caller-owned mutable object after preflight
+```
+
+The snapshot must no longer alias caller `dict` / `list` containers.
+Invalid canonical Memory JSON fails before session acquisition and maps to
 `PromotionAdmissionIntentConflictError`.
 
+After snapshot completion, the original caller `content` object MUST NOT be
+read or used again. Every later digest comparison and every expected-Memory
+construction must use the exact detached `content_snapshot`.
+
+No repository read is allowed during validation, canonicalization, snapshot
+creation, or digest computation.
+
 The payload digest must use the existing `memory_content_digest(...)`
-authority. No second digest implementation is allowed.
+authority over the detached snapshot. No second digest implementation is
+allowed.
 
 After pure preflight:
 
@@ -232,8 +265,8 @@ Inside the already-established SQLite write-intent boundary:
 2. missing authority maps to
    `PromotionAdmissionReservationNotIssuedError`;
 3. canonical-compare durable intent to envelope intent;
-4. compare the precomputed payload digest with durable
-   `intent.content_digest`;
+4. compare the payload digest precomputed from the detached
+   `content_snapshot` with durable `intent.content_digest`;
 5. branch only on exact durable reservation state.
 
 No lookup by intent, digest, proof tuple, or alternate authority may substitute
@@ -250,7 +283,7 @@ constructed only from durable authority using existing
 ```text
 source_ref = durable intent.source_ref_snapshot
 promotion_authority_id = durable reservation authority id
-content = supplied canonical content
+content = detached preflight content_snapshot
 metadata = durable intent.metadata
 memory_schema_version = durable intent.memory_schema_version
 ```
@@ -259,7 +292,9 @@ There is no caller-supplied source, owner, metadata, schema-version, intent, or
 alternate authority field.
 
 For CONSUMED replay, constructing this expected in-process Memory is
-non-authorizing and non-mutating.
+non-authorizing and non-mutating. Both first admission and CONSUMED replay
+must use the exact same detached preflight `content_snapshot`; neither path
+may reread the original caller-owned `content` object.
 
 ## 9. Exact state machine
 
@@ -313,8 +348,9 @@ Before transaction commit:
 
 After durable commit with lost response:
 - retry sees CONSUMED;
+- pure preflight creates a fresh detached snapshot for that retry invocation;
 - load exact Memory;
-- construct expected Memory in-process;
+- construct expected Memory in-process from that invocation's detached snapshot;
 - compare with `memory_records_replay_equivalent(...)`;
 - exact replay returns the same Memory;
 - no replacement promotion authority is minted.
@@ -350,7 +386,11 @@ Before H-B2 can reach FINAL GREEN / integration-ready, evidence must prove:
 19. CONSUMED replay constructs expected Memory only in-process and performs zero repository mutation;
 20. commit-time failure is translated to PromotionAdmissionPersistenceFailureError;
 21. cancellation is not swallowed or translated;
-22. durable-row corruption cannot be misreported as reservation-not-issued or replay success.
+22. durable-row corruption cannot be misreported as reservation-not-issued or replay success;
+23. mutable caller content is detached before the first session/transaction await;
+24. mutation of the original caller dict/list after preflight cannot change the persisted/compared Memory payload or identity;
+25. the original caller content object is never reused after snapshot creation;
+26. payload digest and create_memory_record(...) consume the same detached snapshot.
 
 ## 12. Closed authority
 
@@ -381,9 +421,12 @@ At H-B0 release:
 ## 14. Next-stage gates
 
 H-B1 production CLAIM remains CLOSED until:
-- H-B0 exact-head CI is GREEN;
-- independent H-B0 FINAL GREEN is recorded;
-- H-B0 reaches its canonical transition under Issue #15 governance;
+- the post-merge P1 corrective H-B0 follow-up lands from current canonical main;
+- the detached canonical payload snapshot invariant above is frozen;
+- the mandatory evidence matrix contains all 26 proofs;
+- corrective exact-head CI is GREEN/GREEN;
+- fresh independent corrective FINAL GREEN is recorded;
+- the corrective transition reaches canonical main and passes exact-main post-merge health;
 - no material main/dependency drift invalidates the freeze.
 
 H-B2 production CLAIM remains CLOSED until H-B1 is independently released,
