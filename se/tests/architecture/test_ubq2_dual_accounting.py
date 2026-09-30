@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 import yaml
@@ -81,3 +82,28 @@ def test_ubq2_runtime_mirror_is_resource_only() -> None:
         body = source[start : end if end != -1 else len(source)]
         assert "mirror_resource_in_uow" not in body
         assert "_mutate_enrolled_resource(" not in body
+
+
+def test_ubq2_all_task_budget_replay_and_cas_calls_are_incarnation_bound() -> None:
+    source = _text("se/src/runtimes/agent/task_budget.py")
+    tree = ast.parse(source)
+
+    guarded = {
+        "get_task_budget_reservation",
+        "compare_and_set_task_budget",
+    }
+    missing: list[tuple[str, int]] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        func = node.func
+        if not isinstance(func, ast.Attribute) or func.attr not in guarded:
+            continue
+        keywords = {item.arg for item in node.keywords if item.arg is not None}
+        if "expected_incarnation_generation" not in keywords:
+            missing.append((func.attr, node.lineno))
+
+    assert missing == [], (
+        "Every TaskBudget reservation replay/CAS path must carry the exact "
+        f"incarnation generation; missing={missing}"
+    )
