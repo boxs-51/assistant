@@ -29,6 +29,25 @@ def _class_methods(path: Path, class_name: str) -> set[str]:
     raise AssertionError(f"class {class_name} not found")
 
 
+def _top_level_bound_names(path: Path) -> set[str]:
+    tree = ast.parse(_source(path))
+    names: set[str] = set()
+
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            names.update(
+                target.id for target in node.targets if isinstance(target, ast.Name)
+            )
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            names.add(node.target.id)
+        elif isinstance(node, ast.Import):
+            names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            names.update(alias.asname or alias.name for alias in node.names)
+
+    return names
+
+
 def test_ctx_f5_3h_b2_freezes_exact_error_family_and_service_surface() -> None:
     promotion = _source(PROMOTION)
     service = _source(SERVICE)
@@ -48,8 +67,10 @@ def test_ctx_f5_3h_b2_freezes_exact_error_family_and_service_surface() -> None:
 
     methods = _class_methods(SERVICE, "DurableMemoryPromotionAdmission")
     assert methods == {"__init__", "admit"}
-    assert "MemoryAdmissionSessionContextFactory = Callable[" in service
-    assert "SessionContextFactory" not in service
+
+    bound_names = _top_level_bound_names(SERVICE)
+    assert "MemoryAdmissionSessionContextFactory" in bound_names
+    assert "SessionContextFactory" not in bound_names
 
 
 def test_ctx_f5_3h_b2_detaches_payload_before_session_or_transaction() -> None:
