@@ -41,6 +41,42 @@ class PromotionReservationIntentMismatchError(PromotionPrimitiveIntegrityError):
     """Promotion reservation does not bind the exact supplied intent."""
 
 
+class MemoryPromotionAdmissionError(RuntimeError):
+    """Base failure for authoritative durable Memory promotion admission."""
+
+
+class PromotionAdmissionReservationNotIssuedError(MemoryPromotionAdmissionError):
+    """The requested durable promotion authority does not exist."""
+
+
+class PromotionAdmissionReservationRevokedError(MemoryPromotionAdmissionError):
+    """The durable promotion reservation is terminally REVOKED."""
+
+
+class PromotionAdmissionIntentConflictError(MemoryPromotionAdmissionError):
+    """Caller payload/envelope conflicts with the exact durable promotion intent."""
+
+
+class PromotionAdmissionMemoryReplayConflictError(MemoryPromotionAdmissionError):
+    """ISSUED admission collided with an existing or conflicting Memory replay."""
+
+
+class PromotionAdmissionConsumedMemoryMissingError(MemoryPromotionAdmissionError):
+    """A CONSUMED reservation has no durable Memory record."""
+
+
+class PromotionAdmissionConsumedMemoryMismatchError(MemoryPromotionAdmissionError):
+    """A CONSUMED reservation's durable Memory is not replay-equivalent."""
+
+
+class PromotionAdmissionTransactionUnavailableError(MemoryPromotionAdmissionError):
+    """The authoritative SQLite admission transaction could not be acquired."""
+
+
+class PromotionAdmissionPersistenceFailureError(MemoryPromotionAdmissionError):
+    """Persistence failed after the authoritative admission transaction was entered."""
+
+
 class MemoryPromotionProofScope(StrEnum):
     MEMORY_PROMOTION = "MEMORY_PROMOTION"
 
