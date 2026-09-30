@@ -65,10 +65,19 @@ def test_ubq2_runtime_mirror_is_resource_only() -> None:
     assert "async def reserve_tool_call_batch(" in source
     assert "USER_BUDGET_UNSUPPORTED_LEGACY_MIRROR" in source
 
-    # Structural R12/R8 reservations still call the generic TaskBudget
-    # reservation core and never name the UBQ mirror primitive.
-    structural = source[
-        source.index("async def reserve_new_execution("):
-        source.index("async def reserve_tool_calls(")
-    ]
-    assert "mirror_resource_in_uow" not in structural
+    # Structural R8/R12 control-plane operations may be incarnation-fenced,
+    # but they must never be routed through the UBQ resource mirror.
+    structural_methods = (
+        "start_root_task_scoped_execution",
+        "resume_task_scoped_execution",
+        "finish_task_scoped_execution",
+        "recover_task_scoped_execution",
+        "_transition_execution_with_budget",
+    )
+    for method in structural_methods:
+        marker = f"async def {method}("
+        start = source.index(marker)
+        end = source.find("\n    async def ", start + len(marker))
+        body = source[start : end if end != -1 else len(source)]
+        assert "mirror_resource_in_uow" not in body
+        assert "_mutate_enrolled_resource(" not in body
