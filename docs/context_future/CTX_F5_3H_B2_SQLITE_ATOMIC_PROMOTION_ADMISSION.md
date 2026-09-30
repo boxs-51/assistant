@@ -64,7 +64,11 @@ The durable reservation is loaded only by exact
 `_canonical_intent_bytes` is not admission authority.
 
 Expected Memory is created only from durable intent/authority plus the detached
-payload snapshot.
+payload snapshot. Durable intent metadata is recursively thawed into ordinary JSON
+material through the intent's public JSON serialization before
+`create_memory_record(...)`; the frozen in-memory metadata view is never passed
+directly as record-construction input. This preserves durable intent as the sole
+metadata authority while accepting valid nested object/array metadata.
 
 ```text
 missing -> ReservationNotIssued
