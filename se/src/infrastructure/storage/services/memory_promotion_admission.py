@@ -115,11 +115,14 @@ class DurableMemoryPromotionAdmission:
                             "durable promotion reservation is REVOKED"
                         )
 
+                    durable_intent_json = json.loads(durable.intent.model_dump_json())
+                    metadata_snapshot = durable_intent_json["metadata"]
+
                     expected = create_memory_record(
                         source_ref=durable.intent.source_ref_snapshot,
                         promotion_authority_id=durable.promotion_authority_id,
                         content=content_snapshot,
-                        metadata=durable.intent.metadata,
+                        metadata=metadata_snapshot,
                         memory_schema_version=durable.intent.memory_schema_version,
                     )
 
