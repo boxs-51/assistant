@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -112,9 +113,21 @@ def _task(task_id: str, owner: str, *, parent_task_id: str | None = None):
 
 async def _setup(tmp_path: Path):
     database = tmp_path / "ubq2-integration.sqlite"
-    # Alembic's env owns its own asyncio.run(), so invoke the synchronous
-    # command outside pytest's already-running event loop.
-    await asyncio.to_thread(command.upgrade, _config(database), "head")
+    # Alembic env.py intentionally resolves ASSISTANT_ALEMBIC_DATABASE_URL
+    # ahead of Config sqlalchemy.url. Bind the test database explicitly so
+    # CI never falls back to the repository-relative data/ default.
+    env_key = "ASSISTANT_ALEMBIC_DATABASE_URL"
+    previous_url = os.environ.get(env_key)
+    os.environ[env_key] = f"sqlite+aiosqlite:///{database.as_posix()}"
+    try:
+        # Alembic's env owns its own asyncio.run(), so invoke the synchronous
+        # command outside pytest's already-running event loop.
+        await asyncio.to_thread(command.upgrade, _config(database), "head")
+    finally:
+        if previous_url is None:
+            os.environ.pop(env_key, None)
+        else:
+            os.environ[env_key] = previous_url
     await asyncio.to_thread(_seed_user, database, "user-a")
     await asyncio.to_thread(_seed_user, database, "user-b")
 
