@@ -405,6 +405,16 @@ class UserBudgetReservationRecord(Base):
             "idempotency_key",
             name="uq_user_budget_reservation_owner_idempotency",
         ),
+        Index(
+            "uq_user_budget_reservation_exact_bridge_ref",
+            "owner_user_id",
+            "reservation_id",
+            "window_epoch",
+            "resource_kind",
+            "idempotency_key",
+            "payload_fingerprint",
+            unique=True,
+        ),
         CheckConstraint(
             "resource_kind IN ("
             "'INFERENCE_CALL', 'INPUT_TOKEN', 'OUTPUT_TOKEN', 'TOTAL_TOKEN', "
@@ -440,5 +450,111 @@ class UserBudgetReservationRecord(Base):
         CheckConstraint(
             "revision >= 0",
             name="ck_user_budget_reservation_revision_nonnegative",
+        ),
+    )
+
+
+class UserBudgetTaskBindingRecord(Base):
+    __tablename__ = "user_budget_task_bindings"
+
+    task_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(
+        String(255), ForeignKey("users.id", ondelete="RESTRICT"), nullable=False
+    )
+    enrollment_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_auth_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_api_key_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_application_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    source_organization_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    resolution_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "task_id", "owner_user_id", name="uq_user_budget_task_binding_task_owner"
+        ),
+    )
+
+
+class UserBudgetDualAccountingReceiptRecord(Base):
+    __tablename__ = "user_budget_dual_accounting_receipts"
+
+    bridge_receipt_id: Mapped[str] = mapped_column(String(255), primary_key=True)
+    owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    task_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    task_budget_kind: Mapped[str] = mapped_column(String(32), nullable=False)
+    task_budget_reservation_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    mirror_dimension: Mapped[str] = mapped_column(String(32), nullable=False)
+    source_payload_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    window_epoch: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    ubq_reservation_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ubq_idempotency_key: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    ubq_payload_fingerprint: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    amount_atomic: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0, server_default="0")
+    capability_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "owner_user_id"],
+            ["user_budget_task_bindings.task_id", "user_budget_task_bindings.owner_user_id"],
+            ondelete="RESTRICT",
+            name="fk_ubq2_bridge_task_binding",
+        ),
+        ForeignKeyConstraint(
+            [
+                "owner_user_id", "ubq_reservation_id", "window_epoch",
+                "mirror_dimension", "ubq_idempotency_key", "ubq_payload_fingerprint",
+            ],
+            [
+                "user_budget_reservations.owner_user_id",
+                "user_budget_reservations.reservation_id",
+                "user_budget_reservations.window_epoch",
+                "user_budget_reservations.resource_kind",
+                "user_budget_reservations.idempotency_key",
+                "user_budget_reservations.payload_fingerprint",
+            ],
+            ondelete="RESTRICT",
+            name="fk_ubq2_bridge_exact_ubq_receipt",
+        ),
+        UniqueConstraint(
+            "task_id", "task_budget_kind", "task_budget_reservation_key",
+            "mirror_dimension", name="uq_ubq2_bridge_source_dimension",
+        ),
+        UniqueConstraint("ubq_reservation_id", name="uq_ubq2_bridge_ubq_reservation"),
+        CheckConstraint(
+            "task_budget_kind IN ('INFERENCE', 'USAGE', 'TOOL_CALL')",
+            name="ck_ubq2_bridge_task_budget_kind",
+        ),
+        CheckConstraint(
+            "mirror_dimension IN ('INFERENCE_CALL', 'TOTAL_TOKEN', 'COST_USD', 'TOOL_CALL', 'NO_CHARGE')",
+            name="ck_ubq2_bridge_mirror_dimension",
+        ),
+        CheckConstraint(
+            "amount_atomic >= 0 AND amount_atomic <= 9223372036854775807",
+            name="ck_ubq2_bridge_amount",
+        ),
+        CheckConstraint(
+            "(mirror_dimension = 'NO_CHARGE' AND amount_atomic = 0 "
+            "AND window_epoch IS NULL AND ubq_reservation_id IS NULL "
+            "AND ubq_idempotency_key IS NULL AND ubq_payload_fingerprint IS NULL "
+            "AND capability_id IS NULL) OR "
+            "(mirror_dimension != 'NO_CHARGE' AND amount_atomic > 0 "
+            "AND window_epoch IS NOT NULL AND ubq_reservation_id IS NOT NULL "
+            "AND ubq_idempotency_key IS NOT NULL AND ubq_payload_fingerprint IS NOT NULL)",
+            name="ck_ubq2_bridge_charge_shape",
+        ),
+        CheckConstraint(
+            "(task_budget_kind = 'INFERENCE' AND mirror_dimension = 'INFERENCE_CALL' "
+            "AND amount_atomic = 1 AND capability_id IS NULL) OR "
+            "(task_budget_kind = 'USAGE' AND mirror_dimension IN ('TOTAL_TOKEN', 'COST_USD', 'NO_CHARGE') "
+            "AND capability_id IS NULL) OR "
+            "(task_budget_kind = 'TOOL_CALL' AND mirror_dimension = 'TOOL_CALL' "
+            "AND amount_atomic = 1 AND capability_id IS NOT NULL)",
+            name="ck_ubq2_bridge_source_dimension_shape",
         ),
     )

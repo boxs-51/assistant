@@ -58,6 +58,7 @@ class ApplicationContainer:
     agent_execution_id_factory: Optional[Any] = None
     task_budget_service: Optional[Any] = None
     task_budget_policy: Optional[Any] = None
+    user_budget_dual_accounting: Optional[Any] = None
     context_assembler: Optional[Any] = None
     support_loader: Optional[Any] = None
 

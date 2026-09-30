@@ -227,6 +227,26 @@ class AgentSettings(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+
+class UserBudgetDualAccountingSettings(BaseModel):
+    enabled: bool = False
+    policy_version: str = Field(
+        default="ubq2-shadow-v1",
+        min_length=1,
+        max_length=64,
+    )
+    window_duration_seconds: int = Field(default=86400, gt=0)
+
+    model_config = ConfigDict(frozen=True)
+
+
+class UserBudgetSettings(BaseModel):
+    dual_accounting: UserBudgetDualAccountingSettings = Field(
+        default_factory=UserBudgetDualAccountingSettings
+    )
+
+    model_config = ConfigDict(frozen=True)
+
 class ConfigSchema(BaseModel):
     """
     Schema xác thực cuối cùng cho toàn bộ cấu hình ứng dụng.
@@ -242,6 +262,7 @@ class ConfigSchema(BaseModel):
     tracing: TracingSettings = Field(default_factory=TracingSettings)
     semantic_cache: SemanticCacheSettings = Field(default_factory=SemanticCacheSettings)
     agent: AgentSettings = Field(default_factory=AgentSettings)
+    user_budget: UserBudgetSettings = Field(default_factory=UserBudgetSettings)
     storage: StorageSettings = Field(default_factory=StorageSettings)
     assets: AssetStorageSettings = Field(default_factory=AssetStorageSettings)
     auth: AuthenticationSettings = Field(default_factory=AuthenticationSettings)

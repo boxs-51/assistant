@@ -182,9 +182,16 @@ def test_r11_f0_task_budget_physical_edges_do_not_replace_replay_authority():
         "kind",
         "reservation_key",
         "payload_fingerprint",
+        "task_budget_incarnation_generation",
     } <= _columns(TaskBudgetReservationRecord)
     assert _fk_ondelete(TaskBudgetRecord, "task_id") == {"CASCADE"}
-    assert _fk_ondelete(TaskBudgetReservationRecord, "task_id") == {"CASCADE"}
+    # R11 physical ownership remains CASCADE to AgentTask. UBQ-2 adds an
+    # exact-incarnation RESTRICT edge to TaskBudget so reservation-first GC
+    # ordering is enforced without changing Task collection authority.
+    assert _fk_ondelete(TaskBudgetReservationRecord, "task_id") == {
+        "CASCADE",
+        "RESTRICT",
+    }
 
 
 @pytest.mark.asyncio

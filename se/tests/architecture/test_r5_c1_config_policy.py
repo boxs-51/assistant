@@ -80,8 +80,9 @@ async def test_r5_c1_coordinator_uses_atomic_task_budget_creation_path():
         def __init__(self):
             self.values = None
 
-        async def create_task_with_budget(self, values):
+        async def create_task_with_budget(self, values, *, identity=None):
             self.values = dict(values)
+            self.identity = identity
 
     class LegacyStore:
         async def save_task(self, values):
@@ -120,3 +121,4 @@ async def test_r5_c1_coordinator_uses_atomic_task_budget_creation_path():
     assert budget_service.values["id"] == task.task_id
     assert budget_service.values["revision"] == 0
     assert budget_service.values["status"] == "ASSIGNED"
+    assert budget_service.identity is identity

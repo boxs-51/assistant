@@ -20,8 +20,10 @@ from se.src.domain.schemas.user_budget import (
 
 from ..models.sql.user_budget import (
     UserBudgetAccountRecord,
+    UserBudgetDualAccountingReceiptRecord,
     UserBudgetPolicyRecord,
     UserBudgetReservationRecord,
+    UserBudgetTaskBindingRecord,
     UserBudgetWindowRecord,
     UserToolBudgetUsageRecord,
 )
@@ -195,6 +197,188 @@ class UserBudgetRepository:
 
     def __init__(self, session: AsyncSession) -> None:
         self.session = session
+
+    async def begin_write_intent(self) -> None:
+        """Prepare the caller-owned UoW for UBQ authority writes.
+
+        SQLite requires BEGIN IMMEDIATE before the first authority read.
+        PostgreSQL keeps its row-lock/CAS semantics and needs no special
+        transaction primitive.
+        """
+        if self.session.get_bind().dialect.name == "sqlite":
+            await _begin_sqlite_write_intent(self.session)
+
+    async def get_task_binding(
+        self,
+        task_id: str,
+    ) -> Optional[UserBudgetTaskBindingRecord]:
+        result = await self.session.execute(
+            select(UserBudgetTaskBindingRecord)
+            .where(UserBudgetTaskBindingRecord.task_id == task_id)
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def create_task_binding(
+        self,
+        *,
+        task_id: str,
+        owner_user_id: str,
+        enrollment_version: str,
+        source_auth_type: str,
+        resolution_fingerprint: str,
+        source_api_key_id: str | None = None,
+        source_application_id: str | None = None,
+        source_organization_id: str | None = None,
+    ) -> UserBudgetTaskBindingRecord:
+        existing = await self.get_task_binding(task_id)
+        if existing is not None:
+            if (
+                existing.owner_user_id != owner_user_id
+                or existing.resolution_fingerprint != resolution_fingerprint
+                or existing.enrollment_version != enrollment_version
+            ):
+                raise UserBudgetConflictError(
+                    "Task is already bound to a different UBQ owner/provenance"
+                )
+            return existing
+
+        row = UserBudgetTaskBindingRecord(
+            task_id=task_id,
+            owner_user_id=owner_user_id,
+            enrollment_version=enrollment_version,
+            source_auth_type=source_auth_type,
+            source_api_key_id=source_api_key_id,
+            source_application_id=source_application_id,
+            source_organization_id=source_organization_id,
+            resolution_fingerprint=resolution_fingerprint,
+        )
+        try:
+            async with self.session.begin_nested():
+                self.session.add(row)
+                await self.session.flush()
+        except IntegrityError:
+            winner = await self.get_task_binding(task_id)
+            if winner is None:
+                raise
+            if (
+                winner.owner_user_id != owner_user_id
+                or winner.resolution_fingerprint != resolution_fingerprint
+                or winner.enrollment_version != enrollment_version
+            ):
+                raise UserBudgetConflictError(
+                    "Concurrent UBQ task binding conflicts with immutable provenance"
+                )
+            return winner
+        return row
+
+    async def get_dual_accounting_receipt(
+        self,
+        task_id: str,
+        task_budget_kind: str,
+        task_budget_reservation_key: str,
+        mirror_dimension: str,
+    ) -> Optional[UserBudgetDualAccountingReceiptRecord]:
+        result = await self.session.execute(
+            select(UserBudgetDualAccountingReceiptRecord)
+            .where(
+                UserBudgetDualAccountingReceiptRecord.task_id == task_id,
+                UserBudgetDualAccountingReceiptRecord.task_budget_kind
+                == task_budget_kind,
+                UserBudgetDualAccountingReceiptRecord.task_budget_reservation_key
+                == task_budget_reservation_key,
+                UserBudgetDualAccountingReceiptRecord.mirror_dimension
+                == mirror_dimension,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_dual_accounting_receipts(
+        self,
+        task_id: str,
+    ) -> list[UserBudgetDualAccountingReceiptRecord]:
+        result = await self.session.execute(
+            select(UserBudgetDualAccountingReceiptRecord)
+            .where(UserBudgetDualAccountingReceiptRecord.task_id == task_id)
+            .order_by(
+                UserBudgetDualAccountingReceiptRecord.task_budget_kind.asc(),
+                UserBudgetDualAccountingReceiptRecord.task_budget_reservation_key.asc(),
+                UserBudgetDualAccountingReceiptRecord.mirror_dimension.asc(),
+            )
+        )
+        return list(result.scalars().all())
+
+    async def create_or_get_dual_accounting_receipt(
+        self,
+        values: dict[str, Any],
+    ) -> UserBudgetDualAccountingReceiptRecord:
+        task_id = str(values["task_id"])
+        task_budget_kind = str(values["task_budget_kind"])
+        reservation_key = str(values["task_budget_reservation_key"])
+        mirror_dimension = str(values["mirror_dimension"])
+
+        existing = await self.get_dual_accounting_receipt(
+            task_id,
+            task_budget_kind,
+            reservation_key,
+            mirror_dimension,
+        )
+        if existing is not None:
+            immutable_fields = (
+                "bridge_receipt_id",
+                "owner_user_id",
+                "source_payload_fingerprint",
+                "window_epoch",
+                "ubq_reservation_id",
+                "ubq_idempotency_key",
+                "ubq_payload_fingerprint",
+                "amount_atomic",
+                "capability_id",
+            )
+            if any(
+                getattr(existing, field) != values.get(field)
+                for field in immutable_fields
+            ):
+                raise UserBudgetConflictError(
+                    "Dual-accounting bridge identity conflicts with durable receipt"
+                )
+            return existing
+
+        row = UserBudgetDualAccountingReceiptRecord(**values)
+        try:
+            async with self.session.begin_nested():
+                self.session.add(row)
+                await self.session.flush()
+        except IntegrityError:
+            winner = await self.get_dual_accounting_receipt(
+                task_id,
+                task_budget_kind,
+                reservation_key,
+                mirror_dimension,
+            )
+            if winner is None:
+                raise
+            immutable_fields = (
+                "bridge_receipt_id",
+                "owner_user_id",
+                "source_payload_fingerprint",
+                "window_epoch",
+                "ubq_reservation_id",
+                "ubq_idempotency_key",
+                "ubq_payload_fingerprint",
+                "amount_atomic",
+                "capability_id",
+            )
+            if any(
+                getattr(winner, field) != values.get(field)
+                for field in immutable_fields
+            ):
+                raise UserBudgetConflictError(
+                    "Concurrent dual-accounting receipt conflicts with durable identity"
+                )
+            return winner
+        return row
 
     async def get_policy(
         self,

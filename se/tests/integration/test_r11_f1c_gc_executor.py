@@ -74,6 +74,7 @@ async def _database():
 def _budget(task_id: str) -> TaskBudgetRecord:
     return TaskBudgetRecord(
         task_id=task_id,
+        incarnation_generation=1,
         state="CLOSED",
         max_total_executions=8,
         max_active_executions=4,

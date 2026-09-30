@@ -10,9 +10,12 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Integer,
     Numeric,
+    SmallInteger,
     String,
+    UniqueConstraint,
     func,
     true,
 )
@@ -29,6 +32,7 @@ class TaskBudgetRecord(Base):
         ForeignKey("agent_tasks.id", ondelete="CASCADE"),
         primary_key=True,
     )
+    incarnation_generation: Mapped[int] = mapped_column(BigInteger, nullable=False)
     revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0, server_default="0"
     )
@@ -90,6 +94,19 @@ class TaskBudgetRecord(Base):
     )
 
     __table_args__ = (
+        UniqueConstraint(
+            "task_id",
+            "incarnation_generation",
+            name="uq_task_budget_task_incarnation",
+        ),
+        UniqueConstraint(
+            "incarnation_generation",
+            name="uq_task_budget_incarnation_generation",
+        ),
+        CheckConstraint(
+            "incarnation_generation > 0 AND incarnation_generation < 9223372036854775807",
+            name="ck_task_budget_incarnation_generation",
+        ),
         CheckConstraint("revision >= 0", name="ck_task_budget_revision_nonnegative"),
         CheckConstraint(
             "state IN ('OPEN', 'CLOSED')",
@@ -165,12 +182,26 @@ class TaskBudgetReservationRecord(Base):
     )
     kind: Mapped[str] = mapped_column(String(32), primary_key=True)
     reservation_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    task_budget_incarnation_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False
+    )
     payload_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["task_id", "task_budget_incarnation_generation"],
+            ["agent_task_budgets.task_id", "agent_task_budgets.incarnation_generation"],
+            ondelete="RESTRICT",
+            name="fk_task_budget_reservation_exact_incarnation",
+        ),
+        CheckConstraint(
+            "task_budget_incarnation_generation > 0 "
+            "AND task_budget_incarnation_generation < 9223372036854775807",
+            name="ck_task_budget_reservation_incarnation_generation",
+        ),
         CheckConstraint(
             "kind IN ("
             "'NEW_EXECUTION', 'RESUME_EXECUTION', 'RELEASE_EXECUTION', "
@@ -178,5 +209,27 @@ class TaskBudgetReservationRecord(Base):
             "'BRANCH', 'RELEASE_BRANCH'"
             ")",
             name="ck_task_budget_reservation_kind",
+        ),
+    )
+
+
+class TaskBudgetIncarnationAllocatorRecord(Base):
+    __tablename__ = "agent_task_budget_incarnation_allocator"
+
+    allocator_id: Mapped[int] = mapped_column(
+        SmallInteger, primary_key=True, default=1, server_default="1"
+    )
+    next_generation: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=1, server_default="1"
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "allocator_id = 1",
+            name="ck_task_budget_incarnation_allocator_singleton",
+        ),
+        CheckConstraint(
+            "next_generation >= 1 AND next_generation <= 9223372036854775807",
+            name="ck_task_budget_incarnation_allocator_bounds",
         ),
     )

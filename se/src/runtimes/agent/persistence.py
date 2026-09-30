@@ -1841,12 +1841,17 @@ class DurableAgentStore:
         task_id: str,
         expected_revision: int,
         values: Dict[str, Any],
+        *,
+        expected_incarnation_generation: int | None = None,
     ):
         async with self.uow_factory() as uow:
             record = await uow.agents.compare_and_set_task_budget(
                 task_id,
                 expected_revision,
                 values,
+                expected_incarnation_generation=(
+                    expected_incarnation_generation
+                ),
             )
             if record is None:
                 raise TaskBudgetConflictError(
@@ -1861,12 +1866,17 @@ class DurableAgentStore:
         task_id: str,
         kind: str,
         reservation_key: str,
+        *,
+        expected_incarnation_generation: int | None = None,
     ):
         async with self.uow_factory() as uow:
             record = await uow.agents.get_task_budget_reservation(
                 task_id,
                 kind,
                 reservation_key,
+                expected_incarnation_generation=(
+                    expected_incarnation_generation
+                ),
             )
             await uow.commit()
             return record

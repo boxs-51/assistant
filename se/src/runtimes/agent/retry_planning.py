@@ -493,6 +493,9 @@ class AgentRetryPlanningService:
                 checkpoint_transcript_fingerprint
             ),
             "expected_task_budget_revision": int(budget.revision),
+            "expected_task_budget_incarnation_generation": int(
+                budget.incarnation_generation
+            ),
             "budget_policy_fingerprint": str(budget.policy_fingerprint),
             "parent_execution_id": execution.parent_execution_id,
             "base_execution_id": execution.base_execution_id,
@@ -553,6 +556,8 @@ async def revalidate_retry_plan_in_uow(
     if (
         _value(budget.state) != "OPEN"
         or int(budget.revision) != int(plan.expected_task_budget_revision)
+        or int(budget.incarnation_generation)
+        != int(plan.expected_task_budget_incarnation_generation)
         or str(budget.policy_fingerprint) != plan.budget_policy_fingerprint
     ):
         raise RetryPlanRejected(

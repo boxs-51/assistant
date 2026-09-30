@@ -235,6 +235,7 @@ async def _seed_task_scoped(factory, *, expiry: datetime):
         uow.session.add(
             TaskBudgetRecord(
                 task_id="task-r12-e",
+                incarnation_generation=1,
                 revision=0,
                 state="OPEN",
                 max_total_executions=10,

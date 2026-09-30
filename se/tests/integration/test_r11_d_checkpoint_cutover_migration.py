@@ -26,7 +26,7 @@ def _config(database: Path) -> Config:
 
 def test_r11_d_is_single_linear_migration_head(tmp_path: Path):
     script = ScriptDirectory.from_config(_config(tmp_path / "unused.sqlite"))
-    assert script.get_heads() == ["25a_ubq1_user_budget_foundation"]
+    assert script.get_heads() == ["26a_ubq2_dual_accounting_bridge"]
     assert (
         script.get_revision("21a_ctx_f5_memory_foundation").down_revision
         == "20a_cas_f5_binding_foundation"

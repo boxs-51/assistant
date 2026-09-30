@@ -6,7 +6,11 @@ from .session import AgentSessionRecord, AgentSessionMemberRecord
 from .message import AgentMessageRecord
 from .task import AgentTaskRecord
 from .task_branch import AgentTaskBranchContextRecord, AgentTaskBranchRecord
-from .task_budget import TaskBudgetRecord, TaskBudgetReservationRecord
+from .task_budget import (
+    TaskBudgetIncarnationAllocatorRecord,
+    TaskBudgetRecord,
+    TaskBudgetReservationRecord,
+)
 from .checkpoint import (
     AgentCheckpointPendingInvocationRecord,
     AgentExecutionCheckpointRecord,
@@ -32,6 +36,7 @@ __all__ = [
     "AgentTaskRecord",
     "AgentTaskBranchRecord",
     "AgentTaskBranchContextRecord",
+    "TaskBudgetIncarnationAllocatorRecord",
     "TaskBudgetRecord",
     "TaskBudgetReservationRecord",
     "AgentExecutionCheckpointRecord",

@@ -34,6 +34,7 @@ from ..models.sql.agent import (
     AgentTranscriptChunkRecord,
     AgentTranscriptPayloadNodeRecord,
     AgentTranscriptRepresentationRecord,
+    TaskBudgetIncarnationAllocatorRecord,
     TaskBudgetRecord,
     TaskBudgetReservationRecord,
     AgentToolCallRecord,
@@ -628,10 +629,79 @@ class AgentRepository(BaseRepository):
         )
         return list(result.scalars().all())
 
+    async def get_task_budget_incarnation_allocator(
+        self,
+        *,
+        for_update: bool = False,
+    ):
+        statement = select(TaskBudgetIncarnationAllocatorRecord).where(
+            TaskBudgetIncarnationAllocatorRecord.allocator_id == 1
+        )
+        if for_update and self.session.get_bind().dialect.name != "sqlite":
+            statement = statement.with_for_update()
+        result = await self.session.execute(statement)
+        return result.scalar_one_or_none()
+
+    async def _ensure_task_budget_incarnation_allocator(self):
+        allocator = await self.get_task_budget_incarnation_allocator(
+            for_update=True
+        )
+        if allocator is not None:
+            return allocator
+
+        # Production databases receive the singleton from migration 26a.
+        # This fallback keeps metadata.create_all test databases compatible
+        # while preserving the same singleton authority.
+        try:
+            async with self.session.begin_nested():
+                self.session.add(
+                    TaskBudgetIncarnationAllocatorRecord(
+                        allocator_id=1,
+                        next_generation=1,
+                    )
+                )
+                await self.session.flush()
+        except IntegrityError:
+            pass
+
+        allocator = await self.get_task_budget_incarnation_allocator(
+            for_update=True
+        )
+        if allocator is None:
+            raise RuntimeError(
+                "TaskBudget incarnation allocator is unavailable"
+            )
+        return allocator
+
     async def save_task_budget(self, values: Dict[str, Any]):
-        record = TaskBudgetRecord(**values)
+        if "incarnation_generation" in values:
+            raise ValueError(
+                "TaskBudget incarnation_generation is repository-owned"
+            )
+
+        allocator = await self._ensure_task_budget_incarnation_allocator()
+        generation = int(allocator.next_generation)
+        if generation >= 9223372036854775807:
+            raise RuntimeError("TASK_BUDGET_INCARNATION_EXHAUSTED")
+
+        record = TaskBudgetRecord(
+            **values,
+            incarnation_generation=generation,
+        )
         self.session.add(record)
         await self.session.flush()
+
+        # Migration 26a DB triggers consume the allocator atomically.  Test
+        # databases created directly from ORM metadata have no triggers, so
+        # advance the singleton here only when the DB did not already do so.
+        await self.session.refresh(allocator)
+        if int(allocator.next_generation) == generation:
+            allocator.next_generation = generation + 1
+            await self.session.flush()
+        elif int(allocator.next_generation) != generation + 1:
+            raise RuntimeError(
+                "TaskBudget incarnation allocator advanced unexpectedly"
+            )
         return record
 
     async def get_task_budget(self, task_id: str):
@@ -655,16 +725,27 @@ class AgentRepository(BaseRepository):
         task_id: str,
         expected_revision: int,
         values: Dict[str, Any],
+        *,
+        expected_incarnation_generation: int | None = None,
     ):
+        if "incarnation_generation" in values:
+            raise ValueError(
+                "TaskBudget incarnation_generation is immutable"
+            )
+
         next_values = dict(values)
         next_values["revision"] = expected_revision + 1
-        result = await self.session.execute(
-            update(TaskBudgetRecord)
-            .where(
-                TaskBudgetRecord.task_id == task_id,
-                TaskBudgetRecord.revision == expected_revision,
+        statement = update(TaskBudgetRecord).where(
+            TaskBudgetRecord.task_id == task_id,
+            TaskBudgetRecord.revision == expected_revision,
+        )
+        if expected_incarnation_generation is not None:
+            statement = statement.where(
+                TaskBudgetRecord.incarnation_generation
+                == int(expected_incarnation_generation)
             )
-            .values(**next_values)
+        result = await self.session.execute(
+            statement.values(**next_values)
         )
         if result.rowcount != 1:
             return None
@@ -675,7 +756,30 @@ class AgentRepository(BaseRepository):
         self,
         values: Dict[str, Any],
     ):
-        record = TaskBudgetReservationRecord(**values)
+        task_id = str(values.get("task_id") or "")
+        budget = await self.get_task_budget(task_id)
+        if budget is None:
+            raise ValueError(
+                "TaskBudget reservation requires an existing TaskBudget"
+            )
+
+        supplied_generation = values.get(
+            "task_budget_incarnation_generation"
+        )
+        if (
+            supplied_generation is not None
+            and int(supplied_generation)
+            != int(budget.incarnation_generation)
+        ):
+            raise ValueError(
+                "TaskBudget reservation incarnation does not match source budget"
+            )
+
+        reservation_values = dict(values)
+        reservation_values["task_budget_incarnation_generation"] = int(
+            budget.incarnation_generation
+        )
+        record = TaskBudgetReservationRecord(**reservation_values)
         self.session.add(record)
         await self.session.flush()
         return record
@@ -685,15 +789,20 @@ class AgentRepository(BaseRepository):
         task_id: str,
         kind: str,
         reservation_key: str,
+        *,
+        expected_incarnation_generation: int | None = None,
     ):
-        result = await self.session.execute(
-            select(TaskBudgetReservationRecord).where(
-                TaskBudgetReservationRecord.task_id == task_id,
-                TaskBudgetReservationRecord.kind == kind,
-                TaskBudgetReservationRecord.reservation_key
-                == reservation_key,
-            )
+        statement = select(TaskBudgetReservationRecord).where(
+            TaskBudgetReservationRecord.task_id == task_id,
+            TaskBudgetReservationRecord.kind == kind,
+            TaskBudgetReservationRecord.reservation_key == reservation_key,
         )
+        if expected_incarnation_generation is not None:
+            statement = statement.where(
+                TaskBudgetReservationRecord.task_budget_incarnation_generation
+                == int(expected_incarnation_generation)
+            )
+        result = await self.session.execute(statement)
         return result.scalar_one_or_none()
 
     async def has_execution_for_task(self, task_id: str) -> bool:
