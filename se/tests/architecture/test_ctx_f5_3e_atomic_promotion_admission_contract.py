@@ -121,7 +121,7 @@ def test_ctx_f5_3e_binds_canonical_replay_and_non_authorizing_constructor():
     constructor = _function_source(MEMORY_DOMAIN, "create_memory_record")
     text = _normalized(CONTRACT)
 
-    assert "def _same_immutable_record" in memory_source
+    assert "def memory_records_replay_equivalent" in memory_source
     assert "_immutable_record_canonical_bytes" in memory_source
     assert "canonical_memory_bytes" in memory_source
     assert "already-authorized provenance input" in constructor
