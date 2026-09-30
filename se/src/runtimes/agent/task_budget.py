@@ -3713,6 +3713,9 @@ class TaskBudgetService:
                             task_id,
                             TaskBudgetReservationKind.RELEASE_EXECUTION.value,
                             reservation_key,
+                            expected_incarnation_generation=(
+                                expected_generation
+                            ),
                         )
                     )
                     if existing is not None:
