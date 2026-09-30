@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
@@ -640,6 +641,42 @@ async def test_ubq2_replay_precedes_expired_window_rollover(
             )
             assert bridge is not None
             assert bridge.window_epoch == 1
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_taskbudget_allocator_concurrent_legacy_creators_are_unique(
+    tmp_path: Path,
+) -> None:
+    _, engine, _, factory, service, _, disabled = await _setup(tmp_path)
+    try:
+        service._user_budget_dual_accounting = disabled
+
+        async def _create(task_id: str) -> None:
+            await service.create_task_with_budget(
+                _task(task_id, "user-a"),
+                identity=_identity("user-a"),
+            )
+
+        await asyncio.gather(
+            _create("task-generation-a"),
+            _create("task-generation-b"),
+        )
+
+        async with factory() as uow:
+            first = await uow.agents.get_task_budget("task-generation-a")
+            second = await uow.agents.get_task_budget("task-generation-b")
+            assert first is not None and second is not None
+            assert first.incarnation_generation != second.incarnation_generation
+            assert {
+                int(first.incarnation_generation),
+                int(second.incarnation_generation),
+            } == {1, 2}
+            allocator = await uow.agents.get_task_budget_incarnation_allocator()
+            assert allocator is not None
+            assert int(allocator.next_generation) == 3
             await uow.commit()
     finally:
         await engine.dispose()
