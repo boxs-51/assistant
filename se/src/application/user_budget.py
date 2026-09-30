@@ -88,6 +88,14 @@ class MirrorDimension:
     capability_id: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class DualAccountingReconciliationItem:
+    status: str
+    task_id: str
+    bridge_receipt_id: str | None = None
+    mirror_dimension: str | None = None
+
+
 def _canonical_sha256(payload: dict[str, Any]) -> str:
     encoded = json.dumps(
         payload,
@@ -126,6 +134,120 @@ class UserBudgetDualAccountingService:
             exc,
             (UserBudgetConflictError, UserBudgetSerializationError),
         )
+
+    async def reconcile_task(
+        self,
+        task_id: str,
+    ) -> tuple[DualAccountingReconciliationItem, ...]:
+        """Read-only UBQ-2 provenance reconciliation for one Task.
+
+        Missing source rows are deliberately not called canonical GC because
+        R11 persists no durable GC receipt/tombstone proving why they vanished.
+        """
+        async with self._uow_factory() as uow:
+            binding = await uow.user_budgets.get_task_binding(task_id)
+            if binding is None:
+                await uow.commit()
+                return (
+                    DualAccountingReconciliationItem(
+                        status="LEGACY_UNBOUND",
+                        task_id=task_id,
+                    ),
+                )
+
+            bridges = await uow.user_budgets.list_dual_accounting_receipts(
+                task_id
+            )
+            task = await uow.agents.get_task(task_id)
+            if task is None:
+                await uow.commit()
+                if not bridges:
+                    return (
+                        DualAccountingReconciliationItem(
+                            status="SOURCE_ABSENT_UNPROVEN",
+                            task_id=task_id,
+                        ),
+                    )
+                return tuple(
+                    DualAccountingReconciliationItem(
+                        status="SOURCE_ABSENT_UNPROVEN",
+                        task_id=task_id,
+                        bridge_receipt_id=str(row.bridge_receipt_id),
+                        mirror_dimension=str(row.mirror_dimension),
+                    )
+                    for row in bridges
+                )
+
+            budget = await uow.agents.get_task_budget(task_id)
+            if budget is None:
+                await uow.commit()
+                return (
+                    DualAccountingReconciliationItem(
+                        status="SOURCE_RESERVATION_MISSING",
+                        task_id=task_id,
+                    ),
+                )
+            generation = int(budget.incarnation_generation)
+
+            if not bridges:
+                await uow.commit()
+                return (
+                    DualAccountingReconciliationItem(
+                        status="OK",
+                        task_id=task_id,
+                    ),
+                )
+
+            items: list[DualAccountingReconciliationItem] = []
+            for bridge in bridges:
+                status = "OK"
+                source = await uow.agents.get_task_budget_reservation(
+                    task_id,
+                    str(bridge.task_budget_kind),
+                    str(bridge.task_budget_reservation_key),
+                    expected_incarnation_generation=generation,
+                )
+                if source is None:
+                    status = "SOURCE_RESERVATION_MISSING"
+                elif (
+                    str(source.payload_fingerprint)
+                    != str(bridge.source_payload_fingerprint)
+                ):
+                    status = "PAYLOAD_MISMATCH"
+                elif str(bridge.mirror_dimension) != "NO_CHARGE":
+                    ubq = await uow.user_budgets.get_reservation(
+                        str(bridge.owner_user_id),
+                        str(bridge.ubq_idempotency_key),
+                    )
+                    if ubq is None:
+                        status = "MISSING_UBQ"
+                    elif (
+                        str(ubq.reservation_id)
+                        != str(bridge.ubq_reservation_id)
+                        or int(ubq.window_epoch) != int(bridge.window_epoch)
+                        or str(ubq.resource_kind)
+                        != str(bridge.mirror_dimension)
+                        or str(ubq.payload_fingerprint)
+                        != str(bridge.ubq_payload_fingerprint)
+                        or str(ubq.state)
+                        != UserBudgetReservationState.SETTLED.value
+                        or int(ubq.settled_amount_atomic or 0)
+                        != int(bridge.amount_atomic)
+                        or (ubq.capability_id or None)
+                        != (bridge.capability_id or None)
+                    ):
+                        status = "PAYLOAD_MISMATCH"
+
+                items.append(
+                    DualAccountingReconciliationItem(
+                        status=status,
+                        task_id=task_id,
+                        bridge_receipt_id=str(bridge.bridge_receipt_id),
+                        mirror_dimension=str(bridge.mirror_dimension),
+                    )
+                )
+            await uow.commit()
+            return tuple(items)
 
     async def preflight_binding(
         self,
