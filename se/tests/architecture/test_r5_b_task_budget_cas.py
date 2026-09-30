@@ -36,6 +36,7 @@ async def _seed(sessions):
         session.add(
             TaskBudgetRecord(
                 task_id="task-cas",
+                incarnation_generation=1,
                 revision=0,
                 state="OPEN",
                 max_total_executions=4,
