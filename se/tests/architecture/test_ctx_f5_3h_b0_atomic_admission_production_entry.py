@@ -95,6 +95,7 @@ def test_ctx_f5_3h_b0_freezes_pure_preflight_before_write_intent() -> None:
     memory_repository = MEMORY_REPOSITORY.read_text(encoding="utf-8")
     promotion = PROMOTION.read_text(encoding="utf-8")
 
+    assert "def canonical_memory_bytes(" in memory
     assert "def memory_content_digest(" in memory
     assert "def validate_promotion_reservation_integrity(" in promotion
     assert "async def sqlite_memory_admission_transaction(" in memory_repository
@@ -104,8 +105,12 @@ def test_ctx_f5_3h_b0_freezes_pure_preflight_before_write_intent() -> None:
 
     for phrase in (
         "validate_promotion_reservation_integrity(reservation)",
-        "compute payload digest using existing memory_content_digest(content)",
-        "No repository read is allowed in preflight",
+        "canonicalize caller content to detached canonical JSON bytes",
+        "materialize one detached canonical content_snapshot",
+        "compute payload digest using existing memory_content_digest(content_snapshot)",
+        "AUTHORIZED PAYLOAD = detached canonical preflight snapshot",
+        "After snapshot completion, the original caller content object MUST NOT be read or used again",
+        "No repository read is allowed during validation, canonicalization, snapshot creation, or digest computation",
         "immediately enter sqlite_memory_admission_transaction(session)",
         "BEFORE any reservation or Memory durable read",
         "No second digest implementation is allowed",
@@ -150,6 +155,8 @@ def test_ctx_f5_3h_b0_freezes_expected_memory_and_state_machine() -> None:
         "promotion_authority_id = durable reservation authority id",
         "metadata = durable intent.metadata",
         "memory_schema_version = durable intent.memory_schema_version",
+        "content = detached preflight content_snapshot",
+        "exact same detached preflight content_snapshot",
         "pre-existing Memory by exact authority -> PromotionAdmissionMemoryReplayConflictError",
         "ZERO put",
         "ZERO consume",
@@ -167,6 +174,10 @@ def test_ctx_f5_3h_b0_freezes_exit_evidence_and_closed_authority() -> None:
     for phrase in (
         "H-B2 production cannot merge without H-B3-equivalent exit evidence",
         "22. durable-row corruption cannot be misreported as reservation-not-issued or replay success",
+        "23. mutable caller content is detached before the first session/transaction await",
+        "24. mutation of the original caller dict/list after preflight cannot change the persisted/compared Memory payload or identity",
+        "25. the original caller content object is never reused after snapshot creation",
+        "26. payload digest and create_memory_record(...) consume the same detached snapshot",
         "H-B1 production CLAIM remains CLOSED",
         "H-B2 production CLAIM remains CLOSED",
         "runtime/API/source/non-SQLite authority = CLOSED",
