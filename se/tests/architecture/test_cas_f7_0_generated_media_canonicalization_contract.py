@@ -194,8 +194,17 @@ def test_f7_p1_rejects_multi_object_response_before_first_ingest():
 
 
 def test_f7_p1_rejects_generated_media_on_nonterminal_tool_call_response():
+    response_schema = _read("se/src/domain/schemas/response.py")
     direct = _read("se/src/runtimes/chat/direct.py")
     agent = _read("se/src/runtimes/agent/runtime.py")
+
+    for phrase in (
+        "class GatewayChoice(GatewayBaseModel):",
+        "message: GatewayMessage",
+        "class GatewayResponse(GatewayBaseModel):",
+        "choices: List[GatewayChoice]",
+    ):
+        assert phrase in response_schema
 
     for phrase in (
         "transcript.append(response.message)",
@@ -216,7 +225,12 @@ def test_f7_p1_rejects_generated_media_on_nonterminal_tool_call_response():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
         "terminal non-stream assistant response with no tool calls",
-        "AND response.message.tool_calls is empty",
+        "AND response.choices[0].message.tool_calls is empty",
+        "provider-neutral preflight operates on the decoded GatewayResponse",
+        "selected_choice = response.choices[0]",
+        "require selected_choice.message.tool_calls to be empty",
+        "GatewayResponse itself has no top-level message field",
+        "InferenceResponse.message.tool_calls checks are supporting consumer-terminal evidence only",
         "any durable generated-media object on a response with one or more tool_calls",
         "nonterminal intermediate response in the initial F7-P1 slice",
         "fail closed BEFORE first CAS ingest",
@@ -226,10 +240,12 @@ def test_f7_p1_rejects_generated_media_on_nonterminal_tool_call_response():
         "AGENT likewise transitions to FINALIZING and COMPLETED only when response.message.tool_calls is empty",
         "F7-P1 MUST NOT create a READY asset from an intermediate tool-loop response",
         "Supporting generated media on tool-call-bearing intermediate responses is deferred.",
-        "terminal response with empty tool_calls",
+        "response.choices[0].message.tool_calls is empty",
         "generated media on any response with non-empty tool_calls fails closed before the first CAS ingest with ZERO CAS ingest attempts / ZERO READY assets",
     ):
         assert phrase in document
+
+    assert "AND response.message.tool_calls is empty" not in document
 
 
 def test_f7_p1_nonstream_filedata_requires_preserve_or_reject_compatibility():
@@ -312,7 +328,7 @@ def test_f7_p1_freezes_one_ingest_attempt_no_internal_retry():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     for phrase in (
-        "at most ONE durable generated-media object is eligible per terminal successful non-stream assistant response, it must be in choice index 0, and response.message.tool_calls must be empty",
+        "at most ONE durable generated-media object is eligible per terminal successful non-stream assistant response, it must be in choice index 0, and response.choices[0].message.tool_calls must be empty",
         "response cardinality greater than one fails closed before the first CAS ingest with ZERO CAS ingest attempts",
         "one canonicalization pass for the sole admitted generated-media object",
         "no automatic CAS canonicalization retry after ingest has begun",
@@ -496,7 +512,7 @@ def test_f7_0_exit_gate_keeps_production_closed_until_replacement_green():
     for phrase in (
         "exact current main",
         "F7-P1 is non-stream provider-response-only",
-        "non-stream complete-object boundary, terminal-response empty-tool_calls fence, selected-choice-0 fence and response-wide cardinality fence",
+        "non-stream complete-object boundary, selected-choice-0 fence, exact response.choices[0].message.tool_calls empty terminal-response fence, and response-wide cardinality fence",
         "generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED, provenance must survive successful decode, and terminal rejection occurs only in provider-neutral post-success preflight before first CAS ingest",
         "streaming generated media is deferred to separate F7-S authority",
         "tool-generated media is deferred to separate F7-T authority",
