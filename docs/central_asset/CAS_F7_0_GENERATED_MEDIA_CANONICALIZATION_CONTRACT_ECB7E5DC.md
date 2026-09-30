@@ -242,7 +242,7 @@ Provider name, model, provider response ID and MIME/filename are metadata/proven
 
 Before any CAS ingest, the first F7-P1 production slice MUST perform a response-wide generated-media cardinality preflight over the fully decoded successful NON-STREAM provider response only.
 
-The initial production contract deliberately admits **at most ONE durable generated-media object in the consumer-selected choice of a non-stream provider response**.
+The initial production contract deliberately admits **at most ONE durable generated-media object in the consumer-selected choice of a terminal non-stream assistant response with no tool calls**.
 
 Normative behavior:
 
@@ -253,8 +253,17 @@ Normative behavior:
 exactly 1 durable generated-media object
 AND it is in consumer-selected choice index 0
 AND its source provenance is explicitly preserved and F7-P1-admitted
+AND response.message.tool_calls is empty
+-> terminal consumer-visible assistant response is eligible
 -> validate the sole object completely
 -> exactly one CAS ingest may begin
+
+any durable generated-media object on a response with one or more tool_calls
+-> nonterminal intermediate response in the initial F7-P1 slice
+-> fail closed BEFORE first CAS ingest
+-> ZERO CAS ingest attempts
+-> ZERO READY assets created for that logical response
+-> provider success remains consumed; MUST NOT trigger provider fallback/regeneration
 
 any durable generated-media object in choice index >0
 -> unsupported in the first F7-P1 slice
@@ -273,7 +282,11 @@ The cardinality preflight counts every provider-produced attachment/object whose
 
 Current downstream Agent projection is explicit: `ProviderInferenceAdapter.complete(...)` consumes `response.choices[0]`. Therefore the first F7-P1 slice freezes **choice index 0 as the only consumer-selected choice eligible to carry canonicalized generated media**. If any generated-media candidate is present in choice index >0, the response fails closed before the first CAS ingest. F7-P1 MUST NOT create a READY asset that the current consumer projection would immediately discard.
 
-For the sole admitted object, all deterministic pre-ingest validation that can be completed without storage side effects MUST complete before `AssetService.ingest_stream(...)` begins: authenticated owner, non-stream complete object boundary, selected choice index 0, preserved generated-media provenance, transport decode, MIME/metadata requirements, and configured size bound.
+The first slice also freezes **terminal-response eligibility** across both current consumers. DIRECT appends each inference response but returns it only when `response.message.tool_calls` is empty; otherwise it executes tools and continues the inference loop. AGENT likewise transitions to `FINALIZING` and `COMPLETED` only when `response.message.tool_calls` is empty; otherwise it enters the tool-calling path and continues. Therefore any generated-media object on a tool-call-bearing response is unsupported in initial F7-P1 and MUST fail closed before first CAS ingest with ZERO CAS ingest attempts / ZERO READY assets. F7-P1 MUST NOT create a READY asset from an intermediate tool-loop response that may never become the final consumer-visible assistant result.
+
+Supporting generated media on tool-call-bearing intermediate responses is deferred. It requires a separate contract for durable intermediate attachment/history semantics and must not be inferred from F7-P1.
+
+For the sole admitted object, all deterministic pre-ingest validation that can be completed without storage side effects MUST complete before `AssetService.ingest_stream(...)` begins: authenticated owner, non-stream complete object boundary, terminal response with empty `tool_calls`, selected choice index 0, preserved generated-media provenance, transport decode, MIME/metadata requirements, and configured size bound.
 
 Multi-object canonicalization is deferred to a separate later contract/audit that proves either an atomic batch primitive or independently authorized compensation/rollback authority. F7-P1 MUST NOT infer READY deletion, cleanup or rollback authority to compensate a partially ingested multi-object response.
 
@@ -284,7 +297,8 @@ Future application composition:
 ```text
 GeneratedAssetCanonicalizer
   -> validate authenticated owner
-  -> validate one complete non-stream provider-generated object in choice index 0
+  -> validate terminal non-stream assistant response with empty tool_calls
+  -> validate one complete provider-generated object in choice index 0
   -> require preserved generated-media provenance
   -> decode admitted inline transient provider transport
   -> enforce configured AssetStorageSettings.max_upload_bytes
@@ -307,8 +321,9 @@ GeneratedAssetCanonicalizer
 Current `AssetService.ingest_stream` allocates new asset/blob IDs and is not a content-idempotency primitive.
 
 Therefore the first F7-P1 slice freezes:
-- at most ONE durable generated-media object is eligible per successful non-stream provider response and it must be in choice index 0;
+- at most ONE durable generated-media object is eligible per terminal successful non-stream assistant response, it must be in choice index 0, and `response.message.tool_calls` must be empty;
 - response cardinality greater than one fails closed before the first CAS ingest with ZERO CAS ingest attempts;
+- generated media on any response with non-empty `tool_calls` fails closed before the first CAS ingest with ZERO CAS ingest attempts / ZERO READY assets;
 - one canonicalization pass for the sole admitted generated-media object;
 - no automatic CAS canonicalization retry after ingest has begun;
 - no provider regeneration on CAS failure;
@@ -456,6 +471,7 @@ Session regeneration remains CLOSED.
 F7-P1 non-stream fails closed on:
 - more than one durable generated-media object in one non-stream provider response;
 - any durable generated-media object outside consumer-selected choice index 0;
+- any generated-media object on a nonterminal response with non-empty `tool_calls`;
 - unsupported provider fileData/generic URL/remote-handle generated media, regardless of whether provenance is preserved;
 - missing authenticated owner;
 - incomplete/ambiguous generated object;
@@ -469,6 +485,7 @@ F7-P1 non-stream fails closed on:
 Failure MUST NOT:
 - perform any CAS ingest when response cardinality is greater than one;
 - perform any CAS ingest when generated media exists outside choice index 0;
+- perform any CAS ingest when the response has generated media and non-empty `tool_calls`;
 - return unsupported generated fileData as an ordinary durable/raw URL substitute;
 - expose provider/base64 identity as substitute durable canonical message state;
 - fall back to legacy `/v1/files`;
@@ -491,7 +508,8 @@ This is a **future production-candidate map**, not a production grant.
 | `se/src/provider/gemini/converters/chats/response.py` | provider decoding/lowering; current non-stream extensionless fileData and stream paths can lose generated-media provenance/cardinality | REQUIRED future F7-P1 compatibility change to preserve non-stream generated fileData provenance through successful decode; downstream provider-neutral preflight performs terminal rejection while fileData remains EXCLUDED/CLOSED; separate REQUIRED future F7-S change for streaming |
 | other provider response converters | decoding/lowering only | NON-STREAM audit for F7-P1; streaming eligibility CLOSED until each provider preserves full terminal cardinality/media identity |
 | `se/src/runtimes/agent/adapters/inference.py` | AGENT consumer projects response.choices[0] | EXPECT NO CHANGE; F7-P1 preflight must reject generated media in choice index >0 before ingest |
-| `se/src/runtimes/agent/runtime.py` | Agent execution/tool-result authority | NO CHANGE in F7-P1 |
+| `se/src/runtimes/chat/direct.py` | DIRECT terminal-response evidence; tool-call responses continue the loop | EXPECT NO CHANGE; F7-P1 preflight must reject generated media when tool_calls is non-empty before ingest |
+| `se/src/runtimes/agent/runtime.py` | AGENT terminal-response/tool-loop evidence and execution authority | NO CHANGE; F7-P1 preflight uses empty tool_calls as terminal-response eligibility evidence only |
 | `se/src/runtimes/agent/persistence.py` | COMMITTED/PROVISIONAL durable authority | NO CHANGE |
 | `se/src/runtimes/agent/stream.py` | canonical public response/tool activity projection | NO CHANGE / NOT ASSET COMMITMENT AUTHORITY |
 | `se/src/infrastructure/storage/repositories/agent.py` | Agent durable result repository | NO CHANGE |
@@ -585,7 +603,7 @@ A first provider-response production PRE-CLAIM may be considered only when the z
 7. `AssetStorageSettings.max_upload_bytes` is the authoritative server ingestion bound;
 8. F6 32 MiB render-memory limit is explicitly not the F7 server ingest bound;
 9. `origin_type="ASSISTANT"` for F7-P1 provider-generated assistant media;
-10. non-stream complete-object boundary, selected-choice-0 fence and response-wide cardinality fence;
+10. non-stream complete-object boundary, terminal-response empty-tool_calls fence, selected-choice-0 fence and response-wide cardinality fence;
 11. non-stream admitted source provenance is explicit; generated fileData/URL/remote-handle forms remain EXCLUDED/CLOSED, provenance must survive successful decode, and terminal rejection occurs only in provider-neutral post-success preflight before first CAS ingest;
 12. current streaming generated-media exclusion is explicit and future F7-S requires full candidate/media identity preservation;
 13. authenticated owner/canonical identity rules;
