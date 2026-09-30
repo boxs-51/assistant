@@ -111,7 +111,6 @@ class _BarrierAgentRepository(AgentRepository):
                 task_id,
                 expected_revision,
                 values,
-                expected_incarnation_generation=expected_incarnation_generation,
             )
         finally:
             self._timing.task_ns.append(time.perf_counter_ns() - started_ns)
