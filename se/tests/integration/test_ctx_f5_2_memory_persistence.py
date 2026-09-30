@@ -943,7 +943,7 @@ def test_ctx_f5_2_migration_is_linear_and_upgrades_downgrades_real_sqlite(
     config = _config(database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["25a_ubq1_user_budget_foundation"]
+    assert script.get_heads() == ["26a_ubq2_dual_accounting_bridge"]
     assert (
         script.get_revision("21a_ctx_f5_memory_foundation").down_revision
         == "20a_cas_f5_binding_foundation"
