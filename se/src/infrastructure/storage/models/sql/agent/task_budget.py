@@ -99,6 +99,10 @@ class TaskBudgetRecord(Base):
             "incarnation_generation",
             name="uq_task_budget_task_incarnation",
         ),
+        UniqueConstraint(
+            "incarnation_generation",
+            name="uq_task_budget_incarnation_generation",
+        ),
         CheckConstraint(
             "incarnation_generation > 0 AND incarnation_generation < 9223372036854775807",
             name="ck_task_budget_incarnation_generation",
