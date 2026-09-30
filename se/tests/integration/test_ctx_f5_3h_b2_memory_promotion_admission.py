@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
+from sqlalchemy import text, update
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.context.memory import memory_content_digest
 from se.src.context.memory_promotion import (
     MemoryPromotionIntent,
     MemoryPromotionProofScope,
+    PromotionAdmissionPersistenceFailureError,
     PromotionReservation,
     SourcePromotionProof,
 )
@@ -67,6 +72,29 @@ async def _database():
         await connection.run_sync(MemoryRecordRow.__table__.create)
         await connection.run_sync(PromotionReservationRow.__table__.create)
     return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def _file_database(database: Path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{database.as_posix()}",
+        connect_args={"timeout": 0.01},
+    )
+    async with engine.begin() as connection:
+        await connection.execute(text("PRAGMA journal_mode=WAL"))
+        await connection.run_sync(MemoryRecordRow.__table__.create)
+        await connection.run_sync(PromotionReservationRow.__table__.create)
+    return engine, async_sessionmaker(engine, expire_on_commit=False)
+
+
+async def _seed_reservation(sessions, authority_id: str, intent: MemoryPromotionIntent):
+    async with sessions() as session:
+        repository = DurablePromotionReservationRepository(session)
+        durable = await repository.insert_or_converge_issued_candidate(
+            promotion_authority_id=authority_id,
+            intent=intent,
+        )
+        await session.commit()
+        return durable
 
 
 @pytest.mark.asyncio
@@ -128,5 +156,173 @@ async def test_ctx_f5_3h_b2_sqlite_first_admission_and_consumed_replay_are_atomi
             assert durable.state is DurablePromotionReservationState.CONSUMED
             assert persisted is not None
             assert persisted.memory_id == first.memory_id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3h_b2_cancellation_after_memory_put_rolls_back_both_effects(
+    monkeypatch,
+):
+    engine, sessions = await _database()
+    content = {"fact": "cancel"}
+    intent = _intent(content)
+    authority_id = "authority-h-b2-cancel"
+    reservation = PromotionReservation(
+        promotion_authority_id=authority_id,
+        intent=intent,
+    )
+    await _seed_reservation(sessions, authority_id, intent)
+
+    async def cancel_consume(self, promotion_authority_id):
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(
+        DurablePromotionReservationRepository,
+        "mark_consumed",
+        cancel_consume,
+    )
+
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await DurableMemoryPromotionAdmission(sessions).admit(
+                reservation=reservation,
+                content=content,
+            )
+
+        async with sessions() as session:
+            durable = await DurablePromotionReservationRepository(session).get(
+                authority_id
+            )
+            memory = await DurableMemoryRecordRepository(
+                session
+            ).get_by_promotion_authority(authority_id)
+
+            assert durable is not None
+            assert durable.state is DurablePromotionReservationState.ISSUED
+            assert memory is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3h_b2_post_entry_persistence_failure_rolls_back_both_effects(
+    monkeypatch,
+):
+    engine, sessions = await _database()
+    content = {"fact": "failure"}
+    intent = _intent(content)
+    authority_id = "authority-h-b2-failure"
+    reservation = PromotionReservation(
+        promotion_authority_id=authority_id,
+        intent=intent,
+    )
+    await _seed_reservation(sessions, authority_id, intent)
+
+    async def fail_consume(self, promotion_authority_id):
+        raise SQLAlchemyError("forced transition failure")
+
+    monkeypatch.setattr(
+        DurablePromotionReservationRepository,
+        "mark_consumed",
+        fail_consume,
+    )
+
+    try:
+        with pytest.raises(PromotionAdmissionPersistenceFailureError):
+            await DurableMemoryPromotionAdmission(sessions).admit(
+                reservation=reservation,
+                content=content,
+            )
+
+        async with sessions() as session:
+            durable = await DurablePromotionReservationRepository(session).get(
+                authority_id
+            )
+            memory = await DurableMemoryRecordRepository(
+                session
+            ).get_by_promotion_authority(authority_id)
+
+            assert durable is not None
+            assert durable.state is DurablePromotionReservationState.ISSUED
+            assert memory is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3h_b2_concurrent_same_reservation_converges_without_split_state(
+    tmp_path,
+):
+    engine, sessions = await _file_database(tmp_path / "ctx-h-b2-race.db")
+    content = {"fact": "race"}
+    intent = _intent(content)
+    authority_id = "authority-h-b2-race"
+    reservation = PromotionReservation(
+        promotion_authority_id=authority_id,
+        intent=intent,
+    )
+    await _seed_reservation(sessions, authority_id, intent)
+    service = DurableMemoryPromotionAdmission(sessions)
+
+    try:
+        first, second = await asyncio.gather(
+            service.admit(reservation=reservation, content=content),
+            service.admit(reservation=reservation, content={"fact": "race"}),
+        )
+
+        assert first.memory_id == second.memory_id
+
+        async with sessions() as session:
+            durable = await DurablePromotionReservationRepository(session).get(
+                authority_id
+            )
+            memory = await DurableMemoryRecordRepository(
+                session
+            ).get_by_promotion_authority(authority_id)
+
+            assert durable is not None
+            assert durable.state is DurablePromotionReservationState.CONSUMED
+            assert memory is not None
+            assert memory.memory_id == first.memory_id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3h_b2_durable_row_corruption_maps_to_persistence_failure():
+    engine, sessions = await _database()
+    content = {"fact": "corrupt"}
+    intent = _intent(content)
+    authority_id = "authority-h-b2-corrupt"
+    reservation = PromotionReservation(
+        promotion_authority_id=authority_id,
+        intent=intent,
+    )
+    await _seed_reservation(sessions, authority_id, intent)
+
+    try:
+        async with sessions() as session:
+            await session.execute(
+                update(PromotionReservationRow)
+                .where(
+                    PromotionReservationRow.promotion_authority_id
+                    == authority_id
+                )
+                .values(intent_digest="0" * 64)
+            )
+            await session.commit()
+
+        with pytest.raises(PromotionAdmissionPersistenceFailureError):
+            await DurableMemoryPromotionAdmission(sessions).admit(
+                reservation=reservation,
+                content=content,
+            )
+
+        async with sessions() as session:
+            memory = await DurableMemoryRecordRepository(
+                session
+            ).get_by_promotion_authority(authority_id)
+            assert memory is None
     finally:
         await engine.dispose()
