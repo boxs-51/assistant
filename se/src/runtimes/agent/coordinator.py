@@ -253,6 +253,9 @@ class MultiAgentCoordinator:
         return task
 
     async def create_task_async(self, *args, **kwargs) -> AgentTask:
+        identity = kwargs.get("identity")
+        if identity is None and len(args) >= 4:
+            identity = args[3]
         task = self.create_task(*args, **kwargs)
         values = {
             "id": task.task_id,
@@ -269,7 +272,10 @@ class MultiAgentCoordinator:
         }
         try:
             if self.task_budget_service is not None:
-                await self.task_budget_service.create_task_with_budget(values)
+                await self.task_budget_service.create_task_with_budget(
+                    values,
+                    identity=identity,
+                )
             else:
                 await self._persist("save_task", values)
         except BaseException:
