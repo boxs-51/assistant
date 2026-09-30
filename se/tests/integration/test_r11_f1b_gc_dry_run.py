@@ -57,6 +57,11 @@ async def _database():
 def _budget(task_id: str, *, closed: bool) -> TaskBudgetRecord:
     return TaskBudgetRecord(
         task_id=task_id,
+        incarnation_generation=(
+            1 if task_id == "task-active"
+            else 3 if task_id.endswith("-unsafe")
+            else 2
+        ),
         state="CLOSED" if closed else "OPEN",
         max_total_executions=8,
         max_active_executions=4,
