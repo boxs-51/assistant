@@ -1,12 +1,16 @@
 # CAS-F7-0 — Generated Media Canonicalization Contract Freeze
 
-Status: **CONTRACT / PRE-CLAIM / ARCHITECTURE-EVIDENCE REPLACEMENT CANDIDATE**
+Status: **CAS-F7-0 LANDED / F7-P1 PRE-CLAIM COMPOSITION AUTHORITY ADDENDUM CANDIDATE**
 
 Primary workspace: Issue #74  
 Canonical governance: Issue #85 v2.5  
 Independent release: Issue #74 comment #5854440946  
 Replacement audit findings: Issue #74 comment #5854824240  
 Final evidence re-anchor: `main@ecb7e5dc5c61aba9772d9f6ebfec303ce8a01755`
+
+F7-0 landing: PR #131 / merge commit `380ce309a9ab8743437e7932c7e859f2160c5c86` / post-merge Architecture #1641 GREEN/GREEN.  
+F7-P1 PRE-CLAIM composition re-freeze baseline: `main@9031690d176f0cd82484c83a645b6ced05f21f3b` / Architecture #1642 GREEN/GREEN.  
+Current blocking finding: `P1-CAS-F7-P1-COMPOSITION-AUTHORITY-GAP-1`.
 
 ## 1. Authority and scope
 
@@ -513,8 +517,12 @@ This is a **future production-candidate map**, not a production grant.
 | Path | Future role | F7-0 classification |
 |---|---|---|
 | `se/src/application/assets/generated.py` | proposed provider-neutral F7-P1 canonicalizer | EXPECTED NEW / production authority not released |
-| `se/src/application/assets/service.py` | existing ingest/finalize authority | EXPECT NO CHANGE |
-| `se/src/infrastructure/config/schemas.py` | authoritative `AssetStorageSettings.max_upload_bytes` definition | EXPECT NO CHANGE |
+| `se/src/application/assets/service.py` | existing ingest/finalize authority exposed as application-owned `context.container.asset_service` | EXPECT NO CHANGE / REUSE ONLY |
+| `se/src/runtimes/provider/runtime.py` | F7-P1 composition/injection owner inside `ProviderRuntime.initialize(context)` | EXPECTED future F7-P1 composition change; reuse `context.container.asset_service`, pass `context.config.assets.max_upload_bytes` read-only, inject provider-neutral canonicalizer into `ChatExecutionHandler`, preserve existing F5 `asset_projection_hook` |
+| `se/src/kernel/base.py` | existing `RuntimeContext` dependency boundary exposing `container` and `config` | EXPECT NO CHANGE |
+| `se/src/application/container.py` | existing application composition owner exposing `asset_service` | NO CHANGE; F7-P1 MUST NOT add a parallel CAS service or new bootstrap wiring here |
+| `se/src/main.py` | application bootstrap / container assembly | NO CHANGE for F7-P1 |
+| `se/src/infrastructure/config/schemas.py` | authoritative `AssetStorageSettings.max_upload_bytes` definition consumed via `context.config.assets.max_upload_bytes` | EXPECT NO CHANGE / READ-ONLY INPUT |
 | `se/src/infrastructure/storage/models/sql/assets/file.py` | existing valid `origin_type` enum/check | EXPECT NO CHANGE |
 | `se/src/provider/handlers/chat_handler.py` | non-stream post-provider response hook and terminal no-fallback boundary | EXPECTED future F7-P1 non-stream change; streaming generated-media path excluded from first slice |
 | `se/src/provider/gemini/converters/chats/response.py` | provider decoding/lowering; current non-stream extensionless fileData and stream paths can lose generated-media provenance/cardinality | REQUIRED future F7-P1 compatibility change to preserve non-stream generated fileData provenance through successful decode; downstream provider-neutral preflight performs terminal rejection while fileData remains EXCLUDED/CLOSED; separate REQUIRED future F7-S change for streaming |
@@ -531,6 +539,40 @@ This is a **future production-candidate map**, not a production grant.
 | F5 request-side hydration/projection | request-only downstream projection | NO CHANGE |
 
 No production file in this table may be edited under F7-0 authority.
+
+### F7-P1 composition / injection authority freeze
+
+The first production PRE-CLAIM MUST use the existing runtime dependency graph rather than minting a parallel bootstrap or CAS authority.
+
+Normative composition path:
+
+```text
+ProviderRuntime.initialize(context)
+  -> RuntimeContext.container / RuntimeContext.config
+  -> require existing context.container.asset_service
+  -> read context.config.assets.max_upload_bytes
+  -> construct provider-neutral GeneratedAssetCanonicalizer
+       using existing application-owned AssetService
+       and the read-only configured max_upload_bytes bound
+  -> inject canonicalizer into ChatExecutionHandler
+  -> preserve existing CAS-F5 request-side asset_projection_hook unchanged
+  -> provider execution succeeds
+  -> decoded non-stream GatewayResponse reaches shared provider-neutral post-success preflight
+  -> canonicalization succeeds OR fails terminally outside provider fallback/circuit-breaker accounting
+  -> only canonicalized response may return from ChatExecutionHandler
+```
+
+Authority rules:
+- `ProviderRuntime.initialize(context)` is the frozen F7-P1 **composition/injection owner** for the first production slice.
+- `context.container.asset_service` is the only application-owned CAS persistence service that F7-P1 may reuse. F7-P1 MUST NOT construct another `AssetService`, another storage/UoW authority, or another application container.
+- `context.config.assets.max_upload_bytes` is a read-only configuration input. F7-P1 does not own `AssetStorageSettings` schema or config bootstrap.
+- `se/src/application/container.py` and `se/src/main.py` remain NO CHANGE for the first F7-P1 production slice.
+- the landed F5 request-side `asset_projection_hook` wiring remains unchanged and independent from the new response-side generated-media canonicalizer.
+- missing/uninitialized `context.container.asset_service` at F7-P1 activation is fail-closed and MUST NOT be repaired by constructing a parallel persistence service inside ProviderRuntime.
+- canonicalizer failure after provider success is terminal F7 failure. It MUST NOT be charged to provider breaker health and MUST NOT cause provider fallback/reselection/regeneration.
+- this composition freeze opens no F7-S, F7-T, F8, READY deletion/GC, provider cleanup, session-regeneration, bootstrap, or configuration-schema authority.
+
+This addendum closes only the PRE-CLAIM composition-authority gap. It does not itself release F7-P1 production CLAIM.
 
 ## 17. Cross-issue dependency disposition
 
@@ -626,7 +668,8 @@ A first provider-response production PRE-CLAIM may be considered only when the z
 18. CTX/Agent/current-main dependency disposition;
 19. exact current-main health GREEN/GREEN and fresh exact-head Architecture Linux + Windows GREEN;
 20. independent replacement audit PASS;
-21. blocking F7-0 P0/P1/P2 = NONE.
+21. blocking F7-0 P0/P1/P2 = NONE;
+22. F7-P1 composition authority is frozen to `ProviderRuntime.initialize(context)` reusing `context.container.asset_service` and read-only `context.config.assets.max_upload_bytes`, with `application/container.py` and `main.py` NO CHANGE.
 
 Before that gate:
 
