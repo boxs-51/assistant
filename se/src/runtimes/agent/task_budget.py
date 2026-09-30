@@ -1762,9 +1762,6 @@ class TaskBudgetService:
                             ),
                             "error": None,
                         },
-                        expected_incarnation_generation=int(
-                            budget.incarnation_generation
-                        ),
                     )
                     if updated_task is None:
                         await uow.rollback()
