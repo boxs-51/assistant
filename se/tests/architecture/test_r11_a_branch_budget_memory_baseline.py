@@ -111,6 +111,7 @@ class _BarrierAgentRepository(AgentRepository):
                 task_id,
                 expected_revision,
                 values,
+                expected_incarnation_generation=expected_incarnation_generation,
             )
         finally:
             self._timing.task_ns.append(time.perf_counter_ns() - started_ns)
@@ -120,6 +121,8 @@ class _BarrierAgentRepository(AgentRepository):
         task_id,
         expected_revision,
         values,
+        *,
+        expected_incarnation_generation=None,
     ):
         started_ns = time.perf_counter_ns()
         try:
@@ -127,6 +130,7 @@ class _BarrierAgentRepository(AgentRepository):
                 task_id,
                 expected_revision,
                 values,
+                expected_incarnation_generation=expected_incarnation_generation,
             )
         finally:
             self._timing.budget_ns.append(time.perf_counter_ns() - started_ns)
@@ -148,6 +152,8 @@ class _BudgetBarrierAgentRepository(AgentRepository):
         task_id,
         expected_revision,
         values,
+        *,
+        expected_incarnation_generation=None,
     ):
         await self._barrier.wait()
         started_ns = time.perf_counter_ns()
@@ -156,6 +162,7 @@ class _BudgetBarrierAgentRepository(AgentRepository):
                 task_id,
                 expected_revision,
                 values,
+                expected_incarnation_generation=expected_incarnation_generation,
             )
         except Exception as exc:
             message = str(exc).lower()
