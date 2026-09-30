@@ -598,6 +598,37 @@ def test_f7_p1_composition_authority_reuses_runtime_context_and_asset_service():
         assert phrase in document
 
 
+def test_f7_p1_degraded_mode_keeps_text_available_and_generated_media_fail_closed():
+    runtime_source = _read("se/src/runtimes/provider/runtime.py")
+
+    for phrase in (
+        "Asset activation is optional for ordinary text inference.",
+        "canonical assets remain fail-closed.",
+        "asset_projection_hook = self._build_asset_projection_hook(context)",
+        "self.chat_handler = ChatExecutionHandler(**handler_kwargs)",
+        "self.chat_handler.asset_projection_hook = asset_projection_hook",
+    ):
+        assert phrase in runtime_source
+
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+    for phrase in (
+        "ProviderRuntime ordinary text inference MUST NOT depend on CAS asset-service readiness.",
+        "A decoded non-stream response with zero generated-media objects remains ordinary pass-through and requires no CAS ingest.",
+        "the F7-P1 response-side canonicalization boundary MUST remain installed/semantically enforced even when context.container.asset_service is unavailable or not ready",
+        "explicitly as an unavailable persistence state/sentinel rather than silently omit the response fence",
+        "generated media present while persistence is unavailable/not-ready is a terminal F7 canonicalization error after provider success and before any CAS ingest",
+        "ZERO CAS ingest attempts / ZERO READY assets",
+        "unavailable persistence MUST NOT permit raw/base64/provider URL identity to return as a substitute canonical result",
+        "missing/uninitialized context.container.asset_service MUST NOT be repaired by constructing a parallel persistence service inside ProviderRuntime",
+        "including persistence-unavailable generated media",
+        "MUST NOT be charged to provider breaker health",
+        "MUST NOT cause provider fallback/reselection/regeneration",
+        "F5 request-side asset projection readiness remains an independent concern",
+        "F7-P1 MUST NOT reinterpret F5 request hydration/projection readiness as permission to bypass the response-side generated-media fence",
+    ):
+        assert phrase in document
+
+
 def test_cross_issue_and_closed_authority_boundaries_are_explicit():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
