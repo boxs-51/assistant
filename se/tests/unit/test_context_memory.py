@@ -15,6 +15,7 @@ from se.src.context.memory import (
     create_memory_record,
     memory_content_digest,
     memory_id,
+    memory_records_replay_equivalent,
 )
 from se.src.context.source_identity import (
     ContextSourceKind,
@@ -327,3 +328,56 @@ async def test_ctx_f5_1_repository_revalidates_forged_source_snapshot():
 
     with pytest.raises(ValueError, match="context_source_id"):
         await repository.put(forged)
+
+
+def test_ctx_f5_3h_b1_public_replay_equivalence_ignores_only_top_level_created_at():
+    first = _record()
+    replay = MemoryRecord(
+        **{
+            **first.model_dump(mode="python"),
+            "created_at": first.created_at + timedelta(seconds=1),
+        }
+    )
+    conflicting = MemoryRecord(
+        **{
+            **first.model_dump(mode="python"),
+            "metadata": {"kind": "different"},
+        }
+    )
+
+    assert memory_records_replay_equivalent(first, replay)
+    assert not memory_records_replay_equivalent(first, conflicting)
+
+
+def test_ctx_f5_3h_b1_public_replay_equivalence_normalizes_source_datetime_offsets():
+    utc_source = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+        session_id="session-1",
+        source_created_at=datetime(2026, 1, 1, 0, 0, tzinfo=timezone.utc),
+        source_state="active",
+        metadata={"label": "canonical"},
+    )
+    offset_source = create_context_source_ref(
+        source_kind=ContextSourceKind.SESSION,
+        authority_id="session-1",
+        owner_user_id="user-1",
+        session_id="session-1",
+        source_created_at=datetime(
+            2026,
+            1,
+            1,
+            1,
+            0,
+            tzinfo=timezone(timedelta(hours=1)),
+        ),
+        source_state="active",
+        metadata={"label": "canonical"},
+    )
+
+    first = _record(source=utc_source)
+    replay = _record(source=offset_source)
+
+    assert first.memory_id == replay.memory_id
+    assert memory_records_replay_equivalent(first, replay)

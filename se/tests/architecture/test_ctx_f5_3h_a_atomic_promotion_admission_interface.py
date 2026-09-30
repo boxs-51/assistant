@@ -130,7 +130,7 @@ def test_ctx_f5_3h_a_requires_non_mutating_canonical_replay_helper():
 
     assert "def _immutable_record_canonical_bytes(" in memory
     assert 'exclude={"created_at"}' in memory
-    assert "def _same_immutable_record(" in memory
+    assert "def memory_records_replay_equivalent(" in memory
     assert "canonical_memory_bytes(material)" in memory
 
     for phrase in (

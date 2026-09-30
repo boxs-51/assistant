@@ -38,8 +38,8 @@ def test_ctx_f5_3h_b0_freezes_public_replay_helper_migration() -> None:
 
     assert "def _immutable_record_canonical_bytes(" in memory
     assert 'exclude={"created_at"}' in memory
-    assert "def _same_immutable_record(" in memory
-    assert "_same_immutable_record" in memory_repository
+    assert "def memory_records_replay_equivalent(" in memory
+    assert "memory_records_replay_equivalent" in memory_repository
 
     for phrase in (
         "memory_records_replay_equivalent",
