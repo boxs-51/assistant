@@ -378,9 +378,6 @@ class DurableAgentStore:
                 task_id,
                 expected_revision,
                 values,
-                expected_incarnation_generation=(
-                    expected_incarnation_generation
-                ),
             )
             if record is None:
                 raise TaskConflictError(
@@ -1852,6 +1849,9 @@ class DurableAgentStore:
                 task_id,
                 expected_revision,
                 values,
+                expected_incarnation_generation=(
+                    expected_incarnation_generation
+                ),
             )
             if record is None:
                 raise TaskBudgetConflictError(
