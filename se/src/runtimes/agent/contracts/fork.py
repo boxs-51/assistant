@@ -142,6 +142,7 @@ class ForkPlan:
     checkpoint_iteration: int
 
     expected_task_budget_revision: int
+    expected_task_budget_incarnation_generation: int
     budget_policy_fingerprint: str
 
     base_transcript: tuple[InferenceMessage, ...]
@@ -283,6 +284,9 @@ def fork_plan_fingerprint(values: ForkPlan | Mapping[str, Any]) -> str:
         "checkpoint_iteration": int(_get(values, "checkpoint_iteration")),
         "expected_task_budget_revision": int(
             _get(values, "expected_task_budget_revision")
+        ),
+        "expected_task_budget_incarnation_generation": int(
+            _get(values, "expected_task_budget_incarnation_generation")
         ),
         "budget_policy_fingerprint": _get(
             values,
