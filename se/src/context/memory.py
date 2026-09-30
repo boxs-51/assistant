@@ -355,7 +355,11 @@ def _immutable_record_canonical_bytes(record: MemoryRecord) -> bytes:
     return canonical_memory_bytes(material)
 
 
-def _same_immutable_record(left: MemoryRecord, right: MemoryRecord) -> bool:
+def memory_records_replay_equivalent(
+    left: MemoryRecord,
+    right: MemoryRecord,
+) -> bool:
+    """Return whether two Memory records have the same immutable replay material."""
     return _immutable_record_canonical_bytes(left) == _immutable_record_canonical_bytes(
         right
     )
@@ -381,7 +385,7 @@ class InMemoryMemoryRecordRepository:
 
             existing = self._by_id.get(record.memory_id)
             if existing is not None:
-                if not _same_immutable_record(existing, record):
+                if not memory_records_replay_equivalent(existing, record):
                     raise MemoryRecordConflictError(
                         "memory_id already exists with conflicting immutable record"
                     )
