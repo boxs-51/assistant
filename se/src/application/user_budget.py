@@ -17,6 +17,7 @@ from se.src.domain.schemas.user_budget import (
 from se.src.infrastructure.storage.repositories.user_budget import (
     UserBudgetConflictError,
     UserBudgetIntegrityError,
+    UserBudgetSerializationError,
 )
 
 
@@ -118,6 +119,13 @@ class UserBudgetDualAccountingService:
     @property
     def enabled(self) -> bool:
         return bool(self.settings.enabled)
+
+    @staticmethod
+    def is_retryable_error(exc: BaseException) -> bool:
+        return isinstance(
+            exc,
+            (UserBudgetConflictError, UserBudgetSerializationError),
+        )
 
     async def preflight_binding(
         self,
