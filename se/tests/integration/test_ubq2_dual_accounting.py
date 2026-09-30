@@ -463,3 +463,68 @@ def test_ubq2_bridge_schema_has_no_generic_sensitive_projection_column(
         } <= columns
     finally:
         raw.close()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_reconciliation_retains_bridge_but_does_not_invent_gc_proof(
+    tmp_path: Path,
+) -> None:
+    database, engine, _, factory, service, enabled, _ = await _setup(tmp_path)
+    try:
+        await service.create_task_with_budget(
+            _task("task-source-gone", "user-a"),
+            identity=_identity("user-a"),
+        )
+        await service.reserve_inference(
+            "task-source-gone",
+            request_id="source-gone-inference",
+        )
+
+        before = await enabled.reconcile_task("task-source-gone")
+        assert {item.status for item in before} == {"OK"}
+
+        # Model the canonical R11 reservation-first -> TaskBudget -> Task
+        # deletion order. UBQ binding/bridge are independently retained and
+        # no durable R11 GC receipt exists.
+        raw = sqlite3.connect(database)
+        try:
+            raw.execute(
+                "DELETE FROM agent_task_budget_reservations WHERE task_id=?",
+                ("task-source-gone",),
+            )
+            raw.execute(
+                "DELETE FROM agent_task_budgets WHERE task_id=?",
+                ("task-source-gone",),
+            )
+            raw.execute(
+                "DELETE FROM agent_tasks WHERE id=?",
+                ("task-source-gone",),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+
+        after = await enabled.reconcile_task("task-source-gone")
+        assert after
+        assert {item.status for item in after} == {
+            "SOURCE_ABSENT_UNPROVEN"
+        }
+
+        async with factory() as uow:
+            assert await uow.agents.get_task("task-source-gone") is None
+            assert (
+                await uow.user_budgets.get_task_binding("task-source-gone")
+                is not None
+            )
+            assert (
+                await uow.user_budgets.get_dual_accounting_receipt(
+                    "task-source-gone",
+                    "INFERENCE",
+                    "source-gone-inference",
+                    "INFERENCE_CALL",
+                )
+                is not None
+            )
+            await uow.commit()
+    finally:
+        await engine.dispose()
