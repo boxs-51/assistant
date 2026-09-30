@@ -3869,12 +3869,8 @@ class TaskBudgetService:
         task_id: str,
         calls: Sequence[dict[str, Any]],
     ) -> TaskBudget:
-        """Atomically reserve all not-yet-reserved logical tool calls.
-
-        Each tool_call_id keeps its own durable reservation identity. Replays
-        after WAITING/resume therefore do not consume additional task budget.
-        """
-        normalized: list[tuple[str, dict[str, Any], str]] = []
+        """Atomically reserve all not-yet-reserved logical tool calls."""
+        normalized: list[tuple[str, dict[str, Any], str, str]] = []
         seen: dict[str, str] = {}
         for raw in calls:
             payload = to_json_safe(
@@ -3884,6 +3880,7 @@ class TaskBudgetService:
             key = str(payload.get("tool_call_id") or "")
             if not key:
                 raise ValueError("tool_call_id must be non-empty")
+            capability_id = str(payload.get("capability_id") or "")
             fingerprint = _reservation_fingerprint(
                 TaskBudgetReservationKind.TOOL_CALL,
                 key,
@@ -3897,14 +3894,54 @@ class TaskBudgetService:
                     )
                 continue
             seen[key] = fingerprint
-            normalized.append((key, payload, fingerprint))
+            normalized.append(
+                (key, payload, fingerprint, capability_id)
+            )
 
         if not normalized:
             raise ValueError("calls must not be empty")
 
+        dual = self._user_budget_dual_accounting
+        binding, preflight_generation = (
+            await self._preflight_resource_accounting(task_id)
+            if dual is not None
+            else (None, None)
+        )
+        if binding is not None and any(
+            not capability_id
+            for _key, _payload, _fingerprint, capability_id in normalized
+        ):
+            raise TaskBudgetUnsupportedLegacyMirrorError(
+                "enrolled tool call requires canonical capability_id"
+            )
+
+        expected_generation = preflight_generation
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
+                    if binding is not None:
+                        await uow.user_budgets.begin_write_intent()
+                        current_binding = (
+                            await uow.user_budgets.get_task_binding(task_id)
+                        )
+                        if current_binding is None:
+                            raise TaskBudgetConflictError(
+                                "USER_BUDGET_BINDING_DRIFT: "
+                                "enrolled Task binding disappeared"
+                            )
+                        dual.require_same_binding(
+                            binding,
+                            current_binding,
+                        )
+                    elif dual is not None:
+                        current_binding = (
+                            await uow.user_budgets.get_task_binding(task_id)
+                        )
+                        if current_binding is not None:
+                            raise TaskBudgetLegacyBecameEnrolledError(
+                                "legacy tool batch observed a durable UBQ binding"
+                            )
+
                     budget_record = await uow.agents.get_task_budget(task_id)
                     if budget_record is None:
                         if await uow.agents.has_execution_for_task(task_id):
@@ -3915,21 +3952,63 @@ class TaskBudgetService:
                         raise TaskBudgetRequiredError(
                             f"TaskBudget missing: {task_id}"
                         )
-                    budget = _budget_from_record(budget_record)
-                    missing: list[tuple[str, dict[str, Any], str]] = []
 
-                    for key, payload, fingerprint in normalized:
+                    actual_generation = int(
+                        budget_record.incarnation_generation
+                    )
+                    if expected_generation is None:
+                        expected_generation = actual_generation
+                    elif actual_generation != int(expected_generation):
+                        raise TaskBudgetIncarnationChangedError(
+                            "TaskBudget incarnation changed during tool batch"
+                        )
+
+                    budget = _budget_from_record(budget_record)
+                    missing: list[
+                        tuple[str, dict[str, Any], str, str]
+                    ] = []
+
+                    for (
+                        key,
+                        payload,
+                        fingerprint,
+                        capability_id,
+                    ) in normalized:
                         existing = (
                             await uow.agents.get_task_budget_reservation(
                                 task_id,
                                 TaskBudgetReservationKind.TOOL_CALL.value,
                                 key,
+                                expected_incarnation_generation=(
+                                    expected_generation
+                                ),
                             )
                         )
                         if existing is None:
-                            missing.append((key, payload, fingerprint))
-                        else:
-                            self._verify_reservation(existing, fingerprint)
+                            missing.append(
+                                (
+                                    key,
+                                    payload,
+                                    fingerprint,
+                                    capability_id,
+                                )
+                            )
+                            continue
+
+                        self._verify_reservation(existing, fingerprint)
+                        if binding is not None:
+                            await dual.require_mirror_replay_in_uow(
+                                uow,
+                                binding=binding,
+                                task_budget_kind=(
+                                    TaskBudgetReservationKind.TOOL_CALL.value
+                                ),
+                                reservation_key=key,
+                                source_payload_fingerprint=fingerprint,
+                                dimensions=dual.tool_call_dimensions(
+                                    capability_id
+                                ),
+                            )
 
                     if not missing:
                         await uow.commit()
@@ -3946,12 +4025,18 @@ class TaskBudgetService:
                         task_id,
                         budget.revision,
                         {"used_tool_calls": proposed},
+                        expected_incarnation_generation=expected_generation,
                     )
                     if updated is None:
                         await uow.rollback()
                         continue
 
-                    for key, _payload, fingerprint in missing:
+                    for (
+                        key,
+                        _payload,
+                        fingerprint,
+                        capability_id,
+                    ) in missing:
                         await uow.agents.save_task_budget_reservation(
                             {
                                 "task_id": task_id,
@@ -3960,18 +4045,37 @@ class TaskBudgetService:
                                 ),
                                 "reservation_key": key,
                                 "payload_fingerprint": fingerprint,
+                                "task_budget_incarnation_generation": (
+                                    expected_generation
+                                ),
                             }
                         )
+                        if binding is not None:
+                            await dual.mirror_resource_in_uow(
+                                uow,
+                                binding=binding,
+                                task_budget_kind=(
+                                    TaskBudgetReservationKind.TOOL_CALL.value
+                                ),
+                                reservation_key=key,
+                                source_payload_fingerprint=fingerprint,
+                                dimensions=dual.tool_call_dimensions(
+                                    capability_id
+                                ),
+                            )
+
                     result = _budget_from_record(updated)
                     await uow.commit()
                     return result
             except IntegrityError:
-                # Another writer may have committed one or more logical call
-                # reservations first. Re-read all keys in a fresh UoW.
                 continue
             except OperationalError as exc:
                 message = str(exc).lower()
                 if "locked" in message or "busy" in message:
+                    continue
+                raise
+            except Exception as exc:
+                if dual is not None and dual.is_retryable_error(exc):
                     continue
                 raise
 
