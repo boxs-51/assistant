@@ -398,6 +398,9 @@ class AgentForkPlanningService:
             "source_checkpoint_id": source_checkpoint_id,
             "checkpoint_iteration": int(checkpoint.iteration),
             "expected_task_budget_revision": int(budget.revision),
+            "expected_task_budget_incarnation_generation": int(
+                budget.incarnation_generation
+            ),
             "budget_policy_fingerprint": str(
                 budget.policy_fingerprint
             ),
@@ -1081,10 +1084,14 @@ async def revalidate_fork_plan_in_uow(
             "FORK_TASK_BUDGET_CLOSED",
             "TaskBudget is CLOSED.",
         )
-    if int(budget.revision) != int(plan.expected_task_budget_revision):
+    if (
+        int(budget.revision) != int(plan.expected_task_budget_revision)
+        or int(budget.incarnation_generation)
+        != int(plan.expected_task_budget_incarnation_generation)
+    ):
         raise ForkPlanRejected(
             "FORK_TASK_BUDGET_STALE",
-            "TaskBudget revision changed after FORK planning.",
+            "TaskBudget revision/incarnation changed after FORK planning.",
         )
     if str(budget.policy_fingerprint) != plan.budget_policy_fingerprint:
         raise ForkPlanRejected(
