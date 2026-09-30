@@ -591,7 +591,7 @@ def test_f7_p1_composition_authority_reuses_runtime_context_and_asset_service():
         "context.container.asset_service is the only application-owned CAS persistence service that F7-P1 may reuse",
         "context.config.assets.max_upload_bytes is a read-only configuration input",
         "se/src/application/container.py and se/src/main.py remain NO CHANGE for the first F7-P1 production slice",
-        "asset_projection_hook wiring remains unchanged and independent from the new response-side generated-media canonicalizer",
+        "asset_projection_hook readiness/wiring remains unchanged and independent from the new response-side generated-media canonicalizer",
         "MUST NOT cause provider fallback/reselection/regeneration",
         "does not itself release F7-P1 production CLAIM",
     ):
