@@ -3,10 +3,12 @@ from __future__ import annotations
 import asyncio
 import os
 import sqlite3
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
+import se.src.application.user_budget as user_budget_module
 from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -603,6 +605,7 @@ async def test_ubq2_mirror_failure_rolls_back_taskbudget_reservation_and_usage(
 @pytest.mark.asyncio
 async def test_ubq2_replay_precedes_expired_window_rollover(
     tmp_path: Path,
+    monkeypatch,
 ) -> None:
     database, engine, _, factory, service, _, _ = await _setup(tmp_path)
     try:
@@ -622,14 +625,31 @@ async def test_ubq2_replay_precedes_expired_window_rollover(
                 "WHERE owner_user_id='user-a'"
             ).fetchone()[0]
             assert original_count == 1
-            raw.execute(
-                "UPDATE user_budget_windows "
-                "SET expires_at='2000-01-01 00:00:00' "
-                "WHERE owner_user_id='user-a'"
-            )
-            raw.commit()
+            expires_at_raw = raw.execute(
+                "SELECT expires_at FROM user_budget_windows "
+                "WHERE owner_user_id='user-a' AND epoch=1"
+            ).fetchone()[0]
         finally:
             raw.close()
+
+        expires_at = datetime.fromisoformat(str(expires_at_raw))
+        if expires_at.tzinfo is None:
+            expires_at = expires_at.replace(tzinfo=timezone.utc)
+        future_now = expires_at.astimezone(timezone.utc) + timedelta(seconds=1)
+
+        class _FutureDateTime(datetime):
+            @classmethod
+            def now(cls, tz=None):
+                if tz is None:
+                    return future_now.replace(tzinfo=None)
+                return future_now.astimezone(tz)
+
+        # Do not mutate immutable window provenance to simulate expiry.
+        # Move the authoritative UBQ application clock beyond the original
+        # window instead. A broken replay path that consults/rolls the active
+        # window would now create a new epoch; the frozen contract requires
+        # exact replay to return the original bridge first.
+        monkeypatch.setattr(user_budget_module, "datetime", _FutureDateTime)
 
         replay = await service.reserve_inference(
             "task-replay-window",
