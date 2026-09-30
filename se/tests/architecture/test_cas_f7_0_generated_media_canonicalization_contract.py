@@ -312,7 +312,7 @@ def test_f7_p1_freezes_one_ingest_attempt_no_internal_retry():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     for phrase in (
-        "at most ONE durable generated-media object is eligible per successful non-stream provider response and it must be in choice index 0",
+        "at most ONE durable generated-media object is eligible per terminal successful non-stream assistant response, it must be in choice index 0, and response.message.tool_calls must be empty",
         "response cardinality greater than one fails closed before the first CAS ingest with ZERO CAS ingest attempts",
         "one canonicalization pass for the sole admitted generated-media object",
         "no automatic CAS canonicalization retry after ingest has begun",
