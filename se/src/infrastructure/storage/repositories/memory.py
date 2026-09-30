@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from se.src.context.memory import (
     MemoryRecord,
     MemoryRecordConflictError,
-    _same_immutable_record,
+    memory_records_replay_equivalent,
     canonical_memory_bytes,
     validate_memory_record_integrity,
 )
@@ -126,7 +126,7 @@ def _require_replay_equivalence(
     winner: MemoryRecord,
     incoming: MemoryRecord,
 ) -> MemoryRecord:
-    if not _same_immutable_record(winner, incoming):
+    if not memory_records_replay_equivalent(winner, incoming):
         raise MemoryRecordConflictError(
             "durable Memory identity already exists with conflicting immutable record"
         )
