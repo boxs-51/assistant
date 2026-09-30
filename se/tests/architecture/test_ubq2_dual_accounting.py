@@ -34,7 +34,7 @@ def test_ubq2_scope_and_safe_default_are_frozen() -> None:
 
     gc_executor = _text("se/src/runtimes/agent/gc_executor.py")
     gc_dry_run = _text("se/src/runtimes/agent/gc_dry_run.py")
-    sqlite_driver = _text("se/src/infrastructure/storage/drivers/sqlite.py")
+    sqlite_driver = _text("se/src/infrastructure/storage/drivers/sqlite/driver.py")
     assert "UserBudget" not in gc_executor
     assert "user_budget" not in gc_executor
     assert "UserBudget" not in gc_dry_run
