@@ -553,3 +553,74 @@ async def test_ctx_f5_3h_b2_cancellation_propagates_unchanged(monkeypatch):
             reservation=_reservation("authority-cancel", intent),
             content=content,
         )
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3h_b2_first_admission_thaws_nested_durable_metadata(monkeypatch):
+    content = {"fact": "nested-metadata"}
+    nested_metadata = {
+        "labels": {"tier": ["gold", "verified"]},
+        "flags": [True, {"source": "durable"}],
+    }
+    intent = _intent(content, suffix="nested-first", metadata=nested_metadata)
+    durable = _durable(
+        authority_id="authority-nested-first",
+        intent=intent,
+        state=DurablePromotionReservationState.ISSUED,
+    )
+    reservation_repo = _ReservationRepository(durable)
+    memory_repo = _MemoryRepository()
+    _install(
+        monkeypatch,
+        reservation_repository=reservation_repo,
+        memory_repository=memory_repo,
+    )
+
+    winner = await DurableMemoryPromotionAdmission(_SessionFactory()).admit(
+        reservation=_reservation(durable.promotion_authority_id, intent),
+        content=content,
+    )
+
+    assert winner.metadata["labels"]["tier"] == ("gold", "verified")
+    assert winner.metadata["flags"][1]["source"] == "durable"
+    assert memory_repo.put_calls == [winner]
+    assert reservation_repo.consume_calls == [durable.promotion_authority_id]
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3h_b2_consumed_replay_thaws_nested_durable_metadata(monkeypatch):
+    content = {"fact": "nested-replay"}
+    nested_metadata = {
+        "labels": {"tier": ["gold", "verified"]},
+        "flags": [True, {"source": "durable"}],
+    }
+    intent = _intent(content, suffix="nested-replay", metadata=nested_metadata)
+    durable = _durable(
+        authority_id="authority-nested-replay",
+        intent=intent,
+        state=DurablePromotionReservationState.CONSUMED,
+    )
+    existing = create_memory_record(
+        source_ref=durable.intent.source_ref_snapshot,
+        promotion_authority_id=durable.promotion_authority_id,
+        content=content,
+        metadata=nested_metadata,
+        memory_schema_version=durable.intent.memory_schema_version,
+    )
+    reservation_repo = _ReservationRepository(durable)
+    memory_repo = _MemoryRepository(existing=existing)
+    _install(
+        monkeypatch,
+        reservation_repository=reservation_repo,
+        memory_repository=memory_repo,
+    )
+
+    replay = await DurableMemoryPromotionAdmission(_SessionFactory()).admit(
+        reservation=_reservation(durable.promotion_authority_id, intent),
+        content={"fact": "nested-replay"},
+    )
+
+    assert replay.memory_id == existing.memory_id
+    assert replay.metadata["labels"]["tier"] == ("gold", "verified")
+    assert memory_repo.put_calls == []
+    assert reservation_repo.consume_calls == []
