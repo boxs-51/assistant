@@ -93,17 +93,38 @@ def test_ubq2_all_task_budget_replay_and_cas_calls_are_incarnation_bound() -> No
         "compare_and_set_task_budget",
     }
     missing: list[tuple[str, int]] = []
+    reservation_writes_missing_generation: list[int] = []
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call):
             continue
         func = node.func
-        if not isinstance(func, ast.Attribute) or func.attr not in guarded:
+        if not isinstance(func, ast.Attribute):
             continue
-        keywords = {item.arg for item in node.keywords if item.arg is not None}
-        if "expected_incarnation_generation" not in keywords:
-            missing.append((func.attr, node.lineno))
+        if func.attr in guarded:
+            keywords = {
+                item.arg for item in node.keywords if item.arg is not None
+            }
+            if "expected_incarnation_generation" not in keywords:
+                missing.append((func.attr, node.lineno))
+        elif func.attr == "save_task_budget_reservation":
+            if not node.args or not isinstance(node.args[0], ast.Dict):
+                reservation_writes_missing_generation.append(node.lineno)
+                continue
+            keys = {
+                item.value
+                for item in node.args[0].keys
+                if isinstance(item, ast.Constant)
+                and isinstance(item.value, str)
+            }
+            if "task_budget_incarnation_generation" not in keys:
+                reservation_writes_missing_generation.append(node.lineno)
 
     assert missing == [], (
         "Every TaskBudget reservation replay/CAS path must carry the exact "
         f"incarnation generation; missing={missing}"
+    )
+    assert reservation_writes_missing_generation == [], (
+        "Every TaskBudget reservation write must persist exact source "
+        "incarnation generation; missing lines="
+        f"{reservation_writes_missing_generation}"
     )
