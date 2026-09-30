@@ -112,9 +112,11 @@ def _task(task_id: str, owner: str, *, parent_task_id: str | None = None):
 
 async def _setup(tmp_path: Path):
     database = tmp_path / "ubq2-integration.sqlite"
-    command.upgrade(_config(database), "head")
-    _seed_user(database, "user-a")
-    _seed_user(database, "user-b")
+    # Alembic's env owns its own asyncio.run(), so invoke the synchronous
+    # command outside pytest's already-running event loop.
+    await asyncio.to_thread(command.upgrade, _config(database), "head")
+    await asyncio.to_thread(_seed_user, database, "user-a")
+    await asyncio.to_thread(_seed_user, database, "user-b")
 
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{database.as_posix()}",
