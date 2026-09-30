@@ -1,0 +1,678 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from ...infrastructure.storage.transcript_representation import (
+    canonical_transcript_messages,
+)
+from .checkpoint_transcript import (
+    CheckpointTranscriptMaterializationError,
+    materialize_checkpoint_transcript_in_uow,
+)
+
+
+class SafePointReconstructionError(RuntimeError):
+    """Durable state cannot prove one R7-C-compatible safe point."""
+
+
+@dataclass(frozen=True, slots=True)
+class R7CSafePoint:
+    transcript_snapshot: tuple[dict[str, Any], ...]
+    iteration_number: int
+    iteration_id: str | None
+    ordered_tool_calls: tuple[Any, ...]
+    ordered_pending_invocations: tuple[dict[str, Any], ...]
+    checkpoint_id: str | None
+    checkpoint_revision: int | None
+
+
+def recovery_receipt_payload(
+    *,
+    execution_id: str,
+    source_revision: int,
+    target_revision: int,
+    checkpoint_id: str,
+    observed_owner_instance_id: str,
+    observed_lease_generation: int,
+    observed_lease_expires_at: datetime,
+    takeover_now_utc: datetime,
+) -> dict[str, Any]:
+    """Return the deterministic R12-E receipt/target proof payload."""
+
+    return {
+        "execution_id": str(execution_id),
+        "source_revision": int(source_revision),
+        "target_revision": int(target_revision),
+        "target_state": "WAITING",
+        "wait_reason": "RECOVERY",
+        "checkpoint_id": str(checkpoint_id),
+        "observed_owner_instance_id": str(observed_owner_instance_id),
+        "observed_lease_generation": int(observed_lease_generation),
+        "observed_lease_expires_at": observed_lease_expires_at.isoformat(),
+        "takeover_now_utc": takeover_now_utc.isoformat(),
+    }
+
+
+def recovery_safe_point_fingerprint(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _as_message_dict(item: Any) -> dict[str, Any]:
+    if hasattr(item, "model_dump"):
+        return dict(item.model_dump(mode="json"))
+    if isinstance(item, dict):
+        return dict(item)
+    raise SafePointReconstructionError(
+        "SAFE_POINT_TRANSCRIPT_CORRUPT: transcript item is not a message mapping."
+    )
+
+
+def _committed_tool_message(result) -> dict[str, Any]:
+    return {
+        "role": "tool",
+        "content": (
+            result.output
+            if result.success
+            else {
+                "error_code": result.error_code,
+                "error_message": result.error_message,
+            }
+        ),
+        "tool_calls": [],
+        "name": result.capability_id,
+        "tool_call_id": result.tool_call_id,
+        "metadata": {
+            "success": result.success,
+            "retryable": result.retryable,
+        },
+    }
+
+
+def _unresolved_declared_tool_call_ids(
+    raw_messages,
+) -> tuple[str, ...]:
+    """Return the trailing transcript-declared tool batch still unresolved.
+
+    This is transcript evidence only.  It never becomes ordering authority;
+    AgentIteration.tool_call_ids remains the sole durable active-batch order.
+    """
+
+    pending: list[str] = []
+    for raw in list(raw_messages or ()):
+        message = _as_message_dict(raw)
+        role = str(message.get("role") or "")
+        if role == "assistant":
+            tool_calls = list(message.get("tool_calls") or ())
+            if not tool_calls:
+                continue
+            if pending:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_ACTIVE_BATCH_AMBIGUOUS: transcript declares "
+                    "a new assistant tool batch before the prior batch is "
+                    "resolved."
+                )
+            declared: list[str] = []
+            for item in tool_calls:
+                call = _as_message_dict(item)
+                call_id = str(call.get("id") or "")
+                if not call_id or call_id in declared:
+                    raise SafePointReconstructionError(
+                        "SAFE_POINT_ACTIVE_BATCH_AMBIGUOUS: transcript "
+                        "assistant tool_call ids must be non-empty and unique."
+                    )
+                declared.append(call_id)
+            pending = declared
+            continue
+
+        if role == "tool" and pending:
+            tool_call_id = str(message.get("tool_call_id") or "")
+            if tool_call_id in pending:
+                pending.remove(tool_call_id)
+
+    return tuple(pending)
+
+
+async def _sanitize_transcript_in_uow(
+    uow,
+    *,
+    execution_id: str,
+    raw_messages,
+    active_tool_call_ids: frozenset[str],
+) -> tuple[dict[str, Any], ...]:
+    sanitized: list[dict[str, Any]] = []
+    for raw in list(raw_messages or ()):
+        message = _as_message_dict(raw)
+        if message.get("role") != "tool":
+            sanitized.append(message)
+            continue
+
+        tool_call_id = str(message.get("tool_call_id") or "")
+        if not tool_call_id:
+            continue
+        if tool_call_id in active_tool_call_ids:
+            # R7-C rematerializes the active batch at most once after resume.
+            continue
+
+        result = await uow.agents.get_tool_result(
+            execution_id,
+            tool_call_id,
+        )
+        if (
+            result is None
+            or getattr(result, "commit_state", "PROVISIONAL") != "COMMITTED"
+        ):
+            continue
+        if (
+            str(result.execution_id) != str(execution_id)
+            or str(result.tool_call_id) != tool_call_id
+        ):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_TOOL_RESULT_CONFLICT: committed tool result "
+                "does not match transcript execution/tool identity."
+            )
+        sanitized.append(_committed_tool_message(result))
+
+    try:
+        # Canonicalization is a validation/storage-proof boundary only.  Keep
+        # the pre-existing R7-C outward resume projection shape for ordinary
+        # non-tool mappings instead of leaking canonical default fields.
+        canonical_transcript_messages(sanitized)
+    except Exception as exc:
+        raise SafePointReconstructionError(
+            "SAFE_POINT_TRANSCRIPT_CORRUPT: transcript is not canonicalizable."
+        ) from exc
+    return tuple(dict(item) for item in sanitized)
+
+
+async def reconstruct_r7c_safe_point_in_uow(
+    uow,
+    execution,
+    *,
+    require_pending_invocation_authority: bool = False,
+) -> R7CSafePoint:
+    """Reconstruct the canonical R7-C safe prefix inside a caller-owned UoW.
+
+    This helper is intentionally read-only.  It never commits, rolls back,
+    reconciles, dispatches, activates runtime work, or mutates an invocation.
+    """
+
+    execution_id = str(getattr(execution, "id", "") or "")
+    if not execution_id:
+        raise SafePointReconstructionError(
+            "SAFE_POINT_EXECUTION_INVALID: execution id is empty."
+        )
+
+    iterations = list(await uow.agents.list_iterations(execution_id))
+    iteration_by_number: dict[int, Any] = {}
+    for item in iterations:
+        if str(item.execution_id) != execution_id:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_ITERATION_LINEAGE_CONFLICT: iteration belongs "
+                "to another execution."
+            )
+        number = int(item.iteration)
+        if number in iteration_by_number:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_ITERATION_AMBIGUOUS: duplicate durable iteration number."
+            )
+        iteration_by_number[number] = item
+
+    latest_iteration = (
+        iteration_by_number[max(iteration_by_number)]
+        if iteration_by_number
+        else None
+    )
+
+    checkpoint = None
+    checkpoint_messages: tuple[dict[str, Any], ...] = ()
+    checkpoint_metadata: dict[str, Any] = {}
+    current_checkpoint_authority = False
+    r12_recovery_checkpoint_lineage = False
+    r12_recovery_checkpoint_authority = False
+    stale_r12_recovery_checkpoint = False
+    use_r12_recovery_frozen_batch = False
+    initial_recovery_safe_point = False
+    checkpoint_id = getattr(execution, "current_checkpoint_id", None)
+    if checkpoint_id:
+        checkpoint = await uow.agents.get_execution_checkpoint(
+            str(checkpoint_id)
+        )
+        if checkpoint is None:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_CHECKPOINT_MISSING: current checkpoint does not exist."
+            )
+        if (
+            str(checkpoint.execution_id) != execution_id
+            or checkpoint.session_id != execution.session_id
+            or checkpoint.task_id != execution.task_id
+            or checkpoint.branch_id != execution.branch_id
+            or int(checkpoint.execution_revision) > int(execution.revision)
+        ):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_CHECKPOINT_LINEAGE_CONFLICT: current checkpoint "
+                "does not match the execution lineage/revision."
+            )
+        checkpoint_iteration_number = int(checkpoint.iteration)
+        checkpoint_iteration = iteration_by_number.get(
+            checkpoint_iteration_number
+        )
+        checkpoint_metadata = dict(
+            getattr(checkpoint, "metadata_json", None) or {}
+        )
+        execution_state = str(
+            getattr(
+                getattr(execution, "state", None),
+                "value",
+                getattr(execution, "state", None),
+            )
+            or ""
+        )
+        execution_wait_reason = str(
+            getattr(
+                getattr(execution, "wait_reason", None),
+                "value",
+                getattr(execution, "wait_reason", None),
+            )
+            or ""
+        )
+        checkpoint_pointer_matches = (
+            str(getattr(execution, "current_checkpoint_id", "") or "")
+            == str(checkpoint.checkpoint_id)
+        )
+        current_checkpoint_authority = (
+            int(checkpoint.execution_revision) == int(execution.revision)
+            and checkpoint_pointer_matches
+        )
+        r12_recovery_checkpoint_lineage = (
+            checkpoint_pointer_matches
+            and str(checkpoint.wait_reason) == "RECOVERY"
+            and bool(checkpoint_metadata.get("r12_recovery_fingerprint"))
+        )
+        r12_recovery_checkpoint_authority = (
+            current_checkpoint_authority
+            and r12_recovery_checkpoint_lineage
+            and execution_state == "WAITING"
+            and execution_wait_reason == "RECOVERY"
+        )
+        stale_r12_recovery_checkpoint = (
+            r12_recovery_checkpoint_lineage
+            and int(checkpoint.execution_revision) < int(execution.revision)
+        )
+        initial_recovery_safe_point = (
+            checkpoint_iteration is None
+            and checkpoint_iteration_number == 0
+            and (
+                r12_recovery_checkpoint_authority
+                or stale_r12_recovery_checkpoint
+            )
+        )
+        if checkpoint_iteration is None and not initial_recovery_safe_point:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_CHECKPOINT_ITERATION_MISSING: checkpoint "
+                "iteration is absent from durable history."
+            )
+        try:
+            materialized = await materialize_checkpoint_transcript_in_uow(
+                uow,
+                checkpoint,
+            )
+        except CheckpointTranscriptMaterializationError as exc:
+            raise SafePointReconstructionError(str(exc)) from exc
+        materialized_messages = tuple(
+            _as_message_dict(item) for item in materialized
+        )
+        if checkpoint.transcript_snapshot is not None:
+            # Preserve the historical R7-C outward projection for inline
+            # checkpoints.  Materialization above remains the durable proof;
+            # it must not rewrite ordinary message dictionaries by adding
+            # canonical default fields.
+            checkpoint_messages = tuple(
+                dict(item) for item in checkpoint.transcript_snapshot
+            )
+            if len(checkpoint_messages) != len(materialized_messages):
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_TRANSCRIPT_CORRUPT: checkpoint transcript "
+                    "length changed during materialization."
+                )
+        else:
+            checkpoint_messages = materialized_messages
+    else:
+        checkpoint_iteration = None
+
+    # A current checkpoint pins its canonical batch.  A stale R12-E
+    # recovery checkpoint retained across a later RUNNING revision remains a
+    # provenance fence: AgentIteration rows do not carry lease-generation or
+    # execution-revision provenance, so even a numerically later iteration
+    # cannot prove that it belongs to the resumed owner.  Same-iteration rows
+    # remain excluded by the frozen snapshot; any later row fails closed until
+    # a future authority boundary can prove post-recovery progress.
+    if (
+        stale_r12_recovery_checkpoint
+        and latest_iteration is not None
+        and int(latest_iteration.iteration) > int(checkpoint.iteration)
+    ):
+        raise SafePointReconstructionError(
+            "SAFE_POINT_POST_RECOVERY_PROGRESS_UNPROVEN: durable iteration "
+            "progress beyond the frozen recovery cut has no resumed-owner "
+            "provenance."
+        )
+    use_r12_recovery_frozen_batch = (
+        r12_recovery_checkpoint_authority
+        or stale_r12_recovery_checkpoint
+    )
+    if current_checkpoint_authority or use_r12_recovery_frozen_batch:
+        active_iteration = checkpoint_iteration
+    else:
+        active_iteration = latest_iteration
+
+    if use_r12_recovery_frozen_batch:
+        frozen_iteration_id = checkpoint_metadata.get(
+            "r12_recovery_iteration_id"
+        )
+        frozen_ids = checkpoint_metadata.get(
+            "r12_recovery_active_tool_call_ids"
+        )
+        if not isinstance(frozen_ids, (list, tuple)):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CORRUPT: frozen "
+                "active-batch identity is not a sequence."
+            )
+        if frozen_iteration_id is None:
+            if int(checkpoint.iteration) != 0 or frozen_ids:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CORRUPT: recovery "
+                    "checkpoint without an iteration identity must be the "
+                    "empty iteration-zero safe point."
+                )
+            # A row inserted later at the same iteration number has no frozen
+            # provenance and must not be promoted into a subsequent recovery.
+            active_iteration = None
+        elif (
+            active_iteration is None
+            or str(active_iteration.id) != str(frozen_iteration_id)
+        ):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CONFLICT: frozen "
+                "iteration identity differs from durable checkpoint iteration."
+            )
+
+    ordered_tool_calls: list[Any] = []
+    ordered_pending: list[dict[str, Any]] = []
+    active_ids: tuple[str, ...] = ()
+    if active_iteration is not None:
+        if use_r12_recovery_frozen_batch:
+            if "r12_recovery_active_tool_call_ids" not in checkpoint_metadata:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_MISSING: current "
+                    "R12-E recovery checkpoint has no frozen active-batch "
+                    "identity."
+                )
+            frozen_ids = checkpoint_metadata.get(
+                "r12_recovery_active_tool_call_ids"
+            )
+            if not isinstance(frozen_ids, (list, tuple)):
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_RECOVERY_BATCH_SNAPSHOT_CORRUPT: frozen "
+                    "active-batch identity is not a sequence."
+                )
+            active_ids = tuple(str(item) for item in frozen_ids)
+        else:
+            active_ids = tuple(
+                str(item) for item in (active_iteration.tool_call_ids or ())
+            )
+        if any(not item for item in active_ids) or len(set(active_ids)) != len(active_ids):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_ACTIVE_BATCH_AMBIGUOUS: tool_call_ids must be "
+                "non-empty and unique."
+            )
+
+        calls = list(
+            await uow.agents.list_tool_calls(
+                execution_id,
+                active_iteration.id,
+            )
+        )
+        by_id: dict[str, Any] = {}
+        for call in calls:
+            call_id = str(call.tool_call_id)
+            if call_id in by_id:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_TOOL_CALL_AMBIGUOUS: duplicate durable tool binding."
+                )
+            by_id[call_id] = call
+
+        invocation_repository = getattr(
+            uow,
+            "capability_invocations",
+            None,
+        )
+        for ordinal, tool_call_id in enumerate(active_ids):
+            call = by_id.get(tool_call_id)
+            if call is None:
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_TOOL_CALL_MISSING: active batch references "
+                    f"missing tool call {tool_call_id!r}."
+                )
+            if (
+                str(call.execution_id) != execution_id
+                or str(call.iteration_id) != str(active_iteration.id)
+                or str(call.tool_call_id) != tool_call_id
+                or not str(call.invocation_id or "")
+                or not str(call.capability_id or "")
+            ):
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_TOOL_CALL_CONFLICT: active tool binding "
+                    "does not match execution/iteration identity."
+                )
+            ordered_tool_calls.append(call)
+
+            result = await uow.agents.get_tool_result(
+                execution_id,
+                tool_call_id,
+            )
+            if result is not None and getattr(
+                result,
+                "commit_state",
+                "PROVISIONAL",
+            ) == "COMMITTED":
+                if (
+                    str(result.execution_id) != execution_id
+                    or str(result.tool_call_id) != tool_call_id
+                    or str(result.invocation_id) != str(call.invocation_id)
+                    or str(result.capability_id) != str(call.capability_id)
+                ):
+                    raise SafePointReconstructionError(
+                        "SAFE_POINT_COMMITTED_RESULT_CONFLICT: committed "
+                        "result identity differs from active tool binding."
+                    )
+                continue
+
+            if invocation_repository is None:
+                if require_pending_invocation_authority:
+                    raise SafePointReconstructionError(
+                        "SAFE_POINT_INVOCATION_REPOSITORY_MISSING: shared UoW "
+                        "cannot prove unresolved invocation authority."
+                    )
+                continue
+            invocation = await invocation_repository.get_record(
+                str(call.invocation_id)
+            )
+            if invocation is None:
+                if require_pending_invocation_authority:
+                    raise SafePointReconstructionError(
+                        "SAFE_POINT_INVOCATION_MISSING: unresolved active slot "
+                        "has no durable CapabilityInvocation."
+                    )
+                # Preserve ordinary R7-C/local pre-dispatch resume behavior.
+                # R12-E passes require_pending_invocation_authority=True and
+                # therefore never accepts this compatibility branch.
+                continue
+            if (
+                str(invocation.execution_id) != execution_id
+                or str(invocation.tool_call_id) != tool_call_id
+                or str(invocation.capability_id) != str(call.capability_id)
+            ):
+                raise SafePointReconstructionError(
+                    "SAFE_POINT_INVOCATION_CONFLICT: invocation identity "
+                    "differs from active tool binding."
+                )
+            ordered_pending.append(
+                {
+                    "ordinal": ordinal,
+                    "invocation_id": str(invocation.invocation_id),
+                    "tool_call_id": tool_call_id,
+                    "capability_id": str(invocation.capability_id),
+                }
+            )
+
+    active_set = frozenset(active_ids)
+
+    if (
+        checkpoint is not None
+        and (
+            int(checkpoint.execution_revision) == int(execution.revision)
+            or use_r12_recovery_frozen_batch
+        )
+    ):
+        raw_source = checkpoint_messages
+    else:
+        raw_source = (
+            getattr(execution, "transcript", None)
+            or (
+                getattr(latest_iteration, "transcript", None)
+                if latest_iteration is not None
+                else None
+            )
+            or checkpoint_messages
+        )
+
+    safe_transcript = await _sanitize_transcript_in_uow(
+        uow,
+        execution_id=execution_id,
+        raw_messages=raw_source,
+        active_tool_call_ids=active_set,
+    )
+
+    unresolved_declared = _unresolved_declared_tool_call_ids(
+        safe_transcript
+    )
+
+    if active_ids and (
+        require_pending_invocation_authority
+        or use_r12_recovery_frozen_batch
+    ):
+        # R12-E freezes ordering authority from AgentIteration.tool_call_ids,
+        # but the sanitized transcript must prove the same active-batch
+        # membership. Transcript IDs never define order.
+        declared_set = frozenset(unresolved_declared)
+        if declared_set != active_set:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_ACTIVE_BATCH_MEMBERSHIP_MISMATCH: sanitized "
+                "transcript active tool-call membership differs from "
+                "authoritative active-batch identity."
+            )
+
+    if (
+        (
+            require_pending_invocation_authority
+            or current_checkpoint_authority
+            or use_r12_recovery_frozen_batch
+            or initial_recovery_safe_point
+        )
+        and not active_ids
+        and unresolved_declared
+    ):
+        # Resolve transcript declarations only against the committed/sanitized
+        # projection. Raw/provisional tool messages are transport evidence,
+        # never proof that an assistant tool request has been durably resolved.
+        raise SafePointReconstructionError(
+            "SAFE_POINT_ACTIVE_BATCH_AUTHORITY_MISSING: durable "
+            "transcript declares unresolved assistant tool calls but "
+            "AgentIteration.tool_call_ids provides no active-batch "
+            "authority."
+        )
+
+    if checkpoint is not None and (
+        int(checkpoint.execution_revision) < int(execution.revision)
+    ):
+        safe_checkpoint_prefix = await _sanitize_transcript_in_uow(
+            uow,
+            execution_id=execution_id,
+            raw_messages=checkpoint_messages,
+            active_tool_call_ids=active_set,
+        )
+        try:
+            canonical_safe_transcript = tuple(
+                dict(item)
+                for item in canonical_transcript_messages(
+                    list(safe_transcript)
+                )
+            )
+            canonical_checkpoint_prefix = tuple(
+                dict(item)
+                for item in canonical_transcript_messages(
+                    list(safe_checkpoint_prefix)
+                )
+            )
+        except Exception as exc:
+            raise SafePointReconstructionError(
+                "SAFE_POINT_TRANSCRIPT_CORRUPT: transcript prefix proof is "
+                "not canonicalizable."
+            ) from exc
+        if (
+            len(canonical_safe_transcript)
+            < len(canonical_checkpoint_prefix)
+            or canonical_safe_transcript[
+                : len(canonical_checkpoint_prefix)
+            ]
+            != canonical_checkpoint_prefix
+        ):
+            raise SafePointReconstructionError(
+                "SAFE_POINT_TRANSCRIPT_DIVERGENCE: durable RUNNING transcript "
+                "does not extend the current checkpoint prefix."
+            )
+
+    return R7CSafePoint(
+        transcript_snapshot=safe_transcript,
+        iteration_number=(
+            int(active_iteration.iteration)
+            if active_iteration is not None
+            else 0
+        ),
+        iteration_id=(
+            str(active_iteration.id)
+            if active_iteration is not None
+            else None
+        ),
+        ordered_tool_calls=tuple(ordered_tool_calls),
+        ordered_pending_invocations=tuple(ordered_pending),
+        checkpoint_id=(
+            str(checkpoint.checkpoint_id)
+            if checkpoint is not None
+            else None
+        ),
+        checkpoint_revision=(
+            int(checkpoint.execution_revision)
+            if checkpoint is not None
+            else None
+        ),
+    )
+
+
+__all__ = [
+    "R7CSafePoint",
+    "SafePointReconstructionError",
+    "reconstruct_r7c_safe_point_in_uow",
+    "recovery_receipt_payload",
+    "recovery_safe_point_fingerprint",
+]

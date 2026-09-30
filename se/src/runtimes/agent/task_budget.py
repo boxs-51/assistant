@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Callable, Sequence
 from uuid import uuid4
@@ -42,7 +42,14 @@ from .contracts.retry import (
     retry_value_fingerprint,
 )
 from .serialization import to_json_safe
+from .safe_point_reconstruction import (
+    SafePointReconstructionError,
+    reconstruct_r7c_safe_point_in_uow,
+    recovery_receipt_payload,
+    recovery_safe_point_fingerprint,
+)
 from .waiting_checkpoint import (
+    WaitingCheckpointConflictError,
     stage_waiting_checkpoint,
     verify_committed_waiting_checkpoint,
 )
@@ -3363,6 +3370,377 @@ class TaskBudgetService:
         raise TaskBudgetConflictError(
             "Task-scoped WAITING expiry activity conflicts exhausted for "
             f"{task_id}/{execution_id}@{source_revision}"
+        )
+
+    async def recover_task_scoped_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        observed_owner_instance_id: str,
+        observed_lease_generation: int,
+        observed_lease_expires_at: datetime,
+        takeover_now_utc: datetime,
+    ) -> int:
+        """Atomically publish a task-scoped stale RUNNING recovery safe point."""
+
+        if not task_id or not execution_id:
+            raise ValueError("task_id and execution_id must be non-empty")
+        if (
+            not isinstance(observed_owner_instance_id, str)
+            or not observed_owner_instance_id.strip()
+        ):
+            raise ValueError(
+                "observed_owner_instance_id must be a non-empty string"
+            )
+        if (
+            isinstance(observed_lease_generation, bool)
+            or not isinstance(observed_lease_generation, int)
+            or observed_lease_generation <= 0
+        ):
+            raise ValueError(
+                "observed_lease_generation must be a positive integer"
+            )
+        for field, value in (
+            ("observed_lease_expires_at", observed_lease_expires_at),
+            ("takeover_now_utc", takeover_now_utc),
+        ):
+            if (
+                not isinstance(value, datetime)
+                or value.tzinfo is None
+                or value.utcoffset() != timedelta(0)
+            ):
+                raise ValueError(
+                    f"{field} must be a timezone-aware UTC datetime"
+                )
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    execution = await uow.agents.get_execution(execution_id)
+                    if (
+                        execution is None
+                        or str(execution.task_id or "") != str(task_id)
+                    ):
+                        raise TaskBudgetConflictError(
+                            f"Unknown task-scoped execution: {execution_id}"
+                        )
+
+                    delegated = execution.parent_execution_id is not None
+                    current_state = str(execution.state)
+                    current_revision = int(execution.revision)
+
+                    # Exact uncertain-commit replay.  The reservation key stays
+                    # the inherited R5/R7 execution_id:target_revision identity.
+                    if (
+                        current_state == "WAITING"
+                        and str(execution.wait_reason) == "RECOVERY"
+                        and execution.owner_instance_id is None
+                        and execution.lease_expires_at is None
+                        and int(execution.lease_generation)
+                        == observed_lease_generation + 1
+                    ):
+                        target_revision = current_revision
+                        source_revision = target_revision - 1
+                        checkpoint_id = (
+                            f"{execution_id}:checkpoint:{target_revision}"
+                        )
+                        if execution.current_checkpoint_id != checkpoint_id:
+                            raise TaskBudgetConflictError(
+                                "Committed recovery does not point at the "
+                                "deterministic checkpoint."
+                            )
+                        payload = recovery_receipt_payload(
+                            execution_id=execution_id,
+                            source_revision=source_revision,
+                            target_revision=target_revision,
+                            checkpoint_id=checkpoint_id,
+                            observed_owner_instance_id=(
+                                observed_owner_instance_id
+                            ),
+                            observed_lease_generation=(
+                                observed_lease_generation
+                            ),
+                            observed_lease_expires_at=(
+                                observed_lease_expires_at
+                            ),
+                            takeover_now_utc=takeover_now_utc,
+                        )
+                        checkpoint_fingerprint = (
+                            recovery_safe_point_fingerprint(payload)
+                        )
+                        reservation_payload = {
+                            **payload,
+                            "delegated": delegated,
+                        }
+                        reservation_key = (
+                            f"{execution_id}:{target_revision}"
+                        )
+                        reservation_fingerprint = _reservation_fingerprint(
+                            TaskBudgetReservationKind.RELEASE_EXECUTION,
+                            reservation_key,
+                            reservation_payload,
+                        )
+                        reservation = (
+                            await uow.agents.get_task_budget_reservation(
+                                task_id,
+                                TaskBudgetReservationKind.RELEASE_EXECUTION.value,
+                                reservation_key,
+                            )
+                        )
+                        if reservation is None:
+                            raise TaskBudgetConflictError(
+                                "Committed recovery has no canonical "
+                                "RELEASE_EXECUTION reservation."
+                            )
+                        self._verify_reservation(
+                            reservation,
+                            reservation_fingerprint,
+                        )
+                        checkpoint = (
+                            await uow.agents.get_execution_checkpoint(
+                                checkpoint_id
+                            )
+                        )
+                        if (
+                            checkpoint is None
+                            or checkpoint.execution_id != execution_id
+                            or int(checkpoint.execution_revision)
+                            != target_revision
+                            or checkpoint.wait_reason != "RECOVERY"
+                            or dict(checkpoint.metadata_json or {}).get(
+                                "r12_recovery_fingerprint"
+                            )
+                            != checkpoint_fingerprint
+                        ):
+                            raise TaskBudgetConflictError(
+                                "Committed recovery checkpoint does not "
+                                "match the frozen receipt."
+                            )
+                        await uow.commit()
+                        return target_revision
+
+                    durable_expiry = execution.lease_expires_at
+                    if durable_expiry is not None:
+                        if durable_expiry.tzinfo is None:
+                            durable_expiry = durable_expiry.replace(
+                                tzinfo=timezone.utc
+                            )
+                        else:
+                            durable_expiry = durable_expiry.astimezone(
+                                timezone.utc
+                            )
+                    if (
+                        current_state != "RUNNING"
+                        or execution.owner_instance_id
+                        != observed_owner_instance_id
+                        or int(execution.lease_generation)
+                        != observed_lease_generation
+                        or durable_expiry != observed_lease_expires_at
+                        or durable_expiry is None
+                        or durable_expiry > takeover_now_utc
+                    ):
+                        raise TaskBudgetConflictError(
+                            "Execution no longer matches the exact expired "
+                            "lease receipt."
+                        )
+
+                    source_revision = current_revision
+                    target_revision = source_revision + 1
+                    checkpoint_id = (
+                        f"{execution_id}:checkpoint:{target_revision}"
+                    )
+                    payload = recovery_receipt_payload(
+                        execution_id=execution_id,
+                        source_revision=source_revision,
+                        target_revision=target_revision,
+                        checkpoint_id=checkpoint_id,
+                        observed_owner_instance_id=observed_owner_instance_id,
+                        observed_lease_generation=observed_lease_generation,
+                        observed_lease_expires_at=(
+                            observed_lease_expires_at
+                        ),
+                        takeover_now_utc=takeover_now_utc,
+                    )
+                    checkpoint_fingerprint = (
+                        recovery_safe_point_fingerprint(payload)
+                    )
+                    reservation_payload = {
+                        **payload,
+                        "delegated": delegated,
+                    }
+                    reservation_key = f"{execution_id}:{target_revision}"
+                    reservation_fingerprint = _reservation_fingerprint(
+                        TaskBudgetReservationKind.RELEASE_EXECUTION,
+                        reservation_key,
+                        reservation_payload,
+                    )
+
+                    existing = (
+                        await uow.agents.get_task_budget_reservation(
+                            task_id,
+                            TaskBudgetReservationKind.RELEASE_EXECUTION.value,
+                            reservation_key,
+                        )
+                    )
+                    if existing is not None:
+                        self._verify_reservation(
+                            existing,
+                            reservation_fingerprint,
+                        )
+                        # A reservation without the complete recovery safe
+                        # point is a partial durable state and must fail closed.
+                        raise TaskBudgetConflictError(
+                            "Recovery RELEASE_EXECUTION reservation exists "
+                            "without an idempotently provable WAITING winner."
+                        )
+
+                    try:
+                        safe_point = (
+                            await reconstruct_r7c_safe_point_in_uow(
+                                uow,
+                                execution,
+                                require_pending_invocation_authority=True,
+                            )
+                        )
+                    except SafePointReconstructionError as exc:
+                        raise TaskBudgetConflictError(str(exc)) from exc
+
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    budget = _budget_from_record(budget_record)
+                    if budget.active_executions <= 0:
+                        raise TaskBudgetConflictError(
+                            "active_executions is already zero"
+                        )
+                    if delegated and budget.active_parallel_agents <= 0:
+                        raise TaskBudgetConflictError(
+                            "active_parallel_agents is already zero"
+                        )
+                    budget_updates = {
+                        "active_executions": budget.active_executions - 1,
+                        "active_parallel_agents": (
+                            budget.active_parallel_agents - 1
+                            if delegated
+                            else budget.active_parallel_agents
+                        ),
+                    }
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            task_id,
+                            budget.revision,
+                            budget_updates,
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    checkpoint_values = {
+                        "checkpoint_id": checkpoint_id,
+                        "execution_id": execution_id,
+                        "execution_revision": target_revision,
+                        "session_id": execution.session_id,
+                        "task_id": execution.task_id,
+                        "branch_id": execution.branch_id,
+                        "iteration": safe_point.iteration_number,
+                        "wait_reason": "RECOVERY",
+                        "remaining_active_budget_seconds": (
+                            execution.remaining_active_budget_seconds
+                        ),
+                        "wait_expires_at": None,
+                        "origin_client_id": execution.bound_client_id,
+                        "origin_connection_id": (
+                            execution.bound_connection_id
+                        ),
+                        "transcript_snapshot": list(
+                            safe_point.transcript_snapshot
+                        ),
+                        "metadata_json": {
+                            "r12_recovery_fingerprint": (
+                                checkpoint_fingerprint
+                            ),
+                            "r12_recovery_receipt": payload,
+                            "r12_recovery_iteration_id": (
+                                safe_point.iteration_id
+                            ),
+                            "r12_recovery_active_tool_call_ids": [
+                                str(item.tool_call_id)
+                                for item in safe_point.ordered_tool_calls
+                            ],
+                        },
+                    }
+                    transition_values = {
+                        "state": "WAITING",
+                        "wait_reason": "RECOVERY",
+                        "wait_expires_at": None,
+                        "remaining_active_budget_seconds": (
+                            execution.remaining_active_budget_seconds
+                        ),
+                        "bound_connection_id": None,
+                        "completed_at": None,
+                    }
+                    try:
+                        staged_values = await stage_waiting_checkpoint(
+                            uow,
+                            execution=execution,
+                            source_revision=source_revision,
+                            transition_values=transition_values,
+                            checkpoint_values=checkpoint_values,
+                            pending_invocations=(
+                                safe_point.ordered_pending_invocations
+                            ),
+                        )
+                    except WaitingCheckpointConflictError as exc:
+                        raise TaskBudgetConflictError(str(exc)) from exc
+
+                    recovered = (
+                        await uow.agents.compare_and_set_recovery_waiting_execution(
+                            execution_id,
+                            source_revision,
+                            observed_owner_instance_id=(
+                                observed_owner_instance_id
+                            ),
+                            observed_lease_generation=(
+                                observed_lease_generation
+                            ),
+                            observed_lease_expires_at=(
+                                observed_lease_expires_at
+                            ),
+                            takeover_now_utc=takeover_now_utc,
+                            values=staged_values,
+                        )
+                    )
+                    if recovered is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": task_id,
+                            "kind": (
+                                TaskBudgetReservationKind.RELEASE_EXECUTION.value
+                            ),
+                            "reservation_key": reservation_key,
+                            "payload_fingerprint": reservation_fingerprint,
+                        }
+                    )
+                    await uow.commit()
+                    return target_revision
+            except IntegrityError:
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            "Task-scoped recovery conflicts exhausted for "
+            f"{task_id}/{execution_id}"
         )
 
     async def finish_task_scoped_execution(
