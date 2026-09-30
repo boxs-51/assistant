@@ -20,6 +20,7 @@ from se.src.runtimes.agent.task_budget import AggregateAdmissionError
 from se.tests.integration.test_r8_d_atomic_fork_consume import (
     _RecreateBudgetOnFirstCasRepository,
     _Uow,
+    _recreate_task_budget_incarnation,
     _setup,
 )
 from se.tests.integration.test_r9_de_branch_resolution import (
@@ -52,6 +53,58 @@ def _config(database) -> Config:
         "sqlalchemy.url", f"sqlite+aiosqlite:///{database.as_posix()}"
     )
     return config
+
+
+class _AggregateIndependentRecreateBudgetRepository(
+    _RecreateBudgetOnFirstCasRepository
+):
+    """Inject A->B only after rolling back the operation-under-test UoW."""
+
+    sessions = None
+
+    @classmethod
+    def reset_race(cls) -> None:
+        super().reset_race()
+        cls.sessions = None
+
+    async def compare_and_set_task_budget(
+        self,
+        task_id,
+        expected_revision,
+        values,
+        *,
+        expected_incarnation_generation=None,
+    ):
+        cls = type(self)
+        if cls.armed and not cls.triggered:
+            cls.triggered = True
+            budget = await self.get_task_budget(task_id)
+            assert budget is not None
+            observed_generation = int(budget.incarnation_generation)
+
+            # aggregate_branches() has already staged its Task CAS in this
+            # transaction. Roll it back before the concurrent B incarnation
+            # is created so the race injector cannot commit partial state from
+            # the operation under test.
+            await self.session.rollback()
+            assert cls.sessions is not None
+            old_generation, new_generation = (
+                await _recreate_task_budget_incarnation(
+                    cls.sessions,
+                    task_id,
+                )
+            )
+            assert old_generation == observed_generation
+            cls.old_generation = old_generation
+            cls.new_generation = new_generation
+            return None
+
+        return await super().compare_and_set_task_budget(
+            task_id,
+            expected_revision,
+            values,
+            expected_incarnation_generation=expected_incarnation_generation,
+        )
 
 
 def test_r9_f_15b_migration_is_linear_and_reversible(tmp_path, monkeypatch):
@@ -461,7 +514,7 @@ async def test_r9_f_task_cancel_settles_dormant_aggregate_once(tmp_path):
 async def test_ubq2_aggregate_never_adopts_recreated_taskbudget_incarnation(
     tmp_path,
 ):
-    repository_cls = _RecreateBudgetOnFirstCasRepository
+    repository_cls = _AggregateIndependentRecreateBudgetRepository
     repository_cls.reset_race()
     engine, sessions, service, planner = await _setup(
         tmp_path,
@@ -478,10 +531,17 @@ async def test_ubq2_aggregate_never_adopts_recreated_taskbudget_incarnation(
         ordered = (source["source_branch_id"], fork.branch_id)
         async with _Uow(sessions) as uow:
             before = await uow.agents.get_task_budget(source["task_id"])
+            task_before = await uow.agents.get_task(source["task_id"])
+            target_before = await uow.agents.get_task_branch(fork.branch_id)
             assert before is not None
+            assert task_before is not None
+            assert target_before is not None
             before_used = int(before.used_executions)
             before_active = int(before.active_executions)
+            before_task_revision = int(task_before.revision)
+            before_target_execution_id = target_before.current_execution_id
 
+        repository_cls.sessions = sessions
         repository_cls.armed = True
         with pytest.raises(AggregateAdmissionError) as raised:
             await service.aggregate_branches(
@@ -498,14 +558,20 @@ async def test_ubq2_aggregate_never_adopts_recreated_taskbudget_incarnation(
 
         async with _Uow(sessions) as uow:
             budget = await uow.agents.get_task_budget(source["task_id"])
+            task_after = await uow.agents.get_task(source["task_id"])
+            target_after = await uow.agents.get_task_branch(fork.branch_id)
             receipt = await uow.agents.get_task_aggregate_admission(
                 source["task_id"],
                 "aggregate-ubq2-incarnation-race",
             )
             assert budget is not None
+            assert task_after is not None
+            assert target_after is not None
             assert int(budget.incarnation_generation) == repository_cls.new_generation
             assert int(budget.used_executions) == before_used
             assert int(budget.active_executions) == before_active
+            assert int(task_after.revision) == before_task_revision
+            assert target_after.current_execution_id == before_target_execution_id
             assert receipt is None
     finally:
         repository_cls.reset_race()
