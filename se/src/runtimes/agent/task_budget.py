@@ -4293,6 +4293,193 @@ class TaskBudgetService:
             mutate,
         )
 
+    async def _preflight_resource_accounting(
+        self,
+        task_id: str,
+    ):
+        dual = self._user_budget_dual_accounting
+        if dual is None:
+            return None, None
+
+        # Phase A is deliberately read-only.  It decides only whether this
+        # concrete Task was enrolled when created and, for legacy Tasks,
+        # captures the exact TaskBudget incarnation that the logical call owns.
+        async with self._uow_factory() as uow:
+            binding_row = await uow.user_budgets.get_task_binding(task_id)
+            if binding_row is not None:
+                snapshot = dual.binding_snapshot(binding_row)
+                await uow.commit()
+                return snapshot, None
+
+            budget_record = await uow.agents.get_task_budget(task_id)
+            if budget_record is None:
+                if await uow.agents.has_execution_for_task(task_id):
+                    raise TaskBudgetLegacyUninitializedError(
+                        "Task has durable execution history but no TaskBudget."
+                    )
+                raise TaskBudgetRequiredError(
+                    f"TaskBudget missing: {task_id}"
+                )
+            generation = int(budget_record.incarnation_generation)
+            await uow.commit()
+            return None, generation
+
+    async def _mutate_enrolled_resource(
+        self,
+        task_id: str,
+        binding,
+        kind: TaskBudgetReservationKind,
+        reservation_key: str,
+        payload: dict[str, Any],
+        mutate: Callable[[TaskBudget], dict[str, Any]],
+        dimensions,
+    ) -> TaskBudget:
+        dual = self._user_budget_dual_accounting
+        if dual is None:
+            raise TaskBudgetConflictError(
+                "enrolled resource mutation has no UBQ application authority"
+            )
+        if not reservation_key:
+            raise ValueError("reservation_key must be non-empty")
+
+        dimensions = tuple(dimensions)
+        fingerprint = _reservation_fingerprint(
+            kind,
+            reservation_key,
+            payload,
+        )
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    # Phase B uses a fresh UoW.  SQLite must acquire UBQ write
+                    # intent before *any* authority read in this transaction.
+                    await uow.user_budgets.begin_write_intent()
+
+                    current_binding = await uow.user_budgets.get_task_binding(
+                        task_id
+                    )
+                    if current_binding is None:
+                        raise TaskBudgetConflictError(
+                            "USER_BUDGET_BINDING_DRIFT: enrolled Task binding disappeared"
+                        )
+                    dual.require_same_binding(binding, current_binding)
+
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    generation = int(
+                        budget_record.incarnation_generation
+                    )
+
+                    existing = await uow.agents.get_task_budget_reservation(
+                        task_id,
+                        kind.value,
+                        reservation_key,
+                        expected_incarnation_generation=generation,
+                    )
+                    if existing is not None:
+                        self._verify_reservation(existing, fingerprint)
+                        # Replay verification is intentionally before any
+                        # ACTIVE-window lookup/rollover.
+                        await dual.require_mirror_replay_in_uow(
+                            uow,
+                            binding=binding,
+                            task_budget_kind=kind.value,
+                            reservation_key=reservation_key,
+                            source_payload_fingerprint=fingerprint,
+                            dimensions=dimensions,
+                        )
+                        result = _budget_from_record(budget_record)
+                        await uow.commit()
+                        return result
+
+                    budget = _budget_from_record(budget_record)
+                    values = mutate(budget)
+                    updated = await uow.agents.compare_and_set_task_budget(
+                        task_id,
+                        budget.revision,
+                        values,
+                        expected_incarnation_generation=generation,
+                    )
+                    if updated is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": task_id,
+                            "kind": kind.value,
+                            "reservation_key": reservation_key,
+                            "payload_fingerprint": fingerprint,
+                            "task_budget_incarnation_generation": generation,
+                        }
+                    )
+                    await dual.mirror_resource_in_uow(
+                        uow,
+                        binding=binding,
+                        task_budget_kind=kind.value,
+                        reservation_key=reservation_key,
+                        source_payload_fingerprint=fingerprint,
+                        dimensions=dimensions,
+                    )
+                    result = _budget_from_record(updated)
+                    await uow.commit()
+                    return result
+            except IntegrityError:
+                # A concurrent exact winner is observed through replay on the
+                # next fresh transaction.  Any partial local work rolled back.
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+            except Exception as exc:
+                if dual.is_retryable_error(exc):
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            f"UBQ-2 resource accounting conflicts exhausted for {task_id}"
+        )
+
+    async def _mutate_resource_with_reservation(
+        self,
+        task_id: str,
+        kind: TaskBudgetReservationKind,
+        reservation_key: str,
+        payload: dict[str, Any],
+        mutate: Callable[[TaskBudget], dict[str, Any]],
+        dimensions,
+    ) -> TaskBudget:
+        binding, expected_generation = (
+            await self._preflight_resource_accounting(task_id)
+        )
+        if binding is not None:
+            return await self._mutate_enrolled_resource(
+                task_id,
+                binding,
+                kind,
+                reservation_key,
+                payload,
+                mutate,
+                dimensions,
+            )
+        return await self._mutate_with_reservation(
+            task_id,
+            kind,
+            reservation_key,
+            payload,
+            mutate,
+            expected_incarnation_generation=expected_generation,
+            require_legacy_unbound=(
+                self._user_budget_dual_accounting is not None
+            ),
+        )
+
     async def reserve_tool_calls(
         self,
         task_id: str,
@@ -4302,6 +4489,14 @@ class TaskBudgetService:
     ) -> TaskBudget:
         if count <= 0:
             raise ValueError("count must be positive")
+
+        binding, expected_generation = (
+            await self._preflight_resource_accounting(task_id)
+        )
+        if binding is not None:
+            raise TaskBudgetUnsupportedLegacyMirrorError(
+                "enrolled Task requires per-call canonical capability_id"
+            )
 
         def mutate(budget: TaskBudget) -> dict[str, Any]:
             self._require_open(budget)
@@ -4316,6 +4511,10 @@ class TaskBudgetService:
             reservation_key,
             {"count": count},
             mutate,
+            expected_incarnation_generation=expected_generation,
+            require_legacy_unbound=(
+                self._user_budget_dual_accounting is not None
+            ),
         )
 
     async def reserve_inference(
@@ -4348,12 +4547,27 @@ class TaskBudgetService:
                 "used_inference_calls": budget.used_inference_calls + 1
             }
 
-        return await self._mutate_with_reservation(
+        dual = self._user_budget_dual_accounting
+        dimensions = (
+            ()
+            if dual is None
+            else dual.inference_dimensions()
+        )
+        if dual is None:
+            return await self._mutate_with_reservation(
+                task_id,
+                TaskBudgetReservationKind.INFERENCE,
+                request_id,
+                {},
+                mutate,
+            )
+        return await self._mutate_resource_with_reservation(
             task_id,
             TaskBudgetReservationKind.INFERENCE,
             request_id,
             {},
             mutate,
+            dimensions,
         )
 
     async def account_usage(
@@ -4378,15 +4592,29 @@ class TaskBudgetService:
                 ),
             }
 
-        return await self._mutate_with_reservation(
+        payload = {
+            "tokens": tokens,
+            "cost_usd": str(normalized_cost),
+        }
+        dual = self._user_budget_dual_accounting
+        if dual is None:
+            return await self._mutate_with_reservation(
+                task_id,
+                TaskBudgetReservationKind.USAGE,
+                usage_key,
+                payload,
+                mutate,
+            )
+        return await self._mutate_resource_with_reservation(
             task_id,
             TaskBudgetReservationKind.USAGE,
             usage_key,
-            {
-                "tokens": tokens,
-                "cost_usd": str(normalized_cost),
-            },
+            payload,
             mutate,
+            dual.usage_dimensions(
+                tokens=tokens,
+                cost_usd=normalized_cost,
+            ),
         )
 
     async def reserve_branch_slot(
