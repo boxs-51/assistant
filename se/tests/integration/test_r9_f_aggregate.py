@@ -17,7 +17,11 @@ from se.src.runtimes.agent.persistence import (
 )
 from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.task_budget import AggregateAdmissionError
-from se.tests.integration.test_r8_d_atomic_fork_consume import _Uow, _setup
+from se.tests.integration.test_r8_d_atomic_fork_consume import (
+    _RecreateBudgetOnFirstCasRepository,
+    _Uow,
+    _setup,
+)
 from se.tests.integration.test_r9_de_branch_resolution import (
     _seed_two_completed_branches,
 )
@@ -452,3 +456,58 @@ async def test_r9_f_task_cancel_settles_dormant_aggregate_once(tmp_path):
         assert repeated.active_executions == after.active_executions
     finally:
         await engine.dispose()
+
+@pytest.mark.asyncio
+async def test_ubq2_aggregate_never_adopts_recreated_taskbudget_incarnation(
+    tmp_path,
+):
+    repository_cls = _RecreateBudgetOnFirstCasRepository
+    repository_cls.reset_race()
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="ubq2_aggregate_incarnation_revalidation.sqlite",
+        repository_cls=repository_cls,
+    )
+    try:
+        source, fork = await _seed_two_completed_branches(
+            sessions,
+            service,
+            planner,
+            task_id="task-ubq2-aggregate-incarnation",
+        )
+        ordered = (source["source_branch_id"], fork.branch_id)
+        async with _Uow(sessions) as uow:
+            before = await uow.agents.get_task_budget(source["task_id"])
+            assert before is not None
+            before_used = int(before.used_executions)
+            before_active = int(before.active_executions)
+
+        repository_cls.armed = True
+        with pytest.raises(AggregateAdmissionError) as raised:
+            await service.aggregate_branches(
+                source["task_id"],
+                aggregate_request_id="aggregate-ubq2-incarnation-race",
+                target_branch_id=fork.branch_id,
+                source_branch_ids=ordered,
+                target_user_id="user-r8-d",
+            )
+        assert raised.value.code == "AGGREGATE_TASK_BUDGET_INCARCATION_CHANGED"
+        assert repository_cls.triggered is True
+        assert repository_cls.old_generation is not None
+        assert repository_cls.new_generation == repository_cls.old_generation + 1
+
+        async with _Uow(sessions) as uow:
+            budget = await uow.agents.get_task_budget(source["task_id"])
+            receipt = await uow.agents.get_task_aggregate_admission(
+                source["task_id"],
+                "aggregate-ubq2-incarnation-race",
+            )
+            assert budget is not None
+            assert int(budget.incarnation_generation) == repository_cls.new_generation
+            assert int(budget.used_executions) == before_used
+            assert int(budget.active_executions) == before_active
+            assert receipt is None
+    finally:
+        repository_cls.reset_race()
+        await engine.dispose()
+
