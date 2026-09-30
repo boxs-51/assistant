@@ -18,6 +18,7 @@ from se.src.infrastructure.storage.models.sql.agent import (
     AgentCheckpointPendingInvocationRecord,
     AgentIterationRecord,
     AgentToolResultRecord,
+    TaskBudgetRecord,
 )
 from se.src.infrastructure.storage.models.sql.capability import (
     CapabilityInvocationRecord,
@@ -36,6 +37,7 @@ from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.task_budget import (
     ForkConsumeConflict,
     ForkConsumeError,
+    TaskBudgetIncarnationChangedError,
     TaskBudgetService,
 )
 from se.src.runtimes.agent.waiting_checkpoint import (
@@ -44,8 +46,9 @@ from se.src.runtimes.agent.waiting_checkpoint import (
 
 
 class _Uow:
-    def __init__(self, sessions):
+    def __init__(self, sessions, repository_cls=AgentRepository):
         self._sessions = sessions
+        self._repository_cls = repository_cls
         self._ctx = None
         self.session = None
         self.agents = None
@@ -54,7 +57,7 @@ class _Uow:
     async def __aenter__(self):
         self._ctx = self._sessions()
         self.session = await self._ctx.__aenter__()
-        self.agents = AgentRepository(self.session)
+        self.agents = self._repository_cls(self.session)
         self.capability_invocations = CapabilityInvocationRepository(
             self.session
         )
@@ -106,7 +109,13 @@ def _runtime_context_state(tag: str):
     }
 
 
-async def _setup(tmp_path, *, name="r8_d.sqlite", limits=None):
+async def _setup(
+    tmp_path,
+    *,
+    name="r8_d.sqlite",
+    limits=None,
+    repository_cls=AgentRepository,
+):
     database = tmp_path / name
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{database.as_posix()}",
@@ -116,7 +125,7 @@ async def _setup(tmp_path, *, name="r8_d.sqlite", limits=None):
         await connection.run_sync(Base.metadata.create_all)
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
-    factory = lambda: _Uow(sessions)
+    factory = lambda: _Uow(sessions, repository_cls)
     service = TaskBudgetService(
         factory,
         default_limits=limits or _limits(),
@@ -126,6 +135,97 @@ async def _setup(tmp_path, *, name="r8_d.sqlite", limits=None):
     store = DurableAgentStore(factory)
     planner = AgentForkPlanningService(store)
     return engine, sessions, service, planner
+
+
+def _task_budget_clone_values(record) -> dict:
+    return {
+        column.name: getattr(record, column.name)
+        for column in TaskBudgetRecord.__table__.columns
+        if column.name != "incarnation_generation"
+    }
+
+
+async def _recreate_task_budget_incarnation(
+    sessions,
+    task_id: str,
+) -> tuple[int, int]:
+    async with _Uow(sessions) as uow:
+        budget = await uow.agents.get_task_budget(task_id)
+        assert budget is not None
+        old_generation = int(budget.incarnation_generation)
+        values = _task_budget_clone_values(budget)
+        await uow.session.execute(
+            text(
+                "DELETE FROM agent_task_budget_reservations "
+                "WHERE task_id = :task_id"
+            ),
+            {"task_id": task_id},
+        )
+        await uow.session.delete(budget)
+        await uow.session.flush()
+        replacement = TaskBudgetRecord(
+            **values,
+            incarnation_generation=old_generation + 1,
+        )
+        uow.session.add(replacement)
+        await uow.commit()
+        return old_generation, int(replacement.incarnation_generation)
+
+
+class _RecreateBudgetOnFirstCasRepository(AgentRepository):
+    armed = False
+    triggered = False
+    old_generation: int | None = None
+    new_generation: int | None = None
+
+    @classmethod
+    def reset_race(cls) -> None:
+        cls.armed = False
+        cls.triggered = False
+        cls.old_generation = None
+        cls.new_generation = None
+
+    async def compare_and_set_task_budget(
+        self,
+        task_id,
+        expected_revision,
+        values,
+        *,
+        expected_incarnation_generation=None,
+    ):
+        cls = type(self)
+        if cls.armed and not cls.triggered:
+            cls.triggered = True
+            budget = await self.get_task_budget(task_id)
+            assert budget is not None
+            old_generation = int(budget.incarnation_generation)
+            clone = _task_budget_clone_values(budget)
+            await self.session.execute(
+                text(
+                    "DELETE FROM agent_task_budget_reservations "
+                    "WHERE task_id = :task_id"
+                ),
+                {"task_id": task_id},
+            )
+            await self.session.delete(budget)
+            await self.session.flush()
+            replacement = TaskBudgetRecord(
+                **clone,
+                incarnation_generation=old_generation + 1,
+            )
+            self.session.add(replacement)
+            # Test-only race injection: commit B so the service retry cannot
+            # roll the recreated incarnation back with its stale A UoW.
+            await self.session.commit()
+            cls.old_generation = old_generation
+            cls.new_generation = int(replacement.incarnation_generation)
+            return None
+        return await super().compare_and_set_task_budget(
+            task_id,
+            expected_revision,
+            values,
+            expected_incarnation_generation=expected_incarnation_generation,
+        )
 
 
 async def _seed_source(
@@ -1253,5 +1353,144 @@ async def test_r8_d_failure_at_each_write_boundary_rolls_back_everything(
                 ),
                 {"task_id": source["task_id"]},
             ) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_shared_structural_transition_never_adopts_recreated_budget(
+    tmp_path,
+):
+    _RecreateBudgetOnFirstCasRepository.reset_race()
+    engine, sessions, service, _ = await _setup(
+        tmp_path,
+        name="ubq2_structural_incarnation_race.sqlite",
+        repository_cls=_RecreateBudgetOnFirstCasRepository,
+    )
+    task_id = "task-ubq2-structural-race"
+    execution_id = "exec-ubq2-structural-race"
+    try:
+        await service.create_task_with_budget(
+            {
+                "id": task_id,
+                "session_id": f"session-{task_id}",
+                "created_by": "user-r8-d",
+                "assigned_agent_id": "agent-r8-d",
+                "revision": 0,
+                "status": "ASSIGNED",
+                "wait_reasons": [],
+                "input": {"goal": task_id},
+            }
+        )
+        await service.transition_task(
+            task_id,
+            allowed_source_states=("ASSIGNED",),
+            target_state="RUNNING",
+            values={},
+        )
+        await service.start_root_task_scoped_execution(
+            task_id,
+            execution_id=execution_id,
+            execution_values={
+                "id": execution_id,
+                "session_id": f"session-{task_id}",
+                "agent_id": "agent-r8-d",
+                "task_id": task_id,
+                "correlation_id": f"corr-{task_id}",
+                "state": "RUNNING",
+                "revision": 1,
+                "remaining_active_budget_seconds": 30.0,
+                "request": {"prompt": "structural-race"},
+                "context_state": _runtime_context_state(task_id),
+                "started_at": datetime.now(timezone.utc),
+            },
+        )
+
+        _RecreateBudgetOnFirstCasRepository.armed = True
+        with pytest.raises(TaskBudgetIncarnationChangedError):
+            await service.finish_task_scoped_execution(
+                task_id,
+                execution_id=execution_id,
+                source_revision=1,
+                transition_values={
+                    "state": "COMPLETED",
+                    "wait_reason": None,
+                    "completed_at": datetime.now(timezone.utc),
+                },
+                delegated=False,
+            )
+
+        assert _RecreateBudgetOnFirstCasRepository.triggered is True
+        assert (
+            _RecreateBudgetOnFirstCasRepository.new_generation
+            == _RecreateBudgetOnFirstCasRepository.old_generation + 1
+        )
+        async with _Uow(sessions) as uow:
+            budget = await uow.agents.get_task_budget(task_id)
+            execution = await uow.agents.get_execution(execution_id)
+            assert budget is not None
+            assert int(budget.incarnation_generation) == (
+                _RecreateBudgetOnFirstCasRepository.new_generation
+            )
+            assert execution is not None
+            assert execution.state == "RUNNING"
+            assert int(execution.revision) == 1
+            assert (
+                await uow.agents.get_task_budget_reservation(
+                    task_id,
+                    "RELEASE_EXECUTION",
+                    f"{execution_id}:2",
+                    expected_incarnation_generation=(
+                        _RecreateBudgetOnFirstCasRepository.new_generation
+                    ),
+                )
+                is None
+            )
+            await uow.commit()
+    finally:
+        _RecreateBudgetOnFirstCasRepository.reset_race()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_fork_plan_rejects_recreated_taskbudget_incarnation(
+    tmp_path,
+):
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name="ubq2_fork_incarnation_revalidation.sqlite",
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id="task-ubq2-fork-incarnation",
+        )
+        old_generation, new_generation = await _recreate_task_budget_incarnation(
+            sessions,
+            source["task_id"],
+        )
+        assert (
+            int(source["plan"].expected_task_budget_incarnation_generation)
+            == old_generation
+        )
+        assert new_generation != old_generation
+
+        with pytest.raises(ForkConsumeError):
+            await service.consume_fork_plan(source["plan"])
+
+        async with _Uow(sessions) as uow:
+            assert (
+                await uow.agents.get_task_fork_admission(
+                    source["task_id"],
+                    source["plan"].fork_request_id,
+                )
+                is None
+            )
+            budget = await uow.agents.get_task_budget(source["task_id"])
+            assert budget is not None
+            assert int(budget.incarnation_generation) == new_generation
+            await uow.commit()
     finally:
         await engine.dispose()
