@@ -198,13 +198,31 @@ def test_f7_p1_rejects_generated_media_on_nonterminal_tool_call_response():
     direct = _read("se/src/runtimes/chat/direct.py")
     agent = _read("se/src/runtimes/agent/runtime.py")
 
-    for phrase in (
-        "class GatewayChoice(GatewayBaseModel):",
-        "message: GatewayMessage",
-        "class GatewayResponse(GatewayBaseModel):",
-        "choices: List[GatewayChoice]",
-    ):
-        assert phrase in response_schema
+    schema_tree = ast.parse(response_schema)
+    classes = {
+        node.name: node
+        for node in schema_tree.body
+        if isinstance(node, ast.ClassDef)
+    }
+    gateway_choice = classes["GatewayChoice"]
+    gateway_response = classes["GatewayResponse"]
+
+    def owned_annotations(node: ast.ClassDef) -> dict[str, str]:
+        return {
+            stmt.target.id: ast.unparse(stmt.annotation)
+            for stmt in node.body
+            if (
+                isinstance(stmt, ast.AnnAssign)
+                and isinstance(stmt.target, ast.Name)
+            )
+        }
+
+    choice_fields = owned_annotations(gateway_choice)
+    response_fields = owned_annotations(gateway_response)
+
+    assert choice_fields["message"] == "GatewayMessage"
+    assert response_fields["choices"] == "List[GatewayChoice]"
+    assert "message" not in response_fields
 
     for phrase in (
         "transcript.append(response.message)",
