@@ -143,7 +143,10 @@ def test_ubq2_postgresql_v7_parity_has_an_explicit_deployment_gate() -> None:
     assert "asyncpg" not in requirements
 
     required_evidence = (
-        "OPEN / REQUIRED BEFORE POSTGRESQL UBQ-2 PRODUCTION ENABLEMENT",
+        "OPEN / REQUIRED BEFORE ANY POSTGRESQL 26a / UBQ-2 RUNTIME DEPLOYMENT",
+        "26a_ubq2_dual_accounting_bridge",
+        "does not satisfy this gate",
+        "MUST NOT apply 26a",
         "monotonic allocator serialization",
         "MAX_INT64-1",
         "MAX_INT64",
@@ -153,6 +156,8 @@ def test_ubq2_postgresql_v7_parity_has_an_explicit_deployment_gate() -> None:
         "anti-delete/anti-reset/monotonicity",
         "never reused after source GC/recreate",
         "user_budget.dual_accounting.enabled = false",
+        "does not waive either",
+        "TaskBudget schema/runtime semantics are unconditional",
     )
     for item in required_evidence:
         assert item in gate
