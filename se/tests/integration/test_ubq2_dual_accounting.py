@@ -680,3 +680,126 @@ async def test_ubq2_taskbudget_allocator_concurrent_legacy_creators_are_unique(
             await uow.commit()
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_sqlite_bridge_and_incarnation_triggers_hold_with_fk_off(
+    tmp_path: Path,
+) -> None:
+    database, engine, _, _, service, _, _ = await _setup(tmp_path)
+    try:
+        await service.create_task_with_budget(
+            _task("task-trigger-parity", "user-a"),
+            identity=_identity("user-a"),
+        )
+        await service.reserve_inference(
+            "task-trigger-parity",
+            request_id="trigger-inference",
+        )
+
+        raw = sqlite3.connect(database)
+        try:
+            assert raw.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+            bridge = raw.execute(
+                "SELECT bridge_receipt_id, owner_user_id, window_epoch, "
+                "ubq_reservation_id, ubq_idempotency_key, "
+                "ubq_payload_fingerprint, amount_atomic "
+                "FROM user_budget_dual_accounting_receipts "
+                "WHERE task_id='task-trigger-parity' "
+                "AND task_budget_kind='INFERENCE' "
+                "AND task_budget_reservation_key='trigger-inference' "
+                "AND mirror_dimension='INFERENCE_CALL'"
+            ).fetchone()
+            assert bridge is not None
+
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="UBQ2_BRIDGE_REFERENCE_INVALID",
+            ):
+                raw.execute(
+                    "INSERT INTO user_budget_dual_accounting_receipts ("
+                    "bridge_receipt_id, owner_user_id, task_id, "
+                    "task_budget_kind, task_budget_reservation_key, "
+                    "mirror_dimension, source_payload_fingerprint, "
+                    "window_epoch, ubq_reservation_id, ubq_idempotency_key, "
+                    "ubq_payload_fingerprint, amount_atomic, capability_id"
+                    ") VALUES (?, ?, 'task-trigger-parity', 'INFERENCE', "
+                    "'trigger-inference', 'INFERENCE_CALL', ?, ?, ?, ?, ?, ?, NULL)",
+                    (
+                        "bridge-wrong-source-fingerprint",
+                        bridge[1],
+                        "0" * 64,
+                        bridge[2],
+                        bridge[3],
+                        bridge[4],
+                        bridge[5],
+                        bridge[6],
+                    ),
+                )
+
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="TASK_BUDGET_INCARNATION_STILL_REFERENCED",
+            ):
+                raw.execute(
+                    "DELETE FROM agent_task_budgets "
+                    "WHERE task_id='task-trigger-parity'"
+                )
+            raw.rollback()
+        finally:
+            raw.close()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_committed_taskbudget_generation_is_not_reused_after_source_gc(
+    tmp_path: Path,
+) -> None:
+    database, engine, _, factory, service, _, disabled = await _setup(tmp_path)
+    try:
+        service._user_budget_dual_accounting = disabled
+        await service.create_task_with_budget(
+            _task("task-old-generation", "user-a"),
+            identity=_identity("user-a"),
+        )
+        async with factory() as uow:
+            old_budget = await uow.agents.get_task_budget(
+                "task-old-generation"
+            )
+            assert old_budget is not None
+            old_generation = int(old_budget.incarnation_generation)
+            await uow.commit()
+
+        raw = sqlite3.connect(database)
+        try:
+            raw.execute(
+                "DELETE FROM agent_task_budget_reservations WHERE task_id=?",
+                ("task-old-generation",),
+            )
+            raw.execute(
+                "DELETE FROM agent_task_budgets WHERE task_id=?",
+                ("task-old-generation",),
+            )
+            raw.execute(
+                "DELETE FROM agent_tasks WHERE id=?",
+                ("task-old-generation",),
+            )
+            raw.commit()
+        finally:
+            raw.close()
+
+        await service.create_task_with_budget(
+            _task("task-new-generation", "user-a"),
+            identity=_identity("user-a"),
+        )
+        async with factory() as uow:
+            new_budget = await uow.agents.get_task_budget(
+                "task-new-generation"
+            )
+            assert new_budget is not None
+            assert int(new_budget.incarnation_generation) > old_generation
+            assert int(new_budget.incarnation_generation) != old_generation
+            await uow.commit()
+    finally:
+        await engine.dispose()
