@@ -82,6 +82,18 @@ class TaskBudgetConflictError(TaskBudgetError):
     code = "TASK_BUDGET_CONFLICT"
 
 
+class TaskBudgetIncarnationChangedError(TaskBudgetConflictError):
+    code = "USER_BUDGET_TASKBUDGET_INCARCATION_CHANGED"
+
+
+class TaskBudgetLegacyBecameEnrolledError(TaskBudgetConflictError):
+    code = "USER_BUDGET_LEGACY_TASK_BECAME_ENROLLED"
+
+
+class TaskBudgetUnsupportedLegacyMirrorError(TaskBudgetError):
+    code = "USER_BUDGET_UNSUPPORTED_LEGACY_MIRROR"
+
+
 class DelegationDepthExceededError(TaskBudgetError):
     code = "DELEGATION_DEPTH_EXCEEDED"
 
@@ -456,11 +468,13 @@ class TaskBudgetService:
         default_limits: TaskBudgetLimits | None = None,
         default_policy: TaskBudgetPolicy | None = None,
         max_conflict_retries: int = 8,
+        user_budget_dual_accounting=None,
     ) -> None:
         self._uow_factory = uow_factory
         self._default_limits = default_limits
         self._default_policy = default_policy
         self._max_conflict_retries = max(1, int(max_conflict_retries))
+        self._user_budget_dual_accounting = user_budget_dual_accounting
 
     @property
     def default_limits(self) -> TaskBudgetLimits | None:
@@ -619,8 +633,9 @@ class TaskBudgetService:
         *,
         limits: TaskBudgetLimits | None = None,
         policy: TaskBudgetPolicy | None = None,
+        identity=None,
     ):
-        """Atomically persist one AgentTask and its initial TaskBudget."""
+        """Atomically persist one AgentTask, TaskBudget and optional UBQ binding."""
         task_id = str(task_values.get("id") or "")
         if not task_id:
             raise ValueError("task_values.id must be non-empty")
@@ -640,10 +655,28 @@ class TaskBudgetService:
                     path=f"agent_tasks.{field}",
                 )
 
+        dual = self._user_budget_dual_accounting
         async with self._uow_factory() as uow:
             parent_task_id = normalized_task.get("parent_task_id")
             if parent_task_id is not None:
                 parent_task_id = str(parent_task_id)
+
+            enrollment_resolution = None
+            if dual is not None and dual.enabled:
+                if identity is None:
+                    raise TaskBudgetConflictError(
+                        "UBQ-2 enrollment requires authenticated Identity."
+                    )
+                # SQLite UBQ authority requires BEGIN IMMEDIATE before the
+                # first owner/policy/binding authority read.
+                await uow.user_budgets.begin_write_intent()
+                enrollment_resolution = await dual.prepare_enrollment_in_uow(
+                    uow,
+                    parent_task_id=parent_task_id,
+                    identity=identity,
+                )
+
+            if parent_task_id is not None:
                 parent = await uow.agents.lock_task_gc_serialization_fence(
                     parent_task_id
                 )
@@ -656,6 +689,7 @@ class TaskBudgetService:
                 raise TaskBudgetConflictError(
                     f"AgentTask already exists: {task_id}"
                 )
+
             task = await uow.agents.save_task(normalized_task)
             await uow.agents.save_task_budget(
                 self._new_budget_values(
@@ -665,6 +699,12 @@ class TaskBudgetService:
                     fingerprint,
                 )
             )
+            if enrollment_resolution is not None:
+                await dual.bind_prepared_task_in_uow(
+                    uow,
+                    task_id=task_id,
+                    resolution=enrollment_resolution,
+                )
             await uow.commit()
             return task
 
@@ -4430,6 +4470,8 @@ class TaskBudgetService:
         *,
         side_effect=None,
         verify_idempotent=None,
+        expected_incarnation_generation: int | None = None,
+        require_legacy_unbound: bool = False,
     ) -> TaskBudget:
         if not reservation_key:
             raise ValueError("reservation_key must be non-empty")
@@ -4438,31 +4480,20 @@ class TaskBudgetService:
             reservation_key,
             payload,
         )
+        expected_generation = expected_incarnation_generation
 
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
-                    existing = (
-                        await uow.agents.get_task_budget_reservation(
-                            task_id,
-                            kind.value,
-                            reservation_key,
-                        )
-                    )
-                    if existing is not None:
-                        self._verify_reservation(existing, fingerprint)
-                        if verify_idempotent is not None:
-                            await verify_idempotent(uow)
-                        budget_record = await uow.agents.get_task_budget(
-                            task_id
-                        )
-                        if budget_record is None:
-                            raise TaskBudgetRequiredError(
-                                f"TaskBudget missing: {task_id}"
+                    if (
+                        require_legacy_unbound
+                        and self._user_budget_dual_accounting is not None
+                    ):
+                        binding = await uow.user_budgets.get_task_binding(task_id)
+                        if binding is not None:
+                            raise TaskBudgetLegacyBecameEnrolledError(
+                                "legacy resource call observed a durable UBQ binding"
                             )
-                        budget = _budget_from_record(budget_record)
-                        await uow.commit()
-                        return budget
 
                     budget_record = await uow.agents.get_task_budget(task_id)
                     if budget_record is None:
@@ -4474,15 +4505,38 @@ class TaskBudgetService:
                         raise TaskBudgetRequiredError(
                             f"TaskBudget missing: {task_id}"
                         )
+
+                    actual_generation = int(
+                        budget_record.incarnation_generation
+                    )
+                    if expected_generation is None:
+                        expected_generation = actual_generation
+                    elif actual_generation != int(expected_generation):
+                        raise TaskBudgetIncarnationChangedError(
+                            "TaskBudget incarnation changed during logical operation"
+                        )
+
+                    existing = await uow.agents.get_task_budget_reservation(
+                        task_id,
+                        kind.value,
+                        reservation_key,
+                        expected_incarnation_generation=expected_generation,
+                    )
+                    if existing is not None:
+                        self._verify_reservation(existing, fingerprint)
+                        if verify_idempotent is not None:
+                            await verify_idempotent(uow)
+                        budget = _budget_from_record(budget_record)
+                        await uow.commit()
+                        return budget
+
                     budget = _budget_from_record(budget_record)
                     values = mutate(budget)
-
-                    updated = (
-                        await uow.agents.compare_and_set_task_budget(
-                            task_id,
-                            budget.revision,
-                            values,
-                        )
+                    updated = await uow.agents.compare_and_set_task_budget(
+                        task_id,
+                        budget.revision,
+                        values,
+                        expected_incarnation_generation=expected_generation,
                     )
                     if updated is None:
                         await uow.rollback()
@@ -4497,26 +4551,29 @@ class TaskBudgetService:
                             "kind": kind.value,
                             "reservation_key": reservation_key,
                             "payload_fingerprint": fingerprint,
+                            "task_budget_incarnation_generation": (
+                                expected_generation
+                            ),
                         }
                     )
                     result = _budget_from_record(updated)
                     await uow.commit()
                     return result
             except IntegrityError:
+                if expected_generation is None:
+                    continue
                 recovered = await self._load_idempotent(
                     task_id,
                     kind,
                     reservation_key,
                     fingerprint,
                     verify_idempotent=verify_idempotent,
+                    expected_incarnation_generation=expected_generation,
+                    require_legacy_unbound=require_legacy_unbound,
                 )
                 if recovered is not None:
                     return recovered
-                raise
             except OperationalError as exc:
-                # SQLite may surface a concurrent writer as a transient lock.
-                # Only retry that known contention signal; never hide a real
-                # SQL/schema/connection failure as a TaskBudget conflict.
                 message = str(exc).lower()
                 if "locked" in message or "busy" in message:
                     continue
@@ -4694,12 +4751,39 @@ class TaskBudgetService:
         fingerprint: str,
         *,
         verify_idempotent=None,
+        expected_incarnation_generation: int,
+        require_legacy_unbound: bool = False,
     ) -> TaskBudget | None:
         async with self._uow_factory() as uow:
+            if (
+                require_legacy_unbound
+                and self._user_budget_dual_accounting is not None
+            ):
+                binding = await uow.user_budgets.get_task_binding(task_id)
+                if binding is not None:
+                    raise TaskBudgetLegacyBecameEnrolledError(
+                        "legacy replay observed a durable UBQ binding"
+                    )
+
+            budget_record = await uow.agents.get_task_budget(task_id)
+            if budget_record is None:
+                raise TaskBudgetRequiredError(
+                    f"TaskBudget missing: {task_id}"
+                )
+            if int(budget_record.incarnation_generation) != int(
+                expected_incarnation_generation
+            ):
+                raise TaskBudgetIncarnationChangedError(
+                    "TaskBudget incarnation changed during idempotent recovery"
+                )
+
             existing = await uow.agents.get_task_budget_reservation(
                 task_id,
                 kind.value,
                 reservation_key,
+                expected_incarnation_generation=(
+                    expected_incarnation_generation
+                ),
             )
             if existing is None:
                 await uow.commit()
@@ -4707,11 +4791,6 @@ class TaskBudgetService:
             self._verify_reservation(existing, fingerprint)
             if verify_idempotent is not None:
                 await verify_idempotent(uow)
-            budget_record = await uow.agents.get_task_budget(task_id)
-            if budget_record is None:
-                raise TaskBudgetRequiredError(
-                    f"TaskBudget missing: {task_id}"
-                )
             budget = _budget_from_record(budget_record)
             await uow.commit()
             return budget
