@@ -539,7 +539,16 @@ async def test_ubq2_aggregate_never_adopts_recreated_taskbudget_incarnation(
             before_used = int(before.used_executions)
             before_active = int(before.active_executions)
             before_task_revision = int(task_before.revision)
+            before_task_status = str(task_before.status)
             before_target_execution_id = target_before.current_execution_id
+            reservation_count = await uow.session.execute(
+                text(
+                    "SELECT COUNT(*) FROM agent_task_budget_reservations "
+                    "WHERE task_id = :task_id AND kind = 'NEW_EXECUTION'"
+                ),
+                {"task_id": source["task_id"]},
+            )
+            before_new_execution_reservations = reservation_count.scalar_one()
 
         repository_cls.sessions = sessions
         repository_cls.armed = True
@@ -564,6 +573,14 @@ async def test_ubq2_aggregate_never_adopts_recreated_taskbudget_incarnation(
                 source["task_id"],
                 "aggregate-ubq2-incarnation-race",
             )
+            reservation_count = await uow.session.execute(
+                text(
+                    "SELECT COUNT(*) FROM agent_task_budget_reservations "
+                    "WHERE task_id = :task_id AND kind = 'NEW_EXECUTION'"
+                ),
+                {"task_id": source["task_id"]},
+            )
+            after_new_execution_reservations = reservation_count.scalar_one()
             assert budget is not None
             assert task_after is not None
             assert target_after is not None
@@ -571,7 +588,12 @@ async def test_ubq2_aggregate_never_adopts_recreated_taskbudget_incarnation(
             assert int(budget.used_executions) == before_used
             assert int(budget.active_executions) == before_active
             assert int(task_after.revision) == before_task_revision
+            assert str(task_after.status) == before_task_status
             assert target_after.current_execution_id == before_target_execution_id
+            assert (
+                after_new_execution_reservations
+                == before_new_execution_reservations
+            )
             assert receipt is None
     finally:
         repository_cls.reset_race()
