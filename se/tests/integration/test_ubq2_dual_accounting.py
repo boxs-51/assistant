@@ -54,6 +54,28 @@ def _seed_user(database: Path, user_id: str) -> None:
         raw.close()
 
 
+def _set_allocator_next_generation_for_test(database: Path, value: int) -> None:
+    """Move the allocator near exhaustion, then restore the production guard."""
+    raw = sqlite3.connect(database)
+    try:
+        trigger_row = raw.execute(
+            "SELECT sql FROM sqlite_master "
+            "WHERE type='trigger' AND name='trg_ubq2_allocator_update'"
+        ).fetchone()
+        assert trigger_row is not None and trigger_row[0]
+        trigger_sql = str(trigger_row[0])
+        raw.execute("DROP TRIGGER trg_ubq2_allocator_update")
+        raw.execute(
+            "UPDATE agent_task_budget_incarnation_allocator "
+            "SET next_generation=? WHERE allocator_id=1",
+            (value,),
+        )
+        raw.execute(trigger_sql)
+        raw.commit()
+    finally:
+        raw.close()
+
+
 class _Uow:
     def __init__(self, sessions):
         self._sessions = sessions
@@ -738,6 +760,7 @@ async def test_ubq2_sqlite_bridge_and_incarnation_triggers_hold_with_fk_off(
         )
 
         raw = sqlite3.connect(database)
+        raw.row_factory = sqlite3.Row
         try:
             assert raw.execute("PRAGMA foreign_keys").fetchone()[0] == 0
             bridge = raw.execute(
@@ -751,6 +774,24 @@ async def test_ubq2_sqlite_bridge_and_incarnation_triggers_hold_with_fk_off(
                 "AND mirror_dimension='INFERENCE_CALL'"
             ).fetchone()
             assert bridge is not None
+
+            budget = raw.execute(
+                "SELECT * FROM agent_task_budgets "
+                "WHERE task_id='task-trigger-parity'"
+            ).fetchone()
+            assert budget is not None
+            budget_snapshot = dict(budget)
+            generation = int(budget["incarnation_generation"])
+
+            reservation = raw.execute(
+                "SELECT task_budget_incarnation_generation, payload_fingerprint "
+                "FROM agent_task_budget_reservations "
+                "WHERE task_id='task-trigger-parity' "
+                "AND kind='INFERENCE' "
+                "AND reservation_key='trigger-inference'"
+            ).fetchone()
+            assert reservation is not None
+            assert int(reservation["task_budget_incarnation_generation"]) == generation
 
             with pytest.raises(
                 sqlite3.IntegrityError,
@@ -767,15 +808,55 @@ async def test_ubq2_sqlite_bridge_and_incarnation_triggers_hold_with_fk_off(
                     "'trigger-inference', 'INFERENCE_CALL', ?, ?, ?, ?, ?, ?, NULL)",
                     (
                         "bridge-wrong-source-fingerprint",
-                        bridge[1],
+                        bridge["owner_user_id"],
                         "0" * 64,
-                        bridge[2],
-                        bridge[3],
-                        bridge[4],
-                        bridge[5],
-                        bridge[6],
+                        bridge["window_epoch"],
+                        bridge["ubq_reservation_id"],
+                        bridge["ubq_idempotency_key"],
+                        bridge["ubq_payload_fingerprint"],
+                        bridge["amount_atomic"],
                     ),
                 )
+            raw.rollback()
+
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="TASK_BUDGET_RESERVATION_INCARCATION_MISMATCH",
+            ):
+                raw.execute(
+                    "INSERT INTO agent_task_budget_reservations ("
+                    "task_id, kind, reservation_key, "
+                    "task_budget_incarnation_generation, payload_fingerprint"
+                    ") VALUES ('task-trigger-parity', 'USAGE', "
+                    "'wrong-generation', ?, ?)",
+                    (generation + 1, "f" * 64),
+                )
+            raw.rollback()
+
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="TASK_BUDGET_RESERVATION_IDENTITY_IMMUTABLE",
+            ):
+                raw.execute(
+                    "UPDATE agent_task_budget_reservations "
+                    "SET payload_fingerprint=? "
+                    "WHERE task_id='task-trigger-parity' "
+                    "AND kind='INFERENCE' "
+                    "AND reservation_key='trigger-inference'",
+                    ("e" * 64,),
+                )
+            raw.rollback()
+
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match="TASK_BUDGET_INCARNATION_IMMUTABLE",
+            ):
+                raw.execute(
+                    "UPDATE agent_task_budgets "
+                    "SET incarnation_generation=incarnation_generation + 1 "
+                    "WHERE task_id='task-trigger-parity'"
+                )
+            raw.rollback()
 
             with pytest.raises(
                 sqlite3.IntegrityError,
@@ -784,6 +865,41 @@ async def test_ubq2_sqlite_bridge_and_incarnation_triggers_hold_with_fk_off(
                 raw.execute(
                     "DELETE FROM agent_task_budgets "
                     "WHERE task_id='task-trigger-parity'"
+                )
+            raw.rollback()
+
+            raw.execute(
+                "DELETE FROM agent_task_budget_reservations "
+                "WHERE task_id='task-trigger-parity'"
+            )
+            raw.execute(
+                "DELETE FROM agent_task_budgets "
+                "WHERE task_id='task-trigger-parity'"
+            )
+            raw.commit()
+            assert raw.execute(
+                "SELECT COUNT(*) FROM agent_task_budgets "
+                "WHERE task_id='task-trigger-parity'"
+            ).fetchone()[0] == 0
+
+            sentinel_row = dict(budget_snapshot)
+            sentinel_row["incarnation_generation"] = 9223372036854775807
+            columns = tuple(sentinel_row)
+            placeholders = ", ".join("?" for _ in columns)
+            with pytest.raises(
+                sqlite3.IntegrityError,
+                match=(
+                    "TASK_BUDGET_INCARNATION_EXHAUSTED_OR_MISMATCH"
+                    "|ck_task_budget_incarnation_generation"
+                ),
+            ):
+                raw.execute(
+                    "INSERT INTO agent_task_budgets ("
+                    + ", ".join(columns)
+                    + ") VALUES ("
+                    + placeholders
+                    + ")",
+                    tuple(sentinel_row[column] for column in columns),
                 )
             raw.rollback()
         finally:
@@ -840,6 +956,106 @@ async def test_ubq2_committed_taskbudget_generation_is_not_reused_after_source_g
             assert new_budget is not None
             assert int(new_budget.incarnation_generation) > old_generation
             assert int(new_budget.incarnation_generation) != old_generation
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq2_allocator_final_boundary_rollback_and_exhaustion(
+    tmp_path: Path,
+) -> None:
+    database, engine, _, factory, service, _, disabled = await _setup(tmp_path)
+    max_generation = 9223372036854775806
+    sentinel = 9223372036854775807
+    try:
+        service._user_budget_dual_accounting = disabled
+        await service.create_task_with_budget(
+            _task("task-boundary-fixture", "user-a"),
+            identity=_identity("user-a"),
+        )
+
+        raw = sqlite3.connect(database)
+        raw.row_factory = sqlite3.Row
+        try:
+            budget = raw.execute(
+                "SELECT * FROM agent_task_budgets "
+                "WHERE task_id='task-boundary-fixture'"
+            ).fetchone()
+            assert budget is not None
+            budget_values = dict(budget)
+            raw.execute(
+                "DELETE FROM agent_task_budgets "
+                "WHERE task_id='task-boundary-fixture'"
+            )
+            raw.commit()
+        finally:
+            raw.close()
+
+        _set_allocator_next_generation_for_test(database, max_generation)
+
+        budget_values["incarnation_generation"] = max_generation
+        columns = tuple(budget_values)
+        placeholders = ", ".join("?" for _ in columns)
+        insert_sql = (
+            "INSERT INTO agent_task_budgets ("
+            + ", ".join(columns)
+            + ") VALUES ("
+            + placeholders
+            + ")"
+        )
+        insert_values = tuple(budget_values[column] for column in columns)
+
+        raw = sqlite3.connect(database)
+        try:
+            raw.execute("BEGIN")
+            raw.execute(insert_sql, insert_values)
+            assert raw.execute(
+                "SELECT next_generation "
+                "FROM agent_task_budget_incarnation_allocator "
+                "WHERE allocator_id=1"
+            ).fetchone()[0] == sentinel
+            raw.rollback()
+
+            assert raw.execute(
+                "SELECT next_generation "
+                "FROM agent_task_budget_incarnation_allocator "
+                "WHERE allocator_id=1"
+            ).fetchone()[0] == max_generation
+            assert raw.execute(
+                "SELECT COUNT(*) FROM agent_task_budgets "
+                "WHERE task_id='task-boundary-fixture'"
+            ).fetchone()[0] == 0
+
+            raw.execute("BEGIN")
+            raw.execute(insert_sql, insert_values)
+            raw.commit()
+            assert raw.execute(
+                "SELECT next_generation "
+                "FROM agent_task_budget_incarnation_allocator "
+                "WHERE allocator_id=1"
+            ).fetchone()[0] == sentinel
+            assert raw.execute(
+                "SELECT incarnation_generation FROM agent_task_budgets "
+                "WHERE task_id='task-boundary-fixture'"
+            ).fetchone()[0] == max_generation
+        finally:
+            raw.close()
+
+        with pytest.raises(
+            RuntimeError,
+            match="TASK_BUDGET_INCARNATION_EXHAUSTED",
+        ):
+            await service.create_task_with_budget(
+                _task("task-after-exhaustion", "user-a"),
+                identity=_identity("user-a"),
+            )
+
+        async with factory() as uow:
+            assert await uow.agents.get_task("task-after-exhaustion") is None
+            allocator = await uow.agents.get_task_budget_incarnation_allocator()
+            assert allocator is not None
+            assert int(allocator.next_generation) == sentinel
             await uow.commit()
     finally:
         await engine.dispose()
