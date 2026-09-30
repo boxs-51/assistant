@@ -128,12 +128,7 @@ class UserBudgetDualAccountingService:
             if row is None:
                 await uow.commit()
                 return None
-            snapshot = TaskBindingSnapshot(
-                task_id=str(row.task_id),
-                owner_user_id=str(row.owner_user_id),
-                enrollment_version=str(row.enrollment_version),
-                resolution_fingerprint=str(row.resolution_fingerprint),
-            )
+            snapshot = self.binding_snapshot(row)
             await uow.commit()
             return snapshot
 
@@ -348,14 +343,13 @@ class UserBudgetDualAccountingService:
                 )
         return account
 
-    async def enroll_task_in_uow(
+    async def prepare_enrollment_in_uow(
         self,
         uow,
         *,
-        task_id: str,
         parent_task_id: str | None,
         identity: Identity,
-    ) -> TaskBindingSnapshot:
+    ) -> BudgetOwnerResolution:
         resolution = await self.resolve_budget_owner_in_uow(uow, identity)
         await self.ensure_shadow_account_in_uow(
             uow,
@@ -374,7 +368,15 @@ class UserBudgetDualAccountingService:
                 raise UserBudgetParentOwnerMismatchError(
                     "child budget owner differs from parent budget owner"
                 )
+        return resolution
 
+    async def bind_prepared_task_in_uow(
+        self,
+        uow,
+        *,
+        task_id: str,
+        resolution: BudgetOwnerResolution,
+    ) -> TaskBindingSnapshot:
         row = await uow.user_budgets.create_task_binding(
             task_id=task_id,
             owner_user_id=resolution.owner_user_id,
@@ -385,6 +387,10 @@ class UserBudgetDualAccountingService:
             source_organization_id=resolution.source_organization_id,
             resolution_fingerprint=resolution.resolution_fingerprint,
         )
+        return self.binding_snapshot(row)
+
+    @staticmethod
+    def binding_snapshot(row) -> TaskBindingSnapshot:
         return TaskBindingSnapshot(
             task_id=str(row.task_id),
             owner_user_id=str(row.owner_user_id),
@@ -441,6 +447,62 @@ class UserBudgetDualAccountingService:
             owner_user_id,
             expected_account_revision=int(account.revision),
             authoritative_server_now=now,
+        )
+
+    async def require_mirror_replay_in_uow(
+        self,
+        uow,
+        *,
+        binding: TaskBindingSnapshot,
+        task_budget_kind: str,
+        reservation_key: str,
+        source_payload_fingerprint: str,
+        dimensions: Iterable[MirrorDimension],
+    ) -> tuple[Any, ...]:
+        rows = []
+        for dimension in tuple(dimensions):
+            existing = await uow.user_budgets.get_dual_accounting_receipt(
+                binding.task_id,
+                task_budget_kind,
+                reservation_key,
+                dimension.resource_kind,
+            )
+            if existing is None:
+                raise UserBudgetIntegrityError(
+                    "committed TaskBudget resource reservation is missing its UBQ bridge"
+                )
+            if (
+                str(existing.owner_user_id) != binding.owner_user_id
+                or str(existing.source_payload_fingerprint)
+                != source_payload_fingerprint
+                or int(existing.amount_atomic) != int(dimension.amount_atomic)
+                or (existing.capability_id or None)
+                != (dimension.capability_id or None)
+            ):
+                raise UserBudgetConflictError(
+                    "dual-accounting replay conflicts with immutable bridge receipt"
+                )
+            rows.append(existing)
+        return tuple(rows)
+
+    @staticmethod
+    def inference_dimensions() -> tuple[MirrorDimension, ...]:
+        return (
+            MirrorDimension(UserBudgetResourceKind.INFERENCE_CALL.value, 1),
+        )
+
+    @staticmethod
+    def tool_call_dimensions(
+        capability_id: str,
+    ) -> tuple[MirrorDimension, ...]:
+        if not capability_id:
+            raise ValueError("canonical capability_id is required")
+        return (
+            MirrorDimension(
+                UserBudgetResourceKind.TOOL_CALL.value,
+                1,
+                capability_id,
+            ),
         )
 
     async def mirror_resource_in_uow(
