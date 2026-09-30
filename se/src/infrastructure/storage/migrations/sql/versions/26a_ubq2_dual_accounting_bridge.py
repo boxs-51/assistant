@@ -588,6 +588,10 @@ def upgrade() -> None:
             "uq_task_budget_task_incarnation",
             ["task_id", "incarnation_generation"],
         )
+        batch.create_unique_constraint(
+            "uq_task_budget_incarnation_generation",
+            ["incarnation_generation"],
+        )
         batch.create_check_constraint(
             "ck_task_budget_incarnation_generation",
             "incarnation_generation > 0 "
@@ -822,6 +826,10 @@ def downgrade() -> None:
         batch.drop_column("task_budget_incarnation_generation")
 
     with op.batch_alter_table("agent_task_budgets") as batch:
+        batch.drop_constraint(
+            "uq_task_budget_incarnation_generation",
+            type_="unique",
+        )
         batch.drop_constraint(
             "uq_task_budget_task_incarnation",
             type_="unique",
