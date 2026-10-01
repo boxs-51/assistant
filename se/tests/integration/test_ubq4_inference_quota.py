@@ -22,6 +22,7 @@ from se.src.application.user_inference_quota import (
     UserInferenceQuotaConflictError,
     UserInferenceQuotaContextError,
     UserInferenceQuotaService,
+    UserBudgetUnsupportedGovernedOperationError,
     derive_skill_inference_request_id,
 )
 from se.src.domain.schemas.identity import Identity
@@ -95,6 +96,7 @@ async def _setup(
     tmp_path: Path,
     *,
     max_compute_units: Decimal | None = None,
+    finite_governed_policy: bool = True,
 ):
     database = tmp_path / "ubq4-inference-quota.sqlite"
     env_key = "ASSISTANT_ALEMBIC_DATABASE_URL"
@@ -134,10 +136,10 @@ async def _setup(
         policy_version="ubq4-test-v1",
         window_duration_seconds=3600,
         max_compute_units=max_compute_units,
-        max_inference_calls=2,
-        max_input_tokens=100_000,
-        max_output_tokens=100_000,
-        max_total_tokens=200_000,
+        max_inference_calls=(2 if finite_governed_policy else None),
+        max_input_tokens=(100_000 if finite_governed_policy else None),
+        max_output_tokens=(100_000 if finite_governed_policy else None),
+        max_total_tokens=(200_000 if finite_governed_policy else None),
         max_tool_calls_total=None,
         default_per_tool_limit=None,
         tool_limits={},
@@ -314,6 +316,36 @@ async def test_ubq4_same_request_id_changed_semantics_conflicts_before_charge(
                 "user-ubq4", first.window_epoch
             )
             assert int(window.inference_reserved) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq4_embedding_fence_blocks_selected_finite_policy(
+    tmp_path: Path,
+) -> None:
+    engine, _factory, service, identity = await _setup(tmp_path)
+    try:
+        with pytest.raises(UserBudgetUnsupportedGovernedOperationError):
+            await service.require_embedding_allowed(
+                budget_identity=identity,
+            )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq4_embedding_fence_allows_unlimited_governed_policy(
+    tmp_path: Path,
+) -> None:
+    engine, _factory, service, identity = await _setup(
+        tmp_path,
+        finite_governed_policy=False,
+    )
+    try:
+        await service.require_embedding_allowed(
+            budget_identity=identity,
+        )
     finally:
         await engine.dispose()
 
