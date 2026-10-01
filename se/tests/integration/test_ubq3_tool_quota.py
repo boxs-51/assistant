@@ -879,3 +879,66 @@ async def test_ubq3_runtime_terminal_never_dispatched_release_is_idempotent(
             assert int(usage.reserved_calls) == 0
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_concurrent_same_id_conflicting_payload_has_no_extra_charge(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        runtime, driver, store = _quota_runtime(service)
+        invocation_id = "inv-concurrent-conflict"
+
+        outcomes = await asyncio.gather(
+            runtime.execute_capability(
+                driver.name,
+                {"value": "left"},
+                identity,
+                invocation_id=invocation_id,
+            ),
+            runtime.execute_capability(
+                driver.name,
+                {"value": "right"},
+                identity,
+                invocation_id=invocation_id,
+            ),
+            return_exceptions=True,
+        )
+
+        successes = [
+            item for item in outcomes
+            if not isinstance(item, BaseException)
+        ]
+        failures = [
+            item for item in outcomes
+            if isinstance(item, BaseException)
+        ]
+        assert len(successes) == 1
+        assert len(failures) == 1
+        assert driver.calls == 1
+        assert len(await store.list_attempts(invocation_id)) == 1
+
+        direct_key, _ = service._identity(invocation_id)
+        async with factory() as uow:
+            reservation = await uow.user_budgets.get_reservation(
+                identity.user_id,
+                direct_key,
+            )
+            assert reservation is not None
+            assert reservation.state == "SETTLED"
+            window = await uow.user_budgets.get_window(
+                identity.user_id,
+                int(reservation.window_epoch),
+            )
+            usage = await uow.user_budgets.get_tool_usage(
+                identity.user_id,
+                int(reservation.window_epoch),
+                driver.name,
+            )
+            assert int(window.tool_calls_used) == 1
+            assert int(window.tool_calls_reserved) == 0
+            assert int(usage.used_calls) == 1
+            assert int(usage.reserved_calls) == 0
+    finally:
+        await engine.dispose()
