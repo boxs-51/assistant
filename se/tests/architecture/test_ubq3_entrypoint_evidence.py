@@ -150,6 +150,11 @@ class _AllowExecutionPolicy:
         return PolicyDecision.ALLOW
 
 
+class _DenyExecutionPolicy:
+    def check_tool_call(self, context, request) -> PolicyDecision:
+        return PolicyDecision.DENY
+
+
 class _DirectInference:
     def __init__(self, capability_id: str) -> None:
         self.capability_id = capability_id
@@ -352,6 +357,41 @@ async def test_ubq3_unauthorized_tool_is_rejected_before_quota_mutation() -> Non
             invocation_id="inv-ubq3-unauthorized",
         )
 
+    assert driver.calls == 0
+    assert quota.reserve_calls == []
+    assert quota.settle_calls == []
+    assert quota.release_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ubq3_agent_policy_denial_precedes_tool_quota_mutation() -> None:
+    runtime, driver, quota = _runtime("tool.agent.denied")
+    adapter = CapabilityToolExecutionAdapter(
+        runtime,
+        _AllowToolPolicy(),
+        _DenyExecutionPolicy(),
+    )
+    context = AgentExecutionContext.create(
+        execution_id="exec-ubq3-agent-denied",
+        agent_id="agent-ubq3",
+        session_id="session-ubq3-agent-denied",
+        correlation_id="corr-ubq3-agent-denied",
+        identity=_identity(),
+        limits=AgentExecutionLimits(),
+    )
+    request = ToolExecutionRequest(
+        execution_id=context.execution_id,
+        iteration=1,
+        invocation_id="inv-ubq3-agent-denied",
+        tool_call_id="call-ubq3-agent-denied",
+        capability_id=driver.name,
+        arguments={"value": "denied"},
+    )
+
+    result = await adapter.execute(context, request)
+
+    assert result.success is False
+    assert result.error_code == "AGENT_TOOL_POLICY_DENIED"
     assert driver.calls == 0
     assert quota.reserve_calls == []
     assert quota.settle_calls == []
