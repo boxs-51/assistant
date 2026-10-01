@@ -33,55 +33,53 @@ def test_f7_s_contract_is_zero_production_and_keeps_future_authority_closed():
         assert phrase in document
 
 
-def test_current_stream_handler_yields_provider_chunks_without_f7_s_fence():
+def test_stream_handler_routes_through_f7_s_terminal_assembler():
     source = _read("se/src/provider/handlers/chat_handler.py")
 
     assert "async def stream_with_fallback(" in source
     stream = source.index("async def stream_with_fallback(")
     executor = source.index("self.executor.execute_stream(", stream)
-    loop = source.index("async for chunk in provider_stream:", executor)
-    started = source.index("stream_started = True", loop)
-    yielded = source.index("yield chunk", started)
-    assert executor < loop < started < yielded
+    assembler = source.index("GeneratedAssetStreamAssembler(", executor)
+    loop = source.index("async for chunk in provider_stream:", assembler)
+    observe = source.index("stream_assembler.observe(chunk)", loop)
+    finalize = source.index("await stream_assembler.finalize()", observe)
+    assert executor < assembler < loop < observe < finalize
 
-    # F7-P1 canonicalization is present on non-stream but no stream-side
-    # canonicalization call exists after execute_stream in the current baseline.
-    assert "return await self.generated_asset_canonicalizer.canonicalize(" in source
     stream_body = source[stream:]
-    assert "generated_asset_canonicalizer.canonicalize(" not in stream_body
+    assert "stream_assembler.media_seen" in stream_body
+    assert "yield public_chunk" in stream_body
+    assert "yield canonical_chunk" in stream_body
 
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
-        "contains no generated-media response canonicalization fence on the stream path",
         "generated_media_seen = True",
         "provider attempt becomes fallback-terminal",
         "raw generated-media transport MUST NOT be yielded",
+        "The first CAS ingest is prohibited until provider stream completion",
     ):
         assert phrase in document
 
-
-def test_current_gemini_stream_loses_response_wide_and_filedata_authority():
+def test_gemini_stream_preserves_f7_s_candidate_and_filedata_authority():
     source = _read("se/src/provider/gemini/converters/chats/response.py")
 
     stream = source.index("async def adapt_chat_stream(")
     stream_source = source[stream:]
 
-    assert 'candidate = obj["candidates"][0]' in stream_source
-    assert "_parse_gemini_parts_to_content(" in stream_source
-    assert "preserve_generated_file_data=True" not in stream_source
+    assert 'candidates = obj.get("candidates") or []' in stream_source
+    assert "for candidate_index, candidate in enumerate(candidates):" in stream_source
+    assert "preserve_generated_file_data=True" in stream_source
+    assert '"_cas_f7_candidate_index"' in stream_source
+    assert '"_cas_f7_tool_call"' in stream_source
     assert "GatewayStreamChunk(" in stream_source
-    assert "content_parts=[" in stream_source
 
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
     for phrase in (
-        'processes only obj["candidates"][0]',
-        "may lower streaming fileData.fileUri through the legacy URL path",
-        "complete logical provider-stream termination",
         "all candidates relevant to generated-media cardinality",
+        "response-wide tool-call presence",
         "Generated fileData must preserve provider-generated provenance",
+        "provider-neutral stream assembler",
     ):
         assert phrase in document
-
 
 def test_gateway_stream_schema_has_no_attachment_delta_field():
     schema = _read("se/src/domain/schemas/response.py")
@@ -142,7 +140,7 @@ def test_exact_canonical_stream_output_representation_and_client_parity_gate():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     assert "content_parts: Optional[List[Dict[str, Any]]] = None" in server_schema
-    assert "content_parts: Optional[List[Dict[str, Any]]] = None" not in client_schema
+    assert "content_parts: Optional[List[Dict[str, Any]]] = None" in client_schema
 
     for phrase in (
         "emits exactly one terminal GatewayStreamChunk",
