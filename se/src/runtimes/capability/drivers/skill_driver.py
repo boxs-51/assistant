@@ -39,9 +39,9 @@ class ExecutableSkillCapabilityDriver(BaseCapabilityDriver):
                 budget_identity=context.identity,
                 cancellation_event=context.cancellation_event,
                 metadata={
+                    **context.metadata,
                     "quota_source_surface": "SKILL",
                     "outer_request_id": context.request_id,
-                    **context.metadata,
                     "invocation_id": context.invocation_id,
                     **(
                         {"task_id": context.task_id}
