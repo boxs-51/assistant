@@ -108,7 +108,7 @@ def test_terminal_assembler_commit_point_is_frozen_before_first_ingest():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     for phrase in (
-        "provider-neutral terminal envelope / assembler",
+        "Provider-neutral terminal envelope / assembler",
         "response-wide generated-media cardinality",
         "response-wide tool-call presence",
         "cancellation state",
@@ -132,5 +132,28 @@ def test_first_f7_s_source_scope_and_cross_track_fences_are_explicit():
         "Issue #166 / CAS-B1 remains HARD HOLD",
         "F7-T/tool-output persistence remains CLOSED",
         "F7-S production CLAIM remains CLOSED until independent audit",
+    ):
+        assert phrase in document
+
+
+def test_exact_canonical_stream_output_representation_and_client_parity_gate():
+    server_schema = _read("se/src/domain/schemas/response.py")
+    client_schema = _read("cl/src/schemas/response.py")
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+
+    assert "content_parts: Optional[List[Dict[str, Any]]] = None" in server_schema
+    assert "content_parts: Optional[List[Dict[str, Any]]] = None" not in client_schema
+
+    for phrase in (
+        "emits exactly one terminal GatewayStreamChunk",
+        "choices[0].delta.content = None for the generated-media object",
+        "metadata.content_parts contains exactly one canonical serialized MessageContentPart",
+        'the nested GatewayAttachment has source="asset"',
+        "the nested attachment carries asset_id and uri=asset://<asset_id>",
+        "base64_data, bytes_data and provider_file_id are absent",
+        "no second text delta containing asset:// is emitted",
+        "Current typed client cl/src/schemas/response.py::ResponseMetaData does not declare content_parts",
+        "requires bounded client schema parity by adding optional content_parts",
+        "does not create a new public stream field",
     ):
         assert phrase in document
