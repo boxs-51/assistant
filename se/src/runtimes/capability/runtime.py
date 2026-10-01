@@ -67,6 +67,12 @@ from ...runtimes.connection.multiplexer import RemoteConnectionLost
 from ...domain.schemas.identity import Identity
 from ...domain.schemas.event import BaseEvent
 from ...application.policy.authorization import AuthorizationService
+from ...application.user_budget import (
+    ToolQuotaAdmission,
+    UserBudgetDualAccountingError,
+    UserToolQuotaError,
+)
+from .validation import JsonSchemaCapabilityArgumentValidator
 
 logger = structlog.get_logger(__name__)
 
@@ -84,6 +90,8 @@ class CapabilityRuntime(BaseRuntime):
         realtime: RealtimeMultiplexer | None = None,
         driver_registry: CapabilityDriverRegistry | None = None,
         invocation_lifecycle: CapabilityInvocationLifecycle | None = None,
+        tool_quota_service: Any | None = None,
+        argument_validator: Any | None = None,
     ):
         manifest = RuntimeManifest(
             id="capability_runtime",
@@ -100,6 +108,10 @@ class CapabilityRuntime(BaseRuntime):
         self.realtime = realtime
         self.driver_registry = driver_registry or CapabilityDriverRegistry()
         self.invocation_lifecycle = invocation_lifecycle or CapabilityInvocationLifecycle()
+        self.tool_quota_service = tool_quota_service
+        self.argument_validator = (
+            argument_validator or JsonSchemaCapabilityArgumentValidator()
+        )
         effective_connections = (
             connection_registry
             or getattr(realtime, "registry", None)
@@ -822,8 +834,124 @@ class CapabilityRuntime(BaseRuntime):
             implementation,
         )
 
+    @staticmethod
+    def _require_same_logical_invocation(
+        existing: CapabilityInvocation,
+        candidate: CapabilityInvocation,
+    ) -> None:
+        fields = (
+            "invocation_id",
+            "owner_user_id",
+            "capability_id",
+            "capability_version",
+            "kind",
+            "execution_mode",
+            "idempotency",
+            "request_fingerprint",
+            "execution_id",
+            "workflow_id",
+            "tool_call_id",
+            "session_id",
+            "turn_id",
+        )
+        mismatched = [
+            field
+            for field in fields
+            if getattr(existing, field) != getattr(candidate, field)
+        ]
+        if (
+            mismatched
+            or dict(existing.arguments or {}) != dict(candidate.arguments or {})
+        ):
+            raise CapabilityError(
+                code=REMOTE_INVOCATION_CONFLICT,
+                message="Capability invocation id conflicts with durable logical identity.",
+                category="CONCURRENCY",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=candidate.capability_id,
+                invocation_id=candidate.invocation_id,
+                details={"mismatched_fields": mismatched},
+            )
+
+    async def _finalize_tool_quota_for_invocation(
+        self,
+        admission: ToolQuotaAdmission | None,
+        invocation: CapabilityInvocation | None,
+    ) -> ToolQuotaAdmission | None:
+        service = self.tool_quota_service
+        if service is None or admission is None or admission.historical_bridge:
+            return admission
+        if invocation is None:
+            return admission
+
+        if (
+            invocation.state is CapabilityInvocationState.COMPLETED
+            or invocation.remote_outcome_state
+            is RemoteOutcomeState.TERMINAL_COMMITTED
+            or (
+                invocation.state is CapabilityInvocationState.FAILED
+                and invocation.remote_outcome_state is None
+            )
+        ):
+            return await service.settle_tool_call(admission)
+
+        if (
+            invocation.state in TERMINAL_INVOCATION_STATES
+            and invocation.remote_outcome_state
+            is RemoteOutcomeState.NOT_DISPATCHED
+        ):
+            return await service.release_tool_call(admission)
+
+        # WAITING, IN_FLIGHT, OUTCOME_UNKNOWN, local timeout/cancel ambiguity,
+        # and any other uncertain state remain fail-closed as RESERVED.
+        return admission
+
+    @staticmethod
+    def _replayed_terminal_result(
+        invocation: CapabilityInvocation,
+        *,
+        started: float,
+    ) -> CapabilityResult:
+        if invocation.state is CapabilityInvocationState.COMPLETED:
+            completed_at = invocation.completed_at or datetime.now(timezone.utc)
+            started_at = invocation.started_at or invocation.created_at
+            duration_ms = max(
+                0.0,
+                (completed_at - started_at).total_seconds() * 1000.0,
+            )
+            return CapabilityResult(
+                invocation_id=invocation.invocation_id,
+                capability_id=invocation.capability_id,
+                output=invocation.output,
+                output_type=type(invocation.output).__name__,
+                started_at=started_at,
+                completed_at=completed_at,
+                duration_ms=duration_ms,
+                metadata={
+                    "attempt": invocation.attempt,
+                    "replayed_terminal": True,
+                },
+            )
+
+        error = dict(invocation.error or {})
+        raise CapabilityError(
+            code=str(error.get("code") or REMOTE_INVOCATION_CONFLICT),
+            message=str(
+                error.get("message")
+                or "Capability invocation is already terminal."
+            ),
+            category=str(error.get("category") or "REPLAY"),
+            retryable=bool(error.get("retryable", False)),
+            safe_for_client=bool(error.get("safe_for_client", True)),
+            cause_type=error.get("cause_type"),
+            capability_id=invocation.capability_id,
+            invocation_id=invocation.invocation_id,
+            details=dict(error.get("details") or {}),
+        )
+
     async def execute_capability(
-        self, 
+        self,
         capability_id: str,
         arguments: Mapping[str, Any],
         identity: Identity,
@@ -855,6 +983,7 @@ class CapabilityRuntime(BaseRuntime):
                     "caller_agent_execution_id must match execution_id "
                     "for Agent-owned capability invocations."
                 )
+
         request_metadata = dict(metadata or {})
         effective_correlation_id = (
             correlation_id
@@ -862,7 +991,9 @@ class CapabilityRuntime(BaseRuntime):
             else request_metadata.get("correlation_id")
         )
         effective_trace_id = (
-            trace_id if trace_id is not None else request_metadata.get("trace_id")
+            trace_id
+            if trace_id is not None
+            else request_metadata.get("trace_id")
         )
         metadata_connection_id = request_metadata.get("connection_id")
         if (
@@ -873,6 +1004,7 @@ class CapabilityRuntime(BaseRuntime):
             raise ValueError(
                 "Explicit connection_id does not match metadata['connection_id']."
             )
+
         driver, selected_implementation_id = self._resolve_execution_driver(
             capability_id,
             identity,
@@ -880,9 +1012,30 @@ class CapabilityRuntime(BaseRuntime):
             connection_id=connection_id,
         )
         if not driver:
-            raise ValueError(f"Capability '{capability_id}' not found or unavailable.")
+            raise ValueError(
+                f"Capability '{capability_id}' not found or unavailable."
+            )
         if not self.authorization.is_allowed(identity, driver):
-            raise PermissionError(f"Capability '{capability_id}' is not authorized.")
+            raise PermissionError(
+                f"Capability '{capability_id}' is not authorized."
+            )
+
+        if driver.definition.kind is CapabilityKind.TOOL:
+            validation = self.argument_validator.validate(
+                driver.definition,
+                arguments,
+            )
+            if not validation.valid:
+                code = validation.error_code or "CAPABILITY_INVALID_ARGUMENT"
+                raise CapabilityError(
+                    code=code,
+                    message=validation.error_message or code,
+                    category="VALIDATION",
+                    retryable=False,
+                    safe_for_client=True,
+                    capability_id=capability_id,
+                    invocation_id=invocation_id,
+                )
 
         context = CapabilityExecutionContext.create(
             identity=identity,
@@ -901,10 +1054,7 @@ class CapabilityRuntime(BaseRuntime):
             branch_id=branch_id,
             correlation_id=effective_correlation_id,
             trace_id=effective_trace_id,
-            connection_id=(
-                connection_id
-                or metadata_connection_id
-            ),
+            connection_id=(connection_id or metadata_connection_id),
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
             cancellation_event=cancellation_event,
@@ -913,7 +1063,10 @@ class CapabilityRuntime(BaseRuntime):
 
         selected_implementation = (
             self.catalog.get_implementation(selected_implementation_id)
-            if self.catalog is not None and selected_implementation_id is not None
+            if (
+                self.catalog is not None
+                and selected_implementation_id is not None
+            )
             else None
         )
         effective_implementation_id = (
@@ -930,24 +1083,23 @@ class CapabilityRuntime(BaseRuntime):
             and selected_implementation.location
             is CapabilityExecutionLocation.CLIENT
         ):
-            origin_client_id = selected_implementation.metadata.get(
-                "client_id"
-            )
+            origin_client_id = selected_implementation.metadata.get("client_id")
         elif isinstance(driver, RemoteClientDriver):
             origin_client_id = request_metadata.get("client_id")
 
-        invocation = CapabilityInvocation(
+        request_fingerprint = capability_request_fingerprint(
+            capability_id=capability_id,
+            capability_version=driver.definition.version,
+            arguments=arguments,
+        )
+        candidate = CapabilityInvocation(
             invocation_id=context.invocation_id,
             capability_id=capability_id,
             capability_version=driver.definition.version,
             kind=driver.definition.kind,
             execution_mode=driver.definition.execution_mode,
             idempotency=driver.definition.idempotency,
-            request_fingerprint=capability_request_fingerprint(
-                capability_id=capability_id,
-                capability_version=driver.definition.version,
-                arguments=arguments,
-            ),
+            request_fingerprint=request_fingerprint,
             owner_user_id=identity.user_id,
             origin_client_id=origin_client_id,
             remote_outcome_state=(
@@ -963,53 +1115,234 @@ class CapabilityRuntime(BaseRuntime):
             workflow_id=context.workflow_id,
             tool_call_id=request_metadata.get("tool_call_id"),
             connection_id=context.connection_id,
-            max_attempts=max(1, int(request_metadata.get("max_attempts", 1))),
+            max_attempts=max(
+                1,
+                int(request_metadata.get("max_attempts", 1)),
+            ),
             arguments=dict(arguments),
             deadline_at=(
-                datetime.now(timezone.utc) + timedelta(seconds=timeout_seconds)
+                datetime.now(timezone.utc)
+                + timedelta(seconds=timeout_seconds)
                 if timeout_seconds is not None
                 else None
             ),
             correlation_id=context.correlation_id,
             trace_id=context.trace_id,
         )
-        await self.invocation_lifecycle.create(invocation)
-        self._bind_remote_dispatch_started(driver, invocation)
-        invocation.attempt = 1
-        attempt = await self.invocation_lifecycle.start_attempt(
-            invocation,
-            implementation_id=effective_implementation_id,
-            driver_kind=effective_driver_kind,
-            connection_id=context.connection_id,
-        )
-        await self.invocation_lifecycle.transition(
-            invocation,
-            CapabilityInvocationState.DISPATCHING,
-            attempt_id=attempt.attempt_id,
-        )
-        await self.invocation_lifecycle.transition(
-            invocation,
-            CapabilityInvocationState.RUNNING,
-            attempt_id=attempt.attempt_id,
-        )
 
-        return await self._run_invocation_attempt(
-            invocation=invocation,
-            attempt=attempt,
-            driver=driver,
-            selected_implementation_id=selected_implementation_id,
-            selected_implementation=selected_implementation,
-            effective_implementation_id=effective_implementation_id,
-            effective_driver_kind=effective_driver_kind,
-            context=context,
-            capability_id=capability_id,
-            arguments=arguments,
-            identity=identity,
-            request_metadata=request_metadata,
-            routing_connection_id=connection_id,
-            started=started,
-            allow_internal_retry=True,
+        admission: ToolQuotaAdmission | None = None
+        if (
+            driver.definition.kind is CapabilityKind.TOOL
+            and self.tool_quota_service is not None
+        ):
+            try:
+                admission = await self.tool_quota_service.reserve_tool_call(
+                    identity=identity,
+                    invocation_id=candidate.invocation_id,
+                    capability_id=capability_id,
+                    request_fingerprint=request_fingerprint,
+                    arguments=dict(arguments),
+                    execution_id=candidate.execution_id,
+                    tool_call_id=candidate.tool_call_id,
+                    task_id=context.task_id,
+                    workflow_id=candidate.workflow_id,
+                    session_id=candidate.session_id,
+                )
+            except (UserToolQuotaError, UserBudgetDualAccountingError) as exc:
+                code = str(getattr(exc, "code", "USER_TOOL_QUOTA_ERROR"))
+                raise CapabilityError(
+                    code=code,
+                    message=str(exc),
+                    category="QUOTA",
+                    retryable=False,
+                    safe_for_client=code in {
+                        "USER_TOOL_QUOTA_EXHAUSTED",
+                        "USER_TOOL_CAPABILITY_QUOTA_EXHAUSTED",
+                        "USER_BUDGET_OWNER_UNRESOLVED",
+                    },
+                    cause_type=type(exc).__name__,
+                    capability_id=capability_id,
+                    invocation_id=candidate.invocation_id,
+                ) from exc
+            if admission is not None:
+                candidate.owner_user_id = admission.owner_user_id
+
+        existing = await self.invocation_lifecycle.store.get(
+            candidate.invocation_id
         )
+        if (
+            admission is not None
+            and not admission.historical_bridge
+            and admission.reservation_state
+            != "RESERVED"
+            and existing is None
+        ):
+            raise CapabilityError(
+                code=REMOTE_INVOCATION_CONFLICT,
+                message=(
+                    "Terminal UBQ reservation has no recoverable durable "
+                    "CapabilityInvocation."
+                ),
+                category="CONCURRENCY",
+                retryable=False,
+                safe_for_client=False,
+                capability_id=capability_id,
+                invocation_id=candidate.invocation_id,
+            )
+
+        if existing is None:
+            try:
+                await self.invocation_lifecycle.create(candidate)
+                invocation = candidate
+            except Exception:
+                winner = await self.invocation_lifecycle.store.get(
+                    candidate.invocation_id
+                )
+                if winner is None:
+                    raise
+                self._require_same_logical_invocation(winner, candidate)
+                invocation = winner
+        else:
+            self._require_same_logical_invocation(existing, candidate)
+            invocation = existing
+
+        if invocation.state in TERMINAL_INVOCATION_STATES:
+            admission = await self._finalize_tool_quota_for_invocation(
+                admission,
+                invocation,
+            )
+            return self._replayed_terminal_result(
+                invocation,
+                started=started,
+            )
+
+        if (
+            invocation.state is CapabilityInvocationState.CREATED
+            and invocation.attempt == 0
+        ):
+            invocation, attempt = (
+                await self.invocation_lifecycle.begin_initial_attempt(
+                    invocation,
+                    implementation_id=effective_implementation_id,
+                    driver_kind=effective_driver_kind,
+                    connection_id=context.connection_id,
+                )
+            )
+            invocation, attempt = (
+                await self.invocation_lifecycle.start_initial_attempt(
+                    invocation,
+                    attempt,
+                )
+            )
+        elif (
+            invocation.state is CapabilityInvocationState.DISPATCHING
+            and invocation.attempt == 1
+        ):
+            attempts = await self.invocation_lifecycle.store.list_attempts(
+                invocation.invocation_id
+            )
+            if (
+                len(attempts) != 1
+                or attempts[0].attempt_number != 1
+                or attempts[0].state
+                is not CapabilityInvocationState.DISPATCHING
+            ):
+                raise CapabilityError(
+                    code=REMOTE_INVOCATION_CONFLICT,
+                    message="Initial invocation attempt history is ambiguous.",
+                    category="CONCURRENCY",
+                    retryable=False,
+                    safe_for_client=False,
+                    capability_id=capability_id,
+                    invocation_id=invocation.invocation_id,
+                )
+            attempt = attempts[0]
+            if (
+                attempt.implementation_id != effective_implementation_id
+                or attempt.driver_kind != effective_driver_kind
+                or attempt.connection_id != context.connection_id
+            ):
+                raise CapabilityError(
+                    code=REMOTE_INVOCATION_CONFLICT,
+                    message=(
+                        "Initial attempt target changed before physical dispatch."
+                    ),
+                    category="ROUTING",
+                    retryable=True,
+                    safe_for_client=True,
+                    capability_id=capability_id,
+                    invocation_id=invocation.invocation_id,
+                )
+            invocation, attempt = (
+                await self.invocation_lifecycle.start_initial_attempt(
+                    invocation,
+                    attempt,
+                )
+            )
+        else:
+            raise CapabilityError(
+                code=REMOTE_INVOCATION_CONFLICT,
+                message=(
+                    "Ordinary capability execution cannot restart an existing "
+                    f"{invocation.state.value} invocation."
+                ),
+                category="CONCURRENCY",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=capability_id,
+                invocation_id=invocation.invocation_id,
+                details={
+                    "state": invocation.state.value,
+                    "attempt": invocation.attempt,
+                },
+            )
+
+        context.attempt = invocation.attempt
+        self._bind_remote_dispatch_started(driver, invocation)
+
+        try:
+            result = await self._run_invocation_attempt(
+                invocation=invocation,
+                attempt=attempt,
+                driver=driver,
+                selected_implementation_id=selected_implementation_id,
+                selected_implementation=selected_implementation,
+                effective_implementation_id=effective_implementation_id,
+                effective_driver_kind=effective_driver_kind,
+                context=context,
+                capability_id=capability_id,
+                arguments=arguments,
+                identity=identity,
+                request_metadata=request_metadata,
+                routing_connection_id=connection_id,
+                started=started,
+                allow_internal_retry=True,
+            )
+        except BaseException:
+            persisted = await self.invocation_lifecycle.store.get(
+                invocation.invocation_id
+            )
+            try:
+                await self._finalize_tool_quota_for_invocation(
+                    admission,
+                    persisted,
+                )
+            except Exception:
+                logger.exception(
+                    "UBQ-3 terminal reconciliation failed after capability error",
+                    invocation_id=invocation.invocation_id,
+                    capability_id=capability_id,
+                )
+            raise
+
+        persisted = await self.invocation_lifecycle.store.get(
+            invocation.invocation_id
+        )
+        await self._finalize_tool_quota_for_invocation(
+            admission,
+            persisted,
+        )
+        return result
 
     async def _run_invocation_attempt(
         self,
