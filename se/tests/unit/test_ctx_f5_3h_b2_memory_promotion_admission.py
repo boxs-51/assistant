@@ -282,6 +282,29 @@ async def test_ctx_f5_3h_b2_invalid_payload_fails_before_session_creation():
 
 
 @pytest.mark.asyncio
+async def test_ctx_f5_3h_b2_cyclic_payload_fails_before_session_creation():
+    valid_content = {"fact": "alpha"}
+    intent = _intent(valid_content)
+
+    cyclic_list = []
+    cyclic_list.append(cyclic_list)
+    cyclic_dict = {}
+    cyclic_dict["self"] = cyclic_dict
+
+    for payload in (cyclic_list, cyclic_dict):
+        sessions = _SessionFactory()
+        service = DurableMemoryPromotionAdmission(sessions)
+
+        with pytest.raises(PromotionAdmissionIntentConflictError):
+            await service.admit(
+                reservation=_reservation("authority-cyclic", intent),
+                content=payload,
+            )
+
+        assert sessions.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_ctx_f5_3h_b2_missing_and_revoked_fail_without_memory_write(monkeypatch):
     content = {"fact": "alpha"}
     intent = _intent(content)
