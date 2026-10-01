@@ -484,6 +484,109 @@ class UserInferenceQuotaService:
                 "logical inference reservation replay conflicts with canonical payload"
             )
 
+    @staticmethod
+    def _task_budget_inference_fingerprint(request_id: str) -> str:
+        encoded = json.dumps(
+            {
+                "kind": "INFERENCE",
+                "reservation_key": request_id,
+                "payload": {},
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode("utf-8")
+        return hashlib.sha256(encoded).hexdigest()
+
+    async def _require_no_unmigrated_historical_inference_in_uow(
+        self,
+        uow,
+        *,
+        owner_user_id: str,
+        context: InferenceQuotaContext,
+    ) -> None:
+        """Fail closed instead of silently double-charging an UBQ-2 replay.
+
+        V1 freezes historical bridge suppression behind exact durable lineage.
+        Until UBQ-4 has a separately proven cross-window suppression path, an
+        exact historical INFERENCE bridge is a migration/recovery boundary,
+        not permission to create a second renewable-user charge.
+        """
+        if context.task_id is None:
+            return
+        bridge = await uow.user_budgets.get_dual_accounting_receipt(
+            context.task_id,
+            "INFERENCE",
+            context.logical_request_id,
+            UserBudgetResourceKind.INFERENCE_CALL.value,
+        )
+        if bridge is None:
+            return
+
+        binding = await uow.user_budgets.get_task_binding(context.task_id)
+        budget = await uow.agents.get_task_budget(context.task_id)
+        source = None
+        if budget is not None:
+            source = await uow.agents.get_task_budget_reservation(
+                context.task_id,
+                "INFERENCE",
+                context.logical_request_id,
+                expected_incarnation_generation=int(
+                    budget.incarnation_generation
+                ),
+            )
+        expected = self._task_budget_inference_fingerprint(
+            context.logical_request_id
+        )
+        mirrored = None
+        if bridge.ubq_idempotency_key is not None:
+            mirrored = await uow.user_budgets.get_reservation(
+                owner_user_id,
+                str(bridge.ubq_idempotency_key),
+            )
+
+        iteration = None
+        if context.agent_iteration_id is not None:
+            iteration = await uow.agents.get_iteration(
+                context.agent_iteration_id
+            )
+
+        exact_lineage = (
+            binding is not None
+            and str(binding.owner_user_id) == owner_user_id
+            and source is not None
+            and str(source.payload_fingerprint) == expected
+            and str(bridge.source_payload_fingerprint) == expected
+            and str(bridge.owner_user_id) == owner_user_id
+            and int(bridge.amount_atomic) == 1
+            and mirrored is not None
+            and str(mirrored.reservation_id)
+            == str(bridge.ubq_reservation_id)
+            and int(mirrored.window_epoch) == int(bridge.window_epoch)
+            and str(mirrored.resource_kind)
+            == UserBudgetResourceKind.INFERENCE_CALL.value
+            and str(mirrored.payload_fingerprint)
+            == str(bridge.ubq_payload_fingerprint)
+            and str(mirrored.state)
+            == UserBudgetReservationState.SETTLED.value
+            and int(mirrored.settled_amount_atomic or 0) == 1
+            and context.execution_id is not None
+            and context.agent_iteration_id is not None
+            and iteration is not None
+            and str(iteration.execution_id) == context.execution_id
+            and str(iteration.inference_request_id)
+            == context.logical_request_id
+        )
+        if not exact_lineage:
+            raise UserInferenceQuotaConflictError(
+                "historical UBQ-2 inference bridge has incomplete or "
+                "conflicting durable lineage"
+            )
+        raise UserInferenceQuotaConflictError(
+            "historical UBQ-2 inference charge is proven but cross-window "
+            "UBQ-4 suppression is not enabled; defer instead of double-charge"
+        )
+
     async def _resolve_owner_in_uow(
         self,
         uow,
@@ -612,6 +715,12 @@ class UserInferenceQuotaService:
                             window_epoch=int(existing_inf.window_epoch),
                             reservation_keys=keys,
                         )
+
+                    await self._require_no_unmigrated_historical_inference_in_uow(
+                        uow,
+                        owner_user_id=owner,
+                        context=context,
+                    )
 
                     account = await uow.user_budgets.get_account(
                         owner,
