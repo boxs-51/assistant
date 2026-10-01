@@ -154,6 +154,18 @@ class CapabilityInvocationStore(Protocol):
     async def list_attempts(
         self, invocation_id: str
     ) -> list[CapabilityInvocationAttempt]: ...
+    async def begin_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool: ...
+    async def start_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool: ...
     async def begin_continuation_attempt(
         self,
         invocation: CapabilityInvocation,
@@ -201,6 +213,60 @@ class InMemoryCapabilityInvocationStore:
         if attempt.attempt_id in self.attempts:
             raise ValueError(f"Duplicate attempt_id: {attempt.attempt_id}")
         self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+
+    async def begin_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        current = self.items.get(invocation.invocation_id)
+        if (
+            current is None
+            or current.revision != expected_revision
+            or current.state is not CapabilityInvocationState.CREATED
+            or current.attempt != 0
+            or invocation.state is not CapabilityInvocationState.DISPATCHING
+            or invocation.attempt != 1
+            or attempt.invocation_id != invocation.invocation_id
+            or attempt.attempt_number != 1
+            or attempt.state is not CapabilityInvocationState.DISPATCHING
+            or attempt.attempt_id in self.attempts
+            or any(
+                item.invocation_id == invocation.invocation_id
+                for item in self.attempts.values()
+            )
+        ):
+            return False
+        self.items[invocation.invocation_id] = invocation.model_copy(deep=True)
+        self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+        return True
+
+    async def start_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        current = self.items.get(invocation.invocation_id)
+        stored_attempt = self.attempts.get(attempt.attempt_id)
+        if (
+            current is None
+            or current.revision != expected_revision
+            or current.state is not CapabilityInvocationState.DISPATCHING
+            or current.attempt != 1
+            or invocation.state is not CapabilityInvocationState.RUNNING
+            or invocation.attempt != 1
+            or stored_attempt is None
+            or stored_attempt.invocation_id != invocation.invocation_id
+            or stored_attempt.attempt_number != 1
+            or stored_attempt.state is not CapabilityInvocationState.DISPATCHING
+            or attempt.state is not CapabilityInvocationState.RUNNING
+        ):
+            return False
+        self.items[invocation.invocation_id] = invocation.model_copy(deep=True)
+        self.attempts[attempt.attempt_id] = attempt.model_copy(deep=True)
+        return True
 
     async def begin_continuation_attempt(
         self,
@@ -346,6 +412,100 @@ class CapabilityInvocationLifecycle:
                 f"{invocation.invocation_id}"
             )
         return invocation
+
+    async def begin_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        *,
+        implementation_id: str,
+        driver_kind: str,
+        connection_id: str | None,
+    ) -> tuple[CapabilityInvocation, CapabilityInvocationAttempt]:
+        if (
+            invocation.state is not CapabilityInvocationState.CREATED
+            or invocation.attempt != 0
+        ):
+            raise InvalidInvocationTransition(
+                "Initial attempt requires CREATED invocation with attempt=0"
+            )
+        expected_revision = invocation.revision
+        candidate = invocation.model_copy(deep=True)
+        candidate.implementation_id = implementation_id
+        candidate.driver_kind = driver_kind
+        candidate.connection_id = connection_id
+        candidate.attempt = 1
+        previous, candidate = transition_invocation(
+            candidate,
+            CapabilityInvocationState.DISPATCHING,
+        )
+        attempt = CapabilityInvocationAttempt(
+            attempt_id=f"att_{uuid.uuid4().hex}",
+            invocation_id=candidate.invocation_id,
+            attempt_number=1,
+            implementation_id=implementation_id,
+            driver_kind=driver_kind,
+            connection_id=connection_id,
+            state=CapabilityInvocationState.DISPATCHING,
+            started_at=datetime.now(timezone.utc),
+            metadata={
+                "initial_attempt": True,
+                "source_revision": expected_revision,
+            },
+        )
+        begin = getattr(self.store, "begin_initial_attempt", None)
+        if not callable(begin):
+            raise RuntimeError(
+                "Invocation store does not support atomic initial attempts"
+            )
+        if not await begin(candidate, expected_revision, attempt):
+            raise RuntimeError(
+                "Concurrent invocation initial attempt rejected: "
+                f"{candidate.invocation_id}"
+            )
+        await self._publish(
+            candidate,
+            previous=previous,
+            attempt_id=attempt.attempt_id,
+        )
+        return candidate, attempt
+
+    async def start_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        attempt: CapabilityInvocationAttempt,
+    ) -> tuple[CapabilityInvocation, CapabilityInvocationAttempt]:
+        if (
+            invocation.state is not CapabilityInvocationState.DISPATCHING
+            or invocation.attempt != 1
+            or attempt.attempt_number != 1
+        ):
+            raise InvalidInvocationTransition(
+                "Initial attempt start requires DISPATCHING attempt #1"
+            )
+        expected_revision = invocation.revision
+        candidate = invocation.model_copy(deep=True)
+        previous, candidate = transition_invocation(
+            candidate,
+            CapabilityInvocationState.RUNNING,
+        )
+        running_attempt = attempt.model_copy(deep=True)
+        running_attempt.state = CapabilityInvocationState.RUNNING
+        start = getattr(self.store, "start_initial_attempt", None)
+        if not callable(start):
+            raise RuntimeError(
+                "Invocation store does not support atomic initial attempt start"
+            )
+        if not await start(candidate, expected_revision, running_attempt):
+            raise RuntimeError(
+                "Concurrent invocation initial attempt start rejected: "
+                f"{candidate.invocation_id}"
+            )
+        await self._publish(
+            candidate,
+            previous=previous,
+            attempt_id=running_attempt.attempt_id,
+        )
+        return candidate, running_attempt
 
     async def begin_continuation_attempt(
         self,
