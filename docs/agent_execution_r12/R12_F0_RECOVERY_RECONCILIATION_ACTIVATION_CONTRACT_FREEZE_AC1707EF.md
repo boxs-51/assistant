@@ -236,7 +236,8 @@ connection stable client_id == invocation.origin_client_id
 target_connection_id != invocation.connection_id
 checkpoint snapshot origin_client_id == invocation.origin_client_id
 matching capability_id + capability_version is ready on that connection
-exactly one matching client-owned `REMOTE_CLIENT` implementation exists on target
+catalog implementation lookup uses `routable_only=True`
+exactly one matching routable client-owned `REMOTE_CLIENT` implementation exists on target
 implementation.location == CLIENT
 implementation.owner_type == CLIENT
 implementation.driver_kind == REMOTE_CLIENT
