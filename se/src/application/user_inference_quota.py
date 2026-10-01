@@ -272,7 +272,20 @@ class UserInferenceQuotaService:
 
     @property
     def normalization_identity(self) -> str:
-        return f"ubq4-usage:{self.settings.usage_normalization_version}"
+        return (
+            f"ubq4-usage:{self.settings.usage_normalization_version}:"
+            + _fingerprint(
+                {
+                    "version": self.settings.usage_normalization_version,
+                    "compute_units_per_1k_tokens": (
+                        self.settings.compute_units_per_1k_tokens
+                    ),
+                    "cost_usd_per_1k_tokens": (
+                        self.settings.cost_usd_per_1k_tokens
+                    ),
+                }
+            )
+        )
 
     def build_context(
         self,
