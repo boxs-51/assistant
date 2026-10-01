@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import inspect
+import textwrap
 from pathlib import Path
 
 from se.src.infrastructure.storage.models.sql.agent.session import AgentSessionRecord
@@ -118,15 +120,40 @@ def test_r12_f0_existing_continuation_requires_fresh_connection_generation():
 
 def test_r12_f0_existing_continuation_requires_full_unique_target_predicate():
     source = inspect.getsource(CapabilityRuntime._resolve_continuation_target)
+    tree = ast.parse(textwrap.dedent(source))
+    function = tree.body[0]
 
-    transport_guard = (
+    assert isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef))
+    assert isinstance(function.body[0], ast.If)
+
+    initial_guard = function.body[0].test
+    assert isinstance(initial_guard, ast.BoolOp)
+    assert isinstance(initial_guard.op, ast.Or)
+    guard_terms = {ast.unparse(value) for value in initial_guard.values}
+    assert guard_terms == {
+        "not target_connection_id",
         "self.catalog is None",
         "self.connection_registry is None",
         "self.realtime is None",
-        "Continuation target connection is unavailable.",
-    )
-    for item in transport_guard:
-        assert item in source
+    }
+    assert "Continuation target connection is unavailable." in source
+
+    implementation_calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "list_implementations"
+    ]
+    assert len(implementation_calls) == 1
+    routable_keywords = {
+        keyword.arg: keyword.value
+        for keyword in implementation_calls[0].keywords
+        if keyword.arg is not None
+    }
+    assert "routable_only" in routable_keywords
+    assert isinstance(routable_keywords["routable_only"], ast.Constant)
+    assert routable_keywords["routable_only"].value is True
 
     required = (
         "item.location is CapabilityExecutionLocation.CLIENT",
@@ -293,7 +320,8 @@ def test_r12_f0_contract_closes_continuation_affinity_gap():
         "fresh connection generation",
         "same authorized stable client",
         "matching capability_id + capability_version is ready",
-        "exactly one matching client-owned `REMOTE_CLIENT` implementation exists on target",
+        "catalog implementation lookup uses `routable_only=True`",
+        "exactly one matching routable client-owned `REMOTE_CLIENT` implementation exists on target",
         "full canonical",
         "CapabilityRuntime._resolve_continuation_target(...)",
         "definition.kind == invocation.kind",
