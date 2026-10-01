@@ -340,6 +340,134 @@ class SqlCapabilityInvocationStore:
             await uow.commit()
             return True
 
+    async def begin_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        """Atomically CAS CREATED invocation and insert initial attempt #1."""
+        if (
+            invocation.state is not CapabilityInvocationState.DISPATCHING
+            or invocation.attempt != 1
+            or attempt.invocation_id != invocation.invocation_id
+            or attempt.attempt_number != 1
+            or attempt.state is not CapabilityInvocationState.DISPATCHING
+        ):
+            return False
+
+        async with self._uow_factory() as uow:
+            repository = getattr(uow, "capability_invocations", None)
+            if repository is None:
+                repository = CapabilityInvocationRepository(uow.session)
+            try:
+                existing = await repository.lock_invocation_gc_serialization_fence(
+                    invocation.invocation_id
+                )
+                if (
+                    existing is None
+                    or int(existing.revision) != expected_revision
+                    or existing.state != CapabilityInvocationState.CREATED.value
+                    or int(existing.attempt) != 0
+                ):
+                    await uow.rollback()
+                    return False
+
+                prior = (
+                    await uow.session.execute(
+                        select(CapabilityInvocationAttemptRecord).where(
+                            CapabilityInvocationAttemptRecord.invocation_id
+                            == invocation.invocation_id
+                        )
+                    )
+                ).scalars().all()
+                if prior:
+                    await uow.rollback()
+                    return False
+
+                result = await uow.session.execute(
+                    update(CapabilityInvocationRecord)
+                    .where(
+                        CapabilityInvocationRecord.invocation_id
+                        == invocation.invocation_id,
+                        CapabilityInvocationRecord.revision == expected_revision,
+                        CapabilityInvocationRecord.state
+                        == CapabilityInvocationState.CREATED.value,
+                        CapabilityInvocationRecord.attempt == 0,
+                    )
+                    .values(**self._values(invocation))
+                )
+                if result.rowcount != 1:
+                    await uow.rollback()
+                    return False
+
+                values = attempt.model_dump(mode="python")
+                values["state"] = attempt.state.value
+                values["metadata_json"] = jsonable_encoder(
+                    values.pop("metadata")
+                )
+                values["error"] = jsonable_encoder(values["error"])
+                uow.session.add(
+                    CapabilityInvocationAttemptRecord(**values)
+                )
+                await uow.commit()
+                return True
+            except IntegrityError:
+                await uow.rollback()
+                return False
+
+    async def start_initial_attempt(
+        self,
+        invocation: CapabilityInvocation,
+        expected_revision: int,
+        attempt: CapabilityInvocationAttempt,
+    ) -> bool:
+        """Atomically move initial invocation+attempt #1 to RUNNING."""
+        if (
+            invocation.state is not CapabilityInvocationState.RUNNING
+            or invocation.attempt != 1
+            or attempt.state is not CapabilityInvocationState.RUNNING
+            or attempt.invocation_id != invocation.invocation_id
+            or attempt.attempt_number != 1
+        ):
+            return False
+
+        async with self._uow_factory() as uow:
+            invocation_result = await uow.session.execute(
+                update(CapabilityInvocationRecord)
+                .where(
+                    CapabilityInvocationRecord.invocation_id
+                    == invocation.invocation_id,
+                    CapabilityInvocationRecord.revision == expected_revision,
+                    CapabilityInvocationRecord.state
+                    == CapabilityInvocationState.DISPATCHING.value,
+                    CapabilityInvocationRecord.attempt == 1,
+                )
+                .values(**self._values(invocation))
+            )
+            if invocation_result.rowcount != 1:
+                await uow.rollback()
+                return False
+
+            attempt_result = await uow.session.execute(
+                update(CapabilityInvocationAttemptRecord)
+                .where(
+                    CapabilityInvocationAttemptRecord.attempt_id
+                    == attempt.attempt_id,
+                    CapabilityInvocationAttemptRecord.invocation_id
+                    == invocation.invocation_id,
+                    CapabilityInvocationAttemptRecord.attempt_number == 1,
+                    CapabilityInvocationAttemptRecord.state
+                    == CapabilityInvocationState.DISPATCHING.value,
+                )
+                .values(state=CapabilityInvocationState.RUNNING.value)
+            )
+            if attempt_result.rowcount != 1:
+                await uow.rollback()
+                return False
+            await uow.commit()
+            return True
+
     async def begin_continuation_attempt(
         self,
         invocation: CapabilityInvocation,
