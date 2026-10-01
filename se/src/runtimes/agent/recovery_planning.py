@@ -688,12 +688,16 @@ class AgentRecoveryPlanningService:
                 "Checkpoint invocation origin connection changed.",
             )
         if (
-            checkpoint.origin_client_id is not None
-            and checkpoint.origin_client_id != invocation.origin_client_id
+            invocation.remote_outcome_state
+            is not RemoteOutcomeState.TERMINAL_COMMITTED
+            and (
+                not checkpoint.origin_client_id
+                or checkpoint.origin_client_id != invocation.origin_client_id
+            )
         ):
             raise RecoveryPlanRejected(
                 "RECOVERY_CHECKPOINT_CLIENT_LINEAGE_CONFLICT",
-                "RECOVERY checkpoint stable-client identity differs from invocation.",
+                "Non-REUSE recovery requires checkpoint stable-client lineage.",
             )
         if invocation.revision < int(snapshot.invocation_revision):
             raise RecoveryPlanRejected(
