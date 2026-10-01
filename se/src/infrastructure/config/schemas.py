@@ -247,12 +247,41 @@ class UserBudgetToolQuotaSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class UserBudgetInferenceQuotaSettings(BaseModel):
+    enabled: bool = False
+    max_conflict_retries: int = Field(default=8, ge=1, le=64)
+    estimator_policy_version: str = Field(
+        default="ubq4-estimator-v1",
+        min_length=1,
+        max_length=64,
+    )
+    usage_normalization_version: str = Field(
+        default="ubq4-usage-v1",
+        min_length=1,
+        max_length=64,
+    )
+    default_output_token_reservation: int = Field(default=4096, gt=0)
+    compute_units_per_1k_tokens: Decimal | None = Field(
+        default=None,
+        gt=Decimal("0"),
+    )
+    cost_usd_per_1k_tokens: Decimal | None = Field(
+        default=None,
+        gt=Decimal("0"),
+    )
+
+    model_config = ConfigDict(frozen=True)
+
+
 class UserBudgetSettings(BaseModel):
     dual_accounting: UserBudgetDualAccountingSettings = Field(
         default_factory=UserBudgetDualAccountingSettings
     )
     tool_quota: UserBudgetToolQuotaSettings = Field(
         default_factory=UserBudgetToolQuotaSettings
+    )
+    inference_quota: UserBudgetInferenceQuotaSettings = Field(
+        default_factory=UserBudgetInferenceQuotaSettings
     )
 
     model_config = ConfigDict(frozen=True)
