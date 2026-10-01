@@ -215,6 +215,7 @@ class AgentRecoveryPlanningService:
                 invocation = self._invocation_from_record(invocation_record)
                 self._validate_invocation_identity(
                     execution,
+                    checkpoint,
                     snapshot,
                     invocation,
                     principal=principal,
@@ -262,6 +263,8 @@ class AgentRecoveryPlanningService:
                 "expected_unowned_lease_generation": int(
                     execution.lease_generation
                 ),
+                "checkpoint_origin_client_id": checkpoint.origin_client_id,
+                "checkpoint_origin_connection_id": checkpoint.origin_connection_id,
                 "agent_id": str(execution.agent_id),
                 "session_id": str(execution.session_id),
                 "task_id": (
@@ -642,6 +645,7 @@ class AgentRecoveryPlanningService:
     @staticmethod
     def _validate_invocation_identity(
         execution,
+        checkpoint,
         snapshot,
         invocation: CapabilityInvocation,
         *,
@@ -669,6 +673,27 @@ class AgentRecoveryPlanningService:
             raise RecoveryPlanRejected(
                 "RECOVERY_INVOCATION_PRINCIPAL_CONFLICT",
                 "CapabilityInvocation owner differs from durable recovery principal.",
+            )
+        if snapshot.origin_client_id != invocation.origin_client_id:
+            raise RecoveryPlanRejected(
+                "RECOVERY_INVOCATION_CLIENT_LINEAGE_CONFLICT",
+                "Checkpoint invocation stable-client identity changed.",
+            )
+        if (
+            snapshot.origin_connection_id is not None
+            and invocation.connection_id != snapshot.origin_connection_id
+        ):
+            raise RecoveryPlanRejected(
+                "RECOVERY_INVOCATION_CONNECTION_LINEAGE_CONFLICT",
+                "Checkpoint invocation origin connection changed.",
+            )
+        if (
+            checkpoint.origin_client_id is not None
+            and checkpoint.origin_client_id != invocation.origin_client_id
+        ):
+            raise RecoveryPlanRejected(
+                "RECOVERY_CHECKPOINT_CLIENT_LINEAGE_CONFLICT",
+                "RECOVERY checkpoint stable-client identity differs from invocation.",
             )
         if invocation.revision < int(snapshot.invocation_revision):
             raise RecoveryPlanRejected(
@@ -927,6 +952,7 @@ class AgentRecoveryPlanningService:
             expected_invocation_state=invocation.state,
             expected_remote_outcome_state=invocation.remote_outcome_state,
             origin_client_id=invocation.origin_client_id,
+            origin_connection_id=invocation.connection_id,
             action=kind,
             continuation_authority=continuation,
             tool_quota_authority=quota,
