@@ -208,6 +208,30 @@ def _quota_runtime(service: UserToolQuotaService, capability_id: str = "tool.ech
     return runtime, driver, store
 
 
+async def _reserve_runtime_tool(
+    service: UserToolQuotaService,
+    identity: Identity,
+    *,
+    invocation_id: str,
+    capability_id: str = "tool.echo",
+    value: str | None = None,
+    session_id: str | None = "session-ubq3",
+):
+    arguments = {"value": value or invocation_id}
+    return await service.reserve_tool_call(
+        identity=identity,
+        invocation_id=invocation_id,
+        capability_id=capability_id,
+        request_fingerprint=capability_request_fingerprint(
+            capability_id=capability_id,
+            capability_version="1.0",
+            arguments=arguments,
+        ),
+        arguments=arguments,
+        session_id=session_id,
+    )
+
+
 async def _reserve(
     service: UserToolQuotaService,
     identity: Identity,
@@ -525,7 +549,7 @@ async def test_ubq3_crash_after_reservation_before_invocation_create_recovers_on
     engine, factory, service, identity = await _setup(tmp_path)
     try:
         invocation_id = "inv-crash-after-reservation"
-        admission = await _reserve(
+        admission = await _reserve_runtime_tool(
             service,
             identity,
             invocation_id=invocation_id,
@@ -840,7 +864,11 @@ async def test_ubq3_runtime_terminal_never_dispatched_release_is_idempotent(
             capability_version="1.0",
             kind=CapabilityKind.TOOL,
             execution_mode=CapabilityExecutionMode.ONE_SHOT,
-            request_fingerprint="fp:inv-terminal-release:tool.echo",
+            request_fingerprint=capability_request_fingerprint(
+                capability_id="tool.echo",
+                capability_version="1.0",
+                arguments={"value": "inv-terminal-release"},
+            ),
             owner_user_id=identity.user_id,
             remote_outcome_state=RemoteOutcomeState.NOT_DISPATCHED,
             state=CapabilityInvocationState.CANCELLED,
