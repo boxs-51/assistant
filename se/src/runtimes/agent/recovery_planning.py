@@ -153,6 +153,12 @@ class AgentRecoveryPlanningService:
                     "Reconstructed safe point differs from current RECOVERY checkpoint.",
                 )
 
+            await self._reject_unproven_later_iteration_in_uow(
+                uow,
+                execution,
+                checkpoint,
+            )
+
             (
                 recovery_iteration_id,
                 inference_request_id,
@@ -482,6 +488,25 @@ class AgentRecoveryPlanningService:
                     "Recovered execution is not the current OPEN TaskBranch head.",
                 )
         return task, branch, budget
+
+    async def _reject_unproven_later_iteration_in_uow(
+        self,
+        uow,
+        execution,
+        checkpoint,
+    ) -> None:
+        iterations = tuple(
+            await uow.agents.list_iterations(str(execution.id))
+        )
+        if any(
+            int(item.iteration) > int(checkpoint.iteration)
+            for item in iterations
+        ):
+            raise RecoveryPlanRejected(
+                "SAFE_POINT_POST_RECOVERY_PROGRESS_UNPROVEN",
+                "Durable iteration progress beyond the frozen recovery cut "
+                "has no resumed-owner provenance.",
+            )
 
     async def _freeze_inference_identity_in_uow(
         self,
@@ -925,6 +950,11 @@ class AgentRecoveryPlanningService:
             )
         return RecoveryToolQuotaAuthority(
             reservation_id=str(authority.reservation_id),
+            idempotency_key=(
+                str(authority.idempotency_key)
+                if authority.idempotency_key is not None
+                else None
+            ),
             window_epoch=int(authority.window_epoch),
             reservation_state=str(authority.reservation_state),
             historical_bridge=bool(authority.historical_bridge),
@@ -951,6 +981,8 @@ class AgentRecoveryPlanningService:
             capability_id=invocation.capability_id,
             capability_version=invocation.capability_version,
             request_fingerprint=invocation.request_fingerprint,
+            kind=invocation.kind,
+            execution_mode=invocation.execution_mode,
             idempotency=invocation.idempotency,
             expected_invocation_revision=int(invocation.revision),
             expected_invocation_state=invocation.state,
