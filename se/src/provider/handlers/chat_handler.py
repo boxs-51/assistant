@@ -4,7 +4,10 @@ import httpx
 import structlog
 from opentelemetry import trace
 
-from ...application.assets.generated import GeneratedAssetCanonicalizer
+from ...application.assets.generated import (
+    GeneratedAssetCanonicalizer,
+    GeneratedAssetStreamAssembler,
+)
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
 from ..exceptions import (
     NoAvailableProviderError,
@@ -285,6 +288,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         for provider in healthy_execution_chain:
             stream_started = False
             provider_stream = None
+            stream_assembler = None
             asset_attempt_terminal = False
             try:
                 if not await self._has_required_capabilities(
@@ -316,9 +320,21 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     timeout=self.timeout,
                     call_budget=call_budget,
                 )
+                stream_assembler = GeneratedAssetStreamAssembler(
+                    self.generated_asset_canonicalizer,
+                    owner_user_id=owner_user_id,
+                )
                 async for chunk in provider_stream:
+                    public_chunk = stream_assembler.observe(chunk)
+                    if public_chunk is None:
+                        continue
                     stream_started = True
-                    yield chunk
+                    yield public_chunk
+
+                canonical_chunk = await stream_assembler.finalize()
+                if canonical_chunk is not None:
+                    stream_started = True
+                    yield canonical_chunk
                 return
 
             except ProviderDeadlineExceededError:
@@ -339,7 +355,14 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     error,
                     provider.name,
                 )
-                if stream_started or asset_attempt_terminal:
+                if (
+                    stream_started
+                    or asset_attempt_terminal
+                    or bool(
+                        stream_assembler is not None
+                        and stream_assembler.media_seen
+                    )
+                ):
                     if detail is error:
                         raise
                     raise detail from error
