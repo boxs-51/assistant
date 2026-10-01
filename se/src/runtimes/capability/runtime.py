@@ -70,6 +70,7 @@ from ...application.policy.authorization import AuthorizationService
 from ...application.user_budget import UserBudgetDualAccountingError
 from ...application.user_tool_quota import (
     ToolQuotaAdmission,
+    UserToolQuotaConflictError,
     UserToolQuotaError,
 )
 from .validation import JsonSchemaCapabilityArgumentValidator
@@ -1348,7 +1349,7 @@ class CapabilityRuntime(BaseRuntime):
                     )
                     if preexisting_mode == "TERMINAL":
                         if authority is None:
-                            raise UserToolQuotaError(
+                            raise UserToolQuotaConflictError(
                                 "terminal invocation has no pre-existing "
                                 "UBQ charge authority"
                             )
@@ -1372,7 +1373,7 @@ class CapabilityRuntime(BaseRuntime):
                         authority.historical_bridge
                         or authority.reservation_state != "RESERVED"
                     ):
-                        raise UserToolQuotaError(
+                        raise UserToolQuotaConflictError(
                             "pre-dispatch invocation has incompatible terminal "
                             "UBQ charge authority"
                         )
