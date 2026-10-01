@@ -297,6 +297,26 @@ async def test_ubq4_unknown_terminal_usage_is_not_silently_refunded(
 
 
 @pytest.mark.asyncio
+async def test_ubq4_binary_float_semantics_fail_before_quota_mutation(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        body = _body()
+        body["config"]["temperature"] = 0.1
+        with pytest.raises(UserInferenceQuotaContextError):
+            await service.reserve(
+                context=_context(service, identity, "inf-float"),
+                body=body,
+                streaming_mode=False,
+            )
+        async with factory() as uow:
+            assert await uow.user_budgets.get_active_window("user-ubq4") is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ubq4_same_request_id_changed_semantics_conflicts_before_charge(
     tmp_path: Path,
 ) -> None:
