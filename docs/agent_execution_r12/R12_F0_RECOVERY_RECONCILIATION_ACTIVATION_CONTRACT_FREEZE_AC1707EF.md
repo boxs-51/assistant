@@ -227,6 +227,9 @@ planning proves an executable continuation target.
 For the current client-affine continuation substrate this requires:
 
 ```text
+continuation runtime catalog is available
+continuation connection registry is available
+continuation realtime multiplexer is available
 connection is ACTIVE / usable
 connection.user_id == resolved recovery principal
 connection stable client_id == invocation.origin_client_id
@@ -249,10 +252,17 @@ definition.idempotency == invocation.idempotency
 
 Capability/version readiness alone is insufficient continuation authority. The
 pre-claim proof MUST mirror the full canonical
-`CapabilityRuntime._resolve_continuation_target(...)` predicate that F3 will use:
-the target connection must resolve to exactly one matching client-owned
-`REMOTE_CLIENT` implementation, and the current capability definition must still
-match the durable invocation's version, kind, execution mode and idempotency.
+`CapabilityRuntime._resolve_continuation_target(...)` predicate that F3 will use.
+Before any connection or implementation match is considered, the continuation
+runtime MUST prove all three transport-resolution dependencies are available:
+the capability catalog, connection registry and realtime multiplexer. Missing any
+of these dependencies means the continuation target is unavailable and MUST DEFER
+before claim.
+
+After that guard passes, the target connection must resolve to exactly one matching
+client-owned `REMOTE_CLIENT` implementation, and the current capability definition
+must still match the durable invocation's version, kind, execution mode and
+idempotency.
 
 A zero matching implementation is continuation-unavailable and MUST DEFER before
 claim. Multiple matching implementations are ambiguous/conflicting authority and
@@ -433,6 +443,7 @@ task-scoped TaskBudget incarnation_generation when task_id is present
 target recovery trigger = SERVER_RECOVERY
 optional target stable client/connection authority
 fresh connection-generation proof for every non-REUSE client-affine continuation
+catalog + connection-registry + realtime availability for every client-affine continuation
 full continuation-target predicate proof for every non-REUSE client-affine action
 exactly-one implementation identity + definition version/kind/execution_mode/idempotency match
 post-reconciliation invocation revision/state/outcome snapshots
