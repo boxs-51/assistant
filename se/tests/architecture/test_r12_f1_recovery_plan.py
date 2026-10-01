@@ -226,6 +226,8 @@ def _checkpoint(execution, *, iteration=0, frozen_iteration_id=None, active_ids=
         wait_reason="RECOVERY",
         remaining_active_budget_seconds=30.0,
         wait_expires_at=NOW + timedelta(minutes=5),
+        origin_client_id="client-stable",
+        origin_connection_id="conn-old",
         metadata_json=metadata,
     )
 
@@ -373,6 +375,8 @@ async def test_r12_f1_empty_recovery_cut_is_read_only_and_deterministic():
     assert plan.inference_disposition is RecoveryInferenceDisposition.NO_INFERENCE
     assert plan.ordered_tool_call_ids == ()
     assert plan.invocation_actions == ()
+    assert plan.checkpoint_origin_client_id == "client-stable"
+    assert plan.checkpoint_origin_connection_id == "conn-old"
     assert plan.target_client_id is None
     assert plan.target_connection_id is None
     assert plan.plan_fingerprint == recovery_plan_fingerprint(plan)
@@ -592,6 +596,8 @@ async def test_r12_f1_not_dispatched_freezes_continuation_and_existing_quota():
     assert action.action is ResumeInvocationActionKind.DISPATCH_NOT_DISPATCHED
     assert action.continuation_authority.target_connection_id == "conn-new"
     assert action.continuation_authority.target_client_id == "client-stable"
+    assert action.origin_client_id == "client-stable"
+    assert action.origin_connection_id == "conn-old"
     assert action.tool_quota_authority.reservation_state == "RESERVED"
     assert action.tool_quota_authority.reservation_id == "ubq3:reservation"
     assert plan.target_client_id == "client-stable"
