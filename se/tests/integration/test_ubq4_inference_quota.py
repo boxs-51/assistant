@@ -466,6 +466,35 @@ async def test_ubq4_compatibility_owner_mismatch_fails_before_charge(
 
 
 @pytest.mark.asyncio
+async def test_ubq4_unknown_output_bound_fails_before_quota_mutation(
+    tmp_path: Path,
+) -> None:
+    engine, factory, _service, identity = await _setup(tmp_path)
+    try:
+        owner_authority = UserBudgetDualAccountingService(
+            factory,
+            DualAccountingSettings(enabled=False),
+        )
+        service = UserInferenceQuotaService(
+            factory,
+            owner_authority=owner_authority,
+            settings=InferenceQuotaSettings(enabled=True),
+        )
+        body = _body()
+        body["config"].pop("max_tokens")
+        with pytest.raises(UserInferenceEstimateUnavailableError):
+            await service.reserve(
+                context=_context(service, identity, "inf-no-output-bound"),
+                body=body,
+                streaming_mode=False,
+            )
+        async with factory() as uow:
+            assert await uow.user_budgets.get_active_window("user-ubq4") is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ubq4_finite_compute_limit_without_estimator_fails_closed(
     tmp_path: Path,
 ) -> None:
