@@ -460,6 +460,58 @@ async def test_ubq2_resource_mirror_replay_and_minimized_bridge(
         await engine.dispose()
 
 
+@pytest.mark.asyncio
+async def test_ubq3_taskbudget_tool_handoff_skips_new_mirror_and_replay_check(
+    tmp_path: Path,
+) -> None:
+    _, engine, _, factory, service, enabled, _ = await _setup(tmp_path)
+    try:
+        task_id = "task-ubq3-tool-handoff"
+        await service.create_task_with_budget(
+            _task(task_id, "user-a"),
+            identity=_identity("user-a"),
+        )
+        handoff = TaskBudgetService(
+            factory,
+            default_limits=_limits(),
+            default_policy=TaskBudgetPolicy(version="ubq2-test-v1"),
+            user_budget_dual_accounting=enabled,
+            user_tool_quota_enabled=True,
+        )
+        call = {
+            "tool_call_id": "tool-call-handoff",
+            "capability_id": "tool.handoff",
+            "arguments": {"value": "one"},
+        }
+
+        first = await handoff.reserve_tool_call_batch(task_id, [call])
+        replay = await handoff.reserve_tool_call_batch(task_id, [call])
+        assert first.used_tool_calls == replay.used_tool_calls == 1
+
+        async with factory() as uow:
+            budget = await uow.agents.get_task_budget(task_id)
+            assert budget is not None
+            reservation = await uow.agents.get_task_budget_reservation(
+                task_id,
+                "TOOL_CALL",
+                "tool-call-handoff",
+                expected_incarnation_generation=int(
+                    budget.incarnation_generation
+                ),
+            )
+            bridge = await uow.user_budgets.get_dual_accounting_receipt(
+                task_id,
+                "TOOL_CALL",
+                "tool-call-handoff",
+                "TOOL_CALL",
+            )
+            assert reservation is not None
+            assert bridge is None
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
 def test_ubq2_26a_preserves_25a_sqlite_trigger_authority(
     tmp_path: Path,
     monkeypatch,
