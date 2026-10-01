@@ -44,6 +44,8 @@ def _top_level_bound_names(path: Path) -> set[str]:
             names.update(alias.asname or alias.name.split(".")[0] for alias in node.names)
         elif isinstance(node, ast.ImportFrom):
             names.update(alias.asname or alias.name for alias in node.names)
+        elif isinstance(node, ast.TypeAlias) and isinstance(node.name, ast.Name):
+            names.add(node.name.id)
 
     return names
 
