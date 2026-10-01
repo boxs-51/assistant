@@ -423,6 +423,52 @@ class CapabilityRuntime(BaseRuntime):
         )
         await self._validate_attempt_history(invocation)
 
+        continuation_admission: ToolQuotaAdmission | None = None
+        tool_quota_enabled = (
+            invocation.kind is CapabilityKind.TOOL
+            and self.tool_quota_service is not None
+            and bool(getattr(self.tool_quota_service, "enabled", False))
+        )
+        if tool_quota_enabled:
+            try:
+                continuation_admission = (
+                    await self.tool_quota_service.recover_tool_call(
+                        owner_user_id=str(invocation.owner_user_id or ""),
+                        invocation_id=invocation.invocation_id,
+                        capability_id=invocation.capability_id,
+                        request_fingerprint=invocation.request_fingerprint,
+                        arguments=dict(invocation.arguments or {}),
+                        execution_id=invocation.execution_id,
+                        tool_call_id=invocation.tool_call_id,
+                        workflow_id=invocation.workflow_id,
+                        session_id=invocation.session_id,
+                    )
+                )
+            except (UserToolQuotaError, UserBudgetDualAccountingError) as exc:
+                code = str(getattr(exc, "code", "USER_TOOL_QUOTA_CONFLICT"))
+                raise CapabilityError(
+                    code=code,
+                    message=str(exc),
+                    category="QUOTA",
+                    retryable=False,
+                    safe_for_client=False,
+                    cause_type=type(exc).__name__,
+                    capability_id=invocation.capability_id,
+                    invocation_id=invocation.invocation_id,
+                ) from exc
+            if continuation_admission is None:
+                raise CapabilityError(
+                    code="USER_TOOL_QUOTA_CONFLICT",
+                    message=(
+                        "UBQ-3 continuation has no recoverable quota authority."
+                    ),
+                    category="QUOTA",
+                    retryable=False,
+                    safe_for_client=False,
+                    capability_id=invocation.capability_id,
+                    invocation_id=invocation.invocation_id,
+                )
+
         driver, implementation = self._resolve_continuation_target(
             invocation,
             target_connection_id=target_connection_id,
@@ -503,24 +549,46 @@ class CapabilityRuntime(BaseRuntime):
         # callback closes over the current invocation revision.
         self._bind_remote_dispatch_started(driver, invocation)
 
-        return await self._run_invocation_attempt(
-            invocation=invocation,
-            attempt=attempt,
-            driver=driver,
-            selected_implementation_id=implementation.implementation_id,
-            selected_implementation=implementation,
-            effective_implementation_id=implementation.implementation_id,
-            effective_driver_kind=implementation.driver_kind,
-            context=context,
-            capability_id=invocation.capability_id,
-            arguments=invocation.arguments,
-            identity=None,
-            request_metadata=dict(context.metadata),
-            routing_connection_id=target_connection_id,
-            started=started,
-            allow_internal_retry=False,
-            continuation_mode=mode,
+        try:
+            result = await self._run_invocation_attempt(
+                invocation=invocation,
+                attempt=attempt,
+                driver=driver,
+                selected_implementation_id=implementation.implementation_id,
+                selected_implementation=implementation,
+                effective_implementation_id=implementation.implementation_id,
+                effective_driver_kind=implementation.driver_kind,
+                context=context,
+                capability_id=invocation.capability_id,
+                arguments=invocation.arguments,
+                identity=None,
+                request_metadata=dict(context.metadata),
+                routing_connection_id=target_connection_id,
+                started=started,
+                allow_internal_retry=False,
+                continuation_mode=mode,
+            )
+        except BaseException:
+            persisted = await store.get(invocation.invocation_id)
+            try:
+                await self._finalize_tool_quota_for_invocation(
+                    continuation_admission,
+                    persisted,
+                )
+            except Exception:
+                logger.exception(
+                    "UBQ-3 terminal reconciliation failed after continuation error",
+                    invocation_id=invocation.invocation_id,
+                    capability_id=invocation.capability_id,
+                )
+            raise
+
+        persisted = await store.get(invocation.invocation_id)
+        await self._finalize_tool_quota_for_invocation(
+            continuation_admission,
+            persisted,
         )
+        return result
 
     def _validate_existing_continuation(
         self,
