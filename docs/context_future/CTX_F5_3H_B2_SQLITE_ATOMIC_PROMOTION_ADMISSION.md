@@ -53,8 +53,9 @@ original caller content = DEAD
 ```
 
 Every later digest comparison and `create_memory_record(...)` call consumes the
-same detached `content_snapshot`. Invalid canonical Memory JSON maps to
-`PromotionAdmissionIntentConflictError`.
+same detached `content_snapshot`. Invalid canonical Memory JSON, including
+recursive/cyclic caller structures that surface as `RecursionError` during canonical
+validation, maps to `PromotionAdmissionIntentConflictError` before session acquisition.
 
 ## Durable authority and state machine
 
