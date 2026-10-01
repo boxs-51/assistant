@@ -99,7 +99,7 @@ def test_gateway_stream_schema_has_no_attachment_delta_field():
     for phrase in (
         "GatewayStreamDelta has no attachment/media field",
         "must not invent a raw base64/provider URL text substitute",
-        "Any new public stream schema field requires explicit re-freeze",
+        "Any proposal to place generated media in GatewayStreamDelta, emit raw/base64/provider transport as text, or add another public wire field requires a new explicit contract re-freeze.",
     ):
         assert phrase in document
 
