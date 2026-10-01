@@ -225,6 +225,56 @@ async def test_ubq3_replay_before_rollover_reserves_and_settles_once(
 
 
 @pytest.mark.asyncio
+async def test_ubq3_continuation_recovery_reuses_reserved_authority_without_mutation(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        admission = await _reserve(
+            service,
+            identity,
+            invocation_id="inv-continuation-recover",
+        )
+        assert admission is not None
+
+        recovered = await service.recover_tool_call(
+            owner_user_id="user-ubq3",
+            invocation_id="inv-continuation-recover",
+            capability_id="tool.echo",
+            request_fingerprint=(
+                "fp:inv-continuation-recover:tool.echo"
+            ),
+            arguments={"value": "inv-continuation-recover"},
+            execution_id=None,
+            tool_call_id=None,
+            workflow_id=None,
+            session_id="session-ubq3",
+        )
+        assert recovered is not None
+        assert recovered.reservation_id == admission.reservation_id
+        assert recovered.reservation_state == "RESERVED"
+        assert recovered.historical_bridge is False
+
+        async with factory() as uow:
+            window = await uow.user_budgets.get_window(
+                "user-ubq3",
+                int(admission.window_epoch),
+            )
+            usage = await uow.user_budgets.get_tool_usage(
+                "user-ubq3",
+                int(admission.window_epoch),
+                "tool.echo",
+            )
+            assert window is not None and usage is not None
+            assert int(window.tool_calls_used) == 0
+            assert int(window.tool_calls_reserved) == 1
+            assert int(usage.used_calls) == 0
+            assert int(usage.reserved_calls) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_ubq3_release_returns_reserved_capacity_exactly_once(
     tmp_path: Path,
 ) -> None:
