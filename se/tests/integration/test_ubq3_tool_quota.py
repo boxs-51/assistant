@@ -773,7 +773,7 @@ async def test_ubq3_quota_denial_creates_no_invocation_row(
     engine, _, service, identity = await _setup(
         tmp_path,
         total_limit=1,
-        default_per_tool_limit=1,
+        default_per_tool_limit=2,
     )
     try:
         first = await _reserve(
