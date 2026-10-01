@@ -67,7 +67,7 @@ class DurableMemoryPromotionAdmission:
             canonical_payload_bytes = canonical_memory_bytes(content)
             content_snapshot = json.loads(canonical_payload_bytes.decode("utf-8"))
             payload_digest = memory_content_digest(content_snapshot)
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             raise PromotionAdmissionIntentConflictError(
                 "promotion content is not valid canonical Memory JSON"
             ) from exc
