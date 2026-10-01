@@ -22,9 +22,16 @@ from .messages import inference_message_to_provider, jsonable
 class ProviderInferenceAdapter(InferencePort):
     """Provider-neutral bridge over the existing ProviderRuntime."""
 
-    def __init__(self, provider_runtime: Any, http_client: Any):
+    def __init__(
+        self,
+        provider_runtime: Any,
+        http_client: Any,
+        *,
+        inference_quota: Any = None,
+    ):
         self._provider_runtime = provider_runtime
         self._http_client = http_client
+        self._inference_quota = inference_quota
 
     @staticmethod
     def _serialize_tool(tool: InferenceToolDefinition | dict[str, Any]) -> dict[str, Any]:
@@ -97,6 +104,26 @@ class ProviderInferenceAdapter(InferencePort):
         }
         if request.owner_user_id:
             provider_call_kwargs["owner_user_id"] = request.owner_user_id
+        quota = self._inference_quota
+        if quota is not None and getattr(quota, "enabled", False):
+            metadata = dict(request.metadata)
+            quota_context = quota.build_context(
+                budget_identity=request.budget_identity,
+                logical_request_id=request.request_id,
+                source_surface=str(
+                    metadata.get("quota_source_surface")
+                    or "PROVIDER_INFERENCE_ADAPTER"
+                ),
+                session_id=metadata.get("session_id"),
+                task_id=metadata.get("task_id"),
+                execution_id=request.execution_id,
+                workflow_id=metadata.get("workflow_id"),
+                iteration=request.iteration,
+                agent_iteration_id=metadata.get("agent_iteration_id"),
+                outer_request_id=metadata.get("outer_request_id"),
+                capability_invocation_id=metadata.get("invocation_id"),
+            )
+            provider_call_kwargs["quota_context"] = quota_context
 
         provider_task = asyncio.create_task(
             handler.execute_with_fallback(
