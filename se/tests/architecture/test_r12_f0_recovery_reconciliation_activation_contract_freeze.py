@@ -116,6 +116,28 @@ def test_r12_f0_existing_continuation_requires_fresh_connection_generation():
     assert "Continuation requires a new connection generation." in source
 
 
+def test_r12_f0_existing_continuation_requires_full_unique_target_predicate():
+    source = inspect.getsource(CapabilityRuntime._resolve_continuation_target)
+
+    required = (
+        "item.location is CapabilityExecutionLocation.CLIENT",
+        "item.owner_type is CapabilityOwnerType.CLIENT",
+        'item.driver_kind == "REMOTE_CLIENT"',
+        "item.connection_id == target_connection_id",
+        "item.owner_id == invocation.owner_user_id",
+        'item.metadata.get("client_id")',
+        "item.version == invocation.capability_version",
+        "definition.version != invocation.capability_version",
+        "definition.kind is not invocation.kind",
+        "definition.execution_mode is not invocation.execution_mode",
+        "definition.idempotency is not invocation.idempotency",
+        "if len(candidates) != 1",
+        "Continuation requires exactly one matching client",
+    )
+    for item in required:
+        assert item in source
+
+
 def test_r12_f0_resume_claim_is_durable_intent_not_execution_authority():
     assert "Creation alone owns no execution authority" in (
         ResumeClaimIntent.__doc__ or ""
@@ -257,6 +279,15 @@ def test_r12_f0_contract_closes_continuation_affinity_gap():
         "fresh connection generation",
         "same authorized stable client",
         "matching capability_id + capability_version is ready",
+        "exactly one matching client-owned `REMOTE_CLIENT` implementation exists on target",
+        "full canonical",
+        "CapabilityRuntime._resolve_continuation_target(...)",
+        "definition.kind == invocation.kind",
+        "definition.execution_mode == invocation.execution_mode",
+        "definition.idempotency == invocation.idempotency",
+        "zero matching implementation",
+        "Multiple matching implementations",
+        "REJECT before claim",
         "if no compatible connection exists",
         "recovery planning remains DEFERRED",
         "DEFER before claim",
