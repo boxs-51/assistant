@@ -119,6 +119,15 @@ def test_r12_f0_existing_continuation_requires_fresh_connection_generation():
 def test_r12_f0_existing_continuation_requires_full_unique_target_predicate():
     source = inspect.getsource(CapabilityRuntime._resolve_continuation_target)
 
+    transport_guard = (
+        "self.catalog is None",
+        "self.connection_registry is None",
+        "self.realtime is None",
+        "Continuation target connection is unavailable.",
+    )
+    for item in transport_guard:
+        assert item in source
+
     required = (
         "item.location is CapabilityExecutionLocation.CLIENT",
         "item.owner_type is CapabilityOwnerType.CLIENT",
@@ -273,6 +282,11 @@ def test_r12_f0_contract_closes_continuation_affinity_gap():
     required = (
         "null / unsupported remote outcome",
         "executable only after continuation-affinity proof",
+        "continuation runtime catalog is available",
+        "continuation connection registry is available",
+        "continuation realtime multiplexer is available",
+        "Missing any",
+        "MUST DEFER",
         "connection is ACTIVE / usable",
         "connection stable client_id == invocation.origin_client_id",
         "target_connection_id != invocation.connection_id",
