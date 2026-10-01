@@ -595,7 +595,7 @@ async def test_ubq3_crash_after_invocation_create_before_attempt_reuses_attempt_
     engine, _, service, identity = await _setup(tmp_path)
     try:
         invocation_id = "inv-crash-after-create"
-        admission = await _reserve(
+        admission = await _reserve_runtime_tool(
             service,
             identity,
             invocation_id=invocation_id,
@@ -645,7 +645,7 @@ async def test_ubq3_crash_after_dispatching_claim_resumes_same_attempt_one(
     engine, _, service, identity = await _setup(tmp_path)
     try:
         invocation_id = "inv-crash-after-dispatching"
-        admission = await _reserve(
+        admission = await _reserve_runtime_tool(
             service,
             identity,
             invocation_id=invocation_id,
