@@ -1111,7 +1111,11 @@ class CapabilityRuntime(BaseRuntime):
             driver_kind=effective_driver_kind,
             session_id=context.session_id,
             turn_id=turn_id or request_metadata.get("turn_id"),
-            execution_id=context.execution_id,
+            # Only caller-supplied execution lineage is durable logical
+            # identity. Direct API/DIRECT calls may receive a request-local
+            # generated execution id in CapabilityExecutionContext; persisting
+            # that synthetic id would make same-invocation replay conflict.
+            execution_id=execution_id,
             workflow_id=context.workflow_id,
             tool_call_id=request_metadata.get("tool_call_id"),
             connection_id=context.connection_id,
