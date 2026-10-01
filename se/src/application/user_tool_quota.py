@@ -331,6 +331,120 @@ class UserToolQuotaService:
             historical_bridge=True,
         )
 
+    async def recover_tool_call(
+        self,
+        *,
+        owner_user_id: str,
+        invocation_id: str,
+        capability_id: str,
+        request_fingerprint: str,
+        arguments: dict[str, Any],
+        execution_id: str | None,
+        tool_call_id: str | None,
+        workflow_id: str | None = None,
+        session_id: str | None = None,
+    ) -> ToolQuotaAdmission | None:
+        """Recover existing UBQ authority for an R7 continuation.
+
+        This method never creates a reservation, rolls a window or increments
+        counters. Continuation must reuse direct UBQ-3 authority or exact
+        historical UBQ-2 bridge authority for the same logical invocation.
+        """
+        if not self.enabled:
+            return None
+        if (
+            not owner_user_id
+            or not invocation_id
+            or not capability_id
+            or not request_fingerprint
+        ):
+            raise UserToolQuotaConflictError(
+                "continuation lacks durable UBQ-3 logical identity"
+            )
+
+        idempotency_key, _reservation_id = self._identity(invocation_id)
+        async with self._uow_factory() as uow:
+            direct = await uow.user_budgets.get_reservation(
+                owner_user_id,
+                idempotency_key,
+            )
+            execution = None
+            task_id = None
+            if execution_id is not None:
+                execution = await uow.agents.get_execution(execution_id)
+                if execution is None:
+                    raise UserToolQuotaConflictError(
+                        "continuation execution lineage is missing"
+                    )
+                task_id = (
+                    str(execution.task_id)
+                    if execution.task_id is not None
+                    else None
+                )
+
+            if direct is not None:
+                if (
+                    str(direct.state)
+                    != UserBudgetReservationState.RESERVED.value
+                ):
+                    raise UserToolQuotaConflictError(
+                        "continuation requires an unresolved RESERVED "
+                        "direct UBQ-3 reservation"
+                    )
+                self._verify_direct_reservation(
+                    direct,
+                    owner_user_id=owner_user_id,
+                    invocation_id=invocation_id,
+                    capability_id=capability_id,
+                    request_fingerprint=request_fingerprint,
+                    execution_id=execution_id,
+                    tool_call_id=tool_call_id,
+                    task_id=task_id,
+                    workflow_id=workflow_id,
+                    session_id=session_id,
+                )
+                result = ToolQuotaAdmission(
+                    owner_user_id=owner_user_id,
+                    invocation_id=invocation_id,
+                    capability_id=capability_id,
+                    request_fingerprint=request_fingerprint,
+                    idempotency_key=idempotency_key,
+                    reservation_id=str(direct.reservation_id),
+                    window_epoch=int(direct.window_epoch),
+                    reservation_state=str(direct.state),
+                    historical_bridge=False,
+                )
+                await uow.commit()
+                return result
+
+            if (
+                execution is None
+                or task_id is None
+                or tool_call_id is None
+            ):
+                raise UserToolQuotaConflictError(
+                    "continuation has neither direct UBQ-3 reservation nor "
+                    "historical Agent/TaskBudget bridge lineage"
+                )
+
+            historical = await self._historical_bridge_admission_in_uow(
+                uow,
+                owner_user_id=owner_user_id,
+                invocation_id=invocation_id,
+                capability_id=capability_id,
+                request_fingerprint=request_fingerprint,
+                execution_id=execution_id,
+                tool_call_id=tool_call_id,
+                task_id=task_id,
+                arguments=arguments,
+            )
+            if historical is None:
+                raise UserToolQuotaConflictError(
+                    "continuation has no exact UBQ charge authority"
+                )
+            await uow.commit()
+            return historical
+
     async def reserve_tool_call(
         self,
         *,
