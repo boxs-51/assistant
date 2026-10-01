@@ -5,6 +5,13 @@ import asyncio
 import pytest
 
 from se.src.application.user_tool_quota import ToolQuotaAdmission
+from se.src.infrastructure.config.schemas import DriverConfig
+from se.src.infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from se.src.infrastructure.storage.drivers.sqlite.driver import SQLiteDriver
+from se.src.infrastructure.storage.models.sql.base import Base
+from se.src.infrastructure.storage.repositories.capability_invocations import (
+    SqlCapabilityInvocationStore,
+)
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
@@ -256,6 +263,56 @@ async def test_ubq3_disabled_tool_quota_preserves_legacy_runtime_path() -> None:
     assert persisted.execution_id is not None
     assert persisted.revision == 3
     attempts = await store.list_attempts("inv-disabled-runtime")
+    assert len(attempts) == 1
+    assert attempts[0].attempt_number == 1
+
+
+@pytest.mark.asyncio
+async def test_ubq3_sql_initial_attempt_claim_is_atomic() -> None:
+    driver = SQLiteDriver(
+        DriverConfig(
+            enabled=True,
+            required=True,
+            options={"path": ":memory:"},
+        )
+    )
+    async with driver._engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    lifecycle = CapabilityInvocationLifecycle(
+        SqlCapabilityInvocationStore(
+            lambda: SqlAlchemyUnitOfWork(driver)
+        )
+    )
+    original = CapabilityInvocation(
+        invocation_id="inv-sql-initial-race",
+        capability_id="tool.ubq3",
+        kind=CapabilityKind.TOOL,
+        execution_mode=CapabilityExecutionMode.ONE_SHOT,
+    )
+    await lifecycle.create(original)
+    left = await lifecycle.store.get(original.invocation_id)
+    right = await lifecycle.store.get(original.invocation_id)
+    assert left is not None and right is not None
+
+    async def claim(candidate):
+        try:
+            return await lifecycle.begin_initial_attempt(
+                candidate,
+                implementation_id="legacy:tool.ubq3",
+                driver_kind="_EchoDriver",
+                connection_id=None,
+            )
+        except RuntimeError:
+            return None
+
+    outcomes = await asyncio.gather(claim(left), claim(right))
+    winners = [item for item in outcomes if item is not None]
+    assert len(winners) == 1
+    stored = await lifecycle.store.get(original.invocation_id)
+    attempts = await lifecycle.store.list_attempts(original.invocation_id)
+    assert stored is not None
+    assert stored.state is CapabilityInvocationState.DISPATCHING
+    assert stored.attempt == 1
     assert len(attempts) == 1
     assert attempts[0].attempt_number == 1
 
