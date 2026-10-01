@@ -260,7 +260,10 @@ class UserBudgetInferenceQuotaSettings(BaseModel):
         min_length=1,
         max_length=64,
     )
-    default_output_token_reservation: int = Field(default=4096, gt=0)
+    default_output_token_reservation: int | None = Field(
+        default=None,
+        gt=0,
+    )
     compute_units_per_1k_tokens: Decimal | None = Field(
         default=None,
         gt=Decimal("0"),
