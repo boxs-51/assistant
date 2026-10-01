@@ -740,3 +740,40 @@ async def test_r12_f1_outcome_unknown_cannot_regress_to_not_dispatched():
 
     assert runtime.resolve_calls == []
     assert uow.commit_calls == 0
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("wait_reason", "CONNECTION"),
+        ("source_revision", 7),
+        ("observed_lease_generation", 4),
+        ("observed_owner_instance_id", ""),
+    ),
+)
+async def test_r12_f1_rejects_self_hashed_noncanonical_recovery_receipt(
+    field,
+    value,
+):
+    execution = _execution()
+    checkpoint = _checkpoint(execution)
+    receipt = dict(checkpoint.metadata_json["r12_recovery_receipt"])
+    receipt[field] = value
+    checkpoint.metadata_json["r12_recovery_receipt"] = receipt
+    checkpoint.metadata_json["r12_recovery_fingerprint"] = (
+        recovery_safe_point_fingerprint(receipt)
+    )
+    service, uow, _runtime = _service(
+        execution=execution,
+        checkpoint=checkpoint,
+        safe_point=_safe_point(),
+    )
+
+    with pytest.raises(
+        RecoveryPlanRejected,
+        match="RECOVERY_RECEIPT_LINEAGE_CONFLICT",
+    ):
+        await service.build_recovery_plan(execution.id)
+
+    assert uow.commit_calls == 0
+
