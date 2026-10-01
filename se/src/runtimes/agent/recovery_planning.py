@@ -400,13 +400,29 @@ class AgentRecoveryPlanningService:
                 "RECOVERY_FINGERPRINT_CONFLICT",
                 "RECOVERY checkpoint fingerprint does not match its receipt.",
             )
+        try:
+            source_revision = int(receipt["source_revision"])
+            target_revision = int(receipt["target_revision"])
+            observed_lease_generation = int(
+                receipt["observed_lease_generation"]
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RecoveryPlanRejected(
+                "RECOVERY_RECEIPT_LINEAGE_CONFLICT",
+                "R12-E recovery receipt revision/generation authority is invalid.",
+            ) from exc
+
         if (
             str(receipt.get("execution_id") or "") != str(execution.id)
-            or int(receipt.get("target_revision", -1))
-            != int(execution.revision)
+            or target_revision != int(execution.revision)
+            or source_revision + 1 != target_revision
             or str(receipt.get("checkpoint_id") or "")
             != str(checkpoint.checkpoint_id)
             or str(receipt.get("target_state") or "") != "WAITING"
+            or str(receipt.get("wait_reason") or "") != "RECOVERY"
+            or not str(receipt.get("observed_owner_instance_id") or "")
+            or observed_lease_generation + 1
+            != int(execution.lease_generation)
         ):
             raise RecoveryPlanRejected(
                 "RECOVERY_RECEIPT_LINEAGE_CONFLICT",
