@@ -296,6 +296,72 @@ async def test_ubq4_unknown_terminal_usage_is_not_silently_refunded(
         await engine.dispose()
 
 
+def test_ubq4_transport_config_is_not_logical_semantic_authority() -> None:
+    class _OwnerAuthority:
+        pass
+
+    service = UserInferenceQuotaService(
+        lambda: None,
+        owner_authority=_OwnerAuthority(),
+        settings=InferenceQuotaSettings(enabled=True),
+    )
+    identity = Identity(user_id="user-ubq4", auth_type="jwt", scopes={"*"})
+    context = service.build_context(
+        budget_identity=identity,
+        logical_request_id="inf-config",
+        source_surface="TEST",
+        session_id="session-ubq4",
+    )
+    left = _body()
+    left["config"].update({"stream": False, "agent_activity_stream": False})
+    right = _body()
+    right["config"].update({"stream": True, "agent_activity_stream": True})
+
+    assert service.logical_fingerprint(
+        left,
+        context,
+        streaming_mode=True,
+    ) == service.logical_fingerprint(
+        right,
+        context,
+        streaming_mode=True,
+    )
+    assert service.logical_fingerprint(
+        left,
+        context,
+        streaming_mode=False,
+    ) != service.logical_fingerprint(
+        left,
+        context,
+        streaming_mode=True,
+    )
+
+
+def test_ubq4_unfrozen_config_key_fails_closed() -> None:
+    class _OwnerAuthority:
+        pass
+
+    service = UserInferenceQuotaService(
+        lambda: None,
+        owner_authority=_OwnerAuthority(),
+        settings=InferenceQuotaSettings(enabled=True),
+    )
+    identity = Identity(user_id="user-ubq4", auth_type="jwt", scopes={"*"})
+    context = service.build_context(
+        budget_identity=identity,
+        logical_request_id="inf-new-config",
+        source_surface="TEST",
+    )
+    body = _body()
+    body["config"]["unreviewed_semantic_option"] = 1
+    with pytest.raises(UserInferenceQuotaContextError):
+        service.logical_fingerprint(
+            body,
+            context,
+            streaming_mode=False,
+        )
+
+
 @pytest.mark.asyncio
 async def test_ubq4_binary_float_semantics_fail_before_quota_mutation(
     tmp_path: Path,
