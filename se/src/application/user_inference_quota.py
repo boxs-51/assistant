@@ -186,6 +186,52 @@ def derive_skill_inference_request_id(
     return "skillinf:v1:" + digest
 
 
+_SEMANTIC_CONFIG_KEYS = frozenset(
+    {
+        "temperature",
+        "top_p",
+        "max_tokens",
+        "presence_penalty",
+        "frequency_penalty",
+        "response_format",
+        "seed",
+        "stop",
+    }
+)
+_TRANSPORT_CONFIG_KEYS = frozenset({"stream", "agent_activity_stream"})
+
+
+def _as_mapping(value: Any, *, name: str) -> dict[str, Any]:
+    if value is None:
+        return {}
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="python", exclude_none=True)
+    if not isinstance(value, Mapping):
+        raise UserInferenceQuotaContextError(
+            f"{name} must be a canonical mapping"
+        )
+    if not all(isinstance(key, str) for key in value):
+        raise UserInferenceQuotaContextError(
+            f"{name} keys must be strings"
+        )
+    return dict(value)
+
+
+def _semantic_config(body: Mapping[str, Any]) -> dict[str, Any]:
+    config = _as_mapping(body.get("config"), name="semantic config")
+    unknown = set(config) - _SEMANTIC_CONFIG_KEYS - _TRANSPORT_CONFIG_KEYS
+    if unknown:
+        raise UserInferenceQuotaContextError(
+            "unfrozen semantic/transport config keys: "
+            + ", ".join(sorted(unknown))
+        )
+    return {
+        key: config[key]
+        for key in sorted(_SEMANTIC_CONFIG_KEYS)
+        if key in config
+    }
+
+
 class UserInferenceQuotaService:
     """UBQ-4 logical CHAT_INFERENCE admission/finalization authority."""
 
@@ -293,7 +339,7 @@ class UserInferenceQuotaService:
             "semantic_model_id": body.get("model") or "",
             "normalized_messages": body.get("messages") or [],
             "normalized_tool_definitions": body.get("tools") or [],
-            "normalized_semantic_config": body.get("config") or {},
+            "normalized_semantic_config": _semantic_config(body),
             "source_surface": context.source_surface,
             "stable_lineage": {
                 "session_id": context.session_id,
@@ -334,7 +380,7 @@ class UserInferenceQuotaService:
         # One token per UTF-8 byte is deliberately conservative and does not
         # consume a provider retry/probe token.
         input_tokens = max(1, len(encoded))
-        config = body.get("config") or {}
+        config = _semantic_config(body)
         max_tokens = config.get("max_tokens")
         if max_tokens is None:
             output_tokens = int(
