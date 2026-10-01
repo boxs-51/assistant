@@ -69,8 +69,10 @@ from .application.assets import AssetService
 from .application.messages import CanonicalMessageService
 from .application.user_budget import (
     DualAccountingSettings,
-    ToolQuotaSettings,
     UserBudgetDualAccountingService,
+)
+from .application.user_tool_quota import (
+    ToolQuotaSettings,
     UserToolQuotaService,
 )
 from .application.policy.authorization import AuthorizationService
