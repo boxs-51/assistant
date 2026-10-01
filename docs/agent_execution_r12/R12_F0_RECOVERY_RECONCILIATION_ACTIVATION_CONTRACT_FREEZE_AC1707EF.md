@@ -233,7 +233,32 @@ connection stable client_id == invocation.origin_client_id
 target_connection_id != invocation.connection_id
 checkpoint snapshot origin_client_id == invocation.origin_client_id
 matching capability_id + capability_version is ready on that connection
+exactly one matching client-owned `REMOTE_CLIENT` implementation exists on target
+implementation.location == CLIENT
+implementation.owner_type == CLIENT
+implementation.driver_kind == REMOTE_CLIENT
+implementation.connection_id == target_connection_id
+implementation.owner_id == invocation.owner_user_id
+implementation stable client_id == invocation.origin_client_id
+implementation.version == invocation.capability_version
+definition.version == invocation.capability_version
+definition.kind == invocation.kind
+definition.execution_mode == invocation.execution_mode
+definition.idempotency == invocation.idempotency
 ```
+
+Capability/version readiness alone is insufficient continuation authority. The
+pre-claim proof MUST mirror the full canonical
+`CapabilityRuntime._resolve_continuation_target(...)` predicate that F3 will use:
+the target connection must resolve to exactly one matching client-owned
+`REMOTE_CLIENT` implementation, and the current capability definition must still
+match the durable invocation's version, kind, execution mode and idempotency.
+
+A zero matching implementation is continuation-unavailable and MUST DEFER before
+claim. Multiple matching implementations are ambiguous/conflicting authority and
+MUST REJECT before claim. A changed definition contract MUST REJECT before claim.
+Recovery MUST NOT consume ResumeClaim or publish `RUNNING` first and defer this
+predicate to F3.
 
 Current `CapabilityToolExecutionAdapter.continue_invocation(...)` also requires a
 claimed non-null execution connection. Canonical
@@ -408,6 +433,8 @@ task-scoped TaskBudget incarnation_generation when task_id is present
 target recovery trigger = SERVER_RECOVERY
 optional target stable client/connection authority
 fresh connection-generation proof for every non-REUSE client-affine continuation
+full continuation-target predicate proof for every non-REUSE client-affine action
+exactly-one implementation identity + definition version/kind/execution_mode/idempotency match
 post-reconciliation invocation revision/state/outcome snapshots
 safe action per invocation
 continuation-affinity proof for every non-REUSE action
