@@ -74,6 +74,22 @@ class _Realtime:
         self.cancel_calls += 1
 
 
+class _SuccessRealtime:
+    def __init__(self) -> None:
+        self.calls = 0
+        self.cancel_calls = 0
+
+    async def invoke(self, envelope, timeout=None):
+        self.calls += 1
+        return {
+            "source": "client",
+            "value": envelope.payload["arguments"]["value"],
+        }
+
+    async def cancel(self, connection_id, invocation_id):
+        self.cancel_calls += 1
+
+
 def _runtime(error_factory, *, idempotency=CapabilityIdempotency.UNKNOWN):
     capability_id = "tool.ubq3.remote"
     definition = CapabilityDefinition(
@@ -203,3 +219,52 @@ async def test_ubq3_remote_timeout_unknown_does_not_refund() -> None:
     assert len(quota.reserve_calls) == 1
     assert quota.settle_calls == []
     assert quota.release_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ubq3_initial_client_tool_uses_same_logical_quota() -> None:
+    capability_id = "tool.ubq3.client.initial"
+    definition = CapabilityDefinition(
+        id=capability_id,
+        name=capability_id,
+        description="UBQ-3 initial client evidence",
+        kind=CapabilityKind.TOOL,
+        idempotency=CapabilityIdempotency.IDEMPOTENT,
+        input_schema={
+            "type": "object",
+            "properties": {"value": {"type": "string"}},
+            "required": ["value"],
+        },
+    )
+    realtime = _SuccessRealtime()
+    driver = RemoteClientDriver(
+        definition,
+        realtime,
+        "conn-ubq3-client-initial",
+    )
+    quota = _QuotaProbe()
+    runtime = CapabilityRuntime(tool_quota_service=quota)
+    runtime.register_capability(driver)
+
+    result = await runtime.execute_capability(
+        capability_id,
+        {"value": "client"},
+        _identity(),
+        invocation_id="inv-ubq3-client-initial",
+        connection_id="conn-ubq3-client-initial",
+    )
+
+    persisted = await runtime.invocation_lifecycle.store.get(
+        "inv-ubq3-client-initial"
+    )
+    assert result.output["value"] == "client"
+    assert realtime.calls == 1
+    assert len(quota.reserve_calls) == 1
+    assert len(quota.settle_calls) == 1
+    assert quota.release_calls == []
+    assert persisted is not None
+    assert persisted.state is CapabilityInvocationState.COMPLETED
+    assert (
+        persisted.remote_outcome_state
+        is RemoteOutcomeState.TERMINAL_COMMITTED
+    )
