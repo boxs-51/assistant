@@ -1,7 +1,7 @@
 import cl.src.schemas.attachment as attachment_schemas
 from cl.src.schemas.enums import MessageContentType
 from cl.src.schemas.message import MessageContentPart
-from cl.src.schemas.response import GatewayResponse
+from cl.src.schemas.response import GatewayResponse, GatewayStreamChunk
 
 
 def test_gateway_response_defaults_are_constructible() -> None:
@@ -50,3 +50,36 @@ def test_client_migrates_legacy_code_content_to_flat_markdown() -> None:
 
     assert part.text == "```python\nprint(1)\n```"
     assert part.data is None
+
+
+def test_stream_chunk_preserves_existing_content_parts_metadata() -> None:
+    chunk = GatewayStreamChunk.model_validate(
+        {
+            "id": "stream-client-f7-s",
+            "model": "model-f7-s",
+            "choices": [
+                {
+                    "index": 0,
+                    "delta": {"role": "assistant"},
+                    "finish_reason": "stop",
+                }
+            ],
+            "metadata": {
+                "provider": "gemini",
+                "content_parts": [
+                    {
+                        "type": "file",
+                        "data": {
+                            "asset_id": "asset-client-f7-s",
+                            "source": "asset",
+                            "uri": "asset://asset-client-f7-s",
+                            "mime_type": "application/octet-stream",
+                        },
+                    }
+                ],
+            },
+        }
+    )
+
+    assert chunk.metadata.content_parts is not None
+    assert chunk.metadata.content_parts[0]["data"]["asset_id"] == "asset-client-f7-s"
