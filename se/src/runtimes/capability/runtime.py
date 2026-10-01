@@ -1020,7 +1020,13 @@ class CapabilityRuntime(BaseRuntime):
                 f"Capability '{capability_id}' is not authorized."
             )
 
-        if driver.definition.kind is CapabilityKind.TOOL:
+        tool_quota_enabled = (
+            driver.definition.kind is CapabilityKind.TOOL
+            and self.tool_quota_service is not None
+            and bool(getattr(self.tool_quota_service, "enabled", False))
+        )
+
+        if tool_quota_enabled:
             validation = self.argument_validator.validate(
                 driver.definition,
                 arguments,
@@ -1135,10 +1141,7 @@ class CapabilityRuntime(BaseRuntime):
         )
 
         admission: ToolQuotaAdmission | None = None
-        if (
-            driver.definition.kind is CapabilityKind.TOOL
-            and self.tool_quota_service is not None
-        ):
+        if tool_quota_enabled:
             try:
                 admission = await self.tool_quota_service.reserve_tool_call(
                     identity=identity,
@@ -1170,6 +1173,45 @@ class CapabilityRuntime(BaseRuntime):
                 ) from exc
             if admission is not None:
                 candidate.owner_user_id = admission.owner_user_id
+
+        if not tool_quota_enabled:
+            await self.invocation_lifecycle.create(candidate)
+            invocation = candidate
+            self._bind_remote_dispatch_started(driver, invocation)
+            invocation.attempt = 1
+            attempt = await self.invocation_lifecycle.start_attempt(
+                invocation,
+                implementation_id=effective_implementation_id,
+                driver_kind=effective_driver_kind,
+                connection_id=context.connection_id,
+            )
+            await self.invocation_lifecycle.transition(
+                invocation,
+                CapabilityInvocationState.DISPATCHING,
+                attempt_id=attempt.attempt_id,
+            )
+            await self.invocation_lifecycle.transition(
+                invocation,
+                CapabilityInvocationState.RUNNING,
+                attempt_id=attempt.attempt_id,
+            )
+            return await self._run_invocation_attempt(
+                invocation=invocation,
+                attempt=attempt,
+                driver=driver,
+                selected_implementation_id=selected_implementation_id,
+                selected_implementation=selected_implementation,
+                effective_implementation_id=effective_implementation_id,
+                effective_driver_kind=effective_driver_kind,
+                context=context,
+                capability_id=capability_id,
+                arguments=arguments,
+                identity=identity,
+                request_metadata=request_metadata,
+                routing_connection_id=connection_id,
+                started=started,
+                allow_internal_retry=True,
+            )
 
         existing = await self.invocation_lifecycle.store.get(
             candidate.invocation_id
