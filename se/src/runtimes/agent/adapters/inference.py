@@ -114,6 +114,7 @@ class ProviderInferenceAdapter(InferencePort):
                     metadata.get("quota_source_surface")
                     or "PROVIDER_INFERENCE_ADAPTER"
                 ),
+                owner_user_id=request.owner_user_id,
                 session_id=metadata.get("session_id"),
                 task_id=metadata.get("task_id"),
                 execution_id=request.execution_id,
