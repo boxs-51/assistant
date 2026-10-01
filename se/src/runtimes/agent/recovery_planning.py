@@ -578,30 +578,53 @@ class AgentRecoveryPlanningService:
                 "Frozen recovery iteration differs from exact durable row.",
             )
 
+        frozen_tool_call_ids = tuple(str(item) for item in frozen_ids)
+        reconstructed_tool_call_ids = tuple(
+            str(item.tool_call_id) for item in safe_point.ordered_tool_calls
+        )
+        if frozen_tool_call_ids != reconstructed_tool_call_ids:
+            raise RecoveryPlanRejected(
+                "RECOVERY_BATCH_SNAPSHOT_CONFLICT",
+                "Frozen R12-E active tool-call order differs from reconstructed "
+                "recovery authority.",
+            )
+
         inference_request_id = str(
             getattr(iteration, "inference_request_id", "") or ""
         ) or None
-        inference_response = getattr(iteration, "inference_response", None)
-        if inference_request_id is not None and inference_response is None:
-            raise RecoveryPlanDeferred(
-                "RECOVERY_INFERENCE_OUTCOME_AMBIGUOUS",
-                "Frozen logical inference has no canonical completion proof.",
-            )
 
-        if inference_request_id is None:
-            if (
-                str(iteration.state) == "PREPARING"
-                and getattr(iteration, "inference_request", None) is None
-                and inference_response is None
-                and not tuple(safe_point.ordered_tool_calls)
-            ):
+        # AgentRuntime persists inference_request_id on AgentIteration before
+        # provider execution, but it persists the provider response on the
+        # execution checkpoint rather than AgentIteration. Therefore
+        # AgentIteration.inference_response is not canonical completion proof.
+        #
+        # A non-empty active batch *is* cut-time completion proof: R12-E could
+        # freeze those tool_call_ids only after the provider response returned
+        # and runtime durably published the iteration tool batch. Conversely,
+        # request_id + an empty frozen batch remains ambiguous because an
+        # expired worker may complete provider work after the recovery cut.
+        if inference_request_id is not None:
+            if not frozen_tool_call_ids:
+                raise RecoveryPlanDeferred(
+                    "RECOVERY_INFERENCE_OUTCOME_AMBIGUOUS",
+                    "Frozen logical inference has no cut-time completion proof.",
+                )
+            disposition = RecoveryInferenceDisposition.NO_INFERENCE
+        else:
+            if frozen_tool_call_ids:
+                raise RecoveryPlanRejected(
+                    "RECOVERY_INFERENCE_IDENTITY_MISSING",
+                    "Frozen active tool batch lacks its durable inference request id.",
+                )
+            if str(iteration.state) == "PREPARING":
                 disposition = (
                     RecoveryInferenceDisposition.NEW_LOGICAL_INFERENCE_ALLOWED
                 )
             else:
-                disposition = RecoveryInferenceDisposition.NO_INFERENCE
-        else:
-            disposition = RecoveryInferenceDisposition.NO_INFERENCE
+                raise RecoveryPlanRejected(
+                    "RECOVERY_INFERENCE_IDENTITY_MISSING",
+                    "Frozen non-PREPARING iteration lacks inference request identity.",
+                )
 
         return (
             str(frozen_iteration_id),
