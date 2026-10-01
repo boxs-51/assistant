@@ -79,7 +79,7 @@ class InferenceQuotaSettings:
     max_conflict_retries: int = 8
     estimator_policy_version: str = "ubq4-estimator-v1"
     usage_normalization_version: str = "ubq4-usage-v1"
-    default_output_token_reservation: int = 4096
+    default_output_token_reservation: int | None = None
     compute_units_per_1k_tokens: Decimal | None = None
     cost_usd_per_1k_tokens: Decimal | None = None
 
@@ -383,9 +383,13 @@ class UserInferenceQuotaService:
         config = _semantic_config(body)
         max_tokens = config.get("max_tokens")
         if max_tokens is None:
-            output_tokens = int(
-                self.settings.default_output_token_reservation
-            )
+            configured_bound = self.settings.default_output_token_reservation
+            if configured_bound is None:
+                raise UserInferenceEstimateUnavailableError(
+                    "output-token upper bound is unavailable; request "
+                    "max_tokens or configure a server-owned safe default"
+                )
+            output_tokens = int(configured_bound)
         else:
             if (
                 isinstance(max_tokens, bool)
