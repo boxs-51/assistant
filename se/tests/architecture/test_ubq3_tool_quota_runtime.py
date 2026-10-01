@@ -8,6 +8,7 @@ from se.src.application.user_tool_quota import ToolQuotaAdmission
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
+    CapabilityExecutionMode,
     CapabilityKind,
 )
 from se.src.runtimes.capability.contracts.error import CapabilityError
@@ -234,6 +235,7 @@ async def test_ubq3_initial_attempt_claim_allows_only_one_owner() -> None:
         invocation_id="inv-initial-race",
         capability_id="tool.ubq3",
         kind=CapabilityKind.TOOL,
+        execution_mode=CapabilityExecutionMode.ONE_SHOT,
     )
     await lifecycle.create(original)
 
