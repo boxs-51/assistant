@@ -440,12 +440,18 @@ class GeneratedAssetStreamAssembler:
     def _scan_content_parts(
         self,
         chunk: GatewayStreamChunk,
-    ) -> tuple[list[dict[str, Any]], bool]:
+    ) -> tuple[list[dict[str, Any]], bool, bool]:
         raw_parts = getattr(chunk.metadata, "content_parts", None) or []
         safe_parts: list[dict[str, Any]] = []
         found_media = False
+        had_internal_marker = False
 
         for raw in raw_parts:
+            if isinstance(raw, dict) and (
+                self._CANDIDATE_INDEX_KEY in raw
+                or self._TOOL_CALL_SENTINEL_KEY in raw
+            ):
+                had_internal_marker = True
             candidate_index, part, tool_call_sentinel = self._decode_content_part(
                 raw
             )
@@ -474,7 +480,7 @@ class GeneratedAssetStreamAssembler:
                 part.model_dump(mode="json", exclude_none=True)
             )
 
-        return safe_parts, found_media
+        return safe_parts, found_media, had_internal_marker
 
     @staticmethod
     def _chunk_has_public_payload(chunk: GatewayStreamChunk) -> bool:
@@ -514,12 +520,19 @@ class GeneratedAssetStreamAssembler:
             if choice.index == 0 and choice.finish_reason is not None:
                 self._finish_reason = str(choice.finish_reason)
 
-        safe_parts, found_media = self._scan_content_parts(chunk)
+        safe_parts, found_media, had_internal_marker = self._scan_content_parts(
+            chunk
+        )
         if found_media:
             self.media_seen = True
 
         if not self.media_seen:
-            return chunk
+            if not had_internal_marker:
+                return chunk
+            public_chunk = chunk.model_copy(deep=True)
+            public_chunk.metadata.content_parts = safe_parts or None
+            public_chunk.metadata.raw_response = None
+            return public_chunk
 
         # After the first media observation no generated transport, terminal
         # marker, usage, or tool-call authority may escape before CAS commit.
