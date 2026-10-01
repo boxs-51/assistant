@@ -161,6 +161,7 @@ class AgentRecoveryPlanningService:
 
             (
                 recovery_iteration_id,
+                iteration_state,
                 inference_request_id,
                 inference_disposition,
             ) = await self._freeze_inference_identity_in_uow(
@@ -296,6 +297,7 @@ class AgentRecoveryPlanningService:
                 "resolved_recovery_principal": principal,
                 "iteration": int(checkpoint.iteration),
                 "recovery_iteration_id": recovery_iteration_id,
+                "iteration_state": iteration_state,
                 "inference_request_id": inference_request_id,
                 "inference_disposition": inference_disposition,
                 "ordered_tool_call_ids": ordered_tool_call_ids,
@@ -515,7 +517,12 @@ class AgentRecoveryPlanningService:
         checkpoint,
         safe_point,
         metadata: dict[str, Any],
-    ) -> tuple[str | None, str | None, RecoveryInferenceDisposition]:
+    ) -> tuple[
+        str | None,
+        str | None,
+        str | None,
+        RecoveryInferenceDisposition,
+    ]:
         frozen_iteration_id = metadata.get("r12_recovery_iteration_id")
         frozen_ids = metadata.get("r12_recovery_active_tool_call_ids")
         if not isinstance(frozen_ids, (list, tuple)):
@@ -535,7 +542,12 @@ class AgentRecoveryPlanningService:
                     "RECOVERY_ITERATION_ZERO_PROMOTED",
                     "Late iteration row cannot redefine empty recovery cut.",
                 )
-            return None, None, RecoveryInferenceDisposition.NO_INFERENCE
+            return (
+                None,
+                None,
+                None,
+                RecoveryInferenceDisposition.NO_INFERENCE,
+            )
 
         iteration = await uow.agents.get_iteration(str(frozen_iteration_id))
         if (
@@ -575,7 +587,12 @@ class AgentRecoveryPlanningService:
         else:
             disposition = RecoveryInferenceDisposition.NO_INFERENCE
 
-        return str(frozen_iteration_id), inference_request_id, disposition
+        return (
+            str(frozen_iteration_id),
+            str(iteration.state),
+            inference_request_id,
+            disposition,
+        )
 
     @staticmethod
     def _validate_pending_rows(
