@@ -20,6 +20,7 @@ from se.src.application.user_budget import (
 )
 from se.src.application.user_tool_quota import (
     ToolQuotaSettings,
+    UserToolQuotaConflictError,
     UserToolQuotaService,
 )
 from se.src.domain.schemas.identity import Identity
@@ -575,6 +576,19 @@ async def test_ubq3_historical_bridge_suppresses_duplicate_direct_charge(
             assert mirrored.state == "SETTLED"
             assert int(mirrored.settled_amount_atomic) == 1
             await uow.commit()
+
+        with pytest.raises(UserToolQuotaConflictError):
+            await quota.reserve_tool_call(
+                identity=_identity("user-a"),
+                invocation_id=invocation_id,
+                capability_id=capability_id,
+                request_fingerprint="conflicting-runtime-fingerprint",
+                arguments={"value": "different-lineage"},
+                execution_id=execution_id,
+                tool_call_id=tool_call_id,
+                task_id=task_id,
+                session_id=f"session-{task_id}",
+            )
     finally:
         await engine.dispose()
 
