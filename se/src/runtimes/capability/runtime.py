@@ -1301,6 +1301,36 @@ class CapabilityRuntime(BaseRuntime):
         preexisting: CapabilityInvocation | None = None
         preexisting_mode: str | None = None
         if tool_quota_enabled:
+            try:
+                resolver = getattr(
+                    self.tool_quota_service,
+                    "resolve_owner",
+                    None,
+                )
+                if callable(resolver):
+                    resolution = await resolver(
+                        identity=identity,
+                        task_id=context.task_id,
+                    )
+                    if resolution is not None:
+                        candidate.owner_user_id = resolution.owner_user_id
+            except (UserToolQuotaError, UserBudgetDualAccountingError) as exc:
+                code = str(
+                    getattr(exc, "code", "USER_BUDGET_OWNER_UNRESOLVED")
+                )
+                raise CapabilityError(
+                    code=code,
+                    message=str(exc),
+                    category="QUOTA",
+                    retryable=False,
+                    safe_for_client=(
+                        code == "USER_BUDGET_OWNER_UNRESOLVED"
+                    ),
+                    cause_type=type(exc).__name__,
+                    capability_id=capability_id,
+                    invocation_id=candidate.invocation_id,
+                ) from exc
+
             preexisting = await self.invocation_lifecycle.store.get(
                 candidate.invocation_id
             )
