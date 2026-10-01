@@ -97,6 +97,15 @@ class _Agents:
             else None
         )
 
+    async def list_iterations(self, execution_id):
+        if self.iteration is None:
+            return []
+        return (
+            [self.iteration]
+            if execution_id == self.iteration.execution_id
+            else []
+        )
+
     async def list_checkpoint_pending_invocations(self, checkpoint_id):
         assert checkpoint_id == self.checkpoint.checkpoint_id
         return list(self.pending)
@@ -598,8 +607,11 @@ async def test_r12_f1_not_dispatched_freezes_continuation_and_existing_quota():
     assert action.continuation_authority.target_client_id == "client-stable"
     assert action.origin_client_id == "client-stable"
     assert action.origin_connection_id == "conn-old"
+    assert action.kind is CapabilityKind.TOOL
+    assert action.execution_mode is CapabilityExecutionMode.ONE_SHOT
     assert action.tool_quota_authority.reservation_state == "RESERVED"
     assert action.tool_quota_authority.reservation_id == "ubq3:reservation"
+    assert action.tool_quota_authority.idempotency_key == "ubq3:key"
     assert plan.target_client_id == "client-stable"
     assert plan.target_connection_id == "conn-new"
     assert runtime.resolve_calls == [("inv-r12-f1", "conn-new")]
