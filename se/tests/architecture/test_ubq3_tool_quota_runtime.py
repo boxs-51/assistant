@@ -228,6 +228,39 @@ async def test_ubq3_non_tool_kind_does_not_use_tool_quota() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ubq3_disabled_tool_quota_preserves_legacy_runtime_path() -> None:
+    class DisabledQuota(_Quota):
+        enabled = False
+
+    store = InMemoryCapabilityInvocationStore()
+    quota = DisabledQuota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    result = await runtime.execute_capability(
+        driver.name,
+        {"value": "legacy"},
+        _identity(),
+        invocation_id="inv-disabled-runtime",
+    )
+
+    assert result.output["value"] == "legacy"
+    assert quota.reserve_calls == []
+    assert quota.settle_calls == []
+    persisted = store.items["inv-disabled-runtime"]
+    assert persisted.state is CapabilityInvocationState.COMPLETED
+    assert persisted.execution_id is not None
+    assert persisted.revision == 3
+    attempts = await store.list_attempts("inv-disabled-runtime")
+    assert len(attempts) == 1
+    assert attempts[0].attempt_number == 1
+
+
+@pytest.mark.asyncio
 async def test_ubq3_initial_attempt_claim_allows_only_one_owner() -> None:
     store = InMemoryCapabilityInvocationStore()
     lifecycle = CapabilityInvocationLifecycle(store)
