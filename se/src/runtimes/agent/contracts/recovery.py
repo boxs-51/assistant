@@ -7,7 +7,11 @@ import hashlib
 import json
 from typing import Any, Mapping
 
-from ...capability.contracts.definition import CapabilityIdempotency
+from ...capability.contracts.definition import (
+    CapabilityExecutionMode,
+    CapabilityIdempotency,
+    CapabilityKind,
+)
 from ...capability.contracts.invocation import (
     CapabilityInvocationState,
     RemoteOutcomeState,
@@ -38,6 +42,7 @@ class RecoveryToolQuotaAuthority:
     """Existing UBQ-3 authority observed without mutating renewable quota."""
 
     reservation_id: str
+    idempotency_key: str | None
     window_epoch: int
     reservation_state: str
     historical_bridge: bool
@@ -53,6 +58,8 @@ class RecoveryInvocationAction:
     capability_id: str
     capability_version: str
     request_fingerprint: str
+    kind: CapabilityKind
+    execution_mode: CapabilityExecutionMode
     idempotency: CapabilityIdempotency
     expected_invocation_revision: int
     expected_invocation_state: CapabilityInvocationState
@@ -129,6 +136,8 @@ def recovery_plan_fingerprint(
                 "capability_id": item.capability_id,
                 "capability_version": item.capability_version,
                 "request_fingerprint": item.request_fingerprint,
+                "kind": item.kind.value,
+                "execution_mode": item.execution_mode.value,
                 "idempotency": item.idempotency.value,
                 "expected_invocation_revision": item.expected_invocation_revision,
                 "expected_invocation_state": item.expected_invocation_state.value,
@@ -152,6 +161,7 @@ def recovery_plan_fingerprint(
                 "tool_quota_authority": (
                     {
                         "reservation_id": quota.reservation_id,
+                        "idempotency_key": quota.idempotency_key,
                         "window_epoch": quota.window_epoch,
                         "reservation_state": quota.reservation_state,
                         "historical_bridge": quota.historical_bridge,
