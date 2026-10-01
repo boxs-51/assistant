@@ -58,6 +58,7 @@ class RecoveryInvocationAction:
     expected_invocation_state: CapabilityInvocationState
     expected_remote_outcome_state: RemoteOutcomeState | None
     origin_client_id: str | None
+    origin_connection_id: str | None
     action: ResumeInvocationActionKind
     continuation_authority: RecoveryContinuationAuthority | None = None
     tool_quota_authority: RecoveryToolQuotaAuthority | None = None
@@ -72,6 +73,8 @@ class RecoveryPlan:
     expected_execution_revision: int
     recovery_fingerprint: str
     expected_unowned_lease_generation: int
+    checkpoint_origin_client_id: str | None
+    checkpoint_origin_connection_id: str | None
 
     agent_id: str
     session_id: str
@@ -135,6 +138,7 @@ def recovery_plan_fingerprint(
                     else None
                 ),
                 "origin_client_id": item.origin_client_id,
+                "origin_connection_id": item.origin_connection_id,
                 "action": item.action.value,
                 "continuation_authority": (
                     {
@@ -167,6 +171,8 @@ def recovery_plan_fingerprint(
         "expected_unowned_lease_generation": get(
             "expected_unowned_lease_generation"
         ),
+        "checkpoint_origin_client_id": get("checkpoint_origin_client_id"),
+        "checkpoint_origin_connection_id": get("checkpoint_origin_connection_id"),
         "agent_id": get("agent_id"),
         "session_id": get("session_id"),
         "task_id": get("task_id"),
