@@ -141,9 +141,10 @@ def _canonicalize(value: Any) -> Any:
     if isinstance(value, Decimal):
         return canonical_decimal_string(value)
     if isinstance(value, float):
-        # Do not fingerprint binary-float object identity. Convert the
-        # provider-neutral semantic value to a canonical decimal string.
-        return canonical_decimal_string(Decimal(str(value)))
+        raise UserInferenceQuotaContextError(
+            "binary float is not canonical UBQ-4 fingerprint authority; "
+            "normalize semantic numeric values before admission"
+        )
     if isinstance(value, Mapping):
         return {
             str(key): _canonicalize(value[key])
