@@ -268,53 +268,66 @@ async def test_ubq3_disabled_tool_quota_preserves_legacy_runtime_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_ubq3_sql_initial_attempt_claim_is_atomic() -> None:
+async def test_ubq3_sql_initial_attempt_claim_is_atomic(tmp_path) -> None:
     driver = SQLiteDriver(
         DriverConfig(
             enabled=True,
             required=True,
-            options={"path": ":memory:"},
+            options={
+                "path": str(tmp_path / "ubq3-initial-attempt-race.sqlite3")
+            },
         )
     )
-    async with driver._engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-    lifecycle = CapabilityInvocationLifecycle(
-        SqlCapabilityInvocationStore(
-            lambda: SqlAlchemyUnitOfWork(driver)
+    try:
+        async with driver._engine.begin() as connection:
+            await connection.run_sync(Base.metadata.create_all)
+        lifecycle = CapabilityInvocationLifecycle(
+            SqlCapabilityInvocationStore(
+                lambda: SqlAlchemyUnitOfWork(driver)
+            )
         )
-    )
-    original = CapabilityInvocation(
-        invocation_id="inv-sql-initial-race",
-        capability_id="tool.ubq3",
-        kind=CapabilityKind.TOOL,
-        execution_mode=CapabilityExecutionMode.ONE_SHOT,
-    )
-    await lifecycle.create(original)
-    left = await lifecycle.store.get(original.invocation_id)
-    right = await lifecycle.store.get(original.invocation_id)
-    assert left is not None and right is not None
+        original = CapabilityInvocation(
+            invocation_id="inv-sql-initial-race",
+            capability_id="tool.ubq3",
+            kind=CapabilityKind.TOOL,
+            execution_mode=CapabilityExecutionMode.ONE_SHOT,
+        )
+        await lifecycle.create(original)
+        left = await lifecycle.store.get(original.invocation_id)
+        right = await lifecycle.store.get(original.invocation_id)
+        assert left is not None and right is not None
 
-    async def claim(candidate):
-        try:
+        async def claim(candidate):
             return await lifecycle.begin_initial_attempt(
                 candidate,
                 implementation_id="legacy:tool.ubq3",
                 driver_kind="_EchoDriver",
                 connection_id=None,
             )
-        except RuntimeError:
-            return None
 
-    outcomes = await asyncio.gather(claim(left), claim(right))
-    winners = [item for item in outcomes if item is not None]
-    assert len(winners) == 1
-    stored = await lifecycle.store.get(original.invocation_id)
-    attempts = await lifecycle.store.list_attempts(original.invocation_id)
-    assert stored is not None
-    assert stored.state is CapabilityInvocationState.DISPATCHING
-    assert stored.attempt == 1
-    assert len(attempts) == 1
-    assert attempts[0].attempt_number == 1
+        outcomes = await asyncio.gather(
+            claim(left),
+            claim(right),
+            return_exceptions=True,
+        )
+        winners = [item for item in outcomes if isinstance(item, tuple)]
+        losers = [item for item in outcomes if isinstance(item, BaseException)]
+        assert len(winners) == 1
+        assert len(losers) == 1
+        assert isinstance(losers[0], RuntimeError)
+
+        stored = await lifecycle.store.get(original.invocation_id)
+        attempts = await lifecycle.store.list_attempts(original.invocation_id)
+        assert stored is not None
+        assert stored.state is CapabilityInvocationState.DISPATCHING
+        assert stored.revision == original.revision + 1
+        assert stored.attempt == 1
+        assert len(attempts) == 1
+        assert attempts[0].attempt_number == 1
+        assert attempts[0].metadata["initial_attempt"] is True
+        assert attempts[0].metadata["source_revision"] == original.revision
+    finally:
+        await driver.disconnect()
 
 
 @pytest.mark.asyncio
