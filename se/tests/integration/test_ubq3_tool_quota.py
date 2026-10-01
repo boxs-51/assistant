@@ -12,8 +12,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.application.user_budget import (
     DualAccountingSettings,
-    ToolQuotaSettings,
     UserBudgetDualAccountingService,
+)
+from se.src.application.user_tool_quota import (
+    ToolQuotaSettings,
     UserToolCapabilityQuotaExceededError,
     UserToolQuotaExceededError,
     UserToolQuotaService,
