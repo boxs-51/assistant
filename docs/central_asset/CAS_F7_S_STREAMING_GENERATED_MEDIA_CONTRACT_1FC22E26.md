@@ -142,14 +142,31 @@ Cardinality greater than one fails closed before first ingest. No atomic-batch o
 
 ## 8. Canonical stream output
 
-Successful output contains only canonical asset identity plus non-authoritative display metadata:
-- no raw/base64 payload;
-- no provider URI/provider_file_id;
-- source="asset";
-- canonical asset_id / asset://<asset_id>;
-- no duplicate generated-media emission.
+The exact first-slice wire representation is frozen without adding a new GatewayStreamDelta field.
 
-GatewayStreamDelta currently has no attachment field. The first F7-S implementation must use an existing schema-compatible canonical projection whose exact representation is independently frozen before production CLAIM. Any new public stream schema field requires explicit re-freeze and client-contract audit.
+After successful CAS ingest, F7-S emits exactly one terminal GatewayStreamChunk whose generated-media payload is represented only in the existing ResponseMetaData.content_parts field.
+
+The final canonical chunk must satisfy:
+- choices[0].delta.content = None for the generated-media object;
+- choices[0].delta.reasoning_content = None for the generated-media object;
+- choices[0].delta.tool_calls = None;
+- the terminal finish_reason is preserved from the logical provider response;
+- metadata.raw_response is absent/None;
+- metadata.content_parts contains exactly one canonical serialized MessageContentPart for the generated object;
+- the content-part type remains the original media class: image/audio/video/document/file;
+- the nested GatewayAttachment has source="asset";
+- the nested attachment carries asset_id and uri=asset://<asset_id>;
+- filename, mime_type, size, extension and checksum metadata may be preserved as non-authoritative display/integrity metadata;
+- base64_data, bytes_data and provider_file_id are absent;
+- provider URL/remote identity is absent;
+- no second text delta containing asset:// is emitted;
+- the same generated object is emitted exactly once.
+
+This reuses the existing server wire field ResponseMetaData.content_parts and does not create a new public stream field.
+
+Current server schema already declares ResponseMetaData.content_parts. Current typed client cl/src/schemas/response.py::ResponseMetaData does not declare content_parts, so GatewayStreamChunk.model_validate(...) silently drops that existing wire metadata under the current Pydantic extra-field behavior. Therefore first F7-S production CLAIM also requires bounded client schema parity by adding optional content_parts to the client ResponseMetaData model, with no other client runtime behavior change.
+
+Any proposal to place generated media in GatewayStreamDelta, emit raw/base64/provider transport as text, or add another public wire field requires a new explicit contract re-freeze.
 
 ## 9. Tool-call terminality
 
@@ -210,6 +227,7 @@ Expected F7-S production touch set:
 - se/src/application/assets/generated.py or a sibling provider-neutral stream assembler;
 - se/src/provider/handlers/chat_handler.py;
 - se/src/provider/gemini/converters/chats/response.py;
+- cl/src/schemas/response.py only for optional ResponseMetaData.content_parts parity with the already-existing server wire field;
 - focused tests/evidence.
 
 No production authority is granted for:
