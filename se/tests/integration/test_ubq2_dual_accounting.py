@@ -14,12 +14,17 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.application.user_budget import (
     DualAccountingSettings,
+    ToolQuotaSettings,
     UserBudgetDualAccountingService,
     UserBudgetParentOwnerMismatchError,
     UserBudgetParentUnboundError,
+    UserToolQuotaService,
 )
 from se.src.domain.schemas.identity import Identity
 from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
+from se.src.infrastructure.storage.models.sql.agent.execution import AgentExecutionRecord
+from se.src.infrastructure.storage.models.sql.agent.iteration import AgentIterationRecord
+from se.src.infrastructure.storage.models.sql.agent.tool_call import AgentToolCallRecord
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.user_budget import UserBudgetRepository
 from se.src.infrastructure.storage.repositories.user_data.users import UserRepository
@@ -455,6 +460,118 @@ async def test_ubq2_resource_mirror_replay_and_minimized_bridge(
             assert not hasattr(tool, "source_payload_json")
             assert not hasattr(tool, "source_projection_json")
             assert "must-not-be-retained" not in repr(tool.__dict__)
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_historical_bridge_suppresses_duplicate_direct_charge(
+    tmp_path: Path,
+) -> None:
+    _, engine, _, factory, service, enabled, _ = await _setup(tmp_path)
+    try:
+        task_id = "task-ubq3-historical"
+        execution_id = "exec-ubq3-historical"
+        iteration_id = "iter-ubq3-historical"
+        tool_call_id = "tool-call-historical"
+        invocation_id = "inv-ubq3-historical"
+        capability_id = "tool.historical"
+        arguments = {"value": "already-charged"}
+
+        await service.create_task_with_budget(
+            _task(task_id, "user-a"),
+            identity=_identity("user-a"),
+        )
+        async with factory() as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id=execution_id,
+                    session_id=f"session-{task_id}",
+                    agent_id="agent-ubq3",
+                    task_id=task_id,
+                    correlation_id="corr-ubq3-historical",
+                    state="RUNNING",
+                    revision=1,
+                    request={},
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id=iteration_id,
+                    execution_id=execution_id,
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=[tool_call_id],
+                )
+            )
+            uow.session.add(
+                AgentToolCallRecord(
+                    id="row-ubq3-historical",
+                    execution_id=execution_id,
+                    iteration_id=iteration_id,
+                    invocation_id=invocation_id,
+                    tool_call_id=tool_call_id,
+                    capability_id=capability_id,
+                    arguments=arguments,
+                    status="PENDING",
+                    extra_metadata={},
+                )
+            )
+            await uow.commit()
+
+        await service.reserve_tool_call_batch(
+            task_id,
+            [
+                {
+                    "execution_id": execution_id,
+                    "tool_call_id": tool_call_id,
+                    "capability_id": capability_id,
+                    "arguments": arguments,
+                }
+            ],
+        )
+
+        quota = UserToolQuotaService(
+            factory,
+            owner_authority=enabled,
+            settings=ToolQuotaSettings(enabled=True),
+        )
+        admission = await quota.reserve_tool_call(
+            identity=_identity("user-a"),
+            invocation_id=invocation_id,
+            capability_id=capability_id,
+            request_fingerprint="runtime-fingerprint-is-bound-by-arguments",
+            arguments=arguments,
+            execution_id=execution_id,
+            tool_call_id=tool_call_id,
+            task_id=task_id,
+            session_id=f"session-{task_id}",
+        )
+
+        assert admission is not None
+        assert admission.historical_bridge is True
+        assert admission.reservation_state == "SETTLED"
+        direct_key, _ = quota._identity(invocation_id)
+        async with factory() as uow:
+            assert (
+                await uow.user_budgets.get_reservation("user-a", direct_key)
+                is None
+            )
+            bridge = await uow.user_budgets.get_dual_accounting_receipt(
+                task_id,
+                "TOOL_CALL",
+                tool_call_id,
+                "TOOL_CALL",
+            )
+            assert bridge is not None
+            mirrored = await uow.user_budgets.get_reservation(
+                "user-a",
+                bridge.ubq_idempotency_key,
+            )
+            assert mirrored is not None
+            assert mirrored.state == "SETTLED"
+            assert int(mirrored.settled_amount_atomic) == 1
             await uow.commit()
     finally:
         await engine.dispose()
