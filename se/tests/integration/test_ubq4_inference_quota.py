@@ -202,6 +202,9 @@ async def test_ubq4_reserve_replay_and_known_settlement_are_exact_once(
             streaming_mode=False,
         )
         assert first is not None and replay is not None
+        assert first.replayed is False
+        assert replay.replayed is True
+        assert replay.inference_reservation_state == "RESERVED"
         assert replay.window_epoch == first.window_epoch
         assert dict(replay.reservation_keys) == dict(first.reservation_keys)
 
