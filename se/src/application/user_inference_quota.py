@@ -131,6 +131,8 @@ class InferenceQuotaAdmission:
     logical_request_fingerprint: str
     window_epoch: int
     reservation_keys: Mapping[str, str]
+    replayed: bool = False
+    inference_reservation_state: str = UserBudgetReservationState.RESERVED.value
 
 
 def _canonicalize(value: Any) -> Any:
@@ -793,6 +795,8 @@ class UserInferenceQuotaService:
                             logical_request_fingerprint=logical_fp,
                             window_epoch=int(existing_inf.window_epoch),
                             reservation_keys=keys,
+                            replayed=True,
+                            inference_reservation_state=str(existing_inf.state),
                         )
 
                     await self._require_no_unmigrated_historical_inference_in_uow(
@@ -978,6 +982,10 @@ class UserInferenceQuotaService:
                         logical_request_fingerprint=logical_fp,
                         window_epoch=int(window.epoch),
                         reservation_keys=keys,
+                        replayed=False,
+                        inference_reservation_state=(
+                            UserBudgetReservationState.RESERVED.value
+                        ),
                     )
             except (UserBudgetConflictError, UserBudgetSerializationError):
                 if attempt + 1 >= retries:
