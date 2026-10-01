@@ -81,6 +81,7 @@ def test_ctx_f5_3h_b2_detaches_payload_before_session_or_transaction() -> None:
     ordered = (
         "validate_promotion_reservation_integrity(reservation)",
         "canonical_payload_bytes = canonical_memory_bytes(content)",
+        "except (ValueError, RecursionError) as exc:",
         'content_snapshot = json.loads(canonical_payload_bytes.decode("utf-8"))',
         "payload_digest = memory_content_digest(content_snapshot)",
         "del content",
