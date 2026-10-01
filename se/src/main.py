@@ -71,6 +71,10 @@ from .application.user_budget import (
     DualAccountingSettings,
     UserBudgetDualAccountingService,
 )
+from .application.user_tool_quota import (
+    ToolQuotaSettings,
+    UserToolQuotaService,
+)
 from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
@@ -872,11 +876,21 @@ async def bootstrap_runtime_kernel(
             ),
         ),
     )
+    tool_quota_settings = config.user_budget.tool_quota
+    user_tool_quota_service = UserToolQuotaService(
+        eventing_manager.uow_factory,
+        owner_authority=user_budget_dual_accounting,
+        settings=ToolQuotaSettings(
+            enabled=tool_quota_settings.enabled,
+            max_conflict_retries=tool_quota_settings.max_conflict_retries,
+        ),
+    )
     task_budget_service = TaskBudgetService(
         eventing_manager.uow_factory,
         default_limits=task_budget_limits,
         default_policy=task_budget_policy,
         user_budget_dual_accounting=user_budget_dual_accounting,
+        user_tool_quota_enabled=tool_quota_settings.enabled,
     )
 
     asset_service = None
@@ -974,6 +988,7 @@ async def bootstrap_runtime_kernel(
                 connection_registry=connection_runtime.registry,
                 realtime=connection_runtime.realtime,
                 invocation_lifecycle=capability_invocation_lifecycle,
+                tool_quota_service=user_tool_quota_service,
             ),
         ),
         ("provider_runtime", ProviderRuntime(cb_manager)),

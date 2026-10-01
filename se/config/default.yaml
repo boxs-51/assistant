@@ -48,6 +48,9 @@ user_budget:
     enabled: false
     policy_version: "ubq2-shadow-v1"
     window_duration_seconds: 86400
+  tool_quota:
+    enabled: false
+    max_conflict_retries: 8
 
 agent:
   task_budget:

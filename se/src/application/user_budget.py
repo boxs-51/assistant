@@ -20,48 +20,37 @@ from se.src.infrastructure.storage.repositories.user_budget import (
     UserBudgetSerializationError,
 )
 
-
 UBQ2_ENROLLMENT_VERSION = "ubq2-v1"
 UBQ2_IDEMPOTENCY_VERSION = "ubq2-v1"
-
-
 class UserBudgetDualAccountingError(RuntimeError):
     code = "USER_BUDGET_DUAL_ACCOUNTING_ERROR"
 
     def __init__(self, message: str) -> None:
         super().__init__(f"{self.code}: {message}")
 
-
 class UserBudgetOwnerUnresolvedError(UserBudgetDualAccountingError):
     code = "USER_BUDGET_OWNER_UNRESOLVED"
-
 
 class UserBudgetParentOwnerMismatchError(UserBudgetDualAccountingError):
     code = "USER_BUDGET_PARENT_OWNER_MISMATCH"
 
-
 class UserBudgetParentUnboundError(UserBudgetDualAccountingError):
     code = "USER_BUDGET_PARENT_UNBOUND"
-
 
 class UserBudgetPolicyAuthorityConflictError(UserBudgetDualAccountingError):
     code = "USER_BUDGET_POLICY_AUTHORITY_CONFLICT"
 
-
 class UserBudgetBindingDriftError(UserBudgetDualAccountingError):
     code = "USER_BUDGET_BINDING_DRIFT"
 
-
 class UserBudgetUnsupportedLegacyMirrorError(UserBudgetDualAccountingError):
     code = "USER_BUDGET_UNSUPPORTED_LEGACY_MIRROR"
-
 
 @dataclass(frozen=True, slots=True)
 class DualAccountingSettings:
     enabled: bool = False
     policy_version: str = "ubq2-shadow-v1"
     window_duration_seconds: int = 86400
-
 
 @dataclass(frozen=True, slots=True)
 class BudgetOwnerResolution:
@@ -72,7 +61,6 @@ class BudgetOwnerResolution:
     source_organization_id: str | None
     resolution_fingerprint: str
 
-
 @dataclass(frozen=True, slots=True)
 class TaskBindingSnapshot:
     task_id: str
@@ -80,13 +68,11 @@ class TaskBindingSnapshot:
     enrollment_version: str
     resolution_fingerprint: str
 
-
 @dataclass(frozen=True, slots=True)
 class MirrorDimension:
     resource_kind: str
     amount_atomic: int
     capability_id: str | None = None
-
 
 @dataclass(frozen=True, slots=True)
 class DualAccountingReconciliationItem:
@@ -94,7 +80,6 @@ class DualAccountingReconciliationItem:
     task_id: str
     bridge_receipt_id: str | None = None
     mirror_dimension: str | None = None
-
 
 def _canonical_sha256(payload: dict[str, Any]) -> str:
     encoded = json.dumps(
@@ -105,12 +90,10 @@ def _canonical_sha256(payload: dict[str, Any]) -> str:
     ).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
-
 def _record_utc(value: datetime) -> datetime:
     if value.tzinfo is None or value.utcoffset() is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
-
 
 class UserBudgetDualAccountingService:
     """UBQ-2 application authority.
@@ -861,3 +844,4 @@ class UserBudgetDualAccountingService:
         if not dimensions:
             return (MirrorDimension("NO_CHARGE", 0),)
         return tuple(dimensions)
+

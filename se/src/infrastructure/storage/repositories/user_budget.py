@@ -541,6 +541,16 @@ class UserBudgetRepository:
         )
         return list(result.scalars().all())
 
+    async def get_window(
+        self,
+        owner_user_id: str,
+        window_epoch: int,
+    ) -> Optional[UserBudgetWindowRecord]:
+        return await self.session.get(
+            UserBudgetWindowRecord,
+            (owner_user_id, window_epoch),
+        )
+
     async def get_active_window(
         self,
         owner_user_id: str,

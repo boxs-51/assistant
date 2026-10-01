@@ -473,12 +473,14 @@ class TaskBudgetService:
         default_policy: TaskBudgetPolicy | None = None,
         max_conflict_retries: int = 8,
         user_budget_dual_accounting=None,
+        user_tool_quota_enabled: bool = False,
     ) -> None:
         self._uow_factory = uow_factory
         self._default_limits = default_limits
         self._default_policy = default_policy
         self._max_conflict_retries = max(1, int(max_conflict_retries))
         self._user_budget_dual_accounting = user_budget_dual_accounting
+        self._user_tool_quota_enabled = bool(user_tool_quota_enabled)
 
     @property
     def default_limits(self) -> TaskBudgetLimits | None:
@@ -4106,7 +4108,10 @@ class TaskBudgetService:
                             continue
 
                         self._verify_reservation(existing, fingerprint)
-                        if binding is not None:
+                        if (
+                            binding is not None
+                            and not self._user_tool_quota_enabled
+                        ):
                             await dual.require_mirror_replay_in_uow(
                                 uow,
                                 binding=binding,
@@ -4160,7 +4165,10 @@ class TaskBudgetService:
                                 ),
                             }
                         )
-                        if binding is not None:
+                        if (
+                            binding is not None
+                            and not self._user_tool_quota_enabled
+                        ):
                             await dual.mirror_resource_in_uow(
                                 uow,
                                 binding=binding,
