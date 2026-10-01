@@ -380,6 +380,7 @@ async def test_r12_f1_empty_recovery_cut_is_read_only_and_deterministic():
     assert plan.target_trigger is ResumeTriggerType.SERVER_RECOVERY
     assert plan.resolved_recovery_principal == "user-r12-f1"
     assert plan.recovery_iteration_id is None
+    assert plan.iteration_state is None
     assert plan.inference_request_id is None
     assert plan.inference_disposition is RecoveryInferenceDisposition.NO_INFERENCE
     assert plan.ordered_tool_call_ids == ()
@@ -419,6 +420,7 @@ async def test_r12_f1_uses_exact_frozen_iteration_inference_identity():
     plan = await service.build_recovery_plan(execution.id)
 
     assert plan.recovery_iteration_id == "iter-r12-f1"
+    assert plan.iteration_state == "THINKING"
     assert plan.inference_request_id == "inf-frozen"
     assert plan.inference_disposition is RecoveryInferenceDisposition.NO_INFERENCE
     assert uow.commit_calls == 0
@@ -738,4 +740,3 @@ async def test_r12_f1_outcome_unknown_cannot_regress_to_not_dispatched():
 
     assert runtime.resolve_calls == []
     assert uow.commit_calls == 0
-
