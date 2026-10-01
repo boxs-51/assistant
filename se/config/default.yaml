@@ -51,6 +51,14 @@ user_budget:
   tool_quota:
     enabled: false
     max_conflict_retries: 8
+  inference_quota:
+    enabled: false
+    max_conflict_retries: 8
+    estimator_policy_version: "ubq4-estimator-v1"
+    usage_normalization_version: "ubq4-usage-v1"
+    default_output_token_reservation: 4096
+    compute_units_per_1k_tokens: null
+    cost_usd_per_1k_tokens: null
 
 agent:
   task_budget:
