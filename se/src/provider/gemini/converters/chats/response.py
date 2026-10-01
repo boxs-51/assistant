@@ -174,6 +174,7 @@ class ResponseChats:
         parts: List[Dict[str, Any]], 
         citations: Optional[List[Dict[str, Any]]] = None,
         tool_names: ProviderToolNameMap | None = None,
+        preserve_generated_file_data: bool = False,
     ) -> Tuple[List[MessageContentPart], List[GatewayToolCall], str]:
         """
         Chuyển đổi danh sách các 'parts' thô từ Gemini thành MessageContentPart chuẩn, 
@@ -280,7 +281,41 @@ class ResponseChats:
                         data=attachment
                     ))
 
-            # 4. Xử lý URL Content
+            # 4. Generated fileData provenance (NON-STREAM F7-P1 only).
+            # Preserve the source class through successful decoding so the
+            # provider-neutral post-success fence can reject it terminally.
+            elif preserve_generated_file_data and "fileData" in part:
+                file_data = part.get("fileData") or {}
+                file_uri = file_data.get("fileUri") or ""
+                mime_type = (
+                    file_data.get("mimeType")
+                    or FileHelper.detect_mime_type(file_uri)
+                    or "application/octet-stream"
+                )
+                provider_file_id = (
+                    file_data.get("name")
+                    or file_data.get("fileId")
+                    or file_uri
+                    or None
+                )
+                filename = (
+                    file_data.get("displayName")
+                    or (file_uri.rstrip("/").rsplit("/", 1)[-1] if file_uri else None)
+                    or f"provider_generated_{int(time.time())}"
+                )
+                attachment = GatewayAttachment(
+                    id=f"att-{uuid.uuid4()}",
+                    filename=filename,
+                    uri=file_uri or None,
+                    provider_file_id=provider_file_id,
+                    mime_type=mime_type,
+                    source="provider",
+                )
+                content_parts.append(
+                    MessageContentPart(type="file", data=attachment)
+                )
+
+            # 5. Xử lý URL Content / legacy streaming fileData lowering.
             elif "url" in part or ("fileData" in part and part["fileData"].get("fileUri", "").startswith(("http://", "https://"))):
                 url_str = part.get("url") or part.get("fileData", {}).get("fileUri")
                 
@@ -346,6 +381,7 @@ class ResponseChats:
                     parts,
                     citations=citations_data,
                     tool_names=tool_names,
+                    preserve_generated_file_data=True,
                 )
                 
                 # Chuẩn hóa finish_reason

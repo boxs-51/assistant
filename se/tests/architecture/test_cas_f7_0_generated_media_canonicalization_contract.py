@@ -61,7 +61,13 @@ def test_shared_direct_agent_provider_boundary_is_frozen():
     inference = _read("se/src/runtimes/agent/adapters/inference.py")
 
     assert "async def execute_with_fallback(" in handler
-    assert "return await self.executor.execute(" in handler
+    executor = handler.index("response = await self.executor.execute(")
+    canonicalizer = handler.index(
+        "return await self.generated_asset_canonicalizer.canonicalize(",
+        executor,
+    )
+    fallback = handler.index("except ProviderDeadlineExceededError:", canonicalizer)
+    assert executor < canonicalizer < fallback
     assert "async def stream_with_fallback(" in handler
     assert "async for chunk in provider_stream:" in handler
     assert "yield chunk" in handler

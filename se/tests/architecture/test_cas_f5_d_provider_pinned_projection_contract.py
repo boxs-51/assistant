@@ -62,9 +62,13 @@ def test_f5d_current_provider_authority_is_inside_the_eligible_attempt():
         "attempt_body = await self._project_asset_attempt(",
         capability,
     )
-    executor = source.index("return await self.executor.execute(", projection)
+    executor = source.index("response = await self.executor.execute(", projection)
+    canonicalizer = source.index(
+        "return await self.generated_asset_canonicalizer.canonicalize(",
+        executor,
+    )
 
-    assert routing < healthy < loop < capability < projection < executor
+    assert routing < healthy < loop < capability < projection < executor < canonicalizer
     assert "provider=provider" in source[executor : executor + 400]
 
     # Current generic fallback still continues after provider errors. F5-D's

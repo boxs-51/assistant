@@ -12,6 +12,7 @@ from ...provider.executor import ProviderExecutor
 from ...provider.exceptions import NoAvailableProviderError, ProviderError
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
+from ...application.assets.generated import GeneratedAssetCanonicalizer
 from ...application.assets.hydration import CanonicalAssetHydrationService
 from ...application.assets.projection import CanonicalAssetProviderProjectionHook
 
@@ -75,6 +76,7 @@ class ProviderRuntime(BaseRuntime):
         self._asset_projection_hook: Optional[CanonicalAssetProviderProjectionHook] = None
         self._asset_projection_configured = False
         self._asset_projection_ready = False
+        self._generated_asset_canonicalizer: Optional[GeneratedAssetCanonicalizer] = None
 
         # Handlers
         self.chat_handler: Optional[ChatExecutionHandler] = None
@@ -172,6 +174,33 @@ class ProviderRuntime(BaseRuntime):
             )
             return None
 
+    def _build_generated_asset_canonicalizer(
+        self,
+        context: RuntimeContext,
+    ) -> GeneratedAssetCanonicalizer:
+        """Build the always-installed CAS-F7-P1 response fence.
+
+        Ordinary text inference must stay available when CAS persistence is
+        unavailable, so dependency/readiness failures degrade to an explicit
+        unavailable canonicalizer rather than failing ProviderRuntime startup.
+        """
+
+        try:
+            asset_service = getattr(context.container, "asset_service", None)
+            max_bytes = getattr(context.config.assets, "max_upload_bytes", None)
+            return GeneratedAssetCanonicalizer(
+                asset_service=asset_service,
+                max_bytes=max_bytes,
+            )
+        except Exception as exc:
+            logger.warning(
+                "CAS-F7-P1 generated-media canonicalizer unavailable; "
+                "ordinary text inference remains enabled.",
+                error=str(exc),
+                error_type=type(exc).__name__,
+            )
+            return GeneratedAssetCanonicalizer.unavailable()
+
     async def initialize(self, context: RuntimeContext) -> None:
         """Khởi tạo Discovery, Registry & khởi tạo Handlers."""
         await super().initialize(context)
@@ -189,6 +218,10 @@ class ProviderRuntime(BaseRuntime):
         self.executor = ProviderExecutor(self.circuit_breaker_manager, config=context.config)
 
         asset_projection_hook = self._build_asset_projection_hook(context)
+        generated_asset_canonicalizer = self._build_generated_asset_canonicalizer(
+            context
+        )
+        self._generated_asset_canonicalizer = generated_asset_canonicalizer
 
         # Khởi tạo các Sub-handlers
         handler_kwargs = {
@@ -199,6 +232,9 @@ class ProviderRuntime(BaseRuntime):
             "timeout": context.config.provider.timeout,
         }
         self.chat_handler = ChatExecutionHandler(**handler_kwargs)
+        self.chat_handler.generated_asset_canonicalizer = (
+            generated_asset_canonicalizer
+        )
         self.chat_handler.asset_projection_hook = asset_projection_hook
         self._asset_projection_configured = bool(
             asset_projection_hook is not None
