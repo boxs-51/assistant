@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-import uuid
 from typing import Any, Mapping
 
+from ....application.user_inference_quota import derive_skill_inference_request_id
 from ...agent.contracts.inference import InferenceMessage, InferenceRequest
 from ..contracts.context import CapabilityExecutionContext
 from .base import BaseCapabilityDriver
@@ -27,7 +27,7 @@ class ExecutableSkillCapabilityDriver(BaseCapabilityDriver):
             prompt = json.dumps(dict(arguments), ensure_ascii=False)
         response = await self._inference.complete(
             InferenceRequest(
-                request_id=context.request_id or f"skill_{uuid.uuid4().hex}",
+                request_id=derive_skill_inference_request_id(context.invocation_id),
                 execution_id=context.execution_id,
                 iteration=1,
                 messages=(
@@ -36,8 +36,11 @@ class ExecutableSkillCapabilityDriver(BaseCapabilityDriver):
                 ),
                 model=context.metadata.get("model"),
                 timeout_seconds=context.remaining_seconds,
+                budget_identity=context.identity,
                 cancellation_event=context.cancellation_event,
                 metadata={
+                    "quota_source_surface": "SKILL",
+                    "outer_request_id": context.request_id,
                     **context.metadata,
                     "invocation_id": context.invocation_id,
                     **(
