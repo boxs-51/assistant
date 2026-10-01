@@ -942,6 +942,90 @@ class CapabilityRuntime(BaseRuntime):
                 details={"mismatched_fields": mismatched},
             )
 
+    async def _preflight_existing_tool_invocation(
+        self,
+        existing: CapabilityInvocation,
+        candidate: CapabilityInvocation,
+        *,
+        implementation_id: str,
+        driver_kind: str,
+        connection_id: str | None,
+    ) -> str:
+        """Reject semantic/state conflicts before any renewable quota mutation."""
+        self._require_same_logical_invocation(existing, candidate)
+
+        if (
+            existing.state is CapabilityInvocationState.CREATED
+            and existing.attempt == 0
+        ):
+            attempts = await self.invocation_lifecycle.store.list_attempts(
+                existing.invocation_id
+            )
+            if attempts:
+                raise CapabilityError(
+                    code=REMOTE_INVOCATION_CONFLICT,
+                    message=(
+                        "CREATED invocation has ambiguous persisted attempt "
+                        "history."
+                    ),
+                    category="CONCURRENCY",
+                    retryable=False,
+                    safe_for_client=False,
+                    capability_id=existing.capability_id,
+                    invocation_id=existing.invocation_id,
+                )
+            return "INITIAL_CREATED"
+
+        if (
+            existing.state is CapabilityInvocationState.DISPATCHING
+            and existing.attempt == 1
+        ):
+            attempts = await self.invocation_lifecycle.store.list_attempts(
+                existing.invocation_id
+            )
+            if (
+                len(attempts) != 1
+                or attempts[0].attempt_number != 1
+                or attempts[0].state
+                is not CapabilityInvocationState.DISPATCHING
+                or attempts[0].implementation_id != implementation_id
+                or attempts[0].driver_kind != driver_kind
+                or attempts[0].connection_id != connection_id
+            ):
+                raise CapabilityError(
+                    code=REMOTE_INVOCATION_CONFLICT,
+                    message=(
+                        "DISPATCHING invocation has ambiguous or changed "
+                        "initial-attempt authority."
+                    ),
+                    category="CONCURRENCY",
+                    retryable=False,
+                    safe_for_client=False,
+                    capability_id=existing.capability_id,
+                    invocation_id=existing.invocation_id,
+                )
+            return "INITIAL_DISPATCHING"
+
+        if existing.state in TERMINAL_INVOCATION_STATES:
+            return "TERMINAL"
+
+        raise CapabilityError(
+            code=REMOTE_INVOCATION_CONFLICT,
+            message=(
+                "Ordinary capability execution cannot acquire renewable quota "
+                f"for an existing {existing.state.value} invocation."
+            ),
+            category="CONCURRENCY",
+            retryable=False,
+            safe_for_client=True,
+            capability_id=existing.capability_id,
+            invocation_id=existing.invocation_id,
+            details={
+                "state": existing.state.value,
+                "attempt": existing.attempt,
+            },
+        )
+
     async def _finalize_tool_quota_for_invocation(
         self,
         admission: ToolQuotaAdmission | None,
@@ -1213,20 +1297,87 @@ class CapabilityRuntime(BaseRuntime):
         )
 
         admission: ToolQuotaAdmission | None = None
+        preexisting: CapabilityInvocation | None = None
+        preexisting_mode: str | None = None
         if tool_quota_enabled:
-            try:
-                admission = await self.tool_quota_service.reserve_tool_call(
-                    identity=identity,
-                    invocation_id=candidate.invocation_id,
-                    capability_id=capability_id,
-                    request_fingerprint=request_fingerprint,
-                    arguments=dict(arguments),
-                    execution_id=candidate.execution_id,
-                    tool_call_id=candidate.tool_call_id,
-                    task_id=context.task_id,
-                    workflow_id=candidate.workflow_id,
-                    session_id=candidate.session_id,
+            preexisting = await self.invocation_lifecycle.store.get(
+                candidate.invocation_id
+            )
+            if preexisting is not None:
+                preexisting_mode = (
+                    await self._preflight_existing_tool_invocation(
+                        preexisting,
+                        candidate,
+                        implementation_id=effective_implementation_id,
+                        driver_kind=effective_driver_kind,
+                        connection_id=context.connection_id,
+                    )
                 )
+
+            try:
+                if preexisting is None:
+                    admission = await self.tool_quota_service.reserve_tool_call(
+                        identity=identity,
+                        invocation_id=candidate.invocation_id,
+                        capability_id=capability_id,
+                        request_fingerprint=request_fingerprint,
+                        arguments=dict(arguments),
+                        execution_id=candidate.execution_id,
+                        tool_call_id=candidate.tool_call_id,
+                        task_id=context.task_id,
+                        workflow_id=candidate.workflow_id,
+                        session_id=candidate.session_id,
+                    )
+                else:
+                    authority = (
+                        await self.tool_quota_service.find_tool_call_authority(
+                            owner_user_id=str(
+                                preexisting.owner_user_id or ""
+                            ),
+                            invocation_id=preexisting.invocation_id,
+                            capability_id=preexisting.capability_id,
+                            request_fingerprint=str(
+                                preexisting.request_fingerprint or ""
+                            ),
+                            arguments=dict(preexisting.arguments or {}),
+                            execution_id=preexisting.execution_id,
+                            tool_call_id=preexisting.tool_call_id,
+                            workflow_id=preexisting.workflow_id,
+                            session_id=preexisting.session_id,
+                        )
+                    )
+                    if preexisting_mode == "TERMINAL":
+                        if authority is None:
+                            raise UserToolQuotaError(
+                                "terminal invocation has no pre-existing "
+                                "UBQ charge authority"
+                            )
+                        admission = authority
+                    elif authority is None:
+                        admission = (
+                            await self.tool_quota_service.reserve_tool_call(
+                                identity=identity,
+                                invocation_id=candidate.invocation_id,
+                                capability_id=capability_id,
+                                request_fingerprint=request_fingerprint,
+                                arguments=dict(arguments),
+                                execution_id=candidate.execution_id,
+                                tool_call_id=candidate.tool_call_id,
+                                task_id=context.task_id,
+                                workflow_id=candidate.workflow_id,
+                                session_id=candidate.session_id,
+                            )
+                        )
+                    elif (
+                        authority.historical_bridge
+                        or authority.reservation_state != "RESERVED"
+                    ):
+                        raise UserToolQuotaError(
+                            "pre-dispatch invocation has incompatible terminal "
+                            "UBQ charge authority"
+                        )
+                    else:
+                        admission = authority
             except (UserToolQuotaError, UserBudgetDualAccountingError) as exc:
                 code = str(getattr(exc, "code", "USER_TOOL_QUOTA_ERROR"))
                 raise CapabilityError(
