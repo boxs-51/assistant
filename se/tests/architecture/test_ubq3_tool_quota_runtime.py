@@ -113,6 +113,23 @@ class _Quota:
         )
 
 
+class _HistoricalQuota(_Quota):
+    async def reserve_tool_call(self, **kwargs):
+        self.reserve_calls.append(dict(kwargs))
+        invocation_id = str(kwargs["invocation_id"])
+        return ToolQuotaAdmission(
+            owner_user_id=str(kwargs["identity"].user_id),
+            invocation_id=invocation_id,
+            capability_id=str(kwargs["capability_id"]),
+            request_fingerprint=str(kwargs["request_fingerprint"]),
+            idempotency_key=None,
+            reservation_id=f"historical:{invocation_id}",
+            window_epoch=1,
+            reservation_state="SETTLED",
+            historical_bridge=True,
+        )
+
+
 def _identity() -> Identity:
     return Identity(user_id="user-ubq3", auth_type="jwt", scopes={"*"})
 
@@ -148,6 +165,34 @@ async def test_ubq3_runtime_validates_then_admits_then_settles_tool() -> None:
     assert len(attempts) == 1
     assert attempts[0].attempt_number == 1
     assert attempts[0].state is CapabilityInvocationState.COMPLETED
+
+
+
+@pytest.mark.asyncio
+async def test_ubq3_historical_bridge_without_durable_invocation_fails_closed() -> None:
+    store = InMemoryCapabilityInvocationStore()
+    quota = _HistoricalQuota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    with pytest.raises(CapabilityError) as caught:
+        await runtime.execute_capability(
+            driver.name,
+            {"value": "historical"},
+            _identity(),
+            invocation_id="inv-historical-without-row",
+        )
+
+    assert caught.value.code == "REMOTE_INVOCATION_CONFLICT"
+    assert driver.calls == 0
+    assert len(quota.reserve_calls) == 1
+    assert quota.settle_calls == []
+    assert quota.release_calls == []
+    assert "inv-historical-without-row" not in store.items
 
 
 @pytest.mark.asyncio
