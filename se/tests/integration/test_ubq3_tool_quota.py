@@ -25,6 +25,25 @@ from se.src.domain.schemas.user_budget import UserBudgetPolicy
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
 from se.src.infrastructure.storage.repositories.user_budget import UserBudgetRepository
 from se.src.infrastructure.storage.repositories.user_data.users import UserRepository
+from se.src.runtimes.capability.contracts.definition import (
+    CapabilityDefinition,
+    CapabilityExecutionMode,
+    CapabilityKind,
+)
+from se.src.runtimes.capability.contracts.error import CapabilityError
+from se.src.runtimes.capability.contracts.invocation import (
+    CapabilityInvocation,
+    CapabilityInvocationAttempt,
+    CapabilityInvocationState,
+    RemoteOutcomeState,
+)
+from se.src.runtimes.capability.drivers.base import BaseCapabilityDriver
+from se.src.runtimes.capability.fingerprint import capability_request_fingerprint
+from se.src.runtimes.capability.invocation import (
+    CapabilityInvocationLifecycle,
+    InMemoryCapabilityInvocationStore,
+)
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -151,6 +170,42 @@ async def _setup(
         scopes={"*"},
     )
     return engine, factory, service, identity
+
+
+class _RuntimeEchoDriver(BaseCapabilityDriver):
+    def __init__(self, capability_id: str = "tool.echo") -> None:
+        super().__init__(
+            CapabilityDefinition(
+                id=capability_id,
+                name=capability_id,
+                description="UBQ-3 integration runtime",
+                kind=CapabilityKind.TOOL,
+                execution_mode=CapabilityExecutionMode.ONE_SHOT,
+                input_schema={
+                    "type": "object",
+                    "properties": {"value": {"type": "string"}},
+                    "required": ["value"],
+                    "additionalProperties": False,
+                },
+            )
+        )
+        self.calls = 0
+
+    async def execute(self, context, arguments):
+        self.calls += 1
+        return {"value": arguments["value"]}
+
+
+def _quota_runtime(service: UserToolQuotaService, capability_id: str = "tool.echo"):
+    store = InMemoryCapabilityInvocationStore()
+    lifecycle = CapabilityInvocationLifecycle(store)
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=lifecycle,
+        tool_quota_service=service,
+    )
+    driver = _RuntimeEchoDriver(capability_id)
+    runtime.register_capability(driver)
+    return runtime, driver, store
 
 
 async def _reserve(
@@ -408,5 +463,419 @@ async def test_ubq3_disabled_mode_performs_no_budget_mutation(
                 await uow.user_budgets.get_active_window("user-ubq3")
                 is None
             )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_existing_invocation_conflict_has_zero_real_quota_mutation(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        runtime, driver, store = _quota_runtime(service)
+        original_args = {"value": "original"}
+        existing = CapabilityInvocation(
+            invocation_id="inv-real-conflict",
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            kind=CapabilityKind.TOOL,
+            execution_mode=driver.definition.execution_mode,
+            idempotency=driver.definition.idempotency,
+            request_fingerprint=capability_request_fingerprint(
+                capability_id=driver.name,
+                capability_version=driver.definition.version,
+                arguments=original_args,
+            ),
+            owner_user_id=identity.user_id,
+            arguments=original_args,
+        )
+        await runtime.invocation_lifecycle.create(existing)
+
+        with pytest.raises(CapabilityError) as caught:
+            await runtime.execute_capability(
+                driver.name,
+                {"value": "conflicting"},
+                identity,
+                invocation_id=existing.invocation_id,
+            )
+        assert caught.value.code == "REMOTE_INVOCATION_CONFLICT"
+        assert driver.calls == 0
+        assert await store.list_attempts(existing.invocation_id) == []
+
+        direct_key, _ = service._identity(existing.invocation_id)
+        async with factory() as uow:
+            reservation = await uow.user_budgets.get_reservation(
+                identity.user_id,
+                direct_key,
+            )
+            window = await uow.user_budgets.get_active_window(identity.user_id)
+            assert reservation is None
+            if window is not None:
+                assert int(window.tool_calls_used) == 0
+                assert int(window.tool_calls_reserved) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_crash_after_reservation_before_invocation_create_recovers_once(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        invocation_id = "inv-crash-after-reservation"
+        admission = await _reserve(
+            service,
+            identity,
+            invocation_id=invocation_id,
+        )
+        assert admission is not None
+
+        runtime, driver, store = _quota_runtime(service)
+        result = await runtime.execute_capability(
+            driver.name,
+            {"value": invocation_id},
+            identity,
+            invocation_id=invocation_id,
+            session_id="session-ubq3",
+        )
+        assert result.output["value"] == invocation_id
+        assert driver.calls == 1
+        assert await store.get(invocation_id) is not None
+        assert len(await store.list_attempts(invocation_id)) == 1
+
+        async with factory() as uow:
+            window = await uow.user_budgets.get_window(
+                identity.user_id,
+                int(admission.window_epoch),
+            )
+            usage = await uow.user_budgets.get_tool_usage(
+                identity.user_id,
+                int(admission.window_epoch),
+                driver.name,
+            )
+            assert window is not None and usage is not None
+            assert int(window.tool_calls_used) == 1
+            assert int(window.tool_calls_reserved) == 0
+            assert int(usage.used_calls) == 1
+            assert int(usage.reserved_calls) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_crash_after_invocation_create_before_attempt_reuses_attempt_one(
+    tmp_path: Path,
+) -> None:
+    engine, _, service, identity = await _setup(tmp_path)
+    try:
+        invocation_id = "inv-crash-after-create"
+        admission = await _reserve(
+            service,
+            identity,
+            invocation_id=invocation_id,
+        )
+        assert admission is not None
+
+        runtime, driver, store = _quota_runtime(service)
+        arguments = {"value": invocation_id}
+        invocation = CapabilityInvocation(
+            invocation_id=invocation_id,
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            kind=CapabilityKind.TOOL,
+            execution_mode=driver.definition.execution_mode,
+            idempotency=driver.definition.idempotency,
+            request_fingerprint=capability_request_fingerprint(
+                capability_id=driver.name,
+                capability_version=driver.definition.version,
+                arguments=arguments,
+            ),
+            owner_user_id=identity.user_id,
+            session_id="session-ubq3",
+            arguments=arguments,
+        )
+        await runtime.invocation_lifecycle.create(invocation)
+
+        result = await runtime.execute_capability(
+            driver.name,
+            arguments,
+            identity,
+            invocation_id=invocation_id,
+            session_id="session-ubq3",
+        )
+        assert result.output["value"] == invocation_id
+        attempts = await store.list_attempts(invocation_id)
+        assert driver.calls == 1
+        assert len(attempts) == 1
+        assert attempts[0].attempt_number == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_crash_after_dispatching_claim_resumes_same_attempt_one(
+    tmp_path: Path,
+) -> None:
+    engine, _, service, identity = await _setup(tmp_path)
+    try:
+        invocation_id = "inv-crash-after-dispatching"
+        admission = await _reserve(
+            service,
+            identity,
+            invocation_id=invocation_id,
+        )
+        assert admission is not None
+
+        runtime, driver, store = _quota_runtime(service)
+        arguments = {"value": invocation_id}
+        invocation = CapabilityInvocation(
+            invocation_id=invocation_id,
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            kind=CapabilityKind.TOOL,
+            execution_mode=driver.definition.execution_mode,
+            idempotency=driver.definition.idempotency,
+            request_fingerprint=capability_request_fingerprint(
+                capability_id=driver.name,
+                capability_version=driver.definition.version,
+                arguments=arguments,
+            ),
+            owner_user_id=identity.user_id,
+            implementation_id=f"legacy:{driver.name}",
+            driver_kind="_RuntimeEchoDriver",
+            state=CapabilityInvocationState.DISPATCHING,
+            session_id="session-ubq3",
+            attempt=1,
+            arguments=arguments,
+            revision=1,
+        )
+        store.items[invocation_id] = invocation.model_copy(deep=True)
+        await store.save_attempt(
+            CapabilityInvocationAttempt(
+                attempt_id="att-crash-dispatching-1",
+                invocation_id=invocation_id,
+                attempt_number=1,
+                implementation_id=f"legacy:{driver.name}",
+                driver_kind="_RuntimeEchoDriver",
+                state=CapabilityInvocationState.DISPATCHING,
+                metadata={
+                    "initial_attempt": True,
+                    "source_revision": 0,
+                },
+            )
+        )
+
+        result = await runtime.execute_capability(
+            driver.name,
+            arguments,
+            identity,
+            invocation_id=invocation_id,
+            session_id="session-ubq3",
+        )
+        assert result.output["value"] == invocation_id
+        attempts = await store.list_attempts(invocation_id)
+        assert driver.calls == 1
+        assert len(attempts) == 1
+        assert attempts[0].attempt_number == 1
+        assert attempts[0].state is CapabilityInvocationState.COMPLETED
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_concurrent_same_id_same_payload_has_one_charge_and_one_dispatch(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        runtime, driver, store = _quota_runtime(service)
+        invocation_id = "inv-concurrent-e2e"
+        arguments = {"value": "same"}
+
+        results = await asyncio.gather(
+            runtime.execute_capability(
+                driver.name,
+                arguments,
+                identity,
+                invocation_id=invocation_id,
+            ),
+            runtime.execute_capability(
+                driver.name,
+                arguments,
+                identity,
+                invocation_id=invocation_id,
+            ),
+            return_exceptions=True,
+        )
+
+        assert sum(
+            1 for item in results
+            if not isinstance(item, BaseException)
+        ) >= 1
+        assert driver.calls == 1
+        assert len(await store.list_attempts(invocation_id)) == 1
+
+        direct_key, _ = service._identity(invocation_id)
+        async with factory() as uow:
+            reservation = await uow.user_budgets.get_reservation(
+                identity.user_id,
+                direct_key,
+            )
+            assert reservation is not None
+            assert reservation.state == "SETTLED"
+            window = await uow.user_budgets.get_window(
+                identity.user_id,
+                int(reservation.window_epoch),
+            )
+            usage = await uow.user_budgets.get_tool_usage(
+                identity.user_id,
+                int(reservation.window_epoch),
+                driver.name,
+            )
+            assert int(window.tool_calls_used) == 1
+            assert int(window.tool_calls_reserved) == 0
+            assert int(usage.used_calls) == 1
+            assert int(usage.reserved_calls) == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_quota_denial_creates_no_invocation_row(
+    tmp_path: Path,
+) -> None:
+    engine, _, service, identity = await _setup(
+        tmp_path,
+        total_limit=1,
+        default_per_tool_limit=1,
+    )
+    try:
+        first = await _reserve(
+            service,
+            identity,
+            invocation_id="inv-fill-quota",
+        )
+        await service.settle_tool_call(first)
+
+        runtime, driver, store = _quota_runtime(service)
+        with pytest.raises(CapabilityError) as caught:
+            await runtime.execute_capability(
+                driver.name,
+                {"value": "denied"},
+                identity,
+                invocation_id="inv-denied-no-row",
+            )
+
+        assert caught.value.code == "USER_TOOL_QUOTA_EXHAUSTED"
+        assert await store.get("inv-denied-no-row") is None
+        assert driver.calls == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_concurrent_different_invocations_keep_dual_counters_atomic(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(
+        tmp_path,
+        total_limit=1,
+        default_per_tool_limit=1,
+    )
+    try:
+        outcomes = await asyncio.gather(
+            _reserve(service, identity, invocation_id="inv-race-a"),
+            _reserve(service, identity, invocation_id="inv-race-b"),
+            return_exceptions=True,
+        )
+        admissions = [
+            item for item in outcomes
+            if not isinstance(item, BaseException)
+        ]
+        failures = [
+            item for item in outcomes
+            if isinstance(item, BaseException)
+        ]
+        assert len(admissions) == 1
+        assert len(failures) == 1
+
+        admission = admissions[0]
+        async with factory() as uow:
+            window = await uow.user_budgets.get_window(
+                identity.user_id,
+                int(admission.window_epoch),
+            )
+            usage = await uow.user_budgets.get_tool_usage(
+                identity.user_id,
+                int(admission.window_epoch),
+                "tool.echo",
+            )
+            assert window is not None and usage is not None
+            assert int(window.tool_calls_used) == 0
+            assert int(window.tool_calls_reserved) == 1
+            assert int(usage.used_calls) == 0
+            assert int(usage.reserved_calls) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq3_runtime_terminal_never_dispatched_release_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        admission = await _reserve(
+            service,
+            identity,
+            invocation_id="inv-terminal-release",
+        )
+        assert admission is not None
+        runtime, _, _ = _quota_runtime(service)
+        invocation = CapabilityInvocation(
+            invocation_id="inv-terminal-release",
+            capability_id="tool.echo",
+            capability_version="1.0",
+            kind=CapabilityKind.TOOL,
+            execution_mode=CapabilityExecutionMode.ONE_SHOT,
+            request_fingerprint="fp:inv-terminal-release:tool.echo",
+            owner_user_id=identity.user_id,
+            remote_outcome_state=RemoteOutcomeState.NOT_DISPATCHED,
+            state=CapabilityInvocationState.CANCELLED,
+            arguments={"value": "inv-terminal-release"},
+        )
+
+        await runtime._finalize_tool_quota_for_invocation(
+            admission,
+            invocation,
+        )
+        await runtime._finalize_tool_quota_for_invocation(
+            admission,
+            invocation,
+        )
+
+        direct_key, _ = service._identity(invocation.invocation_id)
+        async with factory() as uow:
+            reservation = await uow.user_budgets.get_reservation(
+                identity.user_id,
+                direct_key,
+            )
+            assert reservation is not None
+            assert reservation.state == "RELEASED"
+            window = await uow.user_budgets.get_window(
+                identity.user_id,
+                int(reservation.window_epoch),
+            )
+            usage = await uow.user_budgets.get_tool_usage(
+                identity.user_id,
+                int(reservation.window_epoch),
+                "tool.echo",
+            )
+            assert int(window.tool_calls_used) == 0
+            assert int(window.tool_calls_reserved) == 0
+            assert int(usage.used_calls) == 0
+            assert int(usage.reserved_calls) == 0
     finally:
         await engine.dispose()
