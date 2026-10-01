@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 
 import pytest
 
@@ -11,6 +12,7 @@ from se.src.infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from se.src.infrastructure.storage.drivers.sqlite.driver import SQLiteDriver
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.repositories.capability_invocations import (
+    CapabilityInvocationRepository,
     SqlCapabilityInvocationStore,
 )
 from se.src.domain.schemas.identity import Identity
@@ -797,3 +799,130 @@ async def test_ubq3_initial_attempt_claim_allows_only_one_owner() -> None:
     )
     assert running.state is CapabilityInvocationState.RUNNING
     assert running_attempt.state is CapabilityInvocationState.RUNNING
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "state,attempt",
+    [
+        (CapabilityInvocationState.RUNNING, 1),
+        (CapabilityInvocationState.RETRYING, 1),
+    ],
+)
+async def test_ubq3_ordinary_execute_never_restarts_active_invocation(
+    state,
+    attempt,
+) -> None:
+    store = InMemoryCapabilityInvocationStore()
+    quota = _Quota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    arguments = {"value": "active"}
+    invocation = CapabilityInvocation(
+        invocation_id=f"inv-no-restart-{state.value.lower()}",
+        capability_id=driver.name,
+        capability_version=driver.definition.version,
+        kind=CapabilityKind.TOOL,
+        execution_mode=driver.definition.execution_mode,
+        idempotency=driver.definition.idempotency,
+        request_fingerprint=capability_request_fingerprint(
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            arguments=arguments,
+        ),
+        owner_user_id="user-ubq3",
+        state=state,
+        attempt=attempt,
+        arguments=arguments,
+    )
+    await runtime.invocation_lifecycle.create(invocation)
+
+    with pytest.raises(CapabilityError) as caught:
+        await runtime.execute_capability(
+            driver.name,
+            arguments,
+            _identity(),
+            invocation_id=invocation.invocation_id,
+        )
+
+    assert caught.value.code == "REMOTE_INVOCATION_CONFLICT"
+    assert quota.reserve_calls == []
+    assert quota.find_calls == []
+    assert driver.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_ubq3_created_invocation_with_ambiguous_attempt_history_fails_before_quota() -> None:
+    store = InMemoryCapabilityInvocationStore()
+    quota = _Quota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    arguments = {"value": "ambiguous"}
+    invocation = CapabilityInvocation(
+        invocation_id="inv-created-ambiguous",
+        capability_id=driver.name,
+        capability_version=driver.definition.version,
+        kind=CapabilityKind.TOOL,
+        execution_mode=driver.definition.execution_mode,
+        idempotency=driver.definition.idempotency,
+        request_fingerprint=capability_request_fingerprint(
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            arguments=arguments,
+        ),
+        owner_user_id="user-ubq3",
+        arguments=arguments,
+    )
+    await runtime.invocation_lifecycle.create(invocation)
+    await store.save_attempt(
+        CapabilityInvocationAttempt(
+            attempt_id="att-created-ambiguous",
+            invocation_id=invocation.invocation_id,
+            attempt_number=1,
+            implementation_id=f"legacy:{driver.name}",
+            driver_kind="_EchoDriver",
+            state=CapabilityInvocationState.FAILED,
+        )
+    )
+
+    with pytest.raises(CapabilityError) as caught:
+        await runtime.execute_capability(
+            driver.name,
+            arguments,
+            _identity(),
+            invocation_id=invocation.invocation_id,
+        )
+
+    assert caught.value.code == "REMOTE_INVOCATION_CONFLICT"
+    assert quota.reserve_calls == []
+    assert quota.find_calls == []
+    assert driver.calls == 0
+
+
+def test_ubq3_initial_attempt_sql_serialization_represents_postgresql_fence() -> None:
+    key_source = inspect.getsource(
+        CapabilityInvocationRepository.lock_invocation_id_serialization_key
+    )
+    fence_source = inspect.getsource(
+        CapabilityInvocationRepository.lock_invocation_gc_serialization_fence
+    )
+    begin_source = inspect.getsource(
+        SqlCapabilityInvocationStore.begin_initial_attempt
+    )
+
+    assert 'dialect == "postgresql"' in key_source
+    assert "pg_advisory_xact_lock" in key_source
+    assert "lock_invocation_id_serialization_key" in fence_source
+    assert "lock_invocation_gc_serialization_fence" in begin_source
+    assert "CapabilityInvocationState.CREATED" in begin_source
+    assert "CapabilityInvocationState.DISPATCHING" in begin_source
