@@ -580,8 +580,8 @@ class AgentRecoveryPlanningService:
                     "Pending invocation ordering differs from frozen active batch.",
                 )
             previous = ordinal
-            reconstructed = by_invocation[str(item.invocation_id)]
-            if (
+            reconstructed = by_invocation.get(str(item.invocation_id))
+            if reconstructed is not None and (
                 int(reconstructed["ordinal"]) != ordinal
                 or str(reconstructed["tool_call_id"])
                 != str(item.tool_call_id)
