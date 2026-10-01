@@ -67,9 +67,9 @@ from ...runtimes.connection.multiplexer import RemoteConnectionLost
 from ...domain.schemas.identity import Identity
 from ...domain.schemas.event import BaseEvent
 from ...application.policy.authorization import AuthorizationService
-from ...application.user_budget import (
+from ...application.user_budget import UserBudgetDualAccountingError
+from ...application.user_tool_quota import (
     ToolQuotaAdmission,
-    UserBudgetDualAccountingError,
     UserToolQuotaError,
 )
 from .validation import JsonSchemaCapabilityArgumentValidator
