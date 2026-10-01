@@ -97,6 +97,7 @@ class RecoveryPlan:
 
     iteration: int
     recovery_iteration_id: str | None
+    iteration_state: str | None
     inference_request_id: str | None
     inference_disposition: RecoveryInferenceDisposition
     ordered_tool_call_ids: tuple[str, ...]
@@ -196,6 +197,7 @@ def recovery_plan_fingerprint(
         "resolved_recovery_principal": get("resolved_recovery_principal"),
         "iteration": get("iteration"),
         "recovery_iteration_id": get("recovery_iteration_id"),
+        "iteration_state": get("iteration_state"),
         "inference_request_id": get("inference_request_id"),
         "inference_disposition": get("inference_disposition").value,
         "ordered_tool_call_ids": list(get("ordered_tool_call_ids")),
