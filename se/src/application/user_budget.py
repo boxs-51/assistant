@@ -1267,6 +1267,41 @@ class UserToolQuotaService:
                         raise UserBudgetPolicyAuthorityConflictError(
                             "tool quota owner has no selected UBQ policy"
                         )
+
+                    # PostgreSQL serializes new admissions on the owner account.
+                    # Another transaction may have committed this exact logical
+                    # reservation while we were waiting for that lock, so replay
+                    # must be re-checked before rollover or counter mutation.
+                    locked_replay = await uow.user_budgets.get_reservation(
+                        owner,
+                        idempotency_key,
+                    )
+                    if locked_replay is not None:
+                        self._verify_direct_reservation(
+                            locked_replay,
+                            owner_user_id=owner,
+                            invocation_id=invocation_id,
+                            capability_id=capability_id,
+                            request_fingerprint=request_fingerprint,
+                            execution_id=execution_id,
+                            tool_call_id=tool_call_id,
+                            task_id=task_id,
+                            workflow_id=workflow_id,
+                            session_id=session_id,
+                        )
+                        result = ToolQuotaAdmission(
+                            owner_user_id=owner,
+                            invocation_id=invocation_id,
+                            capability_id=capability_id,
+                            request_fingerprint=request_fingerprint,
+                            idempotency_key=idempotency_key,
+                            reservation_id=str(locked_replay.reservation_id),
+                            window_epoch=int(locked_replay.window_epoch),
+                            reservation_state=str(locked_replay.state),
+                        )
+                        await uow.commit()
+                        return result
+
                     window = await uow.user_budgets.get_active_window(owner)
                     if (
                         window is None
