@@ -90,6 +90,7 @@ class InferenceQuotaContext:
     logical_request_id: str
     logical_request_fingerprint: str | None
     source_surface: str
+    owner_user_id: str | None = None
     session_id: str | None = None
     task_id: str | None = None
     execution_id: str | None = None
@@ -231,6 +232,7 @@ class UserInferenceQuotaService:
         logical_request_id: str,
         source_surface: str,
         logical_request_fingerprint: str | None = None,
+        owner_user_id: str | None = None,
         session_id: str | None = None,
         task_id: str | None = None,
         execution_id: str | None = None,
@@ -255,6 +257,7 @@ class UserInferenceQuotaService:
             logical_request_id=logical_request_id,
             logical_request_fingerprint=logical_request_fingerprint,
             source_surface=source_surface,
+            owner_user_id=owner_user_id,
             session_id=session_id,
             task_id=task_id,
             execution_id=execution_id,
@@ -596,6 +599,13 @@ class UserInferenceQuotaService:
             uow,
             context.budget_identity,
         )
+        if (
+            context.owner_user_id is not None
+            and context.owner_user_id != resolution.owner_user_id
+        ):
+            raise UserInferenceQuotaContextError(
+                "compatibility owner_user_id disagrees with resolved budget owner"
+            )
         if context.task_id is not None:
             binding = await uow.user_budgets.get_task_binding(context.task_id)
             if (
@@ -937,12 +947,27 @@ class UserInferenceQuotaService:
         )
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
+        compute_units = None
+        cost_usd = None
+        if total_tokens is not None:
+            if self.settings.compute_units_per_1k_tokens is not None:
+                compute_units = (
+                    Decimal(total_tokens)
+                    * self.settings.compute_units_per_1k_tokens
+                    / Decimal(1000)
+                )
+            if self.settings.cost_usd_per_1k_tokens is not None:
+                cost_usd = (
+                    Decimal(total_tokens)
+                    * self.settings.cost_usd_per_1k_tokens
+                    / Decimal(1000)
+                )
         return NormalizedInferenceUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            compute_units=None,
-            cost_usd=None,
+            compute_units=compute_units,
+            cost_usd=cost_usd,
             normalization_identity=self.normalization_identity,
             provider=provider,
             model=model,
@@ -976,12 +1001,27 @@ class UserInferenceQuotaService:
         )
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
+        compute_units = None
+        cost_usd = None
+        if total_tokens is not None:
+            if self.settings.compute_units_per_1k_tokens is not None:
+                compute_units = (
+                    Decimal(total_tokens)
+                    * self.settings.compute_units_per_1k_tokens
+                    / Decimal(1000)
+                )
+            if self.settings.cost_usd_per_1k_tokens is not None:
+                cost_usd = (
+                    Decimal(total_tokens)
+                    * self.settings.cost_usd_per_1k_tokens
+                    / Decimal(1000)
+                )
         return NormalizedInferenceUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            compute_units=None,
-            cost_usd=None,
+            compute_units=compute_units,
+            cost_usd=cost_usd,
             normalization_identity=self.normalization_identity,
             provider=provider,
             model=model,
