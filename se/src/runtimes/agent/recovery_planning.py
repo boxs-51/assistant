@@ -560,11 +560,11 @@ class AgentRecoveryPlanningService:
             for item in reconstructed_pending
         }
         expected_unresolved = set(by_invocation)
-        actual_unresolved = {str(item.invocation_id) for item in pending_rows}
-        if actual_unresolved != expected_unresolved:
+        frozen_watermark = {str(item.invocation_id) for item in pending_rows}
+        if not expected_unresolved.issubset(frozen_watermark):
             raise RecoveryPlanRejected(
                 "RECOVERY_PENDING_SNAPSHOT_CONFLICT",
-                "Checkpoint pending-invocation rows differ from reconstructed safe point.",
+                "Current unresolved invocations are missing from frozen checkpoint watermark.",
             )
 
         previous = -1
