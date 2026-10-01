@@ -84,14 +84,19 @@ class _Quota:
 
     def __init__(self) -> None:
         self.reserve_calls = []
+        self.find_calls = []
         self.recover_calls = []
         self.settle_calls = []
         self.release_calls = []
+        self.authorities = {}
 
     async def reserve_tool_call(self, **kwargs):
         self.reserve_calls.append(dict(kwargs))
         invocation_id = str(kwargs["invocation_id"])
-        return ToolQuotaAdmission(
+        existing = self.authorities.get(invocation_id)
+        if existing is not None:
+            return existing
+        admission = ToolQuotaAdmission(
             owner_user_id=str(kwargs["identity"].user_id),
             invocation_id=invocation_id,
             capability_id=str(kwargs["capability_id"]),
@@ -101,11 +106,20 @@ class _Quota:
             window_epoch=1,
             reservation_state="RESERVED",
         )
+        self.authorities[invocation_id] = admission
+        return admission
+
+    async def find_tool_call_authority(self, **kwargs):
+        self.find_calls.append(dict(kwargs))
+        return self.authorities.get(str(kwargs["invocation_id"]))
 
     async def recover_tool_call(self, **kwargs):
         self.recover_calls.append(dict(kwargs))
         invocation_id = str(kwargs["invocation_id"])
-        return ToolQuotaAdmission(
+        existing = self.authorities.get(invocation_id)
+        if existing is not None:
+            return existing
+        admission = ToolQuotaAdmission(
             owner_user_id=str(kwargs["owner_user_id"]),
             invocation_id=invocation_id,
             capability_id=str(kwargs["capability_id"]),
@@ -115,10 +129,12 @@ class _Quota:
             window_epoch=1,
             reservation_state="RESERVED",
         )
+        self.authorities[invocation_id] = admission
+        return admission
 
     async def settle_tool_call(self, admission):
         self.settle_calls.append(admission)
-        return ToolQuotaAdmission(
+        settled = ToolQuotaAdmission(
             owner_user_id=admission.owner_user_id,
             invocation_id=admission.invocation_id,
             capability_id=admission.capability_id,
@@ -128,10 +144,12 @@ class _Quota:
             window_epoch=admission.window_epoch,
             reservation_state="SETTLED",
         )
+        self.authorities[admission.invocation_id] = settled
+        return settled
 
     async def release_tool_call(self, admission):
         self.release_calls.append(admission)
-        return ToolQuotaAdmission(
+        released = ToolQuotaAdmission(
             owner_user_id=admission.owner_user_id,
             invocation_id=admission.invocation_id,
             capability_id=admission.capability_id,
@@ -141,6 +159,8 @@ class _Quota:
             window_epoch=admission.window_epoch,
             reservation_state="RELEASED",
         )
+        self.authorities[admission.invocation_id] = released
+        return released
 
 
 class _HistoricalQuota(_Quota):
@@ -241,6 +261,198 @@ async def test_ubq3_historical_bridge_without_durable_invocation_fails_closed() 
 
 
 @pytest.mark.asyncio
+async def test_ubq3_existing_invocation_identity_conflict_precedes_quota_mutation() -> None:
+    store = InMemoryCapabilityInvocationStore()
+    quota = _Quota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    existing = CapabilityInvocation(
+        invocation_id="inv-conflict-before-quota",
+        capability_id=driver.name,
+        capability_version=driver.definition.version,
+        kind=CapabilityKind.TOOL,
+        execution_mode=driver.definition.execution_mode,
+        idempotency=driver.definition.idempotency,
+        request_fingerprint=capability_request_fingerprint(
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            arguments={"value": "original"},
+        ),
+        owner_user_id="user-ubq3",
+        arguments={"value": "original"},
+    )
+    await runtime.invocation_lifecycle.create(existing)
+
+    with pytest.raises(CapabilityError) as caught:
+        await runtime.execute_capability(
+            driver.name,
+            {"value": "conflicting"},
+            _identity(),
+            invocation_id=existing.invocation_id,
+        )
+
+    assert caught.value.code == "REMOTE_INVOCATION_CONFLICT"
+    assert quota.reserve_calls == []
+    assert quota.find_calls == []
+    assert quota.settle_calls == []
+    assert quota.release_calls == []
+    assert driver.calls == 0
+    assert await store.list_attempts(existing.invocation_id) == []
+
+
+@pytest.mark.asyncio
+async def test_ubq3_exact_created_invocation_may_acquire_quota_then_dispatch() -> None:
+    store = InMemoryCapabilityInvocationStore()
+    quota = _Quota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    arguments = {"value": "resume-created"}
+    existing = CapabilityInvocation(
+        invocation_id="inv-compatible-created",
+        capability_id=driver.name,
+        capability_version=driver.definition.version,
+        kind=CapabilityKind.TOOL,
+        execution_mode=driver.definition.execution_mode,
+        idempotency=driver.definition.idempotency,
+        request_fingerprint=capability_request_fingerprint(
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            arguments=arguments,
+        ),
+        owner_user_id="user-ubq3",
+        arguments=arguments,
+    )
+    await runtime.invocation_lifecycle.create(existing)
+
+    result = await runtime.execute_capability(
+        driver.name,
+        arguments,
+        _identity(),
+        invocation_id=existing.invocation_id,
+    )
+
+    assert result.output["value"] == "resume-created"
+    assert len(quota.find_calls) == 1
+    assert len(quota.reserve_calls) == 1
+    assert len(quota.settle_calls) == 1
+    assert driver.calls == 1
+    attempts = await store.list_attempts(existing.invocation_id)
+    assert len(attempts) == 1
+    assert attempts[0].attempt_number == 1
+
+
+@pytest.mark.asyncio
+async def test_ubq3_existing_waiting_invocation_cannot_mint_new_quota() -> None:
+    store = InMemoryCapabilityInvocationStore()
+    quota = _Quota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    arguments = {"value": "waiting"}
+    existing = CapabilityInvocation(
+        invocation_id="inv-existing-waiting",
+        capability_id=driver.name,
+        capability_version=driver.definition.version,
+        kind=CapabilityKind.TOOL,
+        execution_mode=driver.definition.execution_mode,
+        idempotency=driver.definition.idempotency,
+        request_fingerprint=capability_request_fingerprint(
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            arguments=arguments,
+        ),
+        owner_user_id="user-ubq3",
+        state=CapabilityInvocationState.WAITING,
+        wait_reason=CapabilityWaitReason.CONNECTION,
+        attempt=1,
+        arguments=arguments,
+    )
+    await runtime.invocation_lifecycle.create(existing)
+    await store.save_attempt(
+        CapabilityInvocationAttempt(
+            attempt_id="att-existing-waiting-1",
+            invocation_id=existing.invocation_id,
+            attempt_number=1,
+            implementation_id=f"legacy:{driver.name}",
+            driver_kind="_EchoDriver",
+            state=CapabilityInvocationState.FAILED,
+        )
+    )
+
+    with pytest.raises(CapabilityError) as caught:
+        await runtime.execute_capability(
+            driver.name,
+            arguments,
+            _identity(),
+            invocation_id=existing.invocation_id,
+        )
+
+    assert caught.value.code == "REMOTE_INVOCATION_CONFLICT"
+    assert quota.reserve_calls == []
+    assert quota.find_calls == []
+    assert driver.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_ubq3_terminal_without_existing_quota_authority_does_not_backcharge() -> None:
+    store = InMemoryCapabilityInvocationStore()
+    quota = _Quota()
+    driver = _EchoDriver()
+    runtime = CapabilityRuntime(
+        invocation_lifecycle=CapabilityInvocationLifecycle(store),
+        tool_quota_service=quota,
+    )
+    runtime.register_capability(driver)
+
+    arguments = {"value": "terminal"}
+    existing = CapabilityInvocation(
+        invocation_id="inv-terminal-no-authority",
+        capability_id=driver.name,
+        capability_version=driver.definition.version,
+        kind=CapabilityKind.TOOL,
+        execution_mode=driver.definition.execution_mode,
+        idempotency=driver.definition.idempotency,
+        request_fingerprint=capability_request_fingerprint(
+            capability_id=driver.name,
+            capability_version=driver.definition.version,
+            arguments=arguments,
+        ),
+        owner_user_id="user-ubq3",
+        state=CapabilityInvocationState.COMPLETED,
+        attempt=1,
+        arguments=arguments,
+        output={"value": "terminal"},
+    )
+    await runtime.invocation_lifecycle.create(existing)
+
+    with pytest.raises(CapabilityError):
+        await runtime.execute_capability(
+            driver.name,
+            arguments,
+            _identity(),
+            invocation_id=existing.invocation_id,
+        )
+
+    assert quota.reserve_calls == []
+    assert len(quota.find_calls) == 1
+    assert driver.calls == 0
+
+
+@pytest.mark.asyncio
 async def test_ubq3_runtime_invalid_tool_schema_has_zero_quota_mutation() -> None:
     store = InMemoryCapabilityInvocationStore()
     quota = _Quota()
@@ -291,7 +503,8 @@ async def test_ubq3_runtime_terminal_replay_has_no_second_attempt() -> None:
 
     assert first.output == second.output
     assert driver.calls == 1
-    assert len(quota.reserve_calls) == 2
+    assert len(quota.reserve_calls) == 1
+    assert len(quota.find_calls) == 1
     assert len(quota.settle_calls) == 2
     attempts = await store.list_attempts("inv-replay-ubq3")
     assert len(attempts) == 1
