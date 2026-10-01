@@ -18,6 +18,7 @@ class GatewayChoice(GatewayBaseModel):
 class ResponseMetaData(GatewayBaseModel) :
     created: int = Field(default_factory=lambda: int(time.time()))
     provider: str = Field(default="unknown", description="Provider thực tế đã xử lý request")
+    content_parts: Optional[List[Dict[str, Any]]] = None
 
     agent_id: Optional[str] = None
     agent_fallback: Optional[Dict[str, Any]] = None
