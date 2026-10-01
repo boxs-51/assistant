@@ -4,6 +4,7 @@ import httpx
 import structlog
 from opentelemetry import trace
 
+from ...application.assets.generated import GeneratedAssetCanonicalizer
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
 from ..exceptions import (
     NoAvailableProviderError,
@@ -19,6 +20,22 @@ tracer = trace.get_tracer(__name__)
 
 class ChatExecutionHandler(BaseExecutionHandler):
     """Execute chat requests with deterministic provider fallback."""
+
+    def __init__(
+        self,
+        *args,
+        generated_asset_canonicalizer: GeneratedAssetCanonicalizer | None = None,
+        **kwargs,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        # The response-side F7 fence is always installed. In degraded mode the
+        # unavailable sentinel passes ordinary text responses through and
+        # terminally rejects generated media after provider success.
+        self.generated_asset_canonicalizer = (
+            generated_asset_canonicalizer
+            if generated_asset_canonicalizer is not None
+            else GeneratedAssetCanonicalizer.unavailable()
+        )
 
     async def _has_required_capabilities(
         self,
@@ -163,12 +180,19 @@ class ChatExecutionHandler(BaseExecutionHandler):
                             call_budget=call_budget,
                         )
 
-                    return await self.executor.execute(
+                    response = await self.executor.execute(
                         provider=provider,
                         http_client=http_client,
                         body=attempt_body,
                         timeout=self.timeout,
                         call_budget=call_budget,
+                    )
+                    # CAS-F7-P1 begins only after provider SUCCESS. Errors from
+                    # this boundary are deliberately outside the provider
+                    # fallback/circuit-breaker exception classes below.
+                    return await self.generated_asset_canonicalizer.canonicalize(
+                        response,
+                        owner_user_id=owner_user_id,
                     )
                 except ProviderDeadlineExceededError:
                     raise
