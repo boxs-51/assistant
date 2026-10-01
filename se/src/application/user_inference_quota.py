@@ -617,6 +617,72 @@ class UserInferenceQuotaService:
                 )
         return resolution.owner_user_id
 
+    async def require_embedding_allowed(
+        self,
+        *,
+        budget_identity: Identity,
+    ) -> None:
+        """Fence unsupported user-owned embeddings only when policy is finite."""
+        if not self.enabled:
+            return
+        if not isinstance(budget_identity, Identity):
+            raise UserInferenceQuotaContextError(
+                "trusted Identity is required for embedding policy fencing"
+            )
+        async with self._uow_factory() as uow:
+            resolution = await self._owner_authority.resolve_budget_owner_in_uow(
+                uow,
+                budget_identity,
+            )
+            owner = resolution.owner_user_id
+            window = await uow.user_budgets.get_active_window(owner)
+            if window is not None:
+                policy = await uow.user_budgets.get_policy(
+                    owner,
+                    str(window.governing_policy_id),
+                )
+                if (
+                    policy is None
+                    or str(policy.policy_fingerprint)
+                    != str(window.governing_policy_fingerprint)
+                ):
+                    raise UserBudgetPolicyAuthorityConflictError(
+                        "active embedding owner window has invalid policy authority"
+                    )
+            else:
+                account = await uow.user_budgets.get_account(owner)
+                if account is None or account.next_policy_id is None:
+                    raise UserBudgetPolicyAuthorityConflictError(
+                        "embedding owner has no selected UBQ policy"
+                    )
+                policy = await uow.user_budgets.get_policy(
+                    owner,
+                    str(account.next_policy_id),
+                )
+                if policy is None:
+                    raise UserBudgetPolicyAuthorityConflictError(
+                        "embedding owner selected policy is missing"
+                    )
+
+            governed_finite = any(
+                getattr(policy, field) is not None
+                for field in (
+                    "max_compute_atomic",
+                    "max_inference_calls",
+                    "max_input_tokens",
+                    "max_output_tokens",
+                    "max_total_tokens",
+                    "max_cost_usd_atomic",
+                )
+            )
+            await uow.commit()
+            if governed_finite:
+                raise UserBudgetUnsupportedGovernedOperationError(
+                    "embedding execution has no accepted UBQ estimator/"
+                    "normalizer while the active/selected user policy has a "
+                    "finite governed inference/token/compute/cost dimension"
+                )
+
     async def reserve(
         self,
         *,
