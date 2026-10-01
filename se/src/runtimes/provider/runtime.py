@@ -406,9 +406,18 @@ class ProviderRuntime(BaseRuntime):
                 self._inference_quota is not None
                 and getattr(self._inference_quota, "enabled", False)
             ):
-                raise UserBudgetUnsupportedGovernedOperationError(
-                    "CHAT_INFERENCE quota is enabled; embeddings require a "
-                    "separately frozen estimator/normalizer contract"
+                identity_data = event.payload.get("identity")
+                if identity_data is None:
+                    raise UserBudgetUnsupportedGovernedOperationError(
+                        "embedding execution lacks trusted identity for UBQ policy fencing"
+                    )
+                identity = (
+                    identity_data
+                    if isinstance(identity_data, Identity)
+                    else Identity.model_validate(identity_data)
+                )
+                await self._inference_quota.require_embedding_allowed(
+                    budget_identity=identity,
                 )
             response = await self.embedding_handler.execute(self._http_client, body)
             await self.event_bus.publish(BaseEvent(
