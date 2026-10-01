@@ -1220,25 +1220,28 @@ class CapabilityRuntime(BaseRuntime):
         existing = await self.invocation_lifecycle.store.get(
             candidate.invocation_id
         )
-        if (
-            admission is not None
-            and not admission.historical_bridge
-            and admission.reservation_state
-            != "RESERVED"
-            and existing is None
-        ):
-            raise CapabilityError(
-                code=REMOTE_INVOCATION_CONFLICT,
-                message=(
-                    "Terminal UBQ reservation has no recoverable durable "
-                    "CapabilityInvocation."
-                ),
-                category="CONCURRENCY",
-                retryable=False,
-                safe_for_client=False,
-                capability_id=capability_id,
-                invocation_id=candidate.invocation_id,
+        if admission is not None and existing is None:
+            historical_without_invocation = admission.historical_bridge
+            direct_terminal_without_invocation = (
+                not admission.historical_bridge
+                and admission.reservation_state != "RESERVED"
             )
+            if (
+                historical_without_invocation
+                or direct_terminal_without_invocation
+            ):
+                raise CapabilityError(
+                    code=REMOTE_INVOCATION_CONFLICT,
+                    message=(
+                        "Existing UBQ charge authority has no recoverable "
+                        "durable CapabilityInvocation."
+                    ),
+                    category="CONCURRENCY",
+                    retryable=False,
+                    safe_for_client=False,
+                    capability_id=capability_id,
+                    invocation_id=candidate.invocation_id,
+                )
 
         if existing is None:
             try:
