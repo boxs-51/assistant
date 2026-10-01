@@ -57,6 +57,8 @@ class _EchoDriver(BaseCapabilityDriver):
 
 
 class _Quota:
+    enabled = True
+
     def __init__(self) -> None:
         self.reserve_calls = []
         self.settle_calls = []
