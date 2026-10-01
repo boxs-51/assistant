@@ -20,6 +20,7 @@ from se.src.application.user_inference_quota import (
     NormalizedInferenceUsage,
     UserInferenceEstimateUnavailableError,
     UserInferenceQuotaConflictError,
+    UserInferenceQuotaContextError,
     UserInferenceQuotaService,
     derive_skill_inference_request_id,
 )
@@ -313,6 +314,32 @@ async def test_ubq4_same_request_id_changed_semantics_conflicts_before_charge(
                 "user-ubq4", first.window_epoch
             )
             assert int(window.inference_reserved) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq4_compatibility_owner_mismatch_fails_before_charge(
+    tmp_path: Path,
+) -> None:
+    engine, factory, service, identity = await _setup(tmp_path)
+    try:
+        context = service.build_context(
+            budget_identity=identity,
+            logical_request_id="inf-owner-mismatch",
+            source_surface="TEST",
+            owner_user_id="different-user",
+            session_id="session-ubq4",
+        )
+        with pytest.raises(UserInferenceQuotaContextError):
+            await service.reserve(
+                context=context,
+                body=_body(),
+                streaming_mode=False,
+            )
+        async with factory() as uow:
+            window = await uow.user_budgets.get_active_window("user-ubq4")
+            assert window is None
     finally:
         await engine.dispose()
 
