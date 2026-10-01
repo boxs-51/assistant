@@ -682,3 +682,60 @@ async def test_r12_f1_terminal_committed_reuses_frozen_watermark_result():
     assert plan.invocation_actions[0].tool_quota_authority is None
     assert runtime.resolve_calls == []
     assert uow.commit_calls == 0
+
+@pytest.mark.asyncio
+async def test_r12_f1_outcome_unknown_cannot_regress_to_not_dispatched():
+    execution = _execution(iteration=1)
+    checkpoint = _checkpoint(
+        execution,
+        iteration=1,
+        frozen_iteration_id="iter-r12-f1",
+        active_ids=("call-r12-f1",),
+    )
+    iteration = SimpleNamespace(
+        id="iter-r12-f1",
+        execution_id=execution.id,
+        iteration=1,
+        state="WAITING_TOOL",
+        inference_request_id="inf-done",
+        inference_request={"messages": []},
+        inference_response={"id": "resp-done"},
+    )
+    pending = _pending(outcome="OUTCOME_UNKNOWN")
+    invocation = _invocation(outcome="NOT_DISPATCHED")
+    safe_point = _safe_point(
+        iteration=1,
+        iteration_id="iter-r12-f1",
+        calls=(_call(),),
+        pending=(
+            {
+                "ordinal": 0,
+                "invocation_id": pending.invocation_id,
+                "tool_call_id": pending.tool_call_id,
+                "capability_id": pending.capability_id,
+            },
+        ),
+    )
+    runtime = _Runtime()
+    service, uow, runtime = _service(
+        execution=execution,
+        checkpoint=checkpoint,
+        safe_point=safe_point,
+        iteration=iteration,
+        pending=(pending,),
+        invocation_records=(invocation,),
+        runtime=runtime,
+    )
+
+    with pytest.raises(
+        RecoveryPlanRejected,
+        match="RECOVERY_REMOTE_OUTCOME_REGRESSION",
+    ):
+        await service.build_recovery_plan(
+            execution.id,
+            target_connection_id="conn-new",
+        )
+
+    assert runtime.resolve_calls == []
+    assert uow.commit_calls == 0
+
