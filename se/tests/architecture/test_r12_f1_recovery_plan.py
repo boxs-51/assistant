@@ -400,27 +400,32 @@ async def test_r12_f1_uses_exact_frozen_iteration_inference_identity():
         execution,
         iteration=1,
         frozen_iteration_id="iter-r12-f1",
+        active_ids=("call-r12-f1",),
     )
     iteration = SimpleNamespace(
         id="iter-r12-f1",
         execution_id=execution.id,
         iteration=1,
-        state="THINKING",
+        state="WAITING_TOOL",
         inference_request_id="inf-frozen",
-        inference_request={"messages": []},
-        inference_response={"id": "resp-frozen"},
+        inference_request=None,
+        inference_response=None,
     )
     service, uow, _runtime = _service(
         execution=execution,
         checkpoint=checkpoint,
-        safe_point=_safe_point(iteration=1, iteration_id="iter-r12-f1"),
+        safe_point=_safe_point(
+            iteration=1,
+            iteration_id="iter-r12-f1",
+            calls=(_call(),),
+        ),
         iteration=iteration,
     )
 
     plan = await service.build_recovery_plan(execution.id)
 
     assert plan.recovery_iteration_id == "iter-r12-f1"
-    assert plan.iteration_state == "THINKING"
+    assert plan.iteration_state == "WAITING_TOOL"
     assert plan.inference_request_id == "inf-frozen"
     assert plan.inference_disposition is RecoveryInferenceDisposition.NO_INFERENCE
     assert uow.commit_calls == 0
@@ -496,8 +501,8 @@ async def test_r12_f1_uncertain_r6_outcome_defers_without_reconciliation():
         iteration=1,
         state="WAITING_TOOL",
         inference_request_id="inf-done",
-        inference_request={"messages": []},
-        inference_response={"id": "resp-done"},
+        inference_request=None,
+        inference_response=None,
     )
     pending = _pending(outcome="OUTCOME_UNKNOWN")
     invocation = _invocation(outcome="OUTCOME_UNKNOWN")
@@ -553,8 +558,8 @@ async def test_r12_f1_not_dispatched_freezes_continuation_and_existing_quota():
         iteration=1,
         state="WAITING_TOOL",
         inference_request_id="inf-done",
-        inference_request={"messages": []},
-        inference_response={"id": "resp-done"},
+        inference_request=None,
+        inference_response=None,
     )
     pending = _pending()
     invocation = _invocation()
@@ -636,8 +641,8 @@ async def test_r12_f1_terminal_committed_reuses_frozen_watermark_result():
         iteration=1,
         state="WAITING_TOOL",
         inference_request_id="inf-done",
-        inference_request={"messages": []},
-        inference_response={"id": "resp-done"},
+        inference_request=None,
+        inference_response=None,
     )
     pending = _pending(outcome="IN_FLIGHT")
     invocation = _invocation(
@@ -700,8 +705,8 @@ async def test_r12_f1_outcome_unknown_cannot_regress_to_not_dispatched():
         iteration=1,
         state="WAITING_TOOL",
         inference_request_id="inf-done",
-        inference_request={"messages": []},
-        inference_response={"id": "resp-done"},
+        inference_request=None,
+        inference_response=None,
     )
     pending = _pending(outcome="OUTCOME_UNKNOWN")
     invocation = _invocation(outcome="NOT_DISPATCHED")
@@ -772,6 +777,43 @@ async def test_r12_f1_rejects_self_hashed_noncanonical_recovery_receipt(
     with pytest.raises(
         RecoveryPlanRejected,
         match="RECOVERY_RECEIPT_LINEAGE_CONFLICT",
+    ):
+        await service.build_recovery_plan(execution.id)
+
+    assert uow.commit_calls == 0
+
+@pytest.mark.asyncio
+async def test_r12_f1_active_batch_requires_frozen_inference_request_identity():
+    execution = _execution(iteration=1)
+    checkpoint = _checkpoint(
+        execution,
+        iteration=1,
+        frozen_iteration_id="iter-r12-f1",
+        active_ids=("call-r12-f1",),
+    )
+    iteration = SimpleNamespace(
+        id="iter-r12-f1",
+        execution_id=execution.id,
+        iteration=1,
+        state="WAITING_TOOL",
+        inference_request_id=None,
+        inference_request=None,
+        inference_response=None,
+    )
+    service, uow, _runtime = _service(
+        execution=execution,
+        checkpoint=checkpoint,
+        safe_point=_safe_point(
+            iteration=1,
+            iteration_id="iter-r12-f1",
+            calls=(_call(),),
+        ),
+        iteration=iteration,
+    )
+
+    with pytest.raises(
+        RecoveryPlanRejected,
+        match="RECOVERY_INFERENCE_IDENTITY_MISSING",
     ):
         await service.build_recovery_plan(execution.id)
 
