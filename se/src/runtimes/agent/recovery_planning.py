@@ -734,13 +734,47 @@ class AgentRecoveryPlanningService:
             if snapshot.observed_remote_outcome_state is not None
             else None
         )
-        if observed is RemoteOutcomeState.TERMINAL_COMMITTED and (
-            invocation.remote_outcome_state
-            is not RemoteOutcomeState.TERMINAL_COMMITTED
-        ):
+        allowed_outcomes = {
+            None: frozenset(
+                {
+                    None,
+                    RemoteOutcomeState.NOT_DISPATCHED,
+                    RemoteOutcomeState.IN_FLIGHT,
+                    RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    RemoteOutcomeState.TERMINAL_COMMITTED,
+                }
+            ),
+            RemoteOutcomeState.NOT_DISPATCHED: frozenset(
+                {
+                    RemoteOutcomeState.NOT_DISPATCHED,
+                    RemoteOutcomeState.IN_FLIGHT,
+                    RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    RemoteOutcomeState.TERMINAL_COMMITTED,
+                }
+            ),
+            RemoteOutcomeState.IN_FLIGHT: frozenset(
+                {
+                    RemoteOutcomeState.IN_FLIGHT,
+                    RemoteOutcomeState.NOT_DISPATCHED,
+                    RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    RemoteOutcomeState.TERMINAL_COMMITTED,
+                }
+            ),
+            RemoteOutcomeState.OUTCOME_UNKNOWN: frozenset(
+                {
+                    RemoteOutcomeState.OUTCOME_UNKNOWN,
+                    RemoteOutcomeState.TERMINAL_COMMITTED,
+                }
+            ),
+            RemoteOutcomeState.TERMINAL_COMMITTED: frozenset(
+                {RemoteOutcomeState.TERMINAL_COMMITTED}
+            ),
+        }[observed]
+        if invocation.remote_outcome_state not in allowed_outcomes:
             raise RecoveryPlanRejected(
                 "RECOVERY_REMOTE_OUTCOME_REGRESSION",
-                "Terminal checkpoint outcome regressed in durable invocation.",
+                "CapabilityInvocation remote outcome regressed behind the "
+                "frozen checkpoint watermark.",
             )
 
     async def _classify_action_in_uow(
