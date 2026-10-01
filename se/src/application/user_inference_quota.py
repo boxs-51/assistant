@@ -636,7 +636,10 @@ class UserInferenceQuotaService:
             )
             owner = resolution.owner_user_id
             window = await uow.user_budgets.get_active_window(owner)
-            if window is not None:
+            if (
+                window is not None
+                and datetime.now(timezone.utc) < _record_utc(window.expires_at)
+            ):
                 policy = await uow.user_budgets.get_policy(
                     owner,
                     str(window.governing_policy_id),
