@@ -1121,7 +1121,11 @@ class CapabilityRuntime(BaseRuntime):
             # identity. Direct API/DIRECT calls may receive a request-local
             # generated execution id in CapabilityExecutionContext; persisting
             # that synthetic id would make same-invocation replay conflict.
-            execution_id=execution_id,
+            execution_id=(
+                execution_id
+                if tool_quota_enabled
+                else context.execution_id
+            ),
             workflow_id=context.workflow_id,
             tool_call_id=request_metadata.get("tool_call_id"),
             connection_id=context.connection_id,
