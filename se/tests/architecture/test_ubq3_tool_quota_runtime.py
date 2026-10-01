@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from se.src.application.user_budget import ToolQuotaAdmission
+from se.src.application.user_tool_quota import ToolQuotaAdmission
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
