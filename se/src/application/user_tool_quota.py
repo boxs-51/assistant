@@ -331,6 +331,24 @@ class UserToolQuotaService:
             historical_bridge=True,
         )
 
+    async def resolve_owner(
+        self,
+        *,
+        identity: Identity,
+        task_id: str | None = None,
+    ) -> BudgetOwnerResolution | None:
+        """Resolve canonical budget owner without reserving or mutating quota."""
+        if not self.enabled:
+            return None
+        async with self._uow_factory() as uow:
+            resolution = await self._resolve_owner_in_uow(
+                uow,
+                identity=identity,
+                task_id=task_id,
+            )
+            await uow.commit()
+            return resolution
+
     async def find_tool_call_authority(
         self,
         *,
