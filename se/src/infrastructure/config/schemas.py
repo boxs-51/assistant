@@ -240,9 +240,19 @@ class UserBudgetDualAccountingSettings(BaseModel):
     model_config = ConfigDict(frozen=True)
 
 
+class UserBudgetToolQuotaSettings(BaseModel):
+    enabled: bool = False
+    max_conflict_retries: int = Field(default=8, ge=1, le=64)
+
+    model_config = ConfigDict(frozen=True)
+
+
 class UserBudgetSettings(BaseModel):
     dual_accounting: UserBudgetDualAccountingSettings = Field(
         default_factory=UserBudgetDualAccountingSettings
+    )
+    tool_quota: UserBudgetToolQuotaSettings = Field(
+        default_factory=UserBudgetToolQuotaSettings
     )
 
     model_config = ConfigDict(frozen=True)
