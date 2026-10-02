@@ -38,10 +38,11 @@ def test_r12_f3a_pre_dispatch_guard_runs_inside_continuation_semaphore():
         AgentToolExecutionCoordinator.continue_invocations
     )
 
-    semaphore_index = source.index("async with semaphore")
-    prepare_index = source.index("await pre_dispatch_prepare")
-    dispatch_index = source.index(
-        "return await self.continue_invocation(context, action)"
+    normalized = " ".join(source.split())
+    semaphore_index = normalized.index("async with semaphore")
+    prepare_index = normalized.index("await pre_dispatch_prepare")
+    dispatch_index = normalized.index(
+        "return await self.continue_invocation( context, action"
     )
     assert semaphore_index < prepare_index < dispatch_index
     assert "preserve_started_on_failure" in source
