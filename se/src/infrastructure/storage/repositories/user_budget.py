@@ -15,6 +15,7 @@ from se.src.domain.schemas.user_budget import (
     UserBudgetPolicy,
     UserBudgetReservationIntent,
     UserBudgetReservationState,
+    UserBudgetResourceKind,
     normalize_authoritative_utc,
 )
 
@@ -871,6 +872,35 @@ class UserBudgetRepository:
         if row is None:
             raise UserBudgetConflictError("per-capability user budget CAS lost")
         return row
+
+    async def sum_pending_reservation_amount(
+        self,
+        owner_user_id: str,
+        window_epoch: int,
+        resource_kind: UserBudgetResourceKind | str,
+    ) -> int:
+        """Sum exact-window RESERVED capacity for one UBQ resource kind.
+
+        UBQ-4 uses this under the owner write-serialization boundary for
+        INPUT_TOKEN and OUTPUT_TOKEN because the 25a schema intentionally
+        keeps only TOTAL_TOKEN as an aggregate reserved read model.
+        """
+        kind = UserBudgetResourceKind(resource_kind)
+        result = await self.session.execute(
+            select(
+                func.coalesce(
+                    func.sum(UserBudgetReservationRecord.reserved_amount_atomic),
+                    0,
+                )
+            ).where(
+                UserBudgetReservationRecord.owner_user_id == owner_user_id,
+                UserBudgetReservationRecord.window_epoch == window_epoch,
+                UserBudgetReservationRecord.resource_kind == kind.value,
+                UserBudgetReservationRecord.state
+                == UserBudgetReservationState.RESERVED.value,
+            )
+        )
+        return _require_atomic_counter(int(result.scalar_one()))
 
     async def get_reservation(
         self,
