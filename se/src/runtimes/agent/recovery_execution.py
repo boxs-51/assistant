@@ -459,6 +459,88 @@ class AgentRecoveryExecutionService:
             action=action.action,
         )
 
+    async def _require_canonical_dispatch_authority(
+        self,
+        plan: RecoveryPlan,
+        activation: RecoveryActivationResult,
+        context: AgentExecutionContext,
+        action: RecoveryInvocationAction,
+        invocation,
+        selected_implementation_id: str,
+        target_connection_id: str | None,
+        origin_connection_id: str | None,
+    ) -> None:
+        """Re-prove R12 + F1 authority at the physical dispatch boundary."""
+
+        authority = action.continuation_authority
+        if authority is None:
+            raise RecoveryExecutionError(
+                "RECOVERY_CONTINUATION_AUTHORITY_MISSING",
+                "Executable recovery action lacks continuation authority.",
+            )
+
+        # Keep the lease query as the final await before synchronous live
+        # catalog/connection revalidation and the driver's send boundary.
+        await self._require_exact_active_fence(plan, activation, context)
+
+        revalidator = getattr(
+            self._capabilities,
+            "_revalidate_continuation_target_at_dispatch",
+            None,
+        )
+        if not callable(revalidator):
+            raise RecoveryExecutionError(
+                "RECOVERY_CONTINUATION_AUTHORITY_UNAVAILABLE",
+                "Canonical dispatch-boundary target revalidator is unavailable.",
+            )
+        try:
+            live_implementation = revalidator(
+                invocation,
+                target_connection_id=target_connection_id,
+            )
+        except CapabilityError as exc:
+            raise RecoveryExecutionError(
+                "RECOVERY_CONTINUATION_AFFINITY_CHANGED",
+                str(exc),
+                retryable=bool(getattr(exc, "retryable", False)),
+            ) from exc
+
+        snapshot = self._capabilities.connection_registry.get(
+            target_connection_id
+        )
+        live_client_id = str(
+            getattr(snapshot, "metadata", {}).get("client_id") or ""
+        )
+        live_implementation_id = str(
+            getattr(live_implementation, "implementation_id", "") or ""
+        )
+
+        if (
+            target_connection_id != authority.target_connection_id
+            or plan.target_connection_id != authority.target_connection_id
+            or live_client_id != authority.target_client_id
+            or plan.target_client_id != authority.target_client_id
+            or selected_implementation_id != authority.implementation_id
+            or live_implementation_id != authority.implementation_id
+            or origin_connection_id != action.origin_connection_id
+            or invocation.invocation_id != action.invocation_id
+            or invocation.execution_id != plan.execution_id
+            or invocation.tool_call_id != action.tool_call_id
+            or invocation.capability_id != action.capability_id
+            or invocation.capability_version != action.capability_version
+            or invocation.kind is not action.kind
+            or invocation.execution_mode is not action.execution_mode
+            or invocation.idempotency is not action.idempotency
+            or invocation.request_fingerprint != action.request_fingerprint
+            or invocation.origin_client_id != action.origin_client_id
+            or str(invocation.owner_user_id or "")
+            != plan.resolved_recovery_principal
+        ):
+            raise RecoveryExecutionError(
+                "RECOVERY_CONTINUATION_AFFINITY_CHANGED",
+                "Canonical dispatch authority differs from F1 recovery authority.",
+            )
+
     @staticmethod
     def _tool_result_from_record(
         record,
@@ -683,11 +765,30 @@ class AgentRecoveryExecutionService:
                         raw_action,
                     )
 
+                async def canonical_dispatch_guard(
+                    raw_action: RecoveryInvocationAction,
+                    invocation,
+                    selected_implementation_id: str,
+                    target_connection_id: str | None,
+                    origin_connection_id: str | None,
+                ) -> None:
+                    await self._require_canonical_dispatch_authority(
+                        plan,
+                        activation,
+                        context,
+                        raw_action,
+                        invocation,
+                        selected_implementation_id,
+                        target_connection_id,
+                        origin_connection_id,
+                    )
+
                 raw_results = await runner(
                     context,
                     continuation_actions,
                     max_parallel=context.limits.max_parallel_tools,
                     pre_dispatch_prepare=prepare,
+                    canonical_dispatch_guard=canonical_dispatch_guard,
                     preserve_started_on_failure=True,
                 )
                 raw_by_id = {
