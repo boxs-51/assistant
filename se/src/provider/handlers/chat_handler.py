@@ -83,26 +83,30 @@ class ChatExecutionHandler(BaseExecutionHandler):
         )
 
     @staticmethod
-    def _is_trailing_usage_only_chunk(chunk: Any) -> bool:
-        """Prove post-terminal usage carries no semantic response payload."""
+    def _has_stream_semantic_or_finish_progression(chunk: Any) -> bool:
+        """Detect response progression that revokes an earlier terminal claim."""
 
         for choice in getattr(chunk, "choices", None) or []:
             if getattr(choice, "finish_reason", None) is not None:
-                return False
+                return True
             delta = getattr(choice, "delta", None)
             if delta is None:
                 continue
             if getattr(delta, "content", None):
-                return False
+                return True
             if getattr(delta, "reasoning_content", None):
-                return False
+                return True
             if getattr(delta, "tool_calls", None):
-                return False
+                return True
 
         metadata = getattr(chunk, "metadata", None)
-        if getattr(metadata, "content_parts", None):
-            return False
-        return True
+        return bool(getattr(metadata, "content_parts", None))
+
+    @classmethod
+    def _is_trailing_usage_only_chunk(cls, chunk: Any) -> bool:
+        """Prove post-terminal usage carries no semantic/finish progression."""
+
+        return not cls._has_stream_semantic_or_finish_progression(chunk)
 
     async def _settle_inference_quota_success(
         self,
@@ -454,17 +458,34 @@ class ChatExecutionHandler(BaseExecutionHandler):
                             getattr(chunk, "choices", None) or []
                         )
                     )
+                    semantic_or_finish_progression = (
+                        self._has_stream_semantic_or_finish_progression(chunk)
+                    )
+
+                    # A finish marker only makes usage a provisional candidate.
+                    # Later semantic/finish progression proves that earlier
+                    # terminality was not final for the whole logical stream.
+                    if terminal_seen and semantic_or_finish_progression:
+                        terminal_seen = False
+                    if (
+                        normalized_stream_usage is not None
+                        and semantic_or_finish_progression
+                    ):
+                        normalized_stream_usage = None
+
                     trusted_usage_evidence = (
-                        (chunk_terminal and not terminal_seen)
-                        or (
-                            terminal_seen
-                            and self._is_trailing_usage_only_chunk(chunk)
+                        raw_usage is not None
+                        and (
+                            chunk_terminal
+                            or (
+                                terminal_seen
+                                and self._is_trailing_usage_only_chunk(chunk)
+                            )
                         )
                     )
                     if (
                         admission is not None
                         and quota is not None
-                        and raw_usage is not None
                         and trusted_usage_evidence
                     ):
                         metadata = getattr(chunk, "metadata", None)
