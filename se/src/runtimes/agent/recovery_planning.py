@@ -406,23 +406,40 @@ class AgentRecoveryPlanningService:
             observed_lease_generation = int(
                 receipt["observed_lease_generation"]
             )
+            observed_lease_expires_at = datetime.fromisoformat(
+                str(receipt["observed_lease_expires_at"])
+            )
+            takeover_now_utc = datetime.fromisoformat(
+                str(receipt["takeover_now_utc"])
+            )
         except (KeyError, TypeError, ValueError) as exc:
             raise RecoveryPlanRejected(
                 "RECOVERY_RECEIPT_LINEAGE_CONFLICT",
-                "R12-E recovery receipt revision/generation authority is invalid.",
+                "R12-E recovery receipt revision/generation/time authority is invalid.",
             ) from exc
 
+        zero_offset = timezone.utc.utcoffset(datetime.now(timezone.utc))
+        expected_checkpoint_id = (
+            f"{execution.id}:checkpoint:{target_revision}"
+        )
         if (
             str(receipt.get("execution_id") or "") != str(execution.id)
             or target_revision != int(execution.revision)
             or source_revision + 1 != target_revision
             or str(receipt.get("checkpoint_id") or "")
             != str(checkpoint.checkpoint_id)
+            or str(checkpoint.checkpoint_id) != expected_checkpoint_id
             or str(receipt.get("target_state") or "") != "WAITING"
             or str(receipt.get("wait_reason") or "") != "RECOVERY"
             or not str(receipt.get("observed_owner_instance_id") or "")
+            or observed_lease_generation <= 0
             or observed_lease_generation + 1
             != int(execution.lease_generation)
+            or observed_lease_expires_at.tzinfo is None
+            or takeover_now_utc.tzinfo is None
+            or observed_lease_expires_at.utcoffset() != zero_offset
+            or takeover_now_utc.utcoffset() != zero_offset
+            or observed_lease_expires_at > takeover_now_utc
         ):
             raise RecoveryPlanRejected(
                 "RECOVERY_RECEIPT_LINEAGE_CONFLICT",
