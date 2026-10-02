@@ -5,6 +5,7 @@ import os
 import sqlite3
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from alembic import command
@@ -96,6 +97,7 @@ async def _setup(
     tmp_path: Path,
     *,
     max_compute_units: Decimal | None = None,
+    max_cost_usd: Decimal | None = None,
     finite_governed_policy: bool = True,
 ):
     database = tmp_path / "ubq4-inference-quota.sqlite"
@@ -143,7 +145,7 @@ async def _setup(
         max_tool_calls_total=None,
         default_per_tool_limit=None,
         tool_limits={},
-        max_cost_usd=None,
+        max_cost_usd=max_cost_usd,
     )
     async with factory() as uow:
         await uow.user_budgets.create_or_get_immutable_policy(policy)
@@ -509,6 +511,110 @@ async def test_ubq4_finite_compute_limit_without_estimator_fails_closed(
                 body=_body(),
                 streaming_mode=False,
             )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ubq4_finite_cost_limit_without_provider_model_normalizer_fails_closed(
+    tmp_path: Path,
+) -> None:
+    engine, _factory, service, identity = await _setup(
+        tmp_path,
+        max_cost_usd=Decimal("10"),
+    )
+    try:
+        with pytest.raises(UserInferenceEstimateUnavailableError):
+            await service.reserve(
+                context=_context(service, identity, "inf-cost"),
+                body=_body(),
+                streaming_mode=False,
+            )
+    finally:
+        await engine.dispose()
+
+
+def test_ubq4_usage_normalization_is_token_only_without_provider_model_authority() -> None:
+    class _OwnerAuthority:
+        pass
+
+    service = UserInferenceQuotaService(
+        lambda: None,
+        owner_authority=_OwnerAuthority(),
+        settings=InferenceQuotaSettings(enabled=True),
+    )
+    usage = SimpleNamespace(
+        prompt_tokens=2,
+        completion_tokens=3,
+        total_tokens=5,
+        model_fields_set={"prompt_tokens", "completion_tokens", "total_tokens"},
+    )
+    response = SimpleNamespace(
+        usage=usage,
+        metadata=SimpleNamespace(provider="provider-a"),
+        model="model-a",
+    )
+
+    normalized = service.normalize_gateway_usage(response)
+
+    assert normalized.input_tokens == 2
+    assert normalized.output_tokens == 3
+    assert normalized.total_tokens == 5
+    assert normalized.compute_units is None
+    assert normalized.cost_usd is None
+    assert normalized.provider == "provider-a"
+    assert normalized.model == "model-a"
+
+
+@pytest.mark.asyncio
+async def test_ubq4_skill_replay_accepts_changed_outer_request_lineage(
+    tmp_path: Path,
+) -> None:
+    engine, _factory, service, identity = await _setup(tmp_path)
+    try:
+        invocation_id = "inv-replay"
+        logical_id = derive_skill_inference_request_id(invocation_id)
+        first_context = service.build_context(
+            budget_identity=identity,
+            logical_request_id=logical_id,
+            source_surface="SKILL",
+            outer_request_id="outer-before",
+            capability_invocation_id=invocation_id,
+        )
+        continued_context = service.build_context(
+            budget_identity=identity,
+            logical_request_id=logical_id,
+            source_surface="SKILL",
+            outer_request_id="outer-after",
+            capability_invocation_id=invocation_id,
+        )
+
+        assert service.logical_fingerprint(
+            _body(),
+            first_context,
+            streaming_mode=False,
+        ) == service.logical_fingerprint(
+            _body(),
+            continued_context,
+            streaming_mode=False,
+        )
+
+        first = await service.reserve(
+            context=first_context,
+            body=_body(),
+            streaming_mode=False,
+        )
+        replay = await service.reserve(
+            context=continued_context,
+            body=_body(),
+            streaming_mode=False,
+        )
+
+        assert first is not None and replay is not None
+        assert replay.replayed is True
+        assert replay.logical_request_id == first.logical_request_id
+        assert replay.logical_request_fingerprint == first.logical_request_fingerprint
+        assert dict(replay.reservation_keys) == dict(first.reservation_keys)
     finally:
         await engine.dispose()
 
