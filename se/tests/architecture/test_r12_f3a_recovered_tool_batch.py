@@ -48,6 +48,7 @@ def test_r12_f3a_pre_dispatch_guard_runs_inside_continuation_semaphore():
     assert "preserve_started_on_failure" in source
     assert "continuation_started" in source
     assert "physical_dispatch_authorized" in source
+    assert "not in physical_dispatch_authorized" in source
     assert source.count("prepare_failed.is_set()") >= 4
 
 
