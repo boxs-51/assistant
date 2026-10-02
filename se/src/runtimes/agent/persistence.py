@@ -4808,9 +4808,6 @@ class DurableAgentStore:
                     or plan.task_budget_incarnation_generation is None
                     or int(locked_budget.incarnation_generation)
                     != int(plan.task_budget_incarnation_generation)
-                    or plan.task_budget_revision is None
-                    or int(locked_budget.revision)
-                    != int(plan.task_budget_revision)
                 ):
                     error = await self._reject_created_claim_in_uow(
                         uow,
