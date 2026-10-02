@@ -161,7 +161,6 @@ class AgentRecoveryPlanningService:
 
             (
                 recovery_iteration_id,
-                iteration_state,
                 inference_request_id,
                 inference_disposition,
             ) = await self._freeze_inference_identity_in_uow(
@@ -297,7 +296,6 @@ class AgentRecoveryPlanningService:
                 "resolved_recovery_principal": principal,
                 "iteration": int(checkpoint.iteration),
                 "recovery_iteration_id": recovery_iteration_id,
-                "iteration_state": iteration_state,
                 "inference_request_id": inference_request_id,
                 "inference_disposition": inference_disposition,
                 "ordered_tool_call_ids": ordered_tool_call_ids,
@@ -553,7 +551,6 @@ class AgentRecoveryPlanningService:
     ) -> tuple[
         str | None,
         str | None,
-        str | None,
         RecoveryInferenceDisposition,
     ]:
         frozen_iteration_id = metadata.get("r12_recovery_iteration_id")
@@ -576,7 +573,6 @@ class AgentRecoveryPlanningService:
                     "Late iteration row cannot redefine empty recovery cut.",
                 )
             return (
-                None,
                 None,
                 None,
                 RecoveryInferenceDisposition.NO_INFERENCE,
@@ -610,44 +606,35 @@ class AgentRecoveryPlanningService:
             getattr(iteration, "inference_request_id", "") or ""
         ) or None
 
-        # AgentRuntime persists inference_request_id on AgentIteration before
-        # provider execution, but it persists the provider response on the
-        # execution checkpoint rather than AgentIteration. Therefore
-        # AgentIteration.inference_response is not canonical completion proof.
-        #
-        # A non-empty active batch *is* cut-time completion proof: R12-E could
-        # freeze those tool_call_ids only after the provider response returned
-        # and runtime durably published the iteration tool batch. Conversely,
-        # request_id + an empty frozen batch remains ambiguous because an
-        # expired worker may complete provider work after the recovery cut.
-        if inference_request_id is not None:
-            if not frozen_tool_call_ids:
-                raise RecoveryPlanDeferred(
-                    "RECOVERY_INFERENCE_OUTCOME_AMBIGUOUS",
-                    "Frozen logical inference has no cut-time completion proof.",
-                )
-            disposition = RecoveryInferenceDisposition.NO_INFERENCE
-        else:
-            if frozen_tool_call_ids:
-                raise RecoveryPlanRejected(
-                    "RECOVERY_INFERENCE_IDENTITY_MISSING",
-                    "Frozen active tool batch lacks its durable inference request id.",
-                )
-            if str(iteration.state) == "PREPARING":
-                disposition = (
-                    RecoveryInferenceDisposition.NEW_LOGICAL_INFERENCE_ALLOWED
-                )
-            else:
-                raise RecoveryPlanRejected(
-                    "RECOVERY_INFERENCE_IDENTITY_MISSING",
-                    "Frozen non-PREPARING iteration lacks inference request identity.",
-                )
+        # R12-E freezes iteration identity + active tool-call order, but not the
+        # mutable AgentIteration.state/request fields themselves. The expired
+        # owner may update the same row after the recovery cut, so an empty
+        # frozen batch provides no immutable evidence that a new logical
+        # inference may start. F1 therefore defers unconditionally for a
+        # non-null frozen iteration with an empty batch.
+        if not frozen_tool_call_ids:
+            raise RecoveryPlanDeferred(
+                "RECOVERY_INFERENCE_CUT_UNPROVEN",
+                "Frozen recovery cut does not prove inference disposition for "
+                "this iteration.",
+            )
+
+        # A non-empty frozen R12-E batch is different: canonical AgentRuntime
+        # assigns + durably persists inference_request_id once before provider
+        # execution, then persists tool_call_ids only after provider completion
+        # and tool-call extraction. Therefore the frozen active batch proves the
+        # request id existed before the cut. Same-row post-cut state changes are
+        # deliberately ignored; state is not carried into RecoveryPlan.
+        if inference_request_id is None:
+            raise RecoveryPlanRejected(
+                "RECOVERY_INFERENCE_IDENTITY_MISSING",
+                "Frozen active tool batch lacks its durable inference request id.",
+            )
 
         return (
             str(frozen_iteration_id),
-            str(iteration.state),
             inference_request_id,
-            disposition,
+            RecoveryInferenceDisposition.NO_INFERENCE,
         )
 
     @staticmethod
