@@ -241,7 +241,10 @@ class ProviderRuntime(BaseRuntime):
             "circuit_breaker_manager": self.circuit_breaker_manager,
             "timeout": context.config.provider.timeout,
         }
-        self.chat_handler = ChatExecutionHandler(**handler_kwargs)
+        self.chat_handler = ChatExecutionHandler(
+            **handler_kwargs,
+            inference_quota=self._inference_quota,
+        )
         self.chat_handler.generated_asset_canonicalizer = (
             generated_asset_canonicalizer
         )
