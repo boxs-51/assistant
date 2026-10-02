@@ -46,7 +46,9 @@ def test_r12_f3a_pre_dispatch_guard_runs_inside_continuation_semaphore():
     )
     assert semaphore_index < prepare_index < dispatch_index
     assert "preserve_started_on_failure" in source
-    assert "dispatch_started" in source
+    assert "continuation_started" in source
+    assert "physical_dispatch_authorized" in source
+    assert source.count("prepare_failed.is_set()") >= 4
 
 
 def test_r12_f3a_reuses_r7_r6_path_and_stops_before_provider_inference():
@@ -134,6 +136,9 @@ def test_r12_f3a_projection_fence_is_transactional_with_agent_write():
     fence_source = inspect.getsource(
         DurableAgentStore._lock_recovery_projection_fence_in_uow
     )
+    fence_now_source = inspect.getsource(
+        DurableAgentStore._require_recovery_projection_fence_now
+    )
     save_source = inspect.getsource(DurableAgentStore.save_tool_result)
     promote_source = inspect.getsource(
         DurableAgentStore.load_committed_tool_result
@@ -143,11 +148,12 @@ def test_r12_f3a_projection_fence_is_transactional_with_agent_write():
     )
 
     assert "get_execution_for_update" in fence_source
-    assert 'str(execution.state) != "RUNNING"' in fence_source
-    assert "owner_instance_id" in fence_source
-    assert "lease_generation" in fence_source
-    assert "lease_expires_at" in fence_source
-    assert "datetime.now(timezone.utc)" in fence_source
+    assert "_require_recovery_projection_fence_now" in fence_source
+    assert 'str(execution.state) != "RUNNING"' in fence_now_source
+    assert "owner_instance_id" in fence_now_source
+    assert "lease_generation" in fence_now_source
+    assert "lease_expires_at" in fence_now_source
+    assert "_utc_now()" in fence_now_source
 
     save_fence = save_source.index(
         "await self._lock_recovery_projection_fence_in_uow"
@@ -169,5 +175,11 @@ def test_r12_f3a_projection_fence_is_transactional_with_agent_write():
         "await uow.agents.update_tool_result"
     )
     assert promote_fence < promote_write
+    assert save_source.count(
+        "_require_recovery_projection_fence_now"
+    ) >= 2
+    assert promote_source.count(
+        "_require_recovery_projection_fence_now"
+    ) >= 2
 
     assert "recovery_fence=recovery_fence" in projection_source
