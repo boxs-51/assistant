@@ -459,11 +459,62 @@ class ResponseChats:
             tool_calls = []
             reasoning_delta = ""
             citations_data = []
+            metadata_parts: List[Dict[str, Any]] = []
 
-            if "candidates" in obj and obj["candidates"]:
-                candidate = obj["candidates"][0]
+            candidates = obj.get("candidates") or []
+            parsed_candidates = []
 
-                citations_data = self._extract_citations(candidate)
+            for candidate_index, candidate in enumerate(candidates):
+                candidate_citations = self._extract_citations(candidate)
+                content = candidate.get("content") or {}
+                parts = content.get("parts") or []
+                (
+                    candidate_parts,
+                    candidate_tool_calls,
+                    candidate_reasoning,
+                ) = self._parse_gemini_parts_to_content(
+                    parts,
+                    citations=candidate_citations,
+                    tool_names=tool_names,
+                    preserve_generated_file_data=True,
+                )
+
+                generated_parts = []
+                for part in candidate_parts:
+                    data = part.data
+                    attachment = (
+                        data
+                        if isinstance(data, GatewayAttachment)
+                        else getattr(data, "attachment", None)
+                    )
+                    if (
+                        isinstance(attachment, GatewayAttachment)
+                        and attachment.source in {"base64", "provider"}
+                    ):
+                        generated_parts.append(part)
+
+                parsed_candidates.append(
+                    (
+                        candidate_index,
+                        candidate,
+                        candidate_citations,
+                        candidate_parts,
+                        candidate_tool_calls,
+                        candidate_reasoning,
+                        generated_parts,
+                    )
+                )
+
+            if parsed_candidates:
+                (
+                    _selected_index,
+                    candidate,
+                    citations_data,
+                    parsed_parts,
+                    tool_calls,
+                    reasoning_delta,
+                    _selected_generated_parts,
+                ) = parsed_candidates[0]
 
                 if "finishReason" in candidate:
                     gemini_finish_reason = str(
@@ -482,22 +533,40 @@ class ResponseChats:
                         "stop",
                     )
 
-                content = candidate.get("content") or {}
-                parts = content.get("parts") or []
+                if tool_calls and finish_reason == "stop":
+                    finish_reason = "tool_calls"
 
-                if parts:
-                    (
-                        parsed_parts,
-                        tool_calls,
-                        reasoning_delta,
-                    ) = self._parse_gemini_parts_to_content(
-                        parts,
-                        citations=citations_data,
-                        tool_names=tool_names,
-                    )
+                metadata_parts.extend(
+                    p.model_dump(mode="json", exclude_none=True)
+                    for p in parsed_parts
+                )
 
-                    if tool_calls and finish_reason == "stop":
-                        finish_reason = "tool_calls"
+                # Preserve only F7-S-relevant facts from non-selected candidates.
+                # Internal markers are stripped by the provider-neutral assembler
+                # before any public chunk is emitted.
+                for (
+                    candidate_index,
+                    _candidate,
+                    _candidate_citations,
+                    _candidate_parts,
+                    candidate_tool_calls,
+                    _candidate_reasoning,
+                    generated_parts,
+                ) in parsed_candidates[1:]:
+                    for part in generated_parts:
+                        dumped = part.model_dump(
+                            mode="json",
+                            exclude_none=True,
+                        )
+                        dumped["_cas_f7_candidate_index"] = candidate_index
+                        metadata_parts.append(dumped)
+                    if candidate_tool_calls:
+                        metadata_parts.append(
+                            {
+                                "_cas_f7_candidate_index": candidate_index,
+                                "_cas_f7_tool_call": True,
+                            }
+                        )
 
             text_delta = ""
 
@@ -535,6 +604,7 @@ class ResponseChats:
                 and not finish_reason
                 and not gateway_usage
                 and not citations_data
+                and not metadata_parts
             ):
                 return None
 
@@ -556,10 +626,7 @@ class ResponseChats:
             metadata = ResponseMetaData(
                 provider="gemini",
                 citations=citations_data if citations_data else None,
-                content_parts=[
-                    p.model_dump(exclude_none=True)
-                    for p in parsed_parts
-                ] if parsed_parts else None,
+                content_parts=(metadata_parts if metadata_parts else None),
             )
             return GatewayStreamChunk(
                 id=stream_id,
