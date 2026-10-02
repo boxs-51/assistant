@@ -25,6 +25,45 @@ def _semantic_contract() -> str:
     return text.replace(chr(96), "").replace("*", "")
 
 
+def _service_tree() -> ast.Module:
+    return ast.parse(SERVICE.read_text(encoding="utf-8"))
+
+
+def _class_node(tree: ast.Module, name: str) -> ast.ClassDef:
+    for node in tree.body:
+        if isinstance(node, ast.ClassDef) and node.name == name:
+            return node
+    raise AssertionError(f"class {name!r} not found")
+
+
+def _function_node(
+    class_node: ast.ClassDef,
+    name: str,
+) -> ast.FunctionDef | ast.AsyncFunctionDef:
+    for node in class_node.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == name:
+            return node
+    raise AssertionError(f"method {name!r} not found")
+
+
+def _call_name(call: ast.Call) -> str | None:
+    func = call.func
+    if isinstance(func, ast.Name):
+        return func.id
+    if isinstance(func, ast.Attribute):
+        return func.attr
+    return None
+
+
+def _call_names(node: ast.AST) -> list[str]:
+    return [
+        name
+        for item in ast.walk(node)
+        if isinstance(item, ast.Call)
+        if (name := _call_name(item)) is not None
+    ]
+
+
 def test_b1_protocol_signature_and_exact_service_class():
     assert (
         SourcePromotionAuthorityPort
@@ -88,8 +127,18 @@ def test_b1_owns_one_read_only_session_and_no_write_or_lock_path():
     assert sqlalchemy_imports == {"select"}
 
 
-def test_b1_exact_success_lineage_and_payload_reconstruction_are_present():
+def test_b1_exact_success_lineage_and_delegated_payload_reconstruction_are_present():
     source = SERVICE.read_text(encoding="utf-8")
+    tree = _service_tree()
+    authority = _class_node(
+        tree,
+        "DurableToolResponsePayloadSourceAuthority",
+    )
+    reprove = _function_node(
+        authority,
+        "reprove_for_memory_promotion",
+    )
+    build_material = _function_node(authority, "_build_material")
 
     required = (
         "result.commit_state != COMMITTED_RESULT_STATE",
@@ -110,13 +159,49 @@ def test_b1_exact_success_lineage_and_payload_reconstruction_are_present():
         "tool_call.tool_call_id",
         "tool_call.invocation_id",
         "tool_call.capability_id",
-        "canonical_payload_bytes(result.output)",
-        "tool_response_payload_id(",
         "payload_schema_version=TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION",
         "payload_id != source_ref.authority_id",
     )
     for phrase in required:
         assert phrase in source
+
+    awaited_material_reads = [
+        item
+        for item in ast.walk(reprove)
+        if isinstance(item, ast.Await)
+        and isinstance(item.value, ast.Call)
+        and isinstance(item.value.func, ast.Attribute)
+        and isinstance(item.value.func.value, ast.Name)
+        and item.value.func.value.id == "self"
+        and item.value.func.attr == "read_trusted_promotion_material"
+    ]
+    assert len(awaited_material_reads) == 1
+
+    returned_source_proofs = [
+        item
+        for item in ast.walk(reprove)
+        if isinstance(item, ast.Return)
+        and isinstance(item.value, ast.Attribute)
+        and isinstance(item.value.value, ast.Name)
+        and item.value.value.id == "material"
+        and item.value.attr == "source_proof"
+    ]
+    assert len(returned_source_proofs) == 1
+
+    build_calls = _call_names(build_material)
+    assert build_calls.count("create_tool_response_payload") == 1
+    assert "canonical_payload_bytes" not in build_calls
+    assert "tool_response_payload_id" not in build_calls
+
+    payload_imports = {
+        alias.name
+        for node in tree.body
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "se.src.context.tool_response_payload"
+        for alias in node.names
+    }
+    assert "create_tool_response_payload" in payload_imports
+    assert "tool_response_payload_id" not in payload_imports
 
 
 def test_b1_reconstructs_sanitized_snapshot_instead_of_reusing_caller_ref():
