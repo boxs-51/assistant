@@ -108,12 +108,24 @@ class _ContinuationExecutor:
 
 
 class _Store:
-    def __init__(self, *, fence_results=None, committed=None):
+    def __init__(
+        self,
+        *,
+        fence_results=None,
+        committed=None,
+        claim=None,
+    ):
         self.fence_results = list(fence_results or [])
         self.committed = dict(committed or {})
+        self.claim = claim
         self.fence_calls = []
         self.save_calls = []
         self.promote_calls = []
+
+    async def load_resume_claim_by_request_id(self, resume_request_id):
+        assert self.claim is not None
+        assert resume_request_id == self.claim.resume_request_id
+        return self.claim
 
     async def has_active_execution_lease_fence(self, execution_id, **kwargs):
         self.fence_calls.append((execution_id, kwargs))
@@ -256,6 +268,44 @@ def _activation(plan):
     )
 
 
+def _claim(plan, activation):
+    activation_now = activation.lease_expires_at - timedelta(minutes=1)
+    return SimpleNamespace(
+        claim_id=activation.claim_id,
+        resume_request_id=activation.resume_request_id,
+        execution_id=plan.execution_id,
+        checkpoint_id=plan.checkpoint_id,
+        expected_execution_revision=plan.expected_execution_revision,
+        plan_fingerprint=plan.plan_fingerprint,
+        user_id=plan.resolved_recovery_principal,
+        client_id=plan.target_client_id,
+        connection_id=plan.target_connection_id,
+        wait_reason="RECOVERY",
+        trigger_type=ResumeTriggerType.SERVER_RECOVERY.value,
+        state="CONSUMED",
+        consumed_execution_revision=activation.consumed_execution_revision,
+        metadata={
+            "r12_f2_activation_handoff": {
+                "version": 1,
+                "kind": "SERVER_RECOVERY_ACTIVATION",
+                "execution_id": plan.execution_id,
+                "checkpoint_id": plan.checkpoint_id,
+                "recovery_fingerprint": plan.recovery_fingerprint,
+                "recovery_plan_fingerprint": plan.plan_fingerprint,
+                "activation_owner_instance_id": (
+                    activation.activation_owner_instance_id
+                ),
+                "activation_now_utc": activation_now.isoformat(),
+                "lease_generation": activation.lease_generation,
+                "lease_expires_at": activation.lease_expires_at.isoformat(),
+                "consumed_execution_revision": (
+                    activation.consumed_execution_revision
+                ),
+            }
+        },
+    )
+
+
 def _context(plan, activation):
     context = AgentExecutionContext.create(
         execution_id=EXECUTION,
@@ -307,7 +357,7 @@ async def test_r12_f3a_continues_same_invocation_and_projects_only_under_fence()
     plan = _plan(action)
     activation = _activation(plan)
     context = _context(plan, activation)
-    store = _Store()
+    store = _Store(claim=_claim(plan, activation))
     runtime = _CapabilityRuntime(_invocation())
     executor = _ContinuationExecutor()
     coordinator = AgentToolExecutionCoordinator(executor)
@@ -338,7 +388,7 @@ async def test_r12_f3a_implementation_drift_causes_zero_external_dispatch():
     plan = _plan(action)
     activation = _activation(plan)
     context = _context(plan, activation)
-    store = _Store()
+    store = _Store(claim=_claim(plan, activation))
     runtime = _CapabilityRuntime(
         _invocation(),
         implementation_id="client:replacement",
@@ -369,7 +419,10 @@ async def test_r12_f3a_lease_loss_after_dispatch_preserves_r6_but_blocks_agent_p
     activation = _activation(plan)
     context = _context(plan, activation)
     # Initial batch fence PASS, per-slot dispatch fence PASS, projection fence FAIL.
-    store = _Store(fence_results=[True, True, False])
+    store = _Store(
+        fence_results=[True, True, False],
+        claim=_claim(plan, activation),
+    )
     runtime = _CapabilityRuntime(_invocation())
     executor = _ContinuationExecutor()
     service = AgentRecoveryExecutionService(
@@ -398,7 +451,10 @@ async def test_r12_f3a_reuse_committed_is_read_only_and_never_dispatches():
     activation = _activation(plan)
     context = _context(plan, activation)
     record = _committed_record()
-    store = _Store(committed={TOOL_CALL: record})
+    store = _Store(
+        committed={TOOL_CALL: record},
+        claim=_claim(plan, activation),
+    )
     runtime = _CapabilityRuntime(_invocation())
     executor = _ContinuationExecutor()
     service = AgentRecoveryExecutionService(
