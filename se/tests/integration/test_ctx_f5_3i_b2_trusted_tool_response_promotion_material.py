@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-from types import MappingProxyType
-
 import pytest
 from sqlalchemy import delete, func, inspect as sa_inspect, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -276,17 +274,28 @@ async def test_b2_real_sql_material_is_read_only_detached_and_b1_compatible(
         assert dict(material.source_proof.source_ref_snapshot.metadata) == {
             "source_result_id": RESULT_ID
         }
-        assert isinstance(material.content_snapshot, MappingProxyType)
-        assert isinstance(material.content_snapshot["nested"], MappingProxyType)
-        assert material.content_snapshot["nested"]["values"] == (1, 2, 3)
+        snapshot = material.content_snapshot
+        assert isinstance(snapshot, dict)
+        assert isinstance(snapshot["nested"], dict)
+        assert snapshot["nested"]["values"] == [1, 2, 3]
+        assert hashlib.sha256(canonical_payload_bytes(snapshot)).hexdigest() == material.content_digest
+
+        snapshot["message"] = "caller-mutated"
+        snapshot["nested"]["values"].append(99)
+        fresh_snapshot = material.content_snapshot
+        assert fresh_snapshot["message"] == "durable-result"
+        assert fresh_snapshot["nested"]["values"] == [1, 2, 3]
+        assert hashlib.sha256(canonical_payload_bytes(fresh_snapshot)).hexdigest() == material.content_digest
 
         assert await _counts(sessions) == before_counts
         assert await _snapshot(sessions) == before
 
         await _delete_all_source_rows(sessions)
 
-        assert material.content_snapshot["message"] == "durable-result"
-        assert material.content_snapshot["nested"]["values"] == (1, 2, 3)
+        post_delete_snapshot = material.content_snapshot
+        assert post_delete_snapshot["message"] == "durable-result"
+        assert post_delete_snapshot["nested"]["values"] == [1, 2, 3]
+        assert hashlib.sha256(canonical_payload_bytes(post_delete_snapshot)).hexdigest() == material.content_digest
 
         with pytest.raises(ToolResponsePayloadSourceRejectedError):
             await authority.read_trusted_promotion_material(
