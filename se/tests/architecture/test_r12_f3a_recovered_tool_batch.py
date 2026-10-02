@@ -10,6 +10,9 @@ from se.src.runtimes.agent.recovery_execution import (
 from se.src.runtimes.agent.tool_execution.coordinator import (
     AgentToolExecutionCoordinator,
 )
+from se.src.runtimes.capability.drivers.remote_client_driver import (
+    RemoteClientDriver,
+)
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 
 
@@ -91,15 +94,32 @@ def test_r12_f3a_does_not_create_second_quota_or_lease_lifecycle():
     assert "execute_capability(" not in service_source
 
 
-def test_r12_f3a_canonical_guard_is_immediately_before_driver_boundary():
-    source = inspect.getsource(CapabilityRuntime._run_invocation_attempt)
-    guard_index = source.index("await continuation_dispatch_guard")
-    execute_index = source.index(
-        "raw_output = await self._execute_driver_once"
+def test_r12_f3a_canonical_guard_is_last_await_before_remote_send():
+    bind_source = inspect.getsource(
+        CapabilityRuntime._bind_remote_dispatch_started
     )
-    assert guard_index < execute_index
-    between = source[guard_index:execute_index]
-    assert between.count("await ") == 1
+    mark_index = bind_source.index(
+        "await self.invocation_lifecycle.update_remote_outcome"
+    )
+    guard_index = bind_source.index(
+        "await continuation_dispatch_guard"
+    )
+    assert mark_index < guard_index
+
+    driver_source = inspect.getsource(RemoteClientDriver.execute)
+    handler_index = driver_source.index(
+        "observed = self._dispatch_started_handler"
+    )
+    handler_await = driver_source.index(
+        "await observed",
+        handler_index,
+    )
+    send_index = driver_source.index(
+        "return await self._realtime.invoke",
+        handler_await,
+    )
+    assert handler_index < handler_await < send_index
+    assert driver_source[handler_await:send_index].count("await ") == 1
 
     revalidator = inspect.getsource(
         CapabilityRuntime._revalidate_continuation_target_at_dispatch
