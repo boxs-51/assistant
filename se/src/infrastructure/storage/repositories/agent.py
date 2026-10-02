@@ -1054,23 +1054,41 @@ class AgentRepository(BaseRepository):
         owner_instance_id: str,
         lease_generation: int,
         now_utc: datetime,
+        expected_lease_expires_at: datetime | None = None,
     ) -> bool:
-        """Validate one active durable execution fence without mutating state."""
+        """Validate one active durable execution fence without mutating state.
+
+        R12-F3 may additionally bind the exact F2 activation expiry. Existing
+        callers that omit expected_lease_expires_at preserve the R12-C
+        owner/generation/unexpired predicate.
+        """
 
         owner_instance_id = _require_lease_owner(owner_instance_id)
         lease_generation = _require_lease_generation(lease_generation)
         now_utc = _require_lease_utc_datetime(now_utc, field="now_utc")
+        if expected_lease_expires_at is not None:
+            expected_lease_expires_at = _require_lease_utc_datetime(
+                expected_lease_expires_at,
+                field="expected_lease_expires_at",
+            )
+
+        predicates = [
+            AgentExecutionRecord.id == execution_id,
+            AgentExecutionRecord.state == "RUNNING",
+            AgentExecutionRecord.owner_instance_id == owner_instance_id,
+            AgentExecutionRecord.lease_generation == lease_generation,
+            AgentExecutionRecord.lease_expires_at.is_not(None),
+            AgentExecutionRecord.lease_expires_at > now_utc,
+        ]
+        if expected_lease_expires_at is not None:
+            predicates.append(
+                AgentExecutionRecord.lease_expires_at
+                == expected_lease_expires_at
+            )
 
         result = await self.session.execute(
             select(AgentExecutionRecord.id)
-            .where(
-                AgentExecutionRecord.id == execution_id,
-                AgentExecutionRecord.state == "RUNNING",
-                AgentExecutionRecord.owner_instance_id == owner_instance_id,
-                AgentExecutionRecord.lease_generation == lease_generation,
-                AgentExecutionRecord.lease_expires_at.is_not(None),
-                AgentExecutionRecord.lease_expires_at > now_utc,
-            )
+            .where(*predicates)
             .limit(1)
         )
         return result.scalar_one_or_none() is not None
