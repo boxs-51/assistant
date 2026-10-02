@@ -17,6 +17,9 @@ from se.src.runtimes.agent.tool_execution.coordinator import (
     AgentToolExecutionCoordinator,
 )
 from se.src.runtimes.capability.contracts.definition import CapabilityIdempotency
+from se.src.runtimes.capability.contracts.error import (
+    CapabilityContinuationDispatchGuardError,
+)
 from se.src.runtimes.capability.contracts.invocation import (
     CapabilityInvocationState,
     RemoteOutcomeState,
@@ -127,3 +130,114 @@ async def test_r12_f3a_guard_failure_preserves_already_started_continuation():
 
     assert executor.calls == ["inv-a"]
     assert executor.a_completed is True
+
+
+
+class _TwoSlotCanonicalBarrierExecutor:
+    def __init__(self):
+        self.continuation_setup = []
+        self.external_send_calls = []
+        self.pre_send_truth = {}
+
+    async def continue_invocation(
+        self,
+        context,
+        action,
+        *,
+        continuation_dispatch_guard=None,
+    ):
+        self.continuation_setup.append(action.invocation_id)
+        invocation = SimpleNamespace(
+            invocation_id=action.invocation_id,
+        )
+        try:
+            assert continuation_dispatch_guard is not None
+            await continuation_dispatch_guard(
+                invocation,
+                "client:tool.echo",
+                "conn-r12-f3a-guard",
+                "conn-r12-f3a-origin",
+            )
+        except BaseException:
+            self.pre_send_truth[action.invocation_id] = (
+                "WAITING",
+                "NOT_DISPATCHED",
+            )
+            raise
+
+        self.external_send_calls.append(action.invocation_id)
+        return ToolExecutionResult(
+            execution_id=context.execution_id,
+            iteration=context.iteration,
+            invocation_id=action.invocation_id,
+            tool_call_id=action.tool_call_id,
+            capability_id=action.capability_id,
+            success=True,
+            output={"sent": True},
+        )
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_canonical_guard_failure_blocks_started_presend_sibling():
+    context = _context()
+    context.iteration = 1
+    executor = _TwoSlotCanonicalBarrierExecutor()
+    coordinator = AgentToolExecutionCoordinator(executor)
+
+    raw_a = SimpleNamespace(invocation_id="inv-a", tool_call_id="call-a")
+    raw_b = SimpleNamespace(invocation_id="inv-b", tool_call_id="call-b")
+    mapped = {
+        "inv-a": _resume_action("inv-a", "call-a"),
+        "inv-b": _resume_action("inv-b", "call-b"),
+    }
+
+    a_inside_guard = asyncio.Event()
+    release_a = asyncio.Event()
+
+    async def prepare(raw_action):
+        return mapped[raw_action.invocation_id]
+
+    async def canonical_guard(
+        raw_action,
+        invocation,
+        selected_implementation_id,
+        target_connection_id,
+        origin_connection_id,
+    ):
+        assert invocation.invocation_id == raw_action.invocation_id
+        assert selected_implementation_id == "client:tool.echo"
+        assert target_connection_id == "conn-r12-f3a-guard"
+        assert origin_connection_id == "conn-r12-f3a-origin"
+
+        if raw_action.invocation_id == "inv-a":
+            a_inside_guard.set()
+            await release_a.wait()
+            return
+
+        await a_inside_guard.wait()
+        release_a.set()
+        raise CapabilityContinuationDispatchGuardError(
+            "RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+            "slot B lost canonical recovery authority",
+            retryable=True,
+        )
+
+    with pytest.raises(
+        CapabilityContinuationDispatchGuardError,
+        match="slot B lost canonical recovery authority",
+    ):
+        await coordinator.continue_invocations(
+            context,
+            [raw_a, raw_b],
+            max_parallel=2,
+            pre_dispatch_prepare=prepare,
+            canonical_dispatch_guard=canonical_guard,
+            preserve_started_on_failure=True,
+        )
+
+    assert set(executor.continuation_setup) == {"inv-a", "inv-b"}
+    assert executor.external_send_calls == []
+    assert executor.pre_send_truth == {
+        "inv-a": ("WAITING", "NOT_DISPATCHED"),
+        "inv-b": ("WAITING", "NOT_DISPATCHED"),
+    }
