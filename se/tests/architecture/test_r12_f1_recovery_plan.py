@@ -199,7 +199,7 @@ def _execution(*, iteration=0, task_id=None, branch_id=None):
         owner_instance_id=None,
         lease_expires_at=None,
         lease_generation=4,
-        current_checkpoint_id="cp-r12-f1",
+        current_checkpoint_id="exec-r12-f1:checkpoint:7",
     )
 
 
@@ -248,14 +248,14 @@ def _safe_point(*, iteration=0, iteration_id=None, calls=(), pending=()):
         iteration_id=iteration_id,
         ordered_tool_calls=tuple(calls),
         ordered_pending_invocations=tuple(pending),
-        checkpoint_id="cp-r12-f1",
+        checkpoint_id="exec-r12-f1:checkpoint:7",
         checkpoint_revision=7,
     )
 
 
 def _pending(*, outcome="NOT_DISPATCHED"):
     return SimpleNamespace(
-        checkpoint_id="cp-r12-f1",
+        checkpoint_id="exec-r12-f1:checkpoint:7",
         ordinal=0,
         invocation_id="inv-r12-f1",
         invocation_revision=3,
@@ -814,6 +814,41 @@ async def test_r12_f1_active_batch_requires_frozen_inference_request_identity():
     with pytest.raises(
         RecoveryPlanRejected,
         match="RECOVERY_INFERENCE_IDENTITY_MISSING",
+    ):
+        await service.build_recovery_plan(execution.id)
+
+    assert uow.commit_calls == 0
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("observed_lease_expires_at", "2026-10-01T12:00:05+00:00"),
+        ("takeover_now_utc", "2026-10-01T19:00:00+07:00"),
+        ("observed_lease_generation", 0),
+    ),
+)
+async def test_r12_f1_rejects_noncanonical_recovery_winner_receipt(
+    field,
+    value,
+):
+    execution = _execution()
+    checkpoint = _checkpoint(execution)
+    receipt = dict(checkpoint.metadata_json["r12_recovery_receipt"])
+    receipt[field] = value
+    checkpoint.metadata_json["r12_recovery_receipt"] = receipt
+    checkpoint.metadata_json["r12_recovery_fingerprint"] = (
+        recovery_safe_point_fingerprint(receipt)
+    )
+    service, uow, _runtime = _service(
+        execution=execution,
+        checkpoint=checkpoint,
+        safe_point=_safe_point(),
+    )
+
+    with pytest.raises(
+        RecoveryPlanRejected,
+        match="RECOVERY_RECEIPT_LINEAGE_CONFLICT",
     ):
         await service.build_recovery_plan(execution.id)
 
