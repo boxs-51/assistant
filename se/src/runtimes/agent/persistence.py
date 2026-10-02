@@ -2053,12 +2053,18 @@ class DurableAgentStore:
         """
 
         async with self.uow_factory() as uow:
+            kwargs = {
+                "owner_instance_id": owner_instance_id,
+                "lease_generation": lease_generation,
+                "now_utc": now_utc,
+            }
+            if expected_lease_expires_at is not None:
+                kwargs["expected_lease_expires_at"] = (
+                    expected_lease_expires_at
+                )
             active = await uow.agents.has_active_execution_lease_fence(
                 execution_id,
-                owner_instance_id=owner_instance_id,
-                lease_generation=lease_generation,
-                now_utc=now_utc,
-                expected_lease_expires_at=expected_lease_expires_at,
+                **kwargs,
             )
             await uow.commit()
             return active
