@@ -3,7 +3,10 @@ from __future__ import annotations
 import inspect
 from pathlib import Path
 
-from se.src.runtimes.agent.contracts.recovery import RecoveryActivationResult
+from se.src.runtimes.agent.contracts.recovery import (
+    RecoveryActivationResult,
+    RecoveryContinuationAuthority,
+)
 from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.tool_execution.coordinator import (
@@ -94,3 +97,31 @@ def test_r12_f3_contract_requires_no_second_tool_admission_or_quota_lifecycle():
     assert "F3 performs no second admission" in text
     assert "F3 performs no second logical TOOL charge" in text
     assert "REUSE_COMMITTED never mints quota authority" in text
+
+
+def test_r12_f3_contract_freezes_exact_recovery_continuation_affinity_before_dispatch():
+    fields = RecoveryContinuationAuthority.__dataclass_fields__
+    assert "target_client_id" in fields
+    assert "target_connection_id" in fields
+    assert "implementation_id" in fields
+
+    text = _text()
+    assert "exact F1-frozen" in text
+    assert "continuation_authority.target_client_id" in text
+    assert "continuation_authority.target_connection_id" in text
+    assert "continuation_authority.implementation_id" in text
+    assert "implementation-id replacement/drift" in text
+    assert "kind/execution_mode/origin" in text
+    assert "zero external dispatch" in text
+
+
+def test_r12_f3_contract_preserves_r6_ubq_truth_after_postdispatch_fence_loss():
+    text = _text()
+
+    assert "PRESERVE canonical R6/UBQ truth for any already-started external attempt" in text
+    assert "terminal outcome or OUTCOME_UNKNOWN" in text
+    assert "zero AgentToolResult projection" in text
+    assert "zero checkpoint/transcript update" in text
+    assert "zero execution progression" in text
+    assert "zero model-visible recovery result" in text
+    assert "already-dispatched slot MUST NOT be cancelled in a way that loses side-effect" in text
