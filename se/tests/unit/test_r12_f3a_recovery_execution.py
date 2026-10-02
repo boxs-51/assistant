@@ -473,3 +473,32 @@ async def test_r12_f3a_reuse_committed_is_read_only_and_never_dispatches():
     assert store.save_calls == []
     assert store.promote_calls == []
     assert results[0].output == {"reused": True}
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_stale_consumed_handoff_causes_zero_external_dispatch():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    claim = _claim(plan, activation)
+    claim.metadata["r12_f2_activation_handoff"]["lease_generation"] += 1
+    store = _Store(claim=claim)
+    runtime = _CapabilityRuntime(_invocation())
+    executor = _ContinuationExecutor()
+    service = AgentRecoveryExecutionService(
+        store,
+        runtime,
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "STALE_RECOVERY_ACTIVATION"
+    assert executor.calls == []
+    assert store.save_calls == []
