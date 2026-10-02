@@ -4787,8 +4787,6 @@ class DurableAgentStore:
                     or str(locked_task.created_by)
                     != plan.resolved_recovery_principal
                     or str(locked_task.status) in _TASK_TERMINAL_STATES
-                    or plan.task_revision is None
-                    or int(locked_task.revision) != int(plan.task_revision)
                 ):
                     error = await self._reject_created_claim_in_uow(
                         uow,
@@ -4828,9 +4826,6 @@ class DurableAgentStore:
                         or str(locked_branch.resolution_state) != "OPEN"
                         or str(locked_branch.current_execution_id or "")
                         != plan.execution_id
-                        or plan.branch_revision is None
-                        or int(locked_branch.revision)
-                        != int(plan.branch_revision)
                     ):
                         error = await self._reject_created_claim_in_uow(
                             uow,
