@@ -22,6 +22,7 @@ from se.src.context.source_identity import (
 from se.src.context.tool_response_payload import (
     COMMITTED_RESULT_STATE,
     TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION,
+    ToolResponsePayload,
     canonical_payload_bytes,
     create_tool_response_payload,
 )
@@ -67,8 +68,17 @@ class TrustedToolResponsePromotionMaterial:
     """Detached trusted promotion material from one durable tool-result read."""
 
     source_proof: SourcePromotionProof
-    content_snapshot: Any
-    content_digest: str
+    _payload: ToolResponsePayload
+
+    @property
+    def content_snapshot(self) -> Any:
+        """Return a fresh canonical JSON snapshot detached from trusted state."""
+        return self._payload.model_dump(mode="json")["content"]
+
+    @property
+    def content_digest(self) -> str:
+        """Return the digest owned by the internally frozen canonical payload."""
+        return self._payload.content_digest
 
 
 def _canonical_string(name: str, value: object) -> str:
@@ -469,6 +479,5 @@ class DurableToolResponsePayloadSourceAuthority(
         )
         return TrustedToolResponsePromotionMaterial(
             source_proof=source_proof,
-            content_snapshot=payload.content,
-            content_digest=payload.content_digest,
+            _payload=payload,
         )
