@@ -3,7 +3,7 @@ import asyncio
 import structlog
 import time
 from datetime import datetime, timezone, timedelta
-from typing import Any, Dict, Mapping, Optional
+from typing import Any, Awaitable, Callable, Dict, Mapping, Optional
 
 from ...kernel.base import BaseRuntime, HealthStatus, RuntimeContext, RuntimeManifest
 from .registry import CapabilityRegistry, CapabilityState
@@ -74,6 +74,11 @@ from ...application.user_tool_quota import (
     UserToolQuotaError,
 )
 from .validation import JsonSchemaCapabilityArgumentValidator
+
+ContinuationDispatchGuard = Callable[
+    [CapabilityInvocation, str, str | None, str | None],
+    Awaitable[None],
+]
 
 logger = structlog.get_logger(__name__)
 
@@ -380,6 +385,7 @@ class CapabilityRuntime(BaseRuntime):
         expected_revision: int,
         expected_request_fingerprint: str,
         cancellation_event: asyncio.Event | None = None,
+        continuation_dispatch_guard: ContinuationDispatchGuard | None = None,
     ) -> CapabilityResult:
         """Continue one durable logical invocation by creating exactly one attempt.
 
@@ -422,6 +428,7 @@ class CapabilityRuntime(BaseRuntime):
             expected_revision=expected_revision,
             expected_request_fingerprint=expected_request_fingerprint,
         )
+        continuation_origin_connection_id = invocation.connection_id
         await self._validate_attempt_history(invocation)
 
         continuation_admission: ToolQuotaAdmission | None = None
@@ -568,6 +575,10 @@ class CapabilityRuntime(BaseRuntime):
                 started=started,
                 allow_internal_retry=False,
                 continuation_mode=mode,
+                continuation_dispatch_guard=continuation_dispatch_guard,
+                continuation_origin_connection_id=(
+                    continuation_origin_connection_id
+                ),
             )
         except BaseException:
             persisted = await store.get(invocation.invocation_id)
@@ -902,6 +913,145 @@ class CapabilityRuntime(BaseRuntime):
             ),
             implementation,
         )
+
+    def _revalidate_continuation_target_at_dispatch(
+        self,
+        invocation: CapabilityInvocation,
+        *,
+        target_connection_id: str | None,
+    ) -> CapabilityImplementation:
+        """Re-prove the live continuation target at the physical dispatch seam.
+
+        Unlike the initial selector, this helper intentionally allows the
+        invocation row to already carry the target connection from the R6
+        continuation-attempt transition. It performs no durable mutation and
+        returns the current catalog implementation only.
+        """
+
+        if (
+            not target_connection_id
+            or self.catalog is None
+            or self.connection_registry is None
+            or self.realtime is None
+        ):
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation target connection is unavailable.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        try:
+            snapshot = self.connection_registry.get(target_connection_id)
+        except Exception as exc:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation target connection does not exist.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            ) from exc
+        if not snapshot.is_usable:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation target connection is not ACTIVE.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+
+        client_id = str(snapshot.metadata.get("client_id") or "")
+        if (
+            not invocation.owner_user_id
+            or snapshot.user_id != invocation.owner_user_id
+            or not invocation.origin_client_id
+            or client_id != invocation.origin_client_id
+        ):
+            raise CapabilityError(
+                code="CAPABILITY_UNAUTHORIZED",
+                message=(
+                    "Continuation target must be the same user and stable "
+                    "client installation."
+                ),
+                category="AUTHORIZATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        try:
+            definition = self.catalog.get_definition(
+                invocation.capability_id
+            )
+            candidates = [
+                item
+                for item in self.catalog.list_implementations(
+                    invocation.capability_id,
+                    routable_only=True,
+                )
+                if (
+                    item.location is CapabilityExecutionLocation.CLIENT
+                    and item.owner_type is CapabilityOwnerType.CLIENT
+                    and item.driver_kind == "REMOTE_CLIENT"
+                    and item.connection_id == target_connection_id
+                    and item.owner_id == invocation.owner_user_id
+                    and str(item.metadata.get("client_id") or "")
+                    == invocation.origin_client_id
+                    and item.version == invocation.capability_version
+                )
+            ]
+        except Exception as exc:
+            raise CapabilityError(
+                code=CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
+                message="Continuation capability is not available on target.",
+                category="CONTINUATION",
+                retryable=True,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            ) from exc
+
+        if (
+            definition.version != invocation.capability_version
+            or definition.kind is not invocation.kind
+            or definition.execution_mode is not invocation.execution_mode
+            or definition.idempotency is not invocation.idempotency
+        ):
+            raise CapabilityError(
+                code=REMOTE_INVOCATION_CONFLICT,
+                message="Continuation capability contract changed.",
+                category="RECONCILIATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        if len(candidates) != 1:
+            code = (
+                REMOTE_INVOCATION_CONFLICT
+                if len(candidates) > 1
+                else CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE
+            )
+            raise CapabilityError(
+                code=code,
+                message=(
+                    "Continuation requires exactly one live client "
+                    "implementation at dispatch."
+                ),
+                category="CONTINUATION",
+                retryable=(len(candidates) == 0),
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+                details={"candidate_count": len(candidates)},
+            )
+        return candidates[0]
 
     @staticmethod
     def _require_same_logical_invocation(
@@ -1666,6 +1816,8 @@ class CapabilityRuntime(BaseRuntime):
         started: float,
         allow_internal_retry: bool,
         continuation_mode: ExistingInvocationContinuationMode | None = None,
+        continuation_dispatch_guard: ContinuationDispatchGuard | None = None,
+        continuation_origin_connection_id: str | None = None,
     ) -> CapabilityResult:
         logger.info(
             "Executing capability",
@@ -1768,6 +1920,13 @@ class CapabilityRuntime(BaseRuntime):
 
         while True:
             try:
+                if continuation_dispatch_guard is not None:
+                    await continuation_dispatch_guard(
+                        invocation,
+                        effective_implementation_id,
+                        routing_connection_id,
+                        continuation_origin_connection_id,
+                    )
                 raw_output = await self._execute_driver_once(
                     driver,
                     context,
