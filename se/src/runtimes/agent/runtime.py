@@ -1818,8 +1818,18 @@ class AgentRuntime:
                             if context.identity.user_id
                             else None
                         ),
+                        budget_identity=context.identity,
                         cancellation_event=context.cancellation_event,
-                        metadata=dict(snapshot.metadata),
+                        metadata={
+                            **dict(snapshot.metadata),
+                            "quota_source_surface": "AGENT",
+                            "session_id": context.session_id,
+                            "task_id": context.task_id,
+                            "workflow_id": context.workflow_id,
+                            "agent_iteration_id": (
+                                f"{context.execution_id}:iteration:{iteration_number}"
+                            ),
+                        },
                     )
                 )
 
