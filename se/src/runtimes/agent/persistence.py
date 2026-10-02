@@ -43,6 +43,11 @@ from .contracts.fork import (
     fork_transcript_fingerprint,
 )
 from .contracts.inference import InferenceMessage, InferenceUsage
+from .contracts.recovery import (
+    RecoveryActivationResult,
+    RecoveryActivationSpec,
+    recovery_plan_fingerprint,
+)
 from .contracts.resume import (
     CheckpointPendingInvocation,
     DurableExecutionCheckpoint,
@@ -4398,6 +4403,755 @@ class DurableAgentStore:
         raise ResumeClaimDeferred(
             "RESUME_CONFLICT",
             "ResumeClaim SQL conflicts exhausted.",
+            retryable=True,
+        )
+
+    @staticmethod
+    def _recovery_claim_matches_plan(
+        record,
+        spec: RecoveryActivationSpec,
+    ) -> bool:
+        plan = spec.plan
+        return (
+            record.resume_request_id == spec.resume_request_id
+            and record.execution_id == plan.execution_id
+            and record.checkpoint_id == plan.checkpoint_id
+            and record.expected_execution_revision
+            == plan.expected_execution_revision
+            and record.plan_fingerprint == plan.plan_fingerprint
+            and record.user_id == plan.resolved_recovery_principal
+            and record.client_id == plan.target_client_id
+            and record.connection_id == plan.target_connection_id
+            and record.wait_reason == "RECOVERY"
+            and normalize_resume_trigger_type(record.trigger_type)
+            is ResumeTriggerType.SERVER_RECOVERY
+        )
+
+    async def _consume_recovery_claim_once(
+        self,
+        spec: RecoveryActivationSpec,
+    ) -> RecoveryActivationResult | ResumeClaimError:
+        plan = spec.plan
+        now_utc = spec.activation_now_utc
+        lease_expires_at = spec.activation_lease_expires_at
+        owner_instance_id = spec.activation_owner_instance_id
+
+        if (
+            not isinstance(now_utc, datetime)
+            or now_utc.tzinfo is None
+            or now_utc.utcoffset() != timedelta(0)
+        ):
+            raise ValueError(
+                "activation_now_utc must be a timezone-aware UTC datetime"
+            )
+        if (
+            not isinstance(lease_expires_at, datetime)
+            or lease_expires_at.tzinfo is None
+            or lease_expires_at.utcoffset() != timedelta(0)
+        ):
+            raise ValueError(
+                "activation_lease_expires_at must be a timezone-aware UTC datetime"
+            )
+        if lease_expires_at <= now_utc:
+            raise ValueError(
+                "activation_lease_expires_at must be later than activation_now_utc"
+            )
+        if not isinstance(owner_instance_id, str) or not owner_instance_id.strip():
+            raise ValueError(
+                "activation_owner_instance_id must be a non-empty string"
+            )
+        owner_instance_id = owner_instance_id.strip()
+
+        if plan.target_trigger is not ResumeTriggerType.SERVER_RECOVERY:
+            raise ResumeClaimRejected(
+                "RECOVERY_TRIGGER_CONFLICT",
+                "R12-F2 activation requires SERVER_RECOVERY.",
+            )
+        if recovery_plan_fingerprint(plan) != plan.plan_fingerprint:
+            raise ResumeClaimRejected(
+                "STALE_RECOVERY_PLAN",
+                "RecoveryPlan fingerprint does not match its semantics.",
+            )
+
+        async with self.uow_factory() as uow:
+            claim = await uow.agents.get_resume_claim(spec.claim_id)
+            if claim is None:
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "STALE_RESUME_CLAIM",
+                    "ResumeClaim does not exist.",
+                )
+            if not self._recovery_claim_matches_plan(claim, spec):
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "RESUME_REQUEST_CONFLICT",
+                    "ResumeClaim semantics do not match the RecoveryPlan.",
+                )
+
+            if claim.state == ResumeClaimState.CONSUMED.value:
+                metadata = dict(claim.metadata_json or {})
+                handoff = metadata.get("r12_f2_activation_handoff")
+                if not isinstance(handoff, dict):
+                    await uow.commit()
+                    return ResumeClaimRejected(
+                        "STALE_RECOVERY_ACTIVATION",
+                        "CONSUMED recovery claim lacks activation handoff proof.",
+                    )
+                try:
+                    handoff_version = int(handoff["version"])
+                    handoff_kind = str(handoff["kind"])
+                    handoff_owner = str(
+                        handoff["activation_owner_instance_id"]
+                    )
+                    handoff_generation = int(handoff["lease_generation"])
+                    handoff_expiry = datetime.fromisoformat(
+                        str(handoff["lease_expires_at"])
+                    )
+                    handoff_revision = int(
+                        handoff["consumed_execution_revision"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    await uow.commit()
+                    return ResumeClaimRejected(
+                        "STALE_RECOVERY_ACTIVATION",
+                        "Recovery activation handoff proof is malformed.",
+                    )
+
+                execution = await uow.agents.get_execution(plan.execution_id)
+                current_expiry = (
+                    _utc_datetime(execution.lease_expires_at)
+                    if execution is not None
+                    else None
+                )
+                handoff_expiry = _utc_datetime(handoff_expiry)
+                expected_revision = plan.expected_execution_revision + 1
+                if (
+                    handoff_version != 1
+                    or handoff_kind != "SERVER_RECOVERY_ACTIVATION"
+                    or handoff_owner != owner_instance_id
+                    or handoff_revision != expected_revision
+                    or claim.consumed_execution_revision != expected_revision
+                    or str(handoff.get("execution_id") or "")
+                    != plan.execution_id
+                    or str(handoff.get("checkpoint_id") or "")
+                    != plan.checkpoint_id
+                    or str(handoff.get("recovery_fingerprint") or "")
+                    != plan.recovery_fingerprint
+                    or str(handoff.get("recovery_plan_fingerprint") or "")
+                    != plan.plan_fingerprint
+                    or execution is None
+                    or str(execution.state) != "RUNNING"
+                    or int(execution.revision) != expected_revision
+                    or str(execution.current_checkpoint_id or "")
+                    != plan.checkpoint_id
+                    or str(execution.owner_instance_id or "")
+                    != handoff_owner
+                    or int(execution.lease_generation) != handoff_generation
+                    or current_expiry != handoff_expiry
+                    or handoff_expiry is None
+                    or handoff_expiry <= now_utc
+                ):
+                    await uow.commit()
+                    return ResumeClaimRejected(
+                        "STALE_RECOVERY_ACTIVATION",
+                        "Committed recovery activation no longer owns the exact lease.",
+                    )
+                result = RecoveryActivationResult(
+                    claim_id=claim.claim_id,
+                    resume_request_id=claim.resume_request_id,
+                    execution_id=plan.execution_id,
+                    checkpoint_id=plan.checkpoint_id,
+                    source_execution_revision=plan.expected_execution_revision,
+                    consumed_execution_revision=expected_revision,
+                    activation_owner_instance_id=handoff_owner,
+                    lease_generation=handoff_generation,
+                    lease_expires_at=handoff_expiry,
+                    already_consumed=True,
+                )
+                await uow.commit()
+                return result
+
+            if claim.state == ResumeClaimState.EXPIRED.value:
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "CLAIM_EXPIRED",
+                    "ResumeClaim expired.",
+                )
+            if claim.state == ResumeClaimState.REJECTED.value:
+                code = claim.rejection_code or "STALE_RESUME_CLAIM"
+                await uow.commit()
+                return ResumeClaimRejected(code, code)
+            if (
+                claim.state != ResumeClaimState.CREATED.value
+                or int(claim.revision) != int(spec.expected_claim_revision)
+            ):
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "STALE_RESUME_CLAIM",
+                    "ResumeClaim state/revision is stale.",
+                )
+
+            claim_expires_at = _utc_datetime(claim.claim_expires_at)
+            if claim_expires_at is None or now_utc >= claim_expires_at:
+                expired = await uow.agents.compare_and_set_resume_claim(
+                    claim.claim_id,
+                    claim.revision,
+                    ResumeClaimState.CREATED.value,
+                    {
+                        "state": ResumeClaimState.EXPIRED.value,
+                        "expired_at": now_utc,
+                    },
+                )
+                if expired is None:
+                    await uow.rollback()
+                    return ResumeClaimDeferred(
+                        "RECOVERY_ACTIVATION_CONFLICT",
+                        "ResumeClaim changed while expiring.",
+                        retryable=True,
+                    )
+                await uow.commit()
+                return ResumeClaimRejected(
+                    "CLAIM_EXPIRED",
+                    "ResumeClaim expired.",
+                )
+
+            execution = await uow.agents.get_execution(plan.execution_id)
+            if (
+                execution is None
+                or str(execution.state) != "WAITING"
+                or str(execution.wait_reason or "") != "RECOVERY"
+                or int(execution.revision)
+                != int(plan.expected_execution_revision)
+                or str(execution.current_checkpoint_id or "")
+                != plan.checkpoint_id
+                or execution.owner_instance_id is not None
+                or execution.lease_expires_at is not None
+                or int(execution.lease_generation)
+                != int(plan.expected_unowned_lease_generation)
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="RECOVERY_ACTIVATION_CONFLICT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            if (
+                str(execution.session_id) != plan.session_id
+                or str(execution.agent_id) != plan.agent_id
+                or execution.task_id != plan.task_id
+                or execution.branch_id != plan.branch_id
+                or execution.parent_execution_id != plan.parent_execution_id
+                or execution.retry_of_execution_id
+                != plan.retry_of_execution_id
+                or execution.base_execution_id != plan.base_execution_id
+                or execution.base_checkpoint_id != plan.base_checkpoint_id
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="RECOVERY_LINEAGE_CONFLICT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                plan.checkpoint_id
+            )
+            if (
+                checkpoint is None
+                or str(checkpoint.execution_id) != plan.execution_id
+                or int(checkpoint.execution_revision)
+                != int(plan.expected_execution_revision)
+                or str(checkpoint.session_id) != plan.session_id
+                or checkpoint.task_id != plan.task_id
+                or checkpoint.branch_id != plan.branch_id
+                or int(checkpoint.iteration) != int(plan.iteration)
+                or str(checkpoint.wait_reason) != "RECOVERY"
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="STALE_CHECKPOINT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            execution_wait_expires_at = _utc_datetime(
+                execution.wait_expires_at
+            )
+            checkpoint_wait_expires_at = _utc_datetime(
+                checkpoint.wait_expires_at
+            )
+            plan_wait_expires_at = _utc_datetime(plan.wait_expires_at)
+            if not (
+                execution_wait_expires_at
+                == checkpoint_wait_expires_at
+                == plan_wait_expires_at
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="STALE_CHECKPOINT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+            if plan_wait_expires_at is not None:
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="RECOVERY_WAIT_TTL_UNRELEASED",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            remaining = checkpoint.remaining_active_budget_seconds
+            if (
+                remaining is None
+                or not math.isfinite(float(remaining))
+                or float(remaining) <= 0.0
+                or float(remaining)
+                != float(plan.remaining_active_budget_seconds)
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="RECOVERY_ACTIVE_BUDGET_CONFLICT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            checkpoint_metadata = dict(checkpoint.metadata_json or {})
+            receipt = checkpoint_metadata.get("r12_recovery_receipt")
+            fingerprint = str(
+                checkpoint_metadata.get("r12_recovery_fingerprint") or ""
+            )
+            if (
+                not isinstance(receipt, dict)
+                or fingerprint != plan.recovery_fingerprint
+                or recovery_safe_point_fingerprint(dict(receipt))
+                != plan.recovery_fingerprint
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="RECOVERY_FINGERPRINT_CONFLICT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            session = await uow.agents.get_session(plan.session_id)
+            principal = (
+                str(getattr(session, "owner_user_id", "") or "")
+                if session is not None
+                else ""
+            )
+            if principal != plan.resolved_recovery_principal:
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="FOREIGN_PRINCIPAL",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            locked_task = None
+            locked_budget = None
+            if plan.task_id is not None:
+                locked_task = await uow.agents.get_task_for_update(plan.task_id)
+                if (
+                    locked_task is None
+                    or str(locked_task.session_id) != plan.session_id
+                    or str(locked_task.created_by)
+                    != plan.resolved_recovery_principal
+                    or str(locked_task.status) in _TASK_TERMINAL_STATES
+                    or plan.task_revision is None
+                    or int(locked_task.revision) != int(plan.task_revision)
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="TASK_TERMINAL",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
+                locked_budget = await uow.agents.get_task_budget_for_update(
+                    plan.task_id
+                )
+                if (
+                    locked_budget is None
+                    or str(locked_budget.state) != "OPEN"
+                    or plan.task_budget_incarnation_generation is None
+                    or int(locked_budget.incarnation_generation)
+                    != int(plan.task_budget_incarnation_generation)
+                    or plan.task_budget_revision is None
+                    or int(locked_budget.revision)
+                    != int(plan.task_budget_revision)
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="TASK_BUDGET_CONFLICT",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
+                if plan.branch_id is not None:
+                    locked_branch = await uow.agents.get_task_branch_for_update(
+                        plan.branch_id
+                    )
+                    if (
+                        locked_branch is None
+                        or str(locked_branch.task_id) != plan.task_id
+                        or str(locked_branch.resolution_state) != "OPEN"
+                        or str(locked_branch.current_execution_id or "")
+                        != plan.execution_id
+                        or plan.branch_revision is None
+                        or int(locked_branch.revision)
+                        != int(plan.branch_revision)
+                    ):
+                        error = await self._reject_created_claim_in_uow(
+                            uow,
+                            claim,
+                            code="BRANCH_NOT_OPEN",
+                            now_utc=now_utc,
+                        )
+                        await uow.commit()
+                        return error
+            elif (
+                plan.task_revision is not None
+                or plan.task_budget_incarnation_generation is not None
+                or plan.task_budget_revision is not None
+                or plan.branch_id is not None
+                or plan.branch_revision is not None
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="RECOVERY_LINEAGE_CONFLICT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            pending = await uow.agents.list_checkpoint_pending_invocations(
+                plan.checkpoint_id
+            )
+            actions = tuple(plan.invocation_actions)
+            if (
+                len(pending) != len(actions)
+                or [str(item.invocation_id) for item in pending]
+                != [item.invocation_id for item in actions]
+            ):
+                error = await self._reject_created_claim_in_uow(
+                    uow,
+                    claim,
+                    code="STALE_RECONCILIATION_SNAPSHOT",
+                    now_utc=now_utc,
+                )
+                await uow.commit()
+                return error
+
+            action_tool_call_ids = {
+                item.tool_call_id for item in actions
+            }
+            for tool_call_id in plan.ordered_tool_call_ids:
+                if tool_call_id in action_tool_call_ids:
+                    continue
+                tool_call = await uow.agents.get_tool_call(
+                    plan.execution_id,
+                    tool_call_id,
+                )
+                tool_result = await uow.agents.get_tool_result(
+                    plan.execution_id,
+                    tool_call_id,
+                )
+                if (
+                    tool_call is None
+                    or tool_result is None
+                    or getattr(tool_result, "commit_state", "PROVISIONAL")
+                    != "COMMITTED"
+                    or tool_result.invocation_id != tool_call.invocation_id
+                    or tool_result.capability_id != tool_call.capability_id
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="STALE_RECONCILIATION_SNAPSHOT",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
+            for snapshot, action in zip(pending, actions):
+                if (
+                    int(snapshot.ordinal) != int(action.ordinal)
+                    or str(snapshot.tool_call_id) != action.tool_call_id
+                    or str(snapshot.capability_id) != action.capability_id
+                    or snapshot.capability_version
+                    != action.capability_version
+                    or snapshot.request_fingerprint
+                    != action.request_fingerprint
+                    or str(snapshot.idempotency) != action.idempotency.value
+                    or snapshot.origin_client_id != action.origin_client_id
+                    or snapshot.origin_connection_id
+                    != action.origin_connection_id
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="STALE_CHECKPOINT",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
+                invocation = await uow.capability_invocations.get_record(
+                    action.invocation_id
+                )
+                expected_outcome = (
+                    action.expected_remote_outcome_state.value
+                    if action.expected_remote_outcome_state is not None
+                    else None
+                )
+                if (
+                    invocation is None
+                    or str(invocation.execution_id) != plan.execution_id
+                    or str(invocation.tool_call_id) != action.tool_call_id
+                    or str(invocation.capability_id) != action.capability_id
+                    or invocation.capability_version
+                    != action.capability_version
+                    or invocation.request_fingerprint
+                    != action.request_fingerprint
+                    or str(invocation.kind) != action.kind.value
+                    or str(invocation.execution_mode)
+                    != action.execution_mode.value
+                    or str(invocation.idempotency)
+                    != action.idempotency.value
+                    or invocation.owner_user_id
+                    != plan.resolved_recovery_principal
+                    or invocation.origin_client_id
+                    != action.origin_client_id
+                    or (
+                        action.origin_connection_id is not None
+                        and invocation.connection_id
+                        != action.origin_connection_id
+                    )
+                    or int(invocation.revision)
+                    != int(action.expected_invocation_revision)
+                    or str(invocation.state)
+                    != action.expected_invocation_state.value
+                    or invocation.remote_outcome_state != expected_outcome
+                ):
+                    error = await self._reject_created_claim_in_uow(
+                        uow,
+                        claim,
+                        code="STALE_RECONCILIATION_SNAPSHOT",
+                        now_utc=now_utc,
+                    )
+                    await uow.commit()
+                    return error
+
+                if action.action is ResumeInvocationActionKind.REUSE_COMMITTED:
+                    tool_result = await uow.agents.get_tool_result(
+                        plan.execution_id,
+                        action.tool_call_id,
+                    )
+                    if (
+                        tool_result is None
+                        or getattr(tool_result, "commit_state", "PROVISIONAL")
+                        != "COMMITTED"
+                        or tool_result.invocation_id != action.invocation_id
+                        or tool_result.capability_id != action.capability_id
+                    ):
+                        error = await self._reject_created_claim_in_uow(
+                            uow,
+                            claim,
+                            code="STALE_RECONCILIATION_SNAPSHOT",
+                            now_utc=now_utc,
+                        )
+                        await uow.commit()
+                        return error
+
+            if plan.task_id is not None:
+                assert locked_task is not None
+                activity_task = await uow.agents.compare_and_set_task(
+                    plan.task_id,
+                    int(locked_task.revision),
+                    {
+                        "status": str(locked_task.status),
+                        "wait_reasons": list(locked_task.wait_reasons or []),
+                    },
+                )
+                if activity_task is None:
+                    await uow.rollback()
+                    return ResumeClaimDeferred(
+                        "RECOVERY_ACTIVATION_CONFLICT",
+                        "AgentTask activity epoch changed during recovery activation.",
+                        retryable=True,
+                    )
+                locked_task = activity_task
+
+                await prepare_resume_capacity_in_uow(
+                    uow,
+                    task_id=plan.task_id,
+                    execution_id=plan.execution_id,
+                    source_revision=plan.expected_execution_revision,
+                    delegated=plan.parent_execution_id is not None,
+                )
+
+            updated_execution = await uow.agents.compare_and_set_waiting_execution(
+                plan.execution_id,
+                plan.expected_execution_revision,
+                plan.checkpoint_id,
+                "RECOVERY",
+                {
+                    "state": "RUNNING",
+                    "wait_reason": None,
+                    "wait_expires_at": None,
+                    "bound_client_id": plan.target_client_id,
+                    "bound_connection_id": plan.target_connection_id,
+                },
+            )
+            if updated_execution is None:
+                await uow.rollback()
+                return ResumeClaimDeferred(
+                    "RECOVERY_ACTIVATION_CONFLICT",
+                    "AgentExecution recovery activation CAS lost.",
+                    retryable=True,
+                )
+
+            leased_execution = await uow.agents.acquire_execution_lease(
+                plan.execution_id,
+                owner_instance_id=owner_instance_id,
+                now_utc=now_utc,
+                lease_expires_at=lease_expires_at,
+            )
+            expected_generation = (
+                int(plan.expected_unowned_lease_generation) + 1
+            )
+            if (
+                leased_execution is None
+                or str(leased_execution.owner_instance_id or "")
+                != owner_instance_id
+                or int(leased_execution.lease_generation)
+                != expected_generation
+                or _utc_datetime(leased_execution.lease_expires_at)
+                != lease_expires_at
+            ):
+                await uow.rollback()
+                return ResumeClaimDeferred(
+                    "RECOVERY_ACTIVATION_CONFLICT",
+                    "Fresh recovery execution lease acquisition lost.",
+                    retryable=True,
+                )
+
+            consumed_revision = plan.expected_execution_revision + 1
+            metadata = dict(claim.metadata_json or {})
+            metadata["r12_f2_activation_handoff"] = {
+                "version": 1,
+                "kind": "SERVER_RECOVERY_ACTIVATION",
+                "execution_id": plan.execution_id,
+                "checkpoint_id": plan.checkpoint_id,
+                "recovery_fingerprint": plan.recovery_fingerprint,
+                "recovery_plan_fingerprint": plan.plan_fingerprint,
+                "activation_owner_instance_id": owner_instance_id,
+                "lease_generation": expected_generation,
+                "lease_expires_at": lease_expires_at.isoformat(),
+                "consumed_execution_revision": consumed_revision,
+            }
+            consumed = await uow.agents.compare_and_set_resume_claim(
+                claim.claim_id,
+                claim.revision,
+                ResumeClaimState.CREATED.value,
+                {
+                    "state": ResumeClaimState.CONSUMED.value,
+                    "consumed_at": now_utc,
+                    "consumed_execution_revision": consumed_revision,
+                    "metadata_json": metadata,
+                },
+            )
+            if consumed is None:
+                await uow.rollback()
+                return ResumeClaimDeferred(
+                    "RECOVERY_ACTIVATION_CONFLICT",
+                    "ResumeClaim consumption CAS lost.",
+                    retryable=True,
+                )
+
+            if plan.task_id is not None:
+                activity = await reconcile_multibranch_task_activity_in_uow(
+                    uow,
+                    task_id=plan.task_id,
+                    locked_task=locked_task,
+                )
+                if activity is None:
+                    await uow.rollback()
+                    return ResumeClaimDeferred(
+                        "RECOVERY_ACTIVATION_CONFLICT",
+                        "AgentTask activity CAS lost during recovery activation.",
+                        retryable=True,
+                    )
+
+            result = RecoveryActivationResult(
+                claim_id=claim.claim_id,
+                resume_request_id=claim.resume_request_id,
+                execution_id=plan.execution_id,
+                checkpoint_id=plan.checkpoint_id,
+                source_execution_revision=plan.expected_execution_revision,
+                consumed_execution_revision=consumed_revision,
+                activation_owner_instance_id=owner_instance_id,
+                lease_generation=expected_generation,
+                lease_expires_at=lease_expires_at,
+                already_consumed=False,
+            )
+            await uow.commit()
+            return result
+
+    async def consume_recovery_claim(
+        self,
+        spec: RecoveryActivationSpec,
+    ) -> RecoveryActivationResult:
+        """Atomically activate one R12-F2 SERVER_RECOVERY ResumeClaim.
+
+        The single transaction revalidates the immutable recovery plan,
+        TaskBudget incarnation and invocation snapshots, stages any task
+        resume-capacity writes, publishes WAITING(RECOVERY) -> RUNNING,
+        acquires the fresh R12-C execution lease, records a versioned durable
+        activation handoff, consumes the existing ResumeClaim and commits once.
+        """
+
+        for _ in range(8):
+            try:
+                outcome = await self._consume_recovery_claim_once(spec)
+                if isinstance(outcome, ResumeClaimDeferred):
+                    continue
+                if isinstance(outcome, ResumeClaimError):
+                    raise outcome
+                return outcome
+            except IntegrityError:
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise ResumeClaimDeferred(
+            "RECOVERY_ACTIVATION_CONFLICT",
+            "SERVER_RECOVERY claim SQL conflicts exhausted.",
             retryable=True,
         )
 
