@@ -655,6 +655,85 @@ async def test_r12_f2_task_scoped_activation_reacquires_capacity_once(
 
 
 @pytest.mark.asyncio
+async def test_r12_f2_mutable_lineage_revision_drift_is_not_activation_identity(
+    tmp_path,
+):
+    engine, factory, store = await _setup(
+        tmp_path,
+        "r12_f2_mutable_revision_drift.sqlite",
+    )
+    takeover_at = datetime(2026, 10, 2, 7, 36, tzinfo=timezone.utc)
+    activation_now = takeover_at + timedelta(seconds=5)
+    task_id = "task-r12-f2-revision-drift"
+    execution_id = "exec-task-r12-f2-revision-drift"
+    branch_id = "branch-r12-f2-revision-drift"
+    try:
+        await _seed_task_recovery_cut(
+            factory,
+            store,
+            task_id=task_id,
+            execution_id=execution_id,
+            branch_id=branch_id,
+            takeover_at=takeover_at,
+        )
+        planner, plan, claim = await _plan_and_claim(
+            factory,
+            store,
+            execution_id=execution_id,
+            now_utc=activation_now,
+            request_id="recover-r12-f2-revision-drift",
+        )
+        service = AgentRecoveryActivationService(planner, store)
+
+        async with factory() as uow:
+            task = await uow.agents.get_task(task_id)
+            budget = await uow.agents.get_task_budget(task_id)
+            branch = await uow.agents.get_task_branch(branch_id)
+            task.revision = int(task.revision) + 1
+            budget.revision = int(budget.revision) + 1
+            branch.revision = int(branch.revision) + 1
+            await uow.commit()
+
+        fresh = await planner.build_recovery_plan(execution_id)
+        assert fresh.task_revision != plan.task_revision
+        assert fresh.task_budget_revision != plan.task_budget_revision
+        assert fresh.branch_revision != plan.branch_revision
+        assert fresh.task_budget_incarnation_generation == (
+            plan.task_budget_incarnation_generation
+        )
+        assert fresh.plan_fingerprint == plan.plan_fingerprint
+
+        activated = await service.activate(
+            plan,
+            claim_id=claim.claim_id,
+            resume_request_id=claim.resume_request_id,
+            expected_claim_revision=claim.revision,
+            activation_owner_instance_id="worker-r12-f2-revision-drift",
+            activation_now_utc=activation_now,
+            activation_lease_expires_at=(
+                activation_now + timedelta(seconds=30)
+            ),
+        )
+        assert activated.already_consumed is False
+
+        async with factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            budget = await uow.agents.get_task_budget(task_id)
+            assert execution.state == "RUNNING"
+            assert (
+                execution.owner_instance_id
+                == "worker-r12-f2-revision-drift"
+            )
+            assert budget.active_executions == 1
+            assert budget.incarnation_generation == (
+                plan.task_budget_incarnation_generation
+            )
+            await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_r12_f2_task_budget_incarnation_drift_fails_before_capacity(
     tmp_path,
 ):
