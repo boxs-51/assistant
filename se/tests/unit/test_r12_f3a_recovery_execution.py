@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 
@@ -630,3 +631,70 @@ async def test_r12_f3a_noncommitted_projection_fails_closed():
     assert len(executor.calls) == 1
     assert len(store.save_calls) == 1
     assert store.committed[TOOL_CALL].commit_state == "PROVISIONAL"
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_returns_complete_reuse_batch_in_plan_order():
+    base = _action(kind=ResumeInvocationActionKind.REUSE_COMMITTED)
+    action_a = replace(
+        base,
+        invocation_id="inv-a",
+        tool_call_id="call-a",
+        ordinal=0,
+    )
+    action_b = replace(
+        base,
+        invocation_id="inv-b",
+        tool_call_id="call-b",
+        ordinal=1,
+    )
+    initial = _plan(action_a)
+    plan = replace(
+        initial,
+        ordered_tool_call_ids=("call-a", "call-b"),
+        invocation_actions=(action_a, action_b),
+        plan_fingerprint="",
+    )
+    plan = replace(
+        plan,
+        plan_fingerprint=recovery_plan_fingerprint(plan),
+    )
+    activation = _activation(plan)
+    context = _context(plan, activation)
+
+    record_a = _committed_record(output={"slot": "a"})
+    record_a.invocation_id = "inv-a"
+    record_a.tool_call_id = "call-a"
+    record_a.id = f"{EXECUTION}:call-a"
+    record_b = _committed_record(output={"slot": "b"})
+    record_b.invocation_id = "inv-b"
+    record_b.tool_call_id = "call-b"
+    record_b.id = f"{EXECUTION}:call-b"
+
+    store = _Store(
+        committed={
+            "call-b": record_b,
+            "call-a": record_a,
+        },
+        claim=_claim(plan, activation),
+    )
+    executor = _ContinuationExecutor()
+    service = AgentRecoveryExecutionService(
+        store,
+        _CapabilityRuntime(_invocation()),
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    results = await service.execute_active_tool_batch(
+        context,
+        plan=plan,
+        activation=activation,
+    )
+
+    assert executor.calls == []
+    assert store.save_calls == []
+    assert tuple(item.tool_call_id for item in results) == (
+        "call-a",
+        "call-b",
+    )
+    assert tuple(item.output["slot"] for item in results) == ("a", "b")
