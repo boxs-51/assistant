@@ -1080,3 +1080,152 @@ async def test_ubq4_terminal_usage_then_later_finish_without_usage_revokes_candi
     assert settled.output_tokens is None
     assert settled.total_tokens is None
 
+@pytest.mark.asyncio
+async def test_ubq4_same_chunk_partial_multichoice_terminal_usage_stays_unknown(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    finish_reason="stop",
+                    extra_choices=[
+                        SimpleNamespace(
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content="unfinished choice output",
+                                reasoning_content=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                )
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_ubq4_partial_multichoice_terminal_does_not_authorize_trailing_usage_only(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                    extra_choices=[
+                        SimpleNamespace(
+                            finish_reason=None,
+                            delta=SimpleNamespace(
+                                content="unfinished choice output",
+                                reasoning_content=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                ),
+                _stream_chunk("p1", with_usage=True),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_ubq4_same_chunk_all_choices_terminal_usage_is_known(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    finish_reason="stop",
+                    extra_choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            delta=SimpleNamespace(
+                                content=None,
+                                reasoning_content=None,
+                                tool_calls=None,
+                            ),
+                        )
+                    ],
+                )
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert (
+        settled.input_tokens,
+        settled.output_tokens,
+        settled.total_tokens,
+    ) == (2, 3, 5)
+
