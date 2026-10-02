@@ -15,6 +15,10 @@ from ...domain.schemas.event import BaseEvent
 from ...application.assets.generated import GeneratedAssetCanonicalizer
 from ...application.assets.hydration import CanonicalAssetHydrationService
 from ...application.assets.projection import CanonicalAssetProviderProjectionHook
+from ...application.user_inference_quota import (
+    UserBudgetUnsupportedGovernedOperationError,
+)
+from ...domain.schemas.identity import Identity
 
 # Import các Handlers mới tách
 from ...provider.handlers.chat_handler import ChatExecutionHandler
@@ -77,6 +81,7 @@ class ProviderRuntime(BaseRuntime):
         self._asset_projection_configured = False
         self._asset_projection_ready = False
         self._generated_asset_canonicalizer: Optional[GeneratedAssetCanonicalizer] = None
+        self._inference_quota = None
 
         # Handlers
         self.chat_handler: Optional[ChatExecutionHandler] = None
@@ -205,7 +210,12 @@ class ProviderRuntime(BaseRuntime):
         """Khởi tạo Discovery, Registry & khởi tạo Handlers."""
         await super().initialize(context)
         self._http_client = context.http_client
-        
+        self._inference_quota = getattr(
+            context.container,
+            "user_inference_quota_service",
+            None,
+        )
+
         self.provider_registry = ProviderRegistry()
         discovery = ProviderDiscovery(registry=self.provider_registry, config=context.config.provider)
         discovery.run()
@@ -290,8 +300,30 @@ class ProviderRuntime(BaseRuntime):
         start_time = time.time()
 
         try:
+            quota_kwargs = {}
+            quota = self._inference_quota
+            if quota is not None and getattr(quota, "enabled", False):
+                identity_data = event.payload.get("identity")
+                identity = (
+                    identity_data
+                    if isinstance(identity_data, Identity)
+                    else Identity.model_validate(identity_data)
+                )
+                quota_kwargs["quota_context"] = quota.build_context(
+                    budget_identity=identity,
+                    logical_request_id=(
+                        f"chat:{event.session_id}:{event.turn_id}"
+                    ),
+                    source_surface="PUBLIC_CHAT_EVENT",
+                    session_id=event.session_id,
+                )
+
             if not is_stream:
-                response = await self.chat_handler.execute_with_fallback(self._http_client, body)
+                response = await self.chat_handler.execute_with_fallback(
+                    self._http_client,
+                    body,
+                    **quota_kwargs,
+                )
                 latency = time.time() - start_time
                 response_metadata = response.metadata.model_dump() if hasattr(response.metadata, "model_dump") else (response.metadata or {})
                 provider_name = response_metadata.get("provider", "unknown")
@@ -311,6 +343,7 @@ class ProviderRuntime(BaseRuntime):
                 stream = self.chat_handler.stream_with_fallback(
                     self._http_client,
                     body,
+                    **quota_kwargs,
                 )
                 try:
                     async for chunk in stream:
@@ -369,6 +402,23 @@ class ProviderRuntime(BaseRuntime):
         body = event.payload.get("request_body", {})
         session_id = event.session_id
         try:
+            if (
+                self._inference_quota is not None
+                and getattr(self._inference_quota, "enabled", False)
+            ):
+                identity_data = event.payload.get("identity")
+                if identity_data is None:
+                    raise UserBudgetUnsupportedGovernedOperationError(
+                        "embedding execution lacks trusted identity for UBQ policy fencing"
+                    )
+                identity = (
+                    identity_data
+                    if isinstance(identity_data, Identity)
+                    else Identity.model_validate(identity_data)
+                )
+                await self._inference_quota.require_embedding_allowed(
+                    budget_identity=identity,
+                )
             response = await self.embedding_handler.execute(self._http_client, body)
             await self.event_bus.publish(BaseEvent(
                 event_name="provider.embeddings.responded",
