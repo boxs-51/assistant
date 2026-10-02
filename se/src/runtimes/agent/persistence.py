@@ -2043,8 +2043,13 @@ class DurableAgentStore:
         owner_instance_id: str,
         lease_generation: int,
         now_utc: datetime,
+        expected_lease_expires_at: datetime | None = None,
     ) -> bool:
-        """Read-only durable active-fence predicate for later runtime wiring."""
+        """Read-only durable active-fence predicate for runtime wiring.
+
+        R12-F3 passes the exact F2 activation expiry so owner+generation alone
+        can never authorize a recovered continuation after lease movement.
+        """
 
         async with self.uow_factory() as uow:
             active = await uow.agents.has_active_execution_lease_fence(
@@ -2052,6 +2057,7 @@ class DurableAgentStore:
                 owner_instance_id=owner_instance_id,
                 lease_generation=lease_generation,
                 now_utc=now_utc,
+                expected_lease_expires_at=expected_lease_expires_at,
             )
             await uow.commit()
             return active
