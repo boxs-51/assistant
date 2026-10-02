@@ -556,7 +556,14 @@ class CapabilityRuntime(BaseRuntime):
             ) from exc
         # Bind only after the atomic RUNNING transition so the dispatch
         # callback closes over the current invocation revision.
-        self._bind_remote_dispatch_started(driver, invocation)
+        self._bind_remote_dispatch_started(
+            driver,
+            invocation,
+            continuation_dispatch_guard=continuation_dispatch_guard,
+            selected_implementation_id=implementation.implementation_id,
+            target_connection_id=target_connection_id,
+            origin_connection_id=continuation_origin_connection_id,
+        )
 
         try:
             result = await self._run_invocation_attempt(
@@ -576,10 +583,6 @@ class CapabilityRuntime(BaseRuntime):
                 started=started,
                 allow_internal_retry=False,
                 continuation_mode=mode,
-                continuation_dispatch_guard=continuation_dispatch_guard,
-                continuation_origin_connection_id=(
-                    continuation_origin_connection_id
-                ),
             )
         except BaseException:
             persisted = await store.get(invocation.invocation_id)
@@ -1817,8 +1820,6 @@ class CapabilityRuntime(BaseRuntime):
         started: float,
         allow_internal_retry: bool,
         continuation_mode: ExistingInvocationContinuationMode | None = None,
-        continuation_dispatch_guard: ContinuationDispatchGuard | None = None,
-        continuation_origin_connection_id: str | None = None,
     ) -> CapabilityResult:
         logger.info(
             "Executing capability",
@@ -1921,13 +1922,6 @@ class CapabilityRuntime(BaseRuntime):
 
         while True:
             try:
-                if continuation_dispatch_guard is not None:
-                    await continuation_dispatch_guard(
-                        invocation,
-                        effective_implementation_id,
-                        routing_connection_id,
-                        continuation_origin_connection_id,
-                    )
                 raw_output = await self._execute_driver_once(
                     driver,
                     context,
@@ -2271,6 +2265,11 @@ class CapabilityRuntime(BaseRuntime):
         self,
         driver: BaseCapabilityDriver,
         invocation: CapabilityInvocation,
+        *,
+        continuation_dispatch_guard: ContinuationDispatchGuard | None = None,
+        selected_implementation_id: str | None = None,
+        target_connection_id: str | None = None,
+        origin_connection_id: str | None = None,
     ) -> None:
         if not isinstance(driver, RemoteClientDriver):
             return
@@ -2283,6 +2282,18 @@ class CapabilityRuntime(BaseRuntime):
                 await self.invocation_lifecycle.update_remote_outcome(
                     invocation,
                     RemoteOutcomeState.IN_FLIGHT,
+                )
+            if continuation_dispatch_guard is not None:
+                if not selected_implementation_id:
+                    raise CapabilityContinuationDispatchGuardError(
+                        "RECOVERY_CONTINUATION_AFFINITY_CHANGED",
+                        "Continuation implementation identity is unavailable.",
+                    )
+                await continuation_dispatch_guard(
+                    invocation,
+                    selected_implementation_id,
+                    target_connection_id,
+                    origin_connection_id,
                 )
 
         driver.set_dispatch_started_handler(mark_started)
