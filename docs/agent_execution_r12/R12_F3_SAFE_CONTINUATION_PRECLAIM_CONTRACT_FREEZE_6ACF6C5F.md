@@ -17,6 +17,8 @@ This freeze addresses the independent R12-F3 PRE-CLAIM findings:
 P1-R12-F3-ACTIVE-LEASE-FENCE-1
 P1-R12-F3-RECOVERY-EXECUTION-SEAM-2
 P1-R12-F3-POSTACTIVATION-FAILURE-AUTHORITY-3
+P1-R12-F3-CONTINUATION-AFFINITY-FENCE-4
+P1-R12-F3-POSTDISPATCH-R6-FINALIZATION-5
 ```
 
 No production code, schema, migration, provider dispatch, tool dispatch, or durable
@@ -138,28 +140,56 @@ F3-A MUST NOT:
 - mutate R6 reconciliation authority;
 - perform UBQ reserve/recharge/settle/release outside canonical continuation.
 
-### 4.1 Per-action dispatch fence
+### 4.1 Per-action continuation-affinity + active-lease dispatch fence
 
-For executable continuation actions, the active fence MUST be checked **inside each
-per-action semaphore slot**, immediately before the adapter/CapabilityRuntime
-continuation call.
+For every executable RecoveryInvocationAction, F3-A MUST preserve the exact F1-frozen
+RecoveryContinuationAuthority. Immediately before mapping the recovery action into the
+bounded ResumeInvocationAction DTO and before external dispatch, F3-A MUST re-prove
+that the current continuation target exactly equals:
+
+```text
+continuation_authority.target_client_id
+continuation_authority.target_connection_id
+continuation_authority.implementation_id
+```
+
+F3-A MUST also revalidate the recovery-only action authority that the R7 DTO does not
+carry, including frozen capability kind, execution_mode, and origin identity. A generic
+R7 "currently valid continuation target" check is necessary but not sufficient for
+SERVER_RECOVERY because it does not by itself prove equality to the F1 plan snapshot.
+
+Implementation-id replacement/drift, client-affinity drift, connection-affinity drift,
+or recovery-only kind/execution_mode/origin mismatch after F2 activation MUST produce
+zero external dispatch for that slot. F3-A MUST NOT invent a connection or
+implementation for an action lacking exact continuation authority.
+
+Only after this exact recovery-affinity proof passes may F3-A construct the bounded
+ResumeInvocationAction identity subset and hand it to the existing R7 continuation
+executor. That DTO mapping transfers no recovery claim, lease, connection-selection,
+implementation-selection, or quota authority.
+
+The exact active lease fence MUST then be checked **inside each per-action semaphore
+slot**, immediately before the adapter/CapabilityRuntime continuation call.
 
 Conceptual order:
 
 ```text
 acquire continuation semaphore slot
--> exact active-fence check
+-> exact RecoveryContinuationAuthority target re-proof
+-> recovery-only kind/execution_mode/origin revalidation
+-> exact active-lease fence check
+-> bounded RecoveryInvocationAction -> ResumeInvocationAction DTO mapping
 -> CapabilityToolExecutionAdapter.continue_invocation(...)
 -> CapabilityRuntime.continue_invocation(...)
 ```
 
-If the fence fails in one slot:
+If any recovery-affinity or active-lease fence fails in one slot:
 
 - that slot MUST NOT dispatch;
 - no later not-yet-dispatched slot may dispatch;
-- sibling local tasks SHOULD be cancelled where safe;
+- sibling local tasks that have not crossed external dispatch SHOULD be cancelled;
 - already externally dispatched work is not retroactively "un-dispatched";
-- no stale-owner durable commit may follow.
+- no stale-owner Agent durable progression may follow.
 
 REUSE_COMMITTED is a read-only durable reuse path and does not itself create an
 external dispatch. It still remains subject to the initial recovery-active authority
@@ -198,19 +228,36 @@ MUST re-anchor/re-audit on the new canonical main before production CLAIM.
 
 This freeze selects **Option A / current-safe minimum**.
 
-On lease fence loss, expiry, owner mismatch, generation mismatch, or other stale
-recovery-active authority:
+On lease fence loss, expiry, owner mismatch, generation mismatch, continuation-affinity
+mismatch, or other stale recovery-active authority:
 
 ```text
 STOP new external dispatch
-STOP stale-owner durable commit
-CANCEL local not-yet-completed continuation work where safe
-RETURN/RAISE fail-closed recovery execution error
+STOP stale-owner Agent durable progression
+CANCEL only local work that has not crossed external dispatch
+PRESERVE canonical R6/UBQ truth for any already-started external attempt
+RETURN/RAISE fail-closed recovery execution error after required reconciliation
 DO NOT publish WAITING/RECOVERY
 DO NOT publish FAILED
 DO NOT release TaskBudget active capacity
 DO NOT clear/remint/renew the lease
 ```
+
+"STOP stale-owner Agent durable progression" means the stale recovery owner MUST NOT
+write AgentToolResult projection, checkpoint/transcript, iteration progress, execution
+progress/terminal state, or any later model-visible Agent continuation.
+
+It does **not** forbid the canonical R6/UBQ post-dispatch truth recording required for
+an external attempt that already started. Once external dispatch has crossed its side-
+effect boundary, CapabilityRuntime/R6/UBQ MAY and MUST complete the existing invocation
+attempt bookkeeping needed to preserve durable truth, including canonical terminal
+outcome or OUTCOME_UNKNOWN plus quota finalization/reconciliation as applicable. Those
+writes are invocation/outcome authority for an already-started side effect; they are
+not R12 active-owner Agent progression.
+
+After that R6/UBQ reconciliation completes, F3-A MUST discard the result from stale-owner
+Agent progression: zero AgentToolResult projection, zero checkpoint/transcript update,
+zero execution progression, zero model-visible recovery result, and zero later dispatch.
 
 The durable RUNNING lease is allowed to expire naturally. Canonical R12-D/E later
 observes the stale owned RUNNING execution and publishes a new recovery safe point.
@@ -227,13 +274,19 @@ fenced transition contract and is outside this PRE-CLAIM.
 Parallel recovered continuations remain bounded by the existing
 AgentToolExecutionCoordinator semaphore.
 
-The lease fence is evaluated independently inside each dispatch slot.
+The recovery-affinity fence and active lease fence are evaluated independently inside
+each dispatch slot.
 
 Once any task reports stale active authority:
 
 - the recovery batch enters fail-closed state;
 - no new slot may externally dispatch;
-- caller cancellation remains propagated;
+- a not-yet-dispatched slot may be cancelled immediately;
+- an already-dispatched slot MUST NOT be cancelled in a way that loses side-effect
+  truth; it must reach canonical R6/UBQ terminal or OUTCOME_UNKNOWN reconciliation
+  before its result is discarded from stale-owner Agent progression;
+- caller cancellation remains propagated subject to the same already-dispatched truth
+  preservation rule;
 - cancellation MUST NOT synthesize a durable parking/failure transition under stale
   authority.
 
@@ -243,8 +296,10 @@ For every non-REUSE TOOL action:
 
 - invocation_id remains the existing logical CapabilityInvocation identity;
 - capability_id/version/kind/execution mode/idempotency remain frozen by RecoveryPlan;
-- canonical CapabilityRuntime.continue_invocation() owns fresh continuation target
-  re-proof and UBQ-3 recover_tool_call() authority;
+- F3-A re-proves exact F1 target_client_id + target_connection_id + implementation_id
+  and recovery-only kind/execution_mode/origin before DTO mapping or dispatch;
+- canonical CapabilityRuntime.continue_invocation() still owns its normal fresh
+  continuation target re-proof and UBQ-3 recover_tool_call() authority;
 - F3 performs no second admission;
 - F3 performs no second logical TOOL charge;
 - canonical continuation finalization remains exactly-once authority.
@@ -295,7 +350,16 @@ A future F3-A implementation audit MUST include at least:
 15. no provider/model inference call in F3-A;
 16. no UBQ admission/refund lifecycle duplicated;
 17. no lease renew/release/remint;
-18. CLIENT_RECONNECT R7 behavior remains unchanged.
+18. CLIENT_RECONNECT R7 behavior remains unchanged;
+19. implementation_id replacement/drift after F2 activation => zero external dispatch;
+20. target client/connection affinity drift or kind/execution_mode/origin mismatch =>
+    zero external dispatch;
+21. lease loss after external dispatch but before tool completion preserves canonical
+    R6/UBQ terminal or OUTCOME_UNKNOWN durable truth while producing zero stale
+    AgentToolResult/checkpoint/transcript/execution/model-visible projection;
+22. after one slot loses authority, not-yet-dispatched siblings are cancelled/blocked
+    while already-dispatched siblings reconcile side-effect truth and no later slot
+    externally dispatches.
 
 ## 11. PRE-CLAIM disposition
 
@@ -307,6 +371,12 @@ P1-R12-F3-RECOVERY-EXECUTION-SEAM-2
 = OWNER CONTRACT REPAIR CANDIDATE
 
 P1-R12-F3-POSTACTIVATION-FAILURE-AUTHORITY-3
+= OWNER CONTRACT REPAIR CANDIDATE
+
+P1-R12-F3-CONTINUATION-AFFINITY-FENCE-4
+= OWNER CONTRACT REPAIR CANDIDATE
+
+P1-R12-F3-POSTDISPATCH-R6-FINALIZATION-5
 = OWNER CONTRACT REPAIR CANDIDATE
 
 F3-A production CLAIM = HOLD pending independent PRE-CLAIM PASS
