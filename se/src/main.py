@@ -75,6 +75,10 @@ from .application.user_tool_quota import (
     ToolQuotaSettings,
     UserToolQuotaService,
 )
+from .application.user_inference_quota import (
+    InferenceQuotaSettings,
+    UserInferenceQuotaService,
+)
 from .application.policy.authorization import AuthorizationService
 from .agent.registry import AgentRegistry
 from .tool.registry import ToolRegistry
@@ -885,12 +889,33 @@ async def bootstrap_runtime_kernel(
             max_conflict_retries=tool_quota_settings.max_conflict_retries,
         ),
     )
+    inference_quota_settings = config.user_budget.inference_quota
+    user_inference_quota_service = UserInferenceQuotaService(
+        eventing_manager.uow_factory,
+        owner_authority=user_budget_dual_accounting,
+        settings=InferenceQuotaSettings(
+            enabled=inference_quota_settings.enabled,
+            max_conflict_retries=(
+                inference_quota_settings.max_conflict_retries
+            ),
+            estimator_policy_version=(
+                inference_quota_settings.estimator_policy_version
+            ),
+            usage_normalization_version=(
+                inference_quota_settings.usage_normalization_version
+            ),
+            default_output_token_reservation=(
+                inference_quota_settings.default_output_token_reservation
+            ),
+        ),
+    )
     task_budget_service = TaskBudgetService(
         eventing_manager.uow_factory,
         default_limits=task_budget_limits,
         default_policy=task_budget_policy,
         user_budget_dual_accounting=user_budget_dual_accounting,
         user_tool_quota_enabled=tool_quota_settings.enabled,
+        user_inference_quota_enabled=inference_quota_settings.enabled,
     )
 
     asset_service = None
@@ -930,6 +955,7 @@ async def bootstrap_runtime_kernel(
         task_budget_service=task_budget_service,
         task_budget_policy=task_budget_policy,
         user_budget_dual_accounting=user_budget_dual_accounting,
+        user_inference_quota_service=user_inference_quota_service,
         multi_agent_coordinator=MultiAgentCoordinator(
             agent_registry,
             durable_store=DurableAgentStore(eventing_manager.uow_factory),
@@ -1042,6 +1068,7 @@ async def bootstrap_runtime_kernel(
     container.inference_port = ProviderInferenceAdapter(
         container.provider_runtime,
         container.http_client,
+        inference_quota=container.user_inference_quota_service,
     )
     container.direct_chat_runtime = DirectChatRuntime(
         inference=container.inference_port,
