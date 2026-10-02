@@ -23,6 +23,10 @@ RESERVATION_REPOSITORY = Path(
 ADMISSION = Path(
     "se/src/infrastructure/storage/services/memory_promotion_admission.py"
 )
+ORCHESTRATION = Path(
+    "se/src/infrastructure/storage/services/"
+    "tool_response_payload_promotion_orchestration.py"
+)
 
 
 def _read(path: Path) -> str:
@@ -242,3 +246,97 @@ def test_landed_r12_f3a_refresh_is_frozen_non_material_to_b3_contract() -> None:
         assert phrase in contract
 
     assert "it is not yet canonical main" not in contract
+
+
+def test_b3_production_orchestration_matches_exact_released_surface() -> None:
+    source = _read(ORCHESTRATION)
+    cls = _class_node(
+        source,
+        "DurableToolResponsePayloadPromotionOrchestration",
+    )
+    reserve = _function_node(cls, "reserve")
+
+    assert isinstance(reserve, ast.AsyncFunctionDef)
+    assert [arg.arg for arg in reserve.args.kwonlyargs] == [
+        "source_ref",
+        "owner_user_id",
+    ]
+
+    awaited_calls = []
+    for node in ast.walk(reserve):
+        if not isinstance(node, ast.Await) or not isinstance(node.value, ast.Call):
+            continue
+        function = node.value.func
+        if isinstance(function, ast.Attribute):
+            awaited_calls.append(function.attr)
+        elif isinstance(function, ast.Name):
+            awaited_calls.append(function.id)
+
+    assert awaited_calls.count("read_trusted_promotion_material") == 1
+    assert awaited_calls.count("reserve") == 1
+    assert len(awaited_calls) == 2
+
+    intent_calls = [
+        node
+        for node in ast.walk(reserve)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "MemoryPromotionIntent"
+    ]
+    assert len(intent_calls) == 1
+    intent_keywords = {
+        keyword.arg: keyword.value
+        for keyword in intent_calls[0].keywords
+        if keyword.arg is not None
+    }
+    assert set(intent_keywords) == {
+        "owner_user_id",
+        "source_ref_snapshot",
+        "source_proof",
+        "content_digest",
+        "metadata",
+        "memory_schema_version",
+    }
+    assert ast.unparse(intent_keywords["owner_user_id"]) == (
+        "material.source_proof.source_ref_snapshot.owner_user_id"
+    )
+    assert ast.unparse(intent_keywords["source_ref_snapshot"]) == (
+        "material.source_proof.source_ref_snapshot"
+    )
+    assert ast.unparse(intent_keywords["source_proof"]) == "material.source_proof"
+    assert ast.unparse(intent_keywords["content_digest"]) == "material.content_digest"
+    assert isinstance(intent_keywords["metadata"], ast.Dict)
+    assert intent_keywords["metadata"].keys == []
+    assert ast.unparse(intent_keywords["memory_schema_version"]) == (
+        "MEMORY_SCHEMA_VERSION"
+    )
+
+    assert isinstance(reserve.body[-2], ast.Assign)
+    assert isinstance(reserve.body[-2].value, ast.Await)
+    assert isinstance(reserve.body[-1], ast.Return)
+
+
+def test_b3_production_orchestration_keeps_admission_and_persistence_fences_closed() -> None:
+    source = _read(ORCHESTRATION)
+
+    for forbidden in (
+        "memory_promotion_admission",
+        "DurableMemoryPromotionAdmission",
+        "DurablePromotionReservationRepository",
+        "PromotionReservationRow",
+        "AsyncSession",
+        "sqlalchemy",
+        "ContextBuilder",
+        "ApplicationContainer",
+    ):
+        assert forbidden not in source
+
+    for required in (
+        "DurableToolResponsePayloadSourceAuthority",
+        "TrustedToolResponsePromotionMaterial",
+        "DurablePromotionReservationIssuer",
+        "MemoryPromotionIntent",
+        "MEMORY_SCHEMA_VERSION",
+        "TrustedToolResponsePromotionReservation",
+    ):
+        assert required in source
