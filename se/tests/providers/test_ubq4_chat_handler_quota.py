@@ -1037,3 +1037,46 @@ async def test_ubq4_invalidated_candidate_can_be_replaced_by_later_terminal_usag
         settled.total_tokens,
     ) == (2, 3, 5)
 
+@pytest.mark.asyncio
+async def test_ubq4_terminal_usage_then_later_finish_without_usage_revokes_candidate(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    finish_reason="stop",
+                ),
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                ),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
+
