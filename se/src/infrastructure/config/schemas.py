@@ -264,14 +264,6 @@ class UserBudgetInferenceQuotaSettings(BaseModel):
         default=None,
         gt=0,
     )
-    compute_units_per_1k_tokens: Decimal | None = Field(
-        default=None,
-        gt=Decimal("0"),
-    )
-    cost_usd_per_1k_tokens: Decimal | None = Field(
-        default=None,
-        gt=Decimal("0"),
-    )
 
     model_config = ConfigDict(frozen=True)
 
