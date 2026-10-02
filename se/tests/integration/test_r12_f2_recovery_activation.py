@@ -4,6 +4,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.models.sql.agent import (
@@ -157,6 +158,14 @@ async def _seed_recovery_cut(
     assert recovered.lease_generation == 2
     return recovered
 
+
+
+def _task_budget_clone_values(record) -> dict:
+    return {
+        column.name: getattr(record, column.name)
+        for column in TaskBudgetRecord.__table__.columns
+        if column.name != "incarnation_generation"
+    }
 
 
 async def _seed_task_recovery_cut(
@@ -768,10 +777,27 @@ async def test_r12_f2_task_budget_incarnation_drift_fails_before_capacity(
 
         async with factory() as uow:
             budget = await uow.agents.get_task_budget(task_id)
-            budget.incarnation_generation = (
-                int(plan.task_budget_incarnation_generation) + 1
+            assert budget is not None
+            old_generation = int(budget.incarnation_generation)
+            clone = _task_budget_clone_values(budget)
+            await uow.session.execute(
+                text(
+                    "DELETE FROM agent_task_budget_reservations "
+                    "WHERE task_id = :task_id"
+                ),
+                {"task_id": task_id},
             )
+            await uow.session.delete(budget)
+            await uow.session.flush()
+            replacement = TaskBudgetRecord(
+                **clone,
+                incarnation_generation=old_generation + 1,
+            )
+            uow.session.add(replacement)
             await uow.commit()
+            assert int(replacement.incarnation_generation) != int(
+                plan.task_budget_incarnation_generation
+            )
 
         with pytest.raises(
             ResumeClaimRejected,
