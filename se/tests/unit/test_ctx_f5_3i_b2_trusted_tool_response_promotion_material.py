@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from types import MappingProxyType, SimpleNamespace
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.exc import SQLAlchemyError
@@ -208,16 +208,25 @@ async def test_b2_material_matches_legacy_proof_and_is_deep_frozen_detached():
         "source_result_id": "result-1"
     }
 
-    assert isinstance(material.content_snapshot, MappingProxyType)
-    assert isinstance(material.content_snapshot["nested"], tuple)
-    assert isinstance(material.content_snapshot["nested"][1], MappingProxyType)
-    with pytest.raises(TypeError):
-        material.content_snapshot["kind"] = "mutated"
+    snapshot = material.content_snapshot
+    assert isinstance(snapshot, dict)
+    assert isinstance(snapshot["nested"], list)
+    assert isinstance(snapshot["nested"][1], dict)
+    assert hashlib.sha256(canonical_payload_bytes(snapshot)).hexdigest() == material.content_digest
+
+    snapshot["kind"] = "mutated"
+    snapshot["nested"][1]["ok"] = False
+    fresh_snapshot = material.content_snapshot
+    assert fresh_snapshot is not snapshot
+    assert fresh_snapshot["kind"] == "tool-result"
+    assert fresh_snapshot["nested"][1]["ok"] is True
+    assert hashlib.sha256(canonical_payload_bytes(fresh_snapshot)).hexdigest() == material.content_digest
 
     result.output["kind"] = "changed-after-read"
     result.output["nested"][1]["ok"] = False
-    assert material.content_snapshot["kind"] == "tool-result"
-    assert material.content_snapshot["nested"][1]["ok"] is True
+    after_source_mutation = material.content_snapshot
+    assert after_source_mutation["kind"] == "tool-result"
+    assert after_source_mutation["nested"][1]["ok"] is True
 
 
 @pytest.mark.asyncio
