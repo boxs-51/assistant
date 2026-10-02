@@ -10,6 +10,7 @@ from se.src.runtimes.agent.recovery_execution import (
 from se.src.runtimes.agent.tool_execution.coordinator import (
     AgentToolExecutionCoordinator,
 )
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 
 
 def test_r12_f3a_exact_activation_expiry_is_part_of_durable_fence():
@@ -88,3 +89,64 @@ def test_r12_f3a_does_not_create_second_quota_or_lease_lifecycle():
     assert "release_execution_lease" not in service_source
     assert "acquire_execution_lease" not in service_source
     assert "execute_capability(" not in service_source
+
+
+def test_r12_f3a_canonical_guard_is_immediately_before_driver_boundary():
+    source = inspect.getsource(CapabilityRuntime._run_invocation_attempt)
+    guard_index = source.index("await continuation_dispatch_guard")
+    execute_index = source.index(
+        "raw_output = await self._execute_driver_once"
+    )
+    assert guard_index < execute_index
+    between = source[guard_index:execute_index]
+    assert between.count("await ") == 1
+
+    revalidator = inspect.getsource(
+        CapabilityRuntime._revalidate_continuation_target_at_dispatch
+    )
+    assert "target_connection_id" in revalidator
+    assert "origin_client_id" in revalidator
+    assert "list_implementations" in revalidator
+
+
+def test_r12_f3a_projection_fence_is_transactional_with_agent_write():
+    fence_source = inspect.getsource(
+        DurableAgentStore._lock_recovery_projection_fence_in_uow
+    )
+    save_source = inspect.getsource(DurableAgentStore.save_tool_result)
+    promote_source = inspect.getsource(
+        DurableAgentStore.load_committed_tool_result
+    )
+    projection_source = inspect.getsource(
+        AgentRecoveryExecutionService._project_continuation_result
+    )
+
+    assert "get_execution_for_update" in fence_source
+    assert 'str(execution.state) != "RUNNING"' in fence_source
+    assert "owner_instance_id" in fence_source
+    assert "lease_generation" in fence_source
+    assert "lease_expires_at" in fence_source
+    assert "datetime.now(timezone.utc)" in fence_source
+
+    save_fence = save_source.index(
+        "await self._lock_recovery_projection_fence_in_uow"
+    )
+    save_write = min(
+        index
+        for index in (
+            save_source.find("await uow.agents.save_tool_result"),
+            save_source.find("await uow.agents.update_tool_result"),
+        )
+        if index >= 0
+    )
+    assert save_fence < save_write
+
+    promote_fence = promote_source.index(
+        "await self._lock_recovery_projection_fence_in_uow"
+    )
+    promote_write = promote_source.index(
+        "await uow.agents.update_tool_result"
+    )
+    assert promote_fence < promote_write
+
+    assert "recovery_fence=recovery_fence" in projection_source
