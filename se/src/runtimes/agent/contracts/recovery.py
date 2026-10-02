@@ -215,9 +215,7 @@ def recovery_plan_fingerprint(
         "agent_id": get("agent_id"),
         "session_id": get("session_id"),
         "task_id": get("task_id"),
-        "task_revision": get("task_revision"),
         "branch_id": get("branch_id"),
-        "branch_revision": get("branch_revision"),
         "parent_execution_id": get("parent_execution_id"),
         "retry_of_execution_id": get("retry_of_execution_id"),
         "base_execution_id": get("base_execution_id"),
@@ -243,7 +241,6 @@ def recovery_plan_fingerprint(
         "task_budget_incarnation_generation": get(
             "task_budget_incarnation_generation"
         ),
-        "task_budget_revision": get("task_budget_revision"),
         "target_trigger": get("target_trigger").value,
         "target_client_id": get("target_client_id"),
         "target_connection_id": get("target_connection_id"),
