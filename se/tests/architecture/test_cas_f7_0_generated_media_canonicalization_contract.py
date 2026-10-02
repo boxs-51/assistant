@@ -70,7 +70,11 @@ def test_shared_direct_agent_provider_boundary_is_frozen():
     assert executor < canonicalizer < fallback
     assert "async def stream_with_fallback(" in handler
     assert "async for chunk in provider_stream:" in handler
-    assert "yield chunk" in handler
+    assert "GeneratedAssetStreamAssembler(" in handler
+    assert "public_chunk = stream_assembler.observe(chunk)" in handler
+    assert "yield public_chunk" in handler
+    assert "canonical_chunk = await stream_assembler.finalize()" in handler
+    assert "yield canonical_chunk" in handler
 
     assert 'handler = getattr(self._provider_runtime, "chat_handler", None)' in inference
     assert "handler.execute_with_fallback(" in inference
@@ -364,12 +368,16 @@ def test_f7_p1_freezes_one_ingest_attempt_no_internal_retry():
         assert phrase in document
 
 
-def test_streaming_generated_media_is_explicitly_deferred_from_first_slice():
+def test_f7_p1_streaming_deferral_is_historical_and_f7_s_supersedes_source_facts():
     handler = _read("se/src/provider/handlers/chat_handler.py")
     gemini = _read("se/src/provider/gemini/converters/chats/response.py")
 
+    # F7-P1 remains a non-stream slice historically, while landed F7-S
+    # deliberately supersedes the old current-source snapshot for streaming.
     assert "async def stream_with_fallback(" in handler
-    assert 'candidate = obj["candidates"][0]' in gemini
+    assert "GeneratedAssetStreamAssembler(" in handler
+    assert "for candidate_index, candidate in enumerate(candidates):" in gemini
+    assert "preserve_generated_file_data=True" in gemini
     assert 'type="url"' in gemini
     assert "UrlContent(url=url_str, crawl=True)" in gemini
 
