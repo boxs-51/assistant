@@ -5033,6 +5033,7 @@ class DurableAgentStore:
                     "wait_expires_at": None,
                     "bound_client_id": plan.target_client_id,
                     "bound_connection_id": plan.target_connection_id,
+                    "started_at": now_utc,
                 },
             )
             if updated_execution is None:
