@@ -347,7 +347,7 @@ async def test_r12_f2_atomic_activation_and_consumed_replay_do_not_remint_lease(
             assert execution.state == "RUNNING"
             assert execution.owner_instance_id == "worker-r12-f2"
             assert execution.lease_generation == activated.lease_generation
-            assert execution.lease_expires_at == lease_expiry.replace(tzinfo=None)
+            assert execution.lease_expires_at == lease_expiry
             assert persisted_claim.state == ResumeClaimState.CONSUMED.value
             assert handoff["kind"] == "SERVER_RECOVERY_ACTIVATION"
             assert handoff["version"] == 1
