@@ -116,6 +116,35 @@ class RecoveryPlan:
     plan_fingerprint: str
 
 
+@dataclass(frozen=True, slots=True)
+class RecoveryActivationSpec:
+    """One bounded R12-F2 atomic SERVER_RECOVERY activation attempt."""
+
+    plan: RecoveryPlan
+    claim_id: str
+    resume_request_id: str
+    expected_claim_revision: int
+    activation_owner_instance_id: str
+    activation_now_utc: datetime
+    activation_lease_expires_at: datetime
+
+
+@dataclass(frozen=True, slots=True)
+class RecoveryActivationResult:
+    """Durable R12-F2 activation authority returned after one atomic commit."""
+
+    claim_id: str
+    resume_request_id: str
+    execution_id: str
+    checkpoint_id: str
+    source_execution_revision: int
+    consumed_execution_revision: int
+    activation_owner_instance_id: str
+    lease_generation: int
+    lease_expires_at: datetime
+    already_consumed: bool = False
+
+
 def recovery_plan_fingerprint(
     values: RecoveryPlan | Mapping[str, Any],
 ) -> str:
@@ -230,6 +259,8 @@ def recovery_plan_fingerprint(
 
 
 __all__ = [
+    "RecoveryActivationResult",
+    "RecoveryActivationSpec",
     "RecoveryContinuationAuthority",
     "RecoveryInferenceDisposition",
     "RecoveryInvocationAction",
