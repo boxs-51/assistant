@@ -77,3 +77,14 @@ def test_r12_f3a_reuses_r7_r6_path_and_stops_before_provider_inference():
     assert "ProviderInferenceAdapter" not in combined
     assert "recover_claimed_resume" not in combined
     assert "fail_claimed_resume" not in combined
+
+
+def test_r12_f3a_does_not_create_second_quota_or_lease_lifecycle():
+    service_source = inspect.getsource(AgentRecoveryExecutionService)
+    assert "find_tool_call_authority" in service_source
+    assert "reserve_tool_call" not in service_source
+    assert "recover_tool_call" not in service_source
+    assert "renew_execution_lease" not in service_source
+    assert "release_execution_lease" not in service_source
+    assert "acquire_execution_lease" not in service_source
+    assert "execute_capability(" not in service_source
