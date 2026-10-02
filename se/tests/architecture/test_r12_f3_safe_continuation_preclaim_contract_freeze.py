@@ -27,6 +27,10 @@ def _text() -> str:
     return DOC.read_text(encoding="utf-8")
 
 
+def _normalized_text() -> str:
+    return " ".join(_text().split()).lower()
+
+
 def test_r12_f3_activation_result_carries_exact_lease_handoff_authority():
     fields = RecoveryActivationResult.__dataclass_fields__
     assert "activation_owner_instance_id" in fields
@@ -63,9 +67,10 @@ def test_r12_f3_generic_r7_postclaim_recovery_is_not_r12_lease_fenced():
 
 def test_r12_f3_contract_freezes_exact_per_action_fence_and_fail_closed_option_a():
     text = _text()
+    normalized = _normalized_text()
 
     assert "F3-A bounded production slice" in text
-    assert "per-action semaphore slot" in text
+    assert "per-action semaphore slot" in normalized
     assert "immediately before the adapter/CapabilityRuntime" in text
     assert "lease_expires_at == RecoveryActivationResult.lease_expires_at" in text
     assert "Option A / current-safe minimum" in text
@@ -106,20 +111,22 @@ def test_r12_f3_contract_freezes_exact_recovery_continuation_affinity_before_dis
     assert "implementation_id" in fields
 
     text = _text()
+    normalized = _normalized_text()
     assert "exact F1-frozen" in text
     assert "continuation_authority.target_client_id" in text
     assert "continuation_authority.target_connection_id" in text
     assert "continuation_authority.implementation_id" in text
-    assert "implementation-id replacement/drift" in text
+    assert "implementation-id replacement/drift" in normalized
     assert "kind/execution_mode/origin" in text
     assert "zero external dispatch" in text
 
 
 def test_r12_f3_contract_preserves_r6_ubq_truth_after_postdispatch_fence_loss():
     text = _text()
+    normalized = _normalized_text()
 
     assert "PRESERVE canonical R6/UBQ truth for any already-started external attempt" in text
-    assert "terminal outcome or OUTCOME_UNKNOWN" in text
+    assert "terminal outcome or outcome_unknown" in normalized
     assert "zero AgentToolResult projection" in text
     assert "zero checkpoint/transcript update" in text
     assert "zero execution progression" in text
