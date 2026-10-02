@@ -474,6 +474,7 @@ class TaskBudgetService:
         max_conflict_retries: int = 8,
         user_budget_dual_accounting=None,
         user_tool_quota_enabled: bool = False,
+        user_inference_quota_enabled: bool = False,
     ) -> None:
         self._uow_factory = uow_factory
         self._default_limits = default_limits
@@ -481,6 +482,9 @@ class TaskBudgetService:
         self._max_conflict_retries = max(1, int(max_conflict_retries))
         self._user_budget_dual_accounting = user_budget_dual_accounting
         self._user_tool_quota_enabled = bool(user_tool_quota_enabled)
+        self._user_inference_quota_enabled = bool(
+            user_inference_quota_enabled
+        )
 
     @property
     def default_limits(self) -> TaskBudgetLimits | None:
@@ -4769,6 +4773,18 @@ class TaskBudgetService:
                 "used_inference_calls": budget.used_inference_calls + 1
             }
 
+        if self._user_inference_quota_enabled:
+            # UBQ-4 is the renewable resource authority. Preserve the legacy
+            # TaskBudget local/read-model guard and idempotent reservation,
+            # but do not mint a second UBQ-2 resource mirror.
+            return await self._mutate_with_reservation(
+                task_id,
+                TaskBudgetReservationKind.INFERENCE,
+                request_id,
+                {},
+                mutate,
+            )
+
         dual = self._user_budget_dual_accounting
         dimensions = (
             ()
@@ -4818,6 +4834,17 @@ class TaskBudgetService:
             "tokens": tokens,
             "cost_usd": str(normalized_cost),
         }
+        if self._user_inference_quota_enabled:
+            # Post-cutover USAGE remains a TaskBudget compatibility/read-model
+            # record only. UBQ-4 settlement already owns user token/cost usage.
+            return await self._mutate_with_reservation(
+                task_id,
+                TaskBudgetReservationKind.USAGE,
+                usage_key,
+                payload,
+                mutate,
+            )
+
         dual = self._user_budget_dual_accounting
         if dual is None:
             return await self._mutate_with_reservation(
