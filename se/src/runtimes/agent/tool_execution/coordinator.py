@@ -575,11 +575,21 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         except BaseException:
             if preserve_started_on_failure:
                 for task, action in zip(tasks, action_list):
-                    if (
-                        action.invocation_id not in continuation_started
-                        and not task.done()
-                    ):
+                    if task.done():
+                        continue
+                    if action.invocation_id not in continuation_started:
                         task.cancel()
+                        continue
+                    if (
+                        action.invocation_id
+                        not in physical_dispatch_authorized
+                    ):
+                        # Started but still pre-send: do not cancel the R6
+                        # lifecycle attempt. Let its shared runtime_guard see
+                        # prepare_failed and restore canonical pre-send truth.
+                        continue
+                    # Final-send-authorized work is also preserved so R6/UBQ
+                    # can finish authoritative external-outcome recording.
             else:
                 for task in tasks:
                     if not task.done():
