@@ -112,13 +112,17 @@ def test_f5d_stream_provider_authority_is_inside_the_eligible_attempt():
     # continues. F5-D's stronger rule must fence that continue after projection.
     provider_errors = stream.index("except (", executor)
     terminal_guard = stream.index(
-        "if stream_started or asset_attempt_terminal:",
+        "if (",
         provider_errors,
     )
     fallback_continue = stream.index("continue", terminal_guard)
 
     assert executor < provider_errors < terminal_guard < fallback_continue
-    assert "raise detail from error" in stream[terminal_guard:fallback_continue]
+    guard_body = stream[terminal_guard:fallback_continue]
+    assert "stream_started" in guard_body
+    assert "asset_attempt_terminal" in guard_body
+    assert "stream_assembler.media_seen" in guard_body
+    assert "raise detail from error" in guard_body
     assert "All providers failed before streaming output started." in stream
 
 
