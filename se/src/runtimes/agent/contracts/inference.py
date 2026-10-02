@@ -6,6 +6,8 @@ from typing import Any, Dict, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
+from ....domain.schemas.identity import Identity
+
 
 def _freeze(value: Any) -> Any:
     if isinstance(value, Mapping):
@@ -129,6 +131,7 @@ class InferenceRequest(BaseModel):
         exclude=True,
     )
     owner_user_id: str | None = Field(default=None, exclude=True)
+    budget_identity: Identity | None = Field(default=None, exclude=True)
     cancellation_event: Any = None
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
