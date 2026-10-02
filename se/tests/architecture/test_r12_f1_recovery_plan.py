@@ -823,7 +823,7 @@ async def test_r12_f1_active_batch_requires_frozen_inference_request_identity():
 @pytest.mark.parametrize(
     ("field", "value"),
     (
-        ("observed_lease_expires_at", "2026-10-01T12:00:05+00:00"),
+        ("observed_lease_expires_at", "2026-10-01T16:00:05+00:00"),
         ("takeover_now_utc", "2026-10-01T19:00:00+07:00"),
         ("observed_lease_generation", 0),
     ),
@@ -853,4 +853,3 @@ async def test_r12_f1_rejects_noncanonical_recovery_winner_receipt(
         await service.build_recovery_plan(execution.id)
 
     assert uow.commit_calls == 0
-
