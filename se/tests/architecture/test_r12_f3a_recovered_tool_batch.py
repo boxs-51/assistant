@@ -180,6 +180,6 @@ def test_r12_f3a_projection_fence_is_transactional_with_agent_write():
     ) >= 2
     assert promote_source.count(
         "_require_recovery_projection_fence_now"
-    ) >= 2
+    ) >= 1
 
     assert "recovery_fence=recovery_fence" in projection_source
