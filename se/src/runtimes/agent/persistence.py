@@ -4504,6 +4504,9 @@ class DurableAgentStore:
                         handoff["activation_owner_instance_id"]
                     )
                     handoff_generation = int(handoff["lease_generation"])
+                    handoff_activation_now = datetime.fromisoformat(
+                        str(handoff["activation_now_utc"])
+                    )
                     handoff_expiry = datetime.fromisoformat(
                         str(handoff["lease_expires_at"])
                     )
@@ -4523,13 +4526,23 @@ class DurableAgentStore:
                     if execution is not None
                     else None
                 )
+                handoff_activation_now = _utc_datetime(
+                    handoff_activation_now
+                )
                 handoff_expiry = _utc_datetime(handoff_expiry)
                 expected_revision = plan.expected_execution_revision + 1
+                expected_generation = (
+                    int(plan.expected_unowned_lease_generation) + 1
+                )
                 if (
                     handoff_version != 1
                     or handoff_kind != "SERVER_RECOVERY_ACTIVATION"
                     or handoff_owner != owner_instance_id
                     or handoff_revision != expected_revision
+                    or handoff_generation != expected_generation
+                    or handoff_activation_now is None
+                    or handoff_activation_now >= handoff_expiry
+                    or handoff_expiry != lease_expires_at
                     or claim.consumed_execution_revision != expected_revision
                     or str(handoff.get("execution_id") or "")
                     != plan.execution_id
@@ -5068,6 +5081,7 @@ class DurableAgentStore:
                 "recovery_fingerprint": plan.recovery_fingerprint,
                 "recovery_plan_fingerprint": plan.plan_fingerprint,
                 "activation_owner_instance_id": owner_instance_id,
+                "activation_now_utc": now_utc.isoformat(),
                 "lease_generation": expected_generation,
                 "lease_expires_at": lease_expires_at.isoformat(),
                 "consumed_execution_revision": consumed_revision,
