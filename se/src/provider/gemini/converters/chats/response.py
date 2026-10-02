@@ -36,6 +36,29 @@ logger = structlog.get_logger(__name__)
 
 class ResponseChats:
 
+    @staticmethod
+    def _gateway_usage_from_metadata(
+        usage_data: Dict[str, Any],
+    ) -> GatewayUsage:
+        usage_kwargs: Dict[str, int] = {}
+        if "promptTokenCount" in usage_data:
+            usage_kwargs["prompt_tokens"] = usage_data["promptTokenCount"]
+        if "candidatesTokenCount" in usage_data:
+            usage_kwargs["completion_tokens"] = usage_data[
+                "candidatesTokenCount"
+            ]
+        if "totalTokenCount" in usage_data:
+            usage_kwargs["total_tokens"] = usage_data["totalTokenCount"]
+        elif (
+            "prompt_tokens" in usage_kwargs
+            and "completion_tokens" in usage_kwargs
+        ):
+            usage_kwargs["total_tokens"] = (
+                usage_kwargs["prompt_tokens"]
+                + usage_kwargs["completion_tokens"]
+            )
+        return GatewayUsage(**usage_kwargs)
+
     def _extract_citations(self, candidate: Dict[str, Any]) -> List[Dict[str, Any]]:
         """
         Trích xuất và chuẩn hóa Grounding / Citation Metadata từ Gemini candidate
@@ -404,13 +427,15 @@ class ResponseChats:
                     finish_reason=finish_reason
                 ))
 
-            # Khôi phục Token Usage
-            usage_data = response_data.get("usageMetadata", {})
-            usage = GatewayUsage(
-                prompt_tokens=usage_data.get("promptTokenCount", 0),
-                completion_tokens=usage_data.get("candidatesTokenCount", 0),
-                total_tokens=usage_data.get("totalTokenCount", 0)
-            )
+            # Preserve provider field presence so UBQ can distinguish
+            # unknown usage from an explicit provider-reported zero.
+            usage_data = response_data.get("usageMetadata")
+            if usage_data is None:
+                usage = GatewayUsage()
+            elif isinstance(usage_data, dict):
+                usage = self._gateway_usage_from_metadata(usage_data)
+            else:
+                raise TypeError("Gemini usageMetadata must be an object")
             metadata= ResponseMetaData(
                 provider="gemini",
                 raw_response=response_data
@@ -582,19 +607,8 @@ class ResponseChats:
             usage_data = obj.get("usageMetadata")
 
             if isinstance(usage_data, dict):
-                gateway_usage = GatewayUsage(
-                    prompt_tokens=usage_data.get(
-                        "promptTokenCount",
-                        0,
-                    ),
-                    completion_tokens=usage_data.get(
-                        "candidatesTokenCount",
-                        0,
-                    ),
-                    total_tokens=usage_data.get(
-                        "totalTokenCount",
-                        0,
-                    ),
+                gateway_usage = self._gateway_usage_from_metadata(
+                    usage_data
                 )
 
             if (

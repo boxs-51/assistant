@@ -1,3 +1,4 @@
+from dataclasses import replace
 from typing import Any, AsyncGenerator, Dict
 
 import httpx
@@ -7,6 +8,12 @@ from opentelemetry import trace
 from ...application.assets.generated import (
     GeneratedAssetCanonicalizer,
     GeneratedAssetStreamAssembler,
+)
+from ...application.user_inference_quota import (
+    InferenceQuotaAdmission,
+    InferenceQuotaContext,
+    NormalizedInferenceUsage,
+    UserInferenceQuotaService,
 )
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
 from ..exceptions import (
@@ -27,10 +34,12 @@ class ChatExecutionHandler(BaseExecutionHandler):
     def __init__(
         self,
         *args,
+        inference_quota: UserInferenceQuotaService | None = None,
         generated_asset_canonicalizer: GeneratedAssetCanonicalizer | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
+        self.inference_quota = inference_quota
         # The response-side F7 fence is always installed. In degraded mode the
         # unavailable sentinel passes ordinary text responses through and
         # terminally rejects generated media after provider success.
@@ -39,6 +48,94 @@ class ChatExecutionHandler(BaseExecutionHandler):
             if generated_asset_canonicalizer is not None
             else GeneratedAssetCanonicalizer.unavailable()
         )
+
+    async def _reserve_inference_quota(
+        self,
+        *,
+        body: Dict[str, Any],
+        quota_context: InferenceQuotaContext | None,
+        streaming_mode: bool,
+    ) -> InferenceQuotaAdmission | None:
+        """Complete UBQ admission before any provider-owned budget/work."""
+
+        quota = self.inference_quota
+        if quota is None or not quota.enabled:
+            return None
+        return await quota.reserve(
+            context=quota_context,
+            body=body,
+            streaming_mode=streaming_mode,
+        )
+
+    @staticmethod
+    def _unknown_ambiguous_usage(
+        usage: NormalizedInferenceUsage,
+    ) -> NormalizedInferenceUsage:
+        """Retain attribution while refusing attempt-local resource undercount."""
+
+        return replace(
+            usage,
+            input_tokens=None,
+            output_tokens=None,
+            total_tokens=None,
+            compute_units=None,
+            cost_usd=None,
+        )
+
+    @staticmethod
+    def _has_stream_semantic_or_finish_progression(chunk: Any) -> bool:
+        """Detect response progression that revokes an earlier terminal claim."""
+
+        for choice in getattr(chunk, "choices", None) or []:
+            if getattr(choice, "finish_reason", None) is not None:
+                return True
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            if getattr(delta, "content", None):
+                return True
+            if getattr(delta, "reasoning_content", None):
+                return True
+            if getattr(delta, "tool_calls", None):
+                return True
+
+        metadata = getattr(chunk, "metadata", None)
+        return bool(getattr(metadata, "content_parts", None))
+
+    @classmethod
+    def _is_trailing_usage_only_chunk(cls, chunk: Any) -> bool:
+        """Prove post-terminal usage carries no semantic/finish progression."""
+
+        return not cls._has_stream_semantic_or_finish_progression(chunk)
+
+    async def _settle_inference_quota_success(
+        self,
+        *,
+        admission: InferenceQuotaAdmission | None,
+        usage: NormalizedInferenceUsage,
+        executor_dispatch_count: int,
+        call_budget: Any,
+    ) -> None:
+        """Settle one logical success without treating attempt usage as whole-call."""
+
+        if admission is None:
+            return
+        quota = self.inference_quota
+        if quota is None or not quota.enabled:
+            raise RuntimeError(
+                "UBQ-4 admission exists without active quota settlement authority"
+            )
+
+        settlement_usage = usage
+        if (
+            executor_dispatch_count != 1
+            or int(getattr(call_budget, "retries_used", 0)) != 0
+        ):
+            settlement_usage = self._unknown_ambiguous_usage(usage)
+
+        # Quota errors deliberately remain outside ProviderError/httpx
+        # families so they cannot trigger provider fallback/breaker failure.
+        await quota.settle_success(admission, settlement_usage)
 
     async def _has_required_capabilities(
         self,
@@ -127,6 +224,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         *,
         deadline_monotonic: float | None = None,
         owner_user_id: str | None = None,
+        quota_context: InferenceQuotaContext | None = None,
     ) -> GatewayResponse:
         model = body.get("model")
         tools_present = bool(body.get("tools"))
@@ -140,6 +238,11 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 f"No available or valid provider configured for model '{model}'."
             )
 
+        admission = await self._reserve_inference_quota(
+            body=body,
+            quota_context=quota_context,
+            streaming_mode=False,
+        )
         call_budget = self._new_call_budget(deadline_monotonic)
         healthy_execution_chain = await self._get_healthy_fallback_chain(
             execution_chain
@@ -153,6 +256,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         last_exception: Exception | None = None
         last_detail: ProviderError | None = None
         last_provider_name: str | None = None
+        executor_dispatch_count = 0
 
         for provider in healthy_execution_chain:
             with tracer.start_as_current_span(
@@ -183,6 +287,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                             call_budget=call_budget,
                         )
 
+                    executor_dispatch_count += 1
                     response = await self.executor.execute(
                         provider=provider,
                         http_client=http_client,
@@ -190,6 +295,16 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         timeout=self.timeout,
                         call_budget=call_budget,
                     )
+                    quota = self.inference_quota
+                    if admission is not None and quota is not None:
+                        normalized_usage = quota.normalize_gateway_usage(response)
+                        await self._settle_inference_quota_success(
+                            admission=admission,
+                            usage=normalized_usage,
+                            executor_dispatch_count=executor_dispatch_count,
+                            call_budget=call_budget,
+                        )
+
                     # CAS-F7-P1 begins only after provider SUCCESS. Errors from
                     # this boundary are deliberately outside the provider
                     # fallback/circuit-breaker exception classes below.
@@ -257,6 +372,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         *,
         deadline_monotonic: float | None = None,
         owner_user_id: str | None = None,
+        quota_context: InferenceQuotaContext | None = None,
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Stream with fallback allowed only before the first visible chunk."""
 
@@ -272,6 +388,11 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 f"No available or valid provider configured for model '{model}'."
             )
 
+        admission = await self._reserve_inference_quota(
+            body=body,
+            quota_context=quota_context,
+            streaming_mode=True,
+        )
         call_budget = self._new_call_budget(deadline_monotonic)
         healthy_execution_chain = await self._get_healthy_fallback_chain(
             execution_chain
@@ -284,12 +405,15 @@ class ChatExecutionHandler(BaseExecutionHandler):
         last_exception: Exception | None = None
         last_detail: ProviderError | None = None
         last_provider_name: str | None = None
+        executor_dispatch_count = 0
 
         for provider in healthy_execution_chain:
             stream_started = False
             provider_stream = None
             stream_assembler = None
             asset_attempt_terminal = False
+            normalized_stream_usage: NormalizedInferenceUsage | None = None
+            terminal_seen = False
             try:
                 if not await self._has_required_capabilities(
                     provider,
@@ -313,6 +437,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         call_budget=call_budget,
                     )
 
+                executor_dispatch_count += 1
                 provider_stream = self.executor.execute_stream(
                     provider=provider,
                     http_client=http_client,
@@ -325,11 +450,84 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     owner_user_id=owner_user_id,
                 )
                 async for chunk in provider_stream:
+                    quota = self.inference_quota
+                    raw_usage = getattr(chunk, "usage", None)
+                    chunk_choices = getattr(chunk, "choices", None) or []
+                    chunk_terminal = bool(chunk_choices) and all(
+                        getattr(choice, "finish_reason", None) is not None
+                        for choice in chunk_choices
+                    )
+                    semantic_or_finish_progression = (
+                        self._has_stream_semantic_or_finish_progression(chunk)
+                    )
+
+                    # A finish marker only makes usage a provisional candidate.
+                    # Later semantic/finish progression proves that earlier
+                    # terminality was not final for the whole logical stream.
+                    if terminal_seen and semantic_or_finish_progression:
+                        terminal_seen = False
+                    if (
+                        normalized_stream_usage is not None
+                        and semantic_or_finish_progression
+                    ):
+                        normalized_stream_usage = None
+
+                    trusted_usage_evidence = (
+                        raw_usage is not None
+                        and (
+                            chunk_terminal
+                            or (
+                                terminal_seen
+                                and self._is_trailing_usage_only_chunk(chunk)
+                            )
+                        )
+                    )
+                    if (
+                        admission is not None
+                        and quota is not None
+                        and trusted_usage_evidence
+                    ):
+                        metadata = getattr(chunk, "metadata", None)
+                        normalized_stream_usage = quota.normalize_stream_usage(
+                            usage=raw_usage,
+                            provider=(
+                                getattr(metadata, "provider", None)
+                                or provider.name
+                            ),
+                            model=(
+                                getattr(chunk, "model", None)
+                                or (
+                                    str(model)
+                                    if model is not None
+                                    else None
+                                )
+                            ),
+                        )
+                    terminal_seen = terminal_seen or chunk_terminal
                     public_chunk = stream_assembler.observe(chunk)
                     if public_chunk is None:
                         continue
                     stream_started = True
                     yield public_chunk
+
+                quota = self.inference_quota
+                if admission is not None and quota is not None:
+                    if normalized_stream_usage is None:
+                        normalized_stream_usage = quota.normalize_stream_usage(
+                            usage=None,
+                            provider=provider.name,
+                            model=(
+                                str(model)
+                                if model is not None
+                                else None
+                            ),
+                        )
+                    await self._settle_inference_quota_success(
+                        admission=admission,
+                        usage=normalized_stream_usage,
+                        executor_dispatch_count=executor_dispatch_count,
+                        call_budget=call_budget,
+                    )
 
                 canonical_chunk = await stream_assembler.finalize()
                 if canonical_chunk is not None:

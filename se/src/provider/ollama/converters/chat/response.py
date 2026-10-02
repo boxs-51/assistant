@@ -26,6 +26,23 @@ from .....domain.schemas import (
 
 class ResponseChats:
 
+    @staticmethod
+    def _gateway_usage_from_counts(payload: dict) -> GatewayUsage:
+        usage_kwargs: dict[str, int] = {}
+        if "prompt_eval_count" in payload:
+            usage_kwargs["prompt_tokens"] = payload["prompt_eval_count"]
+        if "eval_count" in payload:
+            usage_kwargs["completion_tokens"] = payload["eval_count"]
+        if (
+            "prompt_tokens" in usage_kwargs
+            and "completion_tokens" in usage_kwargs
+        ):
+            usage_kwargs["total_tokens"] = (
+                usage_kwargs["prompt_tokens"]
+                + usage_kwargs["completion_tokens"]
+            )
+        return GatewayUsage(**usage_kwargs)
+
     async def adapt_chat(
         self,
         response: httpx.Response,
@@ -75,9 +92,8 @@ class ResponseChats:
 
             finish_reason = "tool_calls" if tool_calls else ("stop" if response_data.get("done") else None)
 
-            # 3. Bóc tách Token Usage
-            prompt_tokens = response_data.get("prompt_eval_count", 0)
-            completion_tokens = response_data.get("eval_count", 0)
+            # 3. Preserve source-field presence for UBQ normalization.
+            usage = self._gateway_usage_from_counts(response_data)
 
             msg_obj = GatewayMessage(
                 role=message_data.get("role", "assistant"),
@@ -99,11 +115,7 @@ class ResponseChats:
                         finish_reason=finish_reason,
                     )
                 ],
-                usage=GatewayUsage(
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_tokens=prompt_tokens + completion_tokens
-                ),
+                usage=usage,
                 metadata= ResponseMetaData(
                     provider = "ollama",
                     raw_response = response_data,
@@ -138,12 +150,8 @@ class ResponseChats:
 
                 gateway_usage = None
                 if is_done:
-                    prompt_tokens = ollama_chunk.get("prompt_eval_count", 0)
-                    completion_tokens = ollama_chunk.get("eval_count", 0)
-                    gateway_usage = GatewayUsage(
-                        prompt_tokens=prompt_tokens,
-                        completion_tokens=completion_tokens,
-                        total_tokens=prompt_tokens + completion_tokens
+                    gateway_usage = self._gateway_usage_from_counts(
+                        ollama_chunk
                     )
 
                 tool_calls = None
