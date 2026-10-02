@@ -197,11 +197,17 @@ def _response(provider="p1"):
     )
 
 
-def _stream_chunk(provider="p1", *, with_usage=True):
+def _stream_chunk(
+    provider="p1",
+    *,
+    with_usage=True,
+    finish_reason=None,
+):
     return SimpleNamespace(
         model="logical-model",
         usage=(SimpleNamespace(total_tokens=5) if with_usage else None),
         metadata=SimpleNamespace(provider=provider),
+        choices=[SimpleNamespace(finish_reason=finish_reason)],
     )
 
 
@@ -393,7 +399,15 @@ async def test_ubq4_stream_captures_usage_before_observe_and_settles_before_fina
     provider = _Provider("p1", events)
     quota = _Quota(events)
     executor = _Executor(
-        {"p1": [_stream_chunk("p1", with_usage=True)]},
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    finish_reason="stop",
+                )
+            ]
+        },
         events,
         max_retries=0,
     )
@@ -455,3 +469,134 @@ async def test_ubq4_feature_off_preserves_legacy_handler_path():
         "execute:p1",
         "canonicalize",
     ]
+
+
+@pytest.mark.asyncio
+async def test_ubq4_stream_early_usage_without_terminal_evidence_stays_unknown(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk("p1", with_usage=True),
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                ),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    canonicalizer = _Canonicalizer(events)
+    handler = _handler(
+        [provider],
+        executor,
+        quota,
+        events,
+        canonicalizer=canonicalizer,
+    )
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
+    assert events.index("settle") < events.index("finalize")
+
+
+@pytest.mark.asyncio
+async def test_ubq4_stream_terminal_usage_is_trusted(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    finish_reason="stop",
+                )
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert (
+        settled.input_tokens,
+        settled.output_tokens,
+        settled.total_tokens,
+    ) == (2, 3, 5)
+
+
+@pytest.mark.asyncio
+async def test_ubq4_stream_trailing_usage_after_terminal_marker_is_trusted(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                ),
+                _stream_chunk("p1", with_usage=True),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert (
+        settled.input_tokens,
+        settled.output_tokens,
+        settled.total_tokens,
+    ) == (2, 3, 5)
