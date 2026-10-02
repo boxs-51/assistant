@@ -7,6 +7,7 @@ from .contracts.recovery import (
     RecoveryActivationSpec,
     RecoveryPlan,
 )
+from .contracts.resume import ResumeClaimState
 from .recovery_planning import (
     AgentRecoveryPlanningService,
     RecoveryPlanRejected,
@@ -37,19 +38,32 @@ class AgentRecoveryActivationService:
     ) -> RecoveryActivationResult:
         """Re-prove read-only authority, then consume one recovery claim atomically."""
 
-        fresh = await self._planning.build_recovery_plan(
-            plan.execution_id,
-            target_connection_id=plan.target_connection_id,
-        )
-        if fresh.plan_fingerprint != plan.plan_fingerprint:
-            raise RecoveryPlanRejected(
-                "RECOVERY_PLAN_DRIFT",
-                "Recovery authority changed after the claim plan was frozen.",
+        existing_claim = (
+            await self._durable_store.load_resume_claim_by_request_id(
+                resume_request_id
             )
+        )
+        if (
+            existing_claim is not None
+            and existing_claim.claim_id == claim_id
+            and existing_claim.state is ResumeClaimState.CONSUMED
+        ):
+            durable_plan = plan
+        else:
+            fresh = await self._planning.build_recovery_plan(
+                plan.execution_id,
+                target_connection_id=plan.target_connection_id,
+            )
+            if fresh.plan_fingerprint != plan.plan_fingerprint:
+                raise RecoveryPlanRejected(
+                    "RECOVERY_PLAN_DRIFT",
+                    "Recovery authority changed after the claim plan was frozen.",
+                )
+            durable_plan = fresh
 
         return await self._durable_store.consume_recovery_claim(
             RecoveryActivationSpec(
-                plan=fresh,
+                plan=durable_plan,
                 claim_id=claim_id,
                 resume_request_id=resume_request_id,
                 expected_claim_revision=expected_claim_revision,
