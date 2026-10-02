@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -743,13 +744,12 @@ async def test_r12_f3a_two_slot_guard_failure_preserves_both_presend_r6_truth():
         expected_remote_outcome_state=RemoteOutcomeState.NOT_DISPATCHED,
         action=ResumeInvocationActionKind.DISPATCH_NOT_DISPATCHED,
     )
-    action_b = action_a.model_copy(
-        update={
-            "invocation_id": invocation_b.invocation_id,
-            "tool_call_id": invocation_b.tool_call_id,
-            "ordinal": 1,
-            "expected_invocation_revision": persisted_b_before.revision,
-        }
+    action_b = replace(
+        action_a,
+        invocation_id=invocation_b.invocation_id,
+        tool_call_id=invocation_b.tool_call_id,
+        ordinal=1,
+        expected_invocation_revision=persisted_b_before.revision,
     )
 
     context = AgentExecutionContext.create(
