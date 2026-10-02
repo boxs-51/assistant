@@ -53,7 +53,10 @@ async def embeddings_proxy(
     await event_bus.publish(BaseEvent(
         event_name="provider.embeddings.execute",
         session_id=session_id,
-        payload={"request_body": body}
+        payload={
+            "request_body": body,
+            "identity": identity.model_dump(mode="json"),
+        }
     ))
 
     try:
