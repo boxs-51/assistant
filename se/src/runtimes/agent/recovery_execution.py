@@ -21,6 +21,9 @@ from .contracts.resume import (
 from .contracts.tool import ToolExecutionResult
 
 
+from .persistence import ExecutionConflictError
+
+
 class RecoveryExecutionError(RuntimeError):
     """Fail-closed R12-F3 recovered active-batch execution error."""
 
@@ -598,7 +601,11 @@ class AgentRecoveryExecutionService:
             await self._require_exact_active_fence(plan, activation, context)
             return existing
 
-        await self._require_exact_active_fence(plan, activation, context)
+        recovery_fence = {
+            "owner_instance_id": activation.activation_owner_instance_id,
+            "lease_generation": activation.lease_generation,
+            "lease_expires_at": activation.lease_expires_at,
+        }
         saver = getattr(self._store, "save_tool_result", None)
         if not callable(saver):
             raise RecoveryExecutionError(
@@ -609,23 +616,31 @@ class AgentRecoveryExecutionService:
             plan.recovery_iteration_id
             or f"{plan.execution_id}:iteration:{plan.iteration}"
         )
-        await saver(
-            {
-                "id": f"{result.execution_id}:{result.tool_call_id}",
-                "execution_id": result.execution_id,
-                "iteration_id": iteration_id,
-                "tool_call_id": result.tool_call_id,
-                "invocation_id": result.invocation_id,
-                "capability_id": result.capability_id,
-                "success": result.success,
-                "output": result.output,
-                "error_code": result.error_code,
-                "error_message": result.error_message,
-                "retryable": result.retryable,
-                "extra_metadata": result.metadata,
-                "attempt": result.metadata.get("attempt", 1),
-            }
-        )
+        try:
+            await saver(
+                {
+                    "id": f"{result.execution_id}:{result.tool_call_id}",
+                    "execution_id": result.execution_id,
+                    "iteration_id": iteration_id,
+                    "tool_call_id": result.tool_call_id,
+                    "invocation_id": result.invocation_id,
+                    "capability_id": result.capability_id,
+                    "success": result.success,
+                    "output": result.output,
+                    "error_code": result.error_code,
+                    "error_message": result.error_message,
+                    "retryable": result.retryable,
+                    "extra_metadata": result.metadata,
+                    "attempt": result.metadata.get("attempt", 1),
+                },
+                recovery_fence=recovery_fence,
+            )
+        except ExecutionConflictError as exc:
+            raise RecoveryExecutionError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+                "Exact recovery authority was lost before AgentToolResult write.",
+                retryable=True,
+            ) from exc
 
         committed = await self._load_committed_read_only(
             plan,
@@ -643,11 +658,18 @@ class AgentRecoveryExecutionService:
                     "Continuation has no canonical COMMITTED projection.",
                     retryable=True,
                 )
-            await self._require_exact_active_fence(plan, activation, context)
-            record = await promoter(
-                plan.execution_id,
-                action.tool_call_id,
-            )
+            try:
+                record = await promoter(
+                    plan.execution_id,
+                    action.tool_call_id,
+                    recovery_fence=recovery_fence,
+                )
+            except ExecutionConflictError as exc:
+                raise RecoveryExecutionError(
+                    "RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+                    "Exact recovery authority was lost before result promotion.",
+                    retryable=True,
+                ) from exc
             if (
                 record is None
                 or str(getattr(record, "commit_state", "PROVISIONAL"))
