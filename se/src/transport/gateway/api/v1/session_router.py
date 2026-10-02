@@ -166,9 +166,29 @@ async def regenerate_session_response(
         "metadata": body.metadata,
         "tools": body.tools or None,
     }
+    quota_kwargs = {}
+    inference_quota = getattr(
+        container,
+        "user_inference_quota_service",
+        None,
+    )
+    if (
+        inference_quota is not None
+        and getattr(inference_quota, "enabled", False)
+    ):
+        logical_request_id = (
+            f"regenerate:{session_id}:{uuid.uuid4().hex}"
+        )
+        quota_kwargs["quota_context"] = inference_quota.build_context(
+            budget_identity=identity,
+            logical_request_id=logical_request_id,
+            source_surface="SESSION_REGENERATE",
+            session_id=session_id,
+        )
     response = await container.provider_runtime.chat_handler.execute_with_fallback(
         container.http_client,
         payload,
+        **quota_kwargs,
     )
     response_payload = response.model_dump(mode="json")
     choices = response_payload.get("choices") or []
