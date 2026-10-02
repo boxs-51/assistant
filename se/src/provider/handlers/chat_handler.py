@@ -387,6 +387,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
             stream_assembler = None
             asset_attempt_terminal = False
             normalized_stream_usage: NormalizedInferenceUsage | None = None
+            terminal_seen = False
             try:
                 if not await self._has_required_capabilities(
                     provider,
@@ -425,10 +426,17 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 async for chunk in provider_stream:
                     quota = self.inference_quota
                     raw_usage = getattr(chunk, "usage", None)
+                    chunk_terminal = any(
+                        getattr(choice, "finish_reason", None) is not None
+                        for choice in (
+                            getattr(chunk, "choices", None) or []
+                        )
+                    )
                     if (
                         admission is not None
                         and quota is not None
                         and raw_usage is not None
+                        and (chunk_terminal or terminal_seen)
                     ):
                         metadata = getattr(chunk, "metadata", None)
                         normalized_stream_usage = quota.normalize_stream_usage(
@@ -446,6 +454,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                                 )
                             ),
                         )
+                    terminal_seen = terminal_seen or chunk_terminal
                     public_chunk = stream_assembler.observe(chunk)
                     if public_chunk is None:
                         continue
