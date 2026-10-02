@@ -701,9 +701,10 @@ async def test_r12_f2_mutable_lineage_revision_drift_is_not_activation_identity(
         assert fresh.task_budget_incarnation_generation == (
             plan.task_budget_incarnation_generation
         )
-        # Mutable Task/Branch/TaskBudget revisions remain observable planning
-        # evidence but are not part of immutable recovery activation identity.
-        assert fresh.plan_fingerprint == plan.plan_fingerprint
+        # F1 stays byte-compatible with canonical main and fingerprints these
+        # revision snapshots as planning evidence. F2 tolerates only this bounded
+        # revision-only drift after re-proving every other authority field.
+        assert fresh.plan_fingerprint != plan.plan_fingerprint
 
         activated = await service.activate(
             plan,
