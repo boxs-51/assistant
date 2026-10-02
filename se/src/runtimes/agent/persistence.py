@@ -6151,6 +6151,21 @@ class DurableAgentStore:
                 raise ExecutionConflictError(
                     "STALE_RECOVERY_CHECKPOINT: checkpoint differs from plan."
                 )
+            checkpoint_metadata = dict(
+                getattr(checkpoint, "metadata_json", None) or {}
+            )
+            if (
+                str(
+                    checkpoint_metadata.get(
+                        "r12_recovery_fingerprint"
+                    )
+                    or ""
+                )
+                != plan.recovery_fingerprint
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RECOVERY_CHECKPOINT: recovery fingerprint changed."
+                )
 
             execution_remaining = getattr(
                 execution, "remaining_active_budget_seconds", None
