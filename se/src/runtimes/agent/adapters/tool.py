@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from ..contracts.context import AgentExecutionContext
 from ..contracts.policy import (
@@ -35,6 +35,9 @@ from ..tool_execution.validator import (
 from ...capability.contracts.definition import (
     CapabilityExecutionMode,
     CapabilityKind,
+)
+from ...capability.contracts.error import (
+    CapabilityContinuationDispatchGuardError,
 )
 from ...capability.contracts.invocation import ExistingInvocationContinuationMode
 from ...capability.contracts.implementation import CapabilityExecutionLocation
@@ -289,6 +292,8 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 },
             )
         except asyncio.CancelledError:
+            raise
+        except CapabilityContinuationDispatchGuardError:
             raise
         except Exception as exc:
             normalized = normalize_tool_exception(
