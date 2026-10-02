@@ -13,6 +13,9 @@ from ..contracts.tool import (
     ToolExecutionResult,
 )
 from ..contracts.resume import ResumeInvocationAction
+from ...capability.contracts.error import (
+    CapabilityContinuationDispatchGuardError,
+)
 
 
 RetryDecider = Callable[[ToolExecutionResult, int], bool]
@@ -447,9 +450,10 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         recovery fences pass.
 
         When preserve_started_on_failure is true, a prepare/fence failure
-        cancels only slots that have not crossed the continuation call
-        boundary. Already-started slots are allowed to finish canonical R6/UBQ
-        outcome recording before the batch failure is propagated.
+        cancels only slots that have not entered continuation lifecycle setup.
+        Started-but-pre-send slots remain alive long enough to observe the
+        shared canonical guard failure and fail closed at the final send seam;
+        slots already final-send-authorized continue canonical R6/UBQ truth.
         """
 
         if max_parallel < 1:
@@ -478,7 +482,8 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             min(max_parallel, context.limits.max_parallel_tools)
         )
         prepare_failed = asyncio.Event()
-        dispatch_started: set[str] = set()
+        continuation_started: set[str] = set()
+        physical_dispatch_authorized: set[str] = set()
 
         async def run_one(raw_action: Any) -> ToolExecutionResult:
             async with semaphore:
@@ -499,7 +504,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                             "Continuation dispatch stopped after a "
                             "pre-dispatch fence failure."
                         )
-                dispatch_started.add(raw_action.invocation_id)
+                continuation_started.add(raw_action.invocation_id)
                 if canonical_dispatch_guard is None:
                     return await self.continue_invocation(
                         context,
@@ -513,12 +518,33 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                     origin_connection_id: str | None,
                 ) -> None:
                     try:
+                        if prepare_failed.is_set():
+                            raise CapabilityContinuationDispatchGuardError(
+                                "RECOVERY_BATCH_FAIL_CLOSED",
+                                "A sibling continuation already lost "
+                                "recovery dispatch authority.",
+                                retryable=True,
+                            )
                         await canonical_dispatch_guard(
                             raw_action,
                             invocation,
                             selected_implementation_id,
                             target_connection_id,
                             origin_connection_id,
+                        )
+                        if prepare_failed.is_set():
+                            raise CapabilityContinuationDispatchGuardError(
+                                "RECOVERY_BATCH_FAIL_CLOSED",
+                                "A sibling continuation lost recovery "
+                                "dispatch authority before this slot sent.",
+                                retryable=True,
+                            )
+                        # RemoteClientDriver has no await between returning
+                        # from this guard and RealtimeMultiplexer.invoke().
+                        # Mark only final-send authorization here; entering
+                        # continue_invocation() is deliberately not dispatch.
+                        physical_dispatch_authorized.add(
+                            raw_action.invocation_id
                         )
                     except BaseException:
                         prepare_failed.set()
@@ -550,7 +576,7 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             if preserve_started_on_failure:
                 for task, action in zip(tasks, action_list):
                     if (
-                        action.invocation_id not in dispatch_started
+                        action.invocation_id not in continuation_started
                         and not task.done()
                     ):
                         task.cancel()
