@@ -153,7 +153,7 @@ def test_r12_f3b_deadline_wrapper_current_order_can_rewrite_terminal_error():
 
     assert terminal_capture < deadline_recheck < terminal_reraise
 
-    text = _read(DOC)
+    text = " ".join(_read(DOC).split())
     assert "must not overwrite a completed authority-loss exception" in text
     assert "ProviderDeadlineExceededError" in text
 
