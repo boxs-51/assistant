@@ -31,7 +31,7 @@ def test_r12_f3b_contract_freezes_exact_baseline_and_closed_claim():
     assert "main@ea6c5f00a9432a89275d9cc4b9b52b8f992d0f12" in text
     assert "R12-F3-A = LANDED / CANONICAL / HEALTHY" in text
     assert "R12-F3-B production CLAIM = CLOSED" in text
-    assert "Production delta: ZERO" in text
+    assert "**Production delta:** ZERO" in text
 
 
 def test_r12_f3b_f3a_stops_before_provider_and_returns_ordered_batch():
