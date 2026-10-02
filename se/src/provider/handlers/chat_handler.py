@@ -452,11 +452,10 @@ class ChatExecutionHandler(BaseExecutionHandler):
                 async for chunk in provider_stream:
                     quota = self.inference_quota
                     raw_usage = getattr(chunk, "usage", None)
-                    chunk_terminal = any(
+                    chunk_choices = getattr(chunk, "choices", None) or []
+                    chunk_terminal = bool(chunk_choices) and all(
                         getattr(choice, "finish_reason", None) is not None
-                        for choice in (
-                            getattr(chunk, "choices", None) or []
-                        )
+                        for choice in chunk_choices
                     )
                     semantic_or_finish_progression = (
                         self._has_stream_semantic_or_finish_progression(chunk)
