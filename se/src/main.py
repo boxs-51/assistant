@@ -907,12 +907,6 @@ async def bootstrap_runtime_kernel(
             default_output_token_reservation=(
                 inference_quota_settings.default_output_token_reservation
             ),
-            compute_units_per_1k_tokens=(
-                inference_quota_settings.compute_units_per_1k_tokens
-            ),
-            cost_usd_per_1k_tokens=(
-                inference_quota_settings.cost_usd_per_1k_tokens
-            ),
         ),
     )
     task_budget_service = TaskBudgetService(
