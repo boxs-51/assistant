@@ -22,6 +22,7 @@ from se.src.runtimes.capability.contracts.error import (
     CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT,
     CAPABILITY_CONTINUATION_STALE,
     CAPABILITY_CONTINUATION_UNSAFE,
+    CapabilityContinuationDispatchGuardError,
     CapabilityError,
     REMOTE_INVOCATION_CONFLICT,
 )
@@ -623,3 +624,66 @@ async def test_r7_f4_agent_adapter_enters_exact_r7_e_continuation_path(
     assert persisted.state is CapabilityInvocationState.COMPLETED
     assert persisted.remote_outcome_state is RemoteOutcomeState.TERMINAL_COMMITTED
     assert [item.attempt_number for item in attempts] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_dispatch_guard_runs_after_attempt_setup_before_remote_send():
+    realtime = _Realtime()
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.NON_IDEMPOTENT,
+        outcome=RemoteOutcomeState.NOT_DISPATCHED,
+        realtime=realtime,
+    )
+    observed = []
+
+    async def reject_at_canonical_boundary(
+        current_invocation,
+        selected_implementation_id,
+        target_connection_id,
+        origin_connection_id,
+    ):
+        observed.append(
+            (
+                current_invocation.state,
+                current_invocation.attempt,
+                selected_implementation_id,
+                target_connection_id,
+                origin_connection_id,
+            )
+        )
+        raise CapabilityContinuationDispatchGuardError(
+            "RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+            "lease changed after outer prepare",
+            retryable=True,
+        )
+
+    with pytest.raises(
+        CapabilityContinuationDispatchGuardError,
+        match="lease changed after outer prepare",
+    ):
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K2,
+            mode=ExistingInvocationContinuationMode.DISPATCH_NOT_DISPATCHED,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+            continuation_dispatch_guard=reject_at_canonical_boundary,
+        )
+
+    assert realtime.calls == []
+    assert len(observed) == 1
+    state, attempt_number, implementation_id, target, origin = observed[0]
+    assert state is CapabilityInvocationState.RUNNING
+    assert attempt_number == 2
+    assert implementation_id == f"{K2}:{CAPABILITY_ID}"
+    assert target == K2
+    assert origin == K1
+
+    persisted = await store.get(invocation.invocation_id)
+    attempts = await store.list_attempts(invocation.invocation_id)
+    assert persisted is not None
+    assert persisted.state is CapabilityInvocationState.WAITING
+    assert persisted.wait_reason is CapabilityWaitReason.CONNECTION
+    assert persisted.remote_outcome_state is RemoteOutcomeState.NOT_DISPATCHED
+    assert [item.attempt_number for item in attempts] == [1, 2]
+    assert attempts[-1].state is CapabilityInvocationState.FAILED
