@@ -125,6 +125,105 @@ class AgentRecoveryExecutionService:
                 "F3-A requires a prepared context with frozen active budget.",
             )
 
+    async def _require_consumed_activation_handoff(
+        self,
+        plan: RecoveryPlan,
+        activation: RecoveryActivationResult,
+    ) -> None:
+        loader = getattr(
+            self._store,
+            "load_resume_claim_by_request_id",
+            None,
+        )
+        if not callable(loader):
+            raise RecoveryExecutionError(
+                "RECOVERY_ACTIVATION_HANDOFF_UNAVAILABLE",
+                "Durable recovery claim reader is unavailable.",
+            )
+        claim = await loader(activation.resume_request_id)
+        state = str(
+            getattr(getattr(claim, "state", None), "value", None)
+            or getattr(claim, "state", "")
+        )
+        if (
+            claim is None
+            or str(getattr(claim, "claim_id", "") or "") != activation.claim_id
+            or str(getattr(claim, "resume_request_id", "") or "")
+            != activation.resume_request_id
+            or str(getattr(claim, "execution_id", "") or "")
+            != plan.execution_id
+            or str(getattr(claim, "checkpoint_id", "") or "")
+            != plan.checkpoint_id
+            or int(getattr(claim, "expected_execution_revision", -1))
+            != plan.expected_execution_revision
+            or str(getattr(claim, "plan_fingerprint", "") or "")
+            != plan.plan_fingerprint
+            or str(getattr(claim, "user_id", "") or "")
+            != plan.resolved_recovery_principal
+            or getattr(claim, "client_id", None) != plan.target_client_id
+            or getattr(claim, "connection_id", None)
+            != plan.target_connection_id
+            or str(getattr(claim, "wait_reason", "") or "") != "RECOVERY"
+            or str(getattr(claim, "trigger_type", "") or "")
+            != ResumeTriggerType.SERVER_RECOVERY.value
+            or state != "CONSUMED"
+            or int(getattr(claim, "consumed_execution_revision", -1))
+            != activation.consumed_execution_revision
+        ):
+            raise RecoveryExecutionError(
+                "STALE_RECOVERY_ACTIVATION",
+                "Durable consumed recovery claim differs from F2 activation.",
+            )
+
+        metadata = dict(getattr(claim, "metadata", {}) or {})
+        handoff = metadata.get("r12_f2_activation_handoff")
+        if not isinstance(handoff, dict):
+            raise RecoveryExecutionError(
+                "STALE_RECOVERY_ACTIVATION",
+                "Consumed recovery claim lacks F2 activation handoff proof.",
+            )
+        try:
+            handoff_expiry = datetime.fromisoformat(
+                str(handoff["lease_expires_at"])
+            )
+            handoff_now = datetime.fromisoformat(
+                str(handoff["activation_now_utc"])
+            )
+            handoff_generation = int(handoff["lease_generation"])
+            handoff_revision = int(
+                handoff["consumed_execution_revision"]
+            )
+            handoff_version = int(handoff["version"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise RecoveryExecutionError(
+                "STALE_RECOVERY_ACTIVATION",
+                "F2 activation handoff proof is malformed.",
+            ) from exc
+
+        if (
+            handoff_expiry.tzinfo is None
+            or handoff_now.tzinfo is None
+            or handoff_now >= handoff_expiry
+            or handoff_version != 1
+            or str(handoff.get("kind") or "")
+            != "SERVER_RECOVERY_ACTIVATION"
+            or str(handoff.get("execution_id") or "") != plan.execution_id
+            or str(handoff.get("checkpoint_id") or "") != plan.checkpoint_id
+            or str(handoff.get("recovery_fingerprint") or "")
+            != plan.recovery_fingerprint
+            or str(handoff.get("recovery_plan_fingerprint") or "")
+            != plan.plan_fingerprint
+            or str(handoff.get("activation_owner_instance_id") or "")
+            != activation.activation_owner_instance_id
+            or handoff_generation != activation.lease_generation
+            or handoff_expiry != activation.lease_expires_at
+            or handoff_revision != activation.consumed_execution_revision
+        ):
+            raise RecoveryExecutionError(
+                "STALE_RECOVERY_ACTIVATION",
+                "F2 durable activation handoff no longer matches authority.",
+            )
+
     async def _require_exact_active_fence(
         self,
         plan: RecoveryPlan,
@@ -520,6 +619,10 @@ class AgentRecoveryExecutionService:
 
         self._validate_plan_activation(plan, activation)
         self._validate_context(context, plan, activation)
+        await self._require_consumed_activation_handoff(
+            plan,
+            activation,
+        )
         await self._require_exact_active_fence(plan, activation, context)
 
         context.restore_active_budget(plan.remaining_active_budget_seconds)
