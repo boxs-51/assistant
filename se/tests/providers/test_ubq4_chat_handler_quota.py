@@ -202,12 +202,28 @@ def _stream_chunk(
     *,
     with_usage=True,
     finish_reason=None,
+    content=None,
+    reasoning_content=None,
+    tool_calls=None,
+    content_parts=None,
 ):
     return SimpleNamespace(
         model="logical-model",
         usage=(SimpleNamespace(total_tokens=5) if with_usage else None),
-        metadata=SimpleNamespace(provider=provider),
-        choices=[SimpleNamespace(finish_reason=finish_reason)],
+        metadata=SimpleNamespace(
+            provider=provider,
+            content_parts=content_parts,
+        ),
+        choices=[
+            SimpleNamespace(
+                finish_reason=finish_reason,
+                delta=SimpleNamespace(
+                    content=content,
+                    reasoning_content=reasoning_content,
+                    tool_calls=tool_calls,
+                ),
+            )
+        ],
     )
 
 
@@ -600,3 +616,181 @@ async def test_ubq4_stream_trailing_usage_after_terminal_marker_is_trusted(
         settled.output_tokens,
         settled.total_tokens,
     ) == (2, 3, 5)
+
+
+@pytest.mark.asyncio
+async def test_ubq4_post_terminal_usage_with_content_stays_unknown(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                ),
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    content="late semantic output",
+                ),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_ubq4_post_terminal_usage_with_tool_call_stays_unknown(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                ),
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    tool_calls=[SimpleNamespace(id="call-late")],
+                ),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_ubq4_post_terminal_usage_with_cas_content_parts_stays_unknown(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                ),
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    content_parts=[
+                        {"type": "image", "data": {"source": "provider"}}
+                    ],
+                ),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_ubq4_post_terminal_second_finish_marker_is_not_trusted(
+    monkeypatch,
+):
+    events = []
+    provider = _Provider("p1", events)
+    quota = _Quota(events)
+    executor = _Executor(
+        {
+            "p1": [
+                _stream_chunk(
+                    "p1",
+                    with_usage=False,
+                    finish_reason="stop",
+                ),
+                _stream_chunk(
+                    "p1",
+                    with_usage=True,
+                    finish_reason="stop",
+                ),
+            ]
+        },
+        events,
+        max_retries=0,
+    )
+    handler = _handler([provider], executor, quota, events)
+    monkeypatch.setattr(
+        "se.src.provider.handlers.chat_handler.GeneratedAssetStreamAssembler",
+        _ObservedAssembler,
+    )
+
+    async for _ in handler.stream_with_fallback(
+        object(),
+        {"model": "logical-model"},
+        quota_context="trusted-context",
+    ):
+        pass
+
+    settled = quota.settlements[0]
+    assert settled.input_tokens is None
+    assert settled.output_tokens is None
+    assert settled.total_tokens is None
