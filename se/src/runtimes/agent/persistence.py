@@ -219,6 +219,12 @@ def _utc_datetime(value: datetime | None) -> datetime | None:
     return value.astimezone(timezone.utc)
 
 
+def _utc_now() -> datetime:
+    """Authoritative wall-clock instant for mutation-boundary lease checks."""
+
+    return datetime.now(timezone.utc)
+
+
 async def _retry_source_context_state_in_uow(uow, execution) -> dict[str, Any]:
     state = getattr(execution, "context_state", None)
     if isinstance(state, Mapping):
@@ -2591,13 +2597,12 @@ class DurableAgentStore:
         )
         return projected
 
-    async def _lock_recovery_projection_fence_in_uow(
-        self,
-        uow,
-        execution_id: str,
+    @staticmethod
+    def _require_recovery_projection_fence_now(
+        execution,
         recovery_fence: Mapping[str, Any],
-    ):
-        """Lock and prove exact R12 authority in the projection transaction."""
+    ) -> None:
+        """Prove the locked R12 fence is still live at this wall-clock instant."""
 
         owner = str(
             recovery_fence.get("owner_instance_id") or ""
@@ -2618,8 +2623,6 @@ class DurableAgentStore:
                 "incomplete recovery projection fence."
             )
 
-        execution = await uow.agents.get_execution_for_update(execution_id)
-        now_utc = datetime.now(timezone.utc)
         durable_expiry = _utc_datetime(
             getattr(execution, "lease_expires_at", None)
             if execution is not None
@@ -2632,12 +2635,26 @@ class DurableAgentStore:
             or int(execution.lease_generation) != generation
             or durable_expiry != expected_expiry
             or durable_expiry is None
-            or durable_expiry <= now_utc
+            or durable_expiry <= _utc_now()
         ):
             raise ExecutionConflictError(
                 "RECOVERY_ACTIVE_LEASE_FENCE_LOST: "
                 "projection transaction lost exact R12 authority."
             )
+
+    async def _lock_recovery_projection_fence_in_uow(
+        self,
+        uow,
+        execution_id: str,
+        recovery_fence: Mapping[str, Any],
+    ):
+        """Lock and prove exact R12 authority in the projection transaction."""
+
+        execution = await uow.agents.get_execution_for_update(execution_id)
+        self._require_recovery_projection_fence_now(
+            execution,
+            recovery_fence,
+        )
         return execution
 
     async def save_tool_result(
@@ -2655,11 +2672,14 @@ class DurableAgentStore:
             values, _TOOL_RESULT_JSON_FIELDS, path="agent_tool_results"
         )
         async with self.uow_factory() as uow:
+            locked_recovery_execution = None
             if recovery_fence is not None:
-                await self._lock_recovery_projection_fence_in_uow(
-                    uow,
-                    str(values["execution_id"]),
-                    recovery_fence,
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        str(values["execution_id"]),
+                        recovery_fence,
+                    )
                 )
             existing = await uow.agents.get_tool_result(
                 values["execution_id"], values["tool_call_id"]
@@ -2695,6 +2715,11 @@ class DurableAgentStore:
                     values["commit_state"] = "PROVISIONAL"
 
             if existing is None:
+                if recovery_fence is not None:
+                    self._require_recovery_projection_fence_now(
+                        locked_recovery_execution,
+                        recovery_fence,
+                    )
                 record = await uow.agents.save_tool_result(values)
             else:
                 self._validate_existing_tool_result_identity(existing, values)
@@ -2702,6 +2727,11 @@ class DurableAgentStore:
                     self._validate_committed_tool_result_content(existing, values)
                     record = existing
                 elif values["commit_state"] == "COMMITTED":
+                    if recovery_fence is not None:
+                        self._require_recovery_projection_fence_now(
+                            locked_recovery_execution,
+                            recovery_fence,
+                        )
                     record = await uow.agents.update_tool_result(
                         values["execution_id"],
                         values["tool_call_id"],
@@ -2732,11 +2762,14 @@ class DurableAgentStore:
         terminal output/error rather than the stale transport projection.
         """
         async with self.uow_factory() as uow:
+            locked_recovery_execution = None
             if recovery_fence is not None:
-                await self._lock_recovery_projection_fence_in_uow(
-                    uow,
-                    execution_id,
-                    recovery_fence,
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        execution_id,
+                        recovery_fence,
+                    )
                 )
             record = await uow.agents.get_tool_result(execution_id, tool_call_id)
             if record is None:
@@ -2779,6 +2812,11 @@ class DurableAgentStore:
                 _TOOL_RESULT_JSON_FIELDS,
                 path="agent_tool_results",
             )
+            if recovery_fence is not None:
+                self._require_recovery_projection_fence_now(
+                    locked_recovery_execution,
+                    recovery_fence,
+                )
             record = await uow.agents.update_tool_result(
                 execution_id,
                 tool_call_id,
