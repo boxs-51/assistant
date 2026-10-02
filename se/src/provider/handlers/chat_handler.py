@@ -82,6 +82,28 @@ class ChatExecutionHandler(BaseExecutionHandler):
             cost_usd=None,
         )
 
+    @staticmethod
+    def _is_trailing_usage_only_chunk(chunk: Any) -> bool:
+        """Prove post-terminal usage carries no semantic response payload."""
+
+        for choice in getattr(chunk, "choices", None) or []:
+            if getattr(choice, "finish_reason", None) is not None:
+                return False
+            delta = getattr(choice, "delta", None)
+            if delta is None:
+                continue
+            if getattr(delta, "content", None):
+                return False
+            if getattr(delta, "reasoning_content", None):
+                return False
+            if getattr(delta, "tool_calls", None):
+                return False
+
+        metadata = getattr(chunk, "metadata", None)
+        if getattr(metadata, "content_parts", None):
+            return False
+        return True
+
     async def _settle_inference_quota_success(
         self,
         *,
@@ -432,11 +454,18 @@ class ChatExecutionHandler(BaseExecutionHandler):
                             getattr(chunk, "choices", None) or []
                         )
                     )
+                    trusted_usage_evidence = (
+                        (chunk_terminal and not terminal_seen)
+                        or (
+                            terminal_seen
+                            and self._is_trailing_usage_only_chunk(chunk)
+                        )
+                    )
                     if (
                         admission is not None
                         and quota is not None
                         and raw_usage is not None
-                        and (chunk_terminal or terminal_seen)
+                        and trusted_usage_evidence
                     ):
                         metadata = getattr(chunk, "metadata", None)
                         normalized_stream_usage = quota.normalize_stream_usage(
