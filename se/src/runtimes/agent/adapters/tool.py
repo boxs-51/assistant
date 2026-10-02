@@ -239,6 +239,11 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         self,
         context: AgentExecutionContext,
         action: ResumeInvocationAction,
+        *,
+        continuation_dispatch_guard: (
+            Callable[[Any, str, str | None, str | None], Awaitable[None]]
+            | None
+        ) = None,
     ) -> ToolExecutionResult:
         """Continue exactly one R7-E logical invocation.
 
@@ -266,6 +271,9 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 expected_revision=action.expected_invocation_revision,
                 expected_request_fingerprint=action.request_fingerprint,
                 cancellation_event=context.cancellation_event,
+                continuation_dispatch_guard=(
+                    continuation_dispatch_guard
+                ),
             )
             return ToolExecutionResult(
                 execution_id=context.execution_id,
