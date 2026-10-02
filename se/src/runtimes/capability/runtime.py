@@ -16,6 +16,7 @@ from .contracts.error import (
     CAPABILITY_CONTINUATION_STALE,
     CAPABILITY_CONTINUATION_TARGET_UNAVAILABLE,
     CAPABILITY_CONTINUATION_UNSAFE,
+    CapabilityContinuationDispatchGuardError,
     CapabilityError,
     REMOTE_INVOCATION_CONFLICT,
     REMOTE_OUTCOME_UNKNOWN,
@@ -2151,6 +2152,27 @@ class CapabilityRuntime(BaseRuntime):
                     capability_id=capability_id,
                     invocation_id=context.invocation_id,
                 ) from exc
+            except CapabilityContinuationDispatchGuardError as exc:
+                error = {
+                    "code": exc.code,
+                    "message": str(exc),
+                    "retryable": exc.retryable,
+                }
+                if attempt.completed_at is None:
+                    await self.invocation_lifecycle.finish_attempt(
+                        attempt,
+                        CapabilityInvocationState.FAILED,
+                        error=error,
+                    )
+                await self.invocation_lifecycle.transition(
+                    invocation,
+                    CapabilityInvocationState.WAITING,
+                    wait_reason=CapabilityWaitReason.CONNECTION,
+                    attempt_id=attempt.attempt_id,
+                    error=error,
+                    remote_outcome_state=RemoteOutcomeState.NOT_DISPATCHED,
+                )
+                raise
             except CapabilityError as exc:
                 error = exc.model_dump()
                 await self.invocation_lifecycle.finish_attempt(
