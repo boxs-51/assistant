@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import inspect
 from types import SimpleNamespace
 
 import pytest
@@ -19,6 +20,7 @@ from se.src.runtimes.agent.recovery_planning import (
     RecoveryPlanDeferred,
     RecoveryPlanRejected,
 )
+from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.agent.safe_point_reconstruction import (
     R7CSafePoint,
     SafePointReconstructionError,
@@ -380,7 +382,6 @@ async def test_r12_f1_empty_recovery_cut_is_read_only_and_deterministic():
     assert plan.target_trigger is ResumeTriggerType.SERVER_RECOVERY
     assert plan.resolved_recovery_principal == "user-r12-f1"
     assert plan.recovery_iteration_id is None
-    assert plan.iteration_state is None
     assert plan.inference_request_id is None
     assert plan.inference_disposition is RecoveryInferenceDisposition.NO_INFERENCE
     assert plan.ordered_tool_call_ids == ()
@@ -425,7 +426,6 @@ async def test_r12_f1_uses_exact_frozen_iteration_inference_identity():
     plan = await service.build_recovery_plan(execution.id)
 
     assert plan.recovery_iteration_id == "iter-r12-f1"
-    assert plan.iteration_state == "WAITING_TOOL"
     assert plan.inference_request_id == "inf-frozen"
     assert plan.inference_disposition is RecoveryInferenceDisposition.NO_INFERENCE
     assert uow.commit_calls == 0
@@ -457,7 +457,7 @@ async def test_r12_f1_ambiguous_frozen_inference_defers_without_new_id():
 
     with pytest.raises(
         RecoveryPlanDeferred,
-        match="RECOVERY_INFERENCE_OUTCOME_AMBIGUOUS",
+        match="RECOVERY_INFERENCE_CUT_UNPROVEN",
     ):
         await service.build_recovery_plan(execution.id)
 
@@ -853,3 +853,81 @@ async def test_r12_f1_rejects_noncanonical_recovery_winner_receipt(
         await service.build_recovery_plan(execution.id)
 
     assert uow.commit_calls == 0
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("late_state", "late_request_id"),
+    (
+        ("PREPARING", None),
+        ("THINKING", "inf-late"),
+        ("WAITING_TOOL", "inf-late"),
+    ),
+)
+async def test_r12_f1_same_iteration_late_row_cannot_authorize_new_inference(
+    late_state,
+    late_request_id,
+):
+    execution = _execution(iteration=1)
+    checkpoint = _checkpoint(
+        execution,
+        iteration=1,
+        frozen_iteration_id="iter-r12-f1",
+        active_ids=(),
+    )
+    # This is the CURRENT contents of the same durable row after the recovery
+    # cut. R12-E did not freeze state/request-id, so none of these values are
+    # cut-time authority.
+    iteration = SimpleNamespace(
+        id="iter-r12-f1",
+        execution_id=execution.id,
+        iteration=1,
+        state=late_state,
+        inference_request_id=late_request_id,
+        inference_request=None,
+        inference_response=None,
+    )
+    service, uow, _runtime = _service(
+        execution=execution,
+        checkpoint=checkpoint,
+        safe_point=_safe_point(
+            iteration=1,
+            iteration_id="iter-r12-f1",
+        ),
+        iteration=iteration,
+    )
+
+    with pytest.raises(
+        RecoveryPlanDeferred,
+        match="RECOVERY_INFERENCE_CUT_UNPROVEN",
+    ):
+        await service.build_recovery_plan(execution.id)
+
+    assert uow.commit_calls == 0
+
+
+def test_r12_f1_active_batch_inference_id_depends_on_canonical_runtime_order():
+    source = inspect.getsource(AgentRuntime._execute_loop)
+
+    assign = 'record.inference_request_id = request_id'
+    batch = 'record.tool_call_ids = [item.tool_call_id for item in tool_requests]'
+
+    # One logical request id is assigned once for the AgentIteration.
+    assert source.count(assign) == 1
+    assign_index = source.index(assign)
+    persist_request_index = source.index(
+        "await self._persist_iteration(record)",
+        assign_index,
+    )
+    provider_index = source.index(
+        "response = await self._inference.complete(",
+        persist_request_index,
+    )
+    batch_index = source.index(batch, provider_index)
+    persist_batch_index = source.index(
+        "await self._persist_iteration(record)",
+        batch_index,
+    )
+
+    assert assign_index < persist_request_index < provider_index
+    assert provider_index < batch_index < persist_batch_index
+
