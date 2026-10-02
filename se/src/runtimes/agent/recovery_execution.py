@@ -4,7 +4,10 @@ from datetime import datetime
 from typing import Any
 
 from ..capability.contracts.definition import CapabilityKind
-from ..capability.contracts.error import CapabilityError
+from ..capability.contracts.error import (
+    CapabilityContinuationDispatchGuardError,
+    CapabilityError,
+)
 from .contracts.context import AgentExecutionContext
 from .contracts.recovery import (
     RecoveryActivationResult,
@@ -794,25 +797,41 @@ class AgentRecoveryExecutionService:
                     target_connection_id: str | None,
                     origin_connection_id: str | None,
                 ) -> None:
-                    await self._require_canonical_dispatch_authority(
-                        plan,
-                        activation,
-                        context,
-                        raw_action,
-                        invocation,
-                        selected_implementation_id,
-                        target_connection_id,
-                        origin_connection_id,
-                    )
+                    try:
+                        await self._require_canonical_dispatch_authority(
+                            plan,
+                            activation,
+                            context,
+                            raw_action,
+                            invocation,
+                            selected_implementation_id,
+                            target_connection_id,
+                            origin_connection_id,
+                        )
+                    except RecoveryExecutionError as exc:
+                        raise CapabilityContinuationDispatchGuardError(
+                            exc.code,
+                            str(exc),
+                            retryable=exc.retryable,
+                        ) from exc
 
-                raw_results = await runner(
-                    context,
-                    continuation_actions,
-                    max_parallel=context.limits.max_parallel_tools,
-                    pre_dispatch_prepare=prepare,
-                    canonical_dispatch_guard=canonical_dispatch_guard,
-                    preserve_started_on_failure=True,
-                )
+                try:
+                    raw_results = await runner(
+                        context,
+                        continuation_actions,
+                        max_parallel=context.limits.max_parallel_tools,
+                        pre_dispatch_prepare=prepare,
+                        canonical_dispatch_guard=canonical_dispatch_guard,
+                        preserve_started_on_failure=True,
+                    )
+                except CapabilityContinuationDispatchGuardError as exc:
+                    if isinstance(exc.__cause__, RecoveryExecutionError):
+                        raise exc.__cause__
+                    raise RecoveryExecutionError(
+                        exc.code,
+                        str(exc),
+                        retryable=exc.retryable,
+                    ) from exc
                 raw_by_id = {
                     item.tool_call_id: item for item in raw_results
                 }
