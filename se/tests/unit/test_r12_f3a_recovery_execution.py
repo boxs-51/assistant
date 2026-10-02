@@ -62,15 +62,22 @@ class _InvocationStore:
 
 
 class _CapabilityRuntime:
-    def __init__(self, invocation, *, implementation_id=IMPLEMENTATION):
+    def __init__(
+        self,
+        invocation,
+        *,
+        implementation_id=IMPLEMENTATION,
+        target_client_id=CLIENT,
+    ):
         self.invocation_lifecycle = SimpleNamespace(
             store=_InvocationStore(invocation)
         )
         self.tool_quota_service = None
         self._implementation_id = implementation_id
+        self._target_client_id = target_client_id
         self.connection_registry = SimpleNamespace(
             get=lambda connection_id: SimpleNamespace(
-                metadata={"client_id": CLIENT},
+                metadata={"client_id": self._target_client_id},
                 connection_id=connection_id,
             )
         )
@@ -114,10 +121,12 @@ class _Store:
         fence_results=None,
         committed=None,
         claim=None,
+        commit_on_save=True,
     ):
         self.fence_results = list(fence_results or [])
         self.committed = dict(committed or {})
         self.claim = claim
+        self.commit_on_save = commit_on_save
         self.fence_calls = []
         self.save_calls = []
         self.promote_calls = []
@@ -140,7 +149,9 @@ class _Store:
         self.save_calls.append(dict(values))
         record = SimpleNamespace(
             **values,
-            commit_state="COMMITTED",
+            commit_state=(
+                "COMMITTED" if self.commit_on_save else "PROVISIONAL"
+            ),
         )
         self.committed[values["tool_call_id"]] = record
         return record
@@ -502,3 +513,120 @@ async def test_r12_f3a_stale_consumed_handoff_causes_zero_external_dispatch():
     assert exc_info.value.code == "STALE_RECOVERY_ACTIVATION"
     assert executor.calls == []
     assert store.save_calls == []
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_initial_fence_loss_causes_zero_external_dispatch():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    store = _Store(
+        fence_results=[False],
+        claim=_claim(plan, activation),
+    )
+    executor = _ContinuationExecutor()
+    service = AgentRecoveryExecutionService(
+        store,
+        _CapabilityRuntime(_invocation()),
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+    assert executor.calls == []
+    assert store.save_calls == []
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_target_client_drift_causes_zero_external_dispatch():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    store = _Store(claim=_claim(plan, activation))
+    executor = _ContinuationExecutor()
+    runtime = _CapabilityRuntime(
+        _invocation(),
+        target_client_id="client-replacement",
+    )
+    service = AgentRecoveryExecutionService(
+        store,
+        runtime,
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "RECOVERY_CONTINUATION_AFFINITY_CHANGED"
+    assert executor.calls == []
+    assert store.save_calls == []
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_recovery_only_kind_drift_causes_zero_external_dispatch():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    invocation = _invocation()
+    invocation.kind = CapabilityKind.SKILL
+    store = _Store(claim=_claim(plan, activation))
+    executor = _ContinuationExecutor()
+    service = AgentRecoveryExecutionService(
+        store,
+        _CapabilityRuntime(invocation),
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "RECOVERY_CONTINUATION_IDENTITY_CHANGED"
+    assert executor.calls == []
+    assert store.save_calls == []
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_noncommitted_projection_fails_closed():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    store = _Store(
+        claim=_claim(plan, activation),
+        commit_on_save=False,
+    )
+    executor = _ContinuationExecutor()
+    service = AgentRecoveryExecutionService(
+        store,
+        _CapabilityRuntime(_invocation()),
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "RECOVERY_TOOL_RESULT_NOT_COMMITTED"
+    assert len(executor.calls) == 1
+    assert len(store.save_calls) == 1
+    assert store.committed[TOOL_CALL].commit_state == "PROVISIONAL"
