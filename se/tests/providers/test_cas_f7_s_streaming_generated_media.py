@@ -355,7 +355,11 @@ async def test_gemini_stream_preserves_filedata_and_nonselected_media_provenance
     assert len(parts) == 2
 
     selected = MessageContentPart.model_validate(parts[0])
-    selected_attachment = selected.data
+    selected_attachment = (
+        selected.data
+        if isinstance(selected.data, GatewayAttachment)
+        else getattr(selected.data, "attachment", None)
+    )
     assert isinstance(selected_attachment, GatewayAttachment)
     assert selected_attachment.source == "provider"
 
@@ -363,7 +367,11 @@ async def test_gemini_stream_preserves_filedata_and_nonselected_media_provenance
     nonselected_payload = dict(parts[1])
     nonselected_payload.pop("_cas_f7_candidate_index")
     nonselected = MessageContentPart.model_validate(nonselected_payload)
-    nonselected_attachment = nonselected.data
+    nonselected_attachment = (
+        nonselected.data
+        if isinstance(nonselected.data, GatewayAttachment)
+        else getattr(nonselected.data, "attachment", None)
+    )
     assert isinstance(nonselected_attachment, GatewayAttachment)
     assert nonselected_attachment.source == "base64"
 
