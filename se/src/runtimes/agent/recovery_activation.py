@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime
 
 from .contracts.recovery import (
     RecoveryActivationResult,
     RecoveryActivationSpec,
     RecoveryPlan,
+    recovery_plan_fingerprint,
 )
 from .contracts.resume import ResumeClaimState
 from .recovery_planning import (
@@ -55,11 +57,31 @@ class AgentRecoveryActivationService:
                 target_connection_id=plan.target_connection_id,
             )
             if fresh.plan_fingerprint != plan.plan_fingerprint:
-                raise RecoveryPlanRejected(
-                    "RECOVERY_PLAN_DRIFT",
-                    "Recovery authority changed after the claim plan was frozen.",
+                # F1 preserves mutable Task/Branch/TaskBudget revisions as
+                # planning evidence. F2 revalidates their semantic lineage and
+                # TaskBudget incarnation inside the activation UoW, so benign
+                # revision-only movement must not become immutable activation
+                # identity. Normalize only those three evidence fields back to
+                # the claim-bound snapshot and require every other plan field
+                # to remain byte-equivalent.
+                normalized = replace(
+                    fresh,
+                    task_revision=plan.task_revision,
+                    branch_revision=plan.branch_revision,
+                    task_budget_revision=plan.task_budget_revision,
+                    plan_fingerprint="",
                 )
-            durable_plan = fresh
+                if (
+                    recovery_plan_fingerprint(normalized)
+                    != plan.plan_fingerprint
+                ):
+                    raise RecoveryPlanRejected(
+                        "RECOVERY_PLAN_DRIFT",
+                        "Recovery authority changed after the claim plan was frozen.",
+                    )
+                durable_plan = plan
+            else:
+                durable_plan = fresh
 
         return await self._durable_store.consume_recovery_claim(
             RecoveryActivationSpec(
