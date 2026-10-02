@@ -428,10 +428,7 @@ async def test_r12_f2_consumed_replay_rejects_foreign_owner_without_lease_change
             activation_lease_expires_at=lease_expiry,
         )
 
-        with pytest.raises(
-            ResumeClaimRejected,
-            match="STALE_RECOVERY_ACTIVATION",
-        ):
+        with pytest.raises(ResumeClaimRejected) as raised:
             await service.activate(
                 plan,
                 claim_id=claim.claim_id,
@@ -441,6 +438,7 @@ async def test_r12_f2_consumed_replay_rejects_foreign_owner_without_lease_change
                 activation_now_utc=activation_now + timedelta(seconds=1),
                 activation_lease_expires_at=lease_expiry,
             )
+        assert raised.value.code == "STALE_RECOVERY_ACTIVATION"
 
         async with factory() as uow:
             execution = await uow.agents.get_execution(plan.execution_id)
@@ -478,10 +476,7 @@ async def test_r12_f2_lease_acquire_loss_rolls_back_running_and_claim(
         )
         service = AgentRecoveryActivationService(planner, store)
 
-        with pytest.raises(
-            ResumeClaimDeferred,
-            match="RECOVERY_ACTIVATION_CONFLICT",
-        ):
+        with pytest.raises(ResumeClaimDeferred) as raised:
             await service.activate(
                 plan,
                 claim_id=claim.claim_id,
@@ -493,6 +488,7 @@ async def test_r12_f2_lease_acquire_loss_rolls_back_running_and_claim(
                     activation_now + timedelta(seconds=30)
                 ),
             )
+        assert raised.value.code == "RECOVERY_ACTIVATION_CONFLICT"
 
         async with factory() as uow:
             execution = await uow.agents.get_execution(plan.execution_id)
@@ -538,10 +534,7 @@ async def test_r12_f2_claim_cas_loss_rolls_back_fresh_lease_and_running(
         )
         service = AgentRecoveryActivationService(planner, store)
 
-        with pytest.raises(
-            ResumeClaimDeferred,
-            match="RECOVERY_ACTIVATION_CONFLICT",
-        ):
+        with pytest.raises(ResumeClaimDeferred) as raised:
             await service.activate(
                 plan,
                 claim_id=claim.claim_id,
@@ -553,6 +546,7 @@ async def test_r12_f2_claim_cas_loss_rolls_back_fresh_lease_and_running(
                     activation_now + timedelta(seconds=30)
                 ),
             )
+        assert raised.value.code == "RECOVERY_ACTIVATION_CONFLICT"
 
         async with factory() as uow:
             execution = await uow.agents.get_execution(plan.execution_id)
