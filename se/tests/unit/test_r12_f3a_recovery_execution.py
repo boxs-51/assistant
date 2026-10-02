@@ -22,6 +22,7 @@ from se.src.runtimes.agent.contracts.resume import (
     ResumeTriggerType,
 )
 from se.src.runtimes.agent.contracts.tool import ToolExecutionResult
+from se.src.runtimes.agent.persistence import ExecutionConflictError
 from se.src.runtimes.agent.recovery_execution import (
     AgentRecoveryExecutionService,
     RecoveryExecutionError,
@@ -70,6 +71,7 @@ class _CapabilityRuntime:
         implementation_id=IMPLEMENTATION,
         target_client_id=CLIENT,
     ):
+        self.invocation = invocation
         self.invocation_lifecycle = SimpleNamespace(
             store=_InvocationStore(invocation)
         )
@@ -96,12 +98,43 @@ class _CapabilityRuntime:
             SimpleNamespace(implementation_id=self._implementation_id),
         )
 
+    def _revalidate_continuation_target_at_dispatch(
+        self,
+        invocation,
+        *,
+        target_connection_id,
+    ):
+        assert invocation.invocation_id == INVOCATION
+        assert target_connection_id == NEW_CONNECTION
+        return SimpleNamespace(
+            implementation_id=self._implementation_id,
+        )
+
+
 
 class _ContinuationExecutor:
-    def __init__(self):
+    def __init__(self, *, invocation=None, before_guard=None):
         self.calls = []
+        self.invocation = invocation
+        self.before_guard = before_guard
 
-    async def continue_invocation(self, context, action):
+    async def continue_invocation(
+        self,
+        context,
+        action,
+        *,
+        continuation_dispatch_guard=None,
+    ):
+        invocation = self.invocation or _invocation()
+        if self.before_guard is not None:
+            self.before_guard()
+        if continuation_dispatch_guard is not None:
+            await continuation_dispatch_guard(
+                invocation,
+                IMPLEMENTATION,
+                NEW_CONNECTION,
+                OLD_CONNECTION,
+            )
         self.calls.append(action)
         return ToolExecutionResult(
             execution_id=context.execution_id,
@@ -123,11 +156,15 @@ class _Store:
         committed=None,
         claim=None,
         commit_on_save=True,
+        fail_atomic_save=False,
+        fail_atomic_promote=False,
     ):
         self.fence_results = list(fence_results or [])
         self.committed = dict(committed or {})
         self.claim = claim
         self.commit_on_save = commit_on_save
+        self.fail_atomic_save = fail_atomic_save
+        self.fail_atomic_promote = fail_atomic_promote
         self.fence_calls = []
         self.save_calls = []
         self.promote_calls = []
@@ -146,7 +183,17 @@ class _Store:
     async def load_tool_result(self, execution_id, tool_call_id):
         return self.committed.get(tool_call_id)
 
-    async def save_tool_result(self, values):
+    async def save_tool_result(
+        self,
+        values,
+        *,
+        recovery_fence=None,
+    ):
+        assert recovery_fence is not None
+        if self.fail_atomic_save:
+            raise ExecutionConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+            )
         self.save_calls.append(dict(values))
         record = SimpleNamespace(
             **values,
@@ -157,8 +204,19 @@ class _Store:
         self.committed[values["tool_call_id"]] = record
         return record
 
-    async def load_committed_tool_result(self, execution_id, tool_call_id):
+    async def load_committed_tool_result(
+        self,
+        execution_id,
+        tool_call_id,
+        *,
+        recovery_fence=None,
+    ):
+        assert recovery_fence is not None
         self.promote_calls.append((execution_id, tool_call_id))
+        if self.fail_atomic_promote:
+            raise ExecutionConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+            )
         return self.committed.get(tool_call_id)
 
 
@@ -430,10 +488,12 @@ async def test_r12_f3a_lease_loss_after_dispatch_preserves_r6_but_blocks_agent_p
     plan = _plan(action)
     activation = _activation(plan)
     context = _context(plan, activation)
-    # Initial batch fence PASS, per-slot dispatch fence PASS, projection fence FAIL.
+    # Outer + per-slot + canonical dispatch fences pass. The exact
+    # projection transaction then loses authority before any Agent write.
     store = _Store(
-        fence_results=[True, True, False],
+        fence_results=[True, True, True],
         claim=_claim(plan, activation),
+        fail_atomic_save=True,
     )
     runtime = _CapabilityRuntime(_invocation())
     executor = _ContinuationExecutor()
@@ -698,3 +758,100 @@ async def test_r12_f3a_returns_complete_reuse_batch_in_plan_order():
         "call-b",
     )
     assert tuple(item.output["slot"] for item in results) == ("a", "b")
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_lease_loss_after_outer_prepare_before_driver_is_zero_dispatch():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    # Initial + outer per-slot proof pass; canonical physical-boundary proof loses.
+    store = _Store(
+        fence_results=[True, True, False],
+        claim=_claim(plan, activation),
+    )
+    runtime = _CapabilityRuntime(_invocation())
+    executor = _ContinuationExecutor(invocation=runtime.invocation)
+    service = AgentRecoveryExecutionService(
+        store,
+        runtime,
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+    assert executor.calls == []
+    assert store.save_calls == []
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_implementation_replacement_after_outer_prepare_is_zero_dispatch():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    store = _Store(claim=_claim(plan, activation))
+    runtime = _CapabilityRuntime(_invocation())
+
+    def replace_implementation():
+        runtime._implementation_id = "client:replacement-after-prepare"
+
+    executor = _ContinuationExecutor(
+        invocation=runtime.invocation,
+        before_guard=replace_implementation,
+    )
+    service = AgentRecoveryExecutionService(
+        store,
+        runtime,
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "RECOVERY_CONTINUATION_AFFINITY_CHANGED"
+    assert executor.calls == []
+    assert store.save_calls == []
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_atomic_promotion_fence_blocks_stale_model_consumable_result():
+    action = _action()
+    plan = _plan(action)
+    activation = _activation(plan)
+    context = _context(plan, activation)
+    store = _Store(
+        claim=_claim(plan, activation),
+        commit_on_save=False,
+        fail_atomic_promote=True,
+    )
+    runtime = _CapabilityRuntime(_invocation())
+    executor = _ContinuationExecutor(invocation=runtime.invocation)
+    service = AgentRecoveryExecutionService(
+        store,
+        runtime,
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError) as exc_info:
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert exc_info.value.code == "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+    assert len(executor.calls) == 1
+    assert len(store.save_calls) == 1
+    assert store.committed[TOOL_CALL].commit_state == "PROVISIONAL"
