@@ -106,6 +106,7 @@ async def test_r12_f3a_guard_failure_preserves_already_started_continuation():
     coordinator = AgentToolExecutionCoordinator(executor)
     raw_a = SimpleNamespace(invocation_id="inv-a", tool_call_id="call-a")
     raw_b = SimpleNamespace(invocation_id="inv-b", tool_call_id="call-b")
+    raw_c = SimpleNamespace(invocation_id="inv-c", tool_call_id="call-c")
     mapped_a = _resume_action("inv-a", "call-a")
 
     async def prepare(raw_action):
@@ -118,7 +119,7 @@ async def test_r12_f3a_guard_failure_preserves_already_started_continuation():
     with pytest.raises(RuntimeError, match="recovery fence lost"):
         await coordinator.continue_invocations(
             context,
-            [raw_a, raw_b],
+            [raw_a, raw_b, raw_c],
             max_parallel=2,
             pre_dispatch_prepare=prepare,
             preserve_started_on_failure=True,
