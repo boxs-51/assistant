@@ -38,7 +38,7 @@ def test_r12_f3b_f3a_stops_before_provider_and_returns_ordered_batch():
     source = inspect.getsource(
         AgentRecoveryExecutionService.execute_active_tool_batch
     )
-    class_doc = AgentRecoveryExecutionService.__doc__ or ""
+    class_doc = inspect.getdoc(AgentRecoveryExecutionService) or ""
 
     assert "stops before provider/model inference" in class_doc
     assert "normal Agent-loop progression" in class_doc
