@@ -19,6 +19,10 @@ RetryDecider = Callable[[ToolExecutionResult, int], bool]
 ContinuationPreDispatchPrepare = Callable[
     [Any], Awaitable[ResumeInvocationAction]
 ]
+ContinuationCanonicalDispatchGuard = Callable[
+    [Any, Any, str, str | None, str | None],
+    Awaitable[None],
+]
 
 
 @dataclass
@@ -404,15 +408,23 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         self,
         context: AgentExecutionContext,
         action: ResumeInvocationAction,
+        *,
+        continuation_dispatch_guard=None,
     ) -> ToolExecutionResult:
-        """Delegate one R7-E continuation without ordinary retry orchestration."""
+        """Delegate one continuation without ordinary retry orchestration."""
 
         runner = getattr(self._executor, "continue_invocation", None)
         if not callable(runner):
             raise RuntimeError(
                 "R7 continuation executor is unavailable."
             )
-        return await runner(context, action)
+        if continuation_dispatch_guard is None:
+            return await runner(context, action)
+        return await runner(
+            context,
+            action,
+            continuation_dispatch_guard=continuation_dispatch_guard,
+        )
 
     async def continue_invocations(
         self,
@@ -421,6 +433,9 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         *,
         max_parallel: int,
         pre_dispatch_prepare: ContinuationPreDispatchPrepare | None = None,
+        canonical_dispatch_guard: (
+            ContinuationCanonicalDispatchGuard | None
+        ) = None,
         preserve_started_on_failure: bool = False,
     ) -> Sequence[ToolExecutionResult]:
         """Run a continuation subset concurrently and return plan order.
@@ -485,7 +500,31 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                             "pre-dispatch fence failure."
                         )
                 dispatch_started.add(raw_action.invocation_id)
-                return await self.continue_invocation(context, action)
+                if canonical_dispatch_guard is None:
+                    return await self.continue_invocation(
+                        context,
+                        action,
+                    )
+
+                async def runtime_guard(
+                    invocation,
+                    selected_implementation_id: str,
+                    target_connection_id: str | None,
+                    origin_connection_id: str | None,
+                ) -> None:
+                    await canonical_dispatch_guard(
+                        raw_action,
+                        invocation,
+                        selected_implementation_id,
+                        target_connection_id,
+                        origin_connection_id,
+                    )
+
+                return await self.continue_invocation(
+                    context,
+                    action,
+                    continuation_dispatch_guard=runtime_guard,
+                )
 
         tasks = [
             asyncio.create_task(
