@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
@@ -939,8 +940,8 @@ async def test_r12_f3a_two_slot_canonical_failure_blocks_all_agent_projection():
             assert target_connection_id == NEW_CONNECTION
             return SimpleNamespace(implementation_id=IMPLEMENTATION)
 
-    a_inside_continuation = __import__("asyncio").Event()
-    release_a = __import__("asyncio").Event()
+    a_inside_continuation = asyncio.Event()
+    release_a = asyncio.Event()
 
     class BarrierExecutor:
         def __init__(self):
