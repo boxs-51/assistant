@@ -494,7 +494,16 @@ class UserInferenceQuotaService:
             "workflow_id": context.workflow_id,
             "iteration": context.iteration,
             "agent_iteration_id": context.agent_iteration_id,
-            "outer_request_id": context.outer_request_id,
+            # Keep mutable outer Skill request lineage out of durable
+            # reservation identity. The invocation id remains canonical.
+            "outer_request_id": (
+                None
+                if (
+                    context.source_surface == "SKILL"
+                    and context.capability_invocation_id is not None
+                )
+                else context.outer_request_id
+            ),
             "capability_invocation_id": context.capability_invocation_id,
             "estimator_policy_identity": context.estimator_policy_identity,
             "usage_normalization_identity": context.usage_normalization_identity,
