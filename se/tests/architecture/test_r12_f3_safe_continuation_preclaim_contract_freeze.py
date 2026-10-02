@@ -62,7 +62,8 @@ def test_r12_f3_contract_freezes_exact_per_action_fence_and_fail_closed_option_a
     text = _text()
 
     assert "F3-A bounded production slice" in text
-    assert "inside each per-action semaphore slot" in text
+    assert "per-action semaphore slot" in text
+    assert "immediately before the adapter/CapabilityRuntime" in text
     assert "lease_expires_at == RecoveryActivationResult.lease_expires_at" in text
     assert "Option A / current-safe minimum" in text
     assert "DO NOT publish WAITING/RECOVERY" in text
