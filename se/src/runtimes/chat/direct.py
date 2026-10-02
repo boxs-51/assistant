@@ -101,7 +101,13 @@ class DirectChatRuntime:
                 owner_user_id=(
                     str(identity.user_id) if identity.user_id else None
                 ),
-                metadata={**dict(metadata or {}), "chat_execution_mode": "DIRECT"},
+                budget_identity=identity,
+                metadata={
+                    **dict(metadata or {}),
+                    "chat_execution_mode": "DIRECT",
+                    "quota_source_surface": "DIRECT",
+                    "session_id": session_id,
+                },
             ))
             transcript.append(response.message)
             calls = list(response.message.tool_calls)
