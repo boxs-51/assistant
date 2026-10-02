@@ -63,6 +63,12 @@ def test_r12_f3a_reuses_r7_r6_path_and_stops_before_provider_inference():
     assert "expected_lease_expires_at" in inspect.getsource(
         AgentRecoveryExecutionService._require_exact_active_fence
     )
+    handoff_source = inspect.getsource(
+        AgentRecoveryExecutionService._require_consumed_activation_handoff
+    )
+    assert "r12_f2_activation_handoff" in handoff_source
+    assert "recovery_plan_fingerprint" in handoff_source
+    assert "recovery_fingerprint" in handoff_source
     assert "save_tool_result" in projection_source
     assert "_require_exact_active_fence" in projection_source
 
