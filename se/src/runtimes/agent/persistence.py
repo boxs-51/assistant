@@ -46,6 +46,7 @@ from .contracts.inference import InferenceMessage, InferenceUsage
 from .contracts.recovery import (
     RecoveryActivationResult,
     RecoveryActivationSpec,
+    RecoveryPlan,
     recovery_plan_fingerprint,
 )
 from .contracts.resume import (
@@ -216,6 +217,12 @@ def _utc_datetime(value: datetime | None) -> datetime | None:
     if value.tzinfo is None:
         return value.replace(tzinfo=timezone.utc)
     return value.astimezone(timezone.utc)
+
+
+def _utc_now() -> datetime:
+    """Authoritative wall-clock instant for mutation-boundary lease checks."""
+
+    return datetime.now(timezone.utc)
 
 
 async def _retry_source_context_state_in_uow(uow, execution) -> dict[str, Any]:
@@ -2043,15 +2050,27 @@ class DurableAgentStore:
         owner_instance_id: str,
         lease_generation: int,
         now_utc: datetime,
+        expected_lease_expires_at: datetime | None = None,
     ) -> bool:
-        """Read-only durable active-fence predicate for later runtime wiring."""
+        """Read-only durable active-fence predicate for runtime wiring.
+
+        R12-F3 passes the exact F2 activation expiry so owner+generation alone
+        can never authorize a recovered continuation after lease movement.
+        """
 
         async with self.uow_factory() as uow:
+            kwargs = {
+                "owner_instance_id": owner_instance_id,
+                "lease_generation": lease_generation,
+                "now_utc": now_utc,
+            }
+            if expected_lease_expires_at is not None:
+                kwargs["expected_lease_expires_at"] = (
+                    expected_lease_expires_at
+                )
             active = await uow.agents.has_active_execution_lease_fence(
                 execution_id,
-                owner_instance_id=owner_instance_id,
-                lease_generation=lease_generation,
-                now_utc=now_utc,
+                **kwargs,
             )
             await uow.commit()
             return active
@@ -2578,7 +2597,72 @@ class DurableAgentStore:
         )
         return projected
 
-    async def save_tool_result(self, values: Dict[str, Any]):
+    @staticmethod
+    def _require_recovery_projection_fence_now(
+        execution,
+        recovery_fence: Mapping[str, Any],
+    ) -> None:
+        """Prove the locked R12 fence is still live at this wall-clock instant."""
+
+        owner = str(
+            recovery_fence.get("owner_instance_id") or ""
+        ).strip()
+        try:
+            generation = int(recovery_fence["lease_generation"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ExecutionConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST: "
+                "invalid recovery lease generation."
+            ) from exc
+        expected_expiry = _utc_datetime(
+            recovery_fence.get("lease_expires_at")
+        )
+        if not owner or generation <= 0 or expected_expiry is None:
+            raise ExecutionConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST: "
+                "incomplete recovery projection fence."
+            )
+
+        durable_expiry = _utc_datetime(
+            getattr(execution, "lease_expires_at", None)
+            if execution is not None
+            else None
+        )
+        if (
+            execution is None
+            or str(execution.state) != "RUNNING"
+            or str(execution.owner_instance_id or "") != owner
+            or int(execution.lease_generation) != generation
+            or durable_expiry != expected_expiry
+            or durable_expiry is None
+            or durable_expiry <= _utc_now()
+        ):
+            raise ExecutionConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST: "
+                "projection transaction lost exact R12 authority."
+            )
+
+    async def _lock_recovery_projection_fence_in_uow(
+        self,
+        uow,
+        execution_id: str,
+        recovery_fence: Mapping[str, Any],
+    ):
+        """Lock and prove exact R12 authority in the projection transaction."""
+
+        execution = await uow.agents.get_execution_for_update(execution_id)
+        self._require_recovery_projection_fence_now(
+            execution,
+            recovery_fence,
+        )
+        return execution
+
+    async def save_tool_result(
+        self,
+        values: Dict[str, Any],
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
+    ):
         """Persist one projection without treating transport ambiguity as truth.
 
         Local/server outcomes commit immediately. A linked remote invocation is
@@ -2588,6 +2672,15 @@ class DurableAgentStore:
             values, _TOOL_RESULT_JSON_FIELDS, path="agent_tool_results"
         )
         async with self.uow_factory() as uow:
+            locked_recovery_execution = None
+            if recovery_fence is not None:
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        str(values["execution_id"]),
+                        recovery_fence,
+                    )
+                )
             existing = await uow.agents.get_tool_result(
                 values["execution_id"], values["tool_call_id"]
             )
@@ -2622,6 +2715,11 @@ class DurableAgentStore:
                     values["commit_state"] = "PROVISIONAL"
 
             if existing is None:
+                if recovery_fence is not None:
+                    self._require_recovery_projection_fence_now(
+                        locked_recovery_execution,
+                        recovery_fence,
+                    )
                 record = await uow.agents.save_tool_result(values)
             else:
                 self._validate_existing_tool_result_identity(existing, values)
@@ -2629,6 +2727,11 @@ class DurableAgentStore:
                     self._validate_committed_tool_result_content(existing, values)
                     record = existing
                 elif values["commit_state"] == "COMMITTED":
+                    if recovery_fence is not None:
+                        self._require_recovery_projection_fence_now(
+                            locked_recovery_execution,
+                            recovery_fence,
+                        )
                     record = await uow.agents.update_tool_result(
                         values["execution_id"],
                         values["tool_call_id"],
@@ -2649,6 +2752,8 @@ class DurableAgentStore:
         self,
         execution_id: str,
         tool_call_id: str,
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
     ):
         """Return only model-consumable result projections.
 
@@ -2657,6 +2762,15 @@ class DurableAgentStore:
         terminal output/error rather than the stale transport projection.
         """
         async with self.uow_factory() as uow:
+            locked_recovery_execution = None
+            if recovery_fence is not None:
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        execution_id,
+                        recovery_fence,
+                    )
+                )
             record = await uow.agents.get_tool_result(execution_id, tool_call_id)
             if record is None:
                 await uow.commit()
@@ -2698,6 +2812,11 @@ class DurableAgentStore:
                 _TOOL_RESULT_JSON_FIELDS,
                 path="agent_tool_results",
             )
+            if recovery_fence is not None:
+                self._require_recovery_projection_fence_now(
+                    locked_recovery_execution,
+                    recovery_fence,
+                )
             record = await uow.agents.update_tool_result(
                 execution_id,
                 tool_call_id,
@@ -6017,6 +6136,250 @@ class DurableAgentStore:
             # ordinary execute_capability() resume path.
             context.resume_pending_tool_calls = []
             context.resume_revision = plan.expected_execution_revision
+            await uow.commit()
+            return context
+
+    async def prepare_recovery_plan_context(
+        self,
+        plan: RecoveryPlan,
+        activation: RecoveryActivationResult,
+        *,
+        identity: Identity,
+        limits: AgentExecutionLimits | None = None,
+        agent=None,
+        clock: ExecutionClock | None = None,
+    ) -> AgentExecutionContext:
+        """Reconstruct exact R12-F3 local context after F2 activation.
+
+        This is a read-only handoff. RecoveryPlan + RecoveryActivationResult
+        remain the execution authority; no ResumePlan/ResumeClaim surrogate is
+        manufactured and no durable transition is performed here.
+        """
+
+        if recovery_plan_fingerprint(plan) != plan.plan_fingerprint:
+            raise ExecutionConflictError(
+                "STALE_RECOVERY_PLAN: plan fingerprint does not match semantics."
+            )
+        if plan.target_trigger is not ResumeTriggerType.SERVER_RECOVERY:
+            raise ExecutionConflictError(
+                "RECOVERY_TRIGGER_CONFLICT: SERVER_RECOVERY is required."
+            )
+        if str(identity.user_id or "") != plan.resolved_recovery_principal:
+            raise ExecutionConflictError(
+                "FOREIGN_PRINCIPAL: recovery identity differs from plan."
+            )
+        if (
+            activation.execution_id != plan.execution_id
+            or activation.checkpoint_id != plan.checkpoint_id
+            or activation.source_execution_revision
+            != plan.expected_execution_revision
+            or activation.consumed_execution_revision
+            != plan.expected_execution_revision + 1
+            or activation.lease_generation
+            != plan.expected_unowned_lease_generation + 1
+            or not str(activation.activation_owner_instance_id or "").strip()
+        ):
+            raise ExecutionConflictError(
+                "STALE_RECOVERY_ACTIVATION: activation differs from plan."
+            )
+        activation_expiry = _utc_datetime(activation.lease_expires_at)
+        now_utc = _utc_datetime(
+            clock.now_utc() if clock is not None else datetime.now(timezone.utc)
+        )
+        if (
+            activation_expiry is None
+            or now_utc is None
+            or activation_expiry <= now_utc
+        ):
+            raise ExecutionConflictError(
+                "STALE_RECOVERY_ACTIVATION: activation lease is expired."
+            )
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(plan.execution_id)
+            if execution is None:
+                raise ExecutionConflictError(
+                    f"Unknown AgentExecution: {plan.execution_id}"
+                )
+            durable_expiry = _utc_datetime(
+                getattr(execution, "lease_expires_at", None)
+            )
+            if (
+                str(execution.state) != "RUNNING"
+                or int(execution.revision)
+                != activation.consumed_execution_revision
+                or str(execution.current_checkpoint_id or "")
+                != plan.checkpoint_id
+                or str(execution.owner_instance_id or "")
+                != activation.activation_owner_instance_id
+                or int(execution.lease_generation)
+                != activation.lease_generation
+                or durable_expiry != activation_expiry
+                or durable_expiry is None
+                or durable_expiry <= now_utc
+                or execution.wait_reason is not None
+                or execution.wait_expires_at is not None
+                or execution.bound_client_id != plan.target_client_id
+                or execution.bound_connection_id != plan.target_connection_id
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RECOVERY_AUTHORITY: RUNNING lease handoff changed."
+                )
+            if (
+                execution.session_id != plan.session_id
+                or execution.agent_id != plan.agent_id
+                or execution.task_id != plan.task_id
+                or execution.branch_id != plan.branch_id
+                or execution.parent_execution_id != plan.parent_execution_id
+                or execution.retry_of_execution_id
+                != plan.retry_of_execution_id
+                or execution.base_execution_id != plan.base_execution_id
+                or execution.base_checkpoint_id != plan.base_checkpoint_id
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RECOVERY_PLAN: execution lineage differs from plan."
+                )
+
+            checkpoint = await uow.agents.get_execution_checkpoint(
+                plan.checkpoint_id
+            )
+            if (
+                checkpoint is None
+                or checkpoint.execution_id != plan.execution_id
+                or int(checkpoint.execution_revision)
+                != plan.expected_execution_revision
+                or checkpoint.session_id != plan.session_id
+                or checkpoint.task_id != plan.task_id
+                or checkpoint.branch_id != plan.branch_id
+                or int(checkpoint.iteration) != int(plan.iteration)
+                or str(checkpoint.wait_reason) != "RECOVERY"
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RECOVERY_CHECKPOINT: checkpoint differs from plan."
+                )
+            checkpoint_metadata = dict(
+                getattr(checkpoint, "metadata_json", None) or {}
+            )
+            if (
+                str(
+                    checkpoint_metadata.get(
+                        "r12_recovery_fingerprint"
+                    )
+                    or ""
+                )
+                != plan.recovery_fingerprint
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RECOVERY_CHECKPOINT: recovery fingerprint changed."
+                )
+
+            execution_remaining = getattr(
+                execution, "remaining_active_budget_seconds", None
+            )
+            checkpoint_remaining = getattr(
+                checkpoint, "remaining_active_budget_seconds", None
+            )
+            if (
+                execution_remaining is None
+                or checkpoint_remaining is None
+                or float(execution_remaining)
+                != float(plan.remaining_active_budget_seconds)
+                or float(checkpoint_remaining)
+                != float(plan.remaining_active_budget_seconds)
+            ):
+                raise ExecutionConflictError(
+                    "STALE_RECOVERY_PLAN: active budget differs from checkpoint."
+                )
+
+            state = getattr(execution, "context_state", None) or {}
+            restored_limits = limits or AgentExecutionLimits.model_validate(
+                state.get("limits", {})
+            )
+            metadata = dict(state.get("metadata", {}) or {})
+            metadata["client_id"] = plan.target_client_id
+            metadata["r12_recovery_plan_fingerprint"] = plan.plan_fingerprint
+            metadata["r12_recovery_fingerprint"] = plan.recovery_fingerprint
+            metadata["r12_activation_owner_instance_id"] = (
+                activation.activation_owner_instance_id
+            )
+            metadata["r12_activation_lease_generation"] = (
+                activation.lease_generation
+            )
+            metadata["r12_activation_lease_expires_at"] = (
+                activation_expiry.isoformat()
+            )
+
+            context = AgentExecutionContext.create(
+                execution_id=plan.execution_id,
+                agent_id=plan.agent_id,
+                session_id=plan.session_id,
+                correlation_id=execution.correlation_id,
+                identity=identity,
+                limits=restored_limits,
+                request_id=state.get("request_id"),
+                task_id=plan.task_id,
+                branch_id=plan.branch_id,
+                parent_execution_id=plan.parent_execution_id,
+                retry_of_execution_id=plan.retry_of_execution_id,
+                base_execution_id=plan.base_execution_id,
+                base_checkpoint_id=plan.base_checkpoint_id,
+                workflow_id=state.get("workflow_id"),
+                connection_id=plan.target_connection_id,
+                agent=agent,
+                input=dict(execution.request or {}),
+                metadata=metadata,
+                causation_id=state.get("causation_id"),
+                trace_id=state.get("trace_id"),
+                remaining_active_budget_seconds=(
+                    plan.remaining_active_budget_seconds
+                ),
+                wait_expires_at=None,
+                clock=clock,
+                activate_budget=False,
+            )
+            context.iteration = plan.iteration
+
+            durable_iterations = await uow.agents.list_iterations(
+                plan.execution_id
+            )
+            usage_totals: dict[str, int | float] = {}
+            for iteration in durable_iterations:
+                response = getattr(iteration, "inference_response", None)
+                raw_usage = (
+                    dict(response.get("usage") or {})
+                    if isinstance(response, dict)
+                    else {}
+                )
+                for key, value in raw_usage.items():
+                    if isinstance(value, bool) or not isinstance(
+                        value, (int, float)
+                    ):
+                        continue
+                    usage_totals[key] = usage_totals.get(key, 0) + value
+            context.usage = InferenceUsage.model_validate(usage_totals)
+
+            durable_tool_calls = await uow.agents.list_tool_calls(
+                plan.execution_id
+            )
+            context.tool_calls_used = len(durable_tool_calls)
+            retry_attempts_used = 0
+            for tool_call in durable_tool_calls:
+                result = await uow.agents.get_tool_result(
+                    plan.execution_id,
+                    tool_call.tool_call_id,
+                )
+                if result is None:
+                    continue
+                attempt = getattr(result, "attempt", 1)
+                if isinstance(attempt, int) and not isinstance(attempt, bool):
+                    retry_attempts_used += max(0, attempt - 1)
+            context.retry_attempts_used = retry_attempts_used
+            context.resume_transcript = [
+                item.model_dump(mode="json")
+                for item in plan.transcript_snapshot
+            ]
+            context.resume_pending_tool_calls = []
+            context.resume_revision = activation.consumed_execution_revision
             await uow.commit()
             return context
 

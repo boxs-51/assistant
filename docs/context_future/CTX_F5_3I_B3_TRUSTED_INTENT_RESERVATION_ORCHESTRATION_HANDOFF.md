@@ -8,11 +8,13 @@ Canonical governance: Issue #85 v2.5.
 ~~~text
 stage = CTX-F5-3I-B3
 class = CONTRACT / ARCHITECTURE EVIDENCE ONLY
-exact development baseline = e138db0db9dc7aa165f693af2c9cb2f8a70ef7ec
-baseline Architecture #1879 / 37015631037 = GREEN/GREEN
+exact development baseline = ea6c5f00a9432a89275d9cc4b9b52b8f992d0f12
+baseline Architecture #1882 / 37021044586 = GREEN/GREEN
 parent CTX-F5-3I-B2 = LANDED / CANONICAL / HEALTHY
 parent B2 merge commit = e138db0db9dc7aa165f693af2c9cb2f8a70ef7ec
 IW-2026-10-02-05 = COMPLETE / authorization consumed
+R12-F3-A PR #202 = LANDED / CANONICAL / HEALTHY
+IW-2026-10-02-06 = COMPLETE / authorization consumed
 production PRE-CLAIM = HOLD pending independent B3 audit
 production CLAIM = NONE
 production branch = NONE
@@ -237,9 +239,11 @@ B3 does NOT:
 
 ### AE-R12-F3-A / PR #202
 
-At this baseline:
-- PR #202 is independently FINAL PASS and READY for its own Wave #206;
-- it is not yet canonical main;
+Current refreshed canonical state:
+- PR #202 is MERGED / SQUASH through IW-2026-10-02-06;
+- canonical main = ea6c5f00a9432a89275d9cc4b9b52b8f992d0f12;
+- post-merge Architecture #1882 / 37021044586 = GREEN/GREEN;
+- exact landed #202 delta remains the audited 13-path R12-F3-A scope;
 - exact changed-path overlap with B3 contract candidate is zero.
 
 R12 owns recovery/lease/Agent projection authority.
@@ -252,10 +256,27 @@ Any landing that modifies:
 
 is MATERIAL to B3 and requires fresh audit.
 
-A landing limited to already-audited recovery dispatch/fence semantics may be
-classified NON_MATERIAL only after exact post-landing inspection.
+Exact post-landing inspection classifies PR #202 -> this B3 contract candidate
+as NON_MATERIAL:
+- no AgentToolResultRecord schema/Alembic change;
+- no B2 trusted-material service change;
+- no ContextSourceRef or ToolResponsePayload primitive change;
+- no MemoryPromotionIntent, reservation issuer/repository, or Memory admission change;
+- successful COMMITTED result identity/content semantics consumed by B2 remain intact.
+
+Future R12 landings that touch the listed source/lineage/owner/liveness seams remain
+MATERIAL-POTENTIAL / REFRESH-ON-LAND.
 
 ### UBQ / CAS / #156 / R11
+
+Fresh cross-track refresh on current main:
+- UBQ-5 / Issue #147 T-0 remains contract/evidence-only; future UBQ-5C production
+  remains MATERIAL/HOLD against landed R12-F3-A seams;
+- CAS / Issue #74 has no next production stage released and retains asset/provider
+  lifecycle and destructive-GC authority;
+- R11 / Issue #31 is COMPLETE; its retention/GC boundaries remain external;
+- Issue #156 has no newer routing/fingerprint production change affecting the
+  invocation/capability lineage consumed by B2.
 
 B3 acquires no quota, asset lifecycle, routing/fingerprint, or destructive-GC
 authority.
@@ -298,8 +319,8 @@ The independent auditor must answer:
    production PRE-CLAIM entirely, or only a later reservation-to-admission/runtime
    slice?
 6. What exact production file/evidence scope may be released?
-7. After any R12-F3-A landing, is B3 still valid on this baseline or must it
-   refresh/re-anchor?
+7. Does the exact landed R12-F3-A delta remain NON_MATERIAL to B3 after
+   independent verification on this refreshed baseline?
 
 ## 12. Exit gate
 

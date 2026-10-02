@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 import pytest
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+import se.src.runtimes.agent.persistence as persistence_module
 
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionCheckpointRecord,
@@ -1021,5 +1025,393 @@ async def test_r7_c_local_pre_dispatch_resume_does_not_require_r6_row(tmp_path):
             for item in context.resume_pending_tool_calls
         ] == ["call-local"]
         assert context.resume_pending_tool_calls[0]["invocation_id"] == "inv-local"
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_atomic_projection_rejects_lease_change_after_outer_fence(
+    tmp_path,
+):
+    engine, sessions = await _schema(
+        tmp_path,
+        "r12-f3a-atomic-projection.sqlite",
+    )
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    now = datetime.now(timezone.utc)
+    first_expiry = now + timedelta(minutes=5)
+    renewed_expiry = now + timedelta(minutes=10)
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-f3a-atomic",
+                    session_id="session-r12-f3a-atomic",
+                    agent_id="agent-r12-f3a-atomic",
+                    correlation_id="corr-r12-f3a-atomic",
+                    state="RUNNING",
+                    revision=5,
+                    owner_instance_id="worker-r12-f3a-a",
+                    lease_generation=3,
+                    lease_expires_at=first_expiry,
+                    request={},
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-f3a-atomic:iteration:1",
+                    execution_id="exec-r12-f3a-atomic",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-r12-f3a-atomic"],
+                )
+            )
+            await uow.commit()
+
+        assert await store.has_active_execution_lease_fence(
+            "exec-r12-f3a-atomic",
+            owner_instance_id="worker-r12-f3a-a",
+            lease_generation=3,
+            now_utc=now,
+            expected_lease_expires_at=first_expiry,
+        )
+
+        await store.renew_execution_lease(
+            "exec-r12-f3a-atomic",
+            owner_instance_id="worker-r12-f3a-a",
+            lease_generation=3,
+            now_utc=now + timedelta(seconds=1),
+            new_lease_expires_at=renewed_expiry,
+        )
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+        ):
+            await store.save_tool_result(
+                {
+                    "id": "exec-r12-f3a-atomic:call-r12-f3a-atomic",
+                    "execution_id": "exec-r12-f3a-atomic",
+                    "iteration_id": "exec-r12-f3a-atomic:iteration:1",
+                    "tool_call_id": "call-r12-f3a-atomic",
+                    "invocation_id": "inv-r12-f3a-atomic",
+                    "capability_id": "tool.remote",
+                    "success": True,
+                    "output": {"must_not_commit": True},
+                    "error_code": None,
+                    "error_message": None,
+                    "retryable": False,
+                    "extra_metadata": {},
+                    "attempt": 1,
+                },
+                recovery_fence={
+                    "owner_instance_id": "worker-r12-f3a-a",
+                    "lease_generation": 3,
+                    "lease_expires_at": first_expiry,
+                },
+            )
+
+        assert await store.load_tool_result(
+            "exec-r12-f3a-atomic",
+            "call-r12-f3a-atomic",
+        ) is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_atomic_promotion_rejects_stale_exact_expiry(
+    tmp_path,
+):
+    engine, sessions = await _schema(
+        tmp_path,
+        "r12-f3a-atomic-promotion.sqlite",
+    )
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    now = datetime.now(timezone.utc)
+    first_expiry = now + timedelta(minutes=5)
+    renewed_expiry = now + timedelta(minutes=10)
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r7-c",
+                    session_id="session-r7-c",
+                    agent_id="agent-r7-c",
+                    correlation_id="corr-r7-c",
+                    state="RUNNING",
+                    revision=5,
+                    owner_instance_id="worker-r12-f3a-a",
+                    lease_generation=3,
+                    lease_expires_at=first_expiry,
+                    request={},
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r7-c:iteration:1",
+                    execution_id="exec-r7-c",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-r7-c"],
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id="exec-r7-c:call-r7-c",
+                    execution_id="exec-r7-c",
+                    iteration_id="exec-r7-c:iteration:1",
+                    tool_call_id="call-r7-c",
+                    invocation_id="inv-r7-c",
+                    capability_id="tool.remote",
+                    success=False,
+                    output={"transport": "unknown"},
+                    error_code="REMOTE_OUTCOME_UNKNOWN",
+                    error_message="transport lost",
+                    retryable=True,
+                    extra_metadata={"attempt": 1},
+                    attempt=1,
+                    commit_state="PROVISIONAL",
+                )
+            )
+            uow.session.add(
+                _invocation(
+                    state="COMPLETED",
+                    remote_state="TERMINAL_COMMITTED",
+                    output={"authoritative": 42},
+                    revision=2,
+                )
+            )
+            await uow.commit()
+
+        assert await store.has_active_execution_lease_fence(
+            "exec-r7-c",
+            owner_instance_id="worker-r12-f3a-a",
+            lease_generation=3,
+            now_utc=now,
+            expected_lease_expires_at=first_expiry,
+        )
+
+        await store.renew_execution_lease(
+            "exec-r7-c",
+            owner_instance_id="worker-r12-f3a-a",
+            lease_generation=3,
+            now_utc=now + timedelta(seconds=1),
+            new_lease_expires_at=renewed_expiry,
+        )
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+        ):
+            await store.load_committed_tool_result(
+                "exec-r7-c",
+                "call-r7-c",
+                recovery_fence={
+                    "owner_instance_id": "worker-r12-f3a-a",
+                    "lease_generation": 3,
+                    "lease_expires_at": first_expiry,
+                },
+            )
+
+        row = await store.load_tool_result(
+            "exec-r7-c",
+            "call-r7-c",
+        )
+        assert row is not None
+        assert row.commit_state == "PROVISIONAL"
+        assert row.output == {"transport": "unknown"}
+    finally:
+        await engine.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_atomic_projection_rechecks_wall_clock_at_insert_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions = await _schema(
+        tmp_path,
+        "r12-f3a-wallclock-insert.sqlite",
+    )
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r12-f3a-wallclock-insert",
+                    session_id="session-r12-f3a-wallclock-insert",
+                    agent_id="agent-r12-f3a-wallclock-insert",
+                    correlation_id="corr-r12-f3a-wallclock-insert",
+                    state="RUNNING",
+                    revision=5,
+                    owner_instance_id="worker-r12-f3a-wallclock",
+                    lease_generation=7,
+                    lease_expires_at=expiry,
+                    request={},
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r12-f3a-wallclock-insert:iteration:1",
+                    execution_id="exec-r12-f3a-wallclock-insert",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-r12-f3a-wallclock-insert"],
+                )
+            )
+            await uow.commit()
+
+        instants = iter(
+            (
+                expiry - timedelta(microseconds=1),
+                expiry + timedelta(microseconds=1),
+            )
+        )
+        monkeypatch.setattr(
+            persistence_module,
+            "_utc_now",
+            lambda: next(instants),
+        )
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+        ):
+            await store.save_tool_result(
+                {
+                    "id": (
+                        "exec-r12-f3a-wallclock-insert:"
+                        "call-r12-f3a-wallclock-insert"
+                    ),
+                    "execution_id": "exec-r12-f3a-wallclock-insert",
+                    "iteration_id": (
+                        "exec-r12-f3a-wallclock-insert:iteration:1"
+                    ),
+                    "tool_call_id": "call-r12-f3a-wallclock-insert",
+                    "invocation_id": "inv-r12-f3a-wallclock-insert",
+                    "capability_id": "tool.remote",
+                    "success": True,
+                    "output": {"must_not_commit": True},
+                    "error_code": None,
+                    "error_message": None,
+                    "retryable": False,
+                    "extra_metadata": {},
+                    "attempt": 1,
+                },
+                recovery_fence={
+                    "owner_instance_id": "worker-r12-f3a-wallclock",
+                    "lease_generation": 7,
+                    "lease_expires_at": expiry,
+                },
+            )
+
+        assert await store.load_tool_result(
+            "exec-r12-f3a-wallclock-insert",
+            "call-r12-f3a-wallclock-insert",
+        ) is None
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_atomic_promotion_rechecks_wall_clock_at_write_boundary(
+    tmp_path,
+    monkeypatch,
+):
+    engine, sessions = await _schema(
+        tmp_path,
+        "r12-f3a-wallclock-promotion.sqlite",
+    )
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    expiry = datetime.now(timezone.utc) + timedelta(minutes=5)
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(
+                AgentExecutionRecord(
+                    id="exec-r7-c",
+                    session_id="session-r7-c",
+                    agent_id="agent-r7-c",
+                    correlation_id="corr-r7-c",
+                    state="RUNNING",
+                    revision=5,
+                    owner_instance_id="worker-r12-f3a-wallclock",
+                    lease_generation=7,
+                    lease_expires_at=expiry,
+                    request={},
+                )
+            )
+            uow.session.add(
+                AgentIterationRecord(
+                    id="exec-r7-c:iteration:1",
+                    execution_id="exec-r7-c",
+                    iteration=1,
+                    state="WAITING_TOOL",
+                    tool_call_ids=["call-r7-c"],
+                )
+            )
+            uow.session.add(
+                AgentToolResultRecord(
+                    id="exec-r7-c:call-r7-c",
+                    execution_id="exec-r7-c",
+                    iteration_id="exec-r7-c:iteration:1",
+                    tool_call_id="call-r7-c",
+                    invocation_id="inv-r7-c",
+                    capability_id="tool.remote",
+                    success=False,
+                    output={"transport": "unknown"},
+                    error_code="REMOTE_OUTCOME_UNKNOWN",
+                    error_message="transport lost",
+                    retryable=True,
+                    extra_metadata={"attempt": 1},
+                    attempt=1,
+                    commit_state="PROVISIONAL",
+                )
+            )
+            uow.session.add(
+                _invocation(
+                    state="COMPLETED",
+                    remote_state="TERMINAL_COMMITTED",
+                    output={"authoritative": 42},
+                    revision=2,
+                )
+            )
+            await uow.commit()
+
+        instants = iter(
+            (
+                expiry - timedelta(microseconds=1),
+                expiry + timedelta(microseconds=1),
+            )
+        )
+        monkeypatch.setattr(
+            persistence_module,
+            "_utc_now",
+            lambda: next(instants),
+        )
+
+        with pytest.raises(
+            ExecutionConflictError,
+            match="RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+        ):
+            await store.load_committed_tool_result(
+                "exec-r7-c",
+                "call-r7-c",
+                recovery_fence={
+                    "owner_instance_id": "worker-r12-f3a-wallclock",
+                    "lease_generation": 7,
+                    "lease_expires_at": expiry,
+                },
+            )
+
+        row = await store.load_tool_result(
+            "exec-r7-c",
+            "call-r7-c",
+        )
+        assert row is not None
+        assert row.commit_state == "PROVISIONAL"
+        assert row.output == {"transport": "unknown"}
     finally:
         await engine.dispose()

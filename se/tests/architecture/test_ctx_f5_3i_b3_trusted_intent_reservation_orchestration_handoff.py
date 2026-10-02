@@ -58,8 +58,10 @@ def test_b3_is_exact_two_file_zero_production_contract_slice() -> None:
         "stage = CTX-F5-3I-B3",
         "class = CONTRACT / ARCHITECTURE EVIDENCE ONLY",
         "exact development baseline = "
-        "e138db0db9dc7aa165f693af2c9cb2f8a70ef7ec",
-        "baseline Architecture #1879 / 37015631037 = GREEN/GREEN",
+        "ea6c5f00a9432a89275d9cc4b9b52b8f992d0f12",
+        "baseline Architecture #1882 / 37021044586 = GREEN/GREEN",
+        "R12-F3-A PR #202 = LANDED / CANONICAL / HEALTHY",
+        "IW-2026-10-02-06 = COMPLETE / authorization consumed",
         "parent CTX-F5-3I-B2 = LANDED / CANONICAL / HEALTHY",
         "production PRE-CLAIM = HOLD pending independent B3 audit",
         "production CLAIM = NONE",
@@ -223,3 +225,20 @@ def test_b3_keeps_external_authorities_closed() -> None:
         "acquire UBQ quota authority",
     ):
         assert phrase in contract
+
+
+def test_landed_r12_f3a_refresh_is_frozen_non_material_to_b3_contract() -> None:
+    contract = _semantic_contract()
+
+    for phrase in (
+        "canonical main = ea6c5f00a9432a89275d9cc4b9b52b8f992d0f12",
+        "post-merge Architecture #1882 / 37021044586 = GREEN/GREEN",
+        "exact landed #202 delta remains the audited 13-path R12-F3-A scope",
+        "Exact post-landing inspection classifies PR #202 -> this B3 contract candidate as NON_MATERIAL",
+        "no AgentToolResultRecord schema/Alembic change",
+        "future UBQ-5C production remains MATERIAL/HOLD",
+        "R11 / Issue #31 is COMPLETE",
+    ):
+        assert phrase in contract
+
+    assert "it is not yet canonical main" not in contract

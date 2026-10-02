@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from typing import Any, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from ..contracts.context import AgentExecutionContext
 from ..contracts.policy import (
@@ -35,6 +35,9 @@ from ..tool_execution.validator import (
 from ...capability.contracts.definition import (
     CapabilityExecutionMode,
     CapabilityKind,
+)
+from ...capability.contracts.error import (
+    CapabilityContinuationDispatchGuardError,
 )
 from ...capability.contracts.invocation import ExistingInvocationContinuationMode
 from ...capability.contracts.implementation import CapabilityExecutionLocation
@@ -239,6 +242,11 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         self,
         context: AgentExecutionContext,
         action: ResumeInvocationAction,
+        *,
+        continuation_dispatch_guard: (
+            Callable[[Any, str, str | None, str | None], Awaitable[None]]
+            | None
+        ) = None,
     ) -> ToolExecutionResult:
         """Continue exactly one R7-E logical invocation.
 
@@ -266,6 +274,9 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 expected_revision=action.expected_invocation_revision,
                 expected_request_fingerprint=action.request_fingerprint,
                 cancellation_event=context.cancellation_event,
+                continuation_dispatch_guard=(
+                    continuation_dispatch_guard
+                ),
             )
             return ToolExecutionResult(
                 execution_id=context.execution_id,
@@ -281,6 +292,8 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 },
             )
         except asyncio.CancelledError:
+            raise
+        except CapabilityContinuationDispatchGuardError:
             raise
         except Exception as exc:
             normalized = normalize_tool_exception(

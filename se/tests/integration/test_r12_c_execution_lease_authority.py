@@ -237,6 +237,20 @@ async def test_r12_c_renew_and_fence_fail_closed_for_stale_or_expired_authority(
             lease_generation=1,
             now_utc=now + timedelta(seconds=1),
         )
+        assert await store.has_active_execution_lease_fence(
+            "exec-r12-c-fence",
+            owner_instance_id="worker-r12-c",
+            lease_generation=1,
+            now_utc=now + timedelta(seconds=1),
+            expected_lease_expires_at=expiry,
+        )
+        assert not await store.has_active_execution_lease_fence(
+            "exec-r12-c-fence",
+            owner_instance_id="worker-r12-c",
+            lease_generation=1,
+            now_utc=now + timedelta(seconds=1),
+            expected_lease_expires_at=expiry + timedelta(seconds=1),
+        )
         assert not await store.has_active_execution_lease_fence(
             "exec-r12-c-fence",
             owner_instance_id="other-worker",

@@ -29,6 +29,21 @@ R6_RECONCILIATION_ERROR_CODES = frozenset(
 )
 
 
+class CapabilityContinuationDispatchGuardError(RuntimeError):
+    """Recovery-only continuation guard rejected before physical dispatch."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool = False,
+    ) -> None:
+        self.code = str(code)
+        self.retryable = bool(retryable)
+        super().__init__(message)
+
+
 @dataclass
 class CapabilityError(Exception):
     """Stable machine-readable failure contract and runtime exception."""

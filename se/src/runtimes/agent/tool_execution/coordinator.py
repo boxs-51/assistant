@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from ..contracts.context import AgentExecutionContext
 from ..contracts.tool import (
@@ -13,9 +13,19 @@ from ..contracts.tool import (
     ToolExecutionResult,
 )
 from ..contracts.resume import ResumeInvocationAction
+from ...capability.contracts.error import (
+    CapabilityContinuationDispatchGuardError,
+)
 
 
 RetryDecider = Callable[[ToolExecutionResult, int], bool]
+ContinuationPreDispatchPrepare = Callable[
+    [Any], Awaitable[ResumeInvocationAction]
+]
+ContinuationCanonicalDispatchGuard = Callable[
+    [Any, Any, str, str | None, str | None],
+    Awaitable[None],
+]
 
 
 @dataclass
@@ -401,28 +411,49 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         self,
         context: AgentExecutionContext,
         action: ResumeInvocationAction,
+        *,
+        continuation_dispatch_guard=None,
     ) -> ToolExecutionResult:
-        """Delegate one R7-E continuation without ordinary retry orchestration."""
+        """Delegate one continuation without ordinary retry orchestration."""
 
         runner = getattr(self._executor, "continue_invocation", None)
         if not callable(runner):
             raise RuntimeError(
                 "R7 continuation executor is unavailable."
             )
-        return await runner(context, action)
+        if continuation_dispatch_guard is None:
+            return await runner(context, action)
+        return await runner(
+            context,
+            action,
+            continuation_dispatch_guard=continuation_dispatch_guard,
+        )
 
     async def continue_invocations(
         self,
         context: AgentExecutionContext,
-        actions: Sequence[ResumeInvocationAction],
+        actions: Sequence[Any],
         *,
         max_parallel: int,
+        pre_dispatch_prepare: ContinuationPreDispatchPrepare | None = None,
+        canonical_dispatch_guard: (
+            ContinuationCanonicalDispatchGuard | None
+        ) = None,
+        preserve_started_on_failure: bool = False,
     ) -> Sequence[ToolExecutionResult]:
-        """Run an R7 continuation subset concurrently and return plan order.
+        """Run a continuation subset concurrently and return plan order.
 
-        R7-E's durable expected_revision fence owns duplicate-attempt safety.
-        The Phase-5 retry ledger is intentionally bypassed because these are
-        new attempts of existing logical invocations, not new tool calls.
+        The default path is the unchanged R7 continuation behavior.
+        R12-F3 may supply a recovery-only pre_dispatch_prepare callback.
+        It runs inside each semaphore slot immediately before continuation and
+        returns the bounded ResumeInvocationAction only after the caller's
+        recovery fences pass.
+
+        When preserve_started_on_failure is true, a prepare/fence failure
+        cancels only slots that have not entered continuation lifecycle setup.
+        Started-but-pre-send slots remain alive long enough to observe the
+        shared canonical guard failure and fail closed at the final send seam;
+        slots already final-send-authorized continue canonical R6/UBQ truth.
         """
 
         if max_parallel < 1:
@@ -450,12 +481,80 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         semaphore = asyncio.Semaphore(
             min(max_parallel, context.limits.max_parallel_tools)
         )
+        prepare_failed = asyncio.Event()
+        continuation_started: set[str] = set()
+        physical_dispatch_authorized: set[str] = set()
 
-        async def run_one(
-            action: ResumeInvocationAction,
-        ) -> ToolExecutionResult:
+        async def run_one(raw_action: Any) -> ToolExecutionResult:
             async with semaphore:
-                return await self.continue_invocation(context, action)
+                action = raw_action
+                if pre_dispatch_prepare is not None:
+                    if prepare_failed.is_set():
+                        raise RuntimeError(
+                            "Continuation dispatch stopped after a "
+                            "pre-dispatch fence failure."
+                        )
+                    try:
+                        action = await pre_dispatch_prepare(raw_action)
+                    except BaseException:
+                        prepare_failed.set()
+                        raise
+                    if prepare_failed.is_set():
+                        raise RuntimeError(
+                            "Continuation dispatch stopped after a "
+                            "pre-dispatch fence failure."
+                        )
+                continuation_started.add(raw_action.invocation_id)
+                if canonical_dispatch_guard is None:
+                    return await self.continue_invocation(
+                        context,
+                        action,
+                    )
+
+                async def runtime_guard(
+                    invocation,
+                    selected_implementation_id: str,
+                    target_connection_id: str | None,
+                    origin_connection_id: str | None,
+                ) -> None:
+                    try:
+                        if prepare_failed.is_set():
+                            raise CapabilityContinuationDispatchGuardError(
+                                "RECOVERY_BATCH_FAIL_CLOSED",
+                                "A sibling continuation already lost "
+                                "recovery dispatch authority.",
+                                retryable=True,
+                            )
+                        await canonical_dispatch_guard(
+                            raw_action,
+                            invocation,
+                            selected_implementation_id,
+                            target_connection_id,
+                            origin_connection_id,
+                        )
+                        if prepare_failed.is_set():
+                            raise CapabilityContinuationDispatchGuardError(
+                                "RECOVERY_BATCH_FAIL_CLOSED",
+                                "A sibling continuation lost recovery "
+                                "dispatch authority before this slot sent.",
+                                retryable=True,
+                            )
+                        # RemoteClientDriver has no await between returning
+                        # from this guard and RealtimeMultiplexer.invoke().
+                        # Mark only final-send authorization here; entering
+                        # continue_invocation() is deliberately not dispatch.
+                        physical_dispatch_authorized.add(
+                            raw_action.invocation_id
+                        )
+                    except BaseException:
+                        prepare_failed.set()
+                        raise
+
+                return await self.continue_invocation(
+                    context,
+                    action,
+                    continuation_dispatch_guard=runtime_guard,
+                )
 
         tasks = [
             asyncio.create_task(
@@ -471,11 +570,30 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             raw_results = await self._gather_with_cancellation(
                 context,
                 tasks,
+                shield_children=preserve_started_on_failure,
             )
         except BaseException:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
+            if preserve_started_on_failure:
+                for task, action in zip(tasks, action_list):
+                    if task.done():
+                        continue
+                    if action.invocation_id not in continuation_started:
+                        task.cancel()
+                        continue
+                    if (
+                        action.invocation_id
+                        not in physical_dispatch_authorized
+                    ):
+                        # Started but still pre-send: do not cancel the R6
+                        # lifecycle attempt. Let its shared runtime_guard see
+                        # prepare_failed and restore canonical pre-send truth.
+                        continue
+                    # Final-send-authorized work is also preserved so R6/UBQ
+                    # can finish authoritative external-outcome recording.
+            else:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
@@ -557,6 +675,8 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         self,
         context: AgentExecutionContext,
         tasks: Sequence[asyncio.Task[ToolExecutionResult]],
+        *,
+        shield_children: bool = False,
     ) -> list[ToolExecutionResult]:
         cancellation_task = asyncio.create_task(
             context.cancellation_event.wait(),
@@ -564,7 +684,10 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         )
 
         gather_task = asyncio.create_task(
-            self._gather_tasks(tasks),
+            self._gather_tasks(
+                tasks,
+                shield_children=shield_children,
+            ),
             name=f"tool-batch-gather:{context.execution_id}",
         )
 
@@ -609,7 +732,15 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
     async def _gather_tasks(
         self,
         tasks: Sequence[asyncio.Task[ToolExecutionResult]],
+        *,
+        shield_children: bool = False,
     ) -> list[ToolExecutionResult]:
+        if shield_children:
+            return list(
+                await asyncio.gather(
+                    *(asyncio.shield(task) for task in tasks)
+                )
+            )
         return list(await asyncio.gather(*tasks))
 
     @staticmethod

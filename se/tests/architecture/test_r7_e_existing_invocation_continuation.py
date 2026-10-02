@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 
 import pytest
 
@@ -9,6 +10,10 @@ from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
 from se.src.runtimes.agent.contracts.context import AgentExecutionContext
+from se.src.runtimes.agent.contracts.tool import ToolExecutionResult
+from se.src.runtimes.agent.tool_execution.coordinator import (
+    AgentToolExecutionCoordinator,
+)
 from se.src.runtimes.agent.contracts.resume import (
     ResumeInvocationAction,
     ResumeInvocationActionKind,
@@ -22,6 +27,7 @@ from se.src.runtimes.capability.contracts.error import (
     CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT,
     CAPABILITY_CONTINUATION_STALE,
     CAPABILITY_CONTINUATION_UNSAFE,
+    CapabilityContinuationDispatchGuardError,
     CapabilityError,
     REMOTE_INVOCATION_CONFLICT,
 )
@@ -623,3 +629,235 @@ async def test_r7_f4_agent_adapter_enters_exact_r7_e_continuation_path(
     assert persisted.state is CapabilityInvocationState.COMPLETED
     assert persisted.remote_outcome_state is RemoteOutcomeState.TERMINAL_COMMITTED
     assert [item.attempt_number for item in attempts] == [1, 2]
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_dispatch_guard_runs_after_attempt_setup_before_remote_send():
+    realtime = _Realtime()
+    runtime, store, invocation, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.NON_IDEMPOTENT,
+        outcome=RemoteOutcomeState.NOT_DISPATCHED,
+        realtime=realtime,
+    )
+    observed = []
+
+    async def reject_at_canonical_boundary(
+        current_invocation,
+        selected_implementation_id,
+        target_connection_id,
+        origin_connection_id,
+    ):
+        observed.append(
+            (
+                current_invocation.state,
+                current_invocation.attempt,
+                selected_implementation_id,
+                target_connection_id,
+                origin_connection_id,
+            )
+        )
+        raise CapabilityContinuationDispatchGuardError(
+            "RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+            "lease changed after outer prepare",
+            retryable=True,
+        )
+
+    with pytest.raises(
+        CapabilityContinuationDispatchGuardError,
+        match="lease changed after outer prepare",
+    ):
+        await runtime.continue_invocation(
+            invocation.invocation_id,
+            target_connection_id=K2,
+            mode=ExistingInvocationContinuationMode.DISPATCH_NOT_DISPATCHED,
+            expected_revision=invocation.revision,
+            expected_request_fingerprint=fingerprint,
+            continuation_dispatch_guard=reject_at_canonical_boundary,
+        )
+
+    assert realtime.calls == []
+    assert len(observed) == 1
+    state, attempt_number, implementation_id, target, origin = observed[0]
+    assert state is CapabilityInvocationState.RUNNING
+    assert attempt_number == 2
+    assert implementation_id == f"{K2}:{CAPABILITY_ID}"
+    assert target == K2
+    assert origin == K1
+
+    persisted = await store.get(invocation.invocation_id)
+    attempts = await store.list_attempts(invocation.invocation_id)
+    assert persisted is not None
+    assert persisted.state is CapabilityInvocationState.WAITING
+    assert persisted.wait_reason is CapabilityWaitReason.CONNECTION
+    assert persisted.remote_outcome_state is RemoteOutcomeState.NOT_DISPATCHED
+    assert [item.attempt_number for item in attempts] == [1, 2]
+    assert attempts[-1].state is CapabilityInvocationState.FAILED
+
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_two_slot_guard_failure_preserves_both_presend_r6_truth():
+    realtime = _Realtime()
+    runtime, store, invocation_a, fingerprint = await _runtime(
+        idempotency=CapabilityIdempotency.NON_IDEMPOTENT,
+        outcome=RemoteOutcomeState.NOT_DISPATCHED,
+        realtime=realtime,
+    )
+
+    invocation_b = invocation_a.model_copy(
+        update={
+            "invocation_id": "inv-r7e-b",
+            "tool_call_id": "call-r7e-b",
+            "revision": 0,
+            "attempt": 1,
+            "max_attempts": 1,
+        }
+    )
+    await runtime.invocation_lifecycle.create(invocation_b)
+    await store.save_attempt(
+        CapabilityInvocationAttempt(
+            attempt_id="att-old-b",
+            invocation_id=invocation_b.invocation_id,
+            attempt_number=1,
+            implementation_id=f"{K1}:{CAPABILITY_ID}",
+            driver_kind="REMOTE_CLIENT",
+            connection_id=K1,
+            state=CapabilityInvocationState.FAILED,
+        )
+    )
+
+    persisted_a_before = await store.get(invocation_a.invocation_id)
+    persisted_b_before = await store.get(invocation_b.invocation_id)
+    assert persisted_a_before is not None
+    assert persisted_b_before is not None
+
+    action_a = ResumeInvocationAction(
+        invocation_id=invocation_a.invocation_id,
+        tool_call_id=invocation_a.tool_call_id,
+        ordinal=0,
+        capability_id=CAPABILITY_ID,
+        capability_version="1.0",
+        request_fingerprint=fingerprint,
+        idempotency=CapabilityIdempotency.NON_IDEMPOTENT,
+        expected_invocation_revision=persisted_a_before.revision,
+        expected_invocation_state=CapabilityInvocationState.WAITING,
+        expected_remote_outcome_state=RemoteOutcomeState.NOT_DISPATCHED,
+        action=ResumeInvocationActionKind.DISPATCH_NOT_DISPATCHED,
+    )
+    action_b = replace(
+        action_a,
+        invocation_id=invocation_b.invocation_id,
+        tool_call_id=invocation_b.tool_call_id,
+        ordinal=1,
+        expected_invocation_revision=persisted_b_before.revision,
+    )
+
+    context = AgentExecutionContext.create(
+        execution_id=EXECUTION_ID,
+        agent_id="agent-r12-f3a-batch",
+        session_id="session-r7e",
+        correlation_id="corr-r12-f3a-batch",
+        identity=Identity(
+            user_id=USER_ID,
+            session_id="session-r7e",
+            auth_type="api_key",
+            scopes={"*"},
+        ),
+        limits=AgentExecutionLimits(max_parallel_tools=2),
+        connection_id=K2,
+        remaining_active_budget_seconds=30.0,
+    )
+    context.iteration = 1
+
+    class RuntimeExecutor:
+        async def continue_invocation(
+            self,
+            current_context,
+            action,
+            *,
+            continuation_dispatch_guard=None,
+        ):
+            result = await runtime.continue_invocation(
+                action.invocation_id,
+                target_connection_id=current_context.connection_id,
+                mode=ExistingInvocationContinuationMode(
+                    action.action.value
+                ),
+                expected_revision=action.expected_invocation_revision,
+                expected_request_fingerprint=action.request_fingerprint,
+                cancellation_event=current_context.cancellation_event,
+                continuation_dispatch_guard=continuation_dispatch_guard,
+            )
+            return ToolExecutionResult(
+                execution_id=current_context.execution_id,
+                iteration=current_context.iteration,
+                invocation_id=action.invocation_id,
+                tool_call_id=action.tool_call_id,
+                capability_id=action.capability_id,
+                success=True,
+                output=result.output,
+                metadata=dict(result.metadata),
+            )
+
+    coordinator = AgentToolExecutionCoordinator(RuntimeExecutor())
+    a_inside_guard = asyncio.Event()
+    release_a = asyncio.Event()
+
+    async def prepare(action):
+        return action
+
+    async def canonical_guard(
+        raw_action,
+        current_invocation,
+        selected_implementation_id,
+        target_connection_id,
+        origin_connection_id,
+    ):
+        assert current_invocation.invocation_id == raw_action.invocation_id
+        assert selected_implementation_id == f"{K2}:{CAPABILITY_ID}"
+        assert target_connection_id == K2
+        assert origin_connection_id == K1
+
+        if raw_action.invocation_id == invocation_a.invocation_id:
+            a_inside_guard.set()
+            await release_a.wait()
+            return
+
+        await a_inside_guard.wait()
+        release_a.set()
+        raise CapabilityContinuationDispatchGuardError(
+            "RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+            "slot B lost recovery authority at canonical send seam",
+            retryable=True,
+        )
+
+    with pytest.raises(CapabilityContinuationDispatchGuardError):
+        await coordinator.continue_invocations(
+            context,
+            [action_a, action_b],
+            max_parallel=2,
+            pre_dispatch_prepare=prepare,
+            canonical_dispatch_guard=canonical_guard,
+            preserve_started_on_failure=True,
+        )
+
+    assert realtime.calls == []
+
+    persisted_a = await store.get(invocation_a.invocation_id)
+    persisted_b = await store.get(invocation_b.invocation_id)
+    assert persisted_a is not None
+    assert persisted_b is not None
+    for persisted in (persisted_a, persisted_b):
+        assert persisted.state is CapabilityInvocationState.WAITING
+        assert persisted.wait_reason is CapabilityWaitReason.CONNECTION
+        assert (
+            persisted.remote_outcome_state
+            is RemoteOutcomeState.NOT_DISPATCHED
+        )
+
+    attempts_a = await store.list_attempts(invocation_a.invocation_id)
+    attempts_b = await store.list_attempts(invocation_b.invocation_id)
+    assert [item.attempt_number for item in attempts_a] == [1, 2]
+    assert [item.attempt_number for item in attempts_b] == [1, 2]
+    assert attempts_a[-1].state is CapabilityInvocationState.FAILED
+    assert attempts_b[-1].state is CapabilityInvocationState.FAILED
