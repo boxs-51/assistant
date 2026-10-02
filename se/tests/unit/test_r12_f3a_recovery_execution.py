@@ -855,3 +855,156 @@ async def test_r12_f3a_atomic_promotion_fence_blocks_stale_model_consumable_resu
     assert len(executor.calls) == 1
     assert len(store.save_calls) == 1
     assert store.committed[TOOL_CALL].commit_state == "PROVISIONAL"
+
+
+
+@pytest.mark.asyncio
+async def test_r12_f3a_two_slot_canonical_failure_blocks_all_agent_projection():
+    base = _action()
+    action_a = replace(
+        base,
+        invocation_id="inv-a",
+        tool_call_id="call-a",
+        ordinal=0,
+        request_fingerprint="fp-a",
+    )
+    action_b = replace(
+        base,
+        invocation_id="inv-b",
+        tool_call_id="call-b",
+        ordinal=1,
+        request_fingerprint="fp-b",
+    )
+    initial = _plan(action_a)
+    plan = replace(
+        initial,
+        ordered_tool_call_ids=("call-a", "call-b"),
+        invocation_actions=(action_a, action_b),
+        plan_fingerprint="",
+    )
+    plan = replace(
+        plan,
+        plan_fingerprint=recovery_plan_fingerprint(plan),
+    )
+    activation = _activation(plan)
+    context = _context(plan, activation)
+
+    def invocation_for(action):
+        value = _invocation()
+        value.invocation_id = action.invocation_id
+        value.tool_call_id = action.tool_call_id
+        value.request_fingerprint = action.request_fingerprint
+        return value
+
+    invocations = {
+        "inv-a": invocation_for(action_a),
+        "inv-b": invocation_for(action_b),
+    }
+
+    class MappingInvocationStore:
+        async def get(self, invocation_id):
+            return invocations.get(invocation_id)
+
+    class MappingCapabilityRuntime:
+        def __init__(self):
+            self.invocation_lifecycle = SimpleNamespace(
+                store=MappingInvocationStore()
+            )
+            self.tool_quota_service = None
+            self.connection_registry = SimpleNamespace(
+                get=lambda connection_id: SimpleNamespace(
+                    metadata={"client_id": CLIENT},
+                    connection_id=connection_id,
+                )
+            )
+
+        def _resolve_continuation_target(
+            self,
+            invocation,
+            *,
+            target_connection_id,
+        ):
+            assert target_connection_id == NEW_CONNECTION
+            return (
+                object(),
+                SimpleNamespace(implementation_id=IMPLEMENTATION),
+            )
+
+        def _revalidate_continuation_target_at_dispatch(
+            self,
+            invocation,
+            *,
+            target_connection_id,
+        ):
+            assert target_connection_id == NEW_CONNECTION
+            return SimpleNamespace(implementation_id=IMPLEMENTATION)
+
+    a_inside_continuation = __import__("asyncio").Event()
+    release_a = __import__("asyncio").Event()
+
+    class BarrierExecutor:
+        def __init__(self):
+            self.external_send_calls = []
+
+        async def continue_invocation(
+            self,
+            current_context,
+            action,
+            *,
+            continuation_dispatch_guard=None,
+        ):
+            invocation = invocations[action.invocation_id]
+            assert continuation_dispatch_guard is not None
+
+            if action.invocation_id == "inv-a":
+                a_inside_continuation.set()
+                await release_a.wait()
+                await continuation_dispatch_guard(
+                    invocation,
+                    IMPLEMENTATION,
+                    NEW_CONNECTION,
+                    OLD_CONNECTION,
+                )
+            else:
+                await a_inside_continuation.wait()
+                try:
+                    await continuation_dispatch_guard(
+                        invocation,
+                        "client:replacement",
+                        NEW_CONNECTION,
+                        OLD_CONNECTION,
+                    )
+                finally:
+                    release_a.set()
+
+            self.external_send_calls.append(action.invocation_id)
+            return ToolExecutionResult(
+                execution_id=current_context.execution_id,
+                iteration=current_context.iteration,
+                invocation_id=action.invocation_id,
+                tool_call_id=action.tool_call_id,
+                capability_id=action.capability_id,
+                success=True,
+                output={"sent": True},
+                metadata={"attempt": 1},
+            )
+
+    store = _Store(claim=_claim(plan, activation))
+    runtime = MappingCapabilityRuntime()
+    executor = BarrierExecutor()
+    service = AgentRecoveryExecutionService(
+        store,
+        runtime,
+        AgentToolExecutionCoordinator(executor),
+    )
+
+    with pytest.raises(RecoveryExecutionError):
+        await service.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+
+    assert executor.external_send_calls == []
+    assert store.save_calls == []
+    assert store.promote_calls == []
