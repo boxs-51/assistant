@@ -512,13 +512,17 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
                     target_connection_id: str | None,
                     origin_connection_id: str | None,
                 ) -> None:
-                    await canonical_dispatch_guard(
-                        raw_action,
-                        invocation,
-                        selected_implementation_id,
-                        target_connection_id,
-                        origin_connection_id,
-                    )
+                    try:
+                        await canonical_dispatch_guard(
+                            raw_action,
+                            invocation,
+                            selected_implementation_id,
+                            target_connection_id,
+                            origin_connection_id,
+                        )
+                    except BaseException:
+                        prepare_failed.set()
+                        raise
 
                 return await self.continue_invocation(
                     context,
