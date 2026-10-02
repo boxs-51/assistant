@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Any, Awaitable, Callable, Sequence
 
 from ..contracts.context import AgentExecutionContext
 from ..contracts.tool import (
@@ -16,6 +16,9 @@ from ..contracts.resume import ResumeInvocationAction
 
 
 RetryDecider = Callable[[ToolExecutionResult, int], bool]
+ContinuationPreDispatchPrepare = Callable[
+    [Any], Awaitable[ResumeInvocationAction]
+]
 
 
 @dataclass
@@ -414,15 +417,24 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
     async def continue_invocations(
         self,
         context: AgentExecutionContext,
-        actions: Sequence[ResumeInvocationAction],
+        actions: Sequence[Any],
         *,
         max_parallel: int,
+        pre_dispatch_prepare: ContinuationPreDispatchPrepare | None = None,
+        preserve_started_on_failure: bool = False,
     ) -> Sequence[ToolExecutionResult]:
-        """Run an R7 continuation subset concurrently and return plan order.
+        """Run a continuation subset concurrently and return plan order.
 
-        R7-E's durable expected_revision fence owns duplicate-attempt safety.
-        The Phase-5 retry ledger is intentionally bypassed because these are
-        new attempts of existing logical invocations, not new tool calls.
+        The default path is the unchanged R7 continuation behavior.
+        R12-F3 may supply a recovery-only pre_dispatch_prepare callback.
+        It runs inside each semaphore slot immediately before continuation and
+        returns the bounded ResumeInvocationAction only after the caller's
+        recovery fences pass.
+
+        When preserve_started_on_failure is true, a prepare/fence failure
+        cancels only slots that have not crossed the continuation call
+        boundary. Already-started slots are allowed to finish canonical R6/UBQ
+        outcome recording before the batch failure is propagated.
         """
 
         if max_parallel < 1:
@@ -450,11 +462,29 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         semaphore = asyncio.Semaphore(
             min(max_parallel, context.limits.max_parallel_tools)
         )
+        prepare_failed = asyncio.Event()
+        dispatch_started: set[str] = set()
 
-        async def run_one(
-            action: ResumeInvocationAction,
-        ) -> ToolExecutionResult:
+        async def run_one(raw_action: Any) -> ToolExecutionResult:
             async with semaphore:
+                action = raw_action
+                if pre_dispatch_prepare is not None:
+                    if prepare_failed.is_set():
+                        raise RuntimeError(
+                            "Continuation dispatch stopped after a "
+                            "pre-dispatch fence failure."
+                        )
+                    try:
+                        action = await pre_dispatch_prepare(raw_action)
+                    except BaseException:
+                        prepare_failed.set()
+                        raise
+                    if prepare_failed.is_set():
+                        raise RuntimeError(
+                            "Continuation dispatch stopped after a "
+                            "pre-dispatch fence failure."
+                        )
+                dispatch_started.add(raw_action.invocation_id)
                 return await self.continue_invocation(context, action)
 
         tasks = [
@@ -471,11 +501,20 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
             raw_results = await self._gather_with_cancellation(
                 context,
                 tasks,
+                shield_children=preserve_started_on_failure,
             )
         except BaseException:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
+            if preserve_started_on_failure:
+                for task, action in zip(tasks, action_list):
+                    if (
+                        action.invocation_id not in dispatch_started
+                        and not task.done()
+                    ):
+                        task.cancel()
+            else:
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
             raise
 
@@ -557,6 +596,8 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         self,
         context: AgentExecutionContext,
         tasks: Sequence[asyncio.Task[ToolExecutionResult]],
+        *,
+        shield_children: bool = False,
     ) -> list[ToolExecutionResult]:
         cancellation_task = asyncio.create_task(
             context.cancellation_event.wait(),
@@ -564,7 +605,10 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
         )
 
         gather_task = asyncio.create_task(
-            self._gather_tasks(tasks),
+            self._gather_tasks(
+                tasks,
+                shield_children=shield_children,
+            ),
             name=f"tool-batch-gather:{context.execution_id}",
         )
 
@@ -609,7 +653,15 @@ class AgentToolExecutionCoordinator(ToolExecutionPort):
     async def _gather_tasks(
         self,
         tasks: Sequence[asyncio.Task[ToolExecutionResult]],
+        *,
+        shield_children: bool = False,
     ) -> list[ToolExecutionResult]:
+        if shield_children:
+            return list(
+                await asyncio.gather(
+                    *(asyncio.shield(task) for task in tasks)
+                )
+            )
         return list(await asyncio.gather(*tasks))
 
     @staticmethod
