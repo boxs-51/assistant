@@ -125,11 +125,15 @@ def test_b2_reuses_tool_response_payload_canonicalization_and_deep_freeze() -> N
         "payload_id = payload.payload_id",
         '"content_digest": content_digest',
         '"payload_id": payload_id',
-        "content_snapshot=payload.content",
-        "content_digest=payload.content_digest",
+        "_payload=payload",
+        "def content_snapshot(self) -> Any:",
+        'return self._payload.model_dump(mode="json")["content"]',
+        "def content_digest(self) -> str:",
+        "return self._payload.content_digest",
     ):
         assert phrase in source
 
+    assert "content_snapshot=payload.content" not in source
     assert "canonical_content = canonical_payload_bytes(result.output)" not in source
     assert "content_digest = hashlib.sha256(canonical_content).hexdigest()" not in source
 
@@ -183,7 +187,8 @@ def test_b2_focused_evidence_covers_detach_gc_and_b1_compatibility() -> None:
 
     for phrase in (
         "material.source_proof == legacy_proof",
-        "MappingProxyType",
+        "canonical_payload_bytes(snapshot)",
+        "fresh_snapshot is not snapshot",
         "changed-after-read",
         "ToolResponsePayloadSourceUnavailableError",
         "asyncio.CancelledError",
@@ -195,6 +200,7 @@ def test_b2_focused_evidence_covers_detach_gc_and_b1_compatibility() -> None:
         "assert await _counts(sessions) == before_counts",
         "assert await _snapshot(sessions) == before",
         "await _delete_all_source_rows(sessions)",
+        "canonical_payload_bytes(post_delete_snapshot)",
         "ToolResponsePayloadSourceRejectedError",
     ):
         assert phrase in integration
