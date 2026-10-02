@@ -80,8 +80,6 @@ class InferenceQuotaSettings:
     estimator_policy_version: str = "ubq4-estimator-v1"
     usage_normalization_version: str = "ubq4-usage-v1"
     default_output_token_reservation: int | None = None
-    compute_units_per_1k_tokens: Decimal | None = None
-    cost_usd_per_1k_tokens: Decimal | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -260,11 +258,8 @@ class UserInferenceQuotaService:
                     "default_output_token_reservation": (
                         self.settings.default_output_token_reservation
                     ),
-                    "compute_units_per_1k_tokens": (
-                        self.settings.compute_units_per_1k_tokens
-                    ),
-                    "cost_usd_per_1k_tokens": (
-                        self.settings.cost_usd_per_1k_tokens
+                    "compute_cost_estimator_authority": (
+                        "provider-model-normalizer-required"
                     ),
                 }
             )
@@ -277,11 +272,8 @@ class UserInferenceQuotaService:
             + _fingerprint(
                 {
                     "version": self.settings.usage_normalization_version,
-                    "compute_units_per_1k_tokens": (
-                        self.settings.compute_units_per_1k_tokens
-                    ),
-                    "cost_usd_per_1k_tokens": (
-                        self.settings.cost_usd_per_1k_tokens
+                    "compute_cost_normalization_authority": (
+                        "provider-model-normalizer-required"
                     ),
                 }
             )
@@ -361,7 +353,17 @@ class UserInferenceQuotaService:
                 "workflow_id": context.workflow_id,
                 "iteration": context.iteration,
                 "agent_iteration_id": context.agent_iteration_id,
-                "outer_request_id": context.outer_request_id,
+                # Skill replay/continuation is canonically bound to the durable
+                # capability invocation. The outer request remains attribution
+                # only and may legitimately change across continuation.
+                "outer_request_id": (
+                    None
+                    if (
+                        context.source_surface == "SKILL"
+                        and context.capability_invocation_id is not None
+                    )
+                    else context.outer_request_id
+                ),
                 "capability_invocation_id": context.capability_invocation_id,
             },
             "estimator_policy_identity": context.estimator_policy_identity,
@@ -415,26 +417,15 @@ class UserInferenceQuotaService:
             output_tokens = max_tokens
         total_tokens = input_tokens + output_tokens
 
-        compute = None
-        if self.settings.compute_units_per_1k_tokens is not None:
-            compute = (
-                Decimal(total_tokens)
-                * self.settings.compute_units_per_1k_tokens
-                / Decimal(1000)
-            )
-        cost = None
-        if self.settings.cost_usd_per_1k_tokens is not None:
-            cost = (
-                Decimal(total_tokens)
-                * self.settings.cost_usd_per_1k_tokens
-                / Decimal(1000)
-            )
+        # UBQ-4 does not infer compute/cost from a global token multiplier.
+        # Finite compute/cost policy therefore fails closed in _amounts until a
+        # versioned provider/model normalizer is frozen and wired.
         return InferenceQuotaEstimate(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             total_tokens=total_tokens,
-            compute_units=compute,
-            cost_usd=cost,
+            compute_units=None,
+            cost_usd=None,
         )
 
     @staticmethod
@@ -815,14 +806,8 @@ class UserInferenceQuotaService:
                             raise UserBudgetPolicyAuthorityConflictError(
                                 "replayed inference window lost policy authority"
                             )
-                        include_compute = (
-                            policy.max_compute_atomic is not None
-                            or self.settings.compute_units_per_1k_tokens is not None
-                        )
-                        include_cost = (
-                            policy.max_cost_usd_atomic is not None
-                            or self.settings.cost_usd_per_1k_tokens is not None
-                        )
+                        include_compute = policy.max_compute_atomic is not None
+                        include_cost = policy.max_cost_usd_atomic is not None
                         amounts = self._amounts(
                             estimate,
                             include_compute=include_compute,
@@ -908,14 +893,8 @@ class UserInferenceQuotaService:
                             "active inference window has invalid policy authority"
                         )
 
-                    include_compute = (
-                        policy.max_compute_atomic is not None
-                        or self.settings.compute_units_per_1k_tokens is not None
-                    )
-                    include_cost = (
-                        policy.max_cost_usd_atomic is not None
-                        or self.settings.cost_usd_per_1k_tokens is not None
-                    )
+                    include_compute = policy.max_compute_atomic is not None
+                    include_cost = policy.max_cost_usd_atomic is not None
                     amounts = self._amounts(
                         estimate,
                         include_compute=include_compute,
@@ -1088,21 +1067,11 @@ class UserInferenceQuotaService:
         )
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
+        # Provider/model are attribution only until a versioned
+        # provider/model compute+cost normalizer is accepted. Never synthesize
+        # those dimensions from a global token multiplier.
         compute_units = None
         cost_usd = None
-        if total_tokens is not None:
-            if self.settings.compute_units_per_1k_tokens is not None:
-                compute_units = (
-                    Decimal(total_tokens)
-                    * self.settings.compute_units_per_1k_tokens
-                    / Decimal(1000)
-                )
-            if self.settings.cost_usd_per_1k_tokens is not None:
-                cost_usd = (
-                    Decimal(total_tokens)
-                    * self.settings.cost_usd_per_1k_tokens
-                    / Decimal(1000)
-                )
         return NormalizedInferenceUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
@@ -1142,21 +1111,11 @@ class UserInferenceQuotaService:
         )
         if total_tokens is None and input_tokens is not None and output_tokens is not None:
             total_tokens = input_tokens + output_tokens
+        # Provider/model are attribution only until a versioned
+        # provider/model compute+cost normalizer is accepted. Never synthesize
+        # those dimensions from a global token multiplier.
         compute_units = None
         cost_usd = None
-        if total_tokens is not None:
-            if self.settings.compute_units_per_1k_tokens is not None:
-                compute_units = (
-                    Decimal(total_tokens)
-                    * self.settings.compute_units_per_1k_tokens
-                    / Decimal(1000)
-                )
-            if self.settings.cost_usd_per_1k_tokens is not None:
-                cost_usd = (
-                    Decimal(total_tokens)
-                    * self.settings.cost_usd_per_1k_tokens
-                    / Decimal(1000)
-                )
         return NormalizedInferenceUsage(
             input_tokens=input_tokens,
             output_tokens=output_tokens,
