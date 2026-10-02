@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 import hashlib
-from typing import AsyncContextManager, Callable
+from dataclasses import dataclass
+from typing import Any, AsyncContextManager, Callable
 
 from sqlalchemy import select
 from sqlalchemy.exc import SQLAlchemyError
@@ -22,7 +23,7 @@ from se.src.context.tool_response_payload import (
     COMMITTED_RESULT_STATE,
     TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION,
     canonical_payload_bytes,
-    tool_response_payload_id,
+    create_tool_response_payload,
 )
 from se.src.infrastructure.storage.models.sql.agent.execution import (
     AgentExecutionRecord,
@@ -61,6 +62,15 @@ class ToolResponsePayloadSourceUnavailableError(
     """Durable source evidence could not be read safely."""
 
 
+@dataclass(frozen=True, slots=True)
+class TrustedToolResponsePromotionMaterial:
+    """Detached trusted promotion material from one durable tool-result read."""
+
+    source_proof: SourcePromotionProof
+    content_snapshot: Any
+    content_digest: str
+
+
 def _canonical_string(name: str, value: object) -> str:
     if not isinstance(value, str):
         raise ToolResponsePayloadSourceRejectedError(
@@ -97,6 +107,19 @@ class DurableToolResponsePayloadSourceAuthority(
         owner_user_id: str,
     ) -> SourcePromotionProof:
         """Re-prove one immutable successful tool result from durable evidence."""
+        material = await self.read_trusted_promotion_material(
+            source_ref=source_ref,
+            owner_user_id=owner_user_id,
+        )
+        return material.source_proof
+
+    async def read_trusted_promotion_material(
+        self,
+        *,
+        source_ref: ContextSourceRef,
+        owner_user_id: str,
+    ) -> TrustedToolResponsePromotionMaterial:
+        """Read one immutable promotion material set from durable evidence."""
         try:
             validate_context_source_ref_integrity(source_ref)
         except ValueError as exc:
@@ -191,7 +214,7 @@ class DurableToolResponsePayloadSourceAuthority(
                     )
 
                 try:
-                    return self._build_proof(
+                    return self._build_material(
                         source_ref=source_ref,
                         requested_owner=requested_owner,
                         source_session_id=source_session_id,
@@ -212,7 +235,7 @@ class DurableToolResponsePayloadSourceAuthority(
             ) from exc
 
     @staticmethod
-    def _build_proof(
+    def _build_material(
         *,
         source_ref: ContextSourceRef,
         requested_owner: str,
@@ -223,7 +246,7 @@ class DurableToolResponsePayloadSourceAuthority(
         canonical_session: Session,
         invocation: CapabilityInvocationRecord,
         tool_call: AgentToolCallRecord,
-    ) -> SourcePromotionProof:
+    ) -> TrustedToolResponsePromotionMaterial:
         result_id = _canonical_string("result.id", result.id)
         result_execution_id = _canonical_string(
             "result.execution_id",
@@ -365,17 +388,23 @@ class DurableToolResponsePayloadSourceAuthority(
                 "durable agent tool-call lineage mismatch"
             )
 
-        canonical_content = canonical_payload_bytes(result.output)
-        content_digest = hashlib.sha256(canonical_content).hexdigest()
-        payload_id = tool_response_payload_id(
+        # CTX-F1 identity/canonicalization stays delegated to the existing
+        # ToolResponsePayload primitive. Its implementation applies
+        # canonical_payload_bytes(result.output) and tool_response_payload_id(...).
+        payload = create_tool_response_payload(
             source_result_id=result_id,
             invocation_id=result_invocation_id,
             execution_id=result_execution_id,
             tool_call_id=result_tool_call_id,
             logical_capability_id=result_capability_id,
-            content_digest=content_digest,
+            content=result.output,
+            source_commit_state=COMMITTED_RESULT_STATE,
+            owner_user_id=session_owner,
+            session_id=execution_session_id,
             payload_schema_version=TOOL_RESPONSE_PAYLOAD_SCHEMA_VERSION,
         )
+        content_digest = payload.content_digest
+        payload_id = payload.payload_id
         if payload_id != source_ref.authority_id:
             raise ToolResponsePayloadSourceRejectedError(
                 "reconstructed payload identity does not match source_ref authority"
@@ -432,9 +461,14 @@ class DurableToolResponsePayloadSourceAuthority(
             },
         )
 
-        return SourcePromotionProof(
+        source_proof = SourcePromotionProof(
             source_ref_snapshot=reconstructed_ref,
             proof_receipt_id=proof_receipt_id,
             authority_state_token=authority_state_token,
             scope=MemoryPromotionProofScope.MEMORY_PROMOTION,
+        )
+        return TrustedToolResponsePromotionMaterial(
+            source_proof=source_proof,
+            content_snapshot=payload.content,
+            content_digest=payload.content_digest,
         )
