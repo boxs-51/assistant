@@ -20,8 +20,12 @@ def test_r12_f3a_exact_activation_expiry_is_part_of_durable_fence():
         DurableAgentStore.has_active_execution_lease_fence
     )
 
+    normalized_repository = " ".join(repository_source.split())
     assert "expected_lease_expires_at" in repository_source
-    assert "lease_expires_at ==" in repository_source
+    assert (
+        "AgentExecutionRecord.lease_expires_at == expected_lease_expires_at"
+        in normalized_repository
+    )
     assert "expected_lease_expires_at" in store_source
 
 
