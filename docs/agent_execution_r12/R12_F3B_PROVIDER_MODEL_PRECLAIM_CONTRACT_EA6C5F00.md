@@ -367,7 +367,68 @@ fail closed
 do not release/remint/reset quota, TaskBudget or lease authority
 ```
 
-### 7.0 Fresh next-inference tool calls — Option A / DEFER
+### 7.0 Task-scoped inference accounting — exact same-UoW recovery fence
+
+Canonical R12-F0 includes task-scoped recovery and freezes
+`plan.task_budget_incarnation_generation` when `task_id` is present.
+Therefore F3-B MUST NOT avoid the TaskBudget authority problem by silently
+dropping task-scoped continuation support.
+
+The recovered next-inference path has two TaskBudget durable mutations:
+
+```text
+before provider send:
+  TaskBudgetService.reserve_inference(task_id, request_id)
+
+after provider/UBQ/CAS truth:
+  TaskBudgetService.account_usage(task_id, usage_key=request_id, ...)
+```
+
+Both operations currently enter TaskBudget UoW/reservation logic after awaited
+work. A detached AgentRuntime lease check before calling either method is
+TOCTOU-unsafe and does not authorize the actual TaskBudget mutation.
+
+The bounded F3-B production design therefore adds
+`se/src/runtimes/agent/task_budget.py` to the maximum and requires both
+operations, on the recovery path only, to receive:
+
+```text
+execution_id
+exact activation owner_instance_id
+exact activation lease_generation
+exact activation lease_expires_at
+expected TaskBudget.incarnation_generation from RecoveryPlan
+```
+
+Inside the SAME TaskBudget UoW, before TaskBudget CAS/reservation persistence,
+the implementation must:
+
+1. lock/load the AgentExecution row;
+2. require RUNNING + exact owner + exact generation + exact F2 expiry;
+3. re-check current UTC wall clock is still before that exact expiry at the
+   mutation boundary;
+4. require current TaskBudget incarnation_generation equals the frozen plan
+   generation;
+5. only then apply the existing idempotent TaskBudget reservation/mutation;
+6. preserve existing reservation fingerprint/key semantics;
+7. rollback all TaskBudget mutation/reservation work if the R12 fence fails.
+
+This does not make TaskBudget a lease owner and does not transfer UBQ authority.
+It creates no quota refund/release lifecycle, no second quota reservation, and
+no new timeout/deadline semantics.
+
+Required red-first evidence:
+
+- stale recovery owner before `reserve_inference` mutation => zero TaskBudget
+  inference mutation/reservation and zero provider send;
+- lease loss while TaskBudget UoW is blocked => rollback / zero mutation;
+- TaskBudget incarnation mismatch => fail closed before provider send;
+- stale recovery owner before `account_usage` mutation => canonical provider /
+  UBQ / CAS truth preserved, zero stale TaskBudget compatibility write;
+- exact replay of an already-existing reservation remains idempotent only under
+  the same frozen TaskBudget incarnation.
+
+### 7.1 Fresh next-inference tool calls — Option A / DEFER
 
 The first bounded F3-B slice does **not** gain authority for a fresh logical
 tool invocation produced by the recovered next inference.
@@ -405,7 +466,7 @@ Agent tool execution is unchanged. Recovery support for fresh logical tool
 calls is deferred to a later separately audited stage and would require a
 fresh production-scope + UBQ-5C bilateral re-freeze.
 
-## 7.1 CAS-F5-D pre-send side-effect boundary — Option A
+## 7.2 CAS-F5-D pre-send side-effect boundary — Option A
 
 The CAS bilateral owner/auditor decision for the first F3-B slice is **Option A**.
 
@@ -455,7 +516,7 @@ Required production evidence:
 - zero new/updated provider binding from this recovered inference;
 - ordinary non-recovery canonical-asset projection remains unchanged.
 
-## 7.2 Streaming scope — explicitly CLOSED
+## 7.3 Streaming scope — explicitly CLOSED
 
 F3-B recovery provider progression is **NON-STREAM ONLY**.
 
@@ -475,7 +536,7 @@ F3-B does not add a streaming inference path or a recovery guard to streaming.
 Any future recovery support for streaming is a separate MATERIAL CAS overlap
 and requires a new bilateral #107 <-> #74 PRE-CLAIM freeze.
 
-## 7.3 CAS bilateral repair status
+## 7.4 CAS bilateral repair status
 
 ```text
 P1-CAS-R12-F3B-F5D-PRESEND-SIDE-EFFECT-1
@@ -496,8 +557,16 @@ No CAS authority transfers to R12.
 Current UBQ-5A/T-0 evidence work is NON_MATERIAL to this contract.
 
 Future F3-B provider/model production overlaps materially with UBQ-5B and may
-overlap UBQ-5C. Fresh bilateral PRE-CLAIM is mandatory before overlapping
-production mutation.
+overlap UBQ-5C. In addition, this replacement now includes
+`se/src/runtimes/agent/task_budget.py` solely to bind task-scoped
+`reserve_inference` / `account_usage` mutations to the exact R12 recovery
+fence and frozen TaskBudget incarnation. This is a direct shared authority seam
+and requires fresh bilateral #107 <-> #147 PRE-CLAIM acceptance before
+production CLAIM.
+
+F3-B does not redefine renewable UBQ accounting, timeout ownership, TaskBudget
+limits, reservation keys, refund/release semantics or UBQ-5B/5C migration
+authority.
 
 ### CAS / Issue #74
 
@@ -531,12 +600,13 @@ and provider error truth. F3-B adds authorization fencing only.
 
 ## 9. Exact production file set proposed for PRE-CLAIM release
 
-The replacement contract freezes this exact maximum production set:
+The replacement contract freezes this exact maximum production set of **nine** files:
 
 ```text
 se/src/runtimes/agent/recovery_execution.py
 se/src/runtimes/agent/runtime.py
 se/src/runtimes/agent/persistence.py
+se/src/runtimes/agent/task_budget.py
 se/src/runtimes/agent/contracts/inference.py
 se/src/runtimes/agent/adapters/inference.py
 se/src/provider/handlers/chat_handler.py
@@ -549,6 +619,8 @@ Rationale:
 - `recovery_execution.py`: exact F3-A authority/result handoff;
 - `runtime.py`: recovery continuation, next iteration, post-provider fence;
 - `persistence.py`: atomic exact-lease durable handoff/checkpoint;
+- `task_budget.py`: task-scoped reserve/usage mutation under the same exact
+  recovery fence + frozen TaskBudget incarnation in its own UoW;
 - `contracts/inference.py`: non-persisted typed pre-attempt guard carrier;
 - `adapters/inference.py`: thread guard into canonical provider handler;
 - `chat_handler.py`: preserve UBQ/CAS order while threading guard to executor;
@@ -571,7 +643,7 @@ The addition of `persistence.py` relative to the auditor's prior likely
 maximum is intentional and must receive fresh independent approval: ordinary
 `update_checkpoint()` is not atomic with the R12 exact lease fence.
 
-Any production path outside the eight files above invalidates this PRE-CLAIM
+Any production path outside the nine files above invalidates this PRE-CLAIM
 scope and requires a new audit before mutation.
 
 ## 10. P1 replacement disposition
@@ -597,7 +669,13 @@ P1-R12-F3B-POSTPROVIDER-PROGRESSION-FENCE-4
 
 P1-R12-F3B-NEXT-TOOL-DISPATCH-FENCE-5
   owner decision = OPTION A / DEFER BEFORE NEW LOGICAL TOOL ADMISSION
-  eight-file maximum expansion = NO
+  ordinary tool-dispatch scope expansion = NO
+  independent closure = PENDING
+
+P1-R12-F3B-TASKBUDGET-MUTATION-FENCE-6
+  canonical F0 task-scoped support = PRESERVED
+  owner decision = ADD task_budget.py / SAME-UoW EXACT R12 FENCE
+  UBQ bilateral closure = PENDING
   independent closure = PENDING
 ```
 
@@ -610,13 +688,14 @@ F3-B production CLAIM remains CLOSED until all are true:
 1. this exact two-file replacement contract/evidence candidate is GREEN/GREEN;
 2. independent auditor accepts the durable handoff ordering and the
    `persistence.py` atomic-fence scope;
-3. P1-1, P1-2, P1-4 and P1-5 receive independent closure; P1-3 remains
-   independently CLOSED at contract level;
+3. P1-1, P1-2, P1-4, P1-5 and P1-6 receive independent closure; P1-3
+   remains independently CLOSED at contract level;
 4. CAS #74 bilateral Option-A asset DEFER + NON-STREAM-only release remains
    PASS / PRESERVED; refresh is required only if CAS semantics/path scope changes;
 5. fresh bilateral #107 <-> #147 classification against the then-current
    UBQ-5B/5C state;
-6. exact eight-file maximum production scope is accepted;
+6. exact nine-file maximum production scope, including the bounded
+   `task_budget.py` recovery-fence change, is accepted;
 7. red-first race/evidence matrix is frozen;
 8. no material canonical-main or authority drift invalidates the release.
 
