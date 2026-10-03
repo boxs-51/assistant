@@ -23,6 +23,10 @@ RESERVATION_REPOSITORY = Path(
 ADMISSION = Path(
     "se/src/infrastructure/storage/services/memory_promotion_admission.py"
 )
+ORCHESTRATION = Path(
+    "se/src/infrastructure/storage/services/"
+    "tool_response_payload_promotion_orchestration.py"
+)
 
 
 def _read(path: Path) -> str:
@@ -51,7 +55,8 @@ def _function_node(
     raise AssertionError(f"function {name} not found")
 
 
-def test_b3_is_exact_two_file_zero_production_contract_slice() -> None:
+def test_b3_landed_contract_precursor_records_historical_zero_production_slice() -> None:
+    """Freeze #207 precursor lineage without treating it as current B3 stage status."""
     contract = _semantic_contract()
 
     for phrase in (
@@ -63,15 +68,20 @@ def test_b3_is_exact_two_file_zero_production_contract_slice() -> None:
         "R12-F3-A PR #202 = LANDED / CANONICAL / HEALTHY",
         "IW-2026-10-02-06 = COMPLETE / authorization consumed",
         "parent CTX-F5-3I-B2 = LANDED / CANONICAL / HEALTHY",
-        "production PRE-CLAIM = HOLD pending independent B3 audit",
-        "production CLAIM = NONE",
-        "runtime/container/API wiring = CLOSED",
-        "Memory admission invocation = CLOSED",
         "production/runtime delta = ZERO",
         "CTX-F5-3I-B3 contract candidate is exactly two files",
         "No se/src/** production file changes",
     ):
         assert phrase in contract
+
+    # The Markdown is the landed zero-production contract precursor. Its old
+    # PRE-CLAIM/CLAIM/branch status strings are historical evidence only and
+    # are intentionally not certified here as current production-stage truth.
+    for invariant in (
+        "runtime/container/API wiring = CLOSED",
+        "Memory admission invocation = CLOSED",
+    ):
+        assert invariant in contract
 
 
 def test_landed_b2_exposes_trusted_material_proof_snapshot_and_digest() -> None:
@@ -200,7 +210,6 @@ def test_reservation_to_admission_recovery_fence_stays_open() -> None:
     for phrase in (
         "FUTURE-FENCE-CTX-B3-RESERVATION-TO-ADMISSION-CONTENT-RECOVERY-1",
         "fence status = OPEN / MUST BE DECIDED BEFORE RUNTIME OR ADMISSION ORCHESTRATION",
-        "B3 production PRE-CLAIM = HOLD pending independent decision",
         "Memory admission invocation = CLOSED",
         "public/runtime orchestration = CLOSED",
         "No contract wording may silently treat the reservation as if it stores content",
@@ -242,3 +251,97 @@ def test_landed_r12_f3a_refresh_is_frozen_non_material_to_b3_contract() -> None:
         assert phrase in contract
 
     assert "it is not yet canonical main" not in contract
+
+
+def test_b3_production_orchestration_matches_exact_released_surface() -> None:
+    source = _read(ORCHESTRATION)
+    cls = _class_node(
+        source,
+        "DurableToolResponsePayloadPromotionOrchestration",
+    )
+    reserve = _function_node(cls, "reserve")
+
+    assert isinstance(reserve, ast.AsyncFunctionDef)
+    assert [arg.arg for arg in reserve.args.kwonlyargs] == [
+        "source_ref",
+        "owner_user_id",
+    ]
+
+    awaited_calls = []
+    for node in ast.walk(reserve):
+        if not isinstance(node, ast.Await) or not isinstance(node.value, ast.Call):
+            continue
+        function = node.value.func
+        if isinstance(function, ast.Attribute):
+            awaited_calls.append(function.attr)
+        elif isinstance(function, ast.Name):
+            awaited_calls.append(function.id)
+
+    assert awaited_calls.count("read_trusted_promotion_material") == 1
+    assert awaited_calls.count("reserve") == 1
+    assert len(awaited_calls) == 2
+
+    intent_calls = [
+        node
+        for node in ast.walk(reserve)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "MemoryPromotionIntent"
+    ]
+    assert len(intent_calls) == 1
+    intent_keywords = {
+        keyword.arg: keyword.value
+        for keyword in intent_calls[0].keywords
+        if keyword.arg is not None
+    }
+    assert set(intent_keywords) == {
+        "owner_user_id",
+        "source_ref_snapshot",
+        "source_proof",
+        "content_digest",
+        "metadata",
+        "memory_schema_version",
+    }
+    assert ast.unparse(intent_keywords["owner_user_id"]) == (
+        "material.source_proof.source_ref_snapshot.owner_user_id"
+    )
+    assert ast.unparse(intent_keywords["source_ref_snapshot"]) == (
+        "material.source_proof.source_ref_snapshot"
+    )
+    assert ast.unparse(intent_keywords["source_proof"]) == "material.source_proof"
+    assert ast.unparse(intent_keywords["content_digest"]) == "material.content_digest"
+    assert isinstance(intent_keywords["metadata"], ast.Dict)
+    assert intent_keywords["metadata"].keys == []
+    assert ast.unparse(intent_keywords["memory_schema_version"]) == (
+        "MEMORY_SCHEMA_VERSION"
+    )
+
+    assert isinstance(reserve.body[-2], ast.Assign)
+    assert isinstance(reserve.body[-2].value, ast.Await)
+    assert isinstance(reserve.body[-1], ast.Return)
+
+
+def test_b3_production_orchestration_keeps_admission_and_persistence_fences_closed() -> None:
+    source = _read(ORCHESTRATION)
+
+    for forbidden in (
+        "memory_promotion_admission",
+        "DurableMemoryPromotionAdmission",
+        "DurablePromotionReservationRepository",
+        "PromotionReservationRow",
+        "AsyncSession",
+        "sqlalchemy",
+        "ContextBuilder",
+        "ApplicationContainer",
+    ):
+        assert forbidden not in source
+
+    for required in (
+        "DurableToolResponsePayloadSourceAuthority",
+        "TrustedToolResponsePromotionMaterial",
+        "DurablePromotionReservationIssuer",
+        "MemoryPromotionIntent",
+        "MEMORY_SCHEMA_VERSION",
+        "TrustedToolResponsePromotionReservation",
+    ):
+        assert required in source
