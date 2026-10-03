@@ -129,8 +129,8 @@ The deterministic F3-B handoff identity is derived only from existing canonical
 authority: execution/checkpoint identity, `plan.plan_fingerprint`,
 `plan.recovery_fingerprint`, exact F2 activation owner/generation/expiry,
 `plan.iteration`, the canonical digest of `plan.transcript_snapshot`, and the
-ordered canonical COMMITTED recovered-result identities/content. It is never a
-caller-generated marker and requires no new schema.
+ordered canonical COMMITTED recovered-result identities/content. The identity is
+never a caller-generated marker and requires no new schema.
 
 Passing arbitrary `initial_tool_results` to generic `AgentRuntime.execute()`
 is not sufficient by itself. Current runtime initializes
@@ -339,9 +339,8 @@ Once `ProviderInferenceAdapter.complete()` returns to recovery-owned
 `AgentRuntime`, **a prior fence never authorizes a later boundary across an
 await**. Every externally visible recovery-owner publication/dispatch requires
 a fresh exact R12 fence immediately before that boundary. Every durable
-active-owner mutation requires the exact fence in the SAME UoW/transaction
-where possible, or a fresh mutation-boundary proof with no intervening await
-before the write.
+active-owner mutation requires the exact fence in the SAME UoW. A detached
+outer runtime check or an earlier fence is not durable mutation authority.
 
 Independent fence boundaries apply at least to:
 
@@ -417,6 +416,61 @@ This does not make TaskBudget a lease owner and does not transfer UBQ authority.
 It creates no quota refund/release lifecycle, no second quota reservation, and
 no new timeout/deadline semantics.
 
+### 7.0.1 Existing TaskBudget reservation replay is not recovery authority
+
+The exact R12 fence plus the frozen TaskBudget incarnation MUST be proven
+**before either returning an existing idempotent reservation or creating /
+mutating a new reservation**.
+
+Inside every recovery TaskBudget UoW:
+
+```text
+lock/load exact AgentExecution
+-> prove RUNNING
+-> prove exact recovery owner
+-> prove exact lease_generation
+-> prove exact F2 lease_expires_at
+-> prove wall clock is still before that exact expiry
+-> prove exact frozen TaskBudget incarnation_generation
+-> only then inspect/accept reservation replay as recovery success
+
+existing exact reservation + exact live recovery authority
+-> idempotent reuse may return
+
+existing exact reservation + stale/lost recovery authority
+-> authority loss
+-> cannot return idempotent reserve_inference success
+-> zero provider send
+-> zero new TaskBudget mutation
+
+no existing reservation + exact live recovery authority
+-> canonical reservation/mutation may proceed
+```
+
+Idempotency proves only that TaskBudget truth was previously committed. It is
+never a replacement for current R12 execution authority.
+
+For post-provider `account_usage`, an existing exact USAGE reservation remains
+canonical durable accounting truth, but a stale recovery owner receives
+authority loss rather than progression permission. Existing truth is preserved;
+no duplicate usage mutation is made and no stale Agent progression follows.
+
+For task-scoped terminal transitions, an existing terminal/release reservation
+also remains durable truth only. Reservation replay must not re-mint recovery
+ownership or authorize new stale-owner publication/progression.
+
+Required replay evidence:
+
+- existing `reserve_inference` reservation + stale owner => fail closed /
+  zero provider send;
+- existing `reserve_inference` reservation + exact live owner + exact frozen
+  incarnation => idempotent reuse;
+- existing `account_usage` reservation + stale owner => preserve existing
+  durable truth, return recovery authority-loss, zero stale Agent progression;
+- existing terminal reservation + stale owner => preserve terminal truth but
+  mint no new recovery progression authority;
+- no replay case creates a duplicate TaskBudget reservation or mutation.
+
 Required red-first evidence:
 
 - stale recovery owner before `reserve_inference` mutation => zero TaskBudget
@@ -441,8 +495,7 @@ terminalize the execution.
 For non-task recovery, `DurableAgentStore.compare_and_set_execution()` and any
 recovery checkpoint/iteration/terminal mutation similarly require an exact
 recovery-fenced persistence primitive or same-UoW proof in
-`se/src/runtimes/agent/persistence.py`. An outer runtime check is not durable
-commit authority.
+`se/src/runtimes/agent/persistence.py`. An outer runtime check is not durable commit authority.
 
 Additional red-first evidence:
 
