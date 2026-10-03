@@ -4,8 +4,8 @@
 **Primary workspace:** Issue #107  
 **Policy:** Issue #85 v2.5  
 **Stable development baseline:** `main@ea6c5f00a9432a89275d9cc4b9b52b8f992d0f12`  
-**Current canonical main at replacement audit:** `ab20305b02ac0d2ac6af93e7c53de9464962f8a3`  
-**Inbound main movement:** landed CTX-F5-3I-B3 PR #207, contract/evidence-only, independently classified NON_MATERIAL to F3-B  
+**Current canonical main at replacement audit:** `f577fb370f1a73a8fdcc69e4221ac41c925a0338`  
+**Inbound main movement:** landed CTX-F5-3I-B3 production PR #210; reservation-orchestration-only and independently classified NON_MATERIAL inbound to F3-B  
 **Class:** CONTRACT / EVIDENCE / ARCHITECTURE-TEST ONLY  
 **Production delta:** ZERO
 
@@ -105,17 +105,32 @@ The exact handoff is frozen as follows:
 9. continue the active execution budget; never reset/remint/release it by
    implication.
 
-Crash semantics:
+Durable replay semantics are a strict tri-state inside the SAME locked UoW:
 
 ```text
-crash before durable handoff commit
-=> reconstruct from canonical F3-A COMMITTED results
-=> append recovered tool messages once
+A. durable state == exact frozen pre-handoff checkpoint/snapshot
+   -> require exact live R12 owner/generation/exact-F2-expiry fence
+   -> re-check wall-clock expiry at the mutation boundary
+   -> write exact handoff transcript once
+   -> commit once
 
-crash after durable handoff commit
-=> durable handoff is authoritative
-=> do not append the same recovered tool messages again
+B. durable state == exact deterministic F3-B handoff
+   -> IDEMPOTENT REUSE
+   -> zero transcript append
+   -> zero checkpoint mutation
+   -> zero new inference identity
+
+C. any other revision/checkpoint/transcript/handoff identity
+   -> FAIL CLOSED / CONFLICT / DEFER
+   -> zero transcript mutation
 ```
+
+The deterministic F3-B handoff identity is derived only from existing canonical
+authority: execution/checkpoint identity, `plan.plan_fingerprint`,
+`plan.recovery_fingerprint`, exact F2 activation owner/generation/expiry,
+`plan.iteration`, the canonical digest of `plan.transcript_snapshot`, and the
+ordered canonical COMMITTED recovered-result identities/content. It is never a
+caller-generated marker and requires no new schema.
 
 Passing arbitrary `initial_tool_results` to generic `AgentRuntime.execute()`
 is not sufficient by itself. Current runtime initializes
@@ -143,10 +158,12 @@ UoW:
    - lease_generation == F2 activation generation;
    - lease_expires_at == exact F2 activation expiry;
    - current wall clock is still before that exact expiry;
-3. proves the expected recovery checkpoint/handoff identity has not already
-   advanced incompatibly;
-4. writes the exact recovered transcript handoff;
-5. commits once.
+3. applies the exact tri-state handoff replay machine above: pre-handoff ->
+   write once; exact already-committed handoff -> idempotent reuse; anything
+   else -> conflict/defer;
+4. re-checks authoritative wall-clock expiry at the actual mutation boundary;
+5. writes the exact recovered transcript handoff only for state A;
+6. commits once.
 
 Existing R12-F3-A persistence already contains a transaction-scoped
 `_lock_recovery_projection_fence_in_uow(...)` /
@@ -275,7 +292,9 @@ Required red-first production evidence:
 - retry-attempt guard loss -> prior real attempt truth preserved, no next send;
 - fallback-attempt guard loss -> prior provider truth preserved, no fallback
   send;
-- guard-loss classification survives logical-deadline wrapping unchanged.
+- live-budget guard-loss classification survives provider wrapping unchanged;
+- if the canonical `ProviderCallBudget` is expired at the authoritative
+  post-guard boundary, `ProviderDeadlineExceededError` remains dominant.
 
 ## 6. Ambiguous provider outcome — final F3-B decision
 
@@ -317,20 +336,23 @@ provider success
 ```
 
 Once `ProviderInferenceAdapter.complete()` returns to recovery-owned
-`AgentRuntime`, one fresh exact R12 fence is mandatory **before the first
-recovery-owner semantic/accounting mutation**, including at least:
+`AgentRuntime`, **a prior fence never authorizes a later boundary across an
+await**. Every externally visible recovery-owner publication/dispatch requires
+a fresh exact R12 fence immediately before that boundary. Every durable
+active-owner mutation requires the exact fence in the SAME UoW/transaction
+where possible, or a fresh mutation-boundary proof with no intervening await
+before the write.
 
-- `TaskBudgetService.account_usage`;
+Independent fence boundaries apply at least to:
+
+- `TaskBudgetService.account_usage` compatibility/read-model mutation;
 - `INFERENCE_COMPLETED` publication;
-- transcript append;
-- `context.usage` progression;
-- durable inference request+response checkpoint;
-- iteration progression / terminalization;
-- new tool-call construction;
-- TOOL_REQUESTED / TOOL_STARTED publication;
-- tool-call persistence;
-- TaskBudget tool reservation/admission;
-- external tool dispatch.
+- transcript / `context.usage` durable checkpoint mutation;
+- iteration persistence / terminalization;
+- `ITERATION_COMPLETED` and `EXECUTION_COMPLETED` publication;
+- any later recovery-owner public/durable boundary that remains in this slice.
+
+A successful fence at one item above does not authorize the next item.
 
 `TaskBudgetService.account_usage()` is compatibility/read-model state after
 UBQ-4 cutover. It receives **no stale-owner cleanup exemption**.
@@ -344,6 +366,44 @@ skip stale-owner TaskBudget and Agent progression
 fail closed
 do not release/remint/reset quota, TaskBudget or lease authority
 ```
+
+### 7.0 Fresh next-inference tool calls — Option A / DEFER
+
+The first bounded F3-B slice does **not** gain authority for a fresh logical
+tool invocation produced by the recovered next inference.
+
+Current ordinary path is:
+
+```text
+AgentRuntime
+  -> response.message.tool_calls
+  -> new ToolExecutionRequest objects
+  -> TOOL_REQUESTED / TOOL_STARTED
+  -> tool-call persistence / TaskBudget admission
+  -> AgentToolExecutionCoordinator.execute_many(...)
+  -> ordinary physical tool dispatch
+```
+
+That ordinary `execute_many()` stack has no R12 recovery physical-send guard;
+F3-A only protects continuation of the already-frozen recovered TOOL batch.
+An outer AgentRuntime fence is therefore insufficient.
+
+For bounded F3-B:
+
+```text
+fresh recovered next-inference response contains tool_calls
+=> preserve provider / AE-R10 / UBQ-4 / CAS response truth only under the
+   required exact post-provider mutation fences
+=> FAIL CLOSED / DEFER before any NEW logical tool-call construction,
+   TOOL_REQUESTED / TOOL_STARTED publication, tool-call persistence,
+   TaskBudget tool reservation/admission, execute_many(), or external send
+=> zero new logical tool dispatch
+```
+
+This is **P1-R12-F3B-NEXT-TOOL-DISPATCH-FENCE-5 Option A**. Ordinary non-recovery
+Agent tool execution is unchanged. Recovery support for fresh logical tool
+calls is deferred to a later separately audited stage and would require a
+fresh production-scope + UBQ-5C bilateral re-freeze.
 
 ## 7.1 CAS-F5-D pre-send side-effect boundary — Option A
 
@@ -456,11 +516,15 @@ lifecycle, GC or provider-cleanup authority.
 
 ### CTX / Issue #15
 
-CTX-F5-3I-B3 PR #207 is now LANDED at current main
-`ab20305b02ac0d2ac6af93e7c53de9464962f8a3`.
+CTX-F5-3I-B3 production PR #210 is LANDED at current main
+`f577fb370f1a73a8fdcc69e4221ac41c925a0338` with post-main Architecture
+GREEN/GREEN.
 
-Its delta is contract/evidence-only and independently classified NON_MATERIAL
-inbound to this F3-B contract. No R12 authority transferred.
+Its bounded reservation-orchestration production delta is independently
+classified NON_MATERIAL inbound to this F3-B contract: it does not change
+successful COMMITTED tool-result identity/content, R12 lease/recovery authority,
+provider retry/deadline/dispatch, AgentRuntime provider progression, or ordinary
+tool execution. No R12 authority transferred.
 
 ### AE-R10
 
@@ -502,6 +566,7 @@ stale-lease scanner/scheduler
 schema/Alembic migrations
 new provider-outcome ledger
 new quota/refund lifecycle
+ordinary fresh-tool dispatch seams for recovered next-inference tool_calls
 ```
 
 The addition of `persistence.py` relative to the auditor's prior likely
@@ -515,21 +580,26 @@ scope and requires a new audit before mutation.
 
 ```text
 P1-R12-F3B-ORCHESTRATION-HANDOFF-1
-  owner contract repair = APPLIED
-  atomic persistence scope addition = NEEDS INDEPENDENT APPROVAL
+  owner tri-state idempotent handoff repair = APPLIED
+  persistence.py necessity = INDEPENDENTLY ACCEPTED IN PRINCIPLE
   independent closure = PENDING
 
 P1-R12-F3B-PER-ATTEMPT-LEASE-FENCE-2
-  owner contract repair = APPLIED
+  semantic core = PASS
+  residual deadline-evidence contradiction repair = APPLIED
   independent closure = PENDING
 
 P1-R12-F3B-INFERENCE-AMBIGUOUS-OUTCOME-3
   auditor decision = BOUNDED DEFER / NO-REPLAY ACCEPTED
-  owner contract repair = APPLIED
-  independent closure = PENDING
+  contract level = CLOSED BY INDEPENDENT AUDIT
 
 P1-R12-F3B-POSTPROVIDER-PROGRESSION-FENCE-4
-  owner contract repair = APPLIED
+  owner per-boundary / per-UoW fence repair = APPLIED
+  independent closure = PENDING
+
+P1-R12-F3B-NEXT-TOOL-DISPATCH-FENCE-5
+  owner decision = OPTION A / DEFER BEFORE NEW LOGICAL TOOL ADMISSION
+  eight-file maximum expansion = NO
   independent closure = PENDING
 ```
 
@@ -542,7 +612,8 @@ F3-B production CLAIM remains CLOSED until all are true:
 1. this exact two-file replacement contract/evidence candidate is GREEN/GREEN;
 2. independent auditor accepts the durable handoff ordering and the
    `persistence.py` atomic-fence scope;
-3. all four P1 findings receive independent closure;
+3. P1-1, P1-2, P1-4 and P1-5 receive independent closure; P1-3 remains
+   independently CLOSED at contract level;
 4. fresh bilateral #107 <-> #74 closure confirming Option A asset-bearing
    DEFER plus NON-STREAM-only scope for the exact `chat_handler.py` boundary;
 5. fresh bilateral #107 <-> #147 classification against the then-current
