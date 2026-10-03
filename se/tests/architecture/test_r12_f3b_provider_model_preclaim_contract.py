@@ -138,7 +138,7 @@ def test_r12_f3b_retry_layer_physical_attempt_seam_has_no_r12_guard():
     assert "recovery_dispatch_guard" not in source
 
 
-def test_r12_f3b_deadline_wrapper_current_order_can_rewrite_terminal_error():
+def test_r12_f3b_preserves_ae_r10_deadline_dominance():
     source = inspect.getsource(await_with_provider_deadline)
 
     terminal_capture = source.index("terminal_error = error")
@@ -154,8 +154,10 @@ def test_r12_f3b_deadline_wrapper_current_order_can_rewrite_terminal_error():
     assert terminal_capture < deadline_recheck < terminal_reraise
 
     text = " ".join(_read(DOC).split())
-    assert "must not overwrite a completed authority-loss exception" in text
-    assert "ProviderDeadlineExceededError" in text
+    assert "AE-R10 logical deadline authority remains stronger" in text
+    assert "ProviderDeadlineExceededError remains dominant" in text
+    assert "MUST NOT mask an already-expired AE-R10 logical deadline" in text
+    assert "same canonical AE-R10 `ProviderCallBudget`" in text
 
 
 def test_r12_f3b_contract_freezes_final_ambiguous_outcome_decision():
