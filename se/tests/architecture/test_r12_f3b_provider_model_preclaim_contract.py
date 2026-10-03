@@ -384,3 +384,18 @@ def test_r12_f3b_contract_fences_task_and_non_task_terminal_commits():
     assert "zero TaskBudget capacity release and zero AgentExecution terminalization" in text
     assert "DurableAgentStore.compare_and_set_execution()" in text
     assert "An outer runtime check is not durable commit authority." in text
+
+
+def test_r12_f3b_contract_fences_taskbudget_idempotent_replay_before_success():
+    text = _read(DOC)
+
+    assert "Existing TaskBudget reservation replay is not recovery authority" in text
+    assert "before either returning an existing idempotent reservation" in text
+    assert "existing exact reservation + stale/lost recovery authority" in text
+    assert "cannot return idempotent reserve_inference success" in text
+    assert "zero provider send" in text
+    assert "existing exact reservation + exact live recovery authority" in text
+    assert "idempotent reuse may return" in text
+    assert "existing `account_usage` reservation + stale owner" in text
+    assert "preserve existing durable truth" in text
+    assert "no replay case creates a duplicate TaskBudget reservation or mutation" in text
