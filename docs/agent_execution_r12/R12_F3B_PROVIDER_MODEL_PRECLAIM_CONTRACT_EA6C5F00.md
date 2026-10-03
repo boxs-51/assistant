@@ -303,6 +303,92 @@ fail closed
 do not release/remint/reset quota, TaskBudget or lease authority
 ```
 
+## 7.1 CAS-F5-D pre-send side-effect boundary — Option A
+
+The CAS bilateral owner/auditor decision for the first F3-B slice is **Option A**.
+
+Current canonical non-stream ordering includes an asset projection step before
+the provider executor:
+
+```text
+capability eligibility
+-> _asset_attempt_requires_projection(body)
+-> _project_asset_attempt(...)
+   -> CanonicalAssetHydrationService.hydrate(...)
+   -> durable provider-binding PROCESSING claim
+   -> object-store read
+   -> provider.files.upload_file_outcome(...)
+   -> provider-binding finalization
+-> ProviderExecutor.execute(...)
+-> recovery pre-attempt guard
+-> provider.chat.chat(...)
+```
+
+Therefore the later `ProviderExecutor.execution_func()` guard cannot authorize
+asset-bearing recovered inference: CAS provider-file upload may already have
+happened.
+
+For bounded F3-B the normative rule is:
+
+```text
+recovery guard present
++ request requires canonical-asset projection
+=> FAIL CLOSED / DEFER BEFORE _project_asset_attempt()
+=> ZERO CanonicalAssetHydrationService.hydrate()
+=> ZERO provider.files.upload_file_outcome()
+=> ZERO new/updated provider binding from this recovered inference
+```
+
+Ordinary non-recovery F5-D projection/hydration remains unchanged.
+
+F3-B receives no authority to thread R12 lease fencing into CAS hydration or
+provider-file upload. Any future recovered asset-bearing inference is a
+separate MATERIAL CAS expansion requiring a new bilateral re-freeze.
+
+Required production evidence:
+
+- recovery authority/path plus canonical assets => DEFER before projection;
+- zero `_project_asset_attempt()` call;
+- zero `upload_file_outcome()` side effect;
+- zero new/updated provider binding from this recovered inference;
+- ordinary non-recovery canonical-asset projection remains unchanged.
+
+## 7.2 Streaming scope — explicitly CLOSED
+
+F3-B recovery provider progression is **NON-STREAM ONLY**.
+
+```text
+ChatExecutionHandler.execute_with_fallback = bounded F3-B overlap
+ChatExecutionHandler.stream_with_fallback = OUT OF SCOPE / UNCHANGED
+ProviderExecutor.execute_stream = OUT OF SCOPE / UNCHANGED
+GeneratedAssetStreamAssembler.observe = UNCHANGED
+GeneratedAssetStreamAssembler.finalize = UNCHANGED
+GeneratedAssetStreamAssembler.media_seen = UNCHANGED
+stream generated-media withholding/fallback-terminal semantics = UNCHANGED
+```
+
+`ProviderInferenceAdapter.complete()` is the only F3-B provider entrypoint.
+F3-B does not add a streaming inference path or a recovery guard to streaming.
+
+Any future recovery support for streaming is a separate MATERIAL CAS overlap
+and requires a new bilateral #107 <-> #74 PRE-CLAIM freeze.
+
+## 7.3 CAS bilateral repair status
+
+```text
+P1-CAS-R12-F3B-F5D-PRESEND-SIDE-EFFECT-1
+  CAS decision = OPTION A / NO ASSET-BEARING RECOVERED INFERENCE
+  owner contract repair = APPLIED
+  independent CAS closure = PENDING
+
+P1-CAS-R12-F3B-STREAM-SCOPE-2
+  CAS decision = NON-STREAM ONLY
+  owner contract repair = APPLIED
+  independent CAS closure = PENDING
+```
+
+No CAS authority transfers to R12.
+
 ## 8. Cross-track authority
 
 ### UBQ-5 / Issue #147
@@ -415,8 +501,8 @@ F3-B production CLAIM remains CLOSED until all are true:
 2. independent auditor accepts the durable handoff ordering and the
    `persistence.py` atomic-fence scope;
 3. all four P1 findings receive independent closure;
-4. fresh bilateral #107 <-> #74 approval for the exact `chat_handler.py`
-   change boundary;
+4. fresh bilateral #107 <-> #74 closure confirming Option A asset-bearing
+   DEFER plus NON-STREAM-only scope for the exact `chat_handler.py` boundary;
 5. fresh bilateral #107 <-> #147 classification against the then-current
    UBQ-5B/5C state;
 6. exact eight-file maximum production scope is accepted;
