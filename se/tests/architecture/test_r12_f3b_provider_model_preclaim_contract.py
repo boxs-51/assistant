@@ -11,6 +11,9 @@ from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.recovery_execution import AgentRecoveryExecutionService
 from se.src.runtimes.agent.recovery_planning import AgentRecoveryPlanningService
 from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.agent.tool_execution.coordinator import (
+    AgentToolExecutionCoordinator,
+)
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -30,7 +33,7 @@ def test_r12_f3b_contract_freezes_baseline_current_main_and_closed_claim():
     text = _read(DOC)
 
     assert "main@ea6c5f00a9432a89275d9cc4b9b52b8f992d0f12" in text
-    assert "ab20305b02ac0d2ac6af93e7c53de9464962f8a3" in text
+    assert "f577fb370f1a73a8fdcc69e4221ac41c925a0338" in text
     assert "R12-F3-A = LANDED / CANONICAL / HEALTHY" in text
     assert "R12-F3-B production CLAIM = CLOSED" in text
     assert "**Production delta:** ZERO" in text
@@ -158,6 +161,8 @@ def test_r12_f3b_preserves_ae_r10_deadline_dominance():
     assert "ProviderDeadlineExceededError remains dominant" in text
     assert "MUST NOT mask an already-expired AE-R10 logical deadline" in text
     assert "same canonical AE-R10 `ProviderCallBudget`" in text
+    assert "live-budget guard-loss classification survives provider wrapping unchanged" in text
+    assert "post-guard boundary" in text
 
 
 def test_r12_f3b_contract_freezes_final_ambiguous_outcome_decision():
@@ -209,6 +214,7 @@ def test_r12_f3b_contract_records_all_preclaim_findings_without_self_closure():
         "P1-R12-F3B-PER-ATTEMPT-LEASE-FENCE-2",
         "P1-R12-F3B-INFERENCE-AMBIGUOUS-OUTCOME-3",
         "P1-R12-F3B-POSTPROVIDER-PROGRESSION-FENCE-4",
+        "P1-R12-F3B-NEXT-TOOL-DISPATCH-FENCE-5",
         "independent closure = PENDING",
         "No owner self-closes an independent gate.",
         "F3-B production CLAIM = CLOSED",
@@ -264,3 +270,56 @@ def test_r12_f3b_contract_keeps_cas_bilateral_closure_independent():
     assert "P1-CAS-R12-F3B-F5D-PRESEND-SIDE-EFFECT-1" in text
     assert "P1-CAS-R12-F3B-STREAM-SCOPE-2" in text
     assert text.count("independent CAS closure = PENDING") >= 2
+
+
+def test_r12_f3b_contract_freezes_tri_state_durable_handoff_replay():
+    text = _read(DOC)
+
+    assert "strict tri-state inside the SAME locked UoW" in text
+    assert "durable state == exact frozen pre-handoff checkpoint/snapshot" in text
+    assert "durable state == exact deterministic F3-B handoff" in text
+    assert "IDEMPOTENT REUSE" in text
+    assert "any other revision/checkpoint/transcript/handoff identity" in text
+    assert "FAIL CLOSED / CONFLICT / DEFER" in text
+    assert "never a caller-generated marker" in text
+    assert "requires no new schema" in text
+
+
+def test_r12_f3b_contract_requires_fresh_fence_per_public_or_durable_boundary():
+    text = _read(DOC)
+
+    assert "a prior fence never authorizes a later boundary across an" in text
+    assert "Every externally visible recovery-owner publication/dispatch requires" in text
+    assert "Every durable active-owner mutation requires the exact fence in the SAME UoW" in text
+    assert "A successful fence at one item above does not authorize the next item." in text
+    assert "ITERATION_COMPLETED" in text
+    assert "EXECUTION_COMPLETED" in text
+
+
+def test_r12_f3b_ordinary_fresh_tool_stack_has_no_recovery_send_guard():
+    runtime_source = inspect.getsource(AgentRuntime._execute_loop)
+    coordinator_source = inspect.getsource(AgentToolExecutionCoordinator.execute_many)
+
+    assert "response.message.tool_calls" in runtime_source
+    assert "self._tool_execution.execute_many(" in runtime_source
+    assert "recovery_dispatch_guard" not in coordinator_source
+    assert "continuation_dispatch_guard" not in coordinator_source
+
+
+def test_r12_f3b_contract_defers_fresh_recovery_tool_calls_before_admission():
+    text = _read(DOC)
+
+    assert "Fresh next-inference tool calls — Option A / DEFER" in text
+    assert "fresh recovered next-inference response contains tool_calls" in text
+    assert "FAIL CLOSED / DEFER before any NEW logical tool-call construction" in text
+    assert "zero new logical tool dispatch" in text
+    assert "eight-file maximum expansion = NO" in text
+    assert "ordinary fresh-tool dispatch seams for recovered next-inference tool_calls" in text
+
+
+def test_r12_f3b_contract_records_current_ctx210_as_non_material():
+    text = _read(DOC)
+
+    assert "CTX-F5-3I-B3 production PR #210 is LANDED at current main" in text
+    assert "f577fb370f1a73a8fdcc69e4221ac41c925a0338" in text
+    assert "classified NON_MATERIAL inbound to this F3-B contract" in text
