@@ -200,27 +200,69 @@ exception classification with these properties:
 - leave `provider_attempted == false` when guard loss occurs before physical
   send.
 
-For budgeted calls, `await_with_provider_deadline(...)` must not overwrite a
-completed authority-loss exception with `ProviderDeadlineExceededError` if
-the logical deadline crosses while/after the guard completes.
+For budgeted calls, AE-R10 logical deadline authority remains stronger than
+R12 authority-loss classification at the authoritative pre-send boundary.
+
+The exact precedence is:
+
+```text
+before physical send:
+  if ProviderCallBudget is already expired
+  => ProviderDeadlineExceededError
+  => zero provider send
+
+while budget is still live:
+  run recovery_pre_attempt_guard()
+
+if guard rejects:
+  re-check the same ProviderCallBudget immediately
+  if expired
+    => ProviderDeadlineExceededError remains dominant
+    => zero provider send
+  else
+    => dedicated R12 authority-loss
+    => zero provider send
+
+if guard succeeds:
+  re-check the same ProviderCallBudget immediately before provider_attempted/send
+  if expired
+    => ProviderDeadlineExceededError
+    => zero provider send
+  else
+    => mark provider_attempted
+    => provider.chat.chat(...)
+```
+
+The guard does not create a second deadline or timer. It uses the same canonical
+AE-R10 `ProviderCallBudget`.
 
 The accepted implementation shape is:
 
 ```text
-run_attempt(...)
+execution_func(...)
+  -> require live ProviderCallBudget
   -> await recovery_pre_attempt_guard()
-  -> mark provider_attempted
+  -> authoritative ProviderCallBudget re-check
+  -> only then mark provider_attempted
   -> provider.chat.chat(...)
 
 await_with_provider_deadline(...)
-  -> if child completed with dedicated authority-loss error:
-       re-raise authority-loss before post-completion deadline rewriting
+  -> ordinary provider success/error still obeys existing post-completion
+     logical-deadline dominance
 
 ProviderExecutor.execute(...)
-  -> dedicated except authority-loss:
+  -> live-budget dedicated authority-loss:
        raise unchanged
        no breaker.on_failure()
+       no retry token
+       no fallback
+  -> expired-budget boundary:
+       ProviderDeadlineExceededError remains canonical AE-R10 truth
 ```
+
+A dedicated R12 authority-loss exception therefore survives only when the
+logical ProviderCallBudget remains live at the authoritative post-guard,
+pre-send check. It MUST NOT mask an already-expired AE-R10 logical deadline.
 
 UBQ-4 admission happens before physical provider dispatch. Pre-send R12
 authority loss MUST NOT invent a quota refund/release lifecycle. Existing UBQ
