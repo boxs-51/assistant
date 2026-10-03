@@ -264,12 +264,13 @@ def test_r12_f3b_contract_freezes_non_stream_only_scope():
     assert "Any future recovery support for streaming is a separate MATERIAL CAS overlap" in text
 
 
-def test_r12_f3b_contract_keeps_cas_bilateral_closure_independent():
+def test_r12_f3b_contract_keeps_cas_bilateral_release_preserved():
     text = _read(DOC)
 
     assert "P1-CAS-R12-F3B-F5D-PRESEND-SIDE-EFFECT-1" in text
     assert "P1-CAS-R12-F3B-STREAM-SCOPE-2" in text
-    assert text.count("independent CAS closure = PENDING") >= 2
+    assert text.count("independent CAS closure = CLOSED / PASS / PRESERVED") >= 2
+    assert "refresh is required only if CAS semantics/path scope changes" in text
 
 
 def test_r12_f3b_contract_freezes_tri_state_durable_handoff_replay():
