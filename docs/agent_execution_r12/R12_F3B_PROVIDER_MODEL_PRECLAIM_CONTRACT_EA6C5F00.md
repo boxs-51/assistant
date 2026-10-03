@@ -338,8 +338,10 @@ provider success
 Once `ProviderInferenceAdapter.complete()` returns to recovery-owned
 `AgentRuntime`, **a prior fence never authorizes a later boundary across an
 await**. Every externally visible recovery-owner publication/dispatch requires
-a fresh exact R12 fence immediately before that boundary. Every durable
-active-owner mutation requires the exact fence in the SAME UoW. A detached
+a fresh exact R12 fence immediately before that boundary.
+
+Every durable active-owner mutation requires the exact fence in the SAME UoW.
+A detached
 outer runtime check or an earlier fence is not durable mutation authority.
 
 Independent fence boundaries apply at least to:
@@ -465,8 +467,8 @@ Required replay evidence:
   zero provider send;
 - existing `reserve_inference` reservation + exact live owner + exact frozen
   incarnation => idempotent reuse;
-- existing `account_usage` reservation + stale owner => preserve existing
-  durable truth, return recovery authority-loss, zero stale Agent progression;
+- existing `account_usage` reservation + stale owner => preserve existing durable truth,
+  return recovery authority-loss, zero stale Agent progression;
 - existing terminal reservation + stale owner => preserve terminal truth but
   mint no new recovery progression authority;
 - no replay case creates a duplicate TaskBudget reservation or mutation.
