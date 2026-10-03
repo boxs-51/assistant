@@ -480,13 +480,11 @@ and requires a new bilateral #107 <-> #74 PRE-CLAIM freeze.
 ```text
 P1-CAS-R12-F3B-F5D-PRESEND-SIDE-EFFECT-1
   CAS decision = OPTION A / NO ASSET-BEARING RECOVERED INFERENCE
-  owner contract repair = APPLIED
-  independent CAS closure = PENDING
+  independent CAS closure = CLOSED / PASS / PRESERVED
 
 P1-CAS-R12-F3B-STREAM-SCOPE-2
   CAS decision = NON-STREAM ONLY
-  owner contract repair = APPLIED
-  independent CAS closure = PENDING
+  independent CAS closure = CLOSED / PASS / PRESERVED
 ```
 
 No CAS authority transfers to R12.
@@ -614,8 +612,8 @@ F3-B production CLAIM remains CLOSED until all are true:
    `persistence.py` atomic-fence scope;
 3. P1-1, P1-2, P1-4 and P1-5 receive independent closure; P1-3 remains
    independently CLOSED at contract level;
-4. fresh bilateral #107 <-> #74 closure confirming Option A asset-bearing
-   DEFER plus NON-STREAM-only scope for the exact `chat_handler.py` boundary;
+4. CAS #74 bilateral Option-A asset DEFER + NON-STREAM-only release remains
+   PASS / PRESERVED; refresh is required only if CAS semantics/path scope changes;
 5. fresh bilateral #107 <-> #147 classification against the then-current
    UBQ-5B/5C state;
 6. exact eight-file maximum production scope is accepted;
