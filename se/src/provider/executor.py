@@ -6,13 +6,19 @@ from typing import Any, AsyncGenerator, Awaitable, Callable
 import httpx
 import structlog
 
-from ..circuit_breaker import CircuitBreakerManager, CircuitBreakerOpenError
+from ..circuit_breaker import (
+    CircuitBreakerManager,
+    CircuitBreakerOpenError,
+    CircuitBreakerState,
+)
 from ..domain.schemas import GatewayResponse, GatewayStreamChunk
 from ..infrastructure.config.schemas import ProviderSettings
 from .core.provider import BaseProvider
 from .exceptions import (
     ProviderDeadlineExceededError,
     ProviderError,
+    ProviderRecoveryAuthorityLostError,
+    ProviderRecoveryGuardError,
     wrap_provider_exception,
 )
 from .policies.retry import RetryPolicy
@@ -159,10 +165,34 @@ class ProviderExecutor:
         # supplied a non-scalar timeout object or invalid value.
         return remaining
 
+    @staticmethod
+    def _release_half_open_probe_without_provider_outcome(
+        breaker: Any,
+        *,
+        probe_acquired: bool,
+    ) -> None:
+        """Release this call's HALF_OPEN trial without recording an outcome.
+
+        Recovery/deadline guards can revoke authority after before_request()
+        acquired the HALF_OPEN probe but before any physical provider send.
+        In that case neither provider success nor provider failure occurred, so
+        the breaker state/counters must remain unchanged while this call's
+        exclusive trial lock is relinquished for a later authorized request.
+        """
+
+        if not probe_acquired:
+            return
+        if getattr(breaker, "current_state", None) != CircuitBreakerState.HALF_OPEN:
+            return
+        probe_lock = getattr(breaker, "_half_open_lock", None)
+        if probe_lock is not None and probe_lock.locked():
+            probe_lock.release()
+
     async def execute(
         self,
         *,
         call_budget: ProviderCallBudget | None = None,
+        recovery_pre_attempt_guard: Callable[[], Awaitable[None]] | None = None,
         **kwargs,
     ) -> GatewayResponse:
         """Execute chat with circuit-breaker and optional logical-call budget."""
@@ -170,20 +200,68 @@ class ProviderExecutor:
         provider = kwargs.get("provider")
         breaker = await self.breaker_manager.get_breaker(provider.name)
         provider_attempted = False
+        half_open_probe_acquired = False
+        recovery_guard_aborted_before_send = False
+        recovery_guard_control_flow_error: BaseException | None = None
+
+        async def run_recovery_pre_attempt_guard() -> None:
+            nonlocal recovery_guard_aborted_before_send
+            nonlocal recovery_guard_control_flow_error
+            if recovery_pre_attempt_guard is None:
+                return
+            try:
+                await recovery_pre_attempt_guard()
+            except ProviderRecoveryAuthorityLostError:
+                recovery_guard_aborted_before_send = True
+                raise
+            except asyncio.CancelledError as error:
+                recovery_guard_aborted_before_send = True
+                recovery_guard_control_flow_error = error
+                raise
+            except Exception as error:
+                # Guard/storage failures are control-plane truth even when
+                # their concrete class resembles a provider failure (for
+                # example httpx.ConnectError or ProviderUnavailableError).
+                # Envelope them before RetryPolicy sees them so no provider
+                # retry token or normalization/fallback authority is minted.
+                recovery_guard_aborted_before_send = True
+                raise ProviderRecoveryGuardError(error) from error
+            except BaseException as error:
+                recovery_guard_aborted_before_send = True
+                recovery_guard_control_flow_error = error
+                raise
 
         async def execution_func():
             nonlocal provider_attempted
             attempt_kwargs = dict(kwargs)
+
             if call_budget is None:
+                await run_recovery_pre_attempt_guard()
                 provider_attempted = True
                 return await provider.chat.chat(**attempt_kwargs)
 
+            # The AE-R10 logical call deadline remains the stronger authority
+            # at both sides of the R12 pre-attempt recovery fence.
+            self._remaining_or_raise(call_budget, provider.name)
+            try:
+                await run_recovery_pre_attempt_guard()
+            except ProviderRecoveryAuthorityLostError:
+                # If the same logical budget expired while the guard was
+                # running, deadline truth dominates recovery authority loss.
+                self._remaining_or_raise(call_budget, provider.name)
+                raise
+            self._remaining_or_raise(call_budget, provider.name)
+
             async def run_attempt(remaining: float):
                 nonlocal provider_attempted
+                current_remaining = self._remaining_or_raise(
+                    call_budget,
+                    provider.name,
+                )
                 bounded_kwargs = dict(attempt_kwargs)
                 bounded_kwargs["timeout"] = self._bounded_attempt_timeout(
                     bounded_kwargs.get("timeout"),
-                    remaining,
+                    min(remaining, current_remaining),
                 )
                 provider_attempted = True
                 return await provider.chat.chat(**bounded_kwargs)
@@ -200,6 +278,13 @@ class ProviderExecutor:
                 self._remaining_or_raise(call_budget, provider.name)
 
             await breaker.before_request()
+            probe_lock = getattr(breaker, "_half_open_lock", None)
+            half_open_probe_acquired = (
+                getattr(breaker, "current_state", None)
+                == CircuitBreakerState.HALF_OPEN
+                and probe_lock is not None
+                and probe_lock.locked()
+            )
 
             if call_budget is None:
                 response = await self.retry_policy.apply(
@@ -216,15 +301,78 @@ class ProviderExecutor:
             await breaker.on_success()
             return response
 
+        except asyncio.CancelledError as error:
+            current_task = asyncio.current_task()
+            caller_cancelled = bool(
+                current_task is not None and current_task.cancelling()
+            )
+            if recovery_guard_control_flow_error is error:
+                # Exact guard-origin cancellation is control-plane truth and
+                # occurs before the next physical provider send.
+                self._release_half_open_probe_without_provider_outcome(
+                    breaker,
+                    probe_acquired=half_open_probe_acquired,
+                )
+            elif caller_cancelled:
+                # Preserve canonical AE-R10 caller-cancellation semantics:
+                # propagate CancelledError without recording provider failure.
+                # If this call held a HALF_OPEN probe, relinquish it neutrally
+                # so caller cancellation cannot strand the exclusive trial.
+                self._release_half_open_probe_without_provider_outcome(
+                    breaker,
+                    probe_acquired=half_open_probe_acquired,
+                )
+            elif half_open_probe_acquired:
+                # A CancelledError raised internally by provider dispatch or
+                # retry backoff is not caller cancellation and is not proven
+                # neutral. Fail the acquired HALF_OPEN trial closed.
+                await breaker.on_failure()
+            raise
+
+        except ProviderRecoveryGuardError as guard_error:
+            # RetryPolicy cannot classify the transport envelope as a provider
+            # failure. Relinquish any locally acquired HALF_OPEN probe, then
+            # restore the exact original guard exception at the executor API
+            # boundary. Explicit chaining carries provenance to the handler
+            # without requiring the original exception to accept attributes.
+            self._release_half_open_probe_without_provider_outcome(
+                breaker,
+                probe_acquired=half_open_probe_acquired,
+            )
+            original_error = guard_error.original_error
+            raise original_error from guard_error
+
+        except ProviderRecoveryAuthorityLostError:
+            # R12 control-plane authority loss is not a provider failure and
+            # must not consume breaker, retry, or fallback authority. If
+            # before_request() acquired a HALF_OPEN trial, relinquish only the
+            # probe lock so a later independently-authorized call can retry it.
+            self._release_half_open_probe_without_provider_outcome(
+                breaker,
+                probe_acquired=half_open_probe_acquired,
+            )
+            raise
+
         except ProviderDeadlineExceededError:
             # An expired caller budget is not a provider failure when no
             # request reached the provider. If an earlier attempt did run,
             # retain the existing one-failure-per-executor-call accounting.
             if provider_attempted:
                 await breaker.on_failure()
+            else:
+                self._release_half_open_probe_without_provider_outcome(
+                    breaker,
+                    probe_acquired=half_open_probe_acquired,
+                )
             raise
 
         except CircuitBreakerOpenError as e:
+            if recovery_guard_aborted_before_send:
+                self._release_half_open_probe_without_provider_outcome(
+                    breaker,
+                    probe_acquired=half_open_probe_acquired,
+                )
+                raise
             logger.warning(
                 "Skipping provider call, circuit breaker is open.",
                 provider=provider.name,
@@ -235,7 +383,23 @@ class ProviderExecutor:
             ) from e
 
         except Exception as e:
-            await breaker.on_failure()
+            # A recovery guard/storage/control-plane exception before a
+            # physical send is not a provider outcome and must not be
+            # normalized into provider failure/fallback authority.
+            if recovery_guard_aborted_before_send:
+                self._release_half_open_probe_without_provider_outcome(
+                    breaker,
+                    probe_acquired=half_open_probe_acquired,
+                )
+                raise
+
+            if provider_attempted:
+                await breaker.on_failure()
+            else:
+                self._release_half_open_probe_without_provider_outcome(
+                    breaker,
+                    probe_acquired=half_open_probe_acquired,
+                )
 
             if isinstance(e, httpx.HTTPStatusError):
                 error_label = str(e.response.status_code)
@@ -255,6 +419,18 @@ class ProviderExecutor:
             if normalized is e:
                 raise
             raise normalized from e
+
+        except BaseException as error:
+            # Non-Exception guard exits (for example GeneratorExit or a
+            # BaseExceptionGroup) still must relinquish an acquired HALF_OPEN
+            # probe. Exact object identity prevents unrelated exits from being
+            # misclassified as recovery-control-plane truth.
+            if recovery_guard_control_flow_error is error:
+                self._release_half_open_probe_without_provider_outcome(
+                    breaker,
+                    probe_acquired=half_open_probe_acquired,
+                )
+            raise
 
     async def execute_stream(
         self,

@@ -13,6 +13,7 @@ from ...domain.schemas.agent_execution import (
     AgentExecutionWaitReason,
     normalize_execution_waiting,
 )
+from ...provider.exceptions import ProviderRecoveryAuthorityLostError
 
 from .contracts import (
     AgentContextRequest,
@@ -36,6 +37,11 @@ from .contracts.events import (
     AgentEventPublisher,
     CorrelationContext,
 )
+from .contracts.recovery import (
+    RecoveryActivationResult,
+    RecoveryInferenceDisposition,
+    RecoveryPlan,
+)
 from .contracts.resume import (
     ResumeClaimConsumeResult,
     ResumeInvocationAction,
@@ -58,6 +64,14 @@ class ExecutionWaitExpiredError(ExecutionConflictError):
 
 class ExecutionResumeBudgetError(ExecutionConflictError):
     """A durable WAITING execution has no resumable active-time budget."""
+
+
+class RecoveryProgressionDeferredError(ExecutionConflictError):
+    """Bounded R12-F3-B progression intentionally stopped fail-closed."""
+
+    def __init__(self, code: str, message: str) -> None:
+        self.code = code
+        super().__init__(f"{code}: {message}")
 
 
 def _utc_datetime(value: datetime | None) -> datetime | None:
@@ -142,6 +156,8 @@ class AgentRuntime:
         *,
         checkpoint_values: dict[str, Any] | None = None,
         pending_invocations: Sequence[dict[str, Any]] = (),
+        recovery_fence: Mapping[str, Any] | None = None,
+        expected_task_budget_incarnation_generation: int | None = None,
     ) -> int:
         if self._uses_task_budget(context):
             assert context.task_id is not None
@@ -154,17 +170,27 @@ class AgentRuntime:
                     delegated=context.parent_execution_id is not None,
                     checkpoint_values=checkpoint_values,
                     pending_invocations=pending_invocations,
+                    recovery_fence=recovery_fence,
+                    expected_incarnation_generation=(
+                        expected_task_budget_incarnation_generation
+                    ),
                 )
             )
-            reconciler = getattr(
-                self._task_budget_service,
-                "reconcile_multibranch_task_activity",
-                None,
-            )
-            if callable(reconciler):
-                await reconciler(context.task_id)
+            if recovery_fence is None:
+                reconciler = getattr(
+                    self._task_budget_service,
+                    "reconcile_multibranch_task_activity",
+                    None,
+                )
+                if callable(reconciler):
+                    await reconciler(context.task_id)
             return target_revision
         if checkpoint_values is not None:
+            if recovery_fence is not None:
+                raise ExecutionConflictError(
+                    "RECOVERY_WAITING_TRANSITION_UNSUPPORTED: "
+                    "F3-B does not publish a new WAITING recovery cut."
+                )
             writer = getattr(
                 self._durable_store,
                 "commit_waiting_checkpoint",
@@ -183,11 +209,19 @@ class AgentRuntime:
                 pending_invocations=list(pending_invocations),
             )
             return revision + 1
-        await self._durable_store.compare_and_set_execution(
-            context.execution_id,
-            revision,
-            values,
-        )
+        if recovery_fence is None:
+            await self._durable_store.compare_and_set_execution(
+                context.execution_id,
+                revision,
+                values,
+            )
+        else:
+            await self._durable_store.compare_and_set_execution(
+                context.execution_id,
+                revision,
+                values,
+                recovery_fence=recovery_fence,
+            )
         return revision + 1
 
     async def _publish(
@@ -232,7 +266,12 @@ class AgentRuntime:
             # Observability must not change the execution result.
             return
 
-    async def _persist_iteration(self, record: AgentIteration) -> None:
+    async def _persist_iteration(
+        self,
+        record: AgentIteration,
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
+    ) -> None:
         if self._durable_store is None:
             return
         values = {
@@ -250,9 +289,25 @@ class AgentRuntime:
             iteration_number=record.iteration,
         )
         if existing is None:
-            await self._durable_store.save_iteration(values)
+            if recovery_fence is None:
+                await self._durable_store.save_iteration(values)
+            else:
+                await self._durable_store.save_iteration(
+                    values,
+                    recovery_fence=recovery_fence,
+                )
         else:
-            await self._durable_store.update_iteration(existing.id, values)
+            if recovery_fence is None:
+                await self._durable_store.update_iteration(
+                    existing.id,
+                    values,
+                )
+            else:
+                await self._durable_store.update_iteration(
+                    existing.id,
+                    values,
+                    recovery_fence=recovery_fence,
+                )
 
     async def _persist_execution_checkpoint(
         self,
@@ -261,6 +316,7 @@ class AgentRuntime:
         *,
         inference_request: InferenceRequest | None = None,
         inference_response=None,
+        recovery_fence: Mapping[str, Any] | None = None,
     ) -> None:
         if self._durable_store is None:
             return
@@ -302,7 +358,17 @@ class AgentRuntime:
                 "model": inference_response.model,
                 "metadata": inference_response.metadata,
             }
-        await self._durable_store.update_checkpoint(context.execution_id, values)
+        if recovery_fence is None:
+            await self._durable_store.update_checkpoint(
+                context.execution_id,
+                values,
+            )
+        else:
+            await self._durable_store.update_checkpoint(
+                context.execution_id,
+                values,
+                recovery_fence=recovery_fence,
+            )
 
     async def _load_committed_tool_result(
         self,
@@ -1425,6 +1491,9 @@ class AgentRuntime:
         context: AgentExecutionContext,
         result: AgentExecutionResult,
         expected_revision: int | None,
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
+        expected_task_budget_incarnation_generation: int | None = None,
     ) -> AgentExecutionResult:
         waiting_attempt = result.state is AgentLoopState.WAITING
         if waiting_attempt:
@@ -1535,12 +1604,371 @@ class AgentRuntime:
             values,
             checkpoint_values=checkpoint_values,
             pending_invocations=pending_invocations,
+            recovery_fence=recovery_fence,
+            expected_task_budget_incarnation_generation=(
+                expected_task_budget_incarnation_generation
+            ),
         )
         if target is AgentExecutionState.WAITING:
             context.waiting_checkpoint_transcript = []
             context.waiting_pending_invocations = []
             context.waiting_origin_connection_id = None
         return result
+
+    @staticmethod
+    def _recovery_fence_payload(
+        activation: RecoveryActivationResult,
+    ) -> dict[str, Any]:
+        return {
+            "owner_instance_id": activation.activation_owner_instance_id,
+            "lease_generation": activation.lease_generation,
+            "lease_expires_at": activation.lease_expires_at,
+        }
+
+    async def _require_recovery_owner_fence(
+        self,
+        context: AgentExecutionContext,
+        activation: RecoveryActivationResult,
+        *,
+        provider_boundary: bool = False,
+    ) -> None:
+        checker = getattr(
+            self._durable_store,
+            "has_active_execution_lease_fence",
+            None,
+        )
+        if not callable(checker):
+            if provider_boundary:
+                raise ProviderRecoveryAuthorityLostError(
+                    "Durable R12 lease-fence predicate is unavailable.",
+                    reason_code="RECOVERY_LEASE_FENCE_UNAVAILABLE",
+                )
+            raise ExecutionConflictError(
+                "RECOVERY_LEASE_FENCE_UNAVAILABLE: "
+                "durable R12 lease-fence predicate is unavailable."
+            )
+        active = await checker(
+            context.execution_id,
+            owner_instance_id=activation.activation_owner_instance_id,
+            lease_generation=activation.lease_generation,
+            now_utc=context.clock.now_utc(),
+            expected_lease_expires_at=activation.lease_expires_at,
+        )
+        if active:
+            return
+        if provider_boundary:
+            raise ProviderRecoveryAuthorityLostError(
+                reason_code="RECOVERY_ACTIVE_LEASE_FENCE_LOST",
+            )
+        raise ExecutionConflictError(
+            "RECOVERY_ACTIVE_LEASE_FENCE_LOST: "
+            "exact R12 owner/generation/F2-expiry fence is stale."
+        )
+
+    async def _publish_recovery(
+        self,
+        event_name: str,
+        context: AgentExecutionContext,
+        activation: RecoveryActivationResult,
+        **kwargs,
+    ) -> None:
+        await self._require_recovery_owner_fence(
+            context,
+            activation,
+        )
+        await self._publish(
+            event_name,
+            context,
+            **kwargs,
+        )
+
+    async def execute_recovered_next_iteration(
+        self,
+        context: AgentExecutionContext,
+        *,
+        plan: RecoveryPlan,
+        activation: RecoveryActivationResult,
+        handoff_transcript: Sequence[InferenceMessage],
+        recovered_tool_results: Sequence[ToolExecutionResult],
+    ) -> AgentExecutionResult:
+        """Run the single bounded F3-B fresh inference after durable handoff.
+
+        This entrypoint is separate from ordinary execute(): recovery authority
+        loss propagates to the R12 owner and is never converted into an
+        ordinary Agent FAILED result.
+        """
+        if self._durable_store is None:
+            raise ExecutionConflictError(
+                "RECOVERY_DURABLE_STORE_REQUIRED: F3-B requires durable state."
+            )
+        if (
+            plan.inference_disposition
+            is not RecoveryInferenceDisposition.NO_INFERENCE
+        ):
+            raise RecoveryProgressionDeferredError(
+                "RECOVERY_INFERENCE_CUT_UNPROVEN",
+                "F3-B cannot replay or resume the frozen old inference.",
+            )
+        if (
+            context.execution_id != plan.execution_id
+            or context.iteration != plan.iteration
+            or context.resume_revision != activation.consumed_execution_revision
+            or activation.execution_id != plan.execution_id
+            or activation.checkpoint_id != plan.checkpoint_id
+        ):
+            raise RecoveryProgressionDeferredError(
+                "RECOVERY_CONTEXT_CONFLICT",
+                "Prepared runtime context differs from F2/F3-A authority.",
+            )
+        expected_incarnation = plan.task_budget_incarnation_generation
+        if context.task_id is not None and (
+            isinstance(expected_incarnation, bool)
+            or not isinstance(expected_incarnation, int)
+            or expected_incarnation <= 0
+        ):
+            raise RecoveryProgressionDeferredError(
+                "RECOVERY_TASK_BUDGET_AUTHORITY_UNPROVEN",
+                "Task-scoped recovery lacks its frozen TaskBudget incarnation.",
+            )
+        if context.active_budget_running:
+            raise RecoveryProgressionDeferredError(
+                "RECOVERY_CONTEXT_CONFLICT",
+                "F3-B requires the F3-A active budget frozen at handoff.",
+            )
+
+        recovery_fence = self._recovery_fence_payload(activation)
+        transcript = list(handoff_transcript)
+        latest_tool_results = tuple(recovered_tool_results)
+        iterations: list[AgentIteration] = []
+        total_usage = context.usage
+
+        context.restore_active_budget()
+        try:
+            await self._require_recovery_owner_fence(context, activation)
+            context.ensure_active()
+            next_iteration = context.next_iteration()
+            if next_iteration != plan.iteration + 1:
+                raise RecoveryProgressionDeferredError(
+                    "RECOVERY_ITERATION_CONFLICT",
+                    "Fresh recovery iteration is not plan.iteration + 1.",
+                )
+            if context.begin_iteration_budget() <= 0.0:
+                raise TimeoutError(
+                    "Recovered Agent iteration deadline exceeded before start."
+                )
+            if (
+                self._execution_policy.check_iteration(context, next_iteration)
+                is not PolicyDecision.ALLOW
+            ):
+                raise RecoveryProgressionDeferredError(
+                    "MAX_ITERATIONS_EXCEEDED",
+                    "Recovered next iteration is not allowed by execution policy.",
+                )
+
+            record = AgentIteration(
+                execution_id=context.execution_id,
+                iteration=next_iteration,
+                state=AgentLoopState.PREPARING,
+            )
+            iterations.append(record)
+            await self._publish_recovery(
+                AgentEventName.ITERATION_STARTED,
+                context,
+                activation,
+                iteration=next_iteration,
+            )
+            await self._persist_iteration(
+                record,
+                recovery_fence=recovery_fence,
+            )
+            record.state = transition(
+                record.state,
+                AgentLoopState.THINKING,
+            )
+
+            snapshot = await self._await_contextual(
+                self._context_builder.build(
+                    context,
+                    AgentContextRequest(
+                        execution_id=context.execution_id,
+                        iteration=next_iteration,
+                        prior_messages=[
+                            message.model_dump(mode="json")
+                            for message in transcript
+                        ],
+                        history_mode=AgentContextHistoryMode.EXPLICIT,
+                        tool_results=[],
+                    ),
+                ),
+                context=context,
+                timeout_seconds=context.remaining_iteration_seconds,
+            )
+            await self._require_recovery_owner_fence(context, activation)
+
+            request_id = f"inf_{uuid.uuid4().hex}"
+            record.inference_request_id = request_id
+            await self._persist_iteration(
+                record,
+                recovery_fence=recovery_fence,
+            )
+            inference_timeout = context.remaining_for_operation(
+                getattr(
+                    context.limits,
+                    "inference_timeout_seconds",
+                    None,
+                )
+            )
+            if inference_timeout <= 0:
+                raise TimeoutError(
+                    "Recovered Agent deadline exceeded before inference."
+                )
+            inference_deadline_monotonic = monotonic() + inference_timeout
+
+            await self._publish_recovery(
+                AgentEventName.INFERENCE_REQUESTED,
+                context,
+                activation,
+                iteration=next_iteration,
+                request_id=request_id,
+                payload={
+                    "model": getattr(context.agent, "model", None)
+                    or context.metadata.get("model")
+                },
+            )
+
+            if self._uses_task_budget(context):
+                assert context.task_id is not None
+                await self._task_budget_service.reserve_inference(
+                    context.task_id,
+                    request_id=request_id,
+                    recovery_execution_id=context.execution_id,
+                    recovery_fence=recovery_fence,
+                    expected_incarnation_generation=expected_incarnation,
+                )
+
+            async def recovery_pre_attempt_guard() -> None:
+                await self._require_recovery_owner_fence(
+                    context,
+                    activation,
+                    provider_boundary=True,
+                )
+
+            request = InferenceRequest(
+                request_id=request_id,
+                execution_id=context.execution_id,
+                iteration=next_iteration,
+                messages=list(snapshot.messages),
+                tools=list(snapshot.tools),
+                model=(
+                    getattr(context.agent, "model", None)
+                    or context.metadata.get("model")
+                ),
+                max_output_tokens=context.metadata.get("max_output_tokens"),
+                timeout_seconds=inference_timeout,
+                deadline_monotonic=inference_deadline_monotonic,
+                owner_user_id=(
+                    str(context.identity.user_id)
+                    if context.identity.user_id
+                    else None
+                ),
+                budget_identity=context.identity,
+                cancellation_event=context.cancellation_event,
+                recovery_pre_attempt_guard=recovery_pre_attempt_guard,
+                metadata={
+                    **dict(snapshot.metadata),
+                    "quota_source_surface": "AGENT",
+                    "session_id": context.session_id,
+                    "task_id": context.task_id,
+                    "workflow_id": context.workflow_id,
+                    "agent_iteration_id": (
+                        f"{context.execution_id}:iteration:{next_iteration}"
+                    ),
+                },
+            )
+            response = await self._inference.complete(request)
+
+            if self._uses_task_budget(context):
+                assert context.task_id is not None
+                await self._task_budget_service.account_usage(
+                    context.task_id,
+                    usage_key=request_id,
+                    tokens=response.usage.total_tokens,
+                    cost_usd=response.usage.estimated_cost_usd,
+                    recovery_execution_id=context.execution_id,
+                    recovery_fence=recovery_fence,
+                    expected_incarnation_generation=expected_incarnation,
+                )
+
+            await self._publish_recovery(
+                AgentEventName.INFERENCE_COMPLETED,
+                context,
+                activation,
+                iteration=next_iteration,
+                request_id=request_id,
+                payload={
+                    "finish_reason": response.finish_reason,
+                    "provider": response.provider,
+                    "model": response.model,
+                },
+            )
+
+            transcript.append(response.message)
+            total_usage = _add_usage(total_usage, response.usage)
+            context.usage = total_usage
+            await self._persist_execution_checkpoint(
+                context,
+                transcript,
+                inference_request=request,
+                inference_response=response,
+                recovery_fence=recovery_fence,
+            )
+
+            if response.message.tool_calls:
+                raise RecoveryProgressionDeferredError(
+                    "RECOVERY_FRESH_TOOL_DISPATCH_DEFERRED",
+                    "Fresh recovered tool calls require a later stage.",
+                )
+
+            record.close(AgentLoopState.FINALIZING)
+            record.close(AgentLoopState.COMPLETED)
+            await self._persist_iteration(
+                record,
+                recovery_fence=recovery_fence,
+            )
+            await self._publish_recovery(
+                AgentEventName.ITERATION_COMPLETED,
+                context,
+                activation,
+                iteration=next_iteration,
+                payload={"state": record.state.value},
+            )
+            result = AgentExecutionResult(
+                execution_id=context.execution_id,
+                agent_id=context.agent_id,
+                state=AgentLoopState.COMPLETED,
+                output=_extract_text(response.message.content),
+                final_message=response.message,
+                iterations=tuple(iterations),
+                last_tool_results=latest_tool_results,
+                usage=context.usage,
+            )
+            await self._publish_recovery(
+                AgentEventName.EXECUTION_COMPLETED,
+                context,
+                activation,
+                payload={"state": AgentLoopState.COMPLETED.value},
+            )
+            return await self._finish_durable_execution(
+                context,
+                result,
+                activation.consumed_execution_revision,
+                recovery_fence=recovery_fence,
+                expected_task_budget_incarnation_generation=(
+                    expected_incarnation
+                ),
+            )
+        finally:
+            context.freeze_active_budget()
 
     async def execute(
         self,

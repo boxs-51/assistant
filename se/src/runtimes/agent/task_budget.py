@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Mapping, Sequence
 from uuid import uuid4
 
 from sqlalchemy.exc import IntegrityError, OperationalError
@@ -3909,6 +3909,8 @@ class TaskBudgetService:
         delegated: bool,
         checkpoint_values: dict[str, Any] | None = None,
         pending_invocations: Sequence[dict[str, Any]] = (),
+        recovery_fence: Mapping[str, Any] | None = None,
+        expected_incarnation_generation: int | None = None,
     ) -> int:
         """Atomically release one RUNNING execution's active capacity."""
         target_state = str(transition_values.get("state") or "")
@@ -3978,6 +3980,10 @@ class TaskBudgetService:
             mutate_budget=mutate,
             checkpoint_values=checkpoint_values,
             pending_invocations=pending_invocations,
+            recovery_fence=recovery_fence,
+            expected_incarnation_generation=(
+                expected_incarnation_generation
+            ),
         )
 
     async def reserve_tool_call_batch(
@@ -4748,6 +4754,9 @@ class TaskBudgetService:
         task_id: str,
         *,
         request_id: str,
+        recovery_execution_id: str | None = None,
+        recovery_fence: Mapping[str, Any] | None = None,
+        expected_incarnation_generation: int | None = None,
     ) -> TaskBudget:
         def mutate(budget: TaskBudget) -> dict[str, Any]:
             self._require_open(budget)
@@ -4773,6 +4782,13 @@ class TaskBudgetService:
                 "used_inference_calls": budget.used_inference_calls + 1
             }
 
+        recovery_kwargs = {
+            "recovery_execution_id": recovery_execution_id,
+            "recovery_fence": recovery_fence,
+            "expected_incarnation_generation": (
+                expected_incarnation_generation
+            ),
+        }
         if self._user_inference_quota_enabled:
             # UBQ-4 is the renewable resource authority. Preserve the legacy
             # TaskBudget local/read-model guard and idempotent reservation,
@@ -4783,6 +4799,7 @@ class TaskBudgetService:
                 request_id,
                 {},
                 mutate,
+                **recovery_kwargs,
             )
 
         dual = self._user_budget_dual_accounting
@@ -4798,6 +4815,14 @@ class TaskBudgetService:
                 request_id,
                 {},
                 mutate,
+                **recovery_kwargs,
+            )
+        if recovery_fence is not None:
+            # F3-B must never bypass exact R12 authority through the legacy
+            # dual-accounting path. Canonical UBQ-4 production uses the branch
+            # above; historical dual mode fails closed for recovered inference.
+            raise TaskBudgetConflictError(
+                "RECOVERY_TASK_BUDGET_DUAL_ACCOUNTING_UNSUPPORTED"
             )
         return await self._mutate_resource_with_reservation(
             task_id,
@@ -4815,6 +4840,9 @@ class TaskBudgetService:
         usage_key: str,
         tokens: int = 0,
         cost_usd: Decimal | int | float | str = Decimal("0"),
+        recovery_execution_id: str | None = None,
+        recovery_fence: Mapping[str, Any] | None = None,
+        expected_incarnation_generation: int | None = None,
     ) -> TaskBudget:
         if tokens < 0:
             raise ValueError("tokens must be non-negative")
@@ -4834,6 +4862,13 @@ class TaskBudgetService:
             "tokens": tokens,
             "cost_usd": str(normalized_cost),
         }
+        recovery_kwargs = {
+            "recovery_execution_id": recovery_execution_id,
+            "recovery_fence": recovery_fence,
+            "expected_incarnation_generation": (
+                expected_incarnation_generation
+            ),
+        }
         if self._user_inference_quota_enabled:
             # Post-cutover USAGE remains a TaskBudget compatibility/read-model
             # record only. UBQ-4 settlement already owns user token/cost usage.
@@ -4843,6 +4878,7 @@ class TaskBudgetService:
                 usage_key,
                 payload,
                 mutate,
+                **recovery_kwargs,
             )
 
         dual = self._user_budget_dual_accounting
@@ -4853,6 +4889,11 @@ class TaskBudgetService:
                 usage_key,
                 payload,
                 mutate,
+                **recovery_kwargs,
+            )
+        if recovery_fence is not None:
+            raise TaskBudgetConflictError(
+                "RECOVERY_TASK_BUDGET_DUAL_ACCOUNTING_UNSUPPORTED"
             )
         return await self._mutate_resource_with_reservation(
             task_id,
@@ -4940,6 +4981,96 @@ class TaskBudgetService:
             f"Could not close TaskBudget after CAS conflicts: {task_id}"
         )
 
+    @staticmethod
+    def _validate_recovery_mutation_authority(
+        recovery_execution_id: str | None,
+        recovery_fence: Mapping[str, Any] | None,
+        expected_incarnation_generation: int | None,
+    ) -> None:
+        supplied = (
+            recovery_execution_id is not None
+            or recovery_fence is not None
+        )
+        if not supplied:
+            return
+        if (
+            not str(recovery_execution_id or "").strip()
+            or recovery_fence is None
+            or isinstance(expected_incarnation_generation, bool)
+            or not isinstance(expected_incarnation_generation, int)
+            or expected_incarnation_generation <= 0
+        ):
+            raise TaskBudgetConflictError(
+                "RECOVERY_TASK_BUDGET_AUTHORITY_INCOMPLETE"
+            )
+
+    @staticmethod
+    def _require_recovery_mutation_fence_now(
+        execution,
+        *,
+        task_id: str,
+        recovery_fence: Mapping[str, Any],
+    ) -> None:
+        owner = str(
+            recovery_fence.get("owner_instance_id") or ""
+        ).strip()
+        try:
+            generation = int(recovery_fence["lease_generation"])
+        except (KeyError, TypeError, ValueError) as exc:
+            raise TaskBudgetConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+            ) from exc
+        expected_expiry = recovery_fence.get("lease_expires_at")
+        if (
+            not isinstance(expected_expiry, datetime)
+            or expected_expiry.tzinfo is None
+        ):
+            raise TaskBudgetConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+            )
+        expected_expiry = expected_expiry.astimezone(timezone.utc)
+
+        durable_expiry = (
+            getattr(execution, "lease_expires_at", None)
+            if execution is not None
+            else None
+        )
+        if isinstance(durable_expiry, datetime):
+            durable_expiry = (
+                durable_expiry.replace(tzinfo=timezone.utc)
+                if durable_expiry.tzinfo is None
+                else durable_expiry.astimezone(timezone.utc)
+            )
+        if (
+            execution is None
+            or str(getattr(execution, "task_id", "") or "") != str(task_id)
+            or str(getattr(execution, "state", "")) != "RUNNING"
+            or str(getattr(execution, "owner_instance_id", "") or "") != owner
+            or int(getattr(execution, "lease_generation", -1)) != generation
+            or durable_expiry != expected_expiry
+            or durable_expiry is None
+            or durable_expiry <= datetime.now(timezone.utc)
+        ):
+            raise TaskBudgetConflictError(
+                "RECOVERY_ACTIVE_LEASE_FENCE_LOST"
+            )
+
+    async def _lock_recovery_mutation_fence_in_uow(
+        self,
+        uow,
+        *,
+        task_id: str,
+        execution_id: str,
+        recovery_fence: Mapping[str, Any],
+    ):
+        execution = await uow.agents.get_execution_for_update(execution_id)
+        self._require_recovery_mutation_fence_now(
+            execution,
+            task_id=task_id,
+            recovery_fence=recovery_fence,
+        )
+        return execution
+
     async def _mutate_with_reservation(
         self,
         task_id: str,
@@ -4952,9 +5083,16 @@ class TaskBudgetService:
         verify_idempotent=None,
         expected_incarnation_generation: int | None = None,
         require_legacy_unbound: bool = False,
+        recovery_execution_id: str | None = None,
+        recovery_fence: Mapping[str, Any] | None = None,
     ) -> TaskBudget:
         if not reservation_key:
             raise ValueError("reservation_key must be non-empty")
+        self._validate_recovery_mutation_authority(
+            recovery_execution_id,
+            recovery_fence,
+            expected_incarnation_generation,
+        )
         fingerprint = _reservation_fingerprint(
             kind,
             reservation_key,
@@ -4965,6 +5103,17 @@ class TaskBudgetService:
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
+                    locked_recovery_execution = None
+                    if recovery_fence is not None:
+                        assert recovery_execution_id is not None
+                        locked_recovery_execution = (
+                            await self._lock_recovery_mutation_fence_in_uow(
+                                uow,
+                                task_id=task_id,
+                                execution_id=recovery_execution_id,
+                                recovery_fence=recovery_fence,
+                            )
+                        )
                     if (
                         require_legacy_unbound
                         and self._user_budget_dual_accounting is not None
@@ -5006,12 +5155,24 @@ class TaskBudgetService:
                         self._verify_reservation(existing, fingerprint)
                         if verify_idempotent is not None:
                             await verify_idempotent(uow)
+                        if recovery_fence is not None:
+                            self._require_recovery_mutation_fence_now(
+                                locked_recovery_execution,
+                                task_id=task_id,
+                                recovery_fence=recovery_fence,
+                            )
                         budget = _budget_from_record(budget_record)
                         await uow.commit()
                         return budget
 
                     budget = _budget_from_record(budget_record)
                     values = mutate(budget)
+                    if recovery_fence is not None:
+                        self._require_recovery_mutation_fence_now(
+                            locked_recovery_execution,
+                            task_id=task_id,
+                            recovery_fence=recovery_fence,
+                        )
                     updated = await uow.agents.compare_and_set_task_budget(
                         task_id,
                         budget.revision,
@@ -5050,6 +5211,8 @@ class TaskBudgetService:
                     verify_idempotent=verify_idempotent,
                     expected_incarnation_generation=expected_generation,
                     require_legacy_unbound=require_legacy_unbound,
+                    recovery_execution_id=recovery_execution_id,
+                    recovery_fence=recovery_fence,
                 )
                 if recovered is not None:
                     return recovered
@@ -5077,9 +5240,16 @@ class TaskBudgetService:
         mutate_budget: Callable[[TaskBudget], dict[str, Any]],
         checkpoint_values: dict[str, Any] | None = None,
         pending_invocations: Sequence[dict[str, Any]] = (),
+        recovery_fence: Mapping[str, Any] | None = None,
+        expected_incarnation_generation: int | None = None,
     ) -> int:
         if source_revision < 0:
             raise ValueError("source_revision must be non-negative")
+        self._validate_recovery_mutation_authority(
+            execution_id if recovery_fence is not None else None,
+            recovery_fence,
+            expected_incarnation_generation,
+        )
         target_revision = source_revision + 1
         normalized_values = _normalize_execution_store_values(
             transition_values
@@ -5095,10 +5265,22 @@ class TaskBudgetService:
             reservation_payload,
         )
 
-        expected_generation: int | None = None
+        expected_generation: int | None = (
+            expected_incarnation_generation
+        )
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
+                    locked_recovery_execution = None
+                    if recovery_fence is not None:
+                        locked_recovery_execution = (
+                            await self._lock_recovery_mutation_fence_in_uow(
+                                uow,
+                                task_id=task_id,
+                                execution_id=execution_id,
+                                recovery_fence=recovery_fence,
+                            )
+                        )
                     budget_record = await uow.agents.get_task_budget(task_id)
                     if budget_record is None:
                         if await uow.agents.has_execution_for_task(task_id):
@@ -5131,9 +5313,17 @@ class TaskBudgetService:
                             existing_reservation,
                             fingerprint,
                         )
-                        execution = await uow.agents.get_execution(
-                            execution_id
-                        )
+                        if recovery_fence is not None:
+                            self._require_recovery_mutation_fence_now(
+                                locked_recovery_execution,
+                                task_id=task_id,
+                                recovery_fence=recovery_fence,
+                            )
+                            execution = locked_recovery_execution
+                        else:
+                            execution = await uow.agents.get_execution(
+                                execution_id
+                            )
                         if (
                             execution is None
                             or execution.task_id != task_id
@@ -5154,7 +5344,11 @@ class TaskBudgetService:
                         await uow.commit()
                         return target_revision
 
-                    execution = await uow.agents.get_execution(execution_id)
+                    execution = (
+                        locked_recovery_execution
+                        if recovery_fence is not None
+                        else await uow.agents.get_execution(execution_id)
+                    )
                     if execution is None or execution.task_id != task_id:
                         raise TaskBudgetConflictError(
                             f"Unknown task-scoped execution: {execution_id}"
@@ -5172,6 +5366,12 @@ class TaskBudgetService:
 
                     budget = _budget_from_record(budget_record)
                     budget_values = mutate_budget(budget)
+                    if recovery_fence is not None:
+                        self._require_recovery_mutation_fence_now(
+                            locked_recovery_execution,
+                            task_id=task_id,
+                            recovery_fence=recovery_fence,
+                        )
 
                     updated_budget = (
                         await uow.agents.compare_and_set_task_budget(
@@ -5196,6 +5396,12 @@ class TaskBudgetService:
                             pending_invocations=pending_invocations,
                         )
 
+                    if recovery_fence is not None:
+                        self._require_recovery_mutation_fence_now(
+                            locked_recovery_execution,
+                            task_id=task_id,
+                            recovery_fence=recovery_fence,
+                        )
                     updated_execution = (
                         await uow.agents.compare_and_set_execution(
                             execution_id,
@@ -5248,8 +5454,26 @@ class TaskBudgetService:
         verify_idempotent=None,
         expected_incarnation_generation: int,
         require_legacy_unbound: bool = False,
+        recovery_execution_id: str | None = None,
+        recovery_fence: Mapping[str, Any] | None = None,
     ) -> TaskBudget | None:
+        self._validate_recovery_mutation_authority(
+            recovery_execution_id,
+            recovery_fence,
+            expected_incarnation_generation,
+        )
         async with self._uow_factory() as uow:
+            locked_recovery_execution = None
+            if recovery_fence is not None:
+                assert recovery_execution_id is not None
+                locked_recovery_execution = (
+                    await self._lock_recovery_mutation_fence_in_uow(
+                        uow,
+                        task_id=task_id,
+                        execution_id=recovery_execution_id,
+                        recovery_fence=recovery_fence,
+                    )
+                )
             if (
                 require_legacy_unbound
                 and self._user_budget_dual_accounting is not None
@@ -5286,6 +5510,12 @@ class TaskBudgetService:
             self._verify_reservation(existing, fingerprint)
             if verify_idempotent is not None:
                 await verify_idempotent(uow)
+            if recovery_fence is not None:
+                self._require_recovery_mutation_fence_now(
+                    locked_recovery_execution,
+                    task_id=task_id,
+                    recovery_fence=recovery_fence,
+                )
             budget = _budget_from_record(budget_record)
             await uow.commit()
             return budget

@@ -1,5 +1,5 @@
 from dataclasses import replace
-from typing import Any, AsyncGenerator, Dict
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict
 
 import httpx
 import structlog
@@ -20,6 +20,8 @@ from ..exceptions import (
     NoAvailableProviderError,
     ProviderDeadlineExceededError,
     ProviderError,
+    ProviderRecoveryAuthorityLostError,
+    ProviderRecoveryGuardError,
     wrap_provider_exception,
 )
 from .base import BaseExecutionHandler
@@ -225,6 +227,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
         deadline_monotonic: float | None = None,
         owner_user_id: str | None = None,
         quota_context: InferenceQuotaContext | None = None,
+        recovery_pre_attempt_guard: Callable[[], Awaitable[None]] | None = None,
     ) -> GatewayResponse:
         model = body.get("model")
         tools_present = bool(body.get("tools"))
@@ -279,6 +282,15 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     asset_attempt_terminal = (
                         self._asset_attempt_requires_projection(body)
                     )
+                    if (
+                        asset_attempt_terminal
+                        and recovery_pre_attempt_guard is not None
+                    ):
+                        raise ProviderRecoveryAuthorityLostError(
+                            "Recovered asset-bearing inference is deferred "
+                            "before canonical asset projection.",
+                            reason_code="RECOVERY_ASSET_PROJECTION_DEFERRED",
+                        )
                     if asset_attempt_terminal:
                         attempt_body = await self._project_asset_attempt(
                             provider=provider,
@@ -294,6 +306,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         body=attempt_body,
                         timeout=self.timeout,
                         call_budget=call_budget,
+                        recovery_pre_attempt_guard=recovery_pre_attempt_guard,
                     )
                     quota = self.inference_quota
                     if admission is not None and quota is not None:
@@ -312,6 +325,8 @@ class ChatExecutionHandler(BaseExecutionHandler):
                         response,
                         owner_user_id=owner_user_id,
                     )
+                except ProviderRecoveryAuthorityLostError:
+                    raise
                 except ProviderDeadlineExceededError:
                     raise
                 except (
@@ -319,6 +334,17 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     httpx.RequestError,
                     httpx.HTTPStatusError,
                 ) as error:
+                    guard_envelope = error.__cause__
+                    if (
+                        isinstance(guard_envelope, ProviderRecoveryGuardError)
+                        and guard_envelope.original_error is error
+                    ):
+                        # Provider-shaped error originated in the R12 recovery
+                        # guard, not a physical provider attempt. Preserve the
+                        # exact object and deny provider fallback authority.
+                        # Provenance uses standard exception chaining so even
+                        # immutable/custom exceptions remain supported.
+                        raise
                     span.record_exception(error)
                     last_exception = error
                     last_provider_name = provider.name
