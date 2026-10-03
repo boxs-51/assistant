@@ -102,6 +102,10 @@ class ProviderInferenceAdapter(InferencePort):
         provider_call_kwargs = {
             "deadline_monotonic": caller_deadline,
         }
+        if request.recovery_pre_attempt_guard is not None:
+            provider_call_kwargs["recovery_pre_attempt_guard"] = (
+                request.recovery_pre_attempt_guard
+            )
         if request.owner_user_id:
             provider_call_kwargs["owner_user_id"] = request.owner_user_id
         quota = self._inference_quota

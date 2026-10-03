@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from typing import Any
 
@@ -11,6 +13,7 @@ from ..capability.contracts.error import (
 from .contracts.context import AgentExecutionContext
 from .contracts.recovery import (
     RecoveryActivationResult,
+    RecoveryInferenceDisposition,
     RecoveryInvocationAction,
     RecoveryPlan,
     RecoveryToolQuotaAuthority,
@@ -21,6 +24,7 @@ from .contracts.resume import (
     ResumeInvocationActionKind,
     ResumeTriggerType,
 )
+from .contracts.inference import InferenceMessage
 from .contracts.tool import ToolExecutionResult
 
 
@@ -880,6 +884,204 @@ class AgentRecoveryExecutionService:
             )
         finally:
             context.freeze_active_budget()
+
+    @staticmethod
+    def _f3b_tool_result_message(
+        result: ToolExecutionResult,
+    ) -> InferenceMessage:
+        return InferenceMessage(
+            role="tool",
+            name=result.capability_id,
+            tool_call_id=result.tool_call_id,
+            content=(
+                result.output
+                if result.success
+                else {
+                    "error_code": result.error_code,
+                    "error_message": result.error_message,
+                }
+            ),
+            metadata={
+                "success": result.success,
+                "retryable": result.retryable,
+            },
+        )
+
+    @staticmethod
+    def _f3b_digest(value: Any) -> str:
+        payload = json.dumps(
+            value,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+        return hashlib.sha256(payload).hexdigest()
+
+    @classmethod
+    def _f3b_handoff_marker(
+        cls,
+        plan: RecoveryPlan,
+        activation: RecoveryActivationResult,
+        recovered_results: tuple[ToolExecutionResult, ...],
+    ) -> dict[str, Any]:
+        transcript_payload = [
+            item.model_dump(mode="json")
+            for item in plan.transcript_snapshot
+        ]
+        result_payload = [
+            item.model_dump(mode="json")
+            for item in recovered_results
+        ]
+        seed = {
+            "version": 1,
+            "kind": "R12_F3B_INFERENCE_HANDOFF",
+            "execution_id": plan.execution_id,
+            "checkpoint_id": plan.checkpoint_id,
+            "plan_fingerprint": plan.plan_fingerprint,
+            "recovery_fingerprint": plan.recovery_fingerprint,
+            "activation_owner_instance_id": (
+                activation.activation_owner_instance_id
+            ),
+            "lease_generation": activation.lease_generation,
+            "lease_expires_at": activation.lease_expires_at.isoformat(),
+            "consumed_execution_revision": (
+                activation.consumed_execution_revision
+            ),
+            "iteration": plan.iteration,
+            "transcript_sha256": cls._f3b_digest(transcript_payload),
+            "recovered_results_sha256": cls._f3b_digest(result_payload),
+        }
+        return {
+            **seed,
+            "handoff_id": cls._f3b_digest(seed),
+        }
+
+    async def execute_recovered_next_iteration(
+        self,
+        context: AgentExecutionContext,
+        *,
+        plan: RecoveryPlan,
+        activation: RecoveryActivationResult,
+        runtime,
+    ):
+        """Execute F3-A, commit the one-shot handoff, then run bounded F3-B."""
+
+        if (
+            plan.inference_disposition
+            is not RecoveryInferenceDisposition.NO_INFERENCE
+        ):
+            raise RecoveryExecutionError(
+                "RECOVERY_INFERENCE_CUT_UNPROVEN",
+                "The frozen recovery cut does not prove NO_INFERENCE.",
+            )
+
+        recovered_results = await self.execute_active_tool_batch(
+            context,
+            plan=plan,
+            activation=activation,
+        )
+        ordered_ids = tuple(plan.ordered_tool_call_ids)
+        if (
+            len(recovered_results) != len(ordered_ids)
+            or tuple(item.tool_call_id for item in recovered_results)
+            != ordered_ids
+            or any(
+                item.execution_id != plan.execution_id
+                or item.iteration != plan.iteration
+                for item in recovered_results
+            )
+        ):
+            raise RecoveryExecutionError(
+                "RECOVERY_CONTINUATION_RESULT_CONFLICT",
+                "F3-A results do not exactly cover the frozen ordered batch.",
+            )
+
+        expected_messages = list(plan.transcript_snapshot)
+        handoff_messages = [
+            *expected_messages,
+            *[
+                self._f3b_tool_result_message(item)
+                for item in recovered_results
+            ],
+        ]
+        marker = self._f3b_handoff_marker(
+            plan,
+            activation,
+            recovered_results,
+        )
+        recovery_fence = {
+            "owner_instance_id": activation.activation_owner_instance_id,
+            "lease_generation": activation.lease_generation,
+            "lease_expires_at": activation.lease_expires_at,
+        }
+        writer = getattr(
+            self._store,
+            "commit_recovery_inference_handoff",
+            None,
+        )
+        if not callable(writer):
+            raise RecoveryExecutionError(
+                "RECOVERY_INFERENCE_HANDOFF_UNAVAILABLE",
+                "Durable store has no atomic F3-B handoff writer.",
+            )
+
+        await self._require_exact_active_fence(
+            plan,
+            activation,
+            context,
+        )
+        disposition = await writer(
+            plan.execution_id,
+            expected_revision=activation.consumed_execution_revision,
+            expected_checkpoint_id=plan.checkpoint_id,
+            expected_transcript=[
+                item.model_dump(mode="json")
+                for item in expected_messages
+            ],
+            handoff_transcript=[
+                item.model_dump(mode="json")
+                for item in handoff_messages
+            ],
+            handoff_marker=marker,
+            recovery_fence=recovery_fence,
+        )
+        await self._require_exact_active_fence(
+            plan,
+            activation,
+            context,
+        )
+
+        if disposition == "REUSED":
+            # Once the deterministic handoff already exists, this process
+            # cannot prove whether a prior owner minted/sent the fresh
+            # inference. F3-B deliberately sacrifices liveness over replay.
+            raise RecoveryExecutionError(
+                "RECOVERY_INFERENCE_CUT_UNPROVEN",
+                "F3-B handoff already exists; fresh inference replay is forbidden.",
+            )
+        if disposition != "WRITTEN":
+            raise RecoveryExecutionError(
+                "RECOVERY_INFERENCE_HANDOFF_CONFLICT",
+                "Atomic F3-B handoff returned an unknown disposition.",
+            )
+
+        executor = getattr(
+            runtime,
+            "execute_recovered_next_iteration",
+            None,
+        )
+        if not callable(executor):
+            raise RecoveryExecutionError(
+                "RECOVERY_RUNTIME_HANDOFF_UNAVAILABLE",
+                "AgentRuntime has no bounded F3-B execution entrypoint.",
+            )
+        return await executor(
+            context,
+            plan=plan,
+            activation=activation,
+            handoff_transcript=handoff_messages,
+            recovered_tool_results=recovered_results,
+        )
 
 
 __all__ = [

@@ -116,6 +116,41 @@ class ProviderDeadlineExceededError(ProviderError):
     code = PROVIDER_DEADLINE_EXCEEDED
 
 
+class ProviderRecoveryGuardError(RuntimeError):
+    """Carry a recovery-guard exception across provider retry/fallback layers.
+
+    This envelope deliberately does not inherit from ProviderError. The
+    executor uses it only for exceptions that originate in the R12 recovery
+    pre-attempt guard, so provider retry policy cannot normalize/retry them and
+    the chat handler can restore the exact original control-plane exception
+    before provider fallback classification.
+    """
+
+    retryable = False
+
+    def __init__(self, original_error: Exception) -> None:
+        self.original_error = original_error
+        super().__init__(str(original_error))
+
+
+class ProviderRecoveryAuthorityLostError(RuntimeError):
+    """R12 recovery control-plane authority was lost before provider send."""
+
+    code = "RECOVERY_PROVIDER_AUTHORITY_LOST"
+    # This is not provider/Agent retry authority. A later R12 coordinator may
+    # re-plan only after establishing a new durable recovery owner.
+    retryable = False
+
+    def __init__(
+        self,
+        message: str = "Recovered provider dispatch authority is no longer valid.",
+        *,
+        reason_code: str | None = None,
+    ) -> None:
+        self.reason_code = reason_code or self.code
+        super().__init__(f"{self.reason_code}: {message}")
+
+
 def parse_retry_after_hint(
     value: str | None,
     *,

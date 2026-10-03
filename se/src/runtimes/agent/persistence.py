@@ -1917,12 +1917,29 @@ class DurableAgentStore:
             await uow.commit()
             return record
 
-    async def update_checkpoint(self, execution_id: str, values: Dict[str, Any]):
+    async def update_checkpoint(
+        self,
+        execution_id: str,
+        values: Dict[str, Any],
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
+    ):
         values = _normalize_json_fields(
             values, _EXECUTION_JSON_FIELDS, path="agent_executions"
         )
         async with self.uow_factory() as uow:
-            execution = await uow.agents.get_execution(execution_id)
+            locked_recovery_execution = None
+            if recovery_fence is not None:
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        execution_id,
+                        recovery_fence,
+                    )
+                )
+                execution = locked_recovery_execution
+            else:
+                execution = await uow.agents.get_execution(execution_id)
             if execution is None:
                 raise KeyError(f"Unknown agent execution: {execution_id}")
 
@@ -1942,20 +1959,136 @@ class DurableAgentStore:
                 # treating it as runtime authority.
                 values["context_state"] = {**current_state, **incoming_state}
 
+            if recovery_fence is not None:
+                self._require_recovery_projection_fence_now(
+                    locked_recovery_execution,
+                    recovery_fence,
+                )
             record = await uow.agents.update_execution(execution_id, values)
             await uow.commit()
             return record
+
+    async def commit_recovery_inference_handoff(
+        self,
+        execution_id: str,
+        *,
+        expected_revision: int,
+        expected_checkpoint_id: str,
+        expected_transcript: List[Dict[str, Any]],
+        handoff_transcript: List[Dict[str, Any]],
+        handoff_marker: Mapping[str, Any],
+        recovery_fence: Mapping[str, Any],
+    ) -> str:
+        """Commit the F3-A -> F3-B transcript handoff exactly once.
+
+        The tri-state decision and exact R12 lease proof share one locked UoW.
+        No new schema or semantic execution revision is minted here.
+        """
+
+        expected = canonical_transcript_messages(list(expected_transcript))
+        handoff = canonical_transcript_messages(list(handoff_transcript))
+        marker = to_json_safe(
+            dict(handoff_marker),
+            path="agent_executions.context_state.r12_f3b_handoff",
+        )
+
+        async with self.uow_factory() as uow:
+            execution = await self._lock_recovery_projection_fence_in_uow(
+                uow,
+                execution_id,
+                recovery_fence,
+            )
+            if (
+                int(execution.revision) != int(expected_revision)
+                or str(execution.current_checkpoint_id or "")
+                != str(expected_checkpoint_id)
+            ):
+                raise ExecutionConflictError(
+                    "RECOVERY_INFERENCE_HANDOFF_CONFLICT: "
+                    "execution revision/checkpoint differs from frozen authority."
+                )
+
+            current_transcript = canonical_transcript_messages(
+                list(getattr(execution, "transcript", None) or [])
+            )
+            current_state = to_json_safe(
+                getattr(execution, "context_state", None) or {},
+                path="agent_executions.context_state",
+            )
+            existing_marker = current_state.get("r12_f3b_handoff")
+
+            if existing_marker is not None:
+                if (
+                    existing_marker != marker
+                    or current_transcript != handoff
+                ):
+                    raise ExecutionConflictError(
+                        "RECOVERY_INFERENCE_HANDOFF_CONFLICT: "
+                        "durable handoff identity/content differs from frozen authority."
+                    )
+                await uow.commit()
+                return "REUSED"
+
+            if current_transcript != expected:
+                raise ExecutionConflictError(
+                    "RECOVERY_INFERENCE_HANDOFF_CONFLICT: "
+                    "durable transcript is neither frozen pre-handoff nor exact handoff."
+                )
+
+            self._require_recovery_projection_fence_now(
+                execution,
+                recovery_fence,
+            )
+            record = await uow.agents.update_execution(
+                execution_id,
+                {
+                    "transcript": handoff,
+                    "context_state": {
+                        **current_state,
+                        "r12_f3b_handoff": marker,
+                    },
+                },
+            )
+            if record is None:
+                raise ExecutionConflictError(
+                    "RECOVERY_INFERENCE_HANDOFF_CONFLICT: "
+                    "AgentExecution disappeared during handoff."
+                )
+            await uow.commit()
+            return "WRITTEN"
 
     async def compare_and_set_execution(
         self,
         execution_id: str,
         expected_revision: int,
         values: Dict[str, Any],
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
     ):
         values = _normalize_json_fields(
             values, _EXECUTION_JSON_FIELDS, path="agent_executions"
         )
         async with self.uow_factory() as uow:
+            locked_recovery_execution = None
+            if recovery_fence is not None:
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        execution_id,
+                        recovery_fence,
+                    )
+                )
+                if int(locked_recovery_execution.revision) != int(
+                    expected_revision
+                ):
+                    raise ExecutionConflictError(
+                        f"Stale AgentExecution revision: "
+                        f"{execution_id}@{expected_revision}"
+                    )
+                self._require_recovery_projection_fence_now(
+                    locked_recovery_execution,
+                    recovery_fence,
+                )
             record = await uow.agents.compare_and_set_execution(
                 execution_id,
                 expected_revision,
@@ -2444,20 +2577,69 @@ class DurableAgentStore:
             await uow.commit()
             return record
 
-    async def save_iteration(self, values: Dict[str, Any]):
+    async def save_iteration(
+        self,
+        values: Dict[str, Any],
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
+    ):
         values = _normalize_json_fields(
             values, _ITERATION_JSON_FIELDS, path="agent_iterations"
         )
         async with self.uow_factory() as uow:
+            locked_recovery_execution = None
+            if recovery_fence is not None:
+                execution_id = str(values.get("execution_id") or "")
+                if not execution_id:
+                    raise ExecutionConflictError(
+                        "RECOVERY_ACTIVE_LEASE_FENCE_LOST: "
+                        "iteration write lacks execution identity."
+                    )
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        execution_id,
+                        recovery_fence,
+                    )
+                )
+                self._require_recovery_projection_fence_now(
+                    locked_recovery_execution,
+                    recovery_fence,
+                )
             record = await uow.agents.save_iteration(values)
             await uow.commit()
             return record
 
-    async def update_iteration(self, iteration_id: str, values: Dict[str, Any]):
+    async def update_iteration(
+        self,
+        iteration_id: str,
+        values: Dict[str, Any],
+        *,
+        recovery_fence: Mapping[str, Any] | None = None,
+    ):
         values = _normalize_json_fields(
             values, _ITERATION_JSON_FIELDS, path="agent_iterations"
         )
         async with self.uow_factory() as uow:
+            locked_recovery_execution = None
+            if recovery_fence is not None:
+                execution_id = str(values.get("execution_id") or "")
+                if not execution_id:
+                    raise ExecutionConflictError(
+                        "RECOVERY_ACTIVE_LEASE_FENCE_LOST: "
+                        "iteration update lacks execution identity."
+                    )
+                locked_recovery_execution = (
+                    await self._lock_recovery_projection_fence_in_uow(
+                        uow,
+                        execution_id,
+                        recovery_fence,
+                    )
+                )
+                self._require_recovery_projection_fence_now(
+                    locked_recovery_execution,
+                    recovery_fence,
+                )
             record = await uow.agents.update_iteration(iteration_id, values)
             await uow.commit()
             return record

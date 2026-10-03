@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from types import MappingProxyType
-from typing import Any, Dict, Protocol, Sequence
+from typing import Any, Awaitable, Callable, Dict, Protocol, Sequence
 
 from pydantic import BaseModel, ConfigDict, Field, field_serializer, field_validator
 
@@ -109,6 +109,9 @@ class InferenceUsage(BaseModel):
     tool_invocations: int = 0
     estimated_cost_usd: float = 0.0
 
+RecoveryPreAttemptGuard = Callable[[], Awaitable[None]]
+
+
 class InferenceRequest(BaseModel):
     """Provider-neutral input to one model inference turn."""
 
@@ -133,6 +136,10 @@ class InferenceRequest(BaseModel):
     owner_user_id: str | None = Field(default=None, exclude=True)
     budget_identity: Identity | None = Field(default=None, exclude=True)
     cancellation_event: Any = None
+    recovery_pre_attempt_guard: RecoveryPreAttemptGuard | None = Field(
+        default=None,
+        exclude=True,
+    )
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
