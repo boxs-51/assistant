@@ -8,6 +8,7 @@ from se.src.provider.handlers.chat_handler import ChatExecutionHandler
 from se.src.runtimes.agent.adapters.inference import ProviderInferenceAdapter
 from se.src.runtimes.agent.contracts.recovery import RecoveryInferenceDisposition
 from se.src.runtimes.agent.persistence import DurableAgentStore
+from se.src.runtimes.agent.task_budget import TaskBudgetService
 from se.src.runtimes.agent.recovery_execution import AgentRecoveryExecutionService
 from se.src.runtimes.agent.recovery_planning import AgentRecoveryPlanningService
 from se.src.runtimes.agent.runtime import AgentRuntime
@@ -191,6 +192,7 @@ def test_r12_f3b_contract_freezes_exact_production_set_and_exclusions():
         "se/src/runtimes/agent/recovery_execution.py",
         "se/src/runtimes/agent/runtime.py",
         "se/src/runtimes/agent/persistence.py",
+        "se/src/runtimes/agent/task_budget.py",
         "se/src/runtimes/agent/contracts/inference.py",
         "se/src/runtimes/agent/adapters/inference.py",
         "se/src/provider/handlers/chat_handler.py",
@@ -215,6 +217,7 @@ def test_r12_f3b_contract_records_all_preclaim_findings_without_self_closure():
         "P1-R12-F3B-INFERENCE-AMBIGUOUS-OUTCOME-3",
         "P1-R12-F3B-POSTPROVIDER-PROGRESSION-FENCE-4",
         "P1-R12-F3B-NEXT-TOOL-DISPATCH-FENCE-5",
+        "P1-R12-F3B-TASKBUDGET-MUTATION-FENCE-6",
         "independent closure = PENDING",
         "No owner self-closes an independent gate.",
         "F3-B production CLAIM = CLOSED",
@@ -314,7 +317,7 @@ def test_r12_f3b_contract_defers_fresh_recovery_tool_calls_before_admission():
     assert "fresh recovered next-inference response contains tool_calls" in text
     assert "FAIL CLOSED / DEFER before any NEW logical tool-call construction" in text
     assert "zero new logical tool dispatch" in text
-    assert "eight-file maximum expansion = NO" in text
+    assert "ordinary tool-dispatch scope expansion = NO" in text
     assert "ordinary fresh-tool dispatch seams for recovered next-inference tool_calls" in text
 
 
@@ -324,3 +327,37 @@ def test_r12_f3b_contract_records_current_ctx210_as_non_material():
     assert "CTX-F5-3I-B3 production PR #210 is LANDED at current main" in text
     assert "f577fb370f1a73a8fdcc69e4221ac41c925a0338" in text
     assert "classified NON_MATERIAL inbound to this F3-B contract" in text
+
+
+
+def test_r12_f3b_taskbudget_mutations_currently_lack_recovery_fence_input():
+    reserve = inspect.getsource(TaskBudgetService.reserve_inference)
+    usage = inspect.getsource(TaskBudgetService.account_usage)
+
+    assert "_mutate_with_reservation(" in reserve
+    assert "_mutate_with_reservation(" in usage
+    assert "recovery_fence" not in reserve
+    assert "recovery_fence" not in usage
+    assert "expected_incarnation_generation" not in reserve
+
+
+def test_r12_f3b_contract_requires_taskbudget_same_uow_recovery_fence():
+    text = _read(DOC)
+
+    assert "Task-scoped inference accounting — exact same-UoW recovery fence" in text
+    assert "plan.task_budget_incarnation_generation" in text
+    assert "se/src/runtimes/agent/task_budget.py" in text
+    assert "lock/load the AgentExecution row" in text
+    assert "current TaskBudget incarnation_generation equals the frozen plan" in text
+    assert "rollback all TaskBudget mutation/reservation work if the R12 fence fails" in text
+    assert "no quota refund/release lifecycle" in text
+    assert "exact maximum production set of **nine** files" in text
+
+
+def test_r12_f3b_taskbudget_scope_preserves_ubq_authority():
+    text = _read(DOC)
+
+    assert "P1-R12-F3B-TASKBUDGET-MUTATION-FENCE-6" in text
+    assert "ADD task_budget.py / SAME-UoW EXACT R12 FENCE" in text
+    assert "UBQ bilateral closure = PENDING" in text
+    assert "does not redefine renewable UBQ accounting" in text
