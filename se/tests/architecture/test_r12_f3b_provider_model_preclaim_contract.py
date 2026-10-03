@@ -361,3 +361,26 @@ def test_r12_f3b_taskbudget_scope_preserves_ubq_authority():
     assert "ADD task_budget.py / SAME-UoW EXACT R12 FENCE" in text
     assert "UBQ bilateral closure = PENDING" in text
     assert "does not redefine renewable UBQ accounting" in text
+
+
+
+def test_r12_f3b_current_task_terminal_transition_lacks_recovery_fence():
+    finish = inspect.getsource(TaskBudgetService.finish_task_scoped_execution)
+    transition = inspect.getsource(TaskBudgetService._transition_execution_with_budget)
+
+    assert "_transition_execution_with_budget(" in finish
+    assert "compare_and_set_task_budget(" in transition
+    assert "compare_and_set_execution(" in transition
+    assert "recovery_fence" not in finish
+    assert "recovery_fence" not in transition
+
+
+def test_r12_f3b_contract_fences_task_and_non_task_terminal_commits():
+    text = _read(DOC)
+
+    assert "Task-scoped recovery terminalization is governed by the same rule." in text
+    assert "finish_task_scoped_execution()" in text
+    assert "_transition_execution_with_budget()" in text
+    assert "zero TaskBudget capacity release and zero AgentExecution terminalization" in text
+    assert "DurableAgentStore.compare_and_set_execution()" in text
+    assert "An outer runtime check is not durable commit authority." in text
