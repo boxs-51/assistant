@@ -213,3 +213,52 @@ def test_r12_f3b_contract_records_all_preclaim_findings_without_self_closure():
     )
     for item in required:
         assert item in text
+
+
+def test_r12_f3b_cas_projection_precedes_provider_executor_on_current_main():
+    source = inspect.getsource(ChatExecutionHandler.execute_with_fallback)
+
+    projection_predicate = source.index(
+        "asset_attempt_terminal = ("
+    )
+    projection_call = source.index(
+        "attempt_body = await self._project_asset_attempt(",
+        projection_predicate,
+    )
+    executor_call = source.index(
+        "response = await self.executor.execute(",
+        projection_call,
+    )
+
+    assert projection_predicate < projection_call < executor_call
+
+
+def test_r12_f3b_contract_defers_asset_bearing_recovery_before_projection():
+    text = _read(DOC)
+
+    assert "CAS-F5-D pre-send side-effect boundary" in text
+    assert "FAIL CLOSED / DEFER BEFORE _project_asset_attempt()" in text
+    assert "ZERO CanonicalAssetHydrationService.hydrate()" in text
+    assert "ZERO provider.files.upload_file_outcome()" in text
+    assert "ZERO new/updated provider binding" in text
+    assert "Ordinary non-recovery F5-D projection/hydration remains unchanged." in text
+
+
+def test_r12_f3b_contract_freezes_non_stream_only_scope():
+    text = _read(DOC)
+
+    assert "F3-B recovery provider progression is **NON-STREAM ONLY**." in text
+    assert "ChatExecutionHandler.stream_with_fallback = OUT OF SCOPE / UNCHANGED" in text
+    assert "ProviderExecutor.execute_stream = OUT OF SCOPE / UNCHANGED" in text
+    assert "GeneratedAssetStreamAssembler.observe = UNCHANGED" in text
+    assert "GeneratedAssetStreamAssembler.finalize = UNCHANGED" in text
+    assert "GeneratedAssetStreamAssembler.media_seen = UNCHANGED" in text
+    assert "Any future recovery support for streaming is a separate MATERIAL CAS overlap" in text
+
+
+def test_r12_f3b_contract_keeps_cas_bilateral_closure_independent():
+    text = _read(DOC)
+
+    assert "P1-CAS-R12-F3B-F5D-PRESEND-SIDE-EFFECT-1" in text
+    assert "P1-CAS-R12-F3B-STREAM-SCOPE-2" in text
+    assert text.count("independent CAS closure = PENDING") >= 2
