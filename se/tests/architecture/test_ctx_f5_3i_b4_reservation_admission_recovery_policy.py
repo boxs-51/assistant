@@ -204,7 +204,7 @@ def test_b4_freezes_source_backed_retry_and_fail_closed_source_loss() -> None:
         "ISSUED winner -> recover its exact PromotionReservation envelope",
         "CONSUMED winner -> recover its exact PromotionReservation envelope without calling the issuer",
         "REVOKED winner -> fail closed",
-        "if the source remains live, recovery may continue using the fresh transient content",
+        "if the source remains live, recovery may continue using fresh transient content from that same B2 re-proof",
         "if the source is unavailable/rejected after process loss, recovery fails closed",
         "fail-closed recovery does not synthesize content",
         "fail-closed recovery does not create a replacement reservation",
