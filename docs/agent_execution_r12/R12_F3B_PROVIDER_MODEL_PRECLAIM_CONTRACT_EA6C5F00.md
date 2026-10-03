@@ -428,6 +428,31 @@ Required red-first evidence:
 - exact replay of an already-existing reservation remains idempotent only under
   the same frozen TaskBudget incarnation.
 
+Task-scoped recovery terminalization is governed by the same rule.
+`AgentRuntime._transition_running_durable()` routes task-scoped completion
+through `TaskBudgetService.finish_task_scoped_execution()` /
+`_transition_execution_with_budget()`, which atomically changes TaskBudget
+capacity and AgentExecution state. On the F3-B recovery path that transition
+MUST carry the same exact recovery fence + frozen TaskBudget incarnation into
+that UoW and re-prove them immediately before TaskBudget CAS and
+AgentExecution CAS. A stale recovery owner must not release active capacity or
+terminalize the execution.
+
+For non-task recovery, `DurableAgentStore.compare_and_set_execution()` and any
+recovery checkpoint/iteration/terminal mutation similarly require an exact
+recovery-fenced persistence primitive or same-UoW proof in
+`se/src/runtimes/agent/persistence.py`. An outer runtime check is not durable
+commit authority.
+
+Additional red-first evidence:
+
+- lease loss before task-scoped COMPLETED/FAILED/CANCELLED/TIMEOUT transition
+  => zero TaskBudget capacity release and zero AgentExecution terminalization;
+- exact recovery fence + exact TaskBudget incarnation => one canonical
+  task-scoped terminal transition using existing reservation/idempotency rules;
+- stale non-task owner before terminal CAS => zero terminal mutation;
+- no recovery terminal path releases/remints renewable UBQ quota.
+
 ### 7.1 Fresh next-inference tool calls — Option A / DEFER
 
 The first bounded F3-B slice does **not** gain authority for a fresh logical
