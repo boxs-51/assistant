@@ -55,7 +55,8 @@ def _function_node(
     raise AssertionError(f"function {name} not found")
 
 
-def test_b3_is_exact_two_file_zero_production_contract_slice() -> None:
+def test_b3_landed_contract_precursor_records_historical_zero_production_slice() -> None:
+    """Freeze #207 precursor lineage without treating it as current B3 stage status."""
     contract = _semantic_contract()
 
     for phrase in (
@@ -67,15 +68,20 @@ def test_b3_is_exact_two_file_zero_production_contract_slice() -> None:
         "R12-F3-A PR #202 = LANDED / CANONICAL / HEALTHY",
         "IW-2026-10-02-06 = COMPLETE / authorization consumed",
         "parent CTX-F5-3I-B2 = LANDED / CANONICAL / HEALTHY",
-        "production PRE-CLAIM = HOLD pending independent B3 audit",
-        "production CLAIM = NONE",
-        "runtime/container/API wiring = CLOSED",
-        "Memory admission invocation = CLOSED",
         "production/runtime delta = ZERO",
         "CTX-F5-3I-B3 contract candidate is exactly two files",
         "No se/src/** production file changes",
     ):
         assert phrase in contract
+
+    # The Markdown is the landed zero-production contract precursor. Its old
+    # PRE-CLAIM/CLAIM/branch status strings are historical evidence only and
+    # are intentionally not certified here as current production-stage truth.
+    for invariant in (
+        "runtime/container/API wiring = CLOSED",
+        "Memory admission invocation = CLOSED",
+    ):
+        assert invariant in contract
 
 
 def test_landed_b2_exposes_trusted_material_proof_snapshot_and_digest() -> None:
@@ -204,7 +210,6 @@ def test_reservation_to_admission_recovery_fence_stays_open() -> None:
     for phrase in (
         "FUTURE-FENCE-CTX-B3-RESERVATION-TO-ADMISSION-CONTENT-RECOVERY-1",
         "fence status = OPEN / MUST BE DECIDED BEFORE RUNTIME OR ADMISSION ORCHESTRATION",
-        "B3 production PRE-CLAIM = HOLD pending independent decision",
         "Memory admission invocation = CLOSED",
         "public/runtime orchestration = CLOSED",
         "No contract wording may silently treat the reservation as if it stores content",
