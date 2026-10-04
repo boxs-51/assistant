@@ -56,11 +56,18 @@ def test_r12_h0_disposes_every_required_fault_exit_row():
     assert [line.split("|")[1].strip() for line in rows] == [
         f"H0-{index:02d}" for index in range(1, 21)
     ]
-    assert sum("| PASS" in line for line in rows) == 20
+    assert sum("| PASS" in line for line in rows) == 19
+    assert sum("| GAP / HOLD |" in line for line in rows) == 1
     assert any(
         "H0-19" in line
         and "PASS / EXACT-HEAD CI" in line
-        and "37200717067" in line
+        and "37202230575" in line
+        for line in rows
+    )
+    assert any(
+        "H0-20" in line
+        and "GAP / HOLD" in line
+        and "no startup/background/lifecycle wiring" in line
         for line in rows
     )
 
@@ -70,7 +77,7 @@ def test_r12_h0_binds_inherited_evidence_without_test_only_authority():
 
     required = (
         "EVIDENCE_BINDINGS",
-        "test_r12_h0_zombie_running_exit_chain_is_composed_from_canonical_seams",
+        "test_r12_h0_zombie_running_primitives_exist_but_liveness_gap_is_explicit",
         "test_r12_d1_observation_does_not_mutate_durable_execution",
         "test_r12_e_competing_recoverers_advance_generation_once",
         "test_r12_f2_atomic_activation_and_consumed_replay_do_not_remint_lease",
@@ -118,5 +125,7 @@ def test_r12_h0_final_gate_is_fail_closed():
 
     assert "H0-19 is updated from PENDING to PASS" in text
     assert "no row is GAP" in text
+    assert "| H0-20 | Server crash cannot leave zombie RUNNING indefinitely | GAP / HOLD |" in text
+    assert "separate bounded production PRE-CLAIM" in text
     assert "independent audit finds no blocking P0/P1/P2" in text
     assert "not R12-H closure" in text
