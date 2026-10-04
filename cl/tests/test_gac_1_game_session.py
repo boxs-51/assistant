@@ -1,3 +1,5 @@
+import threading
+
 import pytest
 
 from cl.src.game_automation.session.game_session import (
@@ -73,7 +75,6 @@ def test_close_is_terminal_and_invalidates_inflight_context():
     assert session.state is GameSessionState.CLOSED
     assert not session.is_current(context)
 
-    # Idempotent close does not manufacture repeated generations.
     assert session.close() == closed_generation
 
     with pytest.raises(SessionClosedError):
@@ -99,5 +100,106 @@ def test_explicit_empty_session_id_is_rejected():
 
 def test_omitted_session_id_generates_local_identity():
     session = GameSession()
-
     assert session.automation_session_id
+
+
+def test_hold_current_accepts_current_context_without_exposing_lock():
+    session = GameSession("guard-current")
+    session.bind(_identity())
+    context = session.current_capture_context()
+
+    guard = session.hold_current(context)
+    assert not hasattr(guard, "acquire")
+    assert not hasattr(guard, "release")
+
+    with guard as lease:
+        assert lease is None
+        session.assert_current(context)
+        assert session.is_current(context)
+
+
+@pytest.mark.parametrize("mutation", ["rebind", "unbind", "close"])
+def test_hold_current_rejects_context_invalidated_before_entry(mutation):
+    session = GameSession(f"guard-stale-{mutation}")
+    session.bind(_identity())
+    stale = session.current_capture_context()
+
+    if mutation == "rebind":
+        session.bind(_identity(hwnd=101, pid=201, started=301.0))
+    elif mutation == "unbind":
+        session.unbind()
+    else:
+        session.close()
+
+    with pytest.raises(StaleCaptureContextError):
+        with session.hold_current(stale):
+            raise AssertionError("stale lifecycle guard must not yield")
+
+
+@pytest.mark.parametrize("mutation", ["rebind", "unbind", "close"])
+def test_hold_current_blocks_concurrent_lifecycle_mutation_until_exit(mutation):
+    session = GameSession(f"guard-block-{mutation}")
+    session.bind(_identity())
+    context = session.current_capture_context()
+
+    attempted = threading.Event()
+    completed = threading.Event()
+    failures = []
+
+    def mutate():
+        attempted.set()
+        try:
+            if mutation == "rebind":
+                session.bind(_identity(hwnd=102, pid=202, started=302.0))
+            elif mutation == "unbind":
+                session.unbind()
+            else:
+                session.close()
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=mutate, daemon=True)
+
+    with session.hold_current(context):
+        worker.start()
+        assert attempted.wait(timeout=0.5)
+        assert completed.wait(timeout=0.05) is False
+        assert session.is_current(context)
+
+    assert completed.wait(timeout=0.5)
+    worker.join(timeout=0.5)
+    assert worker.is_alive() is False
+    assert failures == []
+    assert session.is_current(context) is False
+
+
+def test_hold_current_releases_lifecycle_lock_when_guarded_body_raises():
+    session = GameSession("guard-exception")
+    session.bind(_identity())
+    context = session.current_capture_context()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        with session.hold_current(context):
+            raise RuntimeError("boom")
+
+    completed = threading.Event()
+    failures = []
+
+    def rebind():
+        try:
+            session.bind(_identity(hwnd=103, pid=203, started=303.0))
+        except BaseException as error:
+            failures.append(error)
+        finally:
+            completed.set()
+
+    worker = threading.Thread(target=rebind, daemon=True)
+    worker.start()
+
+    assert completed.wait(timeout=0.5)
+    worker.join(timeout=0.5)
+    assert worker.is_alive() is False
+    assert failures == []
+    assert session.binding_generation == 2
