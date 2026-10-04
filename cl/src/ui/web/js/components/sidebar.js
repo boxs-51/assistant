@@ -214,8 +214,11 @@ function renderRenameInput(item) {
   if (!nameSpan) return;
 
   const currentName = item.name;
-  nameSpan.innerHTML = `<input type="text" class="tree-inline-input" value="${currentName}" />`;
-  const inputEl = nameSpan.querySelector('input');
+  const inputEl = document.createElement('input');
+  inputEl.type = 'text';
+  inputEl.className = 'tree-inline-input';
+  inputEl.value = currentName;
+  nameSpan.replaceChildren(inputEl);
   inputEl.focus();
   inputEl.select();
 
@@ -322,13 +325,14 @@ export const ExplorerPage = {
     rootItem.innerHTML = `
       <span class="folder-arrow">${isRootOpen ? '▼' : '▶'}</span>
       <span class="tree-icon">📦</span>
-      <span class="tree-item-name"><strong>${rootFolderName}</strong></span>
+      <span class="tree-item-name"><strong></strong></span>
       <div class="root-actions">
         <button class="root-btn btn-new-file" title="Tạo tệp mới">📄+</button>
         <button class="root-btn btn-new-folder" title="Tạo thư mục mới">📁+</button>
         <button class="root-btn btn-refresh" title="Làm mới">🔄</button>
       </div>
     `;
+    rootItem.querySelector('.tree-item-name strong').textContent = rootFolderName;
 
     const rootChildrenContainer = document.createElement('div');
     rootChildrenContainer.className = 'folder-children root-children';
@@ -393,8 +397,9 @@ export const ExplorerPage = {
         el.innerHTML = `
           <span class="folder-arrow">▶</span>
           <span class="tree-icon">📁</span>
-          <span class="tree-item-name">${item.name}</span>
+          <span class="tree-item-name"></span>
         `;
+        el.querySelector('.tree-item-name').textContent = item.name;
 
         const childContainer = document.createElement('div');
         childContainer.className = 'folder-children';
@@ -421,9 +426,11 @@ export const ExplorerPage = {
         const icon = getFileIcon(item.name);
         el.className = 'tree-item file';
         el.innerHTML = `
-          <span class="tree-icon">${icon}</span>
-          <span class="tree-item-name">${item.name}</span>
+          <span class="tree-icon"></span>
+          <span class="tree-item-name"></span>
         `;
+        el.querySelector('.tree-icon').textContent = icon;
+        el.querySelector('.tree-item-name').textContent = item.name;
 
         el.addEventListener('click', (e) => {
           e.stopPropagation();
@@ -488,8 +495,9 @@ export const SessionsPage = {
       el.className = 'session-item';
       el.innerHTML = `
         <span class="session-icon">💬</span> 
-        <span class="session-title">${session.name || 'Untitled Session'}</span>
+        <span class="session-title"></span>
       `;
+      el.querySelector('.session-title').textContent = session.name || 'Untitled Session';
 
       el.addEventListener('click', () => {
         document.querySelectorAll('.session-item').forEach(item => item.classList.remove('active'));
