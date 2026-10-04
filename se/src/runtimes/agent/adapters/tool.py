@@ -38,6 +38,7 @@ from ...capability.contracts.definition import (
 )
 from ...capability.contracts.error import (
     CapabilityContinuationDispatchGuardError,
+    TOOL_CALL_TIMEOUT,
 )
 from ...capability.contracts.invocation import ExistingInvocationContinuationMode
 from ...capability.contracts.implementation import CapabilityExecutionLocation
@@ -168,11 +169,23 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             else getattr(context.limits, "tool_timeout_seconds", None)
         )
         if timeout <= 0:
+            if is_long_running:
+                return self._failure(
+                    request,
+                    code="CAPABILITY_TIMEOUT",
+                    message="Agent execution deadline exceeded before tool start.",
+                    retryable=True,
+                    pre_dispatch=True,
+                )
             return self._failure(
                 request,
-                code="CAPABILITY_TIMEOUT",
-                message="Agent execution deadline exceeded before tool start.",
+                code=TOOL_CALL_TIMEOUT,
+                message="Tool call hard deadline exceeded before dispatch.",
                 retryable=True,
+                metadata={
+                    "timeout_scope": "tool_call",
+                    "timeout_seconds": max(0.0, float(timeout)),
+                },
                 pre_dispatch=True,
             )
 
