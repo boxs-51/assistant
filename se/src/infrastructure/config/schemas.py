@@ -14,6 +14,14 @@ class GatewaySettings(BaseModel):
     host: str = "0.0.0.0"
     port: int = 8000
     debug: bool = False
+    response_idle_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
+    response_hard_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
 
     allowed_origins: list[str] = ["*"]
 
