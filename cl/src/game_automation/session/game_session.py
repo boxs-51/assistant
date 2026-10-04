@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 import math
@@ -182,6 +184,22 @@ class GameSession:
     def is_current(self, context: CaptureContext) -> bool:
         with self._lock:
             return self._is_current_locked(context)
+
+    @contextmanager
+    def hold_current(self, context: CaptureContext) -> Iterator[None]:
+        """Hold one current binding stable across a bounded downstream action.
+
+        The guard reuses the same lifecycle lock as bind/unbind/close. It does
+        not expose that lock or grant downstream lifecycle authority. Callers
+        must keep the guarded region bounded and free of long waits.
+        """
+
+        with self._lock:
+            if not self._is_current_locked(context):
+                raise StaleCaptureContextError(
+                    "capture context does not match the current game-window binding"
+                )
+            yield None
 
     def reserve_frame_sequence(self, context: CaptureContext) -> int:
         """Allocate the next frame sequence only for a still-current binding."""
