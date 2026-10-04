@@ -124,6 +124,7 @@ _ITERATION_JSON_FIELDS = frozenset({
 })
 _TOOL_CALL_JSON_FIELDS = frozenset({"arguments", "extra_metadata"})
 _TOOL_RESULT_JSON_FIELDS = frozenset({"output", "extra_metadata"})
+_H1A_TERMINAL_RECEIPT_CONTEXT_KEY = "r12_h1a_terminal_receipt_v1"
 
 
 def _normalize_json_fields(
@@ -2236,6 +2237,7 @@ class DurableAgentStore:
         observed_lease_generation: int,
         observed_lease_expires_at: datetime,
         takeover_now_utc: datetime,
+        observed_revision: int | None = None,
     ):
         """Publish one non-task stale RUNNING execution as WAITING(RECOVERY)."""
 
@@ -2270,6 +2272,12 @@ class DurableAgentStore:
             raise ValueError(
                 "observed_lease_generation must be a positive integer"
             )
+        if observed_revision is not None and (
+            isinstance(observed_revision, bool)
+            or not isinstance(observed_revision, int)
+            or observed_revision < 0
+        ):
+            raise ValueError("observed_revision must be a non-negative integer")
 
         async with self.uow_factory() as uow:
             execution = await uow.agents.get_execution(execution_id)
@@ -2295,6 +2303,10 @@ class DurableAgentStore:
                 and execution.lease_expires_at is None
                 and int(execution.lease_generation)
                 == observed_lease_generation + 1
+                and (
+                    observed_revision is None
+                    or current_revision == observed_revision + 1
+                )
             ):
                 target_revision = current_revision
                 source_revision = target_revision - 1
@@ -2347,6 +2359,10 @@ class DurableAgentStore:
                 or durable_expiry != observed_lease_expires_at
                 or durable_expiry is None
                 or durable_expiry > takeover_now_utc
+                or (
+                    observed_revision is not None
+                    and current_revision != observed_revision
+                )
             ):
                 raise LeaseAuthorityConflictError(
                     "RECOVERY_TAKEOVER_REJECTED",
@@ -2499,6 +2515,136 @@ class DurableAgentStore:
                 )
             await uow.commit()
             return record
+
+    async def fail_expired_execution_unrecoverable(
+        self,
+        execution_id: str,
+        *,
+        source_revision: int,
+        observed_owner_instance_id: str,
+        observed_lease_generation: int,
+        observed_lease_expires_at: datetime,
+        takeover_now_utc: datetime,
+        reason_code: str,
+    ):
+        """Terminalize one exact non-task stale owner as FAILED."""
+
+        if isinstance(source_revision, bool) or not isinstance(
+            source_revision, int
+        ) or source_revision < 0:
+            raise ValueError("source_revision must be a non-negative integer")
+        if (
+            not isinstance(reason_code, str)
+            or not reason_code
+            or not reason_code.replace("_", "").isalnum()
+        ):
+            raise ValueError("reason_code must be a non-empty token")
+
+        async with self.uow_factory() as uow:
+            execution = await uow.agents.get_execution(execution_id)
+            if execution is None:
+                raise LeaseAuthorityConflictError(
+                    "RECOVERY_TERMINAL_REJECTED",
+                    f"Unknown AgentExecution: {execution_id}",
+                )
+            if execution.task_id is not None:
+                raise ExecutionConflictError(
+                    "Task-scoped H1-A failure requires TaskBudgetService."
+                )
+
+            expected_error = (
+                "R12_STALE_RECOVERY_UNRECOVERABLE:"
+                f"{reason_code}"
+            )
+            expected_receipt = {
+                "execution_id": str(execution_id),
+                "source_revision": int(source_revision),
+                "target_revision": int(source_revision + 1),
+                "target_state": "FAILED",
+                "reason_code": str(reason_code),
+                "observed_owner_instance_id": str(
+                    observed_owner_instance_id
+                ),
+                "observed_lease_generation": int(
+                    observed_lease_generation
+                ),
+                "observed_lease_expires_at": (
+                    observed_lease_expires_at.isoformat()
+                ),
+                "takeover_now_utc": takeover_now_utc.isoformat(),
+            }
+            current_context_state = dict(execution.context_state or {})
+            current_revision = int(execution.revision)
+            if (
+                str(execution.state) == "FAILED"
+                and current_revision == source_revision + 1
+                and str(execution.error or "") == expected_error
+                and execution.owner_instance_id is None
+                and execution.lease_expires_at is None
+                and int(execution.lease_generation)
+                == observed_lease_generation + 1
+                and current_context_state.get(
+                    _H1A_TERMINAL_RECEIPT_CONTEXT_KEY
+                )
+                == expected_receipt
+            ):
+                await uow.commit()
+                return execution
+
+            durable_expiry = _utc_datetime(execution.lease_expires_at)
+            if (
+                str(execution.state) != "RUNNING"
+                or current_revision != source_revision
+                or execution.owner_instance_id
+                != observed_owner_instance_id
+                or int(execution.lease_generation)
+                != observed_lease_generation
+                or durable_expiry != observed_lease_expires_at
+                or durable_expiry is None
+                or durable_expiry > takeover_now_utc
+            ):
+                raise LeaseAuthorityConflictError(
+                    "RECOVERY_TERMINAL_REJECTED",
+                    "Execution no longer matches the exact expired lease receipt.",
+                )
+
+            terminal_context_state = dict(current_context_state)
+            existing_terminal_receipt = terminal_context_state.get(
+                _H1A_TERMINAL_RECEIPT_CONTEXT_KEY
+            )
+            if (
+                existing_terminal_receipt is not None
+                and existing_terminal_receipt != expected_receipt
+            ):
+                raise ExecutionConflictError(
+                    "Existing H1-A terminal receipt conflicts with the "
+                    "exact stale owner receipt."
+                )
+            terminal_context_state[
+                _H1A_TERMINAL_RECEIPT_CONTEXT_KEY
+            ] = expected_receipt
+
+            record = (
+                await uow.agents.compare_and_set_expired_execution_terminal(
+                    execution_id,
+                    source_revision,
+                    observed_owner_instance_id=observed_owner_instance_id,
+                    observed_lease_generation=observed_lease_generation,
+                    observed_lease_expires_at=observed_lease_expires_at,
+                    takeover_now_utc=takeover_now_utc,
+                    reason_code=reason_code,
+                    terminal_context_state=terminal_context_state,
+                )
+            )
+            if record is None:
+                await uow.rollback()
+                raise LeaseAuthorityConflictError(
+                    "RECOVERY_TERMINAL_REJECTED",
+                    "Exact stale FAILED CAS lost its durable race.",
+                )
+            await uow.commit()
+            return record
+
 
     async def commit_waiting_checkpoint(
         self,

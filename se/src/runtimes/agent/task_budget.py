@@ -3516,6 +3516,7 @@ class TaskBudgetService:
         observed_lease_generation: int,
         observed_lease_expires_at: datetime,
         takeover_now_utc: datetime,
+        observed_revision: int | None = None,
     ) -> int:
         """Atomically publish a task-scoped stale RUNNING recovery safe point."""
 
@@ -3548,6 +3549,12 @@ class TaskBudgetService:
                 raise ValueError(
                     f"{field} must be a timezone-aware UTC datetime"
                 )
+        if observed_revision is not None and (
+            isinstance(observed_revision, bool)
+            or not isinstance(observed_revision, int)
+            or observed_revision < 0
+        ):
+            raise ValueError("observed_revision must be a non-negative integer")
 
         expected_generation: int | None = None
         for _ in range(self._max_conflict_retries):
@@ -3590,6 +3597,10 @@ class TaskBudgetService:
                         and execution.lease_expires_at is None
                         and int(execution.lease_generation)
                         == observed_lease_generation + 1
+                        and (
+                            observed_revision is None
+                            or current_revision == observed_revision + 1
+                        )
                     ):
                         target_revision = current_revision
                         source_revision = target_revision - 1
@@ -3693,6 +3704,10 @@ class TaskBudgetService:
                         or durable_expiry != observed_lease_expires_at
                         or durable_expiry is None
                         or durable_expiry > takeover_now_utc
+                        or (
+                            observed_revision is not None
+                            and current_revision != observed_revision
+                        )
                     ):
                         raise TaskBudgetConflictError(
                             "Execution no longer matches the exact expired "
@@ -3898,6 +3913,280 @@ class TaskBudgetService:
             "Task-scoped recovery conflicts exhausted for "
             f"{task_id}/{execution_id}"
         )
+
+    async def fail_unrecoverable_task_scoped_execution(
+        self,
+        task_id: str,
+        *,
+        execution_id: str,
+        source_revision: int,
+        observed_owner_instance_id: str,
+        observed_lease_generation: int,
+        observed_lease_expires_at: datetime,
+        takeover_now_utc: datetime,
+        reason_code: str,
+    ) -> int:
+        """Atomically fail one exact stale task execution and release capacity."""
+
+        if not task_id or not execution_id:
+            raise ValueError("task_id and execution_id must be non-empty")
+        if isinstance(source_revision, bool) or not isinstance(
+            source_revision, int
+        ) or source_revision < 0:
+            raise ValueError("source_revision must be a non-negative integer")
+        if (
+            not isinstance(reason_code, str)
+            or not reason_code
+            or not reason_code.replace("_", "").isalnum()
+        ):
+            raise ValueError("reason_code must be a non-empty token")
+        if (
+            not isinstance(observed_owner_instance_id, str)
+            or not observed_owner_instance_id.strip()
+        ):
+            raise ValueError(
+                "observed_owner_instance_id must be a non-empty string"
+            )
+        if (
+            isinstance(observed_lease_generation, bool)
+            or not isinstance(observed_lease_generation, int)
+            or observed_lease_generation <= 0
+        ):
+            raise ValueError(
+                "observed_lease_generation must be a positive integer"
+            )
+        for field, value in (
+            ("observed_lease_expires_at", observed_lease_expires_at),
+            ("takeover_now_utc", takeover_now_utc),
+        ):
+            if (
+                not isinstance(value, datetime)
+                or value.tzinfo is None
+                or value.utcoffset() != timedelta(0)
+            ):
+                raise ValueError(
+                    f"{field} must be a timezone-aware UTC datetime"
+                )
+
+        target_revision = source_revision + 1
+        expected_error = (
+            "R12_STALE_RECOVERY_UNRECOVERABLE:"
+            f"{reason_code}"
+        )
+        expected_generation: int | None = None
+
+        for _ in range(self._max_conflict_retries):
+            try:
+                async with self._uow_factory() as uow:
+                    execution = await uow.agents.get_execution(execution_id)
+                    if (
+                        execution is None
+                        or str(execution.task_id or "") != str(task_id)
+                    ):
+                        raise TaskBudgetConflictError(
+                            f"Unknown task-scoped execution: {execution_id}"
+                        )
+
+                    budget_record = await uow.agents.get_task_budget(task_id)
+                    if budget_record is None:
+                        raise TaskBudgetRequiredError(
+                            f"TaskBudget missing: {task_id}"
+                        )
+                    actual_generation = int(
+                        budget_record.incarnation_generation
+                    )
+                    if expected_generation is None:
+                        expected_generation = actual_generation
+                    elif actual_generation != expected_generation:
+                        raise TaskBudgetIncarnationChangedError(
+                            "TaskBudget incarnation changed during stale failure"
+                        )
+
+                    delegated = execution.parent_execution_id is not None
+                    receipt_payload = {
+                        "execution_id": str(execution_id),
+                        "source_revision": int(source_revision),
+                        "target_revision": int(target_revision),
+                        "target_state": "FAILED",
+                        "reason_code": str(reason_code),
+                        "observed_owner_instance_id": str(
+                            observed_owner_instance_id
+                        ),
+                        "observed_lease_generation": int(
+                            observed_lease_generation
+                        ),
+                        "observed_lease_expires_at": (
+                            observed_lease_expires_at.isoformat()
+                        ),
+                        "takeover_now_utc": takeover_now_utc.isoformat(),
+                        "delegated": delegated,
+                    }
+                    reservation_key = (
+                        f"{execution_id}:{target_revision}"
+                    )
+                    reservation_fingerprint = _reservation_fingerprint(
+                        TaskBudgetReservationKind.RELEASE_EXECUTION,
+                        reservation_key,
+                        receipt_payload,
+                    )
+
+                    if (
+                        str(execution.state) == "FAILED"
+                        and int(execution.revision) == target_revision
+                        and str(execution.error or "") == expected_error
+                        and execution.owner_instance_id is None
+                        and execution.lease_expires_at is None
+                        and int(execution.lease_generation)
+                        == observed_lease_generation + 1
+                    ):
+                        reservation = (
+                            await uow.agents.get_task_budget_reservation(
+                                task_id,
+                                TaskBudgetReservationKind.RELEASE_EXECUTION.value,
+                                reservation_key,
+                                expected_incarnation_generation=(
+                                    expected_generation
+                                ),
+                            )
+                        )
+                        if reservation is None:
+                            raise TaskBudgetConflictError(
+                                "Committed stale failure has no canonical "
+                                "RELEASE_EXECUTION reservation."
+                            )
+                        self._verify_reservation(
+                            reservation,
+                            reservation_fingerprint,
+                        )
+                        await uow.commit()
+                        return target_revision
+
+                    durable_expiry = execution.lease_expires_at
+                    if durable_expiry is not None:
+                        if durable_expiry.tzinfo is None:
+                            durable_expiry = durable_expiry.replace(
+                                tzinfo=timezone.utc
+                            )
+                        else:
+                            durable_expiry = durable_expiry.astimezone(
+                                timezone.utc
+                            )
+                    if (
+                        str(execution.state) != "RUNNING"
+                        or int(execution.revision) != source_revision
+                        or execution.owner_instance_id
+                        != observed_owner_instance_id
+                        or int(execution.lease_generation)
+                        != observed_lease_generation
+                        or durable_expiry != observed_lease_expires_at
+                        or durable_expiry is None
+                        or durable_expiry > takeover_now_utc
+                    ):
+                        raise TaskBudgetConflictError(
+                            "Execution no longer matches the exact expired "
+                            "lease receipt."
+                        )
+
+                    existing = (
+                        await uow.agents.get_task_budget_reservation(
+                            task_id,
+                            TaskBudgetReservationKind.RELEASE_EXECUTION.value,
+                            reservation_key,
+                            expected_incarnation_generation=(
+                                expected_generation
+                            ),
+                        )
+                    )
+                    if existing is not None:
+                        self._verify_reservation(
+                            existing,
+                            reservation_fingerprint,
+                        )
+                        raise TaskBudgetConflictError(
+                            "Stale failure RELEASE_EXECUTION reservation exists "
+                            "without an idempotently provable FAILED winner."
+                        )
+
+                    budget = _budget_from_record(budget_record)
+                    if budget.active_executions <= 0:
+                        raise TaskBudgetConflictError(
+                            "active_executions is already zero"
+                        )
+                    if delegated and budget.active_parallel_agents <= 0:
+                        raise TaskBudgetConflictError(
+                            "active_parallel_agents is already zero"
+                        )
+                    updated_budget = (
+                        await uow.agents.compare_and_set_task_budget(
+                            task_id,
+                            budget.revision,
+                            {
+                                "active_executions": (
+                                    budget.active_executions - 1
+                                ),
+                                "active_parallel_agents": (
+                                    budget.active_parallel_agents - 1
+                                    if delegated
+                                    else budget.active_parallel_agents
+                                ),
+                            },
+                            expected_incarnation_generation=expected_generation,
+                        )
+                    )
+                    if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    terminal = (
+                        await uow.agents
+                        .compare_and_set_expired_execution_terminal(
+                            execution_id,
+                            source_revision,
+                            observed_owner_instance_id=(
+                                observed_owner_instance_id
+                            ),
+                            observed_lease_generation=(
+                                observed_lease_generation
+                            ),
+                            observed_lease_expires_at=(
+                                observed_lease_expires_at
+                            ),
+                            takeover_now_utc=takeover_now_utc,
+                            reason_code=reason_code,
+                        )
+                    )
+                    if terminal is None:
+                        await uow.rollback()
+                        continue
+
+                    await uow.agents.save_task_budget_reservation(
+                        {
+                            "task_id": task_id,
+                            "kind": (
+                                TaskBudgetReservationKind.RELEASE_EXECUTION.value
+                            ),
+                            "reservation_key": reservation_key,
+                            "payload_fingerprint": reservation_fingerprint,
+                            "task_budget_incarnation_generation": (
+                                expected_generation
+                            ),
+                        }
+                    )
+                    await uow.commit()
+                    return target_revision
+            except IntegrityError:
+                continue
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskBudgetConflictError(
+            "Task-scoped stale failure conflicts exhausted for "
+            f"{task_id}/{execution_id}"
+        )
+
 
     async def finish_task_scoped_execution(
         self,

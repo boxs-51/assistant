@@ -132,6 +132,7 @@ class StaleLeaseSweepResult:
     pages_fetched: int
     observations: tuple[StaleLeaseObservation, ...]
     stop_reason: StaleLeaseSweepStopReason
+    observation_errors: tuple[str, ...] = ()
 
     @property
     def rows_observed(self) -> int:
@@ -156,6 +157,14 @@ class StaleLeaseScanCoordinator:
         self._policy = policy or StaleLeaseScanPolicy()
         self._clock = clock or SystemExecutionClock()
         self._scan_lock = asyncio.Lock()
+        self._after_expiry: datetime | None = None
+        self._after_execution_id: str | None = None
+
+    @property
+    def cursor(self) -> tuple[datetime | None, str | None]:
+        """Return process-local traversal state; never mutation authority."""
+
+        return self._after_expiry, self._after_execution_id
 
     async def scan_once(self) -> StaleLeaseSweepResult:
         # Lock acquisition is outside the sweep. A queued caller starts its own
@@ -171,9 +180,13 @@ class StaleLeaseScanCoordinator:
         started_monotonic = self._clock.monotonic()
 
         observations: list[StaleLeaseObservation] = []
+        observation_errors: list[str] = []
         pages_fetched = 0
-        after_expiry: datetime | None = None
-        after_execution_id: str | None = None
+        rows_returned = 0
+        after_expiry = self._after_expiry
+        after_execution_id = self._after_execution_id
+        last_returned_expiry: datetime | None = None
+        last_returned_execution_id: str | None = None
         stop_reason = StaleLeaseSweepStopReason.EXHAUSTED
 
         while True:
@@ -185,7 +198,7 @@ class StaleLeaseScanCoordinator:
                 stop_reason = StaleLeaseSweepStopReason.MAX_PAGES
                 break
 
-            remaining_rows = self._policy.max_rows - len(observations)
+            remaining_rows = self._policy.max_rows - rows_returned
             if remaining_rows <= 0:
                 stop_reason = StaleLeaseSweepStopReason.MAX_ROWS
                 break
@@ -212,25 +225,59 @@ class StaleLeaseScanCoordinator:
                 stop_reason = StaleLeaseSweepStopReason.MAX_DURATION
                 break
 
-            page = tuple(
-                StaleLeaseObservation.from_record(record)
-                for record in rows
-            )
-            observations.extend(page)
+            raw_page = tuple(rows)
+            rows_returned += len(raw_page)
+            for record in raw_page:
+                execution_id = str(getattr(record, "id", ""))
+                raw_expiry = _aware_utc(
+                    getattr(record, "lease_expires_at", None),
+                    field="lease_expires_at",
+                )
+                if not execution_id:
+                    raise ValueError(
+                        "expired lease scan row must have an execution id"
+                    )
 
-            if len(page) < request_limit:
+                # Cursor progression is based on the raw ordered row returned by
+                # D1, not on successful semantic observation construction.
+                # This lets one malformed row be isolated without pinning the
+                # bounded traversal prefix forever.
+                last_returned_expiry = raw_expiry
+                last_returned_execution_id = execution_id
+                after_expiry = raw_expiry
+                after_execution_id = execution_id
+
+                try:
+                    observations.append(
+                        StaleLeaseObservation.from_record(record)
+                    )
+                except Exception as exc:
+                    observation_errors.append(
+                        f"{execution_id}:{type(exc).__name__}:{exc}"
+                    )
+
+            if len(raw_page) < request_limit:
                 stop_reason = StaleLeaseSweepStopReason.EXHAUSTED
                 break
-            if len(observations) >= self._policy.max_rows:
+            if rows_returned >= self._policy.max_rows:
                 stop_reason = StaleLeaseSweepStopReason.MAX_ROWS
                 break
             if pages_fetched >= self._policy.max_pages:
                 stop_reason = StaleLeaseSweepStopReason.MAX_PAGES
                 break
 
-            last = page[-1]
-            after_expiry = last.lease_expires_at
-            after_execution_id = last.execution_id
+        # Cursor is process-local traversal state only.  A bounded stop
+        # continues strictly after the last observation actually returned to
+        # the caller.  Exhaustion completes one ordered pass and wraps.
+        if stop_reason == StaleLeaseSweepStopReason.EXHAUSTED:
+            self._after_expiry = None
+            self._after_execution_id = None
+        elif (
+            last_returned_expiry is not None
+            and last_returned_execution_id is not None
+        ):
+            self._after_expiry = last_returned_expiry
+            self._after_execution_id = last_returned_execution_id
 
         finished_monotonic = self._clock.monotonic()
         return StaleLeaseSweepResult(
@@ -240,6 +287,7 @@ class StaleLeaseScanCoordinator:
             pages_fetched=pages_fetched,
             observations=tuple(observations),
             stop_reason=stop_reason,
+            observation_errors=tuple(observation_errors),
         )
 
 
