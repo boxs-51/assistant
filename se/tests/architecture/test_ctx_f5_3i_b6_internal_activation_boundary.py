@@ -87,9 +87,19 @@ def test_b6_evidence_proves_storage_engine_is_the_narrow_activation_seam() -> No
     assert "self.services.clear()" in manager
     assert 'self.drivers.is_available("sqlite")' in manager
 
-    # B5 is still dormant on the contract baseline.
-    for source in (manager, container, main):
+    # The historical B6 contract was dormant, but the separately released
+    # B6-ACTIVATION-1 slice now activates B5 only inside StorageEngine.
+    assert "DurableToolResponsePayloadMemoryPromotion" in manager
+    for source in (container, main):
         assert "DurableToolResponsePayloadMemoryPromotion" not in source
+
+    assert (
+        '_TOOL_RESPONSE_PAYLOAD_MEMORY_PROMOTION = ('
+        in manager
+    )
+    assert '"tool_response_payload_memory_promotion"' in manager
+    assert "_GenerationBoundToolResponsePayloadMemoryPromotion" in manager
+    assert "_active_service_generation" in manager
 
     assert "storage: Any" in container
     assert "container = ApplicationContainer(" in main
@@ -263,3 +273,47 @@ def test_b6_lifetime_follow_up_keeps_non_authorities_closed() -> None:
     ):
         assert phrase in contract
 
+
+def test_b6_activation_reuses_public_sqlite_session_context_only() -> None:
+    manager = _read(MANAGER)
+
+    assert "session_context_factory = sqlite_driver.get_session" in manager
+    assert "DurableToolResponsePayloadSourceAuthority(" in manager
+    assert "DurablePromotionReservationIssuer(" in manager
+    assert "DurablePromotionReservationRecovery(" in manager
+    assert "DurableToolResponsePayloadPromotionOrchestration(" in manager
+    assert "DurableMemoryPromotionAdmission(" in manager
+    assert "DurableToolResponsePayloadMemoryPromotion(" in manager
+
+    assert "create_async_engine" not in manager
+    assert "async_sessionmaker" not in manager
+    assert "._session_factory" not in manager
+
+
+def test_b6_activation_revokes_generation_before_storage_teardown() -> None:
+    manager = _read(MANAGER)
+
+    assert "self._begin_service_generation()" in manager
+    assert "self._revoke_service_generation()" in manager
+    disconnect_start = manager.index("async def disconnect")
+    disconnect_end = manager.index(
+        "    # =========================================================",
+        disconnect_start,
+    )
+    disconnect = manager[disconnect_start:disconnect_end]
+    started_branch = disconnect.index(
+        'logger.info(\n            "Storage Engine is shutting down..."'
+    )
+    not_started = disconnect[:started_branch]
+    started = disconnect[started_branch:]
+
+    assert disconnect.count("await self.drivers.disconnect_all()") == 2
+    for branch in (not_started, started):
+        assert branch.count("self._revoke_service_generation()") == 1
+        assert branch.count("await self.drivers.disconnect_all()") == 1
+        assert branch.index("self._revoke_service_generation()") < branch.index(
+            "await self.drivers.disconnect_all()"
+        )
+
+    assert "self._started" in manager
+    assert "self._active_service_generation == generation" in manager
