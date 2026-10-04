@@ -111,7 +111,8 @@ def test_ubq5_t0_freezes_gateway_response_compatibility_without_task_terminaliza
     text = _doc()
 
     assert "GATEWAY_RESPONSE_TIMEOUT" in router
-    assert '"timeout_scope": "response_wait"' in router
+    assert '"response_wait"' in router
+    assert '"timeout_scope": timeout_scope' in router
     assert '"timeout_seconds": timeout_val' in router
 
     assert "RESPONSE_IDLE_TIMEOUT" in text
@@ -331,7 +332,11 @@ def test_ubq5_t0_marks_adjacent_gateway_and_agent_timers_keep_or_out_of_scope() 
     assert "execution_limits.timeout_seconds" in coordinator
     assert "remaining_duration" in scanner
     assert "timeout=remaining_duration" in scanner
-    assert "queue.get(), timeout=1.0" in chat_router
+    assert "_RESPONSE_TIMEOUT_POLL_SECONDS = 1.0" in chat_router
+    assert "wait_timeout = min(" in chat_router
+    assert "deadline[0] - now" in chat_router
+    assert "queue.get()," in chat_router
+    assert "timeout=wait_timeout" in chat_router
     assert 'yield ": ping\\n\\n"' in chat_router
 
     for path in (
