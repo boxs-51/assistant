@@ -143,8 +143,17 @@ class GameWindowManager:
         self._backend = backend or WindowsWindowBackend()
 
     def enumerate_windows(self) -> tuple[GameWindowIdentity, ...]:
+        try:
+            handles = tuple(self._backend.enumerate_windows())
+        except UnsupportedPlatformError:
+            raise
+        except Exception as error:
+            raise WindowTargetUnavailableError(
+                "native window enumeration failed"
+            ) from error
+
         candidates: list[GameWindowIdentity] = []
-        for hwnd in self._backend.enumerate_windows():
+        for hwnd in handles:
             try:
                 if not self._backend.is_window(hwnd):
                     continue
@@ -156,75 +165,94 @@ class GameWindowManager:
                 if geometry.width <= 0 or geometry.height <= 0:
                     continue
                 candidates.append(self.identity_for_hwnd(hwnd))
-            except (WindowTargetError, OSError, RuntimeError):
+            except UnsupportedPlatformError:
+                raise
+            except Exception:
                 # Enumeration is discovery only; an unstable candidate is omitted
                 # rather than becoming binding authority.
                 continue
         return tuple(candidates)
 
     def identity_for_hwnd(self, hwnd: int) -> GameWindowIdentity:
-        if not self._backend.is_window(hwnd):
-            raise WindowTargetUnavailableError("native window no longer exists")
-
-        process_id = self._backend.process_id(hwnd)
-        if process_id <= 0:
-            raise WindowTargetUnavailableError("window has no valid process owner")
-
         try:
-            process_start_time = self._backend.process_start_time(process_id)
-        except (OSError, RuntimeError) as error:
+            if not self._backend.is_window(hwnd):
+                raise WindowTargetUnavailableError("native window no longer exists")
+
+            process_id = int(self._backend.process_id(hwnd))
+            if process_id <= 0:
+                raise WindowTargetUnavailableError(
+                    "window has no valid process owner"
+                )
+
+            process_start_time = float(
+                self._backend.process_start_time(process_id)
+            )
+            title = str(self._backend.window_title(hwnd) or "")
+            executable = self._backend.executable(process_id)
+
+            return GameWindowIdentity(
+                hwnd=int(hwnd),
+                process_id=process_id,
+                process_start_time=process_start_time,
+                title=title,
+                executable=executable,
+            )
+        except UnsupportedPlatformError:
+            raise
+        except WindowTargetUnavailableError:
+            raise
+        except Exception as error:
             raise WindowTargetUnavailableError(
                 "window process identity cannot be resolved"
             ) from error
-
-        return GameWindowIdentity(
-            hwnd=int(hwnd),
-            process_id=int(process_id),
-            process_start_time=float(process_start_time),
-            title=self._backend.window_title(hwnd),
-            executable=self._backend.executable(process_id),
-        )
 
     def validate_binding(self, identity: GameWindowIdentity) -> CaptureGeometry:
         """Validate HWND/PID/process-instance and capture-supported state."""
 
         hwnd = identity.hwnd
-        if not self._backend.is_window(hwnd):
-            raise WindowTargetUnavailableError("bound window was destroyed or replaced")
-        if not self._backend.is_visible(hwnd):
-            raise WindowTargetUnavailableError("bound window is not visible")
-        if self._backend.is_minimized(hwnd):
-            raise WindowTargetUnavailableError("minimized windows are not capturable")
-
-        current_pid = int(self._backend.process_id(hwnd))
-        if current_pid != identity.process_id:
-            raise WindowTargetUnavailableError(
-                "bound window process changed; refusing HWND reuse"
-            )
-
         try:
+            if not self._backend.is_window(hwnd):
+                raise WindowTargetUnavailableError(
+                    "bound window was destroyed or replaced"
+                )
+            if not self._backend.is_visible(hwnd):
+                raise WindowTargetUnavailableError("bound window is not visible")
+            if self._backend.is_minimized(hwnd):
+                raise WindowTargetUnavailableError(
+                    "minimized windows are not capturable"
+                )
+
+            current_pid = int(self._backend.process_id(hwnd))
+            if current_pid != identity.process_id:
+                raise WindowTargetUnavailableError(
+                    "bound window process changed; refusing HWND reuse"
+                )
+
             current_start_time = float(
                 self._backend.process_start_time(current_pid)
             )
-        except (OSError, RuntimeError) as error:
+            if current_start_time != identity.process_start_time:
+                raise WindowTargetUnavailableError(
+                    "bound process start time changed; refusing PID reuse"
+                )
+
+            try:
+                geometry = self._backend.client_geometry(hwnd)
+            except Exception as error:
+                raise WindowTargetUnavailableError(
+                    "bound window has no valid client capture area"
+                ) from error
+
+            if geometry.width <= 0 or geometry.height <= 0:
+                raise WindowTargetUnavailableError(
+                    "bound window has an empty client capture area"
+                )
+            return geometry
+        except UnsupportedPlatformError:
+            raise
+        except WindowTargetUnavailableError:
+            raise
+        except Exception as error:
             raise WindowTargetUnavailableError(
-                "bound process instance cannot be validated"
+                "bound window validation failed closed"
             ) from error
-
-        if current_start_time != identity.process_start_time:
-            raise WindowTargetUnavailableError(
-                "bound process start time changed; refusing PID reuse"
-            )
-
-        try:
-            geometry = self._backend.client_geometry(hwnd)
-        except (ValueError, OSError, RuntimeError) as error:
-            raise WindowTargetUnavailableError(
-                "bound window has no valid client capture area"
-            ) from error
-
-        if geometry.width <= 0 or geometry.height <= 0:
-            raise WindowTargetUnavailableError(
-                "bound window has an empty client capture area"
-            )
-        return geometry
