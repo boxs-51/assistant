@@ -17,6 +17,49 @@ logger = logging.getLogger(__name__)
 
 MAX_CANONICAL_IN_MEMORY_CONTENT_BYTES = 32 * 1024 * 1024
 
+class UIBridgeJSFacade:
+    """Explicit least-privilege surface exposed to the privileged WebView."""
+
+    def __init__(self, bridge):
+        self._bridge = bridge
+
+    def login(self, payload: dict): return self._bridge.login(payload)
+    def register(self, payload: dict): return self._bridge.register(payload)
+    def verify_registration(self, payload: dict): return self._bridge.verify_registration(payload)
+    def initiate_password_reset(self, payload: dict): return self._bridge.initiate_password_reset(payload)
+    def confirm_password_reset(self, payload: dict): return self._bridge.confirm_password_reset(payload)
+    def logout(self): return self._bridge.logout()
+
+    def get_app_snapshot(self): return self._bridge.get_app_snapshot()
+    def set_chat_preferences(self, payload: dict): return self._bridge.set_chat_preferences(payload)
+    def list_models(self, provider: str): return self._bridge.list_models(provider)
+    def activate_skill(self, skill_name: str): return self._bridge.activate_skill(skill_name)
+    def deactivate_skill(self, skill_name: str): return self._bridge.deactivate_skill(skill_name)
+    def execute_tool(self, tool_name: str = None, tool_arguments: dict = None):
+        return self._bridge.execute_tool(tool_name, tool_arguments)
+    def save_agent(self, payload: dict): return self._bridge.save_agent(payload)
+    def run_agent(self, payload: dict): return self._bridge.run_agent(payload)
+    def get_agent_task_status(self, task_id: str): return self._bridge.get_agent_task_status(task_id)
+    def cancel_agent_task(self, task_id: str): return self._bridge.cancel_agent_task(task_id)
+
+    def read_asset_content(self, asset_id: str, byte_range: str = None, max_bytes: int = None):
+        return self._bridge.read_asset_content(asset_id, byte_range, max_bytes)
+    def submit_prompt(self, text: str, files: list = None, conversation_id: str = None):
+        return self._bridge.submit_prompt(text, files, conversation_id)
+    def get_sessions(self): return self._bridge.get_sessions()
+    def prepare_files_async(self, files: list): return self._bridge.prepare_files_async(files)
+    def respond_approval(self, choice: bool, approval_id: str = None):
+        return self._bridge.respond_approval(choice, approval_id)
+
+    def get_workspace_files(self): return self._bridge.get_workspace_files()
+    def read_file_content(self, path: str): return self._bridge.read_file_content(path)
+    def save_file_content(self, path: str, content: str): return self._bridge.save_file_content(path, content)
+    def rename_file_content(self, old_path: str, new_name: str):
+        return self._bridge.rename_file_content(old_path, new_name)
+    def delete_file_content(self, path: str): return self._bridge.delete_file_content(path)
+    def open_file_picker(self): return self._bridge.open_file_picker()
+
+
 class UIBridge:
     def __init__(self, engine, hitl, client_runtime):
         self._engine = engine
@@ -315,9 +358,13 @@ class UIBridge:
         self._window = window
 
     def _eval_js(self, js_code: str):
-        if self._window:
-            try: self._window.evaluate_js(js_code)
-            except Exception as e: logger.warning("Lỗi JS: %s", e)
+        if not self._window:
+            return False
+        try:
+            return self._window.evaluate_js(js_code)
+        except Exception as error:
+            logger.warning("Lỗi JS: %s", error)
+            return False
 
     def render_block(self, role="assistant", btype=None, data=None, **kwargs):
         payload = {"role": role, "data": data, **kwargs}
@@ -656,7 +703,7 @@ class UIBridge:
         self._client_runtime.start()
         return self._engine.gateway_client.get_sessions()
     def encode_files_async(self, files: list): return self.encoder.encode_async(files)
-    def respond_approval(self, choice: bool, aid: str = None): return self.hitl.respond(choice, aid)
+    def respond_approval(self, choice: bool, approval_id: str = None): return self.hitl.respond(choice, approval_id)
     def get_workspace_files(self): return self.workspace.get_files()
     def read_file_content(self, path: str): return self.workspace.read_file(path)
     def save_file_content(self, path: str, content: str): return self.workspace.save_file(path, content)
