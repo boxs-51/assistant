@@ -13,6 +13,7 @@ from ..models.sql.assets import (
     FileBlobRecord,
     FileProviderBindingRecord,
     FileReferenceRecord,
+    ToolMediaAssetProjectionRecord,
 )
 
 
@@ -529,3 +530,77 @@ class AssetRepository:
         record = result.scalar_one_or_none()
         await self.session.flush()
         return record
+
+    async def get_tool_media_projection_by_source_key(
+        self,
+        *,
+        source_result_id: str,
+        invocation_id: str,
+        tool_call_id: str,
+        capability_id: str,
+        media_ordinal: int,
+    ) -> Optional[ToolMediaAssetProjectionRecord]:
+        result = await self.session.execute(
+            select(ToolMediaAssetProjectionRecord)
+            .where(
+                ToolMediaAssetProjectionRecord.source_result_id
+                == source_result_id,
+                ToolMediaAssetProjectionRecord.invocation_id
+                == invocation_id,
+                ToolMediaAssetProjectionRecord.tool_call_id
+                == tool_call_id,
+                ToolMediaAssetProjectionRecord.capability_id
+                == capability_id,
+                ToolMediaAssetProjectionRecord.media_ordinal
+                == media_ordinal,
+            )
+            .limit(1)
+        )
+        return result.scalar_one_or_none()
+
+    async def try_create_tool_media_projection_reservation(
+        self,
+        values: Mapping[str, Any],
+    ) -> tuple[ToolMediaAssetProjectionRecord, bool]:
+        record = ToolMediaAssetProjectionRecord(**dict(values))
+        try:
+            async with self.session.begin_nested():
+                self.session.add(record)
+                await self.session.flush()
+        except IntegrityError:
+            winner = await self.get_tool_media_projection_by_source_key(
+                source_result_id=record.source_result_id,
+                invocation_id=record.invocation_id,
+                tool_call_id=record.tool_call_id,
+                capability_id=record.capability_id,
+                media_ordinal=record.media_ordinal,
+            )
+            if winner is None:
+                raise
+            return winner, False
+        return record, True
+
+    async def compare_and_set_tool_media_projection(
+        self,
+        projection_id: str,
+        *,
+        expected_revision: int,
+        expected_state: str,
+        values: Mapping[str, Any],
+    ) -> Optional[ToolMediaAssetProjectionRecord]:
+        next_values = dict(values)
+        next_values["revision"] = expected_revision + 1
+        result = await self.session.execute(
+            update(ToolMediaAssetProjectionRecord)
+            .where(
+                ToolMediaAssetProjectionRecord.id == projection_id,
+                ToolMediaAssetProjectionRecord.revision == expected_revision,
+                ToolMediaAssetProjectionRecord.state == expected_state,
+            )
+            .values(**next_values)
+            .returning(ToolMediaAssetProjectionRecord)
+        )
+        record = result.scalar_one_or_none()
+        await self.session.flush()
+        return record
+

@@ -51,7 +51,7 @@ def test_ubq2_is_single_linear_alembic_head() -> None:
         str(ROOT / "se/src/infrastructure/storage/migrations/sql"),
     )
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["26a_ubq2_dual_accounting_bridge"]
+    assert script.get_heads() == ["27a_cas_f7_t_tool_media_projection"]
     assert (
         script.get_revision("26a_ubq2_dual_accounting_bridge").down_revision
         == "25a_ubq1_user_budget_foundation"
