@@ -1,7 +1,7 @@
 """Client DTO for Agent execution budgets used by chat requests."""
 
 from typing import Optional
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 
 from .base import GatewayBaseModel
 
@@ -11,10 +11,31 @@ class AgentExecutionLimits(GatewayBaseModel):
     max_tool_calls: int = 16
     max_parallel_agents: int = 4
     max_parallel_tools: int = 4
-    timeout_seconds: float = 60.0
+    timeout_seconds: float = Field(
+        default=60.0,
+        validation_alias=AliasChoices(
+            "execution_timeout_seconds",
+            "timeout_seconds",
+        ),
+        serialization_alias="timeout_seconds",
+    )
     iteration_timeout_seconds: float = 20.0
-    inference_timeout_seconds: float = 15.0
-    tool_timeout_seconds: float = 10.0
+    inference_timeout_seconds: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices(
+            "provider_call_timeout_seconds",
+            "inference_timeout_seconds",
+        ),
+        serialization_alias="inference_timeout_seconds",
+    )
+    tool_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices(
+            "tool_call_timeout_seconds",
+            "tool_timeout_seconds",
+        ),
+        serialization_alias="tool_timeout_seconds",
+    )
     task_timeout_seconds: Optional[float] = Field(default=None, gt=0)
     max_retry_attempts: int = 1
     max_cost: Optional[float] = None
