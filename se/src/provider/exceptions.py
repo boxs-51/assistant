@@ -19,6 +19,9 @@ PROVIDER_MODEL_UNAVAILABLE = "PROVIDER_MODEL_UNAVAILABLE"
 PROVIDER_RESPONSE_INVALID = "PROVIDER_RESPONSE_INVALID"
 PROVIDER_FALLBACK_EXHAUSTED = "PROVIDER_FALLBACK_EXHAUSTED"
 PROVIDER_DEADLINE_EXCEEDED = "PROVIDER_DEADLINE_EXCEEDED"
+PROVIDER_CALL_TIMEOUT = "PROVIDER_CALL_TIMEOUT"
+PROVIDER_FIRST_RESPONSE_TIMEOUT = "PROVIDER_FIRST_RESPONSE_TIMEOUT"
+PROVIDER_STREAM_IDLE_TIMEOUT = "PROVIDER_STREAM_IDLE_TIMEOUT"
 
 _GOOGLE_RETRY_INFO_TYPE = "type.googleapis.com/google.rpc.RetryInfo"
 _PROTO_DURATION_SECONDS_RE = re.compile(
@@ -114,6 +117,91 @@ class ProviderDeadlineExceededError(ProviderError):
     """Logical provider-call deadline is exhausted."""
 
     code = PROVIDER_DEADLINE_EXCEEDED
+
+
+class ProviderTimeoutError(TimeoutError):
+    """Canonical provider-timeout truth with public scope metadata."""
+
+    code = PROVIDER_CALL_TIMEOUT
+    failure_domain = "PROVIDER"
+    retryable = False
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_name: str | None = None,
+        timeout_scope: str,
+        timeout_seconds: float,
+    ) -> None:
+        timeout = float(timeout_seconds)
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("timeout_seconds must be finite and positive")
+        self.provider_name = provider_name
+        self.timeout_scope = timeout_scope
+        self.timeout_seconds = timeout
+        prefix = f"[{provider_name}] " if provider_name else ""
+        super().__init__(f"{prefix}{message}")
+
+
+class ProviderCallTimeoutError(ProviderTimeoutError):
+    """The one logical provider-call hard deadline expired."""
+
+    code = PROVIDER_CALL_TIMEOUT
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_name: str | None = None,
+        timeout_seconds: float,
+    ) -> None:
+        super().__init__(
+            message,
+            provider_name=provider_name,
+            timeout_scope="provider_call",
+            timeout_seconds=timeout_seconds,
+        )
+
+
+class ProviderFirstResponseTimeoutError(ProviderTimeoutError):
+    """No meaningful provider stream progress arrived before the first fence."""
+
+    code = PROVIDER_FIRST_RESPONSE_TIMEOUT
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_name: str | None = None,
+        timeout_seconds: float,
+    ) -> None:
+        super().__init__(
+            message,
+            provider_name=provider_name,
+            timeout_scope="provider_first_response",
+            timeout_seconds=timeout_seconds,
+        )
+
+
+class ProviderStreamIdleTimeoutError(ProviderTimeoutError):
+    """A started provider stream stopped making meaningful progress."""
+
+    code = PROVIDER_STREAM_IDLE_TIMEOUT
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        provider_name: str | None = None,
+        timeout_seconds: float,
+    ) -> None:
+        super().__init__(
+            message,
+            provider_name=provider_name,
+            timeout_scope="provider_stream_idle",
+            timeout_seconds=timeout_seconds,
+        )
 
 
 class ProviderRecoveryGuardError(RuntimeError):
