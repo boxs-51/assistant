@@ -62,25 +62,6 @@ class ChatExecutionHandler(BaseExecutionHandler):
             else GeneratedAssetCanonicalizer.unavailable()
         )
 
-    def _as_provider_call_timeout(
-        self,
-        error: ProviderDeadlineExceededError,
-    ) -> ProviderCallTimeoutError:
-        return ProviderCallTimeoutError(
-            "Provider logical call timed out.",
-            provider_name=getattr(error, "provider_name", None),
-            timeout_seconds=self.timeout,
-        )
-
-    def _new_provider_call_budget(
-        self,
-        deadline_monotonic: float | None,
-    ):
-        try:
-            return self._new_call_budget(deadline_monotonic)
-        except ProviderDeadlineExceededError as error:
-            raise self._as_provider_call_timeout(error) from error
-
     async def _reserve_inference_quota(
         self,
         *,
@@ -276,7 +257,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
             quota_context=quota_context,
             streaming_mode=False,
         )
-        call_budget = self._new_provider_call_budget(deadline_monotonic)
+        call_budget = self._new_call_budget(deadline_monotonic)
         healthy_execution_chain = await self._get_healthy_fallback_chain(
             execution_chain
         )
@@ -359,8 +340,8 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     raise
                 except ProviderCallTimeoutError:
                     raise
-                except ProviderDeadlineExceededError as error:
-                    raise self._as_provider_call_timeout(error) from error
+                except ProviderDeadlineExceededError:
+                    raise
                 except (
                     ProviderError,
                     httpx.RequestError,
@@ -392,17 +373,9 @@ class ChatExecutionHandler(BaseExecutionHandler):
 
         try:
             self._remaining_timeout(call_budget)
-        except ProviderCallTimeoutError:
-            raise
-        except ProviderDeadlineExceededError as deadline_error:
-            raise ProviderCallTimeoutError(
-                "Provider call deadline exhausted during fallback.",
-                provider_name=getattr(
-                    deadline_error,
-                    "provider_name",
-                    last_provider_name,
-                ),
-                timeout_seconds=self.timeout,
+        except ProviderDeadlineExceededError:
+            raise ProviderDeadlineExceededError(
+                "Provider call deadline exhausted during fallback."
             ) from last_exception
 
         detail = last_detail or (
@@ -459,7 +432,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
             quota_context=quota_context,
             streaming_mode=True,
         )
-        call_budget = self._new_provider_call_budget(deadline_monotonic)
+        call_budget = self._new_call_budget(deadline_monotonic)
         healthy_execution_chain = await self._get_healthy_fallback_chain(
             execution_chain
         )
@@ -613,8 +586,8 @@ class ChatExecutionHandler(BaseExecutionHandler):
             except ProviderCallTimeoutError:
                 raise
 
-            except ProviderDeadlineExceededError as error:
-                raise self._as_provider_call_timeout(error) from error
+            except ProviderDeadlineExceededError:
+                raise
 
             except ProviderFirstResponseTimeoutError as error:
                 logger.warning(
@@ -686,17 +659,9 @@ class ChatExecutionHandler(BaseExecutionHandler):
 
         try:
             self._remaining_timeout(call_budget)
-        except ProviderCallTimeoutError:
-            raise
-        except ProviderDeadlineExceededError as deadline_error:
-            raise ProviderCallTimeoutError(
-                "Provider stream deadline exhausted during fallback.",
-                provider_name=getattr(
-                    deadline_error,
-                    "provider_name",
-                    last_provider_name,
-                ),
-                timeout_seconds=self.timeout,
+        except ProviderDeadlineExceededError:
+            raise ProviderDeadlineExceededError(
+                "Provider stream deadline exhausted during fallback."
             ) from last_exception
 
         if isinstance(last_exception, ProviderFirstResponseTimeoutError):
