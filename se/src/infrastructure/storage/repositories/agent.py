@@ -1047,6 +1047,85 @@ class AgentRepository(BaseRepository):
         await self.session.flush()
         return await self.get_execution(execution_id)
 
+    async def compare_and_set_expired_execution_terminal(
+        self,
+        execution_id: str,
+        expected_revision: int,
+        *,
+        observed_owner_instance_id: str,
+        observed_lease_generation: int,
+        observed_lease_expires_at: datetime,
+        takeover_now_utc: datetime,
+        reason_code: str,
+        terminal_context_state: dict | None = None,
+    ):
+        """Atomically terminalize one exact expired owner as FAILED."""
+
+        observed_owner_instance_id = _require_lease_owner(
+            observed_owner_instance_id
+        )
+        observed_lease_generation = _require_lease_generation(
+            observed_lease_generation
+        )
+        observed_lease_expires_at = _require_lease_utc_datetime(
+            observed_lease_expires_at,
+            field="observed_lease_expires_at",
+        )
+        takeover_now_utc = _require_lease_utc_datetime(
+            takeover_now_utc,
+            field="takeover_now_utc",
+        )
+        if isinstance(expected_revision, bool) or not isinstance(
+            expected_revision,
+            int,
+        ) or expected_revision < 0:
+            raise ValueError("expected_revision must be a non-negative integer")
+        if (
+            not isinstance(reason_code, str)
+            or not reason_code
+            or not reason_code.replace("_", "").isalnum()
+        ):
+            raise ValueError("reason_code must be a non-empty token")
+
+        next_values = {
+            "revision": expected_revision + 1,
+            "state": "FAILED",
+            "wait_reason": None,
+            "wait_expires_at": None,
+            "owner_instance_id": None,
+            "lease_expires_at": None,
+            "lease_generation": observed_lease_generation + 1,
+            "completed_at": takeover_now_utc,
+            "error": (
+                "R12_STALE_RECOVERY_UNRECOVERABLE:"
+                f"{reason_code}"
+            ),
+        }
+        if terminal_context_state is not None:
+            next_values["context_state"] = dict(terminal_context_state)
+
+        result = await self.session.execute(
+            update(AgentExecutionRecord)
+            .where(
+                AgentExecutionRecord.id == execution_id,
+                AgentExecutionRecord.revision == expected_revision,
+                AgentExecutionRecord.state == "RUNNING",
+                AgentExecutionRecord.owner_instance_id
+                == observed_owner_instance_id,
+                AgentExecutionRecord.lease_generation
+                == observed_lease_generation,
+                AgentExecutionRecord.lease_expires_at
+                == observed_lease_expires_at,
+                AgentExecutionRecord.lease_expires_at <= takeover_now_utc,
+            )
+            .values(**next_values)
+        )
+        if result.rowcount != 1:
+            return None
+        await self.session.flush()
+        return await self.get_execution(execution_id)
+
+
     async def has_active_execution_lease_fence(
         self,
         execution_id: str,

@@ -99,6 +99,8 @@ from .runtimes.agent.persistence import (
 from .runtimes.agent.runtime import AgentRuntime
 from .runtimes.agent.supervisor import AgentExecutionSupervisor
 from .runtimes.agent.task_budget import TaskBudgetService
+from .runtimes.agent.stale_lease_scanner import StaleLeaseScanCoordinator
+from .runtimes.agent.recovery_control_plane import H1ARecoveryControlPlane
 from .runtimes.agent.resume_planning import AgentResumePlanningService
 from .runtimes.agent.fork_planning import AgentForkPlanningService
 from .runtimes.agent.retry_planning import AgentRetryPlanningService
@@ -1281,6 +1283,16 @@ async def lifespan(app: FastAPI):
         eventing_manager=eventing_manager
     )
 
+    # AE-R12-H1-A owns only stale RUNNING evacuation.  Its immediate bounded
+    # startup sweep completes before traffic is served; periodic work never
+    # enters recovery planning/activation or AgentRuntime.
+    recovery_control_plane = H1ARecoveryControlPlane(
+        StaleLeaseScanCoordinator(container.agent_durable_store),
+        container.agent_durable_store,
+        container.task_budget_service,
+    )
+    await recovery_control_plane.start()
+
     # Chỉ gán duy nhất app.state.container
     app.state.container = container
 
@@ -1289,6 +1301,9 @@ async def lifespan(app: FastAPI):
     finally:
         # 2. Shutdown Sequence (Dọn dẹp trong try...finally)
         logger.info("Initiating Application Shutdown sequence...")
+
+        # Quiesce/drain H1-A before any dependency it uses can be disposed.
+        await recovery_control_plane.quiesce()
 
         if container.agent_execution_supervisor:
             await container.agent_execution_supervisor.quiesce()

@@ -13,6 +13,10 @@ CONTRACT = (
 SCANNER = ROOT / "se" / "src" / "runtimes" / "agent" / "stale_lease_scanner.py"
 PERSISTENCE = ROOT / "se" / "src" / "runtimes" / "agent" / "persistence.py"
 TASK_BUDGET = ROOT / "se" / "src" / "runtimes" / "agent" / "task_budget.py"
+CONTROL_PLANE = (
+    ROOT / "se" / "src" / "runtimes" / "agent" / "recovery_control_plane.py"
+)
+MAIN = ROOT / "se" / "src" / "main.py"
 AGENT_REPOSITORY = (
     ROOT
     / "se"
@@ -104,6 +108,8 @@ def test_h1a_consumes_existing_exact_stale_waiting_authority() -> None:
 
     assert "commit_recovery_waiting_checkpoint" in persistence
     assert "recover_task_scoped_execution" in task_budget
+    assert "observed_revision" in persistence
+    assert "observed_revision" in task_budget
     assert "compare_and_set_recovery_waiting_execution" in repository
 
     for exact_predicate in (
@@ -170,17 +176,38 @@ def test_h1a_freezes_unrecoverable_stale_terminal_disposition() -> None:
         assert code in checkpoint
         assert code in contract
 
-    # This candidate freezes the missing seam; it must not pretend production
-    # already owns stale-receipt terminalization.
-    assert "compare_and_set_expired_execution_terminal" not in repository
+    persistence = _read(PERSISTENCE)
+    task_budget = _read(TASK_BUDGET)
+    control_plane = _read(CONTROL_PLANE)
+
+    assert "compare_and_set_expired_execution_terminal" in repository
+    assert "fail_expired_execution_unrecoverable" in persistence
+    assert "r12_h1a_terminal_receipt_v1" in persistence
+    assert "expected_receipt" in persistence
+    assert "observed_lease_expires_at" in persistence
+    assert "terminal_context_state" in repository
+    assert "fail_unrecoverable_task_scoped_execution" in task_budget
+    assert "H1A_TERMINAL_SAFE_POINT_REASONS" in control_plane
+    assert "SAFE_POINT_INVOCATION_REPOSITORY_MISSING" not in (
+        control_plane.split("H1A_TERMINAL_SAFE_POINT_REASONS", 1)[1]
+        .split(")", 1)[0]
+    )
 
 
 def test_h1a_freezes_cross_sweep_cursor_fairness_without_granting_mutation() -> None:
     contract = _read(CONTRACT)
     scanner = _read(SCANNER)
 
-    assert "after_expiry: datetime | None = None" in scanner
-    assert "after_execution_id: str | None = None" in scanner
+    assert "self._after_expiry: datetime | None = None" in scanner
+    assert "observation_errors: tuple[str, ...] = ()" in scanner
+    assert "for record in raw_page" in scanner
+    assert "rows_returned" in scanner
+    assert "self._after_execution_id: str | None = None" in scanner
+    assert "after_expiry = self._after_expiry" in scanner
+    assert "after_execution_id = self._after_execution_id" in scanner
+    assert "self._after_expiry = last_returned_expiry" in scanner
+    assert "self._after_execution_id = last_returned_execution_id" in scanner
+    assert "stop_reason == StaleLeaseSweepStopReason.EXHAUSTED" in scanner
     assert "list_expired_execution_leases" in scanner
     assert "asyncio.create_task" not in scanner
 
@@ -200,6 +227,8 @@ def test_h1a_freezes_cross_sweep_cursor_fairness_without_granting_mutation() -> 
 
 def test_h1a_freezes_lifecycle_and_external_authority_closed() -> None:
     contract = _read(CONTRACT)
+    control_plane = _read(CONTROL_PLANE)
+    main = _read(MAIN)
 
     for phrase in (
         "exactly one H1-A control-plane worker",
@@ -218,6 +247,25 @@ def test_h1a_freezes_lifecycle_and_external_authority_closed() -> None:
         "schema or migration changes",
     ):
         assert phrase in contract
+
+    assert "class H1ARecoveryControlPlane" in control_plane
+    assert "await self.sweep_once()" in control_plane
+    assert "asyncio.create_task(" in control_plane
+    assert "for observation in sweep.observations" in control_plane
+    assert "AgentRecoveryPlanningService" not in control_plane
+    assert "AgentRecoveryActivationService" not in control_plane
+    assert "AgentRuntime" not in control_plane
+    assert "Identity(" not in control_plane
+
+    assert "H1ARecoveryControlPlane(" in main
+    assert "await recovery_control_plane.start()" in main
+    assert "await recovery_control_plane.quiesce()" in main
+    assert main.index("await recovery_control_plane.quiesce()") < main.index(
+        "await container.agent_execution_supervisor.quiesce()"
+    )
+    assert main.index("await recovery_control_plane.quiesce()") < main.index(
+        "await storage_engine.disconnect()"
+    )
 
 
 def test_h1a_exit_gate_requires_fresh_production_preclaim() -> None:
