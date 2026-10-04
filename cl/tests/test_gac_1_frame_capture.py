@@ -26,6 +26,10 @@ class _WindowBackend:
     exists: bool = True
     visible: bool = True
     minimized: bool = False
+    left: int = 10
+    top: int = 20
+    width: int = 2
+    height: int = 2
 
     def enumerate_windows(self):
         return (self.hwnd,)
@@ -52,7 +56,12 @@ class _WindowBackend:
         return "game.exe"
 
     def client_geometry(self, hwnd):
-        return CaptureGeometry(left=10, top=20, width=2, height=2)
+        return CaptureGeometry(
+            left=self.left,
+            top=self.top,
+            width=self.width,
+            height=self.height,
+        )
 
 
 class _NativeCapture:
@@ -129,6 +138,23 @@ def test_post_capture_native_identity_drift_discards_frame():
 
     with pytest.raises(StaleFrameError, match="target changed"):
         capture.capture_once(session)
+
+
+def test_post_capture_geometry_drift_discards_frame():
+    window_backend = _WindowBackend()
+    manager, session = _bound_session(window_backend)
+
+    def move_target():
+        window_backend.left += 100
+
+    native = _NativeCapture(after_capture=move_target)
+    capture = WindowCapture(manager, native)
+
+    with pytest.raises(StaleFrameError, match="geometry changed"):
+        capture.capture_once(session)
+
+    context = session.current_capture_context()
+    assert session.reserve_frame_sequence(context) == 1
 
 
 def test_session_rebind_during_capture_discards_stale_frame():
