@@ -215,3 +215,51 @@ def test_b6_contract_does_not_release_production_activation() -> None:
         "grant F6 authority",
     ):
         assert phrase in contract
+
+def test_b6_contract_freezes_generation_bound_retained_reference_lifetime() -> None:
+    manager = _read(MANAGER)
+    sqlite = _read(SQLITE)
+    contract = _normalized(CONTRACT)
+
+    # Current source shape explains why registry cleanup alone is not revocation.
+    assert "self.services.clear()" in manager
+    assert "await self.drivers.disconnect_all()" in manager
+    assert "await self._engine.dispose()" in sqlite
+    assert "async def get_session(" in sqlite
+    assert "async with self._session_factory() as session:" in sqlite
+
+    for phrase in (
+        "Retained-reference lifetime fence — follow-up amendment",
+        "`StorageEngine.services.clear()` is registry cleanup only",
+        "not retained-reference revocation",
+        "generation-bound revocation token, lease, guard, or equivalent stale-reference fence",
+        "generation N disconnect revokes generation N",
+        "every later service_N invocation fails closed",
+        "before any new SQLiteDriver.get_session / SQL acquisition",
+        "service_N remains permanently stale",
+        "A simple reusable `_started` boolean is insufficient",
+        "distinguish generations",
+        "evaluated before the first lower-layer operation that could acquire a SQL session",
+        "Production implementation remains CLOSED",
+        "separate independent production PRE-CLAIM",
+    ):
+        assert phrase in contract
+
+
+def test_b6_lifetime_follow_up_keeps_non_authorities_closed() -> None:
+    contract = _normalized(CONTRACT)
+
+    for phrase in (
+        "This follow-up remains CONTRACT / ARCHITECTURE EVIDENCE / ZERO-PRODUCTION",
+        "grants no caller",
+        "automatic promotion",
+        "public/model-callable API",
+        "capability",
+        "UBQ",
+        "routing",
+        "CAS",
+        "retrieval",
+        "F6 authority",
+    ):
+        assert phrase in contract
+
