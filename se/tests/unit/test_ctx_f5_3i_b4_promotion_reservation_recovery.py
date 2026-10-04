@@ -98,6 +98,24 @@ class _Repository:
         return self.proof
 
 
+class _ConcurrentWinnerRepository:
+    def __init__(self, winner) -> None:
+        self.winner = winner
+        self.calls = []
+        self.exact_reads = 0
+
+    async def get_by_intent(self, intent):
+        self.calls.append(("intent", intent))
+        self.exact_reads += 1
+        if self.exact_reads == 1:
+            return None
+        return self.winner
+
+    async def get_by_proof_authority(self, intent):
+        self.calls.append(("proof", intent))
+        return self.winner
+
+
 def _resolver(monkeypatch, repository: _Repository):
     sessions = []
 
@@ -150,6 +168,31 @@ async def test_recovery_returns_none_only_when_both_lookups_have_no_winner(monke
     resolver, _ = _resolver(monkeypatch, _Repository(None, None))
 
     assert await resolver.recover(intent=intent) is None
+
+
+@pytest.mark.asyncio
+async def test_recovery_rechecks_exact_intent_after_concurrent_winner(monkeypatch):
+    intent = _intent("concurrent")
+    winner = _record(
+        "authority-concurrent",
+        intent,
+        DurablePromotionReservationState.ISSUED,
+    )
+    repository = _ConcurrentWinnerRepository(winner)
+    resolver, sessions = _resolver(monkeypatch, repository)  # type: ignore[arg-type]
+
+    recovered = await resolver.recover(intent=intent)
+
+    assert recovered == PromotionReservation(
+        promotion_authority_id="authority-concurrent",
+        intent=intent,
+    )
+    assert repository.calls == [
+        ("intent", intent),
+        ("proof", intent),
+        ("intent", intent),
+    ]
+    assert len(sessions) == 1
 
 
 @pytest.mark.asyncio

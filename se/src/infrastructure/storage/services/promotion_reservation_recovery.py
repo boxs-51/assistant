@@ -62,6 +62,12 @@ class DurablePromotionReservationRecovery:
             exact_winner = await repository.get_by_intent(intent)
             proof_winner = await repository.get_by_proof_authority(intent)
 
+            # Under READ COMMITTED (and SQLite legacy transaction mode), a
+            # concurrent issuer can commit between the two reads.  Recheck the
+            # exact key before treating a proof-only observation as reuse.
+            if exact_winner is None and proof_winner is not None:
+                exact_winner = await repository.get_by_intent(intent)
+
         if exact_winner is None and proof_winner is None:
             return None
 
