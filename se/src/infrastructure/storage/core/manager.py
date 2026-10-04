@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 import structlog
 
 from .registry import DriverRegistry, RepositoryRegistry
@@ -13,11 +15,69 @@ from ..drivers.object_local.driver import LocalObjectStorageDriver
 
 from ..repositories.sessions import SessionRepository
 from ..services.embedding_service import EmbeddingService
+from ..services.memory_promotion_admission import (
+    DurableMemoryPromotionAdmission,
+)
+from ..services.promotion_reservation_issuer import (
+    DurablePromotionReservationIssuer,
+)
+from ..services.promotion_reservation_recovery import (
+    DurablePromotionReservationRecovery,
+)
+from ..services.tool_response_payload_memory_promotion import (
+    DurableToolResponsePayloadMemoryPromotion,
+)
+from ..services.tool_response_payload_promotion_orchestration import (
+    DurableToolResponsePayloadPromotionOrchestration,
+)
+from ..services.tool_response_payload_source_authority import (
+    DurableToolResponsePayloadSourceAuthority,
+)
 
 from ...config.schemas import ConfigSchema
 
 
 logger = structlog.get_logger(__name__)
+
+
+_TOOL_RESPONSE_PAYLOAD_MEMORY_PROMOTION = (
+    "tool_response_payload_memory_promotion"
+)
+
+
+class StorageServiceGenerationRevokedError(RuntimeError):
+    """A retained storage service belongs to a revoked engine generation."""
+
+
+class _GenerationBoundToolResponsePayloadMemoryPromotion:
+    """Fail closed before entering B5 when the owning engine generation is stale."""
+
+    def __init__(
+        self,
+        delegate: DurableToolResponsePayloadMemoryPromotion,
+        *,
+        generation: int,
+        is_generation_active: Callable[[int], bool],
+    ) -> None:
+        self._delegate = delegate
+        self._generation = generation
+        self._is_generation_active = is_generation_active
+
+    async def promote(
+        self,
+        *,
+        source_ref,
+        owner_user_id: str,
+    ):
+        if not self._is_generation_active(self._generation):
+            raise StorageServiceGenerationRevokedError(
+                "TOOL_RESPONSE_PAYLOAD Memory promotion service generation "
+                "is no longer active"
+            )
+        return await self._delegate.promote(
+            source_ref=source_ref,
+            owner_user_id=owner_user_id,
+        )
 
 
 class StorageEngine:
@@ -43,6 +103,8 @@ class StorageEngine:
         self.services = {}
 
         self._started = False
+        self._service_generation = 0
+        self._active_service_generation = None
 
     async def connect(self) -> None:
         """
@@ -87,6 +149,11 @@ class StorageEngine:
             # -------------------------------------------------
             await self.drivers.connect_all()
 
+            # Every activation attempt that reaches the service phase receives
+            # a fresh, non-reusable generation. Retained services from older
+            # generations can therefore never become valid again after restart.
+            self._begin_service_generation()
+
             # -------------------------------------------------
             # Phase 3:
             # Initialize services
@@ -110,6 +177,7 @@ class StorageEngine:
 
         except Exception:
             self._started = False
+            self._revoke_service_generation()
 
             logger.error(
                 "Storage Engine failed to start",
@@ -137,14 +205,24 @@ class StorageEngine:
                 "Storage Engine is not running"
             )
 
+            # Revoke before any defensive teardown so a retained service from
+            # a partially completed start cannot acquire a fresh SQL session.
+            self._revoke_service_generation()
+
             # Vẫn gọi disconnect để đảm bảo cleanup
             # trong trường hợp startup partially completed.
             await self.drivers.disconnect_all()
+            self.services.clear()
             return
 
         logger.info(
             "Storage Engine is shutting down..."
         )
+
+        # Lifetime authority is revoked before driver teardown. An invocation
+        # that already passed the guard keeps lower-layer failure/cancellation
+        # semantics; later invocations fail before delegate/session acquisition.
+        self._revoke_service_generation()
 
         try:
             await self.drivers.disconnect_all()
@@ -235,6 +313,24 @@ class StorageEngine:
     @property
     def is_started(self) -> bool:
         return self._started
+
+    # =========================================================
+    # Internal service-generation lifetime fence
+    # =========================================================
+
+    def _begin_service_generation(self) -> int:
+        self._service_generation += 1
+        self._active_service_generation = self._service_generation
+        return self._service_generation
+
+    def _revoke_service_generation(self) -> None:
+        self._active_service_generation = None
+
+    def _is_service_generation_active(self, generation: int) -> bool:
+        return (
+            self._started
+            and self._active_service_generation == generation
+        )
 
     # =========================================================
     # Initialization
@@ -430,4 +526,66 @@ class StorageEngine:
             logger.warning(
                 "Chroma driver unavailable. "
                 "Semantic Cache service will not be initialized."
+            )
+
+        # -----------------------------------------------------
+        # TOOL_RESPONSE_PAYLOAD -> durable Memory promotion
+        # -----------------------------------------------------
+
+        if self.drivers.is_available("sqlite"):
+            sqlite_driver = self.drivers.get("sqlite")
+            if sqlite_driver is None:
+                raise RuntimeError(
+                    "SQLite is available but no configured driver exists"
+                )
+
+            generation = self._active_service_generation
+            if generation is None:
+                raise RuntimeError(
+                    "Storage service generation is not active"
+                )
+
+            # This public driver method is the only SQL session-context source
+            # for the complete B1 -> B4 -> H-B2 -> B5 construction chain.
+            session_context_factory = sqlite_driver.get_session
+
+            source_authority = DurableToolResponsePayloadSourceAuthority(
+                session_context_factory
+            )
+            reservation_issuer = DurablePromotionReservationIssuer(
+                session_context_factory
+            )
+            reservation_recovery = DurablePromotionReservationRecovery(
+                session_context_factory
+            )
+            orchestration = DurableToolResponsePayloadPromotionOrchestration(
+                source_authority,
+                reservation_issuer,
+                reservation_recovery,
+            )
+            admission = DurableMemoryPromotionAdmission(
+                session_context_factory
+            )
+            delegate = DurableToolResponsePayloadMemoryPromotion(
+                orchestration,
+                admission,
+            )
+
+            self.services[_TOOL_RESPONSE_PAYLOAD_MEMORY_PROMOTION] = (
+                _GenerationBoundToolResponsePayloadMemoryPromotion(
+                    delegate,
+                    generation=generation,
+                    is_generation_active=self._is_service_generation_active,
+                )
+            )
+
+            logger.info(
+                "TOOL_RESPONSE_PAYLOAD Memory promotion service initialized",
+                storage_generation=generation,
+            )
+        else:
+            logger.info(
+                "SQLite driver unavailable. "
+                "TOOL_RESPONSE_PAYLOAD Memory promotion service "
+                "will not be initialized."
             )
