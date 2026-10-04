@@ -18,8 +18,11 @@ from ...application.user_inference_quota import (
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
 from ..exceptions import (
     NoAvailableProviderError,
+    ProviderCallTimeoutError,
     ProviderDeadlineExceededError,
     ProviderError,
+    ProviderFirstResponseTimeoutError,
+    ProviderStreamIdleTimeoutError,
     ProviderRecoveryAuthorityLostError,
     ProviderRecoveryGuardError,
     wrap_provider_exception,
@@ -38,10 +41,18 @@ class ChatExecutionHandler(BaseExecutionHandler):
         *args,
         inference_quota: UserInferenceQuotaService | None = None,
         generated_asset_canonicalizer: GeneratedAssetCanonicalizer | None = None,
+        provider_first_response_timeout_seconds: float | None = None,
+        provider_stream_idle_timeout_seconds: float | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.inference_quota = inference_quota
+        self.provider_first_response_timeout_seconds = (
+            provider_first_response_timeout_seconds
+        )
+        self.provider_stream_idle_timeout_seconds = (
+            provider_stream_idle_timeout_seconds
+        )
         # The response-side F7 fence is always installed. In degraded mode the
         # unavailable sentinel passes ordinary text responses through and
         # terminally rejects generated media after provider success.
@@ -50,6 +61,25 @@ class ChatExecutionHandler(BaseExecutionHandler):
             if generated_asset_canonicalizer is not None
             else GeneratedAssetCanonicalizer.unavailable()
         )
+
+    def _as_provider_call_timeout(
+        self,
+        error: ProviderDeadlineExceededError,
+    ) -> ProviderCallTimeoutError:
+        return ProviderCallTimeoutError(
+            "Provider logical call timed out.",
+            provider_name=getattr(error, "provider_name", None),
+            timeout_seconds=self.timeout,
+        )
+
+    def _new_provider_call_budget(
+        self,
+        deadline_monotonic: float | None,
+    ):
+        try:
+            return self._new_call_budget(deadline_monotonic)
+        except ProviderDeadlineExceededError as error:
+            raise self._as_provider_call_timeout(error) from error
 
     async def _reserve_inference_quota(
         self,
@@ -246,7 +276,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
             quota_context=quota_context,
             streaming_mode=False,
         )
-        call_budget = self._new_call_budget(deadline_monotonic)
+        call_budget = self._new_provider_call_budget(deadline_monotonic)
         healthy_execution_chain = await self._get_healthy_fallback_chain(
             execution_chain
         )
@@ -327,8 +357,10 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     )
                 except ProviderRecoveryAuthorityLostError:
                     raise
-                except ProviderDeadlineExceededError:
+                except ProviderCallTimeoutError:
                     raise
+                except ProviderDeadlineExceededError as error:
+                    raise self._as_provider_call_timeout(error) from error
                 except (
                     ProviderError,
                     httpx.RequestError,
@@ -360,9 +392,17 @@ class ChatExecutionHandler(BaseExecutionHandler):
 
         try:
             self._remaining_timeout(call_budget)
+        except ProviderCallTimeoutError:
+            raise
         except ProviderDeadlineExceededError as deadline_error:
-            raise ProviderDeadlineExceededError(
-                "Provider call deadline exhausted during fallback."
+            raise ProviderCallTimeoutError(
+                "Provider call deadline exhausted during fallback.",
+                provider_name=getattr(
+                    deadline_error,
+                    "provider_name",
+                    last_provider_name,
+                ),
+                timeout_seconds=self.timeout,
             ) from last_exception
 
         detail = last_detail or (
@@ -419,7 +459,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
             quota_context=quota_context,
             streaming_mode=True,
         )
-        call_budget = self._new_call_budget(deadline_monotonic)
+        call_budget = self._new_provider_call_budget(deadline_monotonic)
         healthy_execution_chain = await self._get_healthy_fallback_chain(
             execution_chain
         )
@@ -470,6 +510,15 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     body=attempt_body,
                     timeout=self.timeout,
                     call_budget=call_budget,
+                    first_response_timeout=(
+                        self.provider_first_response_timeout_seconds
+                    ),
+                    stream_idle_timeout=(
+                        self.provider_stream_idle_timeout_seconds
+                    ),
+                    is_semantic_progress=(
+                        self._has_stream_semantic_or_finish_progression
+                    ),
                 )
                 stream_assembler = GeneratedAssetStreamAssembler(
                     self.generated_asset_canonicalizer,
@@ -561,7 +610,32 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     yield canonical_chunk
                 return
 
-            except ProviderDeadlineExceededError:
+            except ProviderCallTimeoutError:
+                raise
+
+            except ProviderDeadlineExceededError as error:
+                raise self._as_provider_call_timeout(error) from error
+
+            except ProviderFirstResponseTimeoutError as error:
+                logger.warning(
+                    "Provider first response timed out",
+                    provider=provider.name,
+                    stream_started=stream_started,
+                )
+                if (
+                    stream_started
+                    or asset_attempt_terminal
+                    or bool(
+                        stream_assembler is not None
+                        and stream_assembler.media_seen
+                    )
+                ):
+                    raise
+                last_exception = error
+                last_provider_name = provider.name
+                continue
+
+            except ProviderStreamIdleTimeoutError:
                 raise
 
             except (
@@ -612,10 +686,21 @@ class ChatExecutionHandler(BaseExecutionHandler):
 
         try:
             self._remaining_timeout(call_budget)
-        except ProviderDeadlineExceededError:
-            raise ProviderDeadlineExceededError(
-                "Provider stream deadline exhausted during fallback."
+        except ProviderCallTimeoutError:
+            raise
+        except ProviderDeadlineExceededError as deadline_error:
+            raise ProviderCallTimeoutError(
+                "Provider stream deadline exhausted during fallback.",
+                provider_name=getattr(
+                    deadline_error,
+                    "provider_name",
+                    last_provider_name,
+                ),
+                timeout_seconds=self.timeout,
             ) from last_exception
+
+        if isinstance(last_exception, ProviderFirstResponseTimeoutError):
+            raise last_exception
 
         detail = last_detail or (
             last_exception
