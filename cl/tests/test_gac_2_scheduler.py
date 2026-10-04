@@ -1,3 +1,4 @@
+import inspect
 import threading
 
 import pytest
@@ -257,7 +258,7 @@ def test_emergency_stop_wakes_hold_is_latched_and_blocks_future_actions():
 
 def test_focus_loss_before_new_mouse_transition_sends_no_button_down():
     session, binding = make_session("focus-loss")
-    guard = FakeFocusGuard(session, fail_on_call=2)
+    guard = FakeFocusGuard(session, fail_on_call=3)
     scheduler, _keyboard, mouse = make_scheduler(session, guard=guard)
     intent = ActionIntent(
         action_id="click",
@@ -278,7 +279,7 @@ def test_focus_loss_before_new_mouse_transition_sends_no_button_down():
 
 def test_focus_loss_during_hold_releases_gac_owned_key():
     session, binding = make_session("hold-focus-loss")
-    guard = FakeFocusGuard(session, fail_on_call=2)
+    guard = FakeFocusGuard(session, fail_on_call=3)
     keyboard = FakeKeyboardBackend()
     scheduler, _, _ = make_scheduler(
         session,
@@ -414,6 +415,8 @@ def test_mouse_down_repositions_from_same_live_guard_geometry():
     guard = SequencedGeometryGuard(
         session,
         [
+            CaptureGeometry(left=100, top=200, width=640, height=480),
+            CaptureGeometry(left=100, top=200, width=640, height=480),
             CaptureGeometry(left=100, top=200, width=640, height=480),
             CaptureGeometry(left=300, top=400, width=640, height=480),
             CaptureGeometry(left=300, top=400, width=640, height=480),
@@ -571,9 +574,10 @@ def test_mouse_hold_estop_releases_owned_button_and_latches():
 
 def test_mouse_hold_target_failure_releases_owned_button():
     session, binding = make_session("mouse-target-failure")
-    # MOUSE_HOLD performs guarded move, guarded down-at-live-coordinate,
-    # then validates again before release. Fail on that third guard.
-    guard = FakeFocusGuard(session, fail_on_call=3)
+    # Each new transition validates once before and once inside hold_current().
+    # MOUSE_HOLD performs move (2), down-at-live-coordinate (2), then the
+    # cleanup-oriented validation before release. Fail on that fifth guard.
+    guard = FakeFocusGuard(session, fail_on_call=5)
     mouse = FakeMouseBackend()
     scheduler, _keyboard, _ = make_scheduler(
         session,
@@ -594,3 +598,151 @@ def test_mouse_hold_target_failure_releases_owned_button():
     assert mouse.events.count(("up", "left")) == 1
     assert mouse.events[-1] == ("up", "left")
     scheduler.close()
+
+
+class MutatingAfterValidationGuard(FakeFocusGuard):
+    def __init__(self, session, mutation):
+        super().__init__(session)
+        self.mutation = mutation
+        self.mutated = False
+
+    def validate(
+        self,
+        *,
+        automation_session_id,
+        binding_generation,
+        x=None,
+        y=None,
+    ):
+        target = super().validate(
+            automation_session_id=automation_session_id,
+            binding_generation=binding_generation,
+            x=x,
+            y=y,
+        )
+        if not self.mutated:
+            self.mutated = True
+            if self.mutation == "rebind":
+                self.session.bind(
+                    GameWindowIdentity(
+                        hwnd=202,
+                        process_id=303,
+                        process_start_time=404.0,
+                    )
+                )
+            elif self.mutation == "unbind":
+                self.session.unbind()
+            else:
+                self.session.close()
+        return target
+
+
+@pytest.mark.parametrize("mutation", ["rebind", "unbind", "close"])
+def test_lifecycle_mutation_winning_before_hold_current_sends_no_new_input(
+    mutation,
+):
+    session, binding = make_session(f"lifecycle-wins-{mutation}")
+    keyboard = FakeKeyboardBackend()
+    scheduler, _, _ = make_scheduler(
+        session,
+        guard=MutatingAfterValidationGuard(session, mutation),
+        keyboard_backend=keyboard,
+    )
+
+    outcome = scheduler.execute(key_intent(session, binding))
+
+    assert outcome.status is ActionStatus.TARGET_LOST
+    assert keyboard.events == []
+    assert keyboard.down_calls == 0
+    scheduler.close()
+
+
+class BlockingKeyboardBackend(FakeKeyboardBackend):
+    def __init__(self):
+        super().__init__()
+        self.transition_entered = threading.Event()
+        self.transition_release = threading.Event()
+
+    def key_down(self, key):
+        self.down_calls += 1
+        self.events.append(("down", key))
+        self.down_event.set()
+        self.transition_entered.set()
+        assert self.transition_release.wait(timeout=1.0)
+
+
+@pytest.mark.parametrize("mutation", ["rebind", "unbind", "close"])
+def test_hold_current_blocks_lifecycle_mutation_until_transition_exits(
+    mutation,
+):
+    session, binding = make_session(f"transition-wins-{mutation}")
+    keyboard = BlockingKeyboardBackend()
+    scheduler, _, _ = make_scheduler(
+        session,
+        keyboard_backend=keyboard,
+    )
+    outcomes = []
+    execute_thread = threading.Thread(
+        target=lambda: outcomes.append(
+            scheduler.execute(key_intent(session, binding))
+        ),
+        daemon=True,
+    )
+    execute_thread.start()
+    assert keyboard.transition_entered.wait(timeout=0.5)
+
+    mutation_started = threading.Event()
+    mutation_completed = threading.Event()
+
+    def mutate():
+        mutation_started.set()
+        if mutation == "rebind":
+            session.bind(
+                GameWindowIdentity(
+                    hwnd=203,
+                    process_id=304,
+                    process_start_time=405.0,
+                )
+            )
+        elif mutation == "unbind":
+            session.unbind()
+        else:
+            session.close()
+        mutation_completed.set()
+
+    mutation_thread = threading.Thread(target=mutate, daemon=True)
+    mutation_thread.start()
+    assert mutation_started.wait(timeout=0.5)
+
+    # The lifecycle mutation cannot complete while the one input transition
+    # is inside GameSession.hold_current().
+    assert mutation_completed.wait(timeout=0.05) is False
+
+    keyboard.transition_release.set()
+    assert mutation_completed.wait(timeout=0.5)
+    mutation_thread.join(timeout=0.5)
+    execute_thread.join(timeout=0.5)
+
+    assert mutation_thread.is_alive() is False
+    assert execute_thread.is_alive() is False
+    assert keyboard.events.count(("down", "w")) == 1
+    assert ("up", "w") in keyboard.events
+
+    before = keyboard.down_calls
+    stale = scheduler.execute(
+        key_intent(session, binding, action_id=f"stale-after-{mutation}")
+    )
+    assert stale.status is ActionStatus.TARGET_LOST
+    assert keyboard.down_calls == before
+    scheduler.close()
+
+
+def test_scheduler_consumes_public_lifecycle_guard_without_private_lock_or_wait():
+    source = inspect.getsource(ActionScheduler._transition)
+
+    assert "hold_current" in source
+    assert "_session._lock" not in source
+    assert "._lock.acquire" not in source
+    assert "_wait_duration" not in source
+    assert "_wait_for_pacing" not in source
+    assert "wait_function" not in source
