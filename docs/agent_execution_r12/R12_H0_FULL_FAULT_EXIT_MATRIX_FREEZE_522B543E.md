@@ -8,7 +8,7 @@ Development baseline: `main@854ae02d3f896c5f40a51bd2734e2eb46992493e`
 Integration re-anchor baseline: `main@c6b312342509de00eb24f27e1bc435bd5d0d9400`
 Stage: AE-R12-H0
 Class: CONTRACT / INTEGRATION + ARCHITECTURE EVIDENCE ONLY
-Status: CANDIDATE / REPLACEMENT EXACT-HEAD CI PENDING
+Status: HOLD / H0 EVIDENCE CORRECTED / PRODUCTION LIVENESS GAP
 
 ## 1. Authority and purpose
 
@@ -34,7 +34,7 @@ and focused evidence.
 
 | ID | Required exit row | Disposition | Canonical executable evidence |
 | --- | --- | --- | --- |
-| H0-01 | Worker/process loss during provider call | PASS | `test_f3b_first_attempt_guard_loss_starts_zero_provider_send_or_breaker_failure` and retry/fallback guard rechecks. |
+| H0-01 | Worker/process loss during provider call | PASS / INHERITED | `test_f3b_external_caller_cancellation_preserves_half_open_no_failure` starts a blocking physical provider call and proves in-flight owner cancellation propagates without retry/fallback or breaker-failure accounting; `test_f3b_reused_handoff_never_mints_or_sends_fresh_inference` preserves `RECOVERY_INFERENCE_CUT_UNPROVEN` and zero fresh inference send for an ambiguous recovered inference cut. |
 | H0-02 | Worker/process loss during remote invocation | PASS | `test_r12_f3a_lease_loss_after_dispatch_preserves_r6_but_blocks_agent_projection`. |
 | H0-03 | Restart with durable WAITING execution | PASS | `test_r12_g_restart_fresh_service_consumes_durable_created_claim`. |
 | H0-04 | Orphan durable RUNNING through stale observation, recovery ownership and activation | PASS | D1 zero-mutation observation + `test_r12_e_iteration_zero_recovery_checkpoint_can_resume` + F2 atomic activation. |
@@ -52,12 +52,13 @@ and focused evidence.
 | H0-16 | Terminal execution cannot resurrect | PASS | `test_r12_g_terminal_execution_rejects_stale_recovery_activation`. |
 | H0-17 | No duplicate AgentRuntime activation for one durable cut | PASS | G0 one-winner matrix and F2 consumed replay without lease remint. |
 | H0-18 | R11 REF_BACKED checkpoint restart reconstruction | PASS / INHERITED | `test_r11_g1_many_checkpoint_ref_backed_growth_is_bounded` and R11-H final matrix. |
-| H0-19 | Linux + Windows full Architecture | PASS / EXACT-HEAD CI | Architecture #2025 / run `37200717067` is GREEN/GREEN on candidate HEAD `9c886c55e8070c7760ddaf8097f3cd92fff18ab1`. |
-| H0-20 | Server crash cannot leave zombie RUNNING indefinitely | PASS / COMPOSED | D1 bounded expired-owner observation -> R12-E durable recovery cut -> F2 activation -> G0 fresh-process/one-winner evidence. |
+| H0-19 | Linux + Windows full Architecture | PASS / EXACT-HEAD CI | Architecture #2032 / run `37202230575` is GREEN/GREEN on replacement HEAD `b978e1cbcb490109464d5d898a31a98ce7b9738d`; any later H0 evidence commit requires fresh replacement exact-head CI. |
+| H0-20 | Server crash cannot leave zombie RUNNING indefinitely | GAP / HOLD | D1 observation, R12-E recovery ownership, F2 activation and G0 arbitration primitives exist, but current production has no startup/background/lifecycle wiring that invokes the stale-lease scan/recovery control plane. Eventual recovery after process loss is therefore not established. |
 
-No row is silently omitted. H0-19 is backed by exact candidate-head Linux and
-Windows Architecture results; this documentation-only evidence update must
-obtain replacement exact-head CI before FINAL.
+No row is silently omitted. H0-20 is explicitly GAP / HOLD because the landed
+primitives are not wired to an eventual production recovery trigger. H0-19 records
+the last exact-head GREEN/GREEN result, but this evidence correction must obtain
+fresh replacement exact-head Linux + Windows CI before any later FINAL.
 
 ## 3. Executable binding rules
 
@@ -66,14 +67,15 @@ requires the exact test functions named above. This keeps inherited proof
 executable under the full suite without copying or weakening the original
 fixtures.
 
-The composed zombie-exit invariant requires every link:
+The zombie-exit invariant would require every link below plus an eventual production trigger. The first six landed seams exist; the missing lifecycle/startup/background trigger keeps H0-20 in GAP / HOLD:
 
 1. stale owned RUNNING rows are observable with a fixed UTC cutoff and without mutation;
 2. recovery ownership advances durable authority using the canonical recovery cut;
 3. activation consumes the durable ResumeClaim and acquires one fresh lease;
 4. restart rebuilds authority from durable state using fresh persistence objects;
 5. competing workers converge to one activation and one TaskBudget active slot;
-6. stale or terminal authority fails closed.
+6. stale or terminal authority fails closed;
+7. production lifecycle/startup/background wiring eventually invokes stale observation and recovery orchestration after owner-process loss. **MISSING on current canonical main.**
 
 ## 4. Authority fences
 
@@ -118,4 +120,4 @@ H0 can reach FINAL only when:
 6. independent audit finds no blocking P0/P1/P2;
 7. review threads are resolved and integration governance is satisfied.
 
-Until then AE-R12-H0 is a zero-production candidate, not R12-H closure.
+Current disposition: H0-20 violates gate 5, so AE-R12-H0 is HOLD and not R12-H closure. Closing the gap requires a separate bounded production PRE-CLAIM for recovery-control-plane activation/wiring, lifecycle/shutdown and backpressure evidence; H0 itself grants no such authority.
