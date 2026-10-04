@@ -13,7 +13,11 @@ from ...domain.schemas.agent_execution import (
     AgentExecutionWaitReason,
     normalize_execution_waiting,
 )
-from ...provider.exceptions import ProviderRecoveryAuthorityLostError
+from ...provider.exceptions import (
+    ProviderDeadlineExceededError,
+    ProviderRecoveryAuthorityLostError,
+    ProviderTimeoutError,
+)
 
 from .contracts import (
     AgentContextRequest,
@@ -2657,8 +2661,18 @@ class AgentRuntime:
                     "Agent execution cancelled.",
                     last_tool_results=latest_tool_results,
                 )
-            except (asyncio.TimeoutError, TimeoutError):
-                if context.task_timed_out:
+            except (
+                asyncio.TimeoutError,
+                TimeoutError,
+                ProviderDeadlineExceededError,
+            ) as timeout_error:
+                if isinstance(
+                    timeout_error,
+                    (ProviderTimeoutError, ProviderDeadlineExceededError),
+                ):
+                    timeout_code = timeout_error.code
+                    timeout_message = str(timeout_error)
+                elif context.task_timed_out:
                     timeout_code = "AGENT_TASK_TIMEOUT"
                     timeout_message = "Task wall-clock time limit exceeded."
                 elif context.timed_out:
