@@ -9,7 +9,11 @@ from ...provider.registry import ProviderRegistry
 from ...provider.discovery import ProviderDiscovery
 from ...provider.policies.routing_policy import RoutingPolicy
 from ...provider.executor import ProviderExecutor
-from ...provider.exceptions import NoAvailableProviderError, ProviderError
+from ...provider.exceptions import (
+    NoAvailableProviderError,
+    ProviderError,
+    ProviderTimeoutError,
+)
 from ...infrastructure.event_bus.bus import EventBus
 from ...domain.schemas.event import BaseEvent
 from ...application.assets.generated import GeneratedAssetCanonicalizer
@@ -40,7 +44,7 @@ def _provider_failure_payload(
         "error": str(error),
         "status_code": status_code,
     }
-    if isinstance(error, ProviderError):
+    if isinstance(error, (ProviderError, ProviderTimeoutError)):
         payload.update(
             error_code=error.code,
             failure_domain=error.failure_domain,
@@ -48,6 +52,9 @@ def _provider_failure_payload(
         )
         if error.provider_name:
             payload["provider"] = error.provider_name
+        if isinstance(error, ProviderTimeoutError):
+            payload["timeout_scope"] = error.timeout_scope
+            payload["timeout_seconds"] = error.timeout_seconds
     return payload
 
 class ProviderRuntime(BaseRuntime):
@@ -241,9 +248,21 @@ class ProviderRuntime(BaseRuntime):
             "circuit_breaker_manager": self.circuit_breaker_manager,
             "timeout": context.config.provider.timeout,
         }
-        handler_kwargs["inference_quota"] = self._inference_quota
-        self.chat_handler = ChatExecutionHandler(**handler_kwargs)
-        handler_kwargs.pop("inference_quota")
+        chat_handler_kwargs = {
+            **handler_kwargs,
+            "inference_quota": self._inference_quota,
+            "provider_first_response_timeout_seconds": getattr(
+                context.config.provider,
+                "provider_first_response_timeout_seconds",
+                None,
+            ),
+            "provider_stream_idle_timeout_seconds": getattr(
+                context.config.provider,
+                "provider_stream_idle_timeout_seconds",
+                None,
+            ),
+        }
+        self.chat_handler = ChatExecutionHandler(**chat_handler_kwargs)
         self.chat_handler.generated_asset_canonicalizer = (
             generated_asset_canonicalizer
         )
