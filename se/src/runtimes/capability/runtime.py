@@ -20,6 +20,7 @@ from .contracts.error import (
     CapabilityError,
     REMOTE_INVOCATION_CONFLICT,
     REMOTE_OUTCOME_UNKNOWN,
+    TOOL_CALL_TIMEOUT,
 )
 from .contracts.result import CapabilityResult
 from .contracts.definition import (
@@ -582,6 +583,8 @@ class CapabilityRuntime(BaseRuntime):
                 routing_connection_id=target_connection_id,
                 started=started,
                 allow_internal_retry=False,
+                canonical_agent_tool_hard_timeout=False,
+                timeout_seconds=None,
                 continuation_mode=mode,
             )
         except BaseException:
@@ -1333,6 +1336,14 @@ class CapabilityRuntime(BaseRuntime):
             and bool(getattr(self.tool_quota_service, "enabled", False))
         )
 
+        canonical_agent_tool_hard_timeout = (
+            caller_agent_execution_id is not None
+            and timeout_seconds is not None
+            and driver.definition.kind is CapabilityKind.TOOL
+            and driver.definition.execution_mode
+            is not CapabilityExecutionMode.LONG_RUNNING
+        )
+
         if tool_quota_enabled:
             validation = self.argument_validator.validate(
                 driver.definition,
@@ -1619,6 +1630,10 @@ class CapabilityRuntime(BaseRuntime):
                 routing_connection_id=connection_id,
                 started=started,
                 allow_internal_retry=True,
+                canonical_agent_tool_hard_timeout=(
+                    canonical_agent_tool_hard_timeout
+                ),
+                timeout_seconds=timeout_seconds,
             )
 
         existing = await self.invocation_lifecycle.store.get(
@@ -1774,6 +1789,10 @@ class CapabilityRuntime(BaseRuntime):
                 routing_connection_id=connection_id,
                 started=started,
                 allow_internal_retry=True,
+                canonical_agent_tool_hard_timeout=(
+                    canonical_agent_tool_hard_timeout
+                ),
+                timeout_seconds=timeout_seconds,
             )
         except BaseException:
             persisted = await self.invocation_lifecycle.store.get(
@@ -1819,6 +1838,8 @@ class CapabilityRuntime(BaseRuntime):
         routing_connection_id: str | None,
         started: float,
         allow_internal_retry: bool,
+        canonical_agent_tool_hard_timeout: bool,
+        timeout_seconds: float | None,
         continuation_mode: ExistingInvocationContinuationMode | None = None,
     ) -> CapabilityResult:
         logger.info(
@@ -2093,7 +2114,25 @@ class CapabilityRuntime(BaseRuntime):
                         invocation,
                         RemoteOutcomeState.OUTCOME_UNKNOWN,
                     )
-                error = {"code": "CAPABILITY_TIMEOUT", "message": str(exc)}
+                timeout_code = (
+                    TOOL_CALL_TIMEOUT
+                    if canonical_agent_tool_hard_timeout
+                    else "CAPABILITY_TIMEOUT"
+                )
+                timeout_details = (
+                    {
+                        "timeout_scope": "tool_call",
+                        "timeout_seconds": timeout_seconds,
+                    }
+                    if canonical_agent_tool_hard_timeout
+                    else {}
+                )
+                error = {
+                    "code": timeout_code,
+                    "message": str(exc),
+                }
+                if timeout_details:
+                    error["details"] = timeout_details
                 await self.invocation_lifecycle.finish_attempt(
                     attempt, CapabilityInvocationState.TIMED_OUT, error=error
                 )
@@ -2104,7 +2143,7 @@ class CapabilityRuntime(BaseRuntime):
                     error=error,
                 )
                 raise CapabilityError(
-                    code="CAPABILITY_TIMEOUT",
+                    code=timeout_code,
                     message=f"Capability '{capability_id}' timed out.",
                     category="TIMEOUT",
                     retryable=True,
@@ -2112,6 +2151,7 @@ class CapabilityRuntime(BaseRuntime):
                     cause_type=type(exc).__name__,
                     capability_id=capability_id,
                     invocation_id=context.invocation_id,
+                    details=timeout_details,
                 ) from exc
             except asyncio.CancelledError as exc:
                 if (
