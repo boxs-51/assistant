@@ -40,6 +40,14 @@ def test_ubq5e_client_accepts_canonical_names_and_keeps_legacy_wire() -> None:
     assert "provider_call_timeout_seconds" not in wire
     assert "tool_call_timeout_seconds" not in wire
 
+    validation_fields = AgentExecutionLimits.model_json_schema()["properties"]
+    assert "execution_timeout_seconds" in validation_fields
+    assert "provider_call_timeout_seconds" in validation_fields
+    assert "tool_call_timeout_seconds" in validation_fields
+    assert "timeout_seconds" not in validation_fields
+    assert "inference_timeout_seconds" not in validation_fields
+    assert "tool_timeout_seconds" not in validation_fields
+
 
 def test_ubq5e_client_legacy_defaults_and_equal_dual_spelling_are_stable() -> None:
     defaults = AgentExecutionLimits()
