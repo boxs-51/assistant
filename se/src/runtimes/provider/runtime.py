@@ -248,21 +248,18 @@ class ProviderRuntime(BaseRuntime):
             "circuit_breaker_manager": self.circuit_breaker_manager,
             "timeout": context.config.provider.timeout,
         }
-        chat_handler_kwargs = {
-            **handler_kwargs,
-            "inference_quota": self._inference_quota,
-            "provider_first_response_timeout_seconds": getattr(
-                context.config.provider,
-                "provider_first_response_timeout_seconds",
-                None,
-            ),
-            "provider_stream_idle_timeout_seconds": getattr(
-                context.config.provider,
-                "provider_stream_idle_timeout_seconds",
-                None,
-            ),
-        }
-        self.chat_handler = ChatExecutionHandler(**chat_handler_kwargs)
+        self.chat_handler = ChatExecutionHandler(**handler_kwargs)
+        self.chat_handler.inference_quota = self._inference_quota
+        self.chat_handler.provider_first_response_timeout_seconds = getattr(
+            context.config.provider,
+            "provider_first_response_timeout_seconds",
+            None,
+        )
+        self.chat_handler.provider_stream_idle_timeout_seconds = getattr(
+            context.config.provider,
+            "provider_stream_idle_timeout_seconds",
+            None,
+        )
         self.chat_handler.generated_asset_canonicalizer = (
             generated_asset_canonicalizer
         )
