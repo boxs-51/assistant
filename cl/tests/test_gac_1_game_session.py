@@ -90,3 +90,14 @@ def test_window_title_is_metadata_not_binding_authority():
 
     assert left.title == right.title
     assert left != right
+
+
+def test_explicit_empty_session_id_is_rejected():
+    with pytest.raises(ValueError, match="must not be empty"):
+        GameSession("")
+
+
+def test_omitted_session_id_generates_local_identity():
+    session = GameSession()
+
+    assert session.automation_session_id
