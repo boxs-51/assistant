@@ -13,10 +13,15 @@ from .cancellation import (
     WakeSignal,
     wait_interruptibly,
 )
-from .focus_guard import FocusGuard, FocusGuardError, GuardedTarget
+from .focus_guard import (
+    FocusGuard,
+    FocusGuardError,
+    GuardedTarget,
+    TargetLostError,
+)
 from .keyboard import KeyboardExecutor
 from .mouse import MouseExecutor
-from ..session.game_session import GameSession
+from ..session.game_session import GameSession, GameSessionError
 from ..session.window_manager import GameWindowManager
 
 
@@ -400,7 +405,22 @@ class ActionScheduler:
                 y=y,
             )
             self._raise_if_stopped(intent, token)
-            callback(target)
+
+            try:
+                with self._session.hold_current(target.context):
+                    # Revalidate exact target/focus/geometry after lifecycle
+                    # stabilization, then emit exactly one bounded transition.
+                    # No pacing/hold/cooldown wait is allowed inside this guard.
+                    target = self._focus_guard.validate(
+                        automation_session_id=intent.automation_session_id,
+                        binding_generation=intent.binding_generation,
+                        x=x,
+                        y=y,
+                    )
+                    self._raise_if_stopped(intent, token)
+                    callback(target)
+            except GameSessionError as error:
+                raise TargetLostError(str(error)) from error
 
     def _validate_only(
         self,
