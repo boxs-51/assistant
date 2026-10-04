@@ -26,6 +26,10 @@ B6 freezes the first activation boundary for the canonical
 TOOL_RESPONSE_PAYLOAD -> durable Memory promotion service. It does not activate
 that service in production.
 
+Follow-up lifetime-fence amendment: independent narrow release #5980357259 on
+`main@c6b312342509de00eb24f27e1bc435bd5d0d9400` corrects retained-reference
+revocation semantics after late P2 review. The amendment remains zero-production.
+
 The landed B5 service is
 `DurableToolResponsePayloadMemoryPromotion`. B6 preserves the complete B1 ->
 B3/B4 -> H-B2 authority chain and defines how a later, separately released
@@ -173,6 +177,53 @@ method, stop method, engine, or connection pool.
 Its usable lifetime is bounded by the owning `StorageEngine` driver lifecycle.
 On storage shutdown, `StorageEngine.services` is cleared and the SQLite driver
 owns disposal of its engine.
+
+## 6.1. Retained-reference lifetime fence — follow-up amendment
+
+Late post-merge review of the zero-production B6 contract found that registry
+cleanup alone does not revoke a service object already retained by trusted
+internal code. This amendment corrects the future activation contract; it does
+not implement production activation.
+
+`StorageEngine.services.clear()` is registry cleanup only. It is explicitly
+**not** retained-reference revocation. Likewise, disposing the SQLite engine is
+not the B6 service-lifetime authority.
+
+Any later production activation must bind every published B6 service object to
+the exact owning `StorageEngine` activation generation. The activation layer
+must provide a generation-bound revocation token, lease, guard, or equivalent
+stale-reference fence with these semantics:
+
+```text
+StorageEngine generation N publishes service_N
+-> service_N may be used only while generation N remains valid
+-> generation N disconnect revokes generation N
+-> every later service_N invocation fails closed
+-> rejection occurs before any new SQLiteDriver.get_session / SQL acquisition
+-> a later StorageEngine start may publish service_N+1
+-> service_N remains permanently stale and can never become usable again
+```
+
+A simple reusable `_started` boolean is insufficient if restarting the same
+`StorageEngine` could make a retained service from an older generation usable
+again. The fence must distinguish generations (or provide an equivalent
+permanent stale-reference guarantee).
+
+The lifetime check belongs to the future activation/lifecycle boundary. It must
+be evaluated before the first lower-layer operation that could acquire a SQL
+session for a new service invocation. B6 does not redefine already-landed
+B1/B3/B4/H-B2 transaction, failure, or cancellation semantics for work that was
+already legitimately in flight before revocation.
+
+The service still owns no independent thread, task, event loop, start method,
+stop method, engine, or connection pool. A lifetime fence grants no caller,
+trigger, automatic promotion, public/model-callable API, capability, UBQ,
+routing, CAS, retrieval, or F6 authority.
+
+This follow-up remains CONTRACT / ARCHITECTURE EVIDENCE / ZERO-PRODUCTION.
+Production implementation remains CLOSED and requires a separate independent
+production PRE-CLAIM after the corrected B6 contract reaches FINAL, lands, and
+exact-main post-merge health is GREEN/GREEN.
 
 ## 7. Internal-only first activation
 
