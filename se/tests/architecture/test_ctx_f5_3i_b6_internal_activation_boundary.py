@@ -231,7 +231,7 @@ def test_b6_contract_freezes_generation_bound_retained_reference_lifetime() -> N
     for phrase in (
         "Retained-reference lifetime fence — follow-up amendment",
         "`StorageEngine.services.clear()` is registry cleanup only",
-        "not retained-reference revocation",
+        "**not** retained-reference revocation",
         "generation-bound revocation token, lease, guard, or equivalent stale-reference fence",
         "generation N disconnect revokes generation N",
         "every later service_N invocation fails closed",
