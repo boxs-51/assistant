@@ -16,8 +16,8 @@ EVIDENCE_BINDINGS: dict[str, tuple[str, tuple[str, ...]]] = {
     "H0-01": (
         "se/tests/unit/test_r12_f3b_recovered_next_iteration.py",
         (
-            "test_f3b_first_attempt_guard_loss_starts_zero_provider_send_or_breaker_failure",
-            "test_f3b_retry_attempt_rechecks_guard_before_second_physical_send",
+            "test_f3b_external_caller_cancellation_preserves_half_open_no_failure",
+            "test_f3b_reused_handoff_never_mints_or_sends_fresh_inference",
         ),
     ),
     "H0-02": (
@@ -135,14 +135,14 @@ def test_r12_h0_matrix_is_complete_and_fail_closed_before_final():
     }
 
     assert actual_rows == expected_rows
-    assert "| GAP |" not in text
+    assert "| H0-20 | Server crash cannot leave zombie RUNNING indefinitely | GAP / HOLD |" in text
     assert "H0-19" in text
     assert "PASS / EXACT-HEAD CI" in text
-    assert "37200717067" in text
+    assert "37202230575" in text
     assert "If any executable row fails, that row becomes GAP / HOLD." in text
 
 
-def test_r12_h0_zombie_running_exit_chain_is_composed_from_canonical_seams():
+def test_r12_h0_zombie_running_primitives_exist_but_liveness_gap_is_explicit():
     chain = {
         "se/tests/integration/test_r12_d1_expired_execution_lease_observation.py": (
             "test_r12_d1_observation_does_not_mutate_durable_execution",
@@ -166,6 +166,11 @@ def test_r12_h0_zombie_running_exit_chain_is_composed_from_canonical_seams():
         source = _read(path)
         for token in tokens:
             assert token in source
+
+    text = DOC.read_text(encoding="utf-8")
+    assert "| H0-20 | Server crash cannot leave zombie RUNNING indefinitely | GAP / HOLD |" in text
+    assert "no startup/background/lifecycle wiring" in text
+    assert "MISSING on current canonical main" in text
 
 
 def test_r12_h0_preserves_external_outcome_and_checkpoint_authority():
