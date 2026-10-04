@@ -1,11 +1,24 @@
 let currentActionHandlers = { onApprove: null, onReject: null };
+let activeApprovalId = null;
+let decisionPending = false;
+
+const RISK_LEVELS = new Set(['HIGH', 'CRITICAL', 'MEDIUM', 'LOW', 'INFO', 'SUCCESS']);
+const MODES = new Set(['tool', 'diff', 'alert']);
+
+function setDecisionPending(pending) {
+  decisionPending = Boolean(pending);
+  const approve = document.getElementById('btn-approve');
+  const reject = document.getElementById('btn-reject');
+  if (approve) approve.disabled = decisionPending;
+  if (reject) reject.disabled = decisionPending;
+}
 
 export function initApprovalBar() {
   document.getElementById('btn-approve').addEventListener('click', () => {
     if (typeof currentActionHandlers.onApprove === 'function') {
       currentActionHandlers.onApprove();
     } else {
-      handleApproval(true);
+      void handleApproval(true);
     }
   });
 
@@ -13,27 +26,20 @@ export function initApprovalBar() {
     if (typeof currentActionHandlers.onReject === 'function') {
       currentActionHandlers.onReject();
     } else {
-      handleApproval(false);
+      void handleApproval(false);
     }
   });
 }
 
-/**
- * Hàm hiển thị Thanh thông báo / Phê duyệt đa năng
- * @param {Object} req - Cấu hình truyền vào
- * @param {string} [req.mode] - 'tool' | 'diff' | 'alert'
- * @param {string} [req.risk_level] - 'HIGH' | 'MEDIUM' | 'LOW' | 'INFO' | 'SUCCESS'
- * @param {string} [req.title] - Tiêu đề tùy chỉnh
- * @param {string} [req.name] - Tên tool hoặc đối tượng tác động
- * @param {Object} [req.args] - Tham số truyền vào (Dành cho tool)
- * @param {Array<string>} [req.files] - Danh sách file bị thay đổi (Dành cho diff)
- * @param {string} [req.diffText] - Nội dung Unified Diff (Dành cho diff)
- * @param {string} [req.content] - Mẫu HTML/Văn bản hiển thị tùy chỉnh (Dành cho alert)
- * @param {string} [req.message] - Dòng thông điệp hiển thị ở Footer
- * @param {boolean} [req.showActions=true] - Ẩn/Hiện nhóm nút bấm
- * @param {Function} [req.onApprove] - Callback khi bấm Duyệt
- * @param {Function} [req.onReject] - Callback khi bấm Từ chối
- */
+function appendFileBadges(container, files) {
+  (Array.isArray(files) ? files : []).forEach((fileName) => {
+    const badge = document.createElement('span');
+    badge.className = 'diff-file-badge';
+    badge.textContent = `📄 ${String(fileName)}`;
+    container.appendChild(badge);
+  });
+}
+
 export function showApprovalBar(req = {}) {
   const bar = document.getElementById('approval-bar');
   const badge = document.getElementById('approval-badge');
@@ -43,25 +49,23 @@ export function showApprovalBar(req = {}) {
   const message = document.getElementById('approval-message');
   const actionsWrap = document.getElementById('approval-actions');
 
-  // Lưu callback tùy chỉnh (nếu có)
+  const requestedRisk = String(req.risk_level || 'HIGH').toUpperCase();
+  const risk = RISK_LEVELS.has(requestedRisk) ? requestedRisk : 'HIGH';
+  const requestedMode = req.mode || (req.diffText || req.files ? 'diff' : req.args ? 'tool' : 'alert');
+  const mode = MODES.has(requestedMode) ? requestedMode : 'alert';
+
+  activeApprovalId = typeof req.approval_id === 'string' && req.approval_id.trim()
+    ? req.approval_id.trim()
+    : null;
   currentActionHandlers.onApprove = req.onApprove || null;
   currentActionHandlers.onReject = req.onReject || null;
+  setDecisionPending(false);
 
-  // 1. Xác định cấp độ rủi ro & Variant chủ đạo
-  const risk = (req.risk_level || 'HIGH').toUpperCase();
   bar.className = `approval-bar bar-${risk.toLowerCase()}`;
-
   badge.textContent = risk;
   badge.className = `approval-badge badge-${risk.toLowerCase()}`;
-
-  // 2. Tự động nhận diện Mode nếu không truyền
-  const mode = req.mode || (req.diffText || req.files ? 'diff' : req.args ? 'tool' : 'alert');
-
-  // 3. Render Header & Actions
   actionsWrap.style.display = req.showActions !== false ? 'flex' : 'none';
-
-  // 4. Render Body theo Mode
-  customContent.innerHTML = ''; // Reset nội dung cũ
+  customContent.replaceChildren();
 
   if (mode === 'tool') {
     title.textContent = req.title || `Yêu cầu thực thi ${req.type || 'Tool'}`;
@@ -73,70 +77,76 @@ export function showApprovalBar(req = {}) {
       pre.textContent = JSON.stringify(req.args, null, 2);
       customContent.appendChild(pre);
     }
-
   } else if (mode === 'diff') {
-    title.textContent = req.title || `Yêu cầu xác nhận thay đổi tập tin`;
-    target.textContent = `📝 Số file ảnh hưởng: ${(req.files || []).length}`;
+    const files = Array.isArray(req.files) ? req.files : [];
+    title.textContent = req.title || 'Yêu cầu xác nhận thay đổi tập tin';
+    target.textContent = `📝 Số file ảnh hưởng: ${files.length}`;
 
-    // Render danh sách file
-    if (req.files && req.files.length > 0) {
+    if (files.length > 0) {
       const fileListDiv = document.createElement('div');
       fileListDiv.className = 'diff-file-list';
-      fileListDiv.innerHTML = req.files.map(f => `<span class="diff-file-badge">📄 ${f}</span>`).join('');
+      appendFileBadges(fileListDiv, files);
       customContent.appendChild(fileListDiv);
     }
 
-    // Render khối Diff
     if (req.diffText) {
       const diffContainer = document.createElement('div');
       diffContainer.className = 'diff-viewer-container';
-      
-      // Nếu có thư viện diff2html
-      if (window.Diff2HtmlUI) {
-        const ui = new Diff2HtmlUI(diffContainer, req.diffText, {
-          outputFormat: 'side-by-side',
-          drawFileList: false,
-          synchronisedScroll: true,
-          highlight: true
-        });
-        ui.draw();
-      } else {
-        // Fallback hiển thị text diff đơn giản
-        diffContainer.innerHTML = `<pre class="diff-text-fallback">${escapeHtml(req.diffText)}</pre>`;
-      }
+      const pre = document.createElement('pre');
+      pre.className = 'diff-text-fallback';
+      pre.textContent = String(req.diffText);
+      diffContainer.appendChild(pre);
       customContent.appendChild(diffContainer);
     }
-
-  } else { // Mode 'alert' / 'info'
-    title.textContent = req.title || `Thông báo hệ thống`;
+  } else {
+    title.textContent = req.title || 'Thông báo hệ thống';
     target.textContent = req.name ? `📌 Phạm vi: ${req.name}` : '';
-    
+
     if (req.content) {
       const alertDiv = document.createElement('div');
       alertDiv.className = 'approval-alert-content';
-      alertDiv.innerHTML = req.content;
+      alertDiv.textContent = String(req.content);
       customContent.appendChild(alertDiv);
     }
   }
 
-  // 5. Render Footer
-  message.textContent = req.message || (risk === 'HIGH' 
-    ? `⚠️ [Cảnh báo HIGH RISK]: Thao tác này có thể ảnh hưởng đến cấu trúc hệ thống.`
-    : `ℹ️ Vui lòng xem xét kỹ nội dung trước khi tiếp tục.`);
+  message.textContent = req.reason || req.message || (risk === 'HIGH' || risk === 'CRITICAL'
+    ? '⚠️ Thao tác này yêu cầu xác nhận rõ ràng trước khi tiếp tục.'
+    : 'ℹ️ Vui lòng xem xét kỹ nội dung trước khi tiếp tục.');
 
   bar.classList.remove('hidden');
+  return activeApprovalId;
 }
 
-export function hideApprovalBar() {
-  document.getElementById('approval-bar').classList.add('hidden');
-}
-
-function handleApproval(choice) {
-  if (window.pywebview && window.pywebview.api) {
-    window.pywebview.api.respond_approval(choice);
+export function hideApprovalBar(approvalId) {
+  const requestedId = typeof approvalId === 'string' ? approvalId.trim() : null;
+  if (activeApprovalId) {
+    if (!requestedId || requestedId !== activeApprovalId) return false;
   }
+
+  document.getElementById('approval-bar').classList.add('hidden');
+  activeApprovalId = null;
+  currentActionHandlers = { onApprove: null, onReject: null };
+  setDecisionPending(false);
+  return true;
 }
 
-function escapeHtml(str) {
-  return str.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+async function handleApproval(choice) {
+  if (decisionPending || !activeApprovalId) return false;
+  const responder = window.pywebview?.api?.respond_approval;
+  if (!responder) return false;
+
+  setDecisionPending(true);
+  try {
+    const accepted = await responder(choice, activeApprovalId);
+    if (accepted !== true) {
+      setDecisionPending(false);
+      return false;
+    }
+    return true;
+  } catch (error) {
+    console.error('Approval response failed:', error);
+    setDecisionPending(false);
+    return false;
+  }
 }
