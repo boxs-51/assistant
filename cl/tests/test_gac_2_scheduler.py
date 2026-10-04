@@ -750,3 +750,108 @@ def test_scheduler_consumes_public_lifecycle_guard_without_private_lock_or_wait(
     assert "_wait_duration" not in source
     assert "_wait_for_pacing" not in source
     assert "wait_function" not in source
+
+
+class FailOnceDrainKeyboardBackend:
+    def __init__(self):
+        self.events = []
+        self.down_event = threading.Event()
+        self.retry_entered = threading.Event()
+        self.retry_release = threading.Event()
+        self.up_attempts = 0
+
+    def key_down(self, key):
+        self.events.append(("down", key))
+        self.down_event.set()
+
+    def key_up(self, key):
+        self.up_attempts += 1
+        self.events.append(("up-attempt", key, self.up_attempts))
+        if self.up_attempts == 1:
+            raise RuntimeError("transient release failure")
+        if self.up_attempts == 2:
+            self.retry_entered.set()
+            assert self.retry_release.wait(timeout=1.0)
+        self.events.append(("up", key))
+
+
+def test_close_retains_writer_lease_until_active_execute_and_cleanup_drain():
+    session, binding = make_session("close-drain-lease")
+    old_backend = FailOnceDrainKeyboardBackend()
+    scheduler, _, _ = make_scheduler(
+        session,
+        keyboard_backend=old_backend,
+    )
+    intent = ActionIntent(
+        action_id="hold-close-drain",
+        automation_session_id=session.automation_session_id,
+        binding_generation=binding.generation,
+        kind=ActionKind.KEY_HOLD,
+        key="w",
+        hold_seconds=5.0,
+    )
+    outcomes = []
+    execute_thread = threading.Thread(
+        target=lambda: outcomes.append(scheduler.execute(intent)),
+        daemon=True,
+    )
+    execute_thread.start()
+    assert old_backend.down_event.wait(timeout=0.5)
+
+    close_done = threading.Event()
+
+    def close_scheduler():
+        scheduler.close()
+        close_done.set()
+
+    close_thread = threading.Thread(target=close_scheduler, daemon=True)
+    close_thread.start()
+
+    # close() performs the first best-effort cleanup, which fails once.
+    # The active execute() then retries cleanup before close may release the
+    # session registry lease.
+    assert old_backend.retry_entered.wait(timeout=0.5)
+    assert close_done.is_set() is False
+
+    with pytest.raises(DuplicateSchedulerError):
+        make_scheduler(session)
+
+    old_backend.retry_release.set()
+    execute_thread.join(timeout=0.5)
+    close_thread.join(timeout=0.5)
+
+    assert execute_thread.is_alive() is False
+    assert close_thread.is_alive() is False
+    assert close_done.is_set() is True
+    assert outcomes[0].status in {
+        ActionStatus.CANCELLED,
+        ActionStatus.FAILED,
+    }
+    assert old_backend.up_attempts == 2
+    assert old_backend.events[-1] == ("up", "w")
+
+    old_event_count = len(old_backend.events)
+    replacement_backend = FakeKeyboardBackend()
+    replacement, _, _ = make_scheduler(
+        session,
+        keyboard_backend=replacement_backend,
+    )
+    replacement_outcome = replacement.execute(
+        key_intent(session, binding, action_id="replacement-after-drain")
+    )
+
+    assert replacement_outcome.status is ActionStatus.SUCCEEDED
+    assert replacement_backend.events == [("down", "w"), ("up", "w")]
+    assert len(old_backend.events) == old_event_count
+    replacement.close()
+
+
+def test_close_drain_does_not_wait_for_execute_while_holding_transition_lock():
+    source = inspect.getsource(ActionScheduler.close)
+
+    transition_block = source.split("with self._transition_lock:", 1)[1]
+    drain_block = transition_block.split("with self._execute_lock:", 1)
+    assert len(drain_block) == 2
+    before_execute_wait, after_execute_wait = drain_block
+    assert "_active_sessions.discard" not in before_execute_wait
+    assert "_active_sessions.discard" in after_execute_wait
