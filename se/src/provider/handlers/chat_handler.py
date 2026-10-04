@@ -18,8 +18,11 @@ from ...application.user_inference_quota import (
 from ...domain.schemas import GatewayResponse, GatewayStreamChunk, ModelCapability
 from ..exceptions import (
     NoAvailableProviderError,
+    ProviderCallTimeoutError,
     ProviderDeadlineExceededError,
     ProviderError,
+    ProviderFirstResponseTimeoutError,
+    ProviderStreamIdleTimeoutError,
     ProviderRecoveryAuthorityLostError,
     ProviderRecoveryGuardError,
     wrap_provider_exception,
@@ -38,10 +41,18 @@ class ChatExecutionHandler(BaseExecutionHandler):
         *args,
         inference_quota: UserInferenceQuotaService | None = None,
         generated_asset_canonicalizer: GeneratedAssetCanonicalizer | None = None,
+        provider_first_response_timeout_seconds: float | None = None,
+        provider_stream_idle_timeout_seconds: float | None = None,
         **kwargs,
     ) -> None:
         super().__init__(*args, **kwargs)
         self.inference_quota = inference_quota
+        self.provider_first_response_timeout_seconds = (
+            provider_first_response_timeout_seconds
+        )
+        self.provider_stream_idle_timeout_seconds = (
+            provider_stream_idle_timeout_seconds
+        )
         # The response-side F7 fence is always installed. In degraded mode the
         # unavailable sentinel passes ordinary text responses through and
         # terminally rejects generated media after provider success.
@@ -327,6 +338,8 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     )
                 except ProviderRecoveryAuthorityLostError:
                     raise
+                except ProviderCallTimeoutError:
+                    raise
                 except ProviderDeadlineExceededError:
                     raise
                 except (
@@ -360,7 +373,7 @@ class ChatExecutionHandler(BaseExecutionHandler):
 
         try:
             self._remaining_timeout(call_budget)
-        except ProviderDeadlineExceededError as deadline_error:
+        except ProviderDeadlineExceededError:
             raise ProviderDeadlineExceededError(
                 "Provider call deadline exhausted during fallback."
             ) from last_exception
@@ -470,6 +483,15 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     body=attempt_body,
                     timeout=self.timeout,
                     call_budget=call_budget,
+                    first_response_timeout=(
+                        self.provider_first_response_timeout_seconds
+                    ),
+                    stream_idle_timeout=(
+                        self.provider_stream_idle_timeout_seconds
+                    ),
+                    is_semantic_progress=(
+                        self._has_stream_semantic_or_finish_progression
+                    ),
                 )
                 stream_assembler = GeneratedAssetStreamAssembler(
                     self.generated_asset_canonicalizer,
@@ -561,7 +583,32 @@ class ChatExecutionHandler(BaseExecutionHandler):
                     yield canonical_chunk
                 return
 
+            except ProviderCallTimeoutError:
+                raise
+
             except ProviderDeadlineExceededError:
+                raise
+
+            except ProviderFirstResponseTimeoutError as error:
+                logger.warning(
+                    "Provider first response timed out",
+                    provider=provider.name,
+                    stream_started=stream_started,
+                )
+                if (
+                    stream_started
+                    or asset_attempt_terminal
+                    or bool(
+                        stream_assembler is not None
+                        and stream_assembler.media_seen
+                    )
+                ):
+                    raise
+                last_exception = error
+                last_provider_name = provider.name
+                continue
+
+            except ProviderStreamIdleTimeoutError:
                 raise
 
             except (
@@ -616,6 +663,9 @@ class ChatExecutionHandler(BaseExecutionHandler):
             raise ProviderDeadlineExceededError(
                 "Provider stream deadline exhausted during fallback."
             ) from last_exception
+
+        if isinstance(last_exception, ProviderFirstResponseTimeoutError):
+            raise last_exception
 
         detail = last_detail or (
             last_exception
