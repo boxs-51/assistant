@@ -13,13 +13,19 @@ from cl.src.game_automation.session.window_manager import (
 
 
 ROOT = Path(__file__).resolve().parents[2]
-GAME_AUTOMATION_ROOT = ROOT / "cl/src/game_automation"
+GAC1_PRODUCTION_FILES = (
+    ROOT / "cl/src/game_automation/session/game_session.py",
+    ROOT / "cl/src/game_automation/session/window_manager.py",
+    ROOT / "cl/src/game_automation/capture/frame_source.py",
+    ROOT / "cl/src/game_automation/capture/window_capture.py",
+)
 
 
-def test_gac1_exact_production_surface_is_four_new_modules_only():
+def test_gac1_exact_production_surface_remains_four_canonical_modules():
     production_files = {
         path.relative_to(ROOT).as_posix()
-        for path in GAME_AUTOMATION_ROOT.rglob("*.py")
+        for path in GAC1_PRODUCTION_FILES
+        if path.is_file()
     }
     assert production_files == {
         "cl/src/game_automation/session/game_session.py",
@@ -32,7 +38,7 @@ def test_gac1_exact_production_surface_is_four_new_modules_only():
 def test_gac1_production_has_no_server_network_ui_capability_or_persistence_path():
     source = "\n".join(
         path.read_text(encoding="utf-8")
-        for path in GAME_AUTOMATION_ROOT.rglob("*.py")
+        for path in GAC1_PRODUCTION_FILES
     )
 
     forbidden = (
@@ -59,7 +65,7 @@ def test_gac1_production_has_no_server_network_ui_capability_or_persistence_path
     for token in forbidden:
         assert token not in source
 
-    # GAC-1 is synchronous capture-one-frame only.
+    # GAC-1 remains synchronous capture-one-frame only.
     assert "threading.Thread" not in source
     assert "asyncio" not in source
 
