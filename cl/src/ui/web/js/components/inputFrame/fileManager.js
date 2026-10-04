@@ -111,11 +111,14 @@ export function addFilesToQueue(filePaths, onStateChange) {
     chip.dataset.path = path;
     chip.innerHTML = `
       <span class="chip-icon">📄</span>
-      <span class="chip-name" title="${fileName}">${fileName}</span>
+      <span class="chip-name"></span>
       <span class="chip-status">0%</span>
       <div class="chip-progress-bar"><div class="chip-progress-fill" style="width: 0%"></div></div>
       <span class="remove" title="Xóa">✕</span>
     `;
+    const chipName = chip.querySelector('.chip-name');
+    chipName.textContent = fileName;
+    chipName.title = fileName;
 
     chip.querySelector('.remove').addEventListener('click', (event) => {
       event.stopPropagation();
