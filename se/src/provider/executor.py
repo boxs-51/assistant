@@ -17,6 +17,8 @@ from .core.provider import BaseProvider
 from .exceptions import (
     ProviderDeadlineExceededError,
     ProviderError,
+    ProviderFirstResponseTimeoutError,
+    ProviderStreamIdleTimeoutError,
     ProviderRecoveryAuthorityLostError,
     ProviderRecoveryGuardError,
     wrap_provider_exception,
@@ -437,6 +439,9 @@ class ProviderExecutor:
         *,
         call_budget: ProviderCallBudget | None = None,
         timeout: float | None = None,
+        first_response_timeout: float | None = None,
+        stream_idle_timeout: float | None = None,
+        is_semantic_progress: Callable[[GatewayStreamChunk], bool] | None = None,
         **kwargs,
     ) -> AsyncGenerator[GatewayStreamChunk, None]:
         """Execute one stream under the shared logical-call deadline.
@@ -448,6 +453,25 @@ class ProviderExecutor:
         provider = kwargs.get("provider")
         breaker = await self.breaker_manager.get_breaker(provider.name)
         provider_attempted = False
+        semantic_progress_seen = False
+
+        def positive_optional(value: float | None, *, name: str) -> float | None:
+            if value is None:
+                return None
+            normalized = float(value)
+            if not math.isfinite(normalized) or normalized <= 0:
+                raise ValueError(f"{name} must be finite and positive")
+            return normalized
+
+        first_response_timeout = positive_optional(
+            first_response_timeout,
+            name="first_response_timeout",
+        )
+        stream_idle_timeout = positive_optional(
+            stream_idle_timeout,
+            name="stream_idle_timeout",
+        )
+        scope_deadline: float | None = None
 
         try:
             if call_budget is not None:
@@ -478,24 +502,45 @@ class ProviderExecutor:
                 **attempt_kwargs
             ).__aiter__()
             next_chunk_task: asyncio.Task | None = None
+            scope_deadline = (
+                None
+                if first_response_timeout is None
+                else time.monotonic() + first_response_timeout
+            )
             try:
                 while True:
                     try:
-                        if call_budget is None:
-                            provider_attempted = True
-                            chunk = await stream_iterator.__anext__()
-                        else:
-                            remaining = self._remaining_or_raise(
+                        hard_remaining = (
+                            None
+                            if call_budget is None
+                            else self._remaining_or_raise(
                                 call_budget,
                                 provider.name,
                             )
-                            provider_attempted = True
+                        )
+                        scope_remaining = (
+                            None
+                            if scope_deadline is None
+                            else max(0.0, scope_deadline - time.monotonic())
+                        )
+                        wait_candidates = [
+                            value
+                            for value in (hard_remaining, scope_remaining)
+                            if value is not None
+                        ]
+                        wait_timeout = (
+                            min(wait_candidates) if wait_candidates else None
+                        )
+                        provider_attempted = True
+                        if wait_timeout is None:
+                            chunk = await stream_iterator.__anext__()
+                        else:
                             next_chunk_task = asyncio.create_task(
                                 stream_iterator.__anext__()
                             )
                             done, _ = await asyncio.wait(
                                 {next_chunk_task},
-                                timeout=remaining,
+                                timeout=wait_timeout,
                                 return_when=asyncio.FIRST_COMPLETED,
                             )
                             if next_chunk_task not in done:
@@ -505,15 +550,53 @@ class ProviderExecutor:
                                     return_exceptions=True,
                                 )
                                 next_chunk_task = None
-                                raise ProviderDeadlineExceededError(
-                                    "Provider stream deadline exceeded.",
+                                if (
+                                    call_budget is not None
+                                    and call_budget.remaining_seconds(
+                                        now_monotonic=time.monotonic()
+                                    )
+                                    <= 0
+                                ):
+                                    raise ProviderDeadlineExceededError(
+                                        "Provider stream deadline exceeded.",
+                                        provider_name=provider.name,
+                                    )
+                                if not semantic_progress_seen:
+                                    assert first_response_timeout is not None
+                                    raise ProviderFirstResponseTimeoutError(
+                                        "Provider first response timed out.",
+                                        provider_name=provider.name,
+                                        timeout_seconds=first_response_timeout,
+                                    )
+                                assert stream_idle_timeout is not None
+                                raise ProviderStreamIdleTimeoutError(
+                                    "Provider stream became idle.",
                                     provider_name=provider.name,
+                                    timeout_seconds=stream_idle_timeout,
                                 )
                             chunk = await next_chunk_task
                             next_chunk_task = None
+                            if call_budget is not None:
+                                self._remaining_or_raise(
+                                    call_budget,
+                                    provider.name,
+                                )
                     except StopAsyncIteration:
                         next_chunk_task = None
                         break
+
+                    semantic_progress = (
+                        True
+                        if is_semantic_progress is None
+                        else bool(is_semantic_progress(chunk))
+                    )
+                    if semantic_progress:
+                        semantic_progress_seen = True
+                        scope_deadline = (
+                            None
+                            if stream_idle_timeout is None
+                            else time.monotonic() + stream_idle_timeout
+                        )
 
                     yield chunk
             finally:
@@ -537,6 +620,14 @@ class ProviderExecutor:
                         )
 
             await breaker.on_success()
+
+        except (
+            ProviderFirstResponseTimeoutError,
+            ProviderStreamIdleTimeoutError,
+        ):
+            if provider_attempted:
+                await breaker.on_failure()
+            raise
 
         except ProviderDeadlineExceededError:
             if provider_attempted:
