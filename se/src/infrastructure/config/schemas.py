@@ -160,6 +160,14 @@ class ProviderConfig(BaseModel):
     
 class ProviderSettings(BaseModel):
     timeout: int = 60
+    provider_first_response_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
+    provider_stream_idle_timeout_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+    )
     retry: int = 2
     enable_fallback: bool = True
     priority: list[str] = Field(default=["openai", "anthropic", "gemini", "ollama", "mock"])
