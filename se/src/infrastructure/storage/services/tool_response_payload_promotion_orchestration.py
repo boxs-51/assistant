@@ -12,6 +12,10 @@ from se.src.context.source_identity import ContextSourceRef
 from se.src.infrastructure.storage.services.promotion_reservation_issuer import (
     DurablePromotionReservationIssuer,
 )
+from se.src.infrastructure.storage.services.promotion_reservation_recovery import (
+    DurablePromotionReservationRecovery,
+    DurablePromotionReservationRecoveryHandoff,
+)
 from se.src.infrastructure.storage.services.tool_response_payload_source_authority import (
     DurableToolResponsePayloadSourceAuthority,
     TrustedToolResponsePromotionMaterial,
@@ -37,15 +41,19 @@ class TrustedToolResponsePromotionReservation:
 
 
 class DurableToolResponsePayloadPromotionOrchestration:
-    """Bounded B3 handoff from trusted B2 material to durable reservation."""
+    """Bounded handoff from fresh trusted material to recovery or issuance."""
 
     def __init__(
         self,
         source_authority: DurableToolResponsePayloadSourceAuthority,
         reservation_issuer: DurablePromotionReservationIssuer,
+        reservation_recovery: DurablePromotionReservationRecovery | None = None,
     ) -> None:
         self._source_authority = source_authority
-        self._reservation_issuer = reservation_issuer
+        self._reservation_handoff = DurablePromotionReservationRecoveryHandoff(
+            reservation_issuer,
+            reservation_recovery,
+        )
 
     async def reserve(
         self,
@@ -53,7 +61,7 @@ class DurableToolResponsePayloadPromotionOrchestration:
         source_ref: ContextSourceRef,
         owner_user_id: str,
     ) -> TrustedToolResponsePromotionReservation:
-        """Re-prove one source, reserve its exact server intent, and return transient content."""
+        """Re-prove one source, recover-or-issue its intent, and return transient content."""
         material = await self._source_authority.read_trusted_promotion_material(
             source_ref=source_ref,
             owner_user_id=owner_user_id,
@@ -66,7 +74,7 @@ class DurableToolResponsePayloadPromotionOrchestration:
             metadata={},
             memory_schema_version=MEMORY_SCHEMA_VERSION,
         )
-        reservation = await self._reservation_issuer.reserve(intent=intent)
+        reservation = await self._reservation_handoff.reserve(intent=intent)
         return TrustedToolResponsePromotionReservation(
             reservation=reservation,
             trusted_material=material,
