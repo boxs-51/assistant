@@ -85,7 +85,11 @@ class GameSession:
     """
 
     def __init__(self, automation_session_id: str | None = None) -> None:
-        self._automation_session_id = automation_session_id or uuid.uuid4().hex
+        self._automation_session_id = (
+            uuid.uuid4().hex
+            if automation_session_id is None
+            else automation_session_id
+        )
         if not self._automation_session_id:
             raise ValueError("automation_session_id must not be empty")
 
