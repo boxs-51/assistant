@@ -21,6 +21,7 @@ from cl.src.game_automation.actions.scheduler import (
 )
 from cl.src.game_automation.session.game_session import (
     GameSession,
+    GameSessionError,
     GameWindowIdentity,
 )
 from cl.src.game_automation.session.window_manager import CaptureGeometry
@@ -44,7 +45,10 @@ class FakeFocusGuard:
         self.calls += 1
         if self.fail_on_call is not None and self.calls >= self.fail_on_call:
             raise TargetLostError("target/focus lost")
-        context = self.session.current_capture_context()
+        try:
+            context = self.session.current_capture_context()
+        except GameSessionError as error:
+            raise TargetLostError(str(error)) from error
         if (
             context.automation_session_id != automation_session_id
             or context.binding_generation != binding_generation
