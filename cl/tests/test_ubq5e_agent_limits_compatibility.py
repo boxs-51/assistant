@@ -55,6 +55,17 @@ def test_ubq5e_client_legacy_defaults_and_equal_dual_spelling_are_stable() -> No
     assert defaults.inference_timeout_seconds == 15.0
     assert defaults.tool_timeout_seconds == 10.0
 
+    legacy = AgentExecutionLimits.model_validate(
+        {
+            "timeout_seconds": 41.0,
+            "inference_timeout_seconds": 13.0,
+            "tool_timeout_seconds": 8.0,
+        }
+    )
+    assert legacy.execution_timeout_seconds == 41.0
+    assert legacy.provider_call_timeout_seconds == 13.0
+    assert legacy.tool_call_timeout_seconds == 8.0
+
     limits = AgentExecutionLimits.model_validate(
         {
             "timeout_seconds": 42.0,
