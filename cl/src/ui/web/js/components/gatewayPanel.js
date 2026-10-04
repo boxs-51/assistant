@@ -1,3 +1,5 @@
+import { safeEnum } from '../utils/security.js';
+
 const state = {
   snapshot: null,
   activeTab: 'overview',
@@ -5,6 +7,12 @@ const state = {
   authMode: 'login',
 };
 let agentPollTimer = null;
+
+const RISK_PRESENTATION_VALUES = ['low', 'medium', 'high', 'critical'];
+
+function normalizeRiskPresentation(value) {
+  return safeEnum(value, RISK_PRESENTATION_VALUES, 'medium');
+}
 
 const escapeHtml = (value = '') => String(value)
   .replaceAll('&', '&amp;')
@@ -133,7 +141,7 @@ function mergedSkills() {
       ...(byName.get(name) || {}),
       name,
       description: definition.description || byName.get(name)?.description,
-      base_risk: definition.metadata?.base_risk || byName.get(name)?.base_risk || 'LOW',
+      base_risk: definition.metadata?.base_risk ?? byName.get(name)?.base_risk ?? 'MEDIUM',
       loaded: true,
       serverManaged: true,
     });
@@ -149,7 +157,7 @@ function renderSkills(panel) {
     <div class="studio-list">
       ${skills.length ? skills.map(skill => `
         <article class="studio-card resource-card">
-          <div class="resource-title"><strong>${escapeHtml(skill.name)}</strong><span class="risk ${escapeHtml((skill.base_risk || 'MEDIUM').toLowerCase())}">${escapeHtml(skill.base_risk || 'MEDIUM')}</span></div>
+          <div class="resource-title"><strong>${escapeHtml(skill.name)}</strong><span class="risk ${normalizeRiskPresentation(skill.base_risk)}">${normalizeRiskPresentation(skill.base_risk).toUpperCase()}</span></div>
           <p>${escapeHtml(skill.description || '')}</p>
           <button class="gateway-button ${skill.loaded ? 'secondary' : 'primary'}" ${skill.serverManaged ? 'disabled' : `data-skill="${escapeHtml(skill.name)}" data-action="${skill.loaded ? 'deactivate' : 'activate'}"`}>
             ${skill.serverManaged ? 'Server ready' : (skill.loaded ? 'Unload' : 'Activate')}
