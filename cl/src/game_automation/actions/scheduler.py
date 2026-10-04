@@ -210,7 +210,13 @@ class ActionScheduler:
             return changed
 
     def close(self) -> None:
-        """Terminally close this writer, wake waits, cleanup, and release lease."""
+        """Close this writer and release its registry lease only after drain.
+
+        The transition lock is intentionally released before waiting for the
+        execute lock: active execution finalization needs the transition lock.
+        Keeping the registry claim until execute/final cleanup has drained
+        prevents a replacement writer from racing a late cleanup release.
+        """
 
         with self._transition_lock:
             with self._state_lock:
@@ -222,8 +228,16 @@ class ActionScheduler:
                 token.cancel()
             self._cleanup_owned_input()
 
-        with self._registry_lock:
-            self._active_sessions.discard(self._session_id)
+        # Do not hold _transition_lock while waiting here. The active execute()
+        # path owns _execute_lock for its full lifetime and may need
+        # _transition_lock to finalize its outcome.
+        with self._execute_lock:
+            # One final best-effort retry happens after all active execution
+            # cleanup has drained. Once the registry lease is released below,
+            # this scheduler has no remaining path that can emit cleanup input.
+            self._cleanup_owned_input()
+            with self._registry_lock:
+                self._active_sessions.discard(self._session_id)
 
     def __enter__(self) -> "ActionScheduler":
         return self
