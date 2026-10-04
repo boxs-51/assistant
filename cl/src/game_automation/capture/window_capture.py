@@ -165,13 +165,21 @@ class WindowCapture:
         native = self._backend.capture(context.identity, geometry)
 
         # Native capture may block long enough for the HWND/PID/session binding
-        # to change. Validate the native target again before accepting pixels.
+        # or client rectangle to change. Revalidate both native identity and the
+        # exact desktop rectangle used by the capture before publishing pixels.
         try:
-            self._window_manager.validate_binding(context.identity)
+            post_capture_geometry = self._window_manager.validate_binding(
+                context.identity
+            )
         except WindowTargetError as error:
             raise StaleFrameError(
                 "bound target changed while native capture was in progress"
             ) from error
+
+        if post_capture_geometry != geometry:
+            raise StaleFrameError(
+                "bound window geometry changed while native capture was in progress"
+            )
 
         try:
             session.assert_current(context)
