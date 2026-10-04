@@ -10,6 +10,10 @@ from cl.src.game_automation.session.window_manager import (
 )
 
 
+class _BackendSpecificError(Exception):
+    pass
+
+
 @dataclass
 class _FakeBackend:
     hwnd: int = 100
@@ -21,6 +25,7 @@ class _FakeBackend:
     visible: bool = True
     minimized: bool = False
     geometry_error: Exception | None = None
+    process_start_error: Exception | None = None
 
     def enumerate_windows(self):
         return (self.hwnd,)
@@ -38,6 +43,8 @@ class _FakeBackend:
         return self.pid
 
     def process_start_time(self, process_id):
+        if self.process_start_error is not None:
+            raise self.process_start_error
         return self.started
 
     def window_title(self, hwnd):
@@ -128,3 +135,27 @@ def test_unstable_discovery_candidate_is_omitted_not_authoritative():
     manager = GameWindowManager(backend)
 
     assert manager.enumerate_windows() == ()
+
+
+def test_backend_specific_process_race_is_normalized_to_structured_failure():
+    backend = _FakeBackend()
+    manager = GameWindowManager(backend)
+    identity = manager.identity_for_hwnd(backend.hwnd)
+
+    backend.process_start_error = _BackendSpecificError("process vanished")
+
+    with pytest.raises(WindowTargetUnavailableError, match="validation failed closed"):
+        manager.validate_binding(identity)
+
+
+def test_backend_specific_identity_resolution_race_is_structured():
+    backend = _FakeBackend(
+        process_start_error=_BackendSpecificError("process vanished")
+    )
+    manager = GameWindowManager(backend)
+
+    with pytest.raises(
+        WindowTargetUnavailableError,
+        match="process identity cannot be resolved",
+    ):
+        manager.identity_for_hwnd(backend.hwnd)
