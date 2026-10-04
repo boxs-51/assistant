@@ -3,7 +3,7 @@ from enum import Enum
 from typing import Any, Dict, Optional
 
 from .base import GatewayBaseModel
-from pydantic import Field, field_validator, model_validator
+from pydantic import AliasChoices, Field, field_validator, model_validator
 
 MAX_AGENT_PROPOSED_TASK_SECONDS = 86400.0
 
@@ -135,10 +135,41 @@ class AgentExecutionLimits(GatewayBaseModel):
     max_tool_calls: int = 16
     max_parallel_agents: int = 4
     max_parallel_tools: int = 4
-    timeout_seconds: float = Field(default=60.0, description="Total active execution budget, excluding durable WAITING time.")
+    timeout_seconds: float = Field(
+        default=60.0,
+        validation_alias=AliasChoices(
+            "execution_timeout_seconds",
+            "timeout_seconds",
+        ),
+        serialization_alias="timeout_seconds",
+        description=(
+            "Total active execution budget, excluding durable WAITING time."
+        ),
+    )
     iteration_timeout_seconds: float = Field(default=20.0, description="Budget for one Agent loop iteration, bounded by total execution time.")
-    inference_timeout_seconds: float = Field(default=15.0, description="Budget for one model call, bounded by iteration and execution time.")
-    tool_timeout_seconds: float = Field(default=10.0, description="Budget for one ordinary tool call, bounded by iteration and execution time.")
+    inference_timeout_seconds: float = Field(
+        default=15.0,
+        validation_alias=AliasChoices(
+            "provider_call_timeout_seconds",
+            "inference_timeout_seconds",
+        ),
+        serialization_alias="inference_timeout_seconds",
+        description=(
+            "Budget for one model call, bounded by iteration and execution time."
+        ),
+    )
+    tool_timeout_seconds: float = Field(
+        default=10.0,
+        validation_alias=AliasChoices(
+            "tool_call_timeout_seconds",
+            "tool_timeout_seconds",
+        ),
+        serialization_alias="tool_timeout_seconds",
+        description=(
+            "Budget for one ordinary tool call, bounded by iteration and "
+            "execution time."
+        ),
+    )
     task_timeout_seconds: Optional[float] = Field(default=None, gt=0, description="Optional hard wall-clock limit for the task; the Agent may propose it when omitted.")
     max_retry_attempts: int = 1
     max_cost: Optional[float] = None
