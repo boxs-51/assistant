@@ -37,7 +37,9 @@ def test_ubq5b_projects_timeout_truth_without_expanding_other_authority() -> Non
         assert code in exceptions
     assert '"timeout_scope"' in provider_runtime
     assert '"timeout_seconds"' in provider_runtime
-    assert "isinstance(timeout_error, ProviderTimeoutError)" in agent_runtime
+    assert "ProviderDeadlineExceededError" in agent_runtime
+    assert "(ProviderTimeoutError, ProviderDeadlineExceededError)" in agent_runtime
+    assert "timeout_code = timeout_error.code" in agent_runtime
     assert "_reserve_inference_quota" in chat
     assert "_settle_inference_quota_success" in chat
 
