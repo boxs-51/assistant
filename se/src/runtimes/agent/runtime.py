@@ -14,6 +14,7 @@ from ...domain.schemas.agent_execution import (
     normalize_execution_waiting,
 )
 from ...provider.exceptions import (
+    ProviderDeadlineExceededError,
     ProviderRecoveryAuthorityLostError,
     ProviderTimeoutError,
 )
@@ -2660,8 +2661,15 @@ class AgentRuntime:
                     "Agent execution cancelled.",
                     last_tool_results=latest_tool_results,
                 )
-            except (asyncio.TimeoutError, TimeoutError) as timeout_error:
-                if isinstance(timeout_error, ProviderTimeoutError):
+            except (
+                asyncio.TimeoutError,
+                TimeoutError,
+                ProviderDeadlineExceededError,
+            ) as timeout_error:
+                if isinstance(
+                    timeout_error,
+                    (ProviderTimeoutError, ProviderDeadlineExceededError),
+                ):
                     timeout_code = timeout_error.code
                     timeout_message = str(timeout_error)
                 elif context.task_timed_out:
