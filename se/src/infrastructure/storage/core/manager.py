@@ -325,6 +325,12 @@ class StorageEngine:
                 "TOOL_RESPONSE_PAYLOAD Memory promotion service is not active"
             )
 
+        if not self.drivers.is_available("sqlite"):
+            raise RuntimeError(
+                "SQLite driver is unavailable for TOOL_RESPONSE_PAYLOAD "
+                "Memory promotion"
+            )
+
         service = self.services.get(_TOOL_RESPONSE_PAYLOAD_MEMORY_PROMOTION)
         if not isinstance(
             service,
