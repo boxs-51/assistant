@@ -198,7 +198,8 @@ def test_ubq6b_contract_keeps_pg_gate_open_and_followons_unreleased() -> None:
         "Status: **OPEN / REQUIRED BEFORE ANY POSTGRESQL 26a / "
         "UBQ-2 RUNTIME DEPLOYMENT**"
     ) in pg_gate
-    assert "SQLite execution is **not** accepted as cross-dialect proof." in pg_gate
+    assert "SQLite CI remains valid SQLite evidence only" in pg_gate
+    assert "MUST NOT be presented as PostgreSQL parity" in pg_gate
     assert "setting `user_budget.dual_accounting.enabled=false`" in pg_gate
 
     for token in (
