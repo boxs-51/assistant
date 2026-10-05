@@ -726,6 +726,257 @@ All profile/policy fields are descriptive ceilings/preferences unless an owning 
 
 ---
 
+
+## 12A. Client runtime architecture
+
+APR applies to both `se` and `cl`, but the two sides have different responsibilities.
+
+### 12A.1 Canonical client transport/capability host
+
+Current `cl/src/core/client_runtime.py` is the canonical client-side owner for:
+- authenticated client identity/session bootstrap;
+- realtime transport generations/reconnect;
+- connection registration;
+- client capability registration;
+- remote invocation dispatch/reconciliation/resume integration.
+
+Current `cl/src/core/capability_runtime.py` advertises local registry Tools as:
+
+```text
+kind = TOOL
+location = CLIENT
+driver_kind = REMOTE_CLIENT
+owner_type = CLIENT
+```
+
+and handles:
+- `capability.invoke`;
+- `capability.cancel`;
+- `capability.reconcile`;
+- `capability.registered`.
+
+APR specialized client runtimes MUST reuse this transport/capability host instead of creating a second websocket, invocation ledger, reconnect authority or remote-dispatch protocol.
+
+### 12A.2 GatewayRealtimeClient naming boundary
+
+`cl/src/core/realtime_client.py::GatewayRealtimeClient` is currently a persistent gateway control transport.
+
+It MUST NOT be confused with APR `REALTIME` runtime profile.
+
+```text
+GatewayRealtimeClient
+  = websocket/control-plane transport
+
+APR REALTIME
+  = low-latency duplex Agent interaction semantics
+```
+
+APR-RT1 may consume the existing transport or a future transport contract, but must not infer live voice/video/reasoning semantics merely from the current class name.
+
+### 12A.3 Legacy/local AgentEngine boundary
+
+`cl/src/core/agent_engine.py` currently contains a client-local ReAct loop:
+- builds chat requests;
+- calls Gateway LLM;
+- consumes stream/unary responses;
+- parses Tool calls;
+- executes local Tools in parallel;
+- repeats until completion.
+
+This is a materially different execution authority from the target Agent-only server architecture.
+
+APR MUST NOT build FAST_CONTROL, REALTIME or COMPUTER_INTERACTIVE semantics by extending this legacy loop by default.
+
+Target direction:
+
+```text
+server AgentRuntime
+  = canonical reasoning / durable Agent execution authority
+
+ClientRuntime + CapabilityRuntime
+  = canonical client-local capability host
+
+specialized client runtime
+  = bounded local environment/control subsystem
+```
+
+The final disposition of `AgentEngine` is coordinated with #167/AOS-2 and requires a fresh client compatibility audit; APR-C0 does not delete or modify it.
+
+### 12A.4 Legacy registry sync boundary
+
+`cl/src/core/gateway_client.py::sync_registry()` currently:
+- POST-registers local Tools;
+- eagerly loads every client Skill body using `get_skill(..., load=True)`;
+- POST-registers Skills;
+- optionally registers an Agent.
+
+This is not the target Skill V2 lazy model.
+
+Ownership:
+- SKV2-C1 owns client Skill metadata-only normalization/sync;
+- AOS-2 / Agent-only convergence owns legacy client Agent/chat compatibility as separately released;
+- APR consumes those results and does not duplicate them.
+
+### 12A.5 UI/event streaming
+
+Client chat/UI already consumes:
+- ordinary provider streaming;
+- public `agent_stream_event` progress/Tool events.
+
+This is useful presentation infrastructure, but it is not yet APR execution-lane or REALTIME authority.
+
+UI rendering remains CL-UI-owned.
+
+---
+
+## 12B. GAME-AUTO-CLIENT / FAST_CONTROL convergence
+
+Issue #221 GAME-AUTO-CLIENT is the existing client-local closed-loop automation authority.
+
+Its architecture already freezes:
+
+```text
+Game window
+ -> capture
+ -> perception
+ -> tracking
+ -> WorldModel
+ -> local planner / behavior
+ -> ActionScheduler
+ -> keyboard/mouse
+ -> verify
+ -> repeat
+```
+
+and explicitly keeps the LLM out of the per-frame critical path.
+
+APR-FC1 therefore MUST converge with GAC instead of creating a parallel FastControl runtime.
+
+### Existing canonical GAC foundations
+
+As of the APR-C0-A audit:
+- GAC-0 / #222 = LANDED / CANONICAL / HEALTHY;
+- GAC-1 / #226 = LANDED / CANONICAL / HEALTHY;
+- GAC-2 / #231 = LANDED / CANONICAL / HEALTHY;
+- current source includes window binding/capture plus bounded action scheduler/focus/input safety under `cl/src/game_automation/**`.
+
+GAC-2 already provides client-local concepts analogous to part of FAST_CONTROL:
+- `automation_session_id`;
+- `binding_generation`;
+- bounded `ActionIntent`;
+- action deadline;
+- cooldown/pacing;
+- cancellation;
+- latched emergency stop;
+- one serialized writer per game session;
+- exact target/focus validation;
+- fail-closed target loss;
+- no automatic side-effect retry.
+
+These remain GAC-owned production semantics.
+
+### Missing APR-FC1 seam
+
+GAC-2 protects target/session freshness, but GAC-3/GAC-4 have not yet introduced the perception/WorldModel revision that a tactical decision should bind to.
+
+Future convergence should establish:
+
+```text
+FrameObservation
+ -> PerceptionRevision
+ -> WorldStateRevision
+ -> FastDecision(based_on_revision)
+ -> ActionIntent
+ -> pre-action freshness / target validation
+```
+
+The exact type names remain stage-owned.
+
+APR requires the semantic invariant:
+
+> A fast action must be traceable to the observation/world-state revision that justified it, and must be rejected, revalidated or preempted when that state is no longer current.
+
+### GAC stage mapping
+
+Preferred cross-track mapping:
+
+```text
+GAC-1
+  GameSession / binding / capture identity
+       ↓
+GAC-2
+  bounded ActionIntent / scheduler / focus / e-stop
+       ↓
+GAC-3
+  perception adapter
+       ↓
+GAC-4
+  tracker + WorldModel + state revision
+       ↓
+GAC-5
+  local Behavior Runtime
+  + FastDecision / stale-state binding
+       ↓
+GAC-6
+  high-level game.* capability registration
+  via ClientRuntime/CapabilityRuntime
+       ↓
+GAC-7
+  bounded LLM/Agent escalation
+  + StrategyHint / slow-path integration
+```
+
+APR-FC1 should be treated as the generic platform contract consumed by GAC-4/5/7, not a replacement implementation track.
+
+### Capability boundary
+
+Normal server-facing integration should remain high-level:
+
+```text
+AgentRuntime
+ -> DCS
+ -> game.navigate / game.collect / game.combat / game.execute_task
+ -> CLIENT_LOCAL routing
+ -> GameAutomationRuntime local closed loop
+ -> structured outcome / blocked reason / telemetry summary
+```
+
+The server SHOULD NOT stream low-level per-frame keyboard/mouse commands for normal GAC operation.
+
+GAC-6 remains dependent on canonical target-aware routing (#161 or successor authority).
+
+### Deep reasoning escalation
+
+GAC-7 is the natural game-specific consumer of APR's slow path:
+
+```text
+local WorldModel / behavior failure
+ -> compact evidence snapshot
+ -> server AgentRuntime / deep reasoning
+ -> StrategyHint / high-level plan
+ -> client revalidation
+ -> FastPolicyState / behavior update
+```
+
+The deep result is advisory until revalidated against current local state.
+
+### Identity separation
+
+The following identities MUST remain distinct:
+
+```text
+agent_instance_id
+execution_id
+client_id / connection_id
+automation_session_id
+binding_generation
+frame/world-state revision
+```
+
+No local GAC identity becomes durable Agent Memory or AE execution authority by implication.
+
+---
+
 ## 13. Cross-track authority
 
 - AE: durable execution, revision, branch, retry, recovery and execution concurrency.
