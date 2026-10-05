@@ -92,6 +92,12 @@ export function getConversationDraftText(conversationId) {
   }
 }
 
+export function restoreConversationDraftAfterSubmitFailure(conversationId, text) {
+  const id = normalizeId(conversationId);
+  setConversationDraftText(id, text);
+  return activeConversationId === id;
+}
+
 export function isCurrentSelection(conversationId, generation) {
   return activeConversationId === String(conversationId || '')
     && selectionGeneration === generation;
