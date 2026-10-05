@@ -90,6 +90,8 @@ def test_sidebar_workspace_mutations_are_fail_closed_and_report_results():
 
     assert "let settled = false;" in sidebar
     assert "if (settled) return;" in sidebar
+    assert "if (e.key === 'Escape') {" in sidebar
+    assert "settled = true;" in sidebar
     assert "let submitted = false;" in sidebar
     assert "if (submitted) return;" in sidebar
 
