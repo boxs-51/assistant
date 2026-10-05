@@ -93,17 +93,26 @@ def test_agent_runtime_has_commit_then_reload_seam_but_no_f7t_caller():
 
     assert "await self._persist_tool_result(result, iteration_id)" in runtime
     assert "committed_result = await self._load_committed_tool_result(" in runtime
+    assert "async def _load_committed_tool_result_by_id(" in runtime
+    assert "await self._load_committed_tool_result_by_id(" in runtime
     assert 'values["commit_state"] = "COMMITTED"' in persistence
     assert "ToolGeneratedMediaCanonicalizer" not in runtime
     assert "canonicalize_committed_result" not in runtime
     assert "ToolGeneratedMediaCanonicalizer" not in main
 
     for phrase in (
-        "post-COMMITTED Agent caller seam is frozen below but #107 authority is not transferred",
-        "only after AgentRuntime has obtained an exact durable COMMITTED AgentToolResultRecord",
+        "both durable post-COMMITTED Agent read seams are frozen below; AgentRuntime authority is not transferred",
+        "AgentRuntime._load_committed_tool_result(...)",
+        "AgentRuntime._load_committed_tool_result_by_id(...)",
+        "AgentRuntime._schedule_f7t_publication_for_committed_result(",
+        "Each seam may invoke that hook only after its durable loader returned the exact AgentToolResultRecord",
+        "Every ordinary execution, resume, recovery, REUSE_COMMITTED or repeated durable read observation",
+        "the SAME durable record.id as source_result_id",
         "before DurableAgentStore.save_tool_result(...)",
         "inside the SQL transaction that commits AgentToolResultRecord",
         "on a transport-only ToolExecutionResult that has not been re-read as COMMITTED",
+        "from a continuation result before its durable COMMITTED re-read",
+        "No third durable-load seam may silently activate F7-T",
     ):
         assert phrase in document
 
@@ -152,6 +161,42 @@ def test_a0_freezes_duplicate_and_failure_isolation_without_retry_authority():
         assert phrase in document
 
 
+def test_a0_freezes_non_gating_supervised_budget_isolation():
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+
+    for phrase in (
+        "P1-CAS-F7T-A0-BUDGET-ISOLATION-2 = DESIGN FROZEN / REPLACEMENT FINAL REQUIRED",
+        "a non-gating supervised AgentRuntime-owned background task",
+        "the Agent caller does NOT await AssetService.ingest_stream() or canonicalize_committed_result() before model continuation",
+        "the publication task is NOT wrapped by AgentRuntime._await_contextual(...)",
+        "no Agent active-budget deadline, iteration deadline, cancellation_event, retry budget or continuation budget is passed into the CAS publication task",
+        "scheduling itself must not mint, consume, extend, shorten or reset any Agent execution/iteration budget",
+        "AgentRuntime owns every publication Task in an explicit in-memory task set",
+        "an unowned fire-and-forget Task is prohibited",
+        "every Task exception is observed by an owner callback",
+        "normal per-execution Agent cancellation does not cancel an already scheduled publication for a COMMITTED result",
+        "application shutdown/quiesce explicitly stops new F7-T scheduling, cancels outstanding runtime-owned publication Tasks, and awaits/gathers them",
+        "the A1 six-path maximum is INVALIDATED",
+        "publication latency cannot gate model continuation",
+    ):
+        assert phrase in document
+
+
+def test_a0_rebinds_future_agent_authority_to_current_owner_workspace():
+    document = _semantic(CONTRACT.read_text(encoding="utf-8"))
+
+    for phrase in (
+        "P1-CAS-F7T-A0-AGENT-OWNER-1 = DESIGN FROZEN / REPLACEMENT FINAL REQUIRED",
+        "The then-current canonical AgentRuntime owner/workspace owns:",
+        "Issue #107 is COMPLETE / CLOSED / CANONICAL HEALTHY",
+        "#107 closure is NOT a standing future production release",
+        "#107 may become an authority source again only if governance explicitly reopens it",
+        "Issue #156 likewise transfers no AgentRuntime or F7-T production authority by adjacency",
+        "fresh bilateral audit/release from the then-current canonical AgentRuntime owner/workspace",
+    ):
+        assert phrase in document
+
+
 def test_a0_freezes_exact_future_a1_six_path_maximum():
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
@@ -173,8 +218,8 @@ def test_a0_preserves_agent_producer_and_sandbox_ownership_boundaries():
 
     for phrase in (
         "Issue #74 owns: - CAS enrollment admission",
-        "Issue #107 / Agent owns: - tool execution outcome truth",
-        "A1 cannot modify se/src/runtimes/agent/runtime.py until a fresh bilateral audit explicitly confirms",
+        "The then-current canonical AgentRuntime owner/workspace owns: - tool execution outcome truth",
+        "A1 cannot modify se/src/runtimes/agent/runtime.py until a fresh bilateral audit/release from the then-current canonical AgentRuntime owner/workspace explicitly confirms",
         "CAS does not own implementation of the first producer",
         "A1's six-path maximum intentionally contains no producer implementation file",
         "A0 and future A1 remain inline-only",
@@ -212,9 +257,12 @@ def test_a1_remains_not_claimable_until_all_release_gates_pass():
         "producer owner handoff proves intentional exact F7T_INLINE_BASE64_V1 output",
         "max_media_items=8 is preserved",
         "aggregate decoded bytes <= config.assets.max_upload_bytes is preserved",
-        "exact post-COMMITTED AgentRuntime sidecar is independently accepted by #107",
+        "a fresh bilateral release from the then-current canonical AgentRuntime owner/workspace accepts the shared post-COMMITTED scheduling hook",
+        "both _load_committed_tool_result(...) and _load_committed_tool_result_by_id(...) use that same hook after durable COMMITTED proof",
+        "publication is supervised/non-gating, is not wrapped by _await_contextual(...), consumes no Agent execution/iteration budget, and cannot gate model continuation",
+        "application shutdown/quiesce owns, observes and cancels/gathers outstanding publication Tasks before CAS dependency teardown",
         "the call occurs outside the Agent result commit transaction",
-        "exact six-path maximum remains sufficient",
+        "exact six-path maximum remains sufficient for the frozen supervision model",
         "blocking P0/P1 = NONE",
         "CAS-F7-T-A1 = HOLD / NOT CLAIMABLE",
         "concrete enrollment = EMPTY",
