@@ -33,6 +33,7 @@ def test_webview_facade_is_exact_least_privilege_allowlist():
         "read_asset_content",
         "submit_prompt",
         "get_sessions",
+        "get_session",
         "prepare_files_async",
         "respond_approval",
         "get_workspace_files",
