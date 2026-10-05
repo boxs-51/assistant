@@ -13,6 +13,7 @@ from ...domain.schemas.agent_execution import AgentExecutionLimits, MAX_AGENT_PR
 from ..agent.contracts.context import AgentExecutionContext
 from ..agent.adapters.messages import jsonable
 from ..agent.ids import AgentExecutionIdFactory
+from ..agent.resolver import AgentResolutionError, AgentResolver
 from ..agent.waiting_ticket import build_waiting_ticket_payload
 
 logger = structlog.get_logger(__name__)
@@ -270,9 +271,10 @@ class WorkflowRuntime(BaseRuntime):
 
     async def _execute_agent(self, event: BaseEvent, body: dict) -> None:
         try:
-            routing = body.get("metadata", {}).get("routing", {})
-            agent_id = body.get("agent_id") or routing.get("default_agent_id")
-            if not agent_id:
+            resolver = AgentResolver(self.container.agent_registry)
+            selection = resolver.select(body)
+            agent_id = selection.agent_id
+            if agent_id is None:
                 await self._execute_direct(
                     event,
                     body,
@@ -293,20 +295,27 @@ class WorkflowRuntime(BaseRuntime):
                 definition = catalog.get_definition(agent_id)
                 if not self.container.authorization_service.is_allowed(identity, definition):
                     raise PermissionError(f"Agent '{agent_id}' is not permitted for this identity.")
-            agent = self.container.agent_registry.get(agent_id)
-            if agent is None:
-                await self._execute_direct(
-                    event,
-                    body,
-                    fallback_notice={
-                        "status": "AGENT_FALLBACK",
-                        "reason": "AGENT_NOT_FOUND",
-                        "requested_agent_id": agent_id,
-                        "message": f"Agent '{agent_id}' is unavailable; chat_direct handled this request.",
-                        "fallback": "DIRECT",
+            try:
+                resolution = resolver.resolve(selection)
+            except AgentResolutionError as exc:
+                await self.event_bus.publish(BaseEvent(
+                    event_name="provider.failed",
+                    session_id=event.session_id,
+                    turn_id=event.turn_id,
+                    payload={
+                        "error": str(exc),
+                        "error_code": exc.code,
+                        "failure_domain": "AGENT_RESOLUTION",
+                        "retryable": False,
+                        "status_code": 404,
+                        "requested_agent_id": exc.agent_id,
+                        "resolution_source": exc.source,
                     },
-                )
+                ))
                 return
+            if resolution is None:
+                raise RuntimeError("Agent resolution unexpectedly returned no Agent.")
+            agent = resolution.agent
             if identity is None:
                 identity_data = event.payload.get("identity")
                 identity = identity_data if isinstance(identity_data, Identity) else Identity.model_validate(identity_data)
