@@ -99,7 +99,7 @@ def test_agent_runtime_has_commit_then_reload_seam_but_no_f7t_caller():
     assert "ToolGeneratedMediaCanonicalizer" not in main
 
     for phrase in (
-        "exact post-COMMITTED Agent caller seam is frozen below but #107 authority is not transferred",
+        "post-COMMITTED Agent caller seam is frozen below but #107 authority is not transferred",
         "only after AgentRuntime has obtained an exact durable COMMITTED AgentToolResultRecord",
         "It must not run: before DurableAgentStore.save_tool_result(...)",
         "inside the SQL transaction that commits AgentToolResultRecord",
