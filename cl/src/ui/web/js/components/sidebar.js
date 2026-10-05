@@ -37,6 +37,56 @@ function getTargetFolderPath() {
   return getParentPath(currentSelectedItem.path);
 }
 
+function setExplorerStatus(message = '', isError = false) {
+  const page = document.getElementById('page-explorer');
+  if (!page) return;
+
+  let status = document.getElementById('explorer-status');
+  if (!status) {
+    status = document.createElement('div');
+    status.id = 'explorer-status';
+    status.setAttribute('role', 'status');
+    const tree = document.getElementById('explorer-tree');
+    if (tree && tree.parentNode === page) {
+      page.insertBefore(status, tree);
+    } else {
+      page.prepend(status);
+    }
+  }
+
+  status.textContent = message;
+  status.className = message ? (isError ? 'sidebar-error' : 'sidebar-loading') : '';
+  status.style.display = message ? '' : 'none';
+}
+
+async function runWorkspaceMutation(method, args, successMessage) {
+  const api = window.pywebview?.api;
+  const operation = api?.[method];
+  if (typeof operation !== 'function') {
+    const result = { success: false, error: `Explorer operation unavailable: ${method}` };
+    setExplorerStatus(result.error, true);
+    return result;
+  }
+
+  try {
+    const result = await operation.apply(api, args);
+    if (!result || result.success !== true) {
+      const error = result?.error || `Explorer operation failed: ${method}`;
+      setExplorerStatus(error, true);
+      return { success: false, error };
+    }
+
+    await ExplorerPage.load();
+    setExplorerStatus(successMessage, false);
+    return result;
+  } catch (error) {
+    const message = error?.message || String(error);
+    console.error(error);
+    setExplorerStatus(message, true);
+    return { success: false, error: message };
+  }
+}
+
 // ==========================================
 // CONTEXT MENU & ACTIONS
 // ==========================================
@@ -139,17 +189,23 @@ function renderInlineInput(type) {
   const inputEl = inputWrapper.querySelector('input');
   inputEl.focus();
 
+  let submitted = false;
   const handleCreate = async () => {
+    if (submitted) return;
     const val = inputEl.value.trim();
-    if (val) {
-      if (type === 'file' && window.pywebview?.api?.create_file) {
-        await window.pywebview.api.create_file(targetFolder, val);
-      } else if (type === 'folder' && window.pywebview?.api?.create_folder) {
-        await window.pywebview.api.create_folder(targetFolder, val);
-      }
-      await ExplorerPage.load();
-    } else {
+    if (!val) {
       inputWrapper.remove();
+      return;
+    }
+
+    submitted = true;
+    const method = type === 'file' ? 'create_file' : 'create_folder';
+    const label = type === 'file' ? 'Đã tạo tệp' : 'Đã tạo thư mục';
+    const result = await runWorkspaceMutation(method, [targetFolder, val], `${label}: ${val}`);
+    if (!result.success) {
+      submitted = false;
+      inputEl.focus();
+      inputEl.select();
     }
   };
 
@@ -183,14 +239,19 @@ async function executeAction(action, item) {
       if (item && !item.isRoot) clipboard = { action: 'cut', item };
       break;
 
-    case 'paste':
+    case 'paste': {
       if (!clipboard) return;
-      if (window.pywebview?.api?.paste_item) {
-        await window.pywebview.api.paste_item(clipboard.action, clipboard.item.path, targetFolder);
+      const pendingClipboard = clipboard;
+      const result = await runWorkspaceMutation(
+        'paste_item',
+        [pendingClipboard.action, pendingClipboard.item.path, targetFolder],
+        pendingClipboard.action === 'cut' ? 'Đã di chuyển mục' : 'Đã sao chép mục',
+      );
+      if (result.success && pendingClipboard.action === 'cut' && clipboard === pendingClipboard) {
+        clipboard = null;
       }
-      if (clipboard.action === 'cut') clipboard = null;
-      await ExplorerPage.load();
       break;
+    }
 
     case 'rename':
       if (!item || item.isRoot) return;
@@ -200,10 +261,11 @@ async function executeAction(action, item) {
     case 'delete':
       if (!item || item.isRoot) return;
       if (confirm(`Bạn có chắc muốn xóa "${item.name}"?`)) {
-        if (window.pywebview?.api?.delete_file_content) {
-          await window.pywebview.api.delete_file_content(item.path);
-        }
-        await ExplorerPage.load();
+        await runWorkspaceMutation(
+          'delete_file_content',
+          [item.path],
+          `Đã xóa: ${item.name}`,
+        );
       }
       break;
   }
@@ -222,21 +284,33 @@ function renderRenameInput(item) {
   inputEl.focus();
   inputEl.select();
 
+  let settled = false;
   const handleRename = async () => {
+    if (settled) return;
     const newName = inputEl.value.trim();
-    if (newName && newName !== currentName) {
-      if (window.pywebview?.api?.rename_file_content) {
-        await window.pywebview.api.rename_file_content(item.path, newName);
-      }
-      await ExplorerPage.load();
-    } else {
+    if (!newName || newName === currentName) {
+      settled = true;
+      nameSpan.textContent = currentName;
+      return;
+    }
+
+    settled = true;
+    const result = await runWorkspaceMutation(
+      'rename_file_content',
+      [item.path, newName],
+      `Đã đổi tên: ${newName}`,
+    );
+    if (!result.success) {
       nameSpan.textContent = currentName;
     }
   };
 
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') handleRename();
-    if (e.key === 'Escape') nameSpan.textContent = currentName;
+    if (e.key === 'Escape') {
+      settled = true;
+      nameSpan.textContent = currentName;
+    }
   });
 
   inputEl.addEventListener('blur', handleRename);

@@ -38,6 +38,57 @@ class WorkspaceManager:
             
         return canonical
 
+    @staticmethod
+    def _validate_item_name(name: str) -> str:
+        if not isinstance(name, str) or not name.strip():
+            raise ValueError("Tên không hợp lệ")
+        normalized = name.strip()
+        if normalized in {".", ".."} or os.path.basename(normalized) != normalized:
+            raise ValueError("Tên chứa path traversal")
+        return normalized
+
+    def _resolve_target_dir(self, target_path: str = "") -> str:
+        if not target_path:
+            return self._workspace_root
+        target_dir = self._canonicalize(target_path)
+        if not os.path.isdir(target_dir):
+            raise NotADirectoryError("Đích không phải thư mục")
+        return target_dir
+
+    def get_workspace_info(self) -> dict:
+        return {"name": os.path.basename(self._workspace_root) or "WORKSPACE"}
+
+    def create_file(self, target_path: str, name: str) -> dict:
+        try:
+            safe_name = self._validate_item_name(name)
+            target_dir = self._resolve_target_dir(target_path)
+            new_path = self._canonicalize(
+                os.path.join(target_dir, safe_name),
+                allow_missing=True,
+                reject_root=True,
+            )
+            with open(new_path, "x", encoding="utf-8"):
+                pass
+            return {"success": True, "path": new_path}
+        except Exception as e:
+            logger.error("Lỗi khi tạo file: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
+
+    def create_folder(self, target_path: str, name: str) -> dict:
+        try:
+            safe_name = self._validate_item_name(name)
+            target_dir = self._resolve_target_dir(target_path)
+            new_path = self._canonicalize(
+                os.path.join(target_dir, safe_name),
+                allow_missing=True,
+                reject_root=True,
+            )
+            os.mkdir(new_path)
+            return {"success": True, "path": new_path}
+        except Exception as e:
+            logger.error("Lỗi khi tạo thư mục: %s", e, exc_info=True)
+            return {"success": False, "error": str(e)}
+
     def get_files(self) -> list:
         def _scan_dir(path, max_depth=2, current_depth=0):
             if current_depth > max_depth: return []
@@ -92,16 +143,17 @@ class WorkspaceManager:
             else:
                 return {"success": False, "error": "Nguồn không hợp lệ"}
 
-            if not target_path:
-                target_dir = self._workspace_root
-            elif os.path.isfile(target_path):
-                target_dir = os.path.dirname(
-                    self._canonicalize(target_path)
-                )
-            else:
-                target_dir = self._canonicalize(target_path)
+            target_dir = self._resolve_target_dir(target_path)
 
-            target_dir = self._canonicalize(target_dir)
+            if not source_is_file:
+                source_real = os.path.realpath(source)
+                target_real = os.path.realpath(target_dir)
+                try:
+                    target_inside_source = os.path.commonpath([source_real, target_real]) == source_real
+                except ValueError:
+                    target_inside_source = False
+                if target_inside_source:
+                    return {"success": False, "error": "Không thể dán thư mục vào chính nó hoặc thư mục con"}
 
             base_name = os.path.basename(source)
             dest_path = os.path.join(target_dir, base_name)
@@ -140,14 +192,15 @@ class WorkspaceManager:
             if new_name in {".", ".."} or os.path.basename(new_name) != new_name:
                 return {"success": False, "error": "Tên mới chứa path traversal"}
 
-            old_canonical = self._canonicalize_workspace_path(
+            old_canonical = self._canonicalize(
                 old_path,
-                reject_workspace_root=True,
+                reject_root=True,
             )
             parent_dir = self._canonicalize(os.path.dirname(old_canonical))
-            new_path = self._canonicalize_workspace_path(
+            new_path = self._canonicalize(
                 os.path.join(parent_dir, new_name),
-                allow_missing_leaf=True,
+                allow_missing=True,
+                reject_root=True,
             )
 
             if os.path.exists(new_path) and old_canonical != new_path:
@@ -164,7 +217,7 @@ class WorkspaceManager:
         try:
             canonical = self._canonicalize(
                 path,
-                reject_workspace_root=True,
+                reject_root=True,
             )
 
             if os.path.isdir(canonical):

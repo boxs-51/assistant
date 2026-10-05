@@ -52,7 +52,12 @@ class UIBridgeJSFacade:
     def respond_approval(self, choice: bool, approval_id: str = None):
         return self._bridge.respond_approval(choice, approval_id)
 
+    def get_workspace_info(self): return self._bridge.get_workspace_info()
     def get_workspace_files(self): return self._bridge.get_workspace_files()
+    def create_file(self, target_path: str, name: str): return self._bridge.create_file(target_path, name)
+    def create_folder(self, target_path: str, name: str): return self._bridge.create_folder(target_path, name)
+    def paste_item(self, action: str, path: str, target_path: str = ""):
+        return self._bridge.paste_item(action, path, target_path)
     def read_file_content(self, path: str): return self._bridge.read_file_content(path)
     def save_file_content(self, path: str, content: str): return self._bridge.save_file_content(path, content)
     def rename_file_content(self, old_path: str, new_name: str):
@@ -825,7 +830,12 @@ class UIBridge:
 
     def encode_files_async(self, files: list): return self.encoder.encode_async(files)
     def respond_approval(self, choice: bool, approval_id: str = None): return self.hitl.respond(choice, approval_id)
+    def get_workspace_info(self): return self.workspace.get_workspace_info()
     def get_workspace_files(self): return self.workspace.get_files()
+    def create_file(self, target_path: str, name: str): return self.workspace.create_file(target_path, name)
+    def create_folder(self, target_path: str, name: str): return self.workspace.create_folder(target_path, name)
+    def paste_item(self, action: str, path: str, target_path: str = ""):
+        return self.workspace.paste_item(action, path, target_path)
     def read_file_content(self, path: str): return self.workspace.read_file(path)
     def save_file_content(self, path: str, content: str): return self.workspace.save_file(path, content)
     def rename_file_content(self, old_path:str, new_name:str): return self.workspace.rename_item(old_path, new_name)

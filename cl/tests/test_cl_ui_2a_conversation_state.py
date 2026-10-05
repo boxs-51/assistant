@@ -119,11 +119,11 @@ def test_cl_ui_2a_does_not_expand_attachment_or_server_authority():
     assert "getFailedFilePaths()" in input_frame
     assert "def get_session(self, session_id: str)" in bridge
 
-    forbidden = [
+    explorer_owned = [
         "create_file",
         "create_folder",
         "paste_item",
     ]
-    facade = bridge.split("class UIBridgeJSFacade:", 1)[1].split("class UIBridge:", 1)[0]
-    for name in forbidden:
-        assert f"def {name}(" not in facade
+    for name in explorer_owned:
+        assert name not in app
+        assert name not in input_frame
