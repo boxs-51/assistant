@@ -228,7 +228,7 @@ They MUST NOT:
 Canonical intersection:
 
 ```text
-hinted candidates
+(task-derived candidates ∪ advisory Skill hints)
 ∩ Agent maximum Tool envelope
 ∩ Authorization
 ∩ routability/availability
@@ -293,7 +293,7 @@ Zero active Skills is valid.
 
 ActiveSkillSet and CapabilityWorkingSet are separate objects.
 
-Skill activation may influence Tool ranking but cannot mutate Tool visibility directly.
+Skill activation may contribute advisory candidates/ranking signals but cannot mutate Tool visibility directly. DCS must also support task-derived Tool selection when ActiveSkillSet is empty.
 
 No durable ActiveSkillSet persistence is opened by this contract.
 
