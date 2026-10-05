@@ -40,6 +40,7 @@ def test_b7_resolver_is_bounded_to_existing_storage_service_registry() -> None:
     assert "_GenerationBoundToolResponsePayloadMemoryPromotion" in method
     assert "_active_service_generation" in method
     assert "_is_service_generation_active" in method
+    assert 'self.drivers.is_available("sqlite")' in method
     assert "self.services.get(" in method
 
     for forbidden in (
