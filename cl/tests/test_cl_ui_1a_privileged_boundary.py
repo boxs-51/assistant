@@ -36,7 +36,11 @@ def test_webview_facade_is_exact_least_privilege_allowlist():
         "get_session",
         "prepare_files_async",
         "respond_approval",
+        "get_workspace_info",
         "get_workspace_files",
+        "create_file",
+        "create_folder",
+        "paste_item",
         "read_file_content",
         "save_file_content",
         "rename_file_content",
@@ -53,10 +57,6 @@ def test_webview_facade_is_exact_least_privilege_allowlist():
     assert "render_block" not in actual
     assert "execute_gateway_endpoint" not in actual
     assert "encode_files_async" not in actual
-    assert "create_file" not in actual
-    assert "create_folder" not in actual
-    assert "paste_item" not in actual
-    assert "get_workspace_info" not in actual
 
 
 def test_privileged_page_has_no_remote_script_style_or_font_dependencies():
