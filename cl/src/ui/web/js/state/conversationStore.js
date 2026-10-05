@@ -21,6 +21,7 @@ function ensureConversation(conversationId) {
       selectionError: null,
       executionId: null,
       executionState: 'IDLE',
+      draftText: '',
     });
   }
   return conversations.get(id);
@@ -73,6 +74,22 @@ export function createNewConversation() {
 
 export function getActiveConversationId() {
   return activeConversationId;
+}
+
+export function setConversationDraftText(conversationId, text) {
+  const record = ensureConversation(conversationId);
+  record.draftText = String(text ?? '');
+  return record.draftText;
+}
+
+export function getConversationDraftText(conversationId) {
+  if (!conversationId) return '';
+  try {
+    const id = normalizeId(conversationId);
+    return conversations.get(id)?.draftText || '';
+  } catch {
+    return '';
+  }
 }
 
 export function isCurrentSelection(conversationId, generation) {
