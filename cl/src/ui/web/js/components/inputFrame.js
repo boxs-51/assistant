@@ -166,8 +166,8 @@ async function handleSend(onSubmit) {
     await onSubmit(currentText, filePayloads);
   } catch (err) {
     console.error('Lỗi khi gửi dữ liệu:', err);
-    // Phục hồi lại dữ liệu nếu gửi thất bại
-    tx.value = currentText;
+    // Text restoration is owned by the conversation-aware submit callback.
+    // Attachment restoration remains global until the separately gated 2B-B stage.
     restoreFilesMap(filesBackup, updateSendButtonState);
     tx.dispatchEvent(new Event('input'));
   }
