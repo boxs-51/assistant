@@ -348,6 +348,20 @@ class StorageEngine:
 
         return service
 
+    async def promote_tool_response_payload_memory(
+        self,
+        *,
+        source_ref,
+        owner_user_id: str,
+    ):
+        """Invoke the current promotion service for one trusted internal call."""
+
+        service = self.get_tool_response_payload_memory_promotion()
+        return await service.promote(
+            source_ref=source_ref,
+            owner_user_id=owner_user_id,
+        )
+
     # =========================================================
     # Internal service-generation lifetime fence
     # =========================================================
