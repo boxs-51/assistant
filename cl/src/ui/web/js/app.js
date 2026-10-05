@@ -11,7 +11,9 @@ import { initApprovalBar, showApprovalBar, hideApprovalBar } from './components/
 import {
   initInputFrame,
   setInputState,
-  hasUnsentPayload,
+  getTextDraft,
+  setTextDraft,
+  hasUnsentAttachments,
   resetInputForIdentity,
 } from './components/inputFrame.js';
 import { initSidebar, SessionsPage } from './components/sidebar.js';
@@ -22,11 +24,13 @@ import {
   beginConversationSelection,
   createNewConversation,
   getActiveConversationId,
+  getConversationDraftText,
   getActiveExecutionState,
   isCurrentSelection,
   markSelectionReady,
   markSelectionError,
   resetConversationState,
+  setConversationDraftText,
   setConversationExecutionState,
   shouldAcceptConversationEvent,
 } from './state/conversationStore.js';
@@ -83,10 +87,20 @@ function syncActiveConversationExecutionUi() {
   }
 }
 
+function persistActiveTextDraft() {
+  const active = getActiveConversationId();
+  if (!active) return;
+  setConversationDraftText(active, getTextDraft());
+}
+
+function restoreConversationTextDraft(conversationId) {
+  setTextDraft(conversationId ? getConversationDraftText(conversationId) : '');
+}
+
 function canSwitchConversation(targetConversationId) {
   const active = getActiveConversationId();
   if (active === targetConversationId) return true;
-  return !hasUnsentPayload();
+  return !hasUnsentAttachments();
 }
 
 async function selectConversation(sessionId) {
@@ -94,7 +108,9 @@ async function selectConversation(sessionId) {
     throw new Error('Session detail API is unavailable.');
   }
 
+  persistActiveTextDraft();
   const selection = beginConversationSelection(sessionId);
+  setTextDraft('');
   clearConversationConsole();
   removePendingIndicator();
   setInputState(false);
@@ -109,6 +125,7 @@ async function selectConversation(sessionId) {
 
     replaceConversationHistory(session.messages || []);
     markSelectionReady(sessionId, selection.generation);
+    restoreConversationTextDraft(sessionId);
     syncActiveConversationExecutionUi();
     notifyActiveConversationChanged();
     return true;
@@ -117,6 +134,7 @@ async function selectConversation(sessionId) {
       markSelectionError(sessionId, selection.generation, String(error?.message || error));
       clearConversationConsole();
       removePendingIndicator();
+      restoreConversationTextDraft(sessionId);
       setInputState(false);
     }
     throw error;
@@ -124,7 +142,9 @@ async function selectConversation(sessionId) {
 }
 
 function startNewConversation() {
+  persistActiveTextDraft();
   const selection = createNewConversation();
+  setTextDraft('');
   clearConversationConsole();
   removePendingIndicator();
   setInputState(true);
@@ -192,7 +212,15 @@ function setupApp() {
       clearConversationConsole();
       notifyActiveConversationChanged();
     }
-    return window.pywebview.api.submit_prompt(text, files, conversationId);
+    setConversationDraftText(conversationId, text);
+    try {
+      const result = await window.pywebview.api.submit_prompt(text, files, conversationId);
+      setConversationDraftText(conversationId, '');
+      return result;
+    } catch (error) {
+      setConversationDraftText(conversationId, text);
+      throw error;
+    }
   });
 
   // Legacy non-conversation-scoped callbacks remain available for bounded
