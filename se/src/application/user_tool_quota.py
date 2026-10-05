@@ -643,6 +643,11 @@ class UserToolQuotaService:
                         raise UserBudgetPolicyAuthorityConflictError(
                             "active tool quota window has invalid policy authority"
                         )
+                    if self._owner_authority.is_recognized_shadow_policy(policy):
+                        raise UserBudgetPolicyAuthorityConflictError(
+                            "automatic UBQ-2 shadow policy cannot authorize "
+                            "canonical tool quota admission"
+                        )
 
                     tool_usage = (
                         await uow.user_budgets.create_or_get_tool_usage(
