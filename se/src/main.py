@@ -766,6 +766,22 @@ async def bootstrap_storage(config: ConfigSchema) -> Tuple[StorageEngine, Any]:
     return storage_engine, uow_factory
 
 
+async def observe_r13_legacy_waiting_residue(uow_factory):
+    """Emit one fail-open startup observation for durable legacy WAITING rows."""
+
+    try:
+        async with uow_factory() as uow:
+            counts = await uow.agents.count_legacy_waiting_residue()
+        logger.info("ae_r13_legacy_waiting_residue", **counts)
+        return counts
+    except Exception as exc:
+        logger.warning(
+            "ae_r13_legacy_waiting_residue_probe_failed",
+            error_type=type(exc).__name__,
+        )
+        return None
+
+
 def bootstrap_security(
     config: ConfigSchema,
     storage_engine: StorageEngine, 
@@ -1272,6 +1288,7 @@ async def lifespan(app: FastAPI):
     cb_manager = CircuitBreakerManager(config=config.circuit_breaker)
     http_client = httpx.AsyncClient(timeout=config.provider.timeout)
     storage_engine, uow_factory = await bootstrap_storage(config)
+    await observe_r13_legacy_waiting_residue(uow_factory)
     eventing_manager = EventingManager(storage_engine=storage_engine)
     security_services = bootstrap_security(config=config, storage_engine=storage_engine, 
                                            uow_factory=uow_factory, cb_manager=cb_manager,
