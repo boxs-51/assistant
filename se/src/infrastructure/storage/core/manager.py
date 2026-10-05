@@ -314,6 +314,34 @@ class StorageEngine:
     def is_started(self) -> bool:
         return self._started
 
+    def get_tool_response_payload_memory_promotion(
+        self,
+    ) -> _GenerationBoundToolResponsePayloadMemoryPromotion:
+        """Resolve the current B6 promotion service for trusted internal callers."""
+
+        generation = self._active_service_generation
+        if not self._started or generation is None:
+            raise StorageServiceGenerationRevokedError(
+                "TOOL_RESPONSE_PAYLOAD Memory promotion service is not active"
+            )
+
+        service = self.services.get(_TOOL_RESPONSE_PAYLOAD_MEMORY_PROMOTION)
+        if not isinstance(
+            service,
+            _GenerationBoundToolResponsePayloadMemoryPromotion,
+        ):
+            raise RuntimeError(
+                "TOOL_RESPONSE_PAYLOAD Memory promotion service is unavailable"
+            )
+
+        if not self._is_service_generation_active(service._generation):
+            raise StorageServiceGenerationRevokedError(
+                "TOOL_RESPONSE_PAYLOAD Memory promotion service generation "
+                "is no longer active"
+            )
+
+        return service
+
     # =========================================================
     # Internal service-generation lifetime fence
     # =========================================================
