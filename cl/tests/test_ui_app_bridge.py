@@ -1,4 +1,6 @@
 import inspect
+import threading
+import time
 
 from cl.src.ui.bridge import UIBridge
 
@@ -65,7 +67,17 @@ class _Gateway:
         return []
 
     def get_sessions(self):
-        return [{"id": "session-1"}]
+        return [{"session_id": "session-1", "title": "Session 1"}]
+
+    def get_session(self, session_id):
+        return {
+            "session_id": session_id,
+            "title": "Session 1",
+            "status": "ACTIVE",
+            "messages": [
+                {"id": "m1", "role": "user", "content": "hello", "sequence": 1},
+            ],
+        }
 
     def register_skill(self, payload):
         self.registered_skills.append(payload)
@@ -234,7 +246,122 @@ def test_sidebar_session_load_bootstraps_auth_before_request():
     sessions = bridge.get_sessions()
 
     assert bridge._client_runtime.start_calls == 1
-    assert sessions == [{"id": "session-1"}]
+    assert sessions == [{"session_id": "session-1", "title": "Session 1"}]
+
+
+def test_session_detail_bootstraps_runtime_and_preserves_exact_identity():
+    bridge, _, _ = _bridge()
+    bridge._client_runtime.ready = False
+
+    session = bridge.get_session("session-1")
+
+    assert bridge._client_runtime.start_calls == 1
+    assert session["session_id"] == "session-1"
+    assert session["messages"][0]["sequence"] == 1
+
+
+def test_scoped_render_block_carries_conversation_and_execution_identity():
+    bridge, _, _ = _bridge()
+    calls = []
+
+    class Window:
+        def evaluate_js(self, source):
+            calls.append(source)
+            return True
+
+    bridge.set_window(Window())
+    bridge.render_block(
+        role="assistant",
+        btype="stream_content",
+        data={"text": "hello"},
+        conversation_id="conversation-1",
+        execution_id="exec-1",
+    )
+
+    assert len(calls) == 1
+    assert "window.onConversationBlock" in calls[0]
+    assert '"conversation_id": "conversation-1"' in calls[0]
+    assert '"execution_id": "exec-1"' in calls[0]
+
+
+def test_same_conversation_busy_state_is_published_only_after_serialization_lock():
+    bridge, _, _ = _bridge()
+    runtime = bridge._client_runtime
+    first_chat_started = threading.Event()
+    release_first = threading.Event()
+    chat_calls = []
+
+    def blocking_chat(payload):
+        chat_calls.append(payload)
+        if len(chat_calls) == 1:
+            first_chat_started.set()
+            assert release_first.wait(1.0)
+        return iter(())
+
+    runtime.chat = blocking_chat
+    states = []
+    bridge._emit_conversation_execution_state = (
+        lambda cid, eid, state, generation:
+        states.append((cid, eid, state, generation))
+    )
+
+    first = bridge.submit_prompt("first", conversation_id="conversation-1")
+    assert first_chat_started.wait(1.0)
+    second = bridge.submit_prompt("second", conversation_id="conversation-1")
+
+    time.sleep(0.05)
+    busy = [item for item in states if item[2] == "BUSY"]
+    assert [item[1] for item in busy] == [first["execution_id"]]
+
+    release_first.set()
+    deadline = time.monotonic() + 1.0
+    while len([item for item in states if item[2] == "TERMINAL"]) < 2 and time.monotonic() < deadline:
+        time.sleep(0.01)
+
+    busy = [item for item in states if item[2] == "BUSY"]
+    terminal = [item for item in states if item[2] == "TERMINAL"]
+    assert [item[1] for item in busy] == [first["execution_id"], second["execution_id"]]
+    assert [item[1] for item in terminal] == [first["execution_id"], second["execution_id"]]
+    assert len(chat_calls) == 2
+
+
+def test_queued_old_identity_execution_fails_closed_before_chat_dispatch():
+    bridge, _, _ = _bridge()
+    runtime = bridge._client_runtime
+    first_chat_started = threading.Event()
+    release_first = threading.Event()
+    chat_calls = []
+
+    def blocking_chat(payload):
+        chat_calls.append(payload)
+        if len(chat_calls) == 1:
+            first_chat_started.set()
+            assert release_first.wait(1.0)
+        return iter(())
+
+    runtime.chat = blocking_chat
+    states = []
+    bridge._emit_conversation_execution_state = (
+        lambda cid, eid, state, generation:
+        states.append((cid, eid, state, generation))
+    )
+
+    first = bridge.submit_prompt("first", conversation_id="conversation-1")
+    assert first_chat_started.wait(1.0)
+    second = bridge.submit_prompt("second", conversation_id="conversation-1")
+
+    old_sessions = bridge.sessions
+    assert bridge.login({"email": "next@example.com"})["success"] is True
+    assert bridge.sessions is not old_sessions
+
+    release_first.set()
+    deadline = time.monotonic() + 1.0
+    while not any(item[1] == first["execution_id"] and item[2] == "TERMINAL" for item in states) and time.monotonic() < deadline:
+        time.sleep(0.01)
+    time.sleep(0.05)
+
+    assert len(chat_calls) == 1
+    assert not any(item[1] == second["execution_id"] for item in states)
 
 
 def test_submit_prompt_uses_server_agent_runtime_by_default(monkeypatch):
