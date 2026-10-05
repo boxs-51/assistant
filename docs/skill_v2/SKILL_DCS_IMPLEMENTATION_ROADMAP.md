@@ -196,9 +196,9 @@ Expected flow:
 ```text
 Agent maximum Tool envelope
         +
-trusted eligible Skill descriptors
+task/iteration-derived Tool candidates
         +
-task/iteration context
+trusted eligible/active Skill advisory hints
         ↓
 selector
         ↓
@@ -317,7 +317,7 @@ A future document/image Tool stage must run a fresh producer/transport/CAS audit
 
 ### DCS-1
 - no-tool simple request -> `tools=[]`;
-- no relevant Skill -> `ActiveSkillSet=[]`;
+- no relevant Skill -> `ActiveSkillSet=[]` while task-derived Tool selection may still operate when the task needs Tools;
 - strict subset Tool visibility;
 - unauthorized/non-selected Tool execution fails closed;
 - selected Skill body only;
