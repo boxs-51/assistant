@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, case, insert, or_, select, update
+from sqlalchemy import and_, case, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -176,6 +176,30 @@ class AgentRepository(BaseRepository):
             select(AgentTaskRecord).where(AgentTaskRecord.id == task_id)
         )
         return result.scalar_one_or_none()
+
+    async def count_legacy_waiting_residue(self) -> Dict[str, int]:
+        """Count only durable pre-R1 WAITING spellings without mutating rows."""
+
+        async def count_where(model, predicate) -> int:
+            result = await self.session.execute(
+                select(func.count()).select_from(model).where(predicate)
+            )
+            return int(result.scalar_one() or 0)
+
+        return {
+            "task_waiting_for_connection": await count_where(
+                AgentTaskRecord,
+                AgentTaskRecord.status == "WAITING_FOR_CONNECTION",
+            ),
+            "execution_waiting_for_connection": await count_where(
+                AgentExecutionRecord,
+                AgentExecutionRecord.state == "WAITING_FOR_CONNECTION",
+            ),
+            "execution_waiting_agent": await count_where(
+                AgentExecutionRecord,
+                AgentExecutionRecord.state == "WAITING_AGENT",
+            ),
+        }
 
     async def get_task_for_update(
         self,
