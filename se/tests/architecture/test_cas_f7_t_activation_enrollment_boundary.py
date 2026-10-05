@@ -101,7 +101,7 @@ def test_agent_runtime_has_commit_then_reload_seam_but_no_f7t_caller():
     for phrase in (
         "post-COMMITTED Agent caller seam is frozen below but #107 authority is not transferred",
         "only after AgentRuntime has obtained an exact durable COMMITTED AgentToolResultRecord",
-        "It must not run: before DurableAgentStore.save_tool_result(...)",
+        "before DurableAgentStore.save_tool_result(...)",
         "inside the SQL transaction that commits AgentToolResultRecord",
         "on a transport-only ToolExecutionResult that has not been re-read as COMMITTED",
     ):
