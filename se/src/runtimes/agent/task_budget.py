@@ -4430,7 +4430,12 @@ class TaskBudgetService:
 
                     self._require_open(budget)
                     proposed = budget.used_tool_calls + len(missing)
-                    if proposed > budget.limits.max_total_tool_calls:
+                    if self._user_tool_quota_enabled:
+                        proposed = min(
+                            proposed,
+                            budget.limits.max_total_tool_calls,
+                        )
+                    elif proposed > budget.limits.max_total_tool_calls:
                         raise TaskBudgetExceededError(
                             "max_total_tool_calls exceeded"
                         )
@@ -5049,6 +5054,13 @@ class TaskBudgetService:
     ) -> TaskBudget:
         def mutate(budget: TaskBudget) -> dict[str, Any]:
             self._require_open(budget)
+            if self._user_inference_quota_enabled:
+                return {
+                    "used_inference_calls": min(
+                        budget.used_inference_calls + 1,
+                        budget.limits.max_total_inference_calls,
+                    )
+                }
             if (
                 budget.used_inference_calls
                 >= budget.limits.max_total_inference_calls
@@ -5079,9 +5091,10 @@ class TaskBudgetService:
             ),
         }
         if self._user_inference_quota_enabled:
-            # UBQ-4 is the renewable resource authority. Preserve the legacy
-            # TaskBudget local/read-model guard and idempotent reservation,
-            # but do not mint a second UBQ-2 resource mirror.
+            # UBQ-4 is the renewable resource authority. TaskBudget preserves
+            # only the saturated compatibility counter and exact idempotent
+            # reservation; it does not independently reject on resource limits
+            # or mint a second UBQ-2 resource mirror.
             return await self._mutate_with_reservation(
                 task_id,
                 TaskBudgetReservationKind.INFERENCE,

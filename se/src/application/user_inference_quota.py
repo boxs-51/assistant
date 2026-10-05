@@ -901,6 +901,11 @@ class UserInferenceQuotaService:
                         raise UserBudgetPolicyAuthorityConflictError(
                             "active inference window has invalid policy authority"
                         )
+                    if self._owner_authority.is_recognized_shadow_policy(policy):
+                        raise UserBudgetPolicyAuthorityConflictError(
+                            "automatic UBQ-2 shadow policy cannot authorize "
+                            "canonical inference quota admission"
+                        )
 
                     include_compute = policy.max_compute_atomic is not None
                     include_cost = policy.max_cost_usd_atomic is not None
