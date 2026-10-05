@@ -87,8 +87,8 @@ P1-CAS-F7T-ACT-PRODUCER-1 = OPEN / GAP-HOLD
 P1-CAS-F7T-ACT-BOUNDS-1 = DESIGN FROZEN BY A0
   live count/aggregate/media-kind/MIME policy is frozen below but not implemented
 
-P1-CAS-F7T-ACT-TRIGGER-1 = DESIGN FROZEN BY A0 / BILATERAL RELEASE STILL REQUIRED
-  post-COMMITTED Agent caller seam is frozen below but #107 authority is not transferred
+P1-CAS-F7T-ACT-TRIGGER-1 = DESIGN FROZEN BY A0 / FRESH AGENT-OWNER RELEASE STILL REQUIRED
+  both durable post-COMMITTED Agent read seams are frozen below; AgentRuntime authority is not transferred
 
 P1-CAS-F7T-ACT-FAILURE-1 = DESIGN FROZEN BY A0
   live failure isolation is frozen below but not implemented
@@ -99,6 +99,20 @@ production A1 PRE-CLAIM = HOLD
 A0 may land with P1-CAS-F7T-ACT-PRODUCER-1 still OPEN. A1 may not be CLAIMed
 until that GAP is closed by an explicit producer-owner handoff on then-current
 main.
+
+The independent FINAL HOLD in Issue #74 comment #5988013554 also requires this
+candidate to freeze three activation fences before replacement FINAL:
+
+~~~text
+P1-CAS-F7T-A0-AGENT-OWNER-1 = DESIGN FROZEN / REPLACEMENT FINAL REQUIRED
+P1-CAS-F7T-A0-BUDGET-ISOLATION-2 = DESIGN FROZEN / REPLACEMENT FINAL REQUIRED
+P1-CAS-F7T-A0-TRIGGER-COVERAGE-3 = DESIGN FROZEN / REPLACEMENT FINAL REQUIRED
+~~~
+
+These design freezes close no production gate by themselves. A1 remains
+NOT CLAIMABLE until the then-current canonical AgentRuntime owner/workspace,
+the producer owner, exact-head Architecture, and replacement independent audit
+all pass their separate gates.
 
 ## 4. Exact first activation producer gate
 
@@ -174,14 +188,40 @@ A0 does not change AssetStorageSettings and does not add a new quota. It reuses
 the existing server CAS max_upload_bytes as the upper bound for both a single
 admitted item and the complete decoded F7-T envelope.
 
-## 6. Exact post-COMMITTED trigger seam
+## 6. Exact post-COMMITTED trigger coverage
 
 The future A1 trigger is a read-only Agent sidecar after durable commitment is
 proven.
 
-The trigger MUST occur only after AgentRuntime has obtained an exact durable
-COMMITTED AgentToolResultRecord through its existing committed-result loading
-path. It must not run:
+Current AgentRuntime has exactly two durable COMMITTED read seams that may
+observe a result for F7-T publication:
+
+~~~text
+AgentRuntime._load_committed_tool_result(...)
+AgentRuntime._load_committed_tool_result_by_id(...)
+~~~
+
+A1 must route BOTH seams through one shared post-COMMITTED scheduling hook:
+
+~~~text
+AgentRuntime._schedule_f7t_publication_for_committed_result(
+    source_result_id=<durable AgentToolResultRecord.id>
+)
+~~~
+
+Each seam may invoke that hook only after its durable loader returned the exact
+AgentToolResultRecord, commit_state == COMMITTED has been proved, and the seam's
+execution/tool-call/invocation identity checks have passed. The hook is invoked
+before the seam returns its model-facing ToolExecutionResult, but the hook only
+schedules publication; it does not wait for publication completion.
+
+Every ordinary execution, resume, recovery, REUSE_COMMITTED or repeated durable
+read observation that passes through either seam MUST schedule using the SAME
+durable record.id as source_result_id. Duplicate observation is permitted only
+because the landed F7-T projection is idempotent/fail-closed by durable source
+key.
+
+The trigger MUST NOT run:
 
 - before DurableAgentStore.save_tool_result(...);
 - inside the SQL transaction that commits AgentToolResultRecord;
@@ -191,10 +231,16 @@ path. It must not run:
 - from CapabilityRuntime before Agent commitment;
 - from provider/runtime response handling;
 - from CTX source assembly;
-- from a startup scanner that invents a new tool outcome.
+- from a continuation result before its durable COMMITTED re-read;
+- from a startup scanner, catalog walk or recovery scanner that invents a new
+  tool outcome.
 
-A1 may add one AgentRuntime sidecar helper that receives only the already
-committed result identity and calls:
+No third durable-load seam may silently activate F7-T. If AgentRuntime later
+adds another model-consumable COMMITTED read seam, that is MATERIAL to A1 and
+requires a fresh PRE-CLAIM unless the shared hook coverage is independently
+re-proved.
+
+The shared hook passes only the already committed result identity to:
 
 ~~~text
 ToolGeneratedMediaCanonicalizer.canonicalize_committed_result(
@@ -217,7 +263,11 @@ idempotent/fail-closed by durable source key.
 
 Required A1 behavior:
 
-- every observation uses the same durable source_result_id;
+- both _load_committed_tool_result(...) and
+  _load_committed_tool_result_by_id(...) observations use the same durable
+  AgentToolResultRecord.id as source_result_id;
+- every repeated observation of that record uses that same durable
+  source_result_id;
 - READY projection -> reuse asset identity / ZERO new ingest;
 - RESERVED observed by a non-winner -> ZERO ingest;
 - pre-existing INGESTING -> ZERO automatic re-ingest;
@@ -256,10 +306,47 @@ A1 MUST NOT:
 - mutate checkpoint/ResumeClaim/lease authority;
 - replace CTX tool-response content with asset:// identity.
 
-If the Agent task itself is cancelled while a canonicalization ingest has
-started, the landed canonicalizer cancellation rule applies and projects
-AMBIGUOUS where possible. Agent cancellation authority remains owned by Agent;
-CAS obtains no new cancellation authority.
+### Publication execution / Agent-budget isolation
+
+A1 publication uses one execution model only: a non-gating supervised
+AgentRuntime-owned background task created by the shared scheduling hook after
+the durable COMMITTED read.
+
+Required execution semantics:
+
+- the Agent caller does NOT await AssetService.ingest_stream() or
+  canonicalize_committed_result() before model continuation;
+- the publication task is NOT wrapped by AgentRuntime._await_contextual(...);
+- no Agent active-budget deadline, iteration deadline, cancellation_event,
+  retry budget or continuation budget is passed into the CAS publication task;
+- scheduling itself must not mint, consume, extend, shorten or reset any Agent
+  execution/iteration budget;
+- model continuation proceeds after successful scheduling and never waits for
+  publication success, rejection, ambiguity or failure;
+- AgentRuntime owns every publication Task in an explicit in-memory task set;
+  an unowned fire-and-forget Task is prohibited;
+- every Task exception is observed by an owner callback and logged/recorded on
+  the CAS publication side; it must never propagate into the already-COMMITTED
+  Agent outcome or model continuation;
+- normal per-execution Agent cancellation does not cancel an already scheduled
+  publication for a COMMITTED result and does not transfer cancellation
+  authority to CAS;
+- application shutdown/quiesce explicitly stops new F7-T scheduling, cancels
+  outstanding runtime-owned publication Tasks, and awaits/gathers them before
+  CAS dependencies are torn down;
+- shutdown cancellation is handled by the landed canonicalizer cancellation
+  rule and projects AMBIGUOUS where possible.
+
+The future shutdown hook is owned by AgentRuntime and invoked from the existing
+main.py application lifespan shutdown sequence. If safe task ownership,
+exception observation and shutdown/quiesce cannot be implemented inside the
+frozen runtime.py + main.py production paths, the A1 six-path maximum is
+INVALIDATED and A1 PRE-CLAIM must stop rather than silently add paths.
+
+This execution model proves publication latency cannot gate model continuation
+and cannot become Agent timeout/continuation failure. Agent cancellation and
+budget authority remain owned by Agent; CAS obtains no new execution-budget or
+cancellation authority.
 
 ## 9. Service composition and configuration source
 
@@ -274,6 +361,10 @@ The future composition is frozen as:
 - media-kind/MIME allowlist: immutable first-activation policy owned by the CAS
   F7-T module;
 - AgentRuntime receives an optional canonicalizer dependency at construction;
+- AgentRuntime owns the supervised F7-T publication task set and a bounded
+  shutdown/quiesce method;
+- main.py lifespan invokes that quiesce method before CAS dependencies are
+  torn down;
 - if AssetService is unavailable, no live F7-T canonicalizer is composed and
   no enrollment is activated.
 
@@ -284,8 +375,9 @@ auto-enrollment is authorized.
 
 A0 itself changes only this document and its architecture evidence.
 
-If, and only if, the producer GAP and bilateral #107 gate are independently
-closed, a future A1 PRE-CLAIM may release at most the following six paths:
+If, and only if, the producer GAP and a fresh bilateral release from the
+then-current canonical AgentRuntime owner/workspace are independently closed,
+a future A1 PRE-CLAIM may release at most the following six paths:
 
 Production:
 1. MODIFY se/src/application/assets/tool_generated_media.py
@@ -306,7 +398,7 @@ routing, client, CTX, UBQ or #156 file is included.
 Any need for a seventh path is a PRE-CLAIM invalidation and requires a fresh
 independent audit.
 
-## 11. Bilateral #107 / Agent authority boundary
+## 11. Bilateral AgentRuntime-owner authority boundary
 
 Issue #74 owns:
 - CAS enrollment admission;
@@ -315,16 +407,28 @@ Issue #74 owns:
 - durable projection/idempotency semantics;
 - AssetService publication.
 
-Issue #107 / Agent owns:
+The then-current canonical AgentRuntime owner/workspace owns:
 - tool execution outcome truth;
 - durable COMMITTED transition;
 - invocation/result identity;
 - resume/recovery/replay authority;
-- Agent cancellation and continuation semantics.
+- Agent cancellation, execution-budget and continuation semantics.
+
+Issue #107 is COMPLETE / CLOSED / CANONICAL HEALTHY. Its landed contracts remain
+historical Agent authority evidence, but #107 closure is NOT a standing future
+production release and does not make #107 the automatic owner of a later
+AgentRuntime edit. #107 may become an authority source again only if governance
+explicitly reopens it.
+
+Issue #156 likewise transfers no AgentRuntime or F7-T production authority by
+adjacency.
 
 Therefore A1 cannot modify se/src/runtimes/agent/runtime.py until a fresh
-bilateral audit explicitly confirms the exact post-COMMITTED sidecar hook does
-not move Agent authority into CAS.
+bilateral audit/release from the then-current canonical AgentRuntime
+owner/workspace explicitly confirms that both durable read seams use the shared
+post-COMMITTED scheduling hook and that the supervised publication model does
+not move Agent outcome, retry, cancellation, budget or continuation authority
+into CAS.
 
 A0 is not that production release.
 
@@ -391,14 +495,23 @@ A1 production PRE-CLAIM may PASS only when all are true:
 7. max_media_items=8 is preserved;
 8. aggregate decoded bytes <= config.assets.max_upload_bytes is preserved;
 9. admitted kind/MIME set is exactly the A0 image allowlist;
-10. exact post-COMMITTED AgentRuntime sidecar is independently accepted by #107;
-11. the call occurs outside the Agent result commit transaction;
-12. COMMITTED result semantics remain unchanged on all F7-T outcomes;
-13. duplicate/resume/recovery observations cannot produce a second ingest;
-14. exact six-path maximum remains sufficient;
-15. #156/#165/#166 remain non-overlapping;
-16. F8/lifecycle/deletion/GC/provider cleanup/reconciliation remain closed;
-17. blocking P0/P1 = NONE.
+10. a fresh bilateral release from the then-current canonical AgentRuntime
+    owner/workspace accepts the shared post-COMMITTED scheduling hook;
+11. both _load_committed_tool_result(...) and
+    _load_committed_tool_result_by_id(...) use that same hook after durable
+    COMMITTED proof and pass the durable record.id as source_result_id;
+12. publication is supervised/non-gating, is not wrapped by
+    _await_contextual(...), consumes no Agent execution/iteration budget, and
+    cannot gate model continuation;
+13. application shutdown/quiesce owns, observes and cancels/gathers outstanding
+    publication Tasks before CAS dependency teardown;
+14. the call occurs outside the Agent result commit transaction;
+15. COMMITTED result semantics remain unchanged on all F7-T outcomes;
+16. duplicate/resume/recovery observations cannot produce a second ingest;
+17. exact six-path maximum remains sufficient for the frozen supervision model;
+18. #156/#165/#166 remain non-overlapping;
+19. F8/lifecycle/deletion/GC/provider cleanup/reconciliation remain closed;
+20. blocking P0/P1 = NONE.
 
 Until then:
 
@@ -420,4 +533,5 @@ A0 is acceptable when:
 - an independent A0 FINAL/PRE-CLAIM audit confirms no authority expansion.
 
 Landing A0 does not itself make A1 claimable. The unresolved producer GAP and
-bilateral #107 release remain hard gates.
+fresh bilateral release from the then-current canonical AgentRuntime
+owner/workspace remain hard gates.
