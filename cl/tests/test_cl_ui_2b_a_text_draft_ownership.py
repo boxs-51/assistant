@@ -16,6 +16,7 @@ def test_cl_ui_2b_a_source_freezes_text_draft_ownership_without_attachment_expan
     assert "draftText: ''" in store
     assert "setConversationDraftText" in store
     assert "getConversationDraftText" in store
+    assert "restoreConversationDraftAfterSubmitFailure" in store
     assert "conversations.clear();" in store
 
     assert "persistActiveTextDraft();" in app
@@ -24,11 +25,14 @@ def test_cl_ui_2b_a_source_freezes_text_draft_ownership_without_attachment_expan
     assert "return !hasUnsentAttachments();" in app
     assert "setConversationDraftText(conversationId, text);" in app
     assert "setConversationDraftText(conversationId, '');" in app
+    assert "restoreConversationDraftAfterSubmitFailure(" in app
+    assert "if (restoreVisibleText)" in app
 
     assert "export function getTextDraft()" in input_frame
     assert "export function setTextDraft" in input_frame
     assert "export function hasUnsentText()" in input_frame
     assert "export function hasUnsentAttachments()" in input_frame
+    assert "tx.value = currentText;" not in input_frame
 
     # 2B-A is intentionally text-only. Attachment ownership/callback identity
     # remains untouched for the separately gated 2B-B stage.
@@ -54,6 +58,7 @@ import {
   createNewConversation,
   getConversationDraftText,
   resetConversationState,
+  restoreConversationDraftAfterSubmitFailure,
   setConversationDraftText,
 } from "./conversationStore.mjs";
 
@@ -65,6 +70,25 @@ setConversationDraftText("conversation-b", "draft B");
 
 assert.equal(getConversationDraftText("conversation-a"), "draft A");
 assert.equal(getConversationDraftText("conversation-b"), "draft B");
+
+let visibleDraft = getConversationDraftText("conversation-b");
+const restoreInactive = restoreConversationDraftAfterSubmitFailure(
+  "conversation-a",
+  "failed draft A",
+);
+if (restoreInactive) visibleDraft = "failed draft A";
+assert.equal(restoreInactive, false);
+assert.equal(visibleDraft, "draft B");
+assert.equal(getConversationDraftText("conversation-a"), "failed draft A");
+assert.equal(getConversationDraftText("conversation-b"), "draft B");
+
+beginConversationSelection("conversation-a");
+const restoreActive = restoreConversationDraftAfterSubmitFailure(
+  "conversation-a",
+  "active failed draft A",
+);
+assert.equal(restoreActive, true);
+assert.equal(getConversationDraftText("conversation-a"), "active failed draft A");
 
 const created = createNewConversation();
 assert.equal(getConversationDraftText(created.conversationId), "");
