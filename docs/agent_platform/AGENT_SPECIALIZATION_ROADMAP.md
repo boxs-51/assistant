@@ -397,6 +397,197 @@ Use internal fast/deep lanes when it is one Agent/task with different latency cl
 
 ---
 
+
+## 12A. Client-side implementation roadmap
+
+APR implementation is not server-only.
+
+### Current client ownership map
+
+```text
+cl/src/core/client_runtime.py
+  auth + connection generation + reconnect + capability host lifecycle
+
+cl/src/core/capability_runtime.py
+  CLIENT Tool advertisement + invoke/cancel/reconcile dispatch
+
+cl/src/core/realtime_client.py
+  persistent gateway websocket/control transport
+
+cl/src/core/gateway_client.py
+  HTTP/API compatibility + legacy registry sync
+
+cl/src/core/agent_engine.py
+  legacy/local client ReAct loop; not target APR specialized runtime
+
+cl/src/game_automation/**
+  GAC client-local closed-loop automation runtime
+
+cl/src/ui/**
+  presentation/HITL/interaction surface; CL-UI authority
+```
+
+### Canonical future direction
+
+```text
+SE AgentRuntime
+  high-level reasoning + durable Agent execution
+          |
+          | high-level CLIENT capability
+          v
+CL ClientRuntime / CapabilityRuntime
+          |
+          v
+specialized local runtime
+  FAST_CONTROL / COMPUTER environment / other bounded subsystem
+```
+
+Do not create a second network/runtime stack inside specialized client runtimes.
+
+### AgentEngine convergence
+
+Before APR-P0/X1/RT1/CU1 touches client execution behavior, audit `cl/src/core/agent_engine.py` together with #167/AOS-2.
+
+Default future assumption:
+- do not add new durable Agent authority to `AgentEngine`;
+- do not make it the host of Agent-private Memory;
+- do not build FAST_CONTROL by placing per-frame LLM/tool loops there;
+- preserve compatibility until the owning migration stage explicitly removes/migrates it.
+
+### Client Skill sync
+
+`GatewayLLMClient.sync_registry()` eager Skill body loading belongs to SKV2-C1 cleanup.
+
+APR stages should consume the eventual lazy Skill contract, not duplicate a second client profile/Skill registry.
+
+---
+
+## 12B. APR-FC1 ↔ GAC implementation mapping
+
+GAC #221 is the concrete client implementation program for game-focused FAST_CONTROL.
+
+APR-FC1 is the reusable platform semantics.
+
+### Already implemented / KEEP under GAC
+
+```text
+GAC-1:
+  GameSession
+  GameWindowIdentity
+  binding_generation
+  visible-window capture baseline
+
+GAC-2:
+  ActionIntent / ActionOutcome
+  ActionScheduler
+  cancellation
+  emergency stop
+  focus guard
+  keyboard/mouse execution
+  deadline/cooldown/pacing
+```
+
+APR MUST NOT reimplement these under `se/src/runtimes/agent/**`.
+
+### GAC-3
+
+Perception Pipeline should produce bounded observations with stable frame/session provenance.
+
+APR recommendation for evidence:
+- observation/frame identity;
+- capture binding generation;
+- timestamp/monotonic ordering;
+- reject perception output from stale binding/frame generation.
+
+### GAC-4
+
+WorldModel/tracking stage is the preferred owner to add a monotonic/comparable local state revision.
+
+Conceptually:
+
+```text
+WorldStateSnapshot
+  automation_session_id
+  binding_generation
+  world_revision
+  observed_at
+  entities/layout/player state
+```
+
+Exact schema remains GAC-owned.
+
+### GAC-5
+
+Local Behavior Runtime should bind each selected tactical action to the state revision it used.
+
+Conceptually:
+
+```text
+LocalDecision
+  decision_id
+  based_on_world_revision
+  action
+  deadline
+  priority
+  preemptible
+```
+
+Before executing a new side effect:
+- confirm session/binding remains current;
+- confirm decision freshness policy;
+- then reuse GAC-2 focus/target guard.
+
+This is the concrete client realization of APR stale-decision/preemption semantics.
+
+### GAC-6
+
+Register high-level `game.*` capabilities through existing:
+
+```text
+ClientRuntime
+ -> CapabilityRuntime
+ -> CapabilityDispatcher
+ -> GameAutomationRuntime
+```
+
+Do not expose ordinary per-frame keyboard/mouse primitives as the normal Agent-facing surface.
+
+Hard dependency:
+- #161 CRT-1 or equivalent canonical CLIENT_LOCAL routing/target identity.
+
+### GAC-7
+
+LLM escalation should use the canonical server AgentRuntime and APR slow-path semantics.
+
+Preferred:
+
+```text
+local escalation policy
+ -> compact WorldState/evidence
+ -> server AgentExecution / deep inference
+ -> StrategyHint
+ -> client revalidation
+ -> local FastPolicyState
+```
+
+Do not invoke deep LLM every frame.
+
+### APR-FC1 implementation gate
+
+APR-FC1 production work should only be opened for generic contracts/runtime seams not already owned by GAC.
+
+If a proposed APR-FC1 change belongs entirely under `cl/src/game_automation/**`, the GAC owner should normally own that production change.
+
+If a change touches:
+- Agent execution event sequencing;
+- cross-profile generic contracts;
+- provider/model lane contracts;
+- generic client-specialized-runtime host seams;
+
+then APR may own it after fresh cross-track PRE-CLAIM.
+
+---
+
 ## 13. Implementation classification
 
 ### KEEP
