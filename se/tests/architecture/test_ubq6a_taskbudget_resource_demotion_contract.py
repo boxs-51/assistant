@@ -54,7 +54,7 @@ def test_ubq6a_taskbudget_resource_veto_is_feature_scoped_and_saturating() -> No
     source = _text("se/src/runtimes/agent/task_budget.py")
 
     batch_start = source.index("async def reserve_tool_call_batch(")
-    batch_end = source.index("async def start_task_scoped_execution(", batch_start)
+    batch_end = source.index("async def reconcile_multibranch_task_activity(", batch_start)
     batch = source[batch_start:batch_end]
     assert "if self._user_tool_quota_enabled:" in batch
     assert "proposed = min(" in batch
