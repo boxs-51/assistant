@@ -307,7 +307,10 @@ function renderRenameInput(item) {
 
   inputEl.addEventListener('keydown', (e) => {
     if (e.key === 'Enter') handleRename();
-    if (e.key === 'Escape') nameSpan.textContent = currentName;
+    if (e.key === 'Escape') {
+      settled = true;
+      nameSpan.textContent = currentName;
+    }
   });
 
   inputEl.addEventListener('blur', handleRename);
