@@ -8,13 +8,25 @@ from se.src.infrastructure.storage.core.manager import (
 )
 
 
+class _Drivers:
+    def __init__(self, *, sqlite_available: bool) -> None:
+        self._sqlite_available = sqlite_available
+
+    def is_available(self, name: str) -> bool:
+        return name == "sqlite" and self._sqlite_available
+
+
 def _engine(
     *,
     started: bool,
     active_generation: int | None,
+    sqlite_available: bool = True,
 ) -> StorageEngine:
     engine = StorageEngine.__new__(StorageEngine)
     engine.services = {}
+    engine.drivers = _Drivers(  # type: ignore[assignment]
+        sqlite_available=sqlite_available
+    )
     engine._started = started
     engine._service_generation = active_generation or 0
     engine._active_service_generation = active_generation
@@ -80,4 +92,18 @@ def test_b7_resolver_rejects_stale_generation_service() -> None:
     )
 
     with pytest.raises(StorageServiceGenerationRevokedError):
+        engine.get_tool_response_payload_memory_promotion()
+
+
+def test_b7_resolver_rejects_unavailable_sqlite_backend() -> None:
+    engine = _engine(
+        started=True,
+        active_generation=7,
+        sqlite_available=False,
+    )
+    engine.services[_TOOL_RESPONSE_PAYLOAD_MEMORY_PROMOTION] = _service(
+        generation=7
+    )
+
+    with pytest.raises(RuntimeError, match="SQLite driver is unavailable"):
         engine.get_tool_response_payload_memory_promotion()
