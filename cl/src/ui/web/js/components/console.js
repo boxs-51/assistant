@@ -91,6 +91,53 @@ export function flushStream() {
   streamManager.flushStream();
 }
 
+export function clearConversationConsole() {
+  flushStream();
+  removePendingIndicator();
+  seenAgentEvents.clear();
+  const consoleElem = document.getElementById('console');
+  if (!consoleElem) return;
+  if (typeof consoleElem.replaceChildren === 'function') {
+    consoleElem.replaceChildren();
+  } else {
+    consoleElem.innerHTML = '';
+  }
+}
+
+export function replaceConversationHistory(messages = []) {
+  clearConversationConsole();
+  const ordered = (Array.isArray(messages) ? messages : [])
+    .map((message, index) => ({ message, index }))
+    .sort((left, right) => {
+      const leftSequence = Number(left.message?.sequence);
+      const rightSequence = Number(right.message?.sequence);
+      const leftRank = Number.isFinite(leftSequence) ? leftSequence : Number.MAX_SAFE_INTEGER;
+      const rightRank = Number.isFinite(rightSequence) ? rightSequence : Number.MAX_SAFE_INTEGER;
+      return leftRank === rightRank ? left.index - right.index : leftRank - rightRank;
+    })
+    .map(({ message }) => message);
+
+  ordered.forEach((message) => {
+    const role = message?.role || 'assistant';
+    const content = message?.content;
+    if (typeof content === 'string') {
+      renderBlock({ role, text: content });
+      return;
+    }
+    if (content !== null && content !== undefined) {
+      const parts = Array.isArray(content) ? content : [content];
+      renderBlock({
+        role,
+        data: {
+          response: {
+            choices: [{ message: { content: parts } }],
+          },
+        },
+      });
+    }
+  });
+}
+
 function mergeThoughtWithTextParts(parts) {
   const merged = [];
   

@@ -176,9 +176,33 @@ async function handleSend(onSubmit) {
 /**
  * Khóa/Mở khóa ô nhập liệu dựa theo trạng thái xử lý của AI
  */
+export function hasUnsentPayload() {
+  const text = document.getElementById('user-input')?.value?.trim() || '';
+  return Boolean(text)
+    || hasFilesEncoding()
+    || getReadyPayloads().length > 0
+    || getFailedFilePaths().length > 0;
+}
+
+export function resetInputForIdentity(enabled = true) {
+  const tx = document.getElementById('user-input');
+  if (tx) {
+    tx.value = '';
+    tx.style.height = 'auto';
+  }
+  clearAllFiles();
+  isSystemBusy = !enabled;
+  const attach = document.getElementById('btn-attach');
+  if (tx) tx.disabled = !enabled;
+  if (attach) attach.disabled = !enabled;
+  updateSendButtonState();
+}
+
 export function setInputState(enabled) {
   isSystemBusy = !enabled;
-  document.getElementById('user-input').disabled = !enabled;
-  document.getElementById('btn-attach').disabled = !enabled;
+  const tx = document.getElementById('user-input');
+  const attach = document.getElementById('btn-attach');
+  if (tx) tx.disabled = !enabled;
+  if (attach) attach.disabled = !enabled;
   updateSendButtonState();
 }

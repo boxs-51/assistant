@@ -47,6 +47,7 @@ class UIBridgeJSFacade:
     def submit_prompt(self, text: str, files: list = None, conversation_id: str = None):
         return self._bridge.submit_prompt(text, files, conversation_id)
     def get_sessions(self): return self._bridge.get_sessions()
+    def get_session(self, session_id: str): return self._bridge.get_session(session_id)
     def prepare_files_async(self, files: list): return self._bridge.prepare_files_async(files)
     def respond_approval(self, choice: bool, approval_id: str = None):
         return self._bridge.respond_approval(choice, approval_id)
@@ -68,6 +69,7 @@ class UIBridge:
         self._execution_local = threading.local()
         self._state_lock = threading.RLock()
         self._activity = []
+        self._auth_generation = 0
         self._chat_preferences = {
             "provider": "gemini",
             "model": "gemini-2.5-flash",
@@ -89,9 +91,11 @@ class UIBridge:
 
     def login(self, payload: dict):
         try:
+            data = self._client_runtime.login(payload)
+            self._notify_identity_changed(authenticated=True)
             return {
                 "success": True,
-                "data": self._client_runtime.login(payload),
+                "data": data,
             }
         except Exception as error:
             logger.exception("Login failed")
@@ -120,7 +124,10 @@ class UIBridge:
         return self._auth_action(self._client_runtime.confirm_password_reset, payload)
 
     def logout(self):
-        return self._auth_action(lambda _payload: self._client_runtime.logout(), {})
+        result = self._auth_action(lambda _payload: self._client_runtime.logout(), {})
+        if result.get("success"):
+            self._notify_identity_changed(authenticated=False)
+        return result
 
     def _record_activity(self, action: str, status: str, detail=None):
         item = {
@@ -366,10 +373,69 @@ class UIBridge:
             logger.warning("Lỗi JS: %s", error)
             return False
 
-    def render_block(self, role="assistant", btype=None, data=None, **kwargs):
+    def _notify_identity_changed(self, authenticated: bool):
+        with self._state_lock:
+            self._auth_generation += 1
+            generation = self._auth_generation
+            self.sessions = SessionManager()
+        payload = {
+            "generation": generation,
+            "authenticated": bool(authenticated),
+        }
+        self._eval_js(
+            "window.onConversationIdentityChanged && window.onConversationIdentityChanged("
+            + json.dumps(payload, ensure_ascii=False)
+            + ")"
+        )
+
+    def _emit_conversation_execution_state(
+        self,
+        conversation_id: str,
+        execution_id: str,
+        state: str,
+        auth_generation: int,
+    ):
+        payload = {
+            "conversation_id": conversation_id,
+            "execution_id": execution_id,
+            "state": state,
+            "auth_generation": auth_generation,
+        }
+        self._eval_js(
+            "window.onConversationExecutionState && window.onConversationExecutionState("
+            + json.dumps(payload, ensure_ascii=False)
+            + ")"
+        )
+
+    def render_block(
+        self,
+        role="assistant",
+        btype=None,
+        data=None,
+        conversation_id: str = None,
+        execution_id: str = None,
+        auth_generation: int = None,
+        **kwargs,
+    ):
         payload = {"role": role, "data": data, **kwargs}
-        if btype: payload["type"] = btype
-        self._eval_js(f"window.renderBlock && window.renderBlock({json.dumps(payload, ensure_ascii=False)})")
+        if btype:
+            payload["type"] = btype
+        if conversation_id:
+            payload["conversation_id"] = conversation_id
+        if execution_id:
+            payload["execution_id"] = execution_id
+        if auth_generation is not None:
+            payload["auth_generation"] = auth_generation
+
+        encoded = json.dumps(payload, ensure_ascii=False)
+        if conversation_id:
+            self._eval_js(
+                "window.onConversationBlock && window.onConversationBlock("
+                + encoded
+                + ")"
+            )
+        else:
+            self._eval_js(f"window.renderBlock && window.renderBlock({encoded})")
 
     @staticmethod
     def _canonical_attachment_from_descriptor(descriptor: dict) -> dict:
@@ -549,40 +615,72 @@ class UIBridge:
             return {"success": False, "error": str(error)}
 
     def submit_prompt(self, text: str, files: list = None, conversation_id: str = None):
+        requested_cid = str(conversation_id).strip() if conversation_id else None
 
         if not self._client_runtime.ready:
             self.render_block(
                 role="system",
                 text="Vui lòng đăng nhập trước khi sử dụng Gateway.",
+                conversation_id=requested_cid,
             )
-            return
-        
-        cid, session, lock = self.sessions.get_or_create(conversation_id)
+            return {"success": False, "error": "Gateway client is not ready."}
+
+        with self._state_lock:
+            auth_generation = self._auth_generation
+            session_manager = self.sessions
+        cid, session, lock = session_manager.get_or_create(conversation_id)
         execution_id = uuid.uuid4().hex
-        self._eval_js("window.setInputState(false)")
+
+        def _scoped_render(*args, **kwargs):
+            kwargs.pop("conversation_id", None)
+            kwargs.pop("execution_id", None)
+            return self.render_block(
+                *args,
+                conversation_id=cid,
+                execution_id=execution_id,
+                auth_generation=auth_generation,
+                **kwargs,
+            )
 
         def _worker():
             acquired = False
+            execution_started = False
             try:
                 lock.acquire()
                 acquired = True
+
+                with self._state_lock:
+                    if auth_generation != self._auth_generation:
+                        return
+
+                execution_started = True
                 self._execution_local.execution_id = execution_id
-                
+                self._emit_conversation_execution_state(
+                    cid,
+                    execution_id,
+                    "BUSY",
+                    auth_generation,
+                )
+
                 if text and text.startswith("/"):
                     res = self._engine.registry.execute_slash_command(text)
-                    return self.render_block(role="system", text=str(res))
+                    _scoped_render(role="system", text=str(res))
+                    return
 
                 logger.info("thong tin cua file", files=files)
-                self.render_block(role="user", data={"text": text, "files": files or []})
-                self._eval_js("window.showPendingIndicator()")
-                
+                _scoped_render(role="user", data={"text": text, "files": files or []})
+
                 with self._state_lock:
                     preferences = dict(self._chat_preferences)
                 if preferences.get("execution_mode") == "LOCAL_OFFLINE":
                     self._engine.run_agent_session(
-                        session=session, user_input=text, attached_files=files or [],
-                        render_cb=self.render_block, enable_stream=True,
-                        provider_name=preferences["provider"], model_name=preferences["model"]
+                        session=session,
+                        user_input=text,
+                        attached_files=files or [],
+                        render_cb=_scoped_render,
+                        enable_stream=True,
+                        provider_name=preferences["provider"],
+                        model_name=preferences["model"],
                     )
                 else:
                     message_content = self._online_message_content(text, files)
@@ -609,7 +707,7 @@ class UIBridge:
                         )
                     )
                     if isinstance(response, dict):
-                        self.render_block(
+                        _scoped_render(
                             role="system",
                             btype="execution_status",
                             data=response,
@@ -622,25 +720,37 @@ class UIBridge:
                                     if chunk.get("object") == "agent_stream_event"
                                     else "execution_status"
                                 )
-                                self.render_block(
+                                _scoped_render(
                                     role="system",
                                     btype=block_type,
                                     data=chunk,
                                 )
                             else:
-                                self.render_block(
+                                _scoped_render(
                                     role="assistant",
                                     btype="stream_content",
                                     data=chunk.model_dump(mode="json"),
                                 )
             except Exception as e:
-                self.render_block(role="system", text=f"❌ Lỗi: {str(e)}")
+                _scoped_render(role="system", text=f"❌ Lỗi: {str(e)}")
             finally:
-                self.render_block(role="assistant", btype="stream_end")
-                self._eval_js("window.setInputState(true)")
-                if acquired: lock.release()
+                if execution_started:
+                    _scoped_render(role="assistant", btype="stream_end")
+                    self._emit_conversation_execution_state(
+                        cid,
+                        execution_id,
+                        "TERMINAL",
+                        auth_generation,
+                    )
+                if acquired:
+                    lock.release()
 
         threading.Thread(target=_worker, daemon=True).start()
+        return {
+            "success": True,
+            "conversation_id": cid,
+            "execution_id": execution_id,
+        }
 
     def execute_gateway_endpoint(self, endpoint: str, payload: dict = None):
         """Execute a user-selected, allowlisted Gateway client operation."""
@@ -702,6 +812,17 @@ class UIBridge:
         # startup, so session bootstrap must not depend on panel ordering.
         self._client_runtime.start()
         return self._engine.gateway_client.get_sessions()
+
+    def get_session(self, session_id: str):
+        sid = str(session_id or "").strip()
+        if not sid or len(sid) > 256:
+            raise ValueError("session_id không hợp lệ")
+        self._client_runtime.start()
+        session = self._engine.gateway_client.get_session(sid)
+        if not isinstance(session, dict) or str(session.get("session_id") or "") != sid:
+            raise ValueError("Gateway trả về session_id không khớp")
+        return session
+
     def encode_files_async(self, files: list): return self.encoder.encode_async(files)
     def respond_approval(self, choice: bool, approval_id: str = None): return self.hitl.respond(choice, approval_id)
     def get_workspace_files(self): return self.workspace.get_files()
