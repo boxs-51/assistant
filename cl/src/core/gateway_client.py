@@ -1,11 +1,15 @@
 import requests
 import json
 import mimetypes
+import structlog
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterable, Optional, Union
 from ..schemas.request import GatewayChatRequest
 from ..schemas.response import GatewayResponse, GatewayStreamChunk
 from .realtime_client import GatewayRealtimeClient as PersistentGatewayRealtimeClient
+
+
+logger = structlog.get_logger(__name__)
 
 
 _LEGACY_WAIT_REASONS = {
@@ -20,6 +24,11 @@ def normalize_waiting_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     status = normalized.get("status") or normalized.get("state")
     legacy_reason = _LEGACY_WAIT_REASONS.get(status)
     if legacy_reason is not None:
+        logger.info(
+            "ae_r13_legacy_waiting_wire_consumed",
+            legacy_status=str(status),
+            normalized_wait_reason=legacy_reason,
+        )
         normalized["status"] = "WAITING"
         normalized["wait_reason"] = legacy_reason
     elif status == "WAITING":
