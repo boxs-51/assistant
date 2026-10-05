@@ -365,6 +365,10 @@ class UserBudgetDualAccountingService:
             max_cost_usd=None,
         )
 
+    def is_recognized_shadow_policy(self, row) -> bool:
+        """Return whether row is the exact UBQ-2 automatic shadow policy."""
+        return self._is_recognized_shadow_policy(row)
+
     def _is_recognized_shadow_policy(self, row) -> bool:
         version = str(row.policy_version)
         if not version.startswith("ubq2-shadow-"):
