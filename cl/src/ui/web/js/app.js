@@ -25,6 +25,7 @@ import {
   createNewConversation,
   getActiveConversationId,
   getConversationDraftText,
+  restoreConversationDraftAfterSubmitFailure,
   getActiveExecutionState,
   isCurrentSelection,
   markSelectionReady,
@@ -218,7 +219,13 @@ function setupApp() {
       setConversationDraftText(conversationId, '');
       return result;
     } catch (error) {
-      setConversationDraftText(conversationId, text);
+      const restoreVisibleText = restoreConversationDraftAfterSubmitFailure(
+        conversationId,
+        text,
+      );
+      if (restoreVisibleText) {
+        setTextDraft(text);
+      }
       throw error;
     }
   });
