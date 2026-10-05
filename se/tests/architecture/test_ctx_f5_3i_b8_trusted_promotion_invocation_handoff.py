@@ -146,7 +146,7 @@ def test_b8_contract_binds_future_acquisition_to_b7_resolver_only() -> None:
         assert phrase in contract
 
 
-def test_b8_evidence_proves_no_production_caller_exists() -> None:
+def test_b8_evidence_allows_only_released_b8_p1_resolver_handoff() -> None:
     callers: list[str] = []
     stage_markers: list[str] = []
 
@@ -157,7 +157,35 @@ def test_b8_evidence_proves_no_production_caller_exists() -> None:
         if "CTX_F5_3I_B8" in source or "CTX-F5-3I-B8" in source:
             stage_markers.append(str(path))
 
-    assert callers == []
+    assert callers == [str(MANAGER)]
+
+    manager = _read(MANAGER)
+    storage = _class(manager, "StorageEngine")
+    handoff = _function(
+        storage,
+        "promote_tool_response_payload_memory",
+    )
+    assert isinstance(handoff, ast.AsyncFunctionDef)
+
+    handoff_source = ast.get_source_segment(manager, handoff)
+    assert handoff_source is not None
+    assert (
+        handoff_source.count(
+            "self.get_tool_response_payload_memory_promotion()"
+        )
+        == 1
+    )
+    assert handoff_source.count("await service.promote(") == 1
+
+    for node in storage.body:
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        if node.name == "promote_tool_response_payload_memory":
+            continue
+        segment = ast.get_source_segment(manager, node)
+        assert segment is not None
+        assert ".get_tool_response_payload_memory_promotion(" not in segment
+
     assert stage_markers == []
 
 
