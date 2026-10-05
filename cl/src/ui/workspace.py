@@ -217,7 +217,7 @@ class WorkspaceManager:
         try:
             canonical = self._canonicalize(
                 path,
-                reject_workspace_root=True,
+                reject_root=True,
             )
 
             if os.path.isdir(canonical):
