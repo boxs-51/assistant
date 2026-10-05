@@ -1,7 +1,7 @@
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from sqlalchemy import and_, case, insert, or_, select, update
+from sqlalchemy import and_, case, func, insert, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -176,6 +176,32 @@ class AgentRepository(BaseRepository):
             select(AgentTaskRecord).where(AgentTaskRecord.id == task_id)
         )
         return result.scalar_one_or_none()
+
+    async def count_legacy_waiting_residue(self) -> Dict[str, int]:
+        """Read-only R13 rollout evidence for legacy durable WAITING values."""
+
+        task_result = await self.session.execute(
+            select(func.count())
+            .select_from(AgentTaskRecord)
+            .where(AgentTaskRecord.status == "WAITING_FOR_CONNECTION")
+        )
+        execution_connection_result = await self.session.execute(
+            select(func.count())
+            .select_from(AgentExecutionRecord)
+            .where(AgentExecutionRecord.state == "WAITING_FOR_CONNECTION")
+        )
+        execution_agent_result = await self.session.execute(
+            select(func.count())
+            .select_from(AgentExecutionRecord)
+            .where(AgentExecutionRecord.state == "WAITING_AGENT")
+        )
+        return {
+            "task_waiting_for_connection": int(task_result.scalar_one()),
+            "execution_waiting_for_connection": int(
+                execution_connection_result.scalar_one()
+            ),
+            "execution_waiting_agent": int(execution_agent_result.scalar_one()),
+        }
 
     async def get_task_for_update(
         self,
