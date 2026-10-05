@@ -166,8 +166,8 @@ async function handleSend(onSubmit) {
     await onSubmit(currentText, filePayloads);
   } catch (err) {
     console.error('Lỗi khi gửi dữ liệu:', err);
-    // Phục hồi lại dữ liệu nếu gửi thất bại
-    tx.value = currentText;
+    // Text restoration is owned by the conversation-aware submit callback.
+    // Attachment restoration remains global until the separately gated 2B-B stage.
     restoreFilesMap(filesBackup, updateSendButtonState);
     tx.dispatchEvent(new Event('input'));
   }
@@ -176,12 +176,29 @@ async function handleSend(onSubmit) {
 /**
  * Khóa/Mở khóa ô nhập liệu dựa theo trạng thái xử lý của AI
  */
-export function hasUnsentPayload() {
-  const text = document.getElementById('user-input')?.value?.trim() || '';
-  return Boolean(text)
-    || hasFilesEncoding()
+export function getTextDraft() {
+  return document.getElementById('user-input')?.value || '';
+}
+
+export function setTextDraft(value = '') {
+  const tx = document.getElementById('user-input');
+  if (!tx) return;
+  tx.value = String(value ?? '');
+  tx.dispatchEvent(new Event('input'));
+}
+
+export function hasUnsentText() {
+  return Boolean(getTextDraft().trim());
+}
+
+export function hasUnsentAttachments() {
+  return hasFilesEncoding()
     || getReadyPayloads().length > 0
     || getFailedFilePaths().length > 0;
+}
+
+export function hasUnsentPayload() {
+  return hasUnsentText() || hasUnsentAttachments();
 }
 
 export function resetInputForIdentity(enabled = true) {
