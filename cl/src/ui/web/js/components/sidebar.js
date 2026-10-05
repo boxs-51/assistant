@@ -462,8 +462,22 @@ export const ExplorerPage = {
 // ==========================================
 // SESSIONS PAGE & INIT
 // ==========================================
+let sessionController = {
+  canSwitch: () => true,
+  isActive: () => false,
+  selectSession: async () => false,
+  newChat: () => null,
+};
+
 export const SessionsPage = {
   containerId: 'sessions-list',
+
+  setStatus(message = '', isError = false) {
+    const status = document.getElementById('sessions-status');
+    if (!status) return;
+    status.textContent = message;
+    status.className = message ? (isError ? 'sidebar-error' : 'sidebar-loading') : '';
+  },
 
   async load() {
     const container = document.getElementById(this.containerId);
@@ -477,9 +491,10 @@ export const SessionsPage = {
         sessions = await window.pywebview.api.get_sessions();
       }
       this.renderSessions(sessions, container);
+      this.setStatus('');
     } catch (err) {
       console.error(err);
-      container.innerHTML = `<div class="sidebar-error">Lỗi tải Session</div>`;
+      container.innerHTML = '<div class="sidebar-error">Lỗi tải Session</div>';
     }
   },
 
@@ -491,25 +506,61 @@ export const SessionsPage = {
     }
 
     sessions.forEach(session => {
+      const sessionId = String(session?.session_id || '').trim();
       const el = document.createElement('div');
       el.className = 'session-item';
+      el.dataset.sessionId = sessionId;
       el.innerHTML = `
-        <span class="session-icon">💬</span> 
+        <span class="session-icon">💬</span>
         <span class="session-title"></span>
       `;
-      el.querySelector('.session-title').textContent = session.name || 'Untitled Session';
+      const displayTitle = session?.title ?? session?.name ?? 'Untitled Session';
+      el.querySelector('.session-title').textContent = displayTitle || 'Untitled Session';
+      if (session?.status) el.title = String(session.status);
 
-      el.addEventListener('click', () => {
-        document.querySelectorAll('.session-item').forEach(item => item.classList.remove('active'));
-        el.classList.add('active');
-      });
+      if (!sessionId) {
+        el.classList.add('disabled');
+        el.setAttribute?.('aria-disabled', 'true');
+      } else {
+        el.classList.toggle('active', sessionController.isActive(sessionId));
+        el.addEventListener('click', async () => {
+          if (sessionController.isActive(sessionId)) return;
+          if (!sessionController.canSwitch(sessionId)) {
+            this.setStatus('Hãy gửi hoặc xóa nội dung/tệp chưa gửi trước khi chuyển cuộc trò chuyện.', true);
+            return;
+          }
+
+          this.setStatus('Đang tải cuộc trò chuyện...');
+          try {
+            const applied = await sessionController.selectSession(sessionId);
+            if (!applied) return;
+            document.querySelectorAll('.session-item').forEach(item => {
+              item.classList.toggle(
+                'active',
+                item.dataset?.sessionId === sessionId && sessionController.isActive(sessionId),
+              );
+            });
+            this.setStatus('');
+          } catch (err) {
+            console.error(err);
+            if (sessionController.isActive(sessionId)) {
+              this.setStatus('Không thể tải cuộc trò chuyện đã chọn.', true);
+            }
+          }
+        });
+      }
 
       parentElem.appendChild(el);
     });
   }
 };
 
-export function initSidebar() {
+export function initSidebar(controller = {}) {
+  sessionController = {
+    ...sessionController,
+    ...controller,
+  };
+
   const sidebar = document.getElementById('sidebar');
 
   document.querySelectorAll('.btn-toggle-sidebar').forEach(btn => {
@@ -527,6 +578,17 @@ export function initSidebar() {
 
   initHotkeys();
   createContextMenu();
+
+  document.getElementById('btn-new-chat')?.addEventListener('click', () => {
+    if (!sessionController.canSwitch(null)) {
+      SessionsPage.setStatus('Hãy gửi hoặc xóa nội dung/tệp chưa gửi trước khi tạo cuộc trò chuyện mới.', true);
+      return;
+    }
+    const conversationId = sessionController.newChat();
+    if (!conversationId) return;
+    document.querySelectorAll('.session-item').forEach(item => item.classList.remove('active'));
+    SessionsPage.setStatus('');
+  });
 
   ExplorerPage.load();
   SessionsPage.load();
