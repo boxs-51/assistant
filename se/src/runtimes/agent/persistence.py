@@ -1,6 +1,7 @@
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import math
+import structlog
 from typing import Any, Dict, List, Mapping, Optional
 import uuid
 
@@ -103,6 +104,9 @@ from .checkpoint_backfill import (
     CheckpointBackfillResult,
     backfill_legacy_inline_checkpoints_in_uow,
 )
+
+
+logger = structlog.get_logger(__name__)
 
 
 _EXECUTION_JSON_FIELDS = frozenset({
@@ -6076,11 +6080,30 @@ class DurableAgentStore:
             executions = await uow.agents.list_legacy_waiting_executions_for_owner(
                 owner_user_id=owner_user_id,
             )
+            candidate_count = len(executions)
+            continuation_candidate_count = sum(
+                1
+                for item in executions
+                if isinstance(getattr(item, "context_state", None), Mapping)
+                and isinstance(item.context_state.get("continuation"), Mapping)
+            )
+            logger.info(
+                "ae_r13_legacy_continuation_inventory",
+                candidate_count=candidate_count,
+                continuation_candidate_count=continuation_candidate_count,
+                missing_continuation_count=(
+                    candidate_count - continuation_candidate_count
+                ),
+            )
             execution_ids = tuple(item.id for item in executions)
             await uow.commit()
 
         materialized: list[DurableExecutionCheckpoint] = []
+        attempted_count = 0
+        materialized_count = 0
+        rejected_count = 0
         for execution_id in execution_ids:
+            attempted_count += 1
             try:
                 checkpoint = await self.materialize_legacy_checkpoint(
                     execution_id,
@@ -6088,12 +6111,27 @@ class DurableAgentStore:
                     target_client_id=client_id,
                 )
             except LegacyCheckpointMaterializationError:
+                rejected_count += 1
                 # One unsafe or foreign legacy row must not suppress canonical
                 # ticket replay for other executions. Explicit resume surfaces
                 # the stable rejection code.
                 continue
+            except Exception as exc:
+                logger.warning(
+                    "ae_r13_legacy_continuation_materialization_failed",
+                    error_type=type(exc).__name__,
+                )
+                raise
             if checkpoint is not None:
+                materialized_count += 1
                 materialized.append(checkpoint)
+
+        logger.info(
+            "ae_r13_legacy_continuation_materialization_batch",
+            attempted_count=attempted_count,
+            materialized_count=materialized_count,
+            rejected_count=rejected_count,
+        )
         return tuple(materialized)
 
     async def load_pending_resume_tickets(

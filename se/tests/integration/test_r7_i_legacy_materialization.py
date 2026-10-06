@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 import asyncio
 import pytest
 from sqlalchemy import delete, select
@@ -30,6 +31,7 @@ from se.src.runtimes.agent.legacy_materialization import (
     LegacyCheckpointMaterializationError,
     parse_legacy_checkpoint_source,
 )
+from se.src.runtimes.agent import persistence as agent_persistence
 from se.src.runtimes.agent.persistence import (
     DurableAgentStore,
     ExecutionConflictError,
@@ -61,6 +63,18 @@ class _Uow:
 
     async def rollback(self):
         await self.session.rollback()
+
+
+class _CaptureLogger:
+    def __init__(self) -> None:
+        self.infos: list[tuple[str, dict]] = []
+        self.warnings: list[tuple[str, dict]] = []
+
+    def info(self, event: str, **kwargs) -> None:
+        self.infos.append((event, dict(kwargs)))
+
+    def warning(self, event: str, **kwargs) -> None:
+        self.warnings.append((event, dict(kwargs)))
 
 
 async def _seed_legacy_waiting(
@@ -306,7 +320,10 @@ async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path
 
 
 @pytest.mark.asyncio
-async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(tmp_path):
+async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(
+    tmp_path,
+    monkeypatch,
+):
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-ticket-replay.db').as_posix()}",
         connect_args={"timeout": 5},
@@ -316,9 +333,17 @@ async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(tmp_path):
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     store = DurableAgentStore(lambda: _Uow(sessions))
+    logger = _CaptureLogger()
+    monkeypatch.setattr(agent_persistence, "logger", logger)
 
     try:
         await _seed_legacy_waiting(sessions)
+        async with sessions() as session:
+            legacy_row = await session.get(AgentExecutionRecord, "exec-legacy")
+            legacy_continuation_before = deepcopy(
+                legacy_row.context_state["continuation"]
+            )
+
         tickets = await store.load_pending_resume_tickets(
             owner_user_id="user-1",
             client_id="client-1",
@@ -335,12 +360,106 @@ async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(tmp_path):
                 "auto_resume_allowed": True,
             },
         )
+        assert logger.infos == [
+            (
+                "ae_r13_legacy_continuation_inventory",
+                {
+                    "candidate_count": 1,
+                    "continuation_candidate_count": 1,
+                    "missing_continuation_count": 0,
+                },
+            ),
+            (
+                "ae_r13_legacy_continuation_materialization_batch",
+                {
+                    "attempted_count": 1,
+                    "materialized_count": 1,
+                    "rejected_count": 0,
+                },
+            ),
+        ]
+        assert logger.warnings == []
+
+        async with sessions() as session:
+            legacy_row = await session.get(AgentExecutionRecord, "exec-legacy")
+            assert legacy_row.revision == 4
+            assert legacy_row.current_checkpoint_id == "legacy-cp-1"
+            assert (
+                legacy_row.context_state["continuation"]
+                == legacy_continuation_before
+            )
+            checkpoint = await session.get(
+                AgentExecutionCheckpointRecord,
+                "legacy-cp-1",
+            )
+            assert checkpoint is not None
+            assert checkpoint.execution_revision == 4
+            pending = await AgentRepository(
+                session
+            ).list_checkpoint_pending_invocations("legacy-cp-1")
+            assert len(pending) == 1
+            assert pending[0].invocation_id == "inv-pending"
+            assert pending[0].tool_call_id == "call-pending"
+
+        for _, fields in logger.infos:
+            assert set(fields).issubset(
+                {
+                    "candidate_count",
+                    "continuation_candidate_count",
+                    "missing_continuation_count",
+                    "attempted_count",
+                    "materialized_count",
+                    "rejected_count",
+                }
+            )
+            rendered = repr(fields)
+            for forbidden in (
+                "exec-legacy",
+                "user-1",
+                "client-1",
+                "session-legacy",
+                "legacy-cp-1",
+                "inv-pending",
+                "call-pending",
+                "tool.remote",
+                "run tools",
+            ):
+                assert forbidden not in rendered
+
+        logger.infos.clear()
+        tickets_again = await store.load_pending_resume_tickets(
+            owner_user_id="user-1",
+            client_id="client-1",
+        )
+        assert tickets_again == tickets
+        assert logger.infos == [
+            (
+                "ae_r13_legacy_continuation_inventory",
+                {
+                    "candidate_count": 0,
+                    "continuation_candidate_count": 0,
+                    "missing_continuation_count": 0,
+                },
+            ),
+            (
+                "ae_r13_legacy_continuation_materialization_batch",
+                {
+                    "attempted_count": 0,
+                    "materialized_count": 0,
+                    "rejected_count": 0,
+                },
+            ),
+        ]
+        assert logger.warnings == []
     finally:
         await engine.dispose()
 
 
 @pytest.mark.asyncio
-async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(tmp_path):
+async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(
+    tmp_path,
+    monkeypatch,
+):
     engine = create_async_engine(
         f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-unsafe.db').as_posix()}",
         connect_args={"timeout": 5},
@@ -350,6 +469,8 @@ async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(tmp_path
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     store = DurableAgentStore(lambda: _Uow(sessions))
+    logger = _CaptureLogger()
+    monkeypatch.setattr(agent_persistence, "logger", logger)
 
     try:
         await _seed_legacy_waiting(sessions)
@@ -369,6 +490,31 @@ async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(tmp_path
                 target_client_id="client-1",
             )
         assert exc.value.code == "CHECKPOINT_INCOMPLETE"
+
+        materialized = await store.materialize_legacy_waiting_for_client(
+            owner_user_id="user-1",
+            client_id="client-1",
+        )
+        assert materialized == ()
+        assert logger.infos == [
+            (
+                "ae_r13_legacy_continuation_inventory",
+                {
+                    "candidate_count": 1,
+                    "continuation_candidate_count": 1,
+                    "missing_continuation_count": 0,
+                },
+            ),
+            (
+                "ae_r13_legacy_continuation_materialization_batch",
+                {
+                    "attempted_count": 1,
+                    "materialized_count": 0,
+                    "rejected_count": 1,
+                },
+            ),
+        ]
+        assert logger.warnings == []
 
         execution = await store.load_execution("exec-legacy")
         assert execution.revision == 4
