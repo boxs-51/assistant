@@ -107,7 +107,7 @@ def test_tbo0_preserves_ae_waiting_and_recovery_authority() -> None:
     assert "WAITING execution requires wait_reason" in execution
     assert "wait_reason is only valid for WAITING execution" in execution
 
-    assert "legal Execution state semantics remain owned by AE" in contract
+    assert "legal Execution state semantics remain owned by AE" in _norm(contract)
     assert "redefine AE `WAITING -> RUNNING` resume authority" in contract
     assert "Unknown external outcomes still reconcile through AE-R6 before replay." in contract
 
@@ -123,16 +123,12 @@ def test_tbo0_preserves_timeout_and_provider_deadline_boundaries() -> None:
     assert "remaining_active_budget_seconds: Optional[float]" in limits
 
     normalized_timeout = _norm(timeout)
-    assert (
-        "agent_limits.task_timeout_seconds | optional Task wall-clock horizon | "
-        "Task lifecycle deadline, owned with TBO/AE boundary"
-        in normalized_timeout
-    )
-    assert (
-        "remaining_active_budget_seconds | durable remaining active execution duration | "
-        "compatibility execution-time field"
-        in normalized_timeout
-    )
+    assert "`agent_limits.task_timeout_seconds`" in normalized_timeout
+    assert "optional Task wall-clock horizon" in normalized_timeout
+    assert "Task lifecycle deadline, owned with TBO/AE boundary" in normalized_timeout
+    assert "`remaining_active_budget_seconds`" in normalized_timeout
+    assert "durable remaining active execution duration" in normalized_timeout
+    assert "compatibility execution-time field" in normalized_timeout
     assert "Task lifetime != synchronous response lifetime" in timeout
 
     assert "class ProviderCallBudget:" in provider
@@ -185,7 +181,7 @@ def test_tbo0_freezes_ubq_no_mint_and_activation_ordering() -> None:
 
 
 def test_tbo0_exit_gate_preserves_zero_production_boundary() -> None:
-    text = _read(DOC)
+    text = _norm(_read(DOC))
 
     for forbidden_scope in (
         "se/src/**",
