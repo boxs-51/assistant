@@ -110,8 +110,8 @@ try {
         Write-Host ""
         Write-Host "Running operator-provided restart script: $restartPath"
         & $restartPath
-        if ($LASTEXITCODE -and $LASTEXITCODE -ne 0) {
-            throw "Restart script failed with exit code $LASTEXITCODE."
+        if (-not $?) {
+            throw "Restart script failed."
         }
         Wait-GatewayReady $GatewayUrl
     }
@@ -122,7 +122,7 @@ try {
         Wait-GatewayReady $GatewayUrl
     }
     else {
-        Wait-GatewayReady $GatewayUrl
+        throw "-NonInteractive requires -RestartScript so the restart is inside the recorded observation window."
     }
 
     $cycleA = Run-Probe "CYCLE_A" $ProbePath $GatewayUrl $HoldSeconds
