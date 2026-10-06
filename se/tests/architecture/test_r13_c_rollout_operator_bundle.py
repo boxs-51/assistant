@@ -201,4 +201,4 @@ def test_r13_c_reconnect_probe_bootstraps_repo_root_for_direct_execution(tmp_pat
 
     assert completed.returncode == 0, completed.stderr
     assert "--gateway-url" in completed.stdout
-    assert "zero-capability ClientRuntime generation" in completed.stdout
+    assert "pending-ticket publication path" in completed.stdout
