@@ -34,7 +34,8 @@
       "desktop.mouse_scroll",
       "desktop.type_text",
       "desktop.press_key",
-      "desktop.hotkey"
+      "desktop.hotkey",
+      "desktop.screenshot"
     ]
   }
 }
