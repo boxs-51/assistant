@@ -3,7 +3,7 @@ from __future__ import annotations
 import importlib
 import re
 from copy import deepcopy
-from typing import Any, Mapping, TypedDict
+from typing import Any, Mapping, NotRequired, TypedDict
 
 from .contracts import TOOL_RESULT_REQUIRED_KEYS
 from .errors import ToolJsonSafetyError, ToolMetadataError
@@ -22,6 +22,7 @@ _ALLOWED_EFFECTS = frozenset(
     {"READ", "WRITE", "EXECUTE", "EXTERNAL_SIDE_EFFECT", "PRIVILEGED"}
 )
 _ALLOWED_RISKS = frozenset({"LOW", "MEDIUM", "HIGH"})
+_ALLOWED_EXECUTION_LOCATIONS = frozenset({"SERVER", "CLIENT"})
 
 _ROOT_REQUIRED = (
     "manifest_version",
@@ -66,6 +67,7 @@ class ToolCapabilityExport(TypedDict):
     required_scopes: list[str]
     required_permissions: list[str]
     danger_patterns: list[str]
+    execution_locations: NotRequired[list[str]]
 
 
 class ToolManifestV2(TypedDict):
@@ -273,6 +275,13 @@ def validate_tool_manifest_v2(manifest: Mapping[str, Any]) -> dict[str, Any]:
         danger_patterns = _require_unique_string_list(
             export["danger_patterns"], where=f"{where}.danger_patterns"
         )
+        if "execution_locations" in export:
+            _require_unique_string_list(
+                export["execution_locations"],
+                where=f"{where}.execution_locations",
+                allowed=_ALLOWED_EXECUTION_LOCATIONS,
+                allow_empty=False,
+            )
         for pattern in danger_patterns:
             try:
                 re.compile(pattern)
