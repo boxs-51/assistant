@@ -125,16 +125,12 @@ class DefaultAgentContextAssembler:
             context=context,
             resolved_skills=resolved_skills,
         )
-        active_skill_set = select_active_assigned_skills(
-            assigned_skill_set,
-            conversation,
-            explicit_requested_skill_ids=self._requested_ids(
-                context,
-                "dcs_requested_skill_ids",
-            ),
-        )
 
         if self._selector is None:
+            # No-selector assemblers are the compatibility surface: preserve
+            # historical assigned/preloaded Skill activation and full eligible
+            # Tool projection. Canonical production wiring supplies a selector.
+            active_skill_set = assigned_skill_set
             selected_capabilities = eligible_capabilities
             working_set = CapabilityWorkingSet(
                 visible_capability_ids=tuple(
@@ -146,6 +142,14 @@ class DefaultAgentContextAssembler:
                 revision=max(1, int(context.iteration or 0)),
             )
         else:
+            active_skill_set = select_active_assigned_skills(
+                assigned_skill_set,
+                conversation,
+                explicit_requested_skill_ids=self._requested_ids(
+                    context,
+                    "dcs_requested_skill_ids",
+                ),
+            )
             selection = self._selector.select(
                 CapabilitySelectionContext(
                     owner_user_id=(
