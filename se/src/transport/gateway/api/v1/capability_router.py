@@ -25,6 +25,9 @@ from .....runtimes.capability.contracts.implementation import (
     CapabilityOwnerType,
 )
 from .....runtimes.capability.contracts.registration import CapabilityRegistration
+from .....runtimes.capability.contracts.skill_manifest import (
+    SKILL_RUNTIME_RESERVED_METADATA_KEYS,
+)
 from .....runtimes.capability.contracts.error import CapabilityError
 from .....runtimes.capability.contracts.result import CapabilityResult
 from .....runtimes.capability.drivers.agent_driver import AgentCapabilityDriver
@@ -271,18 +274,43 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 
+def _trusted_legacy_skill_metadata(body: SkillDefinition) -> dict:
+    caller_metadata = dict(body.metadata or {})
+    reserved = sorted(
+        set(caller_metadata).intersection(SKILL_RUNTIME_RESERVED_METADATA_KEYS)
+    )
+    if reserved:
+        raise ValueError(
+            "Skill metadata contains runtime-reserved keys: " + ", ".join(reserved)
+        )
+    return {
+        **caller_metadata,
+        "kind": "SKILL",
+        "instruction": body.instruction,
+        "server_managed": False,
+        "runtime_owned": True,
+        "lazy": False,
+        "loaded": True,
+        "schema_version": "1",
+        "skill_id": body.name,
+        "provenance": "HTTP_CALLER",
+        "ownership": "CALLER_REGISTERED",
+    }
+
+
 @router.post("/skills", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
 async def register_skill_capability(body: SkillDefinition, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
     catalog = _catalog(container)
-    definition = CapabilityDefinition(
-        id=body.name, version=body.version, name=body.name, description=body.description,
-        input_schema=body.input_schema, execution_kind="SKILL",
-        kind=CapabilityKind.SKILL,
-        execution_mode=CapabilityExecutionMode(body.execution_mode),
-        effects=set(body.effects),
-        metadata={"kind": "SKILL", "instruction": body.instruction, **body.metadata},
-    )
     try:
+        metadata = _trusted_legacy_skill_metadata(body)
+        definition = CapabilityDefinition(
+            id=body.name, version=body.version, name=body.name, description=body.description,
+            input_schema=body.input_schema, execution_kind="SKILL",
+            kind=CapabilityKind.SKILL,
+            execution_mode=CapabilityExecutionMode(body.execution_mode),
+            effects=set(body.effects),
+            metadata=metadata,
+        )
         definition = catalog.register_definition(definition, allow_update=True)
         container.capability_runtime.registry.register_definition(definition)
         implementations = []
