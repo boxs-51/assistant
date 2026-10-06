@@ -10,6 +10,7 @@ from .contracts.selection import (
     CapabilitySelectionResult,
     CapabilityWorkingSet,
 )
+from .contracts.skills import ActiveSkill, ActiveSkillSet, SkillActivationSource
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
 _STOP_WORDS = frozenset(
@@ -113,6 +114,69 @@ def _candidate_matches(text: str, text_words: set[str], candidate) -> bool:
     return bool(description_words.intersection(text_words))
 
 
+def select_active_assigned_skills(
+    assigned_skill_set: ActiveSkillSet,
+    messages: Sequence[Any],
+    *,
+    explicit_requested_skill_ids: Sequence[str] = (),
+) -> ActiveSkillSet:
+    """Activate only relevant assigned Skills while preserving legacy preload.
+
+    Canonical V2 activation metadata controls trusted descriptors.  Legacy
+    assigned/preloaded Skills retain historical eager behavior until SKV2-X1.
+    Capability hints are deliberately ignored here.
+    """
+    text = " ".join(
+        _flatten_text(getattr(message, "content", ""))
+        for message in messages
+        if getattr(message, "role", None) != "system"
+    ).lower()
+    text_words = _words(text)
+    explicitly_requested = set(explicit_requested_skill_ids)
+    active: list[ActiveSkill] = []
+
+    for item in assigned_skill_set.skills:
+        descriptor = item.descriptor
+        if descriptor.provenance == "LEGACY_ASSIGNED":
+            active.append(item)
+            continue
+
+        mode = descriptor.activation.mode.value
+        if mode == "ALWAYS_ON":
+            source = SkillActivationSource.ALWAYS_ON
+        elif mode == "ON_DEMAND":
+            if descriptor.skill_id not in explicitly_requested:
+                continue
+            source = SkillActivationSource.ON_DEMAND
+        elif mode == "AUTO_ELIGIBLE":
+            terms = (
+                *descriptor.activation.intents,
+                *descriptor.activation.keywords,
+            )
+            relevant = False
+            for term in terms:
+                normalized = term.strip().lower()
+                if not normalized:
+                    continue
+                if normalized in text or _words(normalized).intersection(text_words):
+                    relevant = True
+                    break
+            if not relevant:
+                continue
+            source = SkillActivationSource.AUTO_MATCH
+        else:
+            continue
+
+        active.append(
+            ActiveSkill(
+                descriptor=descriptor,
+                source=source,
+            )
+        )
+
+    return ActiveSkillSet(skills=tuple(active))
+
+
 class DeterministicCapabilitySelector:
     """DCS-1 rule selector.
 
@@ -182,4 +246,5 @@ __all__ = [
     "CapabilitySelectionViolationError",
     "DeterministicCapabilitySelector",
     "ensure_selected_tool_calls",
+    "select_active_assigned_skills",
 ]
