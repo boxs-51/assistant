@@ -1,19 +1,39 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from copy import deepcopy
 import hashlib
+import socket
 import threading
+import time
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image
+import uvicorn
+from fastapi import FastAPI
 
 from cl.src.core.capability_dispatcher import CapabilityDispatcher
+from cl.src.core.client_invocation_ledger import (
+    ClientInvocationLedger,
+    ClientInvocationLedgerState,
+)
+from cl.src.core.client_runtime import ClientRuntime
 from cl.src.core.local_capability_executor import (
     LocalCapabilityExecutor,
     LocalExecutionDenied,
 )
+from se.src.domain.schemas.identity import Identity
+from se.src.infrastructure.event_bus.ws_manager import WebSocketConnectionManager
 from se.src.runtimes.agent.adapters.context import _project_f7t_screenshot_output
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.registration import ClientCapabilityRegistrationService
+from se.src.runtimes.connection.protocol import RealtimeEnvelope
+from se.src.runtimes.connection.runtime import ConnectionRuntime
+from se.src.transport.gateway.api.v1 import events_router
+from se.src.transport.gateway.authentication.dependency import get_websocket_identity
+from se.src.transport.gateway.dependencies import get_container
 from tools.v1 import desktop_tool
 from tools.v1._shared.errors import ToolMetadataError
 from tools.v1._shared.metadata import validate_tool_manifest_v2
@@ -213,3 +233,218 @@ def test_model_projection_omits_binary_and_preserves_durable_result():
     malformed = deepcopy(durable)
     malformed["data"]["$f7t_media"]["items"][0]["extra"] = "not-strict"
     assert _project_f7t_screenshot_output(malformed) is None
+
+    bad_hash = deepcopy(durable)
+    bad_hash["data"]["$f7t_media"]["items"][0]["sha256"] = "0" * 64
+    assert _project_f7t_screenshot_output(bad_hash) is None
+
+    bad_size = deepcopy(durable)
+    bad_size["data"]["$f7t_media"]["items"][0]["size_bytes"] += 1
+    assert _project_f7t_screenshot_output(bad_size) is None
+
+class _NetworkRegistry:
+    def __init__(self, output):
+        export = _screenshot_export()
+
+        def target(**_kwargs):
+            return output
+
+        self.tools = {
+            CAPABILITY_ID: {
+                "func": target,
+                "metadata": {
+                    "name": export["name"],
+                    "version": export["version"],
+                    "description": export["description"],
+                    "parameters": deepcopy(export["input_schema"]),
+                    "input_schema": deepcopy(export["input_schema"]),
+                    "output_schema": deepcopy(export["output_schema"]),
+                    "kind": export["kind"],
+                    "execution_mode": export["execution_mode"],
+                    "idempotency": export["idempotency"],
+                    "effects": list(export["effects"]),
+                    "require_auth": False,
+                    "required_scopes": list(export["required_scopes"]),
+                    "base_risk": export["base_risk"],
+                    "required_permissions": list(export["required_permissions"]),
+                    "danger_patterns": list(export["danger_patterns"]),
+                    "physical_tool": "desktop_automation",
+                    "physical_version": "2.1.0",
+                    "bind": deepcopy(export["bind"]),
+                    "manifest_version": "2.0",
+                },
+            }
+        }
+
+    def load_all(self):
+        return None
+
+    def get_tool(self, capability_id):
+        return self.tools.get(capability_id)
+
+
+def _free_port() -> int:
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return sock.getsockname()[1]
+
+
+def _wait_until(predicate, timeout=15.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if predicate():
+            return
+        time.sleep(0.01)
+    raise AssertionError("condition timed out")
+
+
+def _build_realtime_gateway(owner_id: str, session_id: str):
+    catalog = CapabilityCatalog()
+    connection_runtime = ConnectionRuntime(
+        ClientCapabilityRegistrationService(catalog, None)
+    )
+    connection_runtime.registration_service.connections = connection_runtime.registry
+    identity = Identity(
+        user_id=owner_id,
+        session_id=session_id,
+        auth_type="jwt",
+    )
+    container = SimpleNamespace(
+        connection_runtime=connection_runtime,
+        eventing_manager=SimpleNamespace(
+            ws_manager=WebSocketConnectionManager(),
+        ),
+    )
+    app = FastAPI()
+    app.include_router(events_router.router)
+    app.dependency_overrides[get_container] = lambda: container
+    app.dependency_overrides[get_websocket_identity] = lambda: identity
+    return app, catalog, connection_runtime
+
+
+def _start_realtime_gateway(app):
+    port = _free_port()
+    server = uvicorn.Server(
+        uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=port,
+            log_level="error",
+            access_log=False,
+        )
+    )
+    thread = threading.Thread(target=server.run, daemon=True)
+    thread.start()
+    _wait_until(lambda: server.started)
+    return server, thread, port
+
+
+@pytest.mark.e2e
+def test_near_bound_f7t_result_crosses_real_tcp_websocket_after_durable_terminal_commit(
+    tmp_path,
+):
+    owner_id = "tv1-t11-b-owner"
+    session_id = "tv1-t11-b-session"
+    client_id = "tv1-t11-b-client"
+    invocation_id = "tv1-t11-b-near-bound"
+
+    # Keep the decoded source close to the frozen 8 MiB ceiling. Producer
+    # validity is covered separately; this evidence stresses the canonical
+    # realtime JSON/base64 path without allocating a second image dependency.
+    raw = b"\x89PNG\r\n\x1a\n" + (
+        b"tv1-t11-b-transport" * 396_000
+    )
+    raw = raw[: desktop_tool.MAX_SCREENSHOT_PNG_BYTES - 65_536]
+    encoded = base64.b64encode(raw).decode("ascii")
+    output = {
+        "ok": True,
+        "tool": "desktop_automation",
+        "action": "screenshot",
+        "data": {
+            "$f7t_media": {
+                "contract": "F7T_INLINE_BASE64_V1",
+                "items": [
+                    {
+                        "ordinal": 0,
+                        "media_kind": "image",
+                        "mime_type": "image/png",
+                        "filename": "desktop-screenshot.png",
+                        "encoding": "base64",
+                        "size_bytes": len(raw),
+                        "sha256": hashlib.sha256(raw).hexdigest(),
+                        "data_base64": encoded,
+                    }
+                ],
+            }
+        },
+        "error": None,
+        "meta": {
+            "version": "2.1.0",
+            "truncated": False,
+            "warnings": [],
+        },
+    }
+
+    app, catalog, connection_runtime = _build_realtime_gateway(
+        owner_id,
+        session_id,
+    )
+    server, thread, port = _start_realtime_gateway(app)
+    ledger = ClientInvocationLedger(tmp_path / "client-invocations.sqlite3")
+    client = ClientRuntime(
+        f"http://127.0.0.1:{port}",
+        _NetworkRegistry(output),
+        api_key="tv1-t11-b-e2e",
+        client_id=client_id,
+        owner_id=owner_id,
+        invocation_ledger=ledger,
+        hitl=_Approval(True),
+    )
+
+    try:
+        client.start()
+        _wait_until(
+            lambda: catalog.contains_implementation(
+                f"{client.connection_id}:{CAPABILITY_ID}"
+            )
+        )
+
+        envelope = RealtimeEnvelope(
+            type="capability.invoke",
+            message_id="tv1-t11-b-near-bound-message",
+            connection_id=client.connection_id,
+            execution_id="tv1-t11-b-exec",
+            invocation_id=invocation_id,
+            trace_id="tv1-t11-b-trace",
+            payload={
+                "capability_id": CAPABILITY_ID,
+                "capability_version": "1.0",
+                "arguments": {},
+            },
+        )
+        received = asyncio.run(
+            connection_runtime.realtime.invoke(
+                envelope,
+                timeout=30.0,
+            )
+        )
+
+        assert received == output
+        received_item = received["data"]["$f7t_media"]["items"][0]
+        assert len(base64.b64decode(received_item["data_base64"], validate=True)) == len(raw)
+        assert received_item["sha256"] == hashlib.sha256(raw).hexdigest()
+
+        durable = ledger.get(
+            client_id=client_id,
+            principal_id=owner_id,
+            invocation_id=invocation_id,
+        )
+        assert durable is not None
+        assert durable.state is ClientInvocationLedgerState.TERMINAL
+        assert durable.terminal_type == "result"
+        assert durable.terminal_payload == {"output": output}
+    finally:
+        client.stop()
+        server.should_exit = True
+        thread.join(timeout=5)
+
