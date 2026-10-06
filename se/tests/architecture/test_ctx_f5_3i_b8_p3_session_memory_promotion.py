@@ -85,7 +85,7 @@ def test_p3_entry_authority_is_fail_closed_and_ordered() -> None:
         "status_code=status.HTTP_422_UNPROCESSABLE_ENTITY",
         "source_ref.session_id != session_id",
         "status_code=status.HTTP_409_CONFLICT",
-        "await container.storage.promote_tool_response_payload_memory (",
+        "await container.storage.promote_tool_response_payload_memory(",
         "source_ref=source_ref",
         "owner_user_id=principal",
     )
@@ -103,7 +103,7 @@ def test_p3_entry_authority_is_fail_closed_and_ordered() -> None:
     assert normalized.index(
         "source_ref.session_id != session_id"
     ) < normalized.index(
-        "await container.storage.promote_tool_response_payload_memory ("
+        "await container.storage.promote_tool_response_payload_memory("
     )
 
 
