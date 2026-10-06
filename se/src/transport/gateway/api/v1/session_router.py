@@ -99,7 +99,7 @@ async def promote_tool_response_payload_memory_for_session(
             detail="Promotion source session does not match the requested session.",
         )
 
-    return await container.storage.promote_tool_response_payload_memory (
+    return await container.storage.promote_tool_response_payload_memory(
         source_ref=source_ref,
         owner_user_id=principal,
     )
