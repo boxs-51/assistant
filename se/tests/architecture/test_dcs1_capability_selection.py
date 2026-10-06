@@ -37,8 +37,13 @@ from se.src.runtimes.agent.selection import (
     CapabilitySelectionViolationError,
     DeterministicCapabilitySelector,
     ensure_selected_tool_calls,
+    select_active_assigned_skills,
 )
-from se.src.runtimes.capability.contracts.skill_manifest import SkillCapabilityHint
+from se.src.runtimes.capability.contracts.skill_manifest import (
+    SkillActivationDescriptor,
+    SkillActivationMode,
+    SkillCapabilityHint,
+)
 
 
 class _PromptProvider:
@@ -84,6 +89,9 @@ class _SkillResolver:
                 version="2.0",
                 name="review-skill",
                 description="Review procedure",
+                activation=SkillActivationDescriptor(
+                    mode=SkillActivationMode.ALWAYS_ON,
+                ),
                 capability_hints=(
                     SkillCapabilityHint(
                         capability_id="terminal.run",
@@ -215,6 +223,37 @@ def test_dcs1_explicit_unknown_and_skill_hint_cannot_create_tool_authority():
     assert result.active_skill_set.skills[0].descriptor.capability_hints[0].capability_id == (
         "dangerous.unavailable"
     )
+
+
+def test_dcs1_v2_skill_activation_is_relevance_gated():
+    candidate = ActiveSkill(
+        descriptor=SkillDescriptor(
+            skill_id="research-skill",
+            version="2.0",
+            name="research-skill",
+            activation=SkillActivationDescriptor(
+                mode=SkillActivationMode.AUTO_ELIGIBLE,
+                keywords=("research", "sources"),
+            ),
+        ),
+        source=SkillActivationSource.ASSIGNED,
+    )
+    assigned = ActiveSkillSet(skills=(candidate,))
+
+    irrelevant = select_active_assigned_skills(
+        assigned,
+        (InferenceMessage(role="user", content="say hello"),),
+    )
+    relevant = select_active_assigned_skills(
+        assigned,
+        (InferenceMessage(role="user", content="research these sources"),),
+    )
+
+    assert irrelevant == ActiveSkillSet()
+    assert [item.descriptor.skill_id for item in relevant.skills] == [
+        "research-skill"
+    ]
+    assert relevant.skills[0].source is SkillActivationSource.AUTO_MATCH
 
 
 @pytest.mark.asyncio
