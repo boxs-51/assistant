@@ -220,6 +220,8 @@ def test_logical_representatives_bind_to_unchanged_physical_dispatchers(
     assert geometry["meta"]["version"] == "2.0.0"
 
     screen_entry = loaded["desktop.screen_info"]
+    assert screen_entry["metadata"]["physical_version"] == "2.1.0"
+    assert loaded["desktop.screenshot"]["metadata"]["physical_version"] == "2.1.0"
     assert screen_entry["metadata"]["bind"] == {
         "action": "get_screen_info"
     }
