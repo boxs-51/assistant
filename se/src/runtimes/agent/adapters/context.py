@@ -113,6 +113,18 @@ def _project_f7t_screenshot_output(output: Any) -> dict[str, Any] | None:
     }
 
 
+def _model_facing_success_output(capability_id: str, output: Any) -> Any:
+    if capability_id != _F7T_SCREENSHOT_CAPABILITY_ID:
+        return jsonable(output)
+    projected = _project_f7t_screenshot_output(output)
+    if projected is not None:
+        return projected
+    # A malformed/near-match successful screenshot result remains durable for
+    # audit/recovery, but binary content must never fall through into model
+    # context. Do not synthesize an alternate media projection contract.
+    return "desktop.screenshot output omitted: invalid strict F7T_INLINE_BASE64_V1 envelope"
+
+
 class ContextBuilderAdapter(ContextBuilderPort):
     """Build one immutable Agent context snapshot from ContextRuntime."""
 
@@ -190,21 +202,16 @@ class ContextBuilderAdapter(ContextBuilderPort):
                 )
 
         for result in request.tool_results:
-            projected_output = (
-                _project_f7t_screenshot_output(result.output)
-                if result.success
-                and result.capability_id == _F7T_SCREENSHOT_CAPABILITY_ID
-                else None
-            )
             history.append(
                 InferenceMessage(
                     role="tool",
                     name=result.capability_id,
                     tool_call_id=result.tool_call_id,
                     content=(
-                        projected_output
-                        if projected_output is not None
-                        else jsonable(result.output)
+                        _model_facing_success_output(
+                            result.capability_id,
+                            result.output,
+                        )
                         if result.success
                         else result.error_message or result.error_code
                     ),
