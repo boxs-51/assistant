@@ -60,6 +60,8 @@ T9_IDS = (
     "desktop.press_key",
     "desktop.hotkey",
 )
+T11_SCREENSHOT_ID = "desktop.screenshot"
+CLIENT_IDS = (*T9_IDS, T11_SCREENSHOT_ID)
 
 PHYSICAL_TOOL_BY_ID = {
     **{capability_id: "file_tool" for capability_id in T9_IDS[:5]},
@@ -71,6 +73,7 @@ PHYSICAL_TOOL_BY_ID = {
         capability_id: "desktop_automation"
         for capability_id in T9_IDS[16:]
     },
+    T11_SCREENSHOT_ID: "desktop_automation",
 }
 
 CONNECTION_ID = "conn-t9-d"
@@ -102,6 +105,7 @@ def _server_catalog() -> CapabilityCatalog:
 
     registered = register_local_tools(runtime, tools, _tools_root())
     assert all(registered[capability_id] == "registered" for capability_id in T9_IDS)
+    assert registered[T11_SCREENSHOT_ID] == "registered"
     return catalog
 
 
@@ -109,7 +113,7 @@ def _client_request() -> ClientCapabilityRegistration:
     loaded = LocalToolManager(_tools_root(), set()).load_tools(
         _client_config()
     )
-    assert set(loaded) == set(T9_IDS)
+    assert set(loaded) == set(CLIENT_IDS)
 
     realtime = SimpleNamespace(connection_id=CONNECTION_ID)
     runtime = ClientCapabilityRuntime(
@@ -157,8 +161,8 @@ def test_real_server_and_client_project_identical_24_logical_definitions():
         item.definition.capability_id: item.definition
         for item in request.capabilities
     }
-    assert set(client_definitions) == set(T9_IDS)
-    assert len(client_definitions) == len(T9_IDS)
+    assert set(client_definitions) == set(CLIENT_IDS)
+    assert len(client_definitions) == len(CLIENT_IDS)
 
     for capability_id in T9_IDS:
         server_definition = catalog.get_definition(capability_id)
@@ -178,7 +182,10 @@ def test_real_server_and_client_project_identical_24_logical_definitions():
         assert registration.metadata["physical_tool"] == (
             PHYSICAL_TOOL_BY_ID[capability_id]
         )
-        assert registration.metadata["physical_version"] == "2.0.0"
+        expected_physical_version = (
+            "2.1.0" if capability_id.startswith("desktop.") else "2.0.0"
+        )
+        assert registration.metadata["physical_version"] == expected_physical_version
         assert registration.metadata["manifest_version"] == "2.0"
         assert registration.metadata["physical_version"] != (
             client_definition.version
@@ -191,10 +198,24 @@ def test_real_server_and_client_project_identical_24_logical_definitions():
         assert server_implementation.metadata["physical_tool"] == (
             PHYSICAL_TOOL_BY_ID[capability_id]
         )
-        assert server_implementation.metadata["physical_version"] == "2.0.0"
+        assert server_implementation.metadata["physical_version"] == expected_physical_version
         assert server_implementation.metadata["physical_version"] != (
             server_implementation.version
         )
+
+    screenshot_server_definition = catalog.get_definition(T11_SCREENSHOT_ID)
+    screenshot_client_definition = client_definitions[T11_SCREENSHOT_ID]
+    assert _definition_dump(screenshot_client_definition) == _definition_dump(
+        screenshot_server_definition
+    )
+    screenshot_registration = next(
+        item
+        for item in request.capabilities
+        if item.definition.capability_id == T11_SCREENSHOT_ID
+    )
+    assert screenshot_registration.metadata["physical_tool"] == "desktop_automation"
+    assert screenshot_registration.metadata["physical_version"] == "2.1.0"
+    assert catalog.list_implementations(T11_SCREENSHOT_ID) == []
 
 
 def test_real_24_client_implementations_coexist_without_definition_rewrite():
@@ -210,10 +231,10 @@ def test_real_24_client_implementations_coexist_without_definition_rewrite():
 
     registered = service.register(_client_request())
 
-    assert len(registered) == 24
+    assert len(registered) == len(CLIENT_IDS)
     assert {
         item.capability_id for item in registered
-    } == set(T9_IDS)
+    } == set(CLIENT_IDS)
     assert all(
         item.location is CapabilityExecutionLocation.CLIENT
         for item in registered
@@ -236,6 +257,14 @@ def test_real_24_client_implementations_coexist_without_definition_rewrite():
             CapabilityExecutionLocation.SERVER,
             CapabilityExecutionLocation.CLIENT,
         }
+
+    screenshot_implementations = catalog.list_implementations(T11_SCREENSHOT_ID)
+    assert {item.implementation_id for item in screenshot_implementations} == {
+        f"{CONNECTION_ID}:{T11_SCREENSHOT_ID}"
+    }
+    assert {item.location for item in screenshot_implementations} == {
+        CapabilityExecutionLocation.CLIENT
+    }
 
 
 def test_divergent_real_24_batch_rejects_atomically_without_client_mutation():
@@ -280,6 +309,11 @@ def test_divergent_real_24_batch_rejects_atomically_without_client_mutation():
             for item in catalog.list_implementations(capability_id)
         } == {f"server:{capability_id}"}
 
+    assert not catalog.contains_implementation(
+        f"{CONNECTION_ID}:{T11_SCREENSHOT_ID}"
+    )
+    assert catalog.list_implementations(T11_SCREENSHOT_ID) == []
+
 
 def test_existing_routing_priority_prefers_same_connection_client_then_server():
     catalog = _server_catalog()
@@ -315,3 +349,18 @@ def test_existing_routing_priority_prefers_same_connection_client_then_server():
         )
         assert fallback.implementation_id == f"server:{capability_id}"
         assert fallback.location is CapabilityExecutionLocation.SERVER
+
+    screenshot = policy.select(
+        catalog,
+        T11_SCREENSHOT_ID,
+        context=same_connection,
+    )
+    assert screenshot.implementation_id == f"{CONNECTION_ID}:{T11_SCREENSHOT_ID}"
+    assert screenshot.location is CapabilityExecutionLocation.CLIENT
+    with pytest.raises(PermissionError, match="No authorized routable implementation"):
+        policy.select(
+            catalog,
+            T11_SCREENSHOT_ID,
+            context=same_connection,
+            excluded_implementation_ids=frozenset({screenshot.implementation_id}),
+        )

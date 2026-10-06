@@ -60,9 +60,11 @@ def test_current_f7t_persistence_is_dormant_and_empty_enrollment():
         assert phrase in document
 
 
-def test_no_production_tool_or_capability_emits_f7t_v1_on_a0_baseline():
+def test_a0_historical_gap_tracks_only_explicit_tv1_t11_b_producer_paths():
     allowed = {
         Path("se/src/application/assets/tool_generated_media.py"),
+        Path("se/src/runtimes/agent/adapters/context.py"),
+        Path("tools/v1/desktop_tool.py"),
     }
     observed: set[Path] = set()
 

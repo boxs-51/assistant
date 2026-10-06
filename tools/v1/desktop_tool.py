@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import hashlib
 import importlib
+import io
 import math
 import sys
 import threading
@@ -18,10 +21,14 @@ from tools.v1._shared.limits import (
 
 
 DESKTOP_TOOL_NAME = "desktop_automation"
-DESKTOP_TOOL_VERSION = "2.0.0"
+DESKTOP_TOOL_VERSION = "2.1.0"
 
 MAX_COORD_ABS = 1_000_000
 MAX_SCREEN_DIMENSION = 1_000_000
+MAX_SCREENSHOT_WIDTH = 7_680
+MAX_SCREENSHOT_HEIGHT = 4_320
+MAX_SCREENSHOT_PIXELS = 33_177_600
+MAX_SCREENSHOT_PNG_BYTES = 8_388_608
 
 MAX_TEXT_CHARS = 32_768
 MAX_KEY_CHARS = 64
@@ -48,6 +55,16 @@ _ACTION_SPECS: dict[str, dict[str, Any]] = {
     "get_screen_info": {
         "description": "Lấy kích thước màn hình và vị trí chuột hiện tại.",
         "base_risk": "LOW",
+        "properties": {},
+        "required": [],
+    },
+    "screenshot": {
+        "description": (
+            "Capture the current local primary display as one bounded PNG. "
+            "The image may contain sensitive visible information and requires "
+            "per-invocation local approval."
+        ),
+        "base_risk": "HIGH",
         "properties": {},
         "required": [],
     },
@@ -234,6 +251,63 @@ _DESKTOP_LOGICAL_EXPORTS = (
 )
 
 
+def _screenshot_data_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "$f7t_media": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "contract": {"const": "F7T_INLINE_BASE64_V1"},
+                    "items": {
+                        "type": "array",
+                        "minItems": 1,
+                        "maxItems": 1,
+                        "items": {
+                            "type": "object",
+                            "additionalProperties": False,
+                            "properties": {
+                                "ordinal": {"const": 0},
+                                "media_kind": {"const": "image"},
+                                "mime_type": {"const": "image/png"},
+                                "filename": {"const": "desktop-screenshot.png"},
+                                "encoding": {"const": "base64"},
+                                "size_bytes": {
+                                    "type": "integer",
+                                    "minimum": 1,
+                                    "maximum": MAX_SCREENSHOT_PNG_BYTES,
+                                },
+                                "sha256": {
+                                    "type": "string",
+                                    "pattern": "^[0-9a-f]{64}$",
+                                },
+                                "data_base64": {
+                                    "type": "string",
+                                    "minLength": 4,
+                                },
+                            },
+                            "required": [
+                                "ordinal",
+                                "media_kind",
+                                "mime_type",
+                                "filename",
+                                "encoding",
+                                "size_bytes",
+                                "sha256",
+                                "data_base64",
+                            ],
+                        },
+                    },
+                },
+                "required": ["contract", "items"],
+            }
+        },
+        "required": ["$f7t_media"],
+    }
+
+
 def _build_logical_exports() -> list[dict[str, Any]]:
     exports: list[dict[str, Any]] = []
     for capability_id, action, idempotency, effects in _DESKTOP_LOGICAL_EXPORTS:
@@ -257,6 +331,27 @@ def _build_logical_exports() -> list[dict[str, Any]]:
                 "danger_patterns": [],
             }
         )
+    screenshot_spec = _ACTION_SPECS["screenshot"]
+    exports.append(
+        {
+            "id": "desktop.screenshot",
+            "version": "1.0",
+            "name": "desktop.screenshot",
+            "description": screenshot_spec["description"],
+            "bind": {"action": "screenshot"},
+            "input_schema": _desktop_input_schema("screenshot"),
+            "output_schema": tool_result_schema(_screenshot_data_schema()),
+            "kind": "TOOL",
+            "execution_mode": "ONE_SHOT",
+            "idempotency": "UNKNOWN",
+            "effects": ["READ", "PRIVILEGED"],
+            "base_risk": "HIGH",
+            "required_scopes": [],
+            "required_permissions": [],
+            "danger_patterns": [],
+            "execution_locations": ["CLIENT"],
+        }
+    )
     return exports
 
 
@@ -717,6 +812,102 @@ class DesktopAutomation:
         except _DesktopToolError as exc:
             return self._failure(action, exc)
 
+    def screenshot(self) -> dict[str, Any]:
+        action = "screenshot"
+        try:
+            def operation(backend: Any) -> dict[str, Any]:
+                size = self._call_pyautogui(backend, "size")
+                try:
+                    width, height = size
+                except Exception as exc:
+                    raise _DesktopToolError(
+                        "DESKTOP_PROPERTY_FAILED",
+                        "desktop backend returned malformed screen dimensions",
+                        {"exception_type": type(exc).__name__},
+                    ) from exc
+                width = self._validate_screen_dimension(width, name="screen_width")
+                height = self._validate_screen_dimension(height, name="screen_height")
+                if width > MAX_SCREENSHOT_WIDTH or height > MAX_SCREENSHOT_HEIGHT:
+                    raise _DesktopToolError(
+                        "SCREENSHOT_BOUNDS_EXCEEDED",
+                        "primary display exceeds screenshot dimension limits",
+                        {"width": width, "height": height},
+                    )
+                if width * height > MAX_SCREENSHOT_PIXELS:
+                    raise _DesktopToolError(
+                        "SCREENSHOT_BOUNDS_EXCEEDED",
+                        "primary display exceeds screenshot pixel limit",
+                        {"width": width, "height": height},
+                    )
+
+                image = self._call_pyautogui(backend, "screenshot")
+                try:
+                    image_width, image_height = image.size
+                except Exception as exc:
+                    raise _DesktopToolError(
+                        "DESKTOP_SCREENSHOT_FAILED",
+                        "screenshot backend returned an invalid image",
+                        {"exception_type": type(exc).__name__},
+                    ) from exc
+                if image_width != width or image_height != height:
+                    raise _DesktopToolError(
+                        "DESKTOP_SCREENSHOT_FAILED",
+                        "captured image dimensions do not match the primary display",
+                        {
+                            "screen_width": width,
+                            "screen_height": height,
+                            "image_width": image_width,
+                            "image_height": image_height,
+                        },
+                    )
+
+                try:
+                    with io.BytesIO() as buffer:
+                        image.save(buffer, format="PNG")
+                        png_bytes = buffer.getvalue()
+                except Exception as exc:
+                    raise _DesktopToolError(
+                        "DESKTOP_SCREENSHOT_ENCODE_FAILED",
+                        "screenshot PNG encoding failed",
+                        {"exception_type": type(exc).__name__},
+                    ) from exc
+
+                size_bytes = len(png_bytes)
+                if size_bytes <= 0:
+                    raise _DesktopToolError(
+                        "DESKTOP_SCREENSHOT_ENCODE_FAILED",
+                        "screenshot PNG encoding produced an empty payload",
+                    )
+                if size_bytes > MAX_SCREENSHOT_PNG_BYTES:
+                    raise _DesktopToolError(
+                        "SCREENSHOT_BOUNDS_EXCEEDED",
+                        "encoded screenshot exceeds the PNG byte limit",
+                        {"size_bytes": size_bytes},
+                    )
+
+                return {
+                    "$f7t_media": {
+                        "contract": "F7T_INLINE_BASE64_V1",
+                        "items": [
+                            {
+                                "ordinal": 0,
+                                "media_kind": "image",
+                                "mime_type": "image/png",
+                                "filename": "desktop-screenshot.png",
+                                "encoding": "base64",
+                                "size_bytes": size_bytes,
+                                "sha256": hashlib.sha256(png_bytes).hexdigest(),
+                                "data_base64": base64.b64encode(png_bytes).decode("ascii"),
+                            }
+                        ],
+                    }
+                }
+
+            data = self._run_with_scoped_pyautogui(operation)
+            return self._success(action, data)
+        except _DesktopToolError as exc:
+            return self._failure(action, exc)
+
     def mouse_click(
         self,
         x: Optional[int] = None,
@@ -1126,6 +1317,8 @@ class DesktopAutomation:
 
         if canonical == "get_screen_info":
             return self.get_screen_info()
+        if canonical == "screenshot":
+            return self.screenshot()
         if canonical == "mouse_click":
             return self.mouse_click(
                 x=x,
@@ -1225,6 +1418,10 @@ _default_desktop_automation = DesktopAutomation()
 
 def get_screen_info() -> dict[str, Any]:
     return _default_desktop_automation.get_screen_info()
+
+
+def screenshot() -> dict[str, Any]:
+    return _default_desktop_automation.screenshot()
 
 
 def mouse_click(

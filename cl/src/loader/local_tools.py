@@ -287,6 +287,8 @@ class LocalToolManager:
             export
             for export in manifest["exports"]
             if export["id"] in enabled
+            and "CLIENT"
+            in export.get("execution_locations", ["SERVER", "CLIENT"])
         ]
 
         entries: Dict[str, Dict[str, Any]] = {}

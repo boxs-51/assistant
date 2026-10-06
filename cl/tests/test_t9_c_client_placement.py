@@ -36,6 +36,7 @@ T9_C_ALL_IDS = (
     "desktop.press_key",
     "desktop.hotkey",
 )
+T11_SCREENSHOT_ID = "desktop.screenshot"
 
 
 def _repo_root() -> Path:
@@ -47,11 +48,11 @@ def _default_tools_config() -> dict:
     return json.loads(path.read_text(encoding="utf-8"))["tools_config"]
 
 
-def test_default_client_placement_is_exact_24_non_web_ids():
+def test_default_client_placement_preserves_t9_and_adds_only_t11_screenshot():
     enabled = _default_tools_config()["enabled_v2_capabilities"]
 
-    assert enabled == list(T9_C_ALL_IDS)
-    assert len(enabled) == len(set(enabled)) == 24
+    assert enabled == [*T9_C_ALL_IDS, T11_SCREENSHOT_ID]
+    assert len(enabled) == len(set(enabled)) == 25
     assert "*" not in enabled
     assert not any(item.startswith("web.") for item in enabled)
     assert not {
@@ -65,6 +66,8 @@ def test_real_window_desktop_top_level_v2_modules_load_without_physical_roots():
     loaded = LocalToolManager(root, set()).load_tools(_default_tools_config())
 
     assert set(T9_C_ALL_IDS).issubset(loaded)
+    assert T11_SCREENSHOT_ID in loaded
+    assert loaded[T11_SCREENSHOT_ID]["metadata"]["physical_version"] == "2.1.0"
     assert "window_tool" not in loaded
     assert "desktop_automation" not in loaded
     assert not {"web.search", "web.search_many", "web.read", "web.read_many"}.intersection(loaded)

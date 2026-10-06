@@ -65,7 +65,9 @@ WEB_IDS = (
     "web.read_many",
 )
 
-ALL_LOGICAL_IDS = (*NON_WEB_IDS, *WEB_IDS)
+SERVER_EXECUTABLE_IDS = (*NON_WEB_IDS, *WEB_IDS)
+CLIENT_ONLY_LOGICAL_IDS = ("desktop.screenshot",)
+ALL_LOGICAL_IDS = (*SERVER_EXECUTABLE_IDS, *CLIENT_ONLY_LOGICAL_IDS)
 
 PHYSICAL_ROOTS = {
     "file_tool",
@@ -150,9 +152,11 @@ async def test_real_projection_exposes_only_logical_ids_and_public_provenance():
         for definition in await runtime.get_available_capabilities(_guest())
     }
 
-    assert registry_ids == set(ALL_LOGICAL_IDS)
+    assert registry_ids == set(SERVER_EXECUTABLE_IDS)
     assert catalog_ids == set(ALL_LOGICAL_IDS)
-    assert model_ids == set(ALL_LOGICAL_IDS)
+    assert model_ids == set(SERVER_EXECUTABLE_IDS)
+    assert runtime.registry.get_driver("desktop.screenshot") is None
+    assert catalog.contains_definition("desktop.screenshot")
     assert not PHYSICAL_ROOTS.intersection(registry_ids)
     assert not PHYSICAL_ROOTS.intersection(catalog_ids)
     assert not PHYSICAL_ROOTS.intersection(model_ids)
@@ -167,6 +171,16 @@ async def test_real_projection_exposes_only_logical_ids_and_public_provenance():
         assert "parameters" in item.definition
         assert "physical_tool" not in item.definition["metadata"]
         assert "physical_version" not in item.definition["metadata"]
+
+        if capability_id in CLIENT_ONLY_LOGICAL_IDS:
+            assert item.implementations == []
+            fetched = await get_capability(
+                capability_id,
+                _guest(),
+                container,
+            )
+            assert fetched == item
+            continue
 
         assert len(item.implementations) == 1
         implementation = item.implementations[0]

@@ -124,7 +124,9 @@ def test_tv1_t11_a_raw_f7t_base64_is_not_allowed_in_next_inference():
     context_adapter = _read("se/src/runtimes/agent/adapters/context.py")
 
     assert "content=(" in context_adapter
-    assert "jsonable(result.output)" in context_adapter
+    assert "_model_facing_success_output(" in context_adapter
+    assert "return jsonable(output)" in context_adapter
+    assert "jsonable(result.output)" not in context_adapter
 
     for phrase in (
         "P1-TV1-T11-A-MODEL-CONTEXT-5",
