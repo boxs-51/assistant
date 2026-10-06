@@ -37,7 +37,7 @@ function Wait-GatewayReady([string]$BaseUrl, [int]$TimeoutSeconds = 60) {
         try {
             $uri = $BaseUrl.TrimEnd("/") + "/health"
             $response = Invoke-WebRequest -Uri $uri -UseBasicParsing -TimeoutSec 3
-            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 500) {
+            if ($response.StatusCode -ge 200 -and $response.StatusCode -lt 300) {
                 return
             }
         }
