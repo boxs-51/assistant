@@ -69,6 +69,10 @@ def first_json_object(line: str) -> dict[str, Any] | None:
     return None
 
 
+def raw_line_mentions_r13_event(line: str) -> bool:
+    return any(event in line for event in EVENTS)
+
+
 def coerce_nonnegative_int(value: Any, field: str) -> int:
     if isinstance(value, bool):
         raise ValueError(f"{field} must be an integer, got bool")
@@ -118,7 +122,13 @@ def load_events(
         with path.open("r", encoding="utf-8", errors="replace") as fh:
             for lineno, line in enumerate(fh, 1):
                 obj = first_json_object(line)
-                if obj is None or obj.get("event") not in EVENTS:
+                if obj is None:
+                    if raw_line_mentions_r13_event(line):
+                        errors.append(
+                            f"{path}:{lineno}: malformed R13-C event JSON"
+                        )
+                    continue
+                if obj.get("event") not in EVENTS:
                     continue
                 try:
                     ev = project_event(obj)
