@@ -228,6 +228,9 @@ async def create_agent_task(
             identity=identity,
             parent_task_id=body.parent_task_id,
             connection_id=body.connection_id,
+            task_mode=body.task_mode,
+            task_horizon_at=body.task_horizon_at,
+            review_horizon_at=body.review_horizon_at,
             client_id=(
                 connection_snapshot.metadata.get("client_id")
                 if connection_snapshot is not None
