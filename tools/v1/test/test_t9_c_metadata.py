@@ -27,6 +27,7 @@ DESKTOP_IDS = (
     "desktop.type_text",
     "desktop.press_key",
     "desktop.hotkey",
+    "desktop.screenshot",
 )
 
 
@@ -63,6 +64,16 @@ def test_t9_c_manifests_publish_exact_ids_and_strict_schemas():
     assert window["window.close"]["idempotency"] == "NON_IDEMPOTENT"
     assert desktop["desktop.mouse_move"]["base_risk"] == "LOW"
     assert desktop["desktop.mouse_click"]["base_risk"] == "HIGH"
+
+    screenshot = desktop["desktop.screenshot"]
+    assert desktop_tool.DESKTOP_TOOL_VERSION == "2.1.0"
+    assert screenshot["bind"] == {"action": "screenshot"}
+    assert screenshot["input_schema"]["properties"] == {}
+    assert screenshot["input_schema"]["required"] == []
+    assert screenshot["idempotency"] == "UNKNOWN"
+    assert screenshot["effects"] == ["READ", "PRIVILEGED"]
+    assert screenshot["base_risk"] == "HIGH"
+    assert screenshot["execution_locations"] == ["CLIENT"]
 
 
 @pytest.mark.parametrize(
