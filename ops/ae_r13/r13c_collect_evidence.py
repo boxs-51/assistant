@@ -344,6 +344,10 @@ def classify(
             reasons.append(
                 f"Cycle {name} has unexplained attempted/materialized/rejected gap"
             )
+        if cycle["attempted_count"] != cycle["candidate_count"]:
+            reasons.append(
+                f"Cycle {name} has unexplained selected-candidate/attempted gap"
+            )
         if (
             cycle["candidate_count"]
             != cycle["continuation_candidate_count"]
