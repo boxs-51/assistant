@@ -17,20 +17,24 @@ from se.src.runtimes.agent.task_budget import TaskBudgetService
 
 def _policy_from_config(config: ConfigSchema):
     settings = config.agent.task_budget
+    execution_guards = settings.execution_guards
+    legacy_resource_fallback = settings.legacy_resource_fallback
     limits = TaskBudgetLimits(
-        max_total_executions=settings.max_total_executions,
-        max_active_executions=settings.max_active_executions,
-        max_active_branches=settings.max_active_branches,
-        max_parallel_agents=settings.max_parallel_agents,
-        max_total_tool_calls=settings.max_total_tool_calls,
-        max_total_inference_calls=settings.max_total_inference_calls,
-        max_total_tokens=settings.max_total_tokens,
-        max_total_cost_usd=settings.max_total_cost_usd,
-        max_delegation_depth=settings.max_delegation_depth,
+        max_total_executions=execution_guards.max_total_executions,
+        max_active_executions=execution_guards.max_active_executions,
+        max_active_branches=execution_guards.max_active_branches,
+        max_parallel_agents=execution_guards.max_parallel_agents,
+        max_total_tool_calls=legacy_resource_fallback.max_total_tool_calls,
+        max_total_inference_calls=(
+            legacy_resource_fallback.max_total_inference_calls
+        ),
+        max_total_tokens=legacy_resource_fallback.max_total_tokens,
+        max_total_cost_usd=legacy_resource_fallback.max_total_cost_usd,
+        max_delegation_depth=execution_guards.max_delegation_depth,
     )
     policy = TaskBudgetPolicy(
         version=settings.policy_version,
-        deny_recursive_agent_cycle=settings.deny_recursive_agent_cycle,
+        deny_recursive_agent_cycle=execution_guards.deny_recursive_agent_cycle,
     )
     return limits, policy
 
@@ -48,6 +52,78 @@ def test_r5_c1_application_config_is_task_budget_authority():
     assert limits.max_total_cost_usd is None
     assert limits.max_delegation_depth == 8
     assert policy.version == "r5-v1"
+
+
+def test_r5_c1_task_budget_config_uses_explicit_nested_groups():
+    settings = ConfigSchema().agent.task_budget
+
+    assert set(settings.model_dump()) == {
+        "policy_version",
+        "execution_guards",
+        "legacy_resource_fallback",
+    }
+    assert settings.execution_guards.max_active_branches == 16
+    assert settings.legacy_resource_fallback.max_total_tool_calls == 256
+
+
+def test_r5_c1_legacy_flat_task_budget_input_maps_to_nested_groups():
+    config = ConfigSchema.model_validate(
+        {
+            "agent": {
+                "task_budget": {
+                    "policy_version": "legacy-input-v1",
+                    "deny_recursive_agent_cycle": False,
+                    "max_total_executions": 72,
+                    "max_active_executions": 9,
+                    "max_active_branches": 17,
+                    "max_parallel_agents": 5,
+                    "max_delegation_depth": 10,
+                    "max_total_tool_calls": 333,
+                    "max_total_inference_calls": 177,
+                    "max_total_tokens": 1_500_000,
+                    "max_total_cost_usd": "12.50",
+                }
+            }
+        }
+    )
+    settings = config.agent.task_budget
+
+    assert settings.policy_version == "legacy-input-v1"
+    assert settings.execution_guards.deny_recursive_agent_cycle is False
+    assert settings.execution_guards.max_total_executions == 72
+    assert settings.execution_guards.max_active_executions == 9
+    assert settings.execution_guards.max_active_branches == 17
+    assert settings.execution_guards.max_parallel_agents == 5
+    assert settings.execution_guards.max_delegation_depth == 10
+    assert settings.legacy_resource_fallback.max_total_tool_calls == 333
+    assert settings.legacy_resource_fallback.max_total_inference_calls == 177
+    assert settings.legacy_resource_fallback.max_total_tokens == 1_500_000
+    assert settings.legacy_resource_fallback.max_total_cost_usd == Decimal("12.50")
+
+
+def test_r5_c1_legacy_flat_input_overrides_nested_merged_defaults():
+    config = ConfigSchema.model_validate(
+        {
+            "agent": {
+                "task_budget": {
+                    "execution_guards": {
+                        "max_total_executions": 64,
+                    },
+                    "legacy_resource_fallback": {
+                        "max_total_tool_calls": 256,
+                    },
+                    "max_total_executions": 91,
+                    "max_total_tool_calls": 444,
+                }
+            }
+        }
+    )
+
+    assert config.agent.task_budget.execution_guards.max_total_executions == 91
+    assert (
+        config.agent.task_budget.legacy_resource_fallback.max_total_tool_calls
+        == 444
+    )
 
 
 def test_r5_c1_policy_fingerprint_is_stable_across_service_injection():
