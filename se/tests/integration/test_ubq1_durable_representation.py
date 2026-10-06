@@ -83,7 +83,7 @@ def test_ubq1_25a_is_linear_and_sqlite_triggers_hold_with_fk_pragma_off(
     config = _config(database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["27a_cas_f7_t_tool_media_projection"]
+    assert script.get_heads() == ["28a_tbo1_task_policy_representation"]
     assert (
         script.get_revision("25a_ubq1_user_budget_foundation").down_revision
         == "24a_r12_stale_lease_scan_index"
