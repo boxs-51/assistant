@@ -4,6 +4,7 @@ import asyncio
 import json
 import math
 from time import monotonic
+import structlog
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Mapping, Sequence
@@ -62,6 +63,9 @@ from .wait_policy import (
 )
 
 
+logger = structlog.get_logger(__name__)
+
+
 class ExecutionWaitExpiredError(ExecutionConflictError):
     """A durable WAITING execution reached its wall-clock expiry."""
 
@@ -104,6 +108,7 @@ class AgentRuntime:
         event_publisher: AgentEventPublisher | None = None,
         wait_policy: ExecutionWaitPolicy | None = None,
         task_budget_service=None,
+        f7t_canonicalizer=None,
     ) -> None:
         self._context_builder = context_builder
         self._inference = inference
@@ -115,6 +120,51 @@ class AgentRuntime:
         self._wait_policy = (
             wait_policy or ConfiguredExecutionWaitPolicy()
         )
+        self._f7t_canonicalizer = f7t_canonicalizer
+        self._f7t_publication_tasks: set[asyncio.Task] = set()
+        self._f7t_publication_accepting = f7t_canonicalizer is not None
+
+    def _observe_f7t_publication_task(self, completed: asyncio.Task) -> None:
+        self._f7t_publication_tasks.discard(completed)
+        if completed.cancelled():
+            return
+        error = completed.exception()
+        if error is not None:
+            logger.warning(
+                "cas_f7t_publication_failed",
+                task_name=completed.get_name(),
+                error_type=type(error).__name__,
+            )
+
+    def _schedule_f7t_publication_for_committed_result(
+        self,
+        *,
+        source_result_id: str,
+    ) -> None:
+        if (
+            self._f7t_canonicalizer is None
+            or not self._f7t_publication_accepting
+        ):
+            return
+        task = asyncio.create_task(
+            self._f7t_canonicalizer.canonicalize_committed_result(
+                source_result_id=source_result_id,
+            ),
+            name=f"cas-f7t-publication:{source_result_id}",
+        )
+        self._f7t_publication_tasks.add(task)
+        task.add_done_callback(self._observe_f7t_publication_task)
+
+    async def quiesce_f7t_publication(self) -> None:
+        """Stop new F7-T scheduling and drain owned publication tasks."""
+
+        self._f7t_publication_accepting = False
+        tasks = tuple(self._f7t_publication_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._f7t_publication_tasks.clear()
 
     def _uses_task_budget(
         self,
@@ -403,6 +453,8 @@ class AgentRuntime:
                 record = None
         if record is None:
             return None
+        if getattr(record, "commit_state", "PROVISIONAL") != "COMMITTED":
+            return None
         expected_identity = {
             "execution_id": request.execution_id,
             "invocation_id": request.invocation_id,
@@ -416,6 +468,11 @@ class AgentRuntime:
                     f"Committed tool-result {key} does not match resume request: "
                     f"{actual!r} != {expected!r}."
                 )
+        source_result_id = getattr(record, "id", None)
+        if isinstance(source_result_id, str) and source_result_id:
+            self._schedule_f7t_publication_for_committed_result(
+                source_result_id=source_result_id,
+            )
         return ToolExecutionResult(
             execution_id=record.execution_id,
             iteration=request.iteration,
@@ -647,6 +704,11 @@ class AgentRuntime:
             raise ResumeActivationError(
                 "STALE_RECONCILIATION_SNAPSHOT",
                 "Canonical active-batch slot is no longer COMMITTED.",
+            )
+        source_result_id = getattr(record, "id", None)
+        if isinstance(source_result_id, str) and source_result_id:
+            self._schedule_f7t_publication_for_committed_result(
+                source_result_id=source_result_id,
             )
         return ToolExecutionResult(
             execution_id=record.execution_id,
