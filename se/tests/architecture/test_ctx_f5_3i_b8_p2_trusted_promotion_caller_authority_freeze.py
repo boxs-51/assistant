@@ -11,6 +11,7 @@ CONTRACT = Path(
 MANAGER = Path("se/src/infrastructure/storage/core/manager.py")
 IDENTITY = Path("se/src/domain/schemas/identity.py")
 SOURCE_ROOT = Path("se/src")
+P3_CALLER = Path("se/src/transport/gateway/api/v1/session_router.py")
 METHOD = "promote_tool_response_payload_memory"
 
 
@@ -76,7 +77,7 @@ def test_p2_freezes_exact_released_zero_production_claim() -> None:
     )
 
 
-def test_p2_proves_current_production_caller_count_is_zero() -> None:
+def test_p2_zero_caller_freeze_is_superseded_only_by_released_p3_caller() -> None:
     call_token = ".promote_tool_response_payload_memory("
     matches: list[str] = []
 
@@ -84,7 +85,18 @@ def test_p2_proves_current_production_caller_count_is_zero() -> None:
         if call_token in _read(path):
             matches.append(path.as_posix())
 
-    assert matches == []
+    assert matches == [P3_CALLER.as_posix()]
+
+    caller_source = _read(P3_CALLER)
+    caller = next(
+        node
+        for node in ast.parse(caller_source).body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "promote_tool_response_payload_memory_for_session"
+    )
+    caller_segment = ast.get_source_segment(caller_source, caller)
+    assert caller_segment is not None
+    assert caller_segment.count(call_token) == 1
 
     manager_source = _read(MANAGER)
     storage = _class(manager_source, "StorageEngine")
@@ -100,7 +112,6 @@ def test_p2_proves_current_production_caller_count_is_zero() -> None:
         == 1
     )
     assert handoff_source.count("await service.promote(") == 1
-
 
 def test_p2_keeps_stage_markers_out_of_production_source() -> None:
     matches: list[str] = []
