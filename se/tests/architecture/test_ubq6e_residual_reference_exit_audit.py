@@ -109,7 +109,8 @@ def test_ubq6e_pins_feature_on_ubq_vs_feature_off_taskbudget_fallback() -> None:
     assert "user_inference_quota_enabled: bool = False" in runtime
     assert "if self._user_tool_quota_enabled:" in runtime
     assert "if self._user_inference_quota_enabled:" in runtime
-    assert "max_total_tool_calls reached" in runtime
+    assert "elif proposed > budget.limits.max_total_tool_calls:" in runtime
+    assert '"max_total_tool_calls exceeded"' in runtime
     assert "max_total_inference_calls reached" in runtime
 
     assert "user_tool_quota_enabled=tool_quota_settings.enabled" in main
@@ -241,8 +242,8 @@ def test_ubq6e_inventories_legacy_ubq2_admission_wording_without_promoting_it() 
 
     assert "TaskBudget remains admission authority." in user_budget
     assert "inventoried historical/compatibility" in contract
-    assert "MUST NOT use this legacy sentence to mint, restore, or broaden" in contract
-    assert "TaskBudget renewable" in contract
+    assert "MUST NOT" in contract
+    assert "use this legacy sentence to mint, restore, or broaden TaskBudget renewable" in contract.replace("\n", " ")
 
 
 def test_ubq6e_keeps_postgresql_v7_gate_open_and_mandatory() -> None:
