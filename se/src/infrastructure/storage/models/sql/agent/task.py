@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any, Dict, Optional
 
-from sqlalchemy import CheckConstraint, JSON, DateTime, Integer, String, Text, func
+from sqlalchemy import CheckConstraint, Float, JSON, DateTime, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
@@ -24,6 +24,14 @@ class AgentTaskRecord(Base):
     parent_task_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     connection_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
     client_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, index=True)
+    task_mode: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="FINITE",
+        server_default="FINITE",
+    )
+    task_horizon_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    review_horizon_at: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False, default="CREATED")
     wait_reasons: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
     input: Mapped[Dict[str, Any]] = mapped_column(JSON, nullable=False, default=dict)
@@ -36,5 +44,17 @@ class AgentTaskRecord(Base):
         CheckConstraint(
             "revision >= 0",
             name="ck_agent_tasks_revision_nonnegative",
+        ),
+        CheckConstraint(
+            "task_mode IN ('FINITE', 'RECURRING')",
+            name="ck_agent_tasks_task_mode",
+        ),
+        CheckConstraint(
+            "task_horizon_at IS NULL OR task_horizon_at >= 0",
+            name="ck_agent_tasks_task_horizon_nonnegative",
+        ),
+        CheckConstraint(
+            "review_horizon_at IS NULL OR review_horizon_at >= 0",
+            name="ck_agent_tasks_review_horizon_nonnegative",
         ),
     )
