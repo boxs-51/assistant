@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
 from typing import Any, Mapping
 
 from ....domain.schemas.tool import GatewayToolResult
@@ -80,6 +83,16 @@ def _project_f7t_screenshot_output(output: Any) -> dict[str, Any] | None:
         or not data_base64
         or any(ch.isspace() for ch in data_base64)
     ):
+        return None
+    try:
+        decoded = base64.b64decode(data_base64, validate=True)
+    except (binascii.Error, ValueError):
+        return None
+    if len(decoded) != size_bytes:
+        return None
+    if hashlib.sha256(decoded).hexdigest() != sha256:
+        return None
+    if base64.b64encode(decoded).decode("ascii") != data_base64:
         return None
 
     return {
