@@ -17,49 +17,46 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    with op.batch_alter_table("agent_tasks") as batch_op:
-        batch_op.add_column(
-            sa.Column(
-                "task_mode",
-                sa.String(length=16),
-                nullable=False,
-                server_default="FINITE",
-            )
-        )
-        batch_op.add_column(
-            sa.Column("task_horizon_at", sa.Float(), nullable=True)
-        )
-        batch_op.add_column(
-            sa.Column("review_horizon_at", sa.Float(), nullable=True)
-        )
-        batch_op.create_check_constraint(
-            "ck_agent_tasks_task_mode",
-            "task_mode IN ('FINITE', 'RECURRING')",
-        )
-        batch_op.create_check_constraint(
-            "ck_agent_tasks_task_horizon_nonnegative",
-            "task_horizon_at IS NULL OR task_horizon_at >= 0",
-        )
-        batch_op.create_check_constraint(
-            "ck_agent_tasks_review_horizon_nonnegative",
-            "review_horizon_at IS NULL OR review_horizon_at >= 0",
-        )
+    op.add_column(
+        "agent_tasks",
+        sa.Column(
+            "task_mode",
+            sa.String(length=16),
+            sa.CheckConstraint(
+                "task_mode IN ('FINITE', 'RECURRING')",
+                name="ck_agent_tasks_task_mode",
+            ),
+            nullable=False,
+            server_default="FINITE",
+        ),
+    )
+    op.add_column(
+        "agent_tasks",
+        sa.Column(
+            "task_horizon_at",
+            sa.Float(),
+            sa.CheckConstraint(
+                "task_horizon_at IS NULL OR task_horizon_at >= 0",
+                name="ck_agent_tasks_task_horizon_nonnegative",
+            ),
+            nullable=True,
+        ),
+    )
+    op.add_column(
+        "agent_tasks",
+        sa.Column(
+            "review_horizon_at",
+            sa.Float(),
+            sa.CheckConstraint(
+                "review_horizon_at IS NULL OR review_horizon_at >= 0",
+                name="ck_agent_tasks_review_horizon_nonnegative",
+            ),
+            nullable=True,
+        ),
+    )
 
 
 def downgrade() -> None:
-    with op.batch_alter_table("agent_tasks") as batch_op:
-        batch_op.drop_constraint(
-            "ck_agent_tasks_review_horizon_nonnegative",
-            type_="check",
-        )
-        batch_op.drop_constraint(
-            "ck_agent_tasks_task_horizon_nonnegative",
-            type_="check",
-        )
-        batch_op.drop_constraint(
-            "ck_agent_tasks_task_mode",
-            type_="check",
-        )
-        batch_op.drop_column("review_horizon_at")
-        batch_op.drop_column("task_horizon_at")
-        batch_op.drop_column("task_mode")
+    op.drop_column("agent_tasks", "review_horizon_at")
+    op.drop_column("agent_tasks", "task_horizon_at")
+    op.drop_column("agent_tasks", "task_mode")
