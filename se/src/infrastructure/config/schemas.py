@@ -214,26 +214,83 @@ class TokenBudgetSettings(BaseModel):
     max_output_tokens: int = 4096
 
 
-class AgentTaskBudgetSettings(BaseModel):
-    """Application-owned durable TaskBudget policy.
+class AgentTaskExecutionGuardSettings(BaseModel):
+    """Task-scoped execution, branch, and delegation guards."""
 
-    These limits are task-wide. They are intentionally separate from
-    AgentExecutionLimits, which remain execution-local.
-    """
-
-    policy_version: str = Field(default="r5-v1", min_length=1, max_length=64)
     deny_recursive_agent_cycle: bool = True
     max_total_executions: int = Field(default=64, gt=0)
     max_active_executions: int = Field(default=8, gt=0)
     max_active_branches: int = Field(default=16, gt=0)
     max_parallel_agents: int = Field(default=4, gt=0)
+    max_delegation_depth: int = Field(default=8, gt=0)
+
+    model_config = ConfigDict(frozen=True)
+
+
+class LegacyTaskBudgetResourceFallbackSettings(BaseModel):
+    """Finite TaskBudget resource fallback retained for compatibility."""
+
     max_total_tool_calls: int = Field(default=256, gt=0)
     max_total_inference_calls: int = Field(default=128, gt=0)
     max_total_tokens: int | None = Field(default=1_000_000, gt=0)
     max_total_cost_usd: Decimal | None = Field(default=None, gt=Decimal("0"))
-    max_delegation_depth: int = Field(default=8, gt=0)
 
     model_config = ConfigDict(frozen=True)
+
+
+class AgentTaskBudgetSettings(BaseModel):
+    """Application-owned durable TaskBudget policy and compatibility config."""
+
+    policy_version: str = Field(default="r5-v1", min_length=1, max_length=64)
+    execution_guards: AgentTaskExecutionGuardSettings = Field(
+        default_factory=AgentTaskExecutionGuardSettings
+    )
+    legacy_resource_fallback: LegacyTaskBudgetResourceFallbackSettings = Field(
+        default_factory=LegacyTaskBudgetResourceFallbackSettings
+    )
+
+    model_config = ConfigDict(frozen=True)
+
+    @model_validator(mode="before")
+    @classmethod
+    def normalize_legacy_flat_input(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+
+        normalized = dict(value)
+        guard_fields = (
+            "deny_recursive_agent_cycle",
+            "max_total_executions",
+            "max_active_executions",
+            "max_active_branches",
+            "max_parallel_agents",
+            "max_delegation_depth",
+        )
+        fallback_fields = (
+            "max_total_tool_calls",
+            "max_total_inference_calls",
+            "max_total_tokens",
+            "max_total_cost_usd",
+        )
+
+        execution_guards = dict(normalized.get("execution_guards") or {})
+        legacy_resource_fallback = dict(
+            normalized.get("legacy_resource_fallback") or {}
+        )
+
+        for field_name in guard_fields:
+            if field_name in normalized:
+                execution_guards[field_name] = normalized.pop(field_name)
+
+        for field_name in fallback_fields:
+            if field_name in normalized:
+                legacy_resource_fallback[field_name] = normalized.pop(field_name)
+
+        if execution_guards:
+            normalized["execution_guards"] = execution_guards
+        if legacy_resource_fallback:
+            normalized["legacy_resource_fallback"] = legacy_resource_fallback
+        return normalized
 
 
 class AgentSettings(BaseModel):
