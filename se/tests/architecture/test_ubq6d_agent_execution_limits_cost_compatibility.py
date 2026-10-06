@@ -131,13 +131,14 @@ def test_ubq6d_accessor_hunks_are_semantic_labels_only() -> None:
         accessor = source[property_start:return_end]
 
         assert "return self.max_cost" in accessor
+        lowered_accessor = accessor.lower()
         for forbidden in (
-            "UserBudgetPolicy",
-            "TaskBudget",
-            "ProviderCallBudget",
+            "userbudgetpolicy",
+            "taskbudget",
+            "providercallbudget",
             "quota",
             "timeout",
             "usd",
             "currency",
         ):
-            assert forbidden not in accessor.lower()
+            assert forbidden not in lowered_accessor
