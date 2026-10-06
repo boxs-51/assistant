@@ -23,6 +23,7 @@ This document prevents phase-name collisions across independent roadmap tracks. 
 | `TBO-*` | Task Orchestration | `TBO-0` through `TBO-8+` — RESERVED / NOT OPEN | `docs/task_budget_orchestration/TBO_ROADMAP_CONTRACT_FREEZE.md` |
 | `AAT-*` | Agent Automation & Triggers | `AAT-0` through `AAT-6+` — RESERVED / NOT OPEN | `docs/agent_automation/AAT_ROADMAP.md` |
 | `AIC-*` | Agent Interconnect & Communication | `AIC-0` through `AIC-6+` — RESERVED / NOT OPEN | `docs/agent_interconnect/AIC_ROADMAP.md` |
+| `SKV2-*` | Skill Contract V2 / Skill Runtime | `SKV2-C0`, `SKV2-P0`, `SKV2-R1`, `SKV2-C1`, `SKV2-X1+` | Issue #274 and `docs/skill_v2/**` |
 
 Bare historical phase IDs remain valid aliases only inside their original track context.
 
@@ -38,7 +39,7 @@ New provider-tool work MUST use `PTC-*`; it must not allocate bare `R*` IDs.
 
 Future Context/Memory/Personalization work MUST use `CTX-F*`; it must not reuse `CAS-F*` or bare `F*` identifiers.
 
-Renewable user resource quota, anchored usage windows, token/compute/inference/tool accounting and per-capability tool quota MUST use `UBQ-*`. Task lifecycle/orchestration work MUST use `TBO-*`. Agent-owned tool publication, scheduling and event-triggered activation use `AAT-*`. Communication between connected Agent instances uses `AIC-*`. These reservations do not reopen or renumber historical AE-R4/R5/R9 budget work.
+Renewable user resource quota, anchored usage windows, token/compute/inference/tool accounting and per-capability tool quota MUST use `UBQ-*`. Task lifecycle/orchestration work MUST use `TBO-*`. Agent-owned tool publication, scheduling and event-triggered activation use `AAT-*`. Communication between connected Agent instances uses `AIC-*`. Skill V2 contract/runtime work MUST use `SKV2-*`; it does not acquire Tools V1 logical-tool authority or DCS selection authority by namespace. These reservations do not reopen or renumber historical AE-R4/R5/R9 budget work.
 
 ---
 
@@ -388,6 +389,41 @@ AIC-6  fault, migration and exit gates
 
 ---
 
+## 7D. Skill Contract V2 namespace — SKV2-*
+
+Issue #274 owns the Skill Contract V2 / Skill Runtime roadmap under parent architecture Issue #156.
+
+Canonical stages:
+
+```text
+SKV2-C0  Skill V2 contract + namespace + dependency freeze
+SKV2-P0  trusted manifest/metadata/authorization + ActiveSkillSet foundation
+SKV2-R1  progressive Skill references / bounded reference loading
+SKV2-C1  client Skill V2 normalization + metadata-only sync
+SKV2-X1  executable-Skill compatibility migration/deprecation
+```
+
+Current coordination:
+
+```text
+Issue #274 = TRACKER / ROADMAP
+Issue #275 = SKV2-C0 ACTIVE / CONTRACT-DOCS ONLY / NO PRODUCTION AUTHORITY
+Issue #276 = SKV2-P0 RESERVED / NOT CLAIMED
+```
+
+Ownership boundary:
+
+- Skill owns procedural knowledge, activation metadata, references and advisory capability hints.
+- Tools V1 and later Tools-owned stages own logical executable capability IDs and physical Tool behavior.
+- Ordinary shared helpers/services are not capabilities merely because a Skill or Tool uses them.
+- Issue #159/#160 DCS owns per-iteration model-visible Tool selection, grouping and expansion.
+- Skill hints are never grants and cannot directly mutate CapabilityWorkingSet.
+- CTX #15, CAS #74, UBQ #141-#149 and Agent execution authority remain with their owning tracks.
+
+A future document-format Skill may reference shared capabilities such as `document.read`, `document.render`, `image.generate` or `chart.render`, but SKV2 does not mint those Tool contracts.
+
+---
+
 ## 8. PTC / Agent overlap boundary
 
 PTC-3 and AE-R10 may touch adjacent provider-routing/fallback code.
@@ -517,6 +553,7 @@ UBQ -> UBQ-*  User Budget & Quota
 TBO -> TBO-*  Task Orchestration
 AAT -> AAT-*  Agent Automation & Triggers
 AIC -> AIC-*  Agent Interconnect & Communication
+SKV2 -> SKV2-* Skill Contract V2 / Skill Runtime
 ```
 
 Do not allocate a second independent `R10`, `T8`, or `F5` roadmap meaning.
@@ -596,6 +633,7 @@ UBQ-0     != AE-R4 / AE-R5 / AE-R9
 TBO-0     != UBQ-0
 AAT-0     != TBO-5
 AIC-0     != AAT-0
+SKV2-P0   != TV1-T* / #159 DCS-1
 ```
 
 If a proposed identifier cannot be resolved unambiguously through this registry, stop and assign a qualified namespace before implementation starts.
