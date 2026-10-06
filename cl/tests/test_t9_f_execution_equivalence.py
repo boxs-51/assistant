@@ -229,7 +229,7 @@ def test_logical_representatives_bind_to_unchanged_physical_dispatchers(
     assert calls["desktop"][0] == ("get_screen_info", {})
     assert screen["tool"] == "desktop_automation"
     assert screen["action"] == "get_screen_info"
-    assert screen["meta"]["version"] == "2.0.0"
+    assert screen["meta"]["version"] == desktop_module.DESKTOP_TOOL_VERSION
 
     # Non-idempotent desktop side effect is proven only through a fake.
     click = loaded["desktop.mouse_click"]["func"](
@@ -249,7 +249,7 @@ def test_logical_representatives_bind_to_unchanged_physical_dispatchers(
     )
     assert click["tool"] == "desktop_automation"
     assert click["action"] == "mouse_click"
-    assert click["meta"]["version"] == "2.0.0"
+    assert click["meta"]["version"] == desktop_module.DESKTOP_TOOL_VERSION
 
     for capability_id, forbidden in (
         ("file.append", {"action": "read"}),
