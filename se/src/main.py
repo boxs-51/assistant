@@ -875,23 +875,31 @@ async def bootstrap_runtime_kernel(
     agent_execution_id_factory = AgentExecutionIdFactory()
     agent_execution_supervisor = AgentExecutionSupervisor()
     task_budget_settings = config.agent.task_budget
+    execution_guard_settings = task_budget_settings.execution_guards
+    legacy_resource_fallback_settings = (
+        task_budget_settings.legacy_resource_fallback
+    )
     task_budget_limits = TaskBudgetLimits(
-        max_total_executions=task_budget_settings.max_total_executions,
-        max_active_executions=task_budget_settings.max_active_executions,
-        max_active_branches=task_budget_settings.max_active_branches,
-        max_parallel_agents=task_budget_settings.max_parallel_agents,
-        max_total_tool_calls=task_budget_settings.max_total_tool_calls,
-        max_total_inference_calls=(
-            task_budget_settings.max_total_inference_calls
+        max_total_executions=execution_guard_settings.max_total_executions,
+        max_active_executions=execution_guard_settings.max_active_executions,
+        max_active_branches=execution_guard_settings.max_active_branches,
+        max_parallel_agents=execution_guard_settings.max_parallel_agents,
+        max_total_tool_calls=(
+            legacy_resource_fallback_settings.max_total_tool_calls
         ),
-        max_total_tokens=task_budget_settings.max_total_tokens,
-        max_total_cost_usd=task_budget_settings.max_total_cost_usd,
-        max_delegation_depth=task_budget_settings.max_delegation_depth,
+        max_total_inference_calls=(
+            legacy_resource_fallback_settings.max_total_inference_calls
+        ),
+        max_total_tokens=legacy_resource_fallback_settings.max_total_tokens,
+        max_total_cost_usd=(
+            legacy_resource_fallback_settings.max_total_cost_usd
+        ),
+        max_delegation_depth=execution_guard_settings.max_delegation_depth,
     )
     task_budget_policy = TaskBudgetPolicy(
         version=task_budget_settings.policy_version,
         deny_recursive_agent_cycle=(
-            task_budget_settings.deny_recursive_agent_cycle
+            execution_guard_settings.deny_recursive_agent_cycle
         ),
     )
     dual_accounting_settings = config.user_budget.dual_accounting
