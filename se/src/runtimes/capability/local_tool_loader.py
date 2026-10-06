@@ -36,6 +36,14 @@ class _LocalCapabilityPlan:
     definition: CapabilityDefinition
     driver: PythonCapabilityDriver
     implementation_metadata: dict[str, Any] = field(default_factory=dict)
+    execution_locations: frozenset[CapabilityExecutionLocation] = field(
+        default_factory=lambda: frozenset(
+            {
+                CapabilityExecutionLocation.SERVER,
+                CapabilityExecutionLocation.CLIENT,
+            }
+        )
+    )
 
 
 def _bound_handler(
@@ -83,6 +91,13 @@ def _build_canonical_v2_plans(
 
     for export in manifest["exports"]:
         capability_id = export["id"]
+        execution_locations = frozenset(
+            CapabilityExecutionLocation(item)
+            for item in export.get(
+                "execution_locations",
+                ["SERVER", "CLIENT"],
+            )
+        )
         definition = CapabilityDefinition(
             id=capability_id,
             version=export["version"],
@@ -123,6 +138,7 @@ def _build_canonical_v2_plans(
                     "physical_version": physical_version,
                     "bind": deepcopy(bind),
                 },
+                execution_locations=execution_locations,
             )
         )
 
@@ -186,7 +202,10 @@ def _preflight_v2_registration(
             raise _MetadataV2Error(
                 f"tool definition already registered: {capability_id}"
             )
-        if runtime.driver_registry.get(implementation_id) is not None:
+        if (
+            CapabilityExecutionLocation.SERVER in plan.execution_locations
+            and runtime.driver_registry.get(implementation_id) is not None
+        ):
             raise _MetadataV2Error(
                 f"implementation driver already bound: {implementation_id}"
             )
@@ -201,7 +220,10 @@ def _preflight_v2_registration(
                         "catalog definition already registered with a "
                         f"different contract: {capability_id}"
                     )
-            if runtime.catalog.contains_implementation(implementation_id):
+            if (
+                CapabilityExecutionLocation.SERVER in plan.execution_locations
+                and runtime.catalog.contains_implementation(implementation_id)
+            ):
                 raise _MetadataV2Error(
                     "catalog implementation already registered: "
                     f"{implementation_id}"
@@ -242,6 +264,9 @@ def _register_one(
             )
     else:
         catalog_definition = runtime.catalog.register_definition(definition)
+
+    if CapabilityExecutionLocation.SERVER not in plan.execution_locations:
+        return
 
     implementation_id = f"server:{definition.capability_id}"
     if not runtime.catalog.contains_implementation(implementation_id):
