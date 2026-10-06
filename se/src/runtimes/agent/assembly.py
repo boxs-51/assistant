@@ -15,6 +15,7 @@ from .contracts.skills import (
     SkillActivationSource,
     SkillDescriptor,
 )
+from .selection import select_active_assigned_skills
 
 
 class DefaultAgentContextAssembler:
@@ -77,8 +78,8 @@ class DefaultAgentContextAssembler:
         return ActiveSkillSet(skills=tuple(active))
 
     @staticmethod
-    def _explicit_requested_capability_ids(context) -> tuple[str, ...]:
-        raw = context.metadata.get("dcs_requested_capability_ids", ())
+    def _requested_ids(context, key: str) -> tuple[str, ...]:
+        raw = context.metadata.get(key, ())
         if not isinstance(raw, (tuple, list, set, frozenset)):
             return ()
         return tuple(
@@ -120,9 +121,17 @@ class DefaultAgentContextAssembler:
             for item in prior_messages
             if item.get("role") != "system"
         )
-        active_skill_set = await self._active_assigned_skills(
+        assigned_skill_set = await self._active_assigned_skills(
             context=context,
             resolved_skills=resolved_skills,
+        )
+        active_skill_set = select_active_assigned_skills(
+            assigned_skill_set,
+            conversation,
+            explicit_requested_skill_ids=self._requested_ids(
+                context,
+                "dcs_requested_skill_ids",
+            ),
         )
 
         if self._selector is None:
@@ -157,7 +166,10 @@ class DefaultAgentContextAssembler:
                         for item in eligible_capabilities
                     ),
                     explicit_requested_capability_ids=(
-                        self._explicit_requested_capability_ids(context)
+                        self._requested_ids(
+                            context,
+                            "dcs_requested_capability_ids",
+                        )
                     ),
                     active_skill_set=active_skill_set,
                 )
