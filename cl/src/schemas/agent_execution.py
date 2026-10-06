@@ -74,3 +74,8 @@ class AgentExecutionLimits(GatewayBaseModel):
     @property
     def tool_call_timeout_seconds(self) -> float:
         return self.tool_timeout_seconds
+
+    @property
+    def legacy_max_cost(self) -> Optional[float]:
+        """Read-only semantic label for legacy max_cost compatibility."""
+        return self.max_cost
