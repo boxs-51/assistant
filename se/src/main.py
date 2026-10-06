@@ -110,6 +110,7 @@ from .runtimes.agent.fork_planning import AgentForkPlanningService
 from .runtimes.agent.retry_planning import AgentRetryPlanningService
 from .runtimes.agent.ids import AgentExecutionIdFactory
 from .runtimes.agent.assembly import DefaultAgentContextAssembler
+from .runtimes.agent.selection import DeterministicCapabilitySelector
 from .runtimes.agent.system_prompt import DefaultAgentSystemPromptProvider
 from .runtimes.agent.capabilities import RegistryAgentCapabilityResolver, RegistryAgentSkillResolver
 from .runtimes.agent.events import EventBusAgentEventPublisher
@@ -1104,6 +1105,7 @@ async def bootstrap_runtime_kernel(
             capability_catalog=capability_catalog,
             authorization=container.authorization_service,
         ),
+        selector=DeterministicCapabilitySelector(),
     )
     container.context_builder_port = ContextBuilderAdapter(
         container.context_runtime,
