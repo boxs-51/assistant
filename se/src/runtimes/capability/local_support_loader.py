@@ -20,6 +20,11 @@ from .contracts.implementation import (
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
+from .contracts.skill_manifest import (
+    SkillManifestV2,
+    normalize_skill_manifest,
+    trusted_skill_runtime_metadata,
+)
 from .drivers.agent_driver import AgentCapabilityDriver
 from .drivers.base import BaseCapabilityDriver
 
@@ -103,7 +108,9 @@ class LocalSupportLoader:
         self.container = container
         self.skills_dir = skills_dir.resolve()
         self.agents_dir = agents_dir.resolve()
-        self._skill_manifests: dict[str, tuple[Path, dict[str, Any]]] = {}
+        self._skill_manifests: dict[
+            str, tuple[Path, dict[str, Any], SkillManifestV2]
+        ] = {}
         self._agent_manifests: dict[str, tuple[Path, dict[str, Any]]] = {}
         self._loaded_skills: set[str] = set()
         self._loaded_skill_definitions: dict[str, CapabilityDefinition] = {}
@@ -113,7 +120,7 @@ class LocalSupportLoader:
     @staticmethod
     def _read_manifest(path: Path) -> dict[str, Any]:
         data = json.loads(path.read_text(encoding="utf-8"))
-        if not isinstance(data, dict) or not str(data.get("name") or "").strip():
+        if not isinstance(data, dict) or not str(data.get("name") or data.get("skill_id") or "").strip():
             raise ValueError(f"Invalid support manifest: {path}")
         return data
 
@@ -136,23 +143,24 @@ class LocalSupportLoader:
     def discover(self) -> dict[str, list[str]]:
         catalog = self.container.capability_runtime.catalog
         for path in self._manifest_files(self.skills_dir):
-            manifest = self._read_manifest(path)
-            name = str(manifest["name"])
+            raw_manifest = self._read_manifest(path)
+            manifest = normalize_skill_manifest(raw_manifest)
+            skill_id = manifest.skill_id
             definition = CapabilityDefinition(
-                id=name,
-                version=str(manifest.get("version", "1.0")),
-                name=name,
-                description=str(manifest.get("description", name)),
+                id=skill_id,
+                version=manifest.version,
+                name=manifest.name,
+                description=manifest.description or manifest.name,
                 execution_kind="SKILL",
                 kind=CapabilityKind.SKILL,
                 execution_mode=CapabilityExecutionMode.CONTEXT_ONLY,
-                require_auth=bool(manifest.get("require_auth", False)),
-                required_scopes=list(manifest.get("required_scopes", [])),
-                metadata=self._metadata(path, manifest, "SKILL"),
+                require_auth=manifest.security.require_auth,
+                required_scopes=list(manifest.security.required_scopes),
+                metadata=trusted_skill_runtime_metadata(manifest),
             )
             catalog.register_definition(definition)
             self.container.capability_runtime.registry.register_definition(definition)
-            self._skill_manifests[name] = (path, manifest)
+            self._skill_manifests[skill_id] = (path, raw_manifest, manifest)
 
         load_definition = CapabilityDefinition(
             id="skill.load",
@@ -240,11 +248,19 @@ class LocalSupportLoader:
         }
 
     @staticmethod
-    def _instruction(path: Path, manifest: dict[str, Any]) -> str:
+    def _instruction(
+        path: Path,
+        manifest: dict[str, Any],
+        normalized: SkillManifestV2 | None = None,
+    ) -> str:
         inline = manifest.get("instruction")
         if isinstance(inline, str) and inline.strip():
             return inline.strip()
-        relative = str(manifest.get("instruction_file") or "instruction.md")
+        relative = (
+            normalized.instruction.path
+            if normalized is not None
+            else str(manifest.get("instruction_file") or "instruction.md")
+        )
         target = (path.parent / relative).resolve()
         if path.parent.resolve() not in target.parents:
             raise ValueError(f"Instruction path escapes manifest directory: {path}")
@@ -266,7 +282,7 @@ class LocalSupportLoader:
 
     def load_skill(self, skill_id: str) -> CapabilityDefinition:
         with self._lock:
-            path, manifest = self._skill_manifests[skill_id]
+            path, raw_manifest, manifest = self._skill_manifests[skill_id]
             cached = self._loaded_skill_definitions.get(skill_id)
             if cached is not None:
                 return cached
@@ -275,7 +291,11 @@ class LocalSupportLoader:
                 update={
                     "metadata": {
                         **definition.metadata,
-                        "instruction": self._instruction(path, manifest),
+                        "instruction": self._instruction(
+                            path,
+                            raw_manifest,
+                            normalized=manifest,
+                        ),
                         "loaded": True,
                     }
                 }
