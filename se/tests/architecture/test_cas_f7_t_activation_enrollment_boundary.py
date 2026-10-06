@@ -36,29 +36,31 @@ def test_a0_is_exact_zero_production_contract_candidate():
         assert phrase in document
 
 
-def test_current_f7t_persistence_is_dormant_and_empty_enrollment():
+
+def test_a1_enrollment_is_exact_and_default_remains_fail_closed():
     source = _read("se/src/application/assets/tool_generated_media.py")
     document = _semantic(CONTRACT.read_text(encoding="utf-8"))
 
     for phrase in (
         'F7T_INLINE_BASE64_V1 = "F7T_INLINE_BASE64_V1"',
         "EMPTY_F7T_ENROLLMENT: Mapping[tuple[str, str], str] = MappingProxyType({})",
+        "F7T_A1_ENROLLMENT: Mapping[tuple[str, str], str] = MappingProxyType(",
+        '{("desktop.screenshot", "1.0"): F7T_INLINE_BASE64_V1}',
+        "F7T_A1_MAX_MEDIA_ITEMS = 8",
+        'F7T_A1_MEDIA_KIND = "image"',
+        '{"image/png", "image/jpeg", "image/webp"}',
+        "aggregate_decoded_bytes > max_media_bytes",
         "class ToolGeneratedMediaCanonicalizer:",
         "async def canonicalize_committed_result(",
-        "if size_bytes > max_media_bytes:",
     ):
         assert phrase in source
-
-    assert "max_media_items" not in source
 
     for phrase in (
         "production enrollment registry = EMPTY",
         "live Agent F7-T trigger/wiring = ABSENT",
         "the default enrollment is EMPTY_F7T_ENROLLMENT",
-        "no production caller invokes canonicalize_committed_result(...)",
     ):
         assert phrase in document
-
 
 def test_a0_historical_gap_tracks_only_explicit_tv1_t11_b_producer_paths():
     allowed = {
@@ -87,7 +89,8 @@ def test_a0_historical_gap_tracks_only_explicit_tv1_t11_b_producer_paths():
         assert phrase in document
 
 
-def test_agent_runtime_has_commit_then_reload_seam_but_no_f7t_caller():
+
+def test_a1_wires_exact_two_post_committed_seams_and_supervised_drain():
     runtime = _read("se/src/runtimes/agent/runtime.py")
     persistence = _read("se/src/runtimes/agent/persistence.py")
     main = _read("se/src/main.py")
@@ -95,29 +98,52 @@ def test_agent_runtime_has_commit_then_reload_seam_but_no_f7t_caller():
 
     assert "await self._persist_tool_result(result, iteration_id)" in runtime
     assert "committed_result = await self._load_committed_tool_result(" in runtime
-    assert "async def _load_committed_tool_result_by_id(" in runtime
-    assert "await self._load_committed_tool_result_by_id(" in runtime
+    assert runtime.count("async def _load_committed_tool_result(") == 1
+    assert runtime.count("async def _load_committed_tool_result_by_id(") == 1
+    assert (
+        runtime.count(
+            "self._schedule_f7t_publication_for_committed_result("
+        )
+        == 2
+    )
+    assert "f7t_canonicalizer=None" in runtime
+    assert "self._f7t_publication_tasks: set[asyncio.Task] = set()" in runtime
+    assert "async def quiesce_f7t_publication(self) -> None:" in runtime
+    assert "asyncio.create_task(" in runtime
+    assert "await asyncio.gather(*tasks, return_exceptions=True)" in runtime
     assert 'values["commit_state"] = "COMMITTED"' in persistence
-    assert "ToolGeneratedMediaCanonicalizer" not in runtime
-    assert "canonicalize_committed_result" not in runtime
-    assert "ToolGeneratedMediaCanonicalizer" not in main
+
+    assert "ToolGeneratedMediaCanonicalizer(" in main
+    assert "enrollment=F7T_A1_ENROLLMENT" in main
+    assert "max_media_bytes=config.assets.max_upload_bytes" in main
+    assert "f7t_canonicalizer=f7t_canonicalizer" in main
+    assert "if asset_service is not None:" in main
+    assert (
+        main.index("await container.agent_execution_supervisor.quiesce()")
+        < main.index("await container.agent_runtime.quiesce_f7t_publication()")
+        < main.index("await eventing_manager.quiesce()")
+    )
+
+    schedule_start = runtime.index(
+        "def _schedule_f7t_publication_for_committed_result("
+    )
+    schedule_end = runtime.index(
+        "async def quiesce_f7t_publication", schedule_start
+    )
+    schedule_body = runtime[schedule_start:schedule_end]
+    assert "_await_contextual" not in schedule_body
+    assert "task_budget" not in schedule_body
+    assert "cancellation_event" not in schedule_body
 
     for phrase in (
-        "both durable post-COMMITTED Agent read seams are frozen below; AgentRuntime authority is not transferred",
         "AgentRuntime._load_committed_tool_result(...)",
         "AgentRuntime._load_committed_tool_result_by_id(...)",
         "AgentRuntime._schedule_f7t_publication_for_committed_result(",
-        "Each seam may invoke that hook only after its durable loader returned the exact AgentToolResultRecord",
         "Every ordinary execution, resume, recovery, REUSE_COMMITTED or repeated durable read observation",
         "the SAME durable record.id as source_result_id",
-        "before DurableAgentStore.save_tool_result(...)",
-        "inside the SQL transaction that commits AgentToolResultRecord",
-        "on a transport-only ToolExecutionResult that has not been re-read as COMMITTED",
-        "from a continuation result before its durable COMMITTED re-read",
         "No third durable-load seam may silently activate F7-T",
     ):
         assert phrase in document
-
 
 def test_a0_freezes_finite_first_activation_bounds():
     config = _read("se/src/infrastructure/config/schemas.py")
