@@ -220,7 +220,18 @@ def test_ubq6e_keeps_timeout_and_provider_retry_outside_renewable_quota() -> Non
         in provider_block
     )
     assert "One instance is shared across every fallback candidate" in provider_block
-    assert "timeout/deadline is not resource quota" in timeout_contract
+    assert (
+        "RESOURCE BUDGET     = renewable resource quota owned by authenticated user"
+        in timeout_contract
+    )
+    assert (
+        "TIMEOUTS/DEADLINES  = bounded waiting and wall/active-time safety controls"
+        in timeout_contract
+    )
+    assert (
+        "execution/iteration/task time controls are guards/deadlines, not renewable quota"
+        in timeout_contract
+    )
     assert "Timeout/deadline remains distinct from renewable resource quota." in contract
 
 
