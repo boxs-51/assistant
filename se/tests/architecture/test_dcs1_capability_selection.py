@@ -323,6 +323,30 @@ async def test_legacy_assembler_without_selector_preserves_full_eligible_project
     assert assembled.working_set.reason == "LEGACY_FULL_ELIGIBLE"
 
 
+@pytest.mark.asyncio
+async def test_legacy_no_selector_preserves_assigned_skill_preload():
+    context = _context(skills=["review-skill"])
+    assembler = DefaultAgentContextAssembler(
+        _PromptProvider(),
+        _CapabilityResolver(),
+        _SkillResolver(),
+    )
+
+    assembled = await assembler.assemble(
+        context=context,
+        prior_messages=[{"role": "user", "content": "hello"}],
+    )
+
+    assert "ASSIGNED REVIEW BODY" in assembled.system_prompt.content
+    assert [
+        item.descriptor.skill_id for item in assembled.active_skill_set.skills
+    ] == ["review-skill"]
+    assert [item.name for item in assembled.tools] == [
+        "file.read",
+        "terminal.run",
+    ]
+
+
 def test_non_selected_model_tool_call_fails_closed():
     with pytest.raises(CapabilitySelectionViolationError) as exc_info:
         ensure_selected_tool_calls(
