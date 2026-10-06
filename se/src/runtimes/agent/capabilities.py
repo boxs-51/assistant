@@ -5,6 +5,7 @@ from __future__ import annotations
 from ...application.policy.authorization import AuthorizationService
 from .contracts.context_assembly import AgentCapabilityView, AgentSkillView
 from .contracts.policy import AgentToolPolicy, PolicyDecision
+from .contracts.skills import SkillDescriptor
 from ..capability.catalog import CapabilityNotFoundError
 
 
@@ -90,21 +91,37 @@ class RegistryAgentSkillResolver:
         self._catalog = capability_catalog
         self._authorization = authorization or AuthorizationService()
 
+    async def list_descriptors(self, *, identity) -> tuple[SkillDescriptor, ...]:
+        """Expose authorized trusted V2 descriptors without reading Skill bodies."""
+        result: list[SkillDescriptor] = []
+        for definition in self._catalog.list_definitions():
+            if str(definition.metadata.get("kind", "")).upper() != "SKILL":
+                continue
+            if definition.metadata.get("server_managed") is not True:
+                continue
+            if definition.metadata.get("lazy") is not True:
+                continue
+            if not self._authorization.is_allowed(identity, definition):
+                continue
+            try:
+                result.append(SkillDescriptor.from_definition(definition))
+            except ValueError:
+                # Legacy/non-V2 definitions are not trusted V2 descriptor sources.
+                continue
+        return tuple(result)
+
     async def list_available(self, *, identity) -> tuple[AgentSkillView, ...]:
-        """Expose authorized skill metadata without reading instruction files."""
+        """Compatibility projection of authorized trusted Skill descriptors."""
+        descriptors = await self.list_descriptors(identity=identity)
         return tuple(
             AgentSkillView(
-                skill_id=definition.capability_id,
-                name=definition.name,
-                description=definition.description,
+                skill_id=descriptor.skill_id,
+                name=descriptor.name,
+                description=descriptor.description,
                 instruction="",
-                version=definition.version,
+                version=descriptor.version,
             )
-            for definition in self._catalog.list_definitions()
-            if str(definition.metadata.get("kind", "")).upper() == "SKILL"
-            and definition.metadata.get("server_managed") is True
-            and definition.metadata.get("lazy") is True
-            and self._authorization.is_allowed(identity, definition)
+            for descriptor in descriptors
         )
 
     async def resolve(self, *, agent_id: str, identity) -> tuple[AgentSkillView, ...]:
@@ -119,6 +136,8 @@ class RegistryAgentSkillResolver:
             except (KeyError, CapabilityNotFoundError):
                 continue
             if str(definition.metadata.get("kind", "")).upper() != "SKILL":
+                continue
+            if not self._authorization.is_allowed(identity, definition):
                 continue
             instruction = definition.metadata.get("instruction")
             if not isinstance(instruction, str) or not instruction.strip():
