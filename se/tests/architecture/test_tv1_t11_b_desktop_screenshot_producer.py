@@ -26,7 +26,10 @@ from cl.src.core.local_capability_executor import (
 )
 from se.src.domain.schemas.identity import Identity
 from se.src.infrastructure.event_bus.ws_manager import WebSocketConnectionManager
-from se.src.runtimes.agent.adapters.context import _project_f7t_screenshot_output
+from se.src.runtimes.agent.adapters.context import (
+    _model_facing_success_output,
+    _project_f7t_screenshot_output,
+)
 from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.registration import ClientCapabilityRegistrationService
 from se.src.runtimes.connection.protocol import RealtimeEnvelope
@@ -233,6 +236,15 @@ def test_model_projection_omits_binary_and_preserves_durable_result():
     malformed = deepcopy(durable)
     malformed["data"]["$f7t_media"]["items"][0]["extra"] = "not-strict"
     assert _project_f7t_screenshot_output(malformed) is None
+    malformed_model_content = _model_facing_success_output(CAPABILITY_ID, malformed)
+    assert malformed_model_content == (
+        "desktop.screenshot output omitted: invalid strict "
+        "F7T_INLINE_BASE64_V1 envelope"
+    )
+    assert "data_base64" not in repr(malformed_model_content)
+    assert _model_facing_success_output(CAPABILITY_ID, durable) == projected
+    historical_output = {"value": 7, "data_base64": "ordinary-tool-field"}
+    assert _model_facing_success_output("calculator.add", historical_output) == historical_output
 
     bad_hash = deepcopy(durable)
     bad_hash["data"]["$f7t_media"]["items"][0]["sha256"] = "0" * 64
