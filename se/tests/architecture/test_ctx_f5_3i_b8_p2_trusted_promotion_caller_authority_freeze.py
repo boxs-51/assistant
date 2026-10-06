@@ -78,11 +78,16 @@ def test_p2_freezes_exact_released_zero_production_claim() -> None:
 
 
 def test_p2_zero_caller_freeze_is_superseded_only_by_released_p3_caller() -> None:
-    call_token = ".promote_tool_response_payload_memory("
     matches: list[str] = []
 
     for path in SOURCE_ROOT.rglob("*.py"):
-        if call_token in _read(path):
+        tree = ast.parse(_read(path))
+        if any(
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute)
+            and node.func.attr == METHOD
+            for node in ast.walk(tree)
+        ):
             matches.append(path.as_posix())
 
     assert matches == [P3_CALLER.as_posix()]
@@ -94,9 +99,17 @@ def test_p2_zero_caller_freeze_is_superseded_only_by_released_p3_caller() -> Non
         if isinstance(node, ast.AsyncFunctionDef)
         and node.name == "promote_tool_response_payload_memory_for_session"
     )
-    caller_segment = ast.get_source_segment(caller_source, caller)
-    assert caller_segment is not None
-    assert caller_segment.count(call_token) == 1
+    caller_calls = [
+        node
+        for node in ast.walk(caller)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == METHOD
+    ]
+    assert len(caller_calls) == 1
+    assert ast.unparse(caller_calls[0].func) == (
+        "container.storage.promote_tool_response_payload_memory"
+    )
 
     manager_source = _read(MANAGER)
     storage = _class(manager_source, "StorageEngine")
