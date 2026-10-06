@@ -4,6 +4,8 @@ from pathlib import Path
 
 MANAGER = Path("se/src/infrastructure/storage/core/manager.py")
 SOURCE_ROOT = Path("se/src")
+P3_CALLER = Path("se/src/transport/gateway/api/v1/session_router.py")
+P3_FUNCTION = "promote_tool_response_payload_memory_for_session"
 METHOD = "promote_tool_response_payload_memory"
 
 
@@ -102,13 +104,39 @@ def test_b8_p1_handoff_contains_no_parallel_authority_or_scheduling() -> None:
         assert forbidden not in segment
 
 
-def test_b8_p1_adds_no_production_caller_or_trigger() -> None:
-    call_token = ".promote_tool_response_payload_memory("
+def test_b8_p1_historical_zero_caller_is_superseded_only_by_released_p3() -> None:
+    callers: list[tuple[str, str]] = []
 
-    matches = []
     for path in SOURCE_ROOT.rglob("*.py"):
-        text = _read(path)
-        if call_token in text:
-            matches.append(path.as_posix())
+        tree = ast.parse(_read(path))
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.AsyncFunctionDef):
+                continue
+            if any(
+                isinstance(child, ast.Call)
+                and isinstance(child.func, ast.Attribute)
+                and child.func.attr == METHOD
+                for child in ast.walk(node)
+            ):
+                callers.append((path.as_posix(), node.name))
 
-    assert matches == []
+    assert callers == [(P3_CALLER.as_posix(), P3_FUNCTION)]
+
+    source = _read(P3_CALLER)
+    function = next(
+        node
+        for node in ast.parse(source).body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == P3_FUNCTION
+    )
+    calls = [
+        node
+        for node in ast.walk(function)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == METHOD
+    ]
+    assert len(calls) == 1
+    assert ast.unparse(calls[0].func) == (
+        "container.storage.promote_tool_response_payload_memory"
+    )
