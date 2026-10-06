@@ -238,7 +238,10 @@ def _register_one(
     from ...domain.schemas.tool import GatewayToolDefinition
 
     definition = plan.definition
-    runtime.register_capability(plan.driver)
+    if CapabilityExecutionLocation.SERVER in plan.execution_locations:
+        runtime.register_capability(plan.driver)
+    else:
+        runtime.registry.register_definition(definition)
     tool_registry.register(
         GatewayToolDefinition(
             name=definition.name,
