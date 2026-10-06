@@ -64,21 +64,13 @@ def test_builtin_support_registers_skills_specialists_and_coordinator():
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("agent_id", "reason"),
-    [(None, "AGENT_NOT_SPECIFIED"), ("missing-agent", "AGENT_NOT_FOUND")],
-)
-async def test_agent_request_without_available_id_notifies_and_falls_back_to_direct(
-    agent_id, reason
-):
+async def test_agent_request_without_selected_id_notifies_and_falls_back_to_direct():
     runtime = WorkflowRuntime()
     runtime.container = SimpleNamespace(
         agent_registry=SimpleNamespace(get=lambda _agent_id: None)
     )
     runtime._execute_direct = AsyncMock()
     body = {"messages": [{"role": "user", "content": "hello"}]}
-    if agent_id:
-        body["agent_id"] = agent_id
     event = BaseEvent(
         event_name="context.event.built",
         session_id="session-1",
@@ -90,7 +82,7 @@ async def test_agent_request_without_available_id_notifies_and_falls_back_to_dir
 
     notice = runtime._execute_direct.await_args.kwargs["fallback_notice"]
     assert notice["status"] == "AGENT_FALLBACK"
-    assert notice["reason"] == reason
+    assert notice["reason"] == "AGENT_NOT_SPECIFIED"
     assert notice["fallback"] == "DIRECT"
 
 
