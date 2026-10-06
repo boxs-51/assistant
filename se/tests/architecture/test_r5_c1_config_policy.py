@@ -1,4 +1,5 @@
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 
@@ -45,6 +46,7 @@ def test_r5_c1_application_config_is_task_budget_authority():
 
     assert limits.max_total_executions == 64
     assert limits.max_active_executions == 8
+    assert limits.max_active_branches == 16
     assert limits.max_parallel_agents == 4
     assert limits.max_total_tool_calls == 256
     assert limits.max_total_inference_calls == 128
@@ -52,6 +54,7 @@ def test_r5_c1_application_config_is_task_budget_authority():
     assert limits.max_total_cost_usd is None
     assert limits.max_delegation_depth == 8
     assert policy.version == "r5-v1"
+    assert policy.deny_recursive_agent_cycle is True
 
 
 def test_r5_c1_task_budget_config_uses_explicit_nested_groups():
@@ -124,6 +127,71 @@ def test_r5_c1_legacy_flat_input_overrides_nested_merged_defaults():
         config.agent.task_budget.legacy_resource_fallback.max_total_tool_calls
         == 444
     )
+
+
+def test_r5_c1_nested_defaults_preserve_pre_6c_policy_fingerprint():
+    canonical_limits, canonical_policy = _policy_from_config(ConfigSchema())
+    legacy_config = ConfigSchema.model_validate(
+        {
+            "agent": {
+                "task_budget": {
+                    "policy_version": "r5-v1",
+                    "deny_recursive_agent_cycle": True,
+                    "max_total_executions": 64,
+                    "max_active_executions": 8,
+                    "max_active_branches": 16,
+                    "max_parallel_agents": 4,
+                    "max_delegation_depth": 8,
+                    "max_total_tool_calls": 256,
+                    "max_total_inference_calls": 128,
+                    "max_total_tokens": 1_000_000,
+                    "max_total_cost_usd": None,
+                }
+            }
+        }
+    )
+    legacy_limits, legacy_policy = _policy_from_config(legacy_config)
+
+    assert canonical_limits.model_dump(mode="json") == legacy_limits.model_dump(
+        mode="json"
+    )
+    assert canonical_policy.model_dump(mode="json") == legacy_policy.model_dump(
+        mode="json"
+    )
+    assert canonical_policy.version == "r5-v1"
+    assert canonical_policy.deny_recursive_agent_cycle is True
+    assert task_budget_policy_fingerprint(
+        canonical_limits,
+        canonical_policy,
+    ) == task_budget_policy_fingerprint(
+        legacy_limits,
+        legacy_policy,
+    )
+
+
+def test_r5_c1_task_budget_config_does_not_acquire_user_budget_policy_authority():
+    se_root = Path(__file__).resolve().parents[2]
+    schemas = (se_root / "src/infrastructure/config/schemas.py").read_text(
+        encoding="utf-8"
+    )
+    main = (se_root / "src/main.py").read_text(encoding="utf-8")
+
+    settings_start = schemas.index("class AgentTaskBudgetSettings")
+    settings_end = schemas.index("\n\nclass AgentSettings", settings_start)
+    settings_block = schemas[settings_start:settings_end]
+
+    composition_start = main.index(
+        "task_budget_settings = config.agent.task_budget"
+    )
+    composition_end = main.index(
+        "\n    dual_accounting_settings =",
+        composition_start,
+    )
+    composition_block = main[composition_start:composition_end]
+
+    for forbidden in ("UserBudgetPolicy", "user_budget"):
+        assert forbidden not in settings_block
+        assert forbidden not in composition_block
 
 
 def test_r5_c1_policy_fingerprint_is_stable_across_service_injection():
