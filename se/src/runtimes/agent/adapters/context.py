@@ -14,6 +14,91 @@ from ..contracts.inference import InferenceMessage, InferenceToolDefinition
 from ..contracts.policy import AgentToolPolicy, PolicyDecision
 from .messages import gateway_message_to_inference, jsonable
 
+_F7T_SCREENSHOT_CAPABILITY_ID = "desktop.screenshot"
+_F7T_INLINE_CONTRACT = "F7T_INLINE_BASE64_V1"
+_F7T_SCREENSHOT_FILENAME = "desktop-screenshot.png"
+_F7T_SCREENSHOT_MAX_BYTES = 8_388_608
+
+
+def _project_f7t_screenshot_output(output: Any) -> dict[str, Any] | None:
+    if not isinstance(output, Mapping) or set(output) != {
+        "ok", "tool", "action", "data", "error", "meta"
+    }:
+        return None
+    if output.get("ok") is not True or output.get("error") is not None:
+        return None
+    if output.get("tool") != "desktop_automation" or output.get("action") != "screenshot":
+        return None
+
+    meta = output.get("meta")
+    if not isinstance(meta, Mapping) or set(meta) != {"version", "truncated", "warnings"}:
+        return None
+    if meta.get("version") != "2.1.0" or meta.get("truncated") is not False:
+        return None
+    if meta.get("warnings") != []:
+        return None
+
+    data = output.get("data")
+    if not isinstance(data, Mapping) or set(data) != {"$f7t_media"}:
+        return None
+    media = data.get("$f7t_media")
+    if not isinstance(media, Mapping) or set(media) != {"contract", "items"}:
+        return None
+    if media.get("contract") != _F7T_INLINE_CONTRACT:
+        return None
+    items = media.get("items")
+    if not isinstance(items, list) or len(items) != 1:
+        return None
+    item = items[0]
+    expected_keys = {
+        "ordinal", "media_kind", "mime_type", "filename", "encoding",
+        "size_bytes", "sha256", "data_base64",
+    }
+    if not isinstance(item, Mapping) or set(item) != expected_keys:
+        return None
+    if (
+        item.get("ordinal") != 0
+        or item.get("media_kind") != "image"
+        or item.get("mime_type") != "image/png"
+        or item.get("filename") != _F7T_SCREENSHOT_FILENAME
+        or item.get("encoding") != "base64"
+    ):
+        return None
+    size_bytes = item.get("size_bytes")
+    if type(size_bytes) is not int or not (1 <= size_bytes <= _F7T_SCREENSHOT_MAX_BYTES):
+        return None
+    sha256 = item.get("sha256")
+    if (
+        not isinstance(sha256, str)
+        or len(sha256) != 64
+        or any(ch not in "0123456789abcdef" for ch in sha256)
+    ):
+        return None
+    data_base64 = item.get("data_base64")
+    if (
+        not isinstance(data_base64, str)
+        or not data_base64
+        or any(ch.isspace() for ch in data_base64)
+    ):
+        return None
+
+    return {
+        "$f7t_media_projection": {
+            "source_contract": _F7T_INLINE_CONTRACT,
+            "binary_omitted": True,
+            "items": [
+                {
+                    "ordinal": 0,
+                    "media_kind": "image",
+                    "mime_type": "image/png",
+                    "filename": _F7T_SCREENSHOT_FILENAME,
+                    "size_bytes": size_bytes,
+                    "sha256": sha256,
+                }
+            ],
+        }
+    }
+
 
 class ContextBuilderAdapter(ContextBuilderPort):
     """Build one immutable Agent context snapshot from ContextRuntime."""
@@ -92,13 +177,21 @@ class ContextBuilderAdapter(ContextBuilderPort):
                 )
 
         for result in request.tool_results:
+            projected_output = (
+                _project_f7t_screenshot_output(result.output)
+                if result.success
+                and result.capability_id == _F7T_SCREENSHOT_CAPABILITY_ID
+                else None
+            )
             history.append(
                 InferenceMessage(
                     role="tool",
                     name=result.capability_id,
                     tool_call_id=result.tool_call_id,
                     content=(
-                        jsonable(result.output)
+                        projected_output
+                        if projected_output is not None
+                        else jsonable(result.output)
                         if result.success
                         else result.error_message or result.error_code
                     ),
