@@ -6,7 +6,6 @@ from copy import deepcopy
 import hashlib
 import socket
 import threading
-import time
 from types import SimpleNamespace
 
 import pytest
@@ -301,12 +300,13 @@ def _free_port() -> int:
         return sock.getsockname()[1]
 
 
-def _wait_until(predicate, timeout=15.0) -> None:
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
+async def _wait_until_async(predicate, timeout=15.0) -> None:
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + timeout
+    while loop.time() < deadline:
         if predicate():
             return
-        time.sleep(0.01)
+        await asyncio.sleep(0.01)
     raise AssertionError("condition timed out")
 
 
@@ -334,7 +334,8 @@ def _build_realtime_gateway(owner_id: str, session_id: str):
     return app, catalog, connection_runtime
 
 
-def _start_realtime_gateway(app):
+async def _start_realtime_gateway(app):
+    """Run Uvicorn on the same asyncio loop as ConnectionRuntime realtime."""
     port = _free_port()
     server = uvicorn.Server(
         uvicorn.Config(
@@ -343,120 +344,157 @@ def _start_realtime_gateway(app):
             port=port,
             log_level="error",
             access_log=False,
+            timeout_graceful_shutdown=2.0,
         )
     )
-    thread = threading.Thread(target=server.run, daemon=True)
-    thread.start()
-    _wait_until(lambda: server.started)
-    return server, thread, port
+    server_task = asyncio.create_task(
+        server.serve(),
+        name="tv1-t11-b-e2e-gateway",
+    )
+    await _wait_until_async(
+        lambda: server.started or server_task.done(),
+        timeout=10.0,
+    )
+    if server_task.done():
+        await server_task
+        raise AssertionError("TV1-T11-B gateway exited before startup completed.")
+    return server, server_task, port
+
+
+async def _stop_realtime_gateway(server, server_task, timeout=5.0):
+    """Bound real-server cleanup so evidence cannot strand the Linux suite."""
+    if server_task.done():
+        if not server_task.cancelled():
+            server_task.exception()
+        return
+
+    server.should_exit = True
+    try:
+        await asyncio.wait_for(asyncio.shield(server_task), timeout=timeout)
+        return
+    except asyncio.TimeoutError:
+        server.force_exit = True
+
+    try:
+        await asyncio.wait_for(asyncio.shield(server_task), timeout=timeout)
+    except asyncio.TimeoutError:
+        server_task.cancel()
+        try:
+            await server_task
+        except asyncio.CancelledError:
+            pass
 
 
 @pytest.mark.e2e
 def test_near_bound_f7t_result_crosses_real_tcp_websocket_after_durable_terminal_commit(
     tmp_path,
 ):
-    owner_id = "tv1-t11-b-owner"
-    session_id = "tv1-t11-b-session"
-    client_id = "tv1-t11-b-client"
-    invocation_id = "tv1-t11-b-near-bound"
+    async def scenario():
+        owner_id = "tv1-t11-b-owner"
+        session_id = "tv1-t11-b-session"
+        client_id = "tv1-t11-b-client"
+        invocation_id = "tv1-t11-b-near-bound"
 
-    # Keep the decoded source close to the frozen 8 MiB ceiling. Producer
-    # validity is covered separately; this evidence stresses the canonical
-    # realtime JSON/base64 path without allocating a second image dependency.
-    raw = b"\x89PNG\r\n\x1a\n" + (
-        b"tv1-t11-b-transport" * 396_000
-    )
-    raw = raw[: desktop_tool.MAX_SCREENSHOT_PNG_BYTES - 65_536]
-    encoded = base64.b64encode(raw).decode("ascii")
-    output = {
-        "ok": True,
-        "tool": "desktop_automation",
-        "action": "screenshot",
-        "data": {
-            "$f7t_media": {
-                "contract": "F7T_INLINE_BASE64_V1",
-                "items": [
-                    {
-                        "ordinal": 0,
-                        "media_kind": "image",
-                        "mime_type": "image/png",
-                        "filename": "desktop-screenshot.png",
-                        "encoding": "base64",
-                        "size_bytes": len(raw),
-                        "sha256": hashlib.sha256(raw).hexdigest(),
-                        "data_base64": encoded,
-                    }
-                ],
-            }
-        },
-        "error": None,
-        "meta": {
-            "version": "2.1.0",
-            "truncated": False,
-            "warnings": [],
-        },
-    }
-
-    app, catalog, connection_runtime = _build_realtime_gateway(
-        owner_id,
-        session_id,
-    )
-    server, thread, port = _start_realtime_gateway(app)
-    ledger = ClientInvocationLedger(tmp_path / "client-invocations.sqlite3")
-    client = ClientRuntime(
-        f"http://127.0.0.1:{port}",
-        _NetworkRegistry(output),
-        api_key="tv1-t11-b-e2e",
-        client_id=client_id,
-        owner_id=owner_id,
-        invocation_ledger=ledger,
-        hitl=_Approval(True),
-    )
-
-    try:
-        client.start()
-        _wait_until(
-            lambda: catalog.contains_implementation(
-                f"{client.connection_id}:{CAPABILITY_ID}"
-            )
+        # Keep the decoded source close to the frozen 8 MiB ceiling. Producer
+        # validity is covered separately; this evidence stresses the canonical
+        # realtime JSON/base64 path without allocating a second image dependency.
+        raw = b"\x89PNG\r\n\x1a\n" + (
+            b"tv1-t11-b-transport" * 396_000
         )
-
-        envelope = RealtimeEnvelope(
-            type="capability.invoke",
-            message_id="tv1-t11-b-near-bound-message",
-            connection_id=client.connection_id,
-            execution_id="tv1-t11-b-exec",
-            invocation_id=invocation_id,
-            trace_id="tv1-t11-b-trace",
-            payload={
-                "capability_id": CAPABILITY_ID,
-                "capability_version": "1.0",
-                "arguments": {},
+        raw = raw[: desktop_tool.MAX_SCREENSHOT_PNG_BYTES - 65_536]
+        encoded = base64.b64encode(raw).decode("ascii")
+        output = {
+            "ok": True,
+            "tool": "desktop_automation",
+            "action": "screenshot",
+            "data": {
+                "$f7t_media": {
+                    "contract": "F7T_INLINE_BASE64_V1",
+                    "items": [
+                        {
+                            "ordinal": 0,
+                            "media_kind": "image",
+                            "mime_type": "image/png",
+                            "filename": "desktop-screenshot.png",
+                            "encoding": "base64",
+                            "size_bytes": len(raw),
+                            "sha256": hashlib.sha256(raw).hexdigest(),
+                            "data_base64": encoded,
+                        }
+                    ],
+                }
             },
+            "error": None,
+            "meta": {
+                "version": "2.1.0",
+                "truncated": False,
+                "warnings": [],
+            },
+        }
+
+        app, catalog, connection_runtime = _build_realtime_gateway(
+            owner_id,
+            session_id,
         )
-        received = asyncio.run(
-            connection_runtime.realtime.invoke(
+        server, server_task, port = await _start_realtime_gateway(app)
+        ledger = ClientInvocationLedger(tmp_path / "client-invocations.sqlite3")
+        client = ClientRuntime(
+            f"http://127.0.0.1:{port}",
+            _NetworkRegistry(output),
+            api_key="tv1-t11-b-e2e",
+            client_id=client_id,
+            owner_id=owner_id,
+            invocation_ledger=ledger,
+            hitl=_Approval(True),
+        )
+
+        try:
+            # ClientRuntime is synchronous. Keep its socket waits off the
+            # server loop while the server-side RealtimeMultiplexer remains on
+            # the same loop that owns the Starlette WebSocket.
+            await asyncio.to_thread(client.start)
+            await _wait_until_async(
+                lambda: catalog.contains_implementation(
+                    f"{client.connection_id}:{CAPABILITY_ID}"
+                )
+            )
+
+            envelope = RealtimeEnvelope(
+                type="capability.invoke",
+                message_id="tv1-t11-b-near-bound-message",
+                connection_id=client.connection_id,
+                execution_id="tv1-t11-b-exec",
+                invocation_id=invocation_id,
+                trace_id="tv1-t11-b-trace",
+                payload={
+                    "capability_id": CAPABILITY_ID,
+                    "capability_version": "1.0",
+                    "arguments": {},
+                },
+            )
+            received = await connection_runtime.realtime.invoke(
                 envelope,
                 timeout=30.0,
             )
-        )
 
-        assert received == output
-        received_item = received["data"]["$f7t_media"]["items"][0]
-        assert len(base64.b64decode(received_item["data_base64"], validate=True)) == len(raw)
-        assert received_item["sha256"] == hashlib.sha256(raw).hexdigest()
+            assert received == output
+            received_item = received["data"]["$f7t_media"]["items"][0]
+            assert len(
+                base64.b64decode(received_item["data_base64"], validate=True)
+            ) == len(raw)
+            assert received_item["sha256"] == hashlib.sha256(raw).hexdigest()
 
-        durable = ledger.get(
-            client_id=client_id,
-            principal_id=owner_id,
-            invocation_id=invocation_id,
-        )
-        assert durable is not None
-        assert durable.state is ClientInvocationLedgerState.TERMINAL
-        assert durable.terminal_type == "result"
-        assert durable.terminal_payload == {"output": output}
-    finally:
-        client.stop()
-        server.should_exit = True
-        thread.join(timeout=5)
+            durable = ledger.get(
+                client_id=client_id,
+                principal_id=owner_id,
+                invocation_id=invocation_id,
+            )
+            assert durable is not None
+            assert durable.state is ClientInvocationLedgerState.TERMINAL
+            assert durable.terminal_type == "result"
+            assert durable.terminal_payload == {"output": output}
+        finally:
+            await asyncio.to_thread(client.stop)
+            await _stop_realtime_gateway(server, server_task)
 
+    asyncio.run(scenario())
