@@ -14,6 +14,10 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 import se.src.infrastructure.storage.core.unit_of_work  # noqa: F401
 from se.src.application.assets.tool_generated_media import (
     EMPTY_F7T_ENROLLMENT,
+    F7T_A1_ENROLLMENT,
+    F7T_A1_MAX_MEDIA_ITEMS,
+    F7T_A1_MEDIA_KIND,
+    F7T_A1_MIME_TYPES,
     F7T_INLINE_BASE64_V1,
     ToolGeneratedMediaAmbiguousError,
     ToolGeneratedMediaCanonicalizer,
@@ -204,7 +208,13 @@ async def _seed(
         await uow.commit()
 
 
-def _canonicalizer(sessions, asset_service, enrollment=None):
+def _canonicalizer(
+    sessions,
+    asset_service,
+    enrollment=None,
+    *,
+    max_media_bytes=1024 * 1024,
+):
     return ToolGeneratedMediaCanonicalizer(
         uow_factory=lambda: _Uow(sessions),
         asset_service=asset_service,
@@ -213,7 +223,7 @@ def _canonicalizer(sessions, asset_service, enrollment=None):
             if enrollment is None
             else enrollment
         ),
-        max_media_bytes=1024 * 1024,
+        max_media_bytes=max_media_bytes,
     )
 
 
@@ -261,6 +271,151 @@ def test_f7_t_schema_and_deterministic_identity_contract():
     assert 'revision: str = "27a_cas_f7_t_tool_media_projection"' in migration
     assert 'down_revision: Union[str, None] = "26a_ubq2_dual_accounting_bridge"' in migration
     assert "Cannot downgrade CAS-F7-T while durable tool-media projections exist." in migration
+
+
+def test_a1_enrollment_and_media_policy_are_exact_and_immutable():
+    assert dict(F7T_A1_ENROLLMENT) == {
+        ("desktop.screenshot", "1.0"): F7T_INLINE_BASE64_V1
+    }
+    assert F7T_A1_MAX_MEDIA_ITEMS == 8
+    assert F7T_A1_MEDIA_KIND == "image"
+    assert F7T_A1_MIME_TYPES == frozenset(
+        {"image/png", "image/jpeg", "image/webp"}
+    )
+    with pytest.raises(TypeError):
+        F7T_A1_ENROLLMENT[("desktop.screenshot", "2.0")] = (
+            F7T_INLINE_BASE64_V1
+        )
+
+
+@pytest.mark.asyncio
+async def test_a1_exact_screenshot_tuple_canonicalizes(tmp_path):
+    engine, sessions = await _database(tmp_path)
+    asset_service = _AssetService()
+    try:
+        await _seed(
+            sessions,
+            result_capability_id="desktop.screenshot",
+            invocation_capability_id="desktop.screenshot",
+            capability_version="1.0",
+        )
+        result = await _canonicalizer(
+            sessions,
+            asset_service,
+            F7T_A1_ENROLLMENT,
+        ).canonicalize_committed_result(source_result_id="result-1")
+        assert len(result) == 1
+        assert result[0].state == "READY"
+        assert len(asset_service.calls) == 1
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("media_kind", "video"),
+        ("mime_type", "IMAGE/PNG"),
+        ("mime_type", "image/gif"),
+    ],
+)
+async def test_a1_rejects_non_image_or_non_allowlisted_mime_before_ingest(
+    tmp_path,
+    field,
+    value,
+):
+    output = _tool_output()
+    output["data"]["$f7t_media"]["items"][0][field] = value
+    engine, sessions = await _database(tmp_path)
+    asset_service = _AssetService()
+    try:
+        await _seed(
+            sessions,
+            output=output,
+            result_capability_id="desktop.screenshot",
+            invocation_capability_id="desktop.screenshot",
+            capability_version="1.0",
+        )
+        with pytest.raises(ToolGeneratedMediaRejectedError):
+            await _canonicalizer(
+                sessions,
+                asset_service,
+                F7T_A1_ENROLLMENT,
+            ).canonicalize_committed_result(source_result_id="result-1")
+        assert asset_service.calls == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a1_rejects_more_than_eight_items_before_ingest(tmp_path):
+    output = _tool_output(b"x")
+    template = output["data"]["$f7t_media"]["items"][0]
+    output["data"]["$f7t_media"]["items"] = [
+        {**copy.deepcopy(template), "ordinal": ordinal}
+        for ordinal in range(F7T_A1_MAX_MEDIA_ITEMS + 1)
+    ]
+    engine, sessions = await _database(tmp_path)
+    asset_service = _AssetService()
+    try:
+        await _seed(
+            sessions,
+            output=output,
+            result_capability_id="desktop.screenshot",
+            invocation_capability_id="desktop.screenshot",
+            capability_version="1.0",
+        )
+        with pytest.raises(
+            ToolGeneratedMediaRejectedError,
+            match="item count exceeds bound",
+        ):
+            await _canonicalizer(
+                sessions,
+                asset_service,
+                F7T_A1_ENROLLMENT,
+            ).canonicalize_committed_result(source_result_id="result-1")
+        assert asset_service.calls == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_a1_aggregate_byte_bound_fails_before_first_ingest(tmp_path):
+    payload = b"123456"
+    output = _tool_output(payload)
+    first = output["data"]["$f7t_media"]["items"][0]
+    output["data"]["$f7t_media"]["items"] = [
+        {**copy.deepcopy(first), "ordinal": 0},
+        {
+            **copy.deepcopy(first),
+            "ordinal": 1,
+            "filename": "generated-2.png",
+        },
+    ]
+    engine, sessions = await _database(tmp_path)
+    asset_service = _AssetService()
+    try:
+        await _seed(
+            sessions,
+            output=output,
+            result_capability_id="desktop.screenshot",
+            invocation_capability_id="desktop.screenshot",
+            capability_version="1.0",
+        )
+        with pytest.raises(
+            ToolGeneratedMediaRejectedError,
+            match="aggregate media exceeds byte bound",
+        ):
+            await _canonicalizer(
+                sessions,
+                asset_service,
+                F7T_A1_ENROLLMENT,
+                max_media_bytes=10,
+            ).canonicalize_committed_result(source_result_id="result-1")
+        assert asset_service.calls == []
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

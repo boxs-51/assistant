@@ -28,6 +28,14 @@ from ...infrastructure.storage.models.sql.chat_data.session import Session
 
 F7T_INLINE_BASE64_V1 = "F7T_INLINE_BASE64_V1"
 EMPTY_F7T_ENROLLMENT: Mapping[tuple[str, str], str] = MappingProxyType({})
+F7T_A1_ENROLLMENT: Mapping[tuple[str, str], str] = MappingProxyType(
+    {("desktop.screenshot", "1.0"): F7T_INLINE_BASE64_V1}
+)
+F7T_A1_MAX_MEDIA_ITEMS = 8
+F7T_A1_MEDIA_KIND = "image"
+F7T_A1_MIME_TYPES = frozenset(
+    {"image/png", "image/jpeg", "image/webp"}
+)
 
 
 class ToolGeneratedMediaRejectedError(ValueError):
@@ -143,8 +151,11 @@ def _decode_media_items(
     items = media["items"]
     if not isinstance(items, list) or not items:
         raise ToolGeneratedMediaRejectedError("F7-T media items must be non-empty")
+    if len(items) > F7T_A1_MAX_MEDIA_ITEMS:
+        raise ToolGeneratedMediaRejectedError("F7-T media item count exceeds bound")
 
     decoded: list[ToolMediaItem] = []
+    aggregate_decoded_bytes = 0
     expected_keys = {
         "ordinal",
         "media_kind",
@@ -166,6 +177,17 @@ def _decode_media_items(
         mime_type = _canonical_string(
             "mime_type", item["mime_type"], max_length=255
         )
+        if media_kind != F7T_A1_MEDIA_KIND:
+            raise ToolGeneratedMediaRejectedError(
+                "F7-T media kind is not admitted"
+            )
+        if (
+            mime_type != mime_type.lower()
+            or mime_type not in F7T_A1_MIME_TYPES
+        ):
+            raise ToolGeneratedMediaRejectedError(
+                "F7-T MIME type is not admitted"
+            )
         filename = _canonical_string(
             "filename", item["filename"], max_length=1024
         )
@@ -205,6 +227,11 @@ def _decode_media_items(
             raise ToolGeneratedMediaRejectedError("size_bytes mismatch")
         if hashlib.sha256(payload).hexdigest() != digest:
             raise ToolGeneratedMediaRejectedError("sha256 mismatch")
+        aggregate_decoded_bytes += len(payload)
+        if aggregate_decoded_bytes > max_media_bytes:
+            raise ToolGeneratedMediaRejectedError(
+                "F7-T aggregate media exceeds byte bound"
+            )
         decoded.append(
             ToolMediaItem(
                 ordinal=index,
@@ -220,10 +247,10 @@ def _decode_media_items(
 
 
 class ToolGeneratedMediaCanonicalizer:
-    """Persistence-only CAS-F7-T infrastructure.
+    """Canonicalize admitted durable tool-generated media into CAS assets.
 
-    The production default enrollment is intentionally empty. This class is not
-    wired into Agent execution by this slice.
+    Enrollment is explicit and immutable. The default remains empty so callers
+    must opt into a frozen producer tuple instead of inferring media authority.
     """
 
     def __init__(

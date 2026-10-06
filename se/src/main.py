@@ -66,6 +66,10 @@ from .transport.gateway.api.v1 import (
 )
 from .application.container import ApplicationContainer
 from .application.assets import AssetService
+from .application.assets.tool_generated_media import (
+    F7T_A1_ENROLLMENT,
+    ToolGeneratedMediaCanonicalizer,
+)
 from .application.messages import CanonicalMessageService
 from .application.user_budget import (
     DualAccountingSettings,
@@ -965,6 +969,15 @@ async def bootstrap_runtime_kernel(
             driver=asset_storage_driver,
         )
 
+    f7t_canonicalizer = None
+    if asset_service is not None:
+        f7t_canonicalizer = ToolGeneratedMediaCanonicalizer(
+            uow_factory=eventing_manager.uow_factory,
+            asset_service=asset_service,
+            enrollment=F7T_A1_ENROLLMENT,
+            max_media_bytes=config.assets.max_upload_bytes,
+        )
+
     message_service = CanonicalMessageService(uow_factory)
 
     # 1. Tạo ApplicationContainer trước
@@ -1134,6 +1147,7 @@ async def bootstrap_runtime_kernel(
         durable_store=container.agent_durable_store,
         event_publisher=EventBusAgentEventPublisher(container.event_bus),
         task_budget_service=container.task_budget_service,
+        f7t_canonicalizer=f7t_canonicalizer,
     )
     builtin_support = register_builtin_support(container)
     container.multi_agent_coordinator.agent_authorizer = (
@@ -1339,6 +1353,9 @@ async def lifespan(app: FastAPI):
 
         if container.agent_execution_supervisor:
             await container.agent_execution_supervisor.quiesce()
+
+        if container.agent_runtime:
+            await container.agent_runtime.quiesce_f7t_publication()
 
         await eventing_manager.quiesce()
 
