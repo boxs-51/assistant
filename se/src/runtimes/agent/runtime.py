@@ -57,6 +57,7 @@ from .contracts.resume import (
 from .persistence import ExecutionConflictError
 from .resume_claim import ResumeActivationError
 from .state_machine import AgentExecutionStateMachine
+from .selection import ensure_selected_tool_calls
 from .wait_policy import (
     ConfiguredExecutionWaitPolicy,
     ExecutionWaitPolicy,
@@ -2396,6 +2397,10 @@ class AgentRuntime:
                         usage=context.usage,
                     )
 
+                ensure_selected_tool_calls(
+                    [item.name for item in snapshot.tools],
+                    [tool_call.name for tool_call in response.message.tool_calls],
+                )
                 record.state = transition(record.state, AgentLoopState.TOOL_CALLING)
                 tool_requests = [
                     ToolExecutionRequest(
