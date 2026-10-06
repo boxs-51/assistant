@@ -66,7 +66,7 @@ def test_tbo0_binds_current_task_status_and_persistence_surface() -> None:
 
     assert 'WAITING_FOR_CONNECTION = "WAITING"' in domain
     assert 'if values.get("status") == "WAITING_FOR_CONNECTION":' in domain
-    assert "values.setdefault("wait_reasons", ["CONNECTION"])" in domain
+    assert 'values.setdefault("wait_reasons", ["CONNECTION"])' in domain
 
     for field in (
         "session_id:",
