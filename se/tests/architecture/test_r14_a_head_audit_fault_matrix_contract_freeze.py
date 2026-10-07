@@ -214,7 +214,7 @@ def test_r14a_preserves_r13_ci_and_cross_track_authority_fences() -> None:
         "R14 may not derive #156 sandbox authority",
         "Each later stage requires a fresh current-main audit and its own PRE-CLAIM.",
     ):
-        assert phrase in contract
+        assert phrase in semantic_contract
 
     assert "R14-B  exact remote pre-side-effect gap closure proposal" in contract
     assert "R14-C  HITL real integration/E2E gap closure proposal" in contract
