@@ -47,6 +47,7 @@ class CapabilityInvocationRecord(Base):
         server_default="UNKNOWN",
     )
     request_fingerprint: Mapped[str | None] = mapped_column(String(64))
+    target_json: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     owner_user_id: Mapped[str | None] = mapped_column(
         String(255),
         index=True,
