@@ -22,18 +22,19 @@ def test_r13a_roadmap_defines_compatibility_cleanup_and_evidence_gate() -> None:
     assert "Compatibility removal is backed by migration tests/telemetry." in roadmap
 
 
-def test_r13a_freezes_legacy_waiting_role_split_without_removing_it() -> None:
+def test_r13a_freezes_waiting_role_split_after_server_raw_retirement() -> None:
     schema = _text("se/src/domain/schemas/agent_execution.py")
     gateway = _text("cl/src/core/gateway_client.py")
     runtime = _text("se/src/runtimes/agent/runtime.py")
     workflow = _text("se/src/runtimes/workflow/runtime.py")
 
-    # R13-D2 retires dead Python enum source aliases while preserving the
-    # raw legacy-input compatibility boundary frozen by R13-A.
+    # R13-D2 retires dead Python enum source aliases; R13-D3 additionally
+    # retires server-side raw legacy-state normalization. Client wire aliases
+    # remain a separately retained compatibility boundary.
     assert 'WAITING_AGENT = "WAITING"' not in schema
     assert 'WAITING_FOR_CONNECTION = "WAITING"' not in schema
-    assert "_LEGACY_WAITING_STATES" in schema
-    assert '"WAITING_FOR_CONNECTION": AgentExecutionWaitReason.CONNECTION' in schema
+    assert "_LEGACY_WAITING_STATES" not in schema
+    assert '"WAITING_FOR_CONNECTION": AgentExecutionWaitReason.CONNECTION' not in schema
 
     assert "_LEGACY_WAIT_REASONS" in gateway
     assert '"WAITING_FOR_CONNECTION": "CONNECTION"' in gateway
