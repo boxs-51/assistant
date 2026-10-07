@@ -2397,10 +2397,15 @@ class AgentRuntime:
                         usage=context.usage,
                     )
 
-                ensure_selected_tool_calls(
-                    [item.name for item in snapshot.tools],
-                    [tool_call.name for tool_call in response.message.tool_calls],
-                )
+                # Canonical assembler snapshots always carry capability_ids,
+                # including [] for the DCS zero-tool fast path. Legacy synthetic
+                # context builders may predate both Tool definitions and assembly
+                # metadata; preserve only that unmarked compatibility shape.
+                if snapshot.tools or "capability_ids" in snapshot.metadata:
+                    ensure_selected_tool_calls(
+                        [item.name for item in snapshot.tools],
+                        [tool_call.name for tool_call in response.message.tool_calls],
+                    )
                 record.state = transition(record.state, AgentLoopState.TOOL_CALLING)
                 tool_requests = [
                     ToolExecutionRequest(
