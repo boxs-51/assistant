@@ -2,6 +2,8 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from datetime import datetime, timezone
 import uuid
 from .....application.container import ApplicationContainer
+from .....context.memory import MemoryRecord
+from .....context.source_identity import ContextSourceKind, ContextSourceRef
 from .....domain.schemas.capability import SessionMessageEditRequest, SessionRegenerateRequest
 from .....domain.schemas.identity import Identity
 from .....domain.schemas.message import (
@@ -65,6 +67,42 @@ async def get_session(session_id: str, identity: Identity = Depends(get_current_
 async def list_session_messages(session_id: str, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
     _, messages = await _owned_session(container, session_id, identity)
     return [_message(item) for item in messages]
+
+
+@router.post(
+    "/{session_id}/memory/promotions/tool-response",
+    response_model=MemoryRecord,
+)
+async def promote_tool_response_payload_memory_for_session(
+    session_id: str,
+    source_ref: ContextSourceRef,
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
+) -> MemoryRecord:
+    principal = str(identity.user_id or "").strip()
+    if not principal:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Authenticated user identity is required for Memory promotion.",
+        )
+
+    await _owned_session(container, session_id, identity)
+
+    if source_ref.source_kind is not ContextSourceKind.TOOL_RESPONSE_PAYLOAD:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Only TOOL_RESPONSE_PAYLOAD sources may be promoted to Memory.",
+        )
+    if source_ref.session_id != session_id:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Promotion source session does not match the requested session.",
+        )
+
+    return await container.storage.promote_tool_response_payload_memory(
+        source_ref=source_ref,
+        owner_user_id=principal,
+    )
 
 
 @router.delete("/{session_id}", status_code=status.HTTP_204_NO_CONTENT)
