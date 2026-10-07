@@ -73,7 +73,6 @@ def test_r11_f1c_fresh_tool_call_rejects_existing_invocation_before_insert():
 def test_r11_f1c_checkpoint_parent_lineage_is_proven_before_transcript_write():
     helper = inspect.getsource(validate_checkpoint_parent_lineage_in_uow)
     stage = inspect.getsource(stage_waiting_checkpoint)
-    legacy = inspect.getsource(DurableAgentStore.materialize_legacy_checkpoint)
 
     for phrase in (
         "parent.execution_id != execution.id",
@@ -89,11 +88,13 @@ def test_r11_f1c_checkpoint_parent_lineage_is_proven_before_transcript_write():
         "write_transcript_representation_in_uow"
     )
 
-    assert "validate_checkpoint_parent_lineage_in_uow" in legacy
-    assert legacy.index("validate_checkpoint_parent_lineage_in_uow") < legacy.index(
-        "write_transcript_representation_in_uow"
+
+def test_r13_c1_legacy_checkpoint_materializer_is_not_reintroduced():
+    assert not hasattr(DurableAgentStore, "materialize_legacy_checkpoint")
+    assert not hasattr(
+        DurableAgentStore,
+        "materialize_legacy_waiting_for_client",
     )
-    assert "LEGACY_CHECKPOINT_UNSAFE" in legacy
 
 
 def test_r11_f1c_semantic_edge_contract_freezes_exact_baseline_and_boundaries():
