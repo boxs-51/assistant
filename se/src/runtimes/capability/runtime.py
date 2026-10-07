@@ -1308,18 +1308,32 @@ class CapabilityRuntime(BaseRuntime):
 
         request_metadata = dict(metadata or {})
         metadata_target = request_metadata.pop("target", None)
-        if target is not None and metadata_target is not None:
-            explicit_target = coerce_capability_target(target)
-            metadata_semantic_target = coerce_capability_target(metadata_target)
-            if explicit_target != metadata_semantic_target:
-                raise ValueError(
-                    "Explicit target does not match metadata['target']."
+        try:
+            if target is not None and metadata_target is not None:
+                explicit_target = coerce_capability_target(target)
+                metadata_semantic_target = coerce_capability_target(
+                    metadata_target
                 )
-            canonical_target = explicit_target
-        else:
-            canonical_target = coerce_capability_target(
-                target if target is not None else metadata_target
-            )
+                if explicit_target != metadata_semantic_target:
+                    raise ValueError(
+                        "Explicit target does not match metadata['target']."
+                    )
+                canonical_target = explicit_target
+            else:
+                canonical_target = coerce_capability_target(
+                    target if target is not None else metadata_target
+                )
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError(
+                code="CAPABILITY_INVALID_TARGET",
+                message=str(exc),
+                category="VALIDATION",
+                retryable=False,
+                safe_for_client=True,
+                cause_type=type(exc).__name__,
+                capability_id=capability_id,
+                invocation_id=invocation_id,
+            ) from exc
         effective_correlation_id = (
             correlation_id
             if correlation_id is not None
