@@ -9,12 +9,13 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import UniqueConstraint, text, update
+from sqlalchemy import CheckConstraint, UniqueConstraint, text, update
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.context.memory import (
     MemoryRecord,
+    MEMORY_SCOPE_USER_WIDE,
     MemoryRecordConflictError,
     create_memory_record,
 )
@@ -82,10 +83,12 @@ def _record(
     metadata=None,
     content=None,
     promotion_authority_id: str = "promotion-memory",
+    memory_scope=None,
 ):
     return create_memory_record(
         source_ref=source or _source(),
         promotion_authority_id=promotion_authority_id,
+        memory_scope=memory_scope,
         content={"fact": "alpha"} if content is None else content,
         metadata={"kind": "durable"} if metadata is None else metadata,
     )
@@ -138,6 +141,8 @@ def test_ctx_f5_2_sql_model_freezes_identity_and_replay_constraints():
     assert table.c.memory_id.primary_key is True
     assert table.c.memory_id.nullable is False
     assert table.c.promotion_authority_id.nullable is False
+    assert table.c.memory_scope.nullable is True
+    assert table.c.memory_scope.server_default is None
     assert table.c.source_ref_json.nullable is False
     assert table.c.content_json.nullable is False
     assert table.c.metadata_json.nullable is False
@@ -150,6 +155,64 @@ def test_ctx_f5_2_sql_model_freezes_identity_and_replay_constraints():
     assert uniques["uq_memory_records_promotion_authority"] == (
         "promotion_authority_id",
     )
+    checks = {
+        constraint.name: str(constraint.sqltext)
+        for constraint in table.constraints
+        if isinstance(constraint, CheckConstraint)
+    }
+    assert "memory_scope" in checks["ck_memory_records_scope"]
+    assert "USER_WIDE" in checks["ck_memory_records_scope"]
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3k_p1_round_trips_legacy_and_user_wide_scope():
+    engine, sessions = await _database()
+    try:
+        legacy = _record(promotion_authority_id="promotion-legacy")
+        explicit = _record(
+            promotion_authority_id="promotion-user-wide",
+            memory_scope=MEMORY_SCOPE_USER_WIDE,
+        )
+        assert legacy.memory_scope is None
+        assert explicit.memory_scope == MEMORY_SCOPE_USER_WIDE
+
+        async with sessions() as session:
+            repository = DurableMemoryRecordRepository(session)
+            await repository.put(legacy)
+            await repository.put(explicit)
+            await session.commit()
+
+        async with sessions() as session:
+            repository = DurableMemoryRecordRepository(session)
+            loaded_legacy = await repository.get(legacy.memory_id)
+            loaded_explicit = await repository.get(explicit.memory_id)
+            assert loaded_legacy is not None
+            assert loaded_explicit is not None
+            assert loaded_legacy.memory_scope is None
+            assert loaded_explicit.memory_scope == MEMORY_SCOPE_USER_WIDE
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3k_p1_scope_change_is_durable_replay_conflict():
+    engine, sessions = await _database()
+    try:
+        legacy = _record()
+        explicit = _record(memory_scope=MEMORY_SCOPE_USER_WIDE)
+        assert legacy.memory_id == explicit.memory_id
+
+        async with sessions() as session:
+            repository = DurableMemoryRecordRepository(session)
+            await repository.put(legacy)
+            await session.commit()
+
+        async with sessions() as session:
+            repository = DurableMemoryRecordRepository(session)
+            with pytest.raises(MemoryRecordConflictError, match="conflicting"):
+                await repository.put(explicit)
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
@@ -1011,3 +1074,104 @@ def test_ctx_f5_2_migration_is_linear_and_upgrades_downgrades_real_sqlite(
         assert "memory_records" not in tables
     finally:
         connection.close()
+
+
+def test_ctx_f5_3k_p1_migration_is_nullable_no_backfill_restrictive_and_reversible(
+    tmp_path,
+    monkeypatch,
+):
+    database = tmp_path / "ctx-f5-user-wide-memory-scope.sqlite3"
+    monkeypatch.setenv(
+        "ASSISTANT_ALEMBIC_DATABASE_URL",
+        f"sqlite+aiosqlite:///{database.as_posix()}",
+    )
+    config = _config(database)
+    revision = "30a_ctx_f5_user_wide_memory_scope"
+    previous = "29a_crt1_capability_invocation_target"
+    script = ScriptDirectory.from_config(config)
+
+    assert script.get_heads() == [revision]
+    assert script.get_revision(revision).down_revision == previous
+
+    command.upgrade(config, previous)
+    with sqlite3.connect(database) as connection:
+        before_columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(memory_records)")
+        }
+        assert "memory_scope" not in before_columns
+        connection.execute(
+            """
+            INSERT INTO memory_records (
+                memory_id,
+                promotion_authority_id,
+                memory_schema_version,
+                owner_user_id,
+                source_context_source_id,
+                source_ref_json,
+                content_digest,
+                canonical_bytes,
+                content_json,
+                metadata_json,
+                created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "1" * 64,
+                "promotion-legacy-migration",
+                1,
+                "user-legacy",
+                "2" * 64,
+                "{}",
+                "3" * 64,
+                0,
+                "null",
+                "{}",
+                "2026-09-25T00:00:00+00:00",
+            ),
+        )
+        connection.commit()
+
+    command.upgrade(config, revision)
+    with sqlite3.connect(database) as connection:
+        after_columns = {
+            row[1]: row
+            for row in connection.execute("PRAGMA table_info(memory_records)")
+        }
+        scope_column = after_columns["memory_scope"]
+        assert scope_column[3] == 0
+        assert scope_column[4] is None
+        stored = connection.execute(
+            "SELECT memory_id, content_digest, memory_scope "
+            "FROM memory_records WHERE memory_id = ?",
+            ("1" * 64,),
+        ).fetchone()
+        assert stored == ("1" * 64, "3" * 64, None)
+
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                "UPDATE memory_records SET memory_scope = 'AGENT_PRIVATE' "
+                "WHERE memory_id = ?",
+                ("1" * 64,),
+            )
+        connection.rollback()
+
+        connection.execute(
+            "UPDATE memory_records SET memory_scope = 'USER_WIDE' "
+            "WHERE memory_id = ?",
+            ("1" * 64,),
+        )
+        connection.commit()
+
+    command.downgrade(config, previous)
+    with sqlite3.connect(database) as connection:
+        downgraded_columns = {
+            row[1]
+            for row in connection.execute("PRAGMA table_info(memory_records)")
+        }
+        assert "memory_scope" not in downgraded_columns
+        stored = connection.execute(
+            "SELECT memory_id, content_digest FROM memory_records WHERE memory_id = ?",
+            ("1" * 64,),
+        ).fetchone()
+        assert stored == ("1" * 64, "3" * 64)
