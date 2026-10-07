@@ -141,11 +141,19 @@ class CapabilityDispatcher:
         capability_version = str(
             payload.get("capability_version") or local_version
         )
-        request_fingerprint = self._request_fingerprint(
-            capability_id,
-            capability_version,
-            arguments,
-        )
+        try:
+            canonical_target = self._canonical_target_payload(
+                payload.get("target")
+            )
+            request_fingerprint = self._request_fingerprint(
+                capability_id,
+                capability_version,
+                arguments,
+                canonical_target,
+            )
+        except (TypeError, ValueError):
+            self._emit_conflict(invocation_id, envelope)
+            return
         declared_fingerprint = payload.get("request_fingerprint")
         if capability_version != local_version or (
             declared_fingerprint is not None
@@ -682,17 +690,76 @@ class CapabilityDispatcher:
         )
 
     @staticmethod
+    def _canonical_target_payload(target):
+        if target is None:
+            return None
+        if not isinstance(target, dict):
+            raise TypeError("target must be an object")
+        required = {
+            "resource_scope",
+            "resource_ref",
+            "stable_client_id",
+            "fallback_policy",
+        }
+        if set(target) != required:
+            raise ValueError("target must use the canonical four-field shape")
+
+        resource_scope = target["resource_scope"]
+        fallback_policy = target["fallback_policy"]
+        if resource_scope not in {
+            "SANDBOX",
+            "CLIENT_LOCAL",
+            "ASSET",
+            "EXTERNAL",
+            "INTERNAL_TRUSTED",
+        }:
+            raise ValueError("unknown resource_scope")
+        if fallback_policy not in {
+            "NONE",
+            "SEMANTICALLY_EQUIVALENT_ONLY",
+        }:
+            raise ValueError("unknown fallback_policy")
+
+        resource_ref = target["resource_ref"]
+        stable_client_id = target["stable_client_id"]
+        for name, value in (
+            ("resource_ref", resource_ref),
+            ("stable_client_id", stable_client_id),
+        ):
+            if value is not None:
+                if (
+                    not isinstance(value, str)
+                    or not value
+                    or value != value.strip()
+                ):
+                    raise ValueError(f"{name} must be canonical")
+        if resource_scope == "CLIENT_LOCAL" and not stable_client_id:
+            raise ValueError("CLIENT_LOCAL requires stable_client_id")
+
+        return {
+            "resource_scope": resource_scope,
+            "resource_ref": resource_ref,
+            "stable_client_id": stable_client_id,
+            "fallback_policy": fallback_policy,
+        }
+
+    @staticmethod
     def _request_fingerprint(
         capability_id: str,
         capability_version: str,
         arguments: Dict[str, Any],
+        target=None,
     ) -> str:
+        payload = {
+            "capability_id": capability_id,
+            "capability_version": capability_version,
+            "arguments": dict(arguments),
+        }
+        canonical_target = CapabilityDispatcher._canonical_target_payload(target)
+        if canonical_target is not None:
+            payload["target"] = canonical_target
         encoded = json.dumps(
-            {
-                "capability_id": capability_id,
-                "capability_version": capability_version,
-                "arguments": dict(arguments),
-            },
+            payload,
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
