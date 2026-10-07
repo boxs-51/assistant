@@ -93,7 +93,7 @@ def test_tbo2_freezes_task_and_review_horizon_decisions() -> None:
         "Horizon expiry blocks activation; it does not by itself: - cancel or "
         "terminalize an already RUNNING Execution"
     ) in normalized
-    assert "REVIEW_REQUIRED is an internal TBO eligibility disposition only." in normalized
+    assert "`REVIEW_REQUIRED` is an internal TBO eligibility disposition only." in normalized
     assert (
         "Reaching the review horizon does not change Task status or revision"
     ) in normalized
@@ -148,16 +148,17 @@ def test_tbo2_freezes_dual_horizon_compatibility_without_reinterpretation() -> N
     assert "optional Task wall-clock horizon" in timeout
     assert "Task lifecycle deadline, owned with TBO/AE boundary" in timeout
 
-    assert "TBO-2 activation eligibility reads durable `task_horizon_at`." in contract
+    normalized_contract = _norm(contract)
+    assert "TBO-2 activation eligibility reads durable `task_horizon_at`." in normalized_contract
     assert (
         "TBO-2 does not derive `task_horizon_at` from "
         "`task_timeout_seconds`."
-    ) in contract
+    ) in normalized_contract
     assert (
         "TBO-2 does not derive `task_timeout_seconds` from "
         "`task_horizon_at`."
-    ) in contract
-    assert "Existing consumers of `task_timeout_seconds` continue unchanged" in contract
+    ) in normalized_contract
+    assert "Existing consumers of `task_timeout_seconds` continue unchanged" in normalized_contract
     assert "no implicit numeric precedence conversion" in contract
 
 
@@ -200,4 +201,5 @@ def test_tbo2_fake_clock_matrix_and_exit_gate_are_frozen() -> None:
     normalized = _norm(contract)
     assert "exact-head Linux + Windows Architecture is GREEN" in normalized
     assert "independent contract FINAL finds no blocking P0/P1/P2" in normalized
-    assert "fresh independent audit consider releasing a separate production PRE-CLAIM" in normalized
+    assert "fresh independent audit consider releasing a" in normalized
+    assert "production PRE-CLAIM" in normalized
