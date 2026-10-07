@@ -11,6 +11,7 @@ from .definition import (
     CapabilityIdempotency,
     CapabilityKind,
 )
+from .target import CapabilityInvocationTarget
 
 
 class CapabilityInvocationState(str, Enum):
@@ -69,6 +70,7 @@ class CapabilityInvocation(BaseModel):
     execution_mode: CapabilityExecutionMode
     idempotency: CapabilityIdempotency = CapabilityIdempotency.UNKNOWN
     request_fingerprint: str | None = None
+    target: CapabilityInvocationTarget | None = Field(default=None, frozen=True)
     owner_user_id: str | None = None
     origin_client_id: str | None = None
     remote_outcome_state: RemoteOutcomeState | None = None
