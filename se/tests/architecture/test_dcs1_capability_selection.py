@@ -2,7 +2,30 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import faulthandler
+import sys
+
 import pytest
+from _pytest.terminal import TerminalReporter
+
+
+# Temporary DCS-1 CI diagnostic instrumentation. This stays inside the
+# released focused-test path and does not change production behavior.
+_DCS1_ORIGINAL_LOGREPORT = TerminalReporter.pytest_runtest_logreport
+
+
+def _dcs1_diagnostic_logreport(self, report):
+    if report.failed:
+        sys.stderr.write(
+            f"\nDCS1_DIAG_FAILED when={report.when} nodeid={report.nodeid}\n"
+        )
+        sys.stderr.flush()
+    return _DCS1_ORIGINAL_LOGREPORT(self, report)
+
+
+TerminalReporter.pytest_runtest_logreport = _dcs1_diagnostic_logreport
+faulthandler.enable()
+faulthandler.dump_traceback_later(300, repeat=True)
 
 from se.src.domain.schemas.agent import AgentDefinition
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
