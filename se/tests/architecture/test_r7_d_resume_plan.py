@@ -816,3 +816,53 @@ async def test_r7_d_parallel_active_batch_requires_pending_or_committed_coverage
     assert raised.value.code == "CHECKPOINT_ACTIVE_BATCH_INCOMPLETE"
     assert "call-2" in str(raised.value)
     assert caps.reconcile_calls == 0
+
+@pytest.mark.asyncio
+async def test_r13_c1_resume_planning_does_not_invoke_legacy_materializer():
+    class LegacyTrapStore(_PlanStore):
+        def __init__(self):
+            super().__init__()
+            self.legacy_materializer_calls = 0
+
+        async def materialize_legacy_checkpoint(self, *args, **kwargs):
+            self.legacy_materializer_calls += 1
+            raise AssertionError("R13-C1 retired legacy materialization")
+
+    store = LegacyTrapStore()
+    caps = _CapabilityRuntime(_invocation())
+
+    plan = await _build(_service(store, caps))
+
+    assert plan.checkpoint_id == "cp-1"
+    assert store.legacy_materializer_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_r13_c1_resume_planning_requires_normalized_current_checkpoint():
+    class LegacyTrapStore(_PlanStore):
+        def __init__(self):
+            super().__init__()
+            self.execution.current_checkpoint_id = None
+            self.execution.context_state = {
+                "continuation": {
+                    "current_checkpoint_id": "cp-1",
+                    "checkpoints": {"cp-1": {"state": "WAITING"}},
+                }
+            }
+            self.legacy_materializer_calls = 0
+
+        async def materialize_legacy_checkpoint(self, *args, **kwargs):
+            self.legacy_materializer_calls += 1
+            raise AssertionError("R13-C1 retired legacy materialization")
+
+    store = LegacyTrapStore()
+    caps = _CapabilityRuntime(_invocation())
+
+    with pytest.raises(ResumePlanRejected) as raised:
+        await _build(_service(store, caps))
+
+    assert raised.value.code == "STALE_CHECKPOINT"
+    assert store.execution.current_checkpoint_id is None
+    assert store.legacy_materializer_calls == 0
+    assert caps.reconcile_calls == 0
+
