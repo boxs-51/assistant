@@ -128,6 +128,7 @@ def test_tbo3_freezes_continuation_dispositions_without_adding_states() -> None:
     task_schema = _read(TASK_SCHEMA)
     execution_schema = _read(EXECUTION_SCHEMA)
     contract = _read(DOC)
+    normalized = _norm(contract)
 
     assert "wait_reasons: List[str]" in task_schema
     assert 'RESOURCE = "RESOURCE"' in execution_schema
@@ -140,7 +141,7 @@ def test_tbo3_freezes_continuation_dispositions_without_adding_states() -> None:
         assert disposition in contract
 
     assert "is a TBO continuation disposition" in contract
-    assert "It is not a new AgentTaskStatus or AgentExecutionState." in contract
+    assert "It is not a new AgentTaskStatus or AgentExecutionState." in normalized
     assert "does not use Task" in contract
     assert "merely to encode an eligibility denial" in contract
 
@@ -158,8 +159,8 @@ def test_tbo3_preserves_ae_resource_waiting_as_external_authority() -> None:
     normalized = _norm(contract)
     assert "AgentExecutionWaitReason.RESOURCE" in normalized
     assert "Its existence is not TBO authority." in normalized
-    assert "only through AE-owned authority" in contract
-    assert "separately released AE/TBO bilateral production gate" in contract
+    assert "only through AE-owned authority" in normalized
+    assert "separately released AE/TBO bilateral production gate" in normalized
     assert "cannot create a checkpoint or ResumeClaim" in contract
     assert "There is no third implicit state-machine path." in contract
 
@@ -189,6 +190,7 @@ def test_tbo3_freezes_non_mutating_next_eligibility_contract() -> None:
 def test_tbo3_preserves_taskbudget_resource_demotion() -> None:
     budget = _read(TASK_BUDGET)
     contract = _read(DOC)
+    normalized = _norm(contract)
 
     assert "if self._user_tool_quota_enabled:" in budget
     assert "proposed = min(" in budget
@@ -196,7 +198,7 @@ def test_tbo3_preserves_taskbudget_resource_demotion() -> None:
     assert "UBQ-4 is the renewable resource authority." in budget
     assert "saturated compatibility counter" in budget
 
-    assert "must not restore renewable resource authority to TaskBudget" in contract
+    assert "must not restore renewable resource authority to TaskBudget" in normalized
     assert "TaskBudget compatibility counters" in contract
     assert "remain saturated/read-only for canonical UBQ resources" in contract
 
