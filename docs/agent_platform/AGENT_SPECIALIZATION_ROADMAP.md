@@ -115,9 +115,9 @@ C0-A freezes:
 
 ## 4. APR-C0-B — namespace registration
 
-HOLD while PR #277 owns `docs/ROADMAP_NAMESPACE_REGISTRY.md`.
+PR #277 / SKV2-C0 is LANDED and `docs/ROADMAP_NAMESPACE_REGISTRY.md` path ownership is released.
 
-After #277 releases that path:
+C0-B remains sequencing-HOLD only until APR-C0-A is LANDED / CANONICAL / HEALTHY. After that:
 - refresh canonical main;
 - create a one-path docs-only candidate;
 - register `APR-*`;
@@ -671,8 +671,8 @@ Recommended coordination order:
 
 ```text
 1. APR-C0-A docs
-2. PR #277/SKV2-C0 resolves registry ownership
-3. APR-C0-B namespace registration
+2. APR-C0-A canonical integration
+3. APR-C0-B namespace registration (registry ownership already released by landed PR #277/SKV2-C0)
 4. AIC-0 stable Agent-instance identity
 5. relevant #156/DCS foundations
 6. APR-P0
