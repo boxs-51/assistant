@@ -20,7 +20,10 @@ from se.src.runtimes.capability.contracts.target import (
     ResourceScope,
     canonical_target_payload,
 )
+from se.src.domain.schemas.identity import Identity
+from se.src.runtimes.capability.contracts.error import CapabilityError
 from se.src.runtimes.capability.fingerprint import capability_request_fingerprint
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.capability.policy import (
     CapabilityRequestContext,
     CapabilityRoutingPolicy,
@@ -260,3 +263,22 @@ def test_same_stable_client_new_connection_preserves_target_and_equivalent_fallb
             context=CapabilityRequestContext(target=no_fallback),
             excluded_implementation_ids=frozenset({"a-server"}),
         )
+
+@pytest.mark.asyncio
+async def test_malformed_metadata_target_is_safe_validation_error():
+    runtime = CapabilityRuntime()
+    with pytest.raises(CapabilityError) as exc_info:
+        await runtime.execute_capability(
+            "crt.echo",
+            {"value": "x"},
+            Identity(user_id="user-crt", auth_type="jwt"),
+            metadata={"target": "CLIENT_LOCAL"},
+        )
+
+    error = exc_info.value
+    assert error.code == "CAPABILITY_INVALID_TARGET"
+    assert error.category == "VALIDATION"
+    assert error.retryable is False
+    assert error.safe_for_client is True
+    assert error.cause_type == "TypeError"
+
