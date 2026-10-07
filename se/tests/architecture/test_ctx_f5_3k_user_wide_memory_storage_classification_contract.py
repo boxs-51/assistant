@@ -25,7 +25,7 @@ def _read(path: Path) -> str:
 
 
 def _normalized(path: Path) -> str:
-    return " ".join(_read(path).replace("\`", "").split())
+    return " ".join(_read(path).replace("`", "").split())
 
 
 def _class(source: str, name: str) -> ast.ClassDef:
