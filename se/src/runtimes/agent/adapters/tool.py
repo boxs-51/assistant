@@ -209,7 +209,13 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
 
         target = None
-        if request.capability_id in _SBX2_SANDBOX_CAPABILITY_IDS:
+        if (
+            request.capability_id in _SBX2_SANDBOX_CAPABILITY_IDS
+            and context.connection_id is None
+        ):
+            # SBX-2 owns only server-side file/glob routing. A connection-bound
+            # Agent call retains the pre-existing client-local routing path and
+            # must never silently fall back to the server sandbox.
             target = CapabilityInvocationTarget(
                 resource_scope=ResourceScope.SANDBOX,
                 resource_ref=context.execution_id,
