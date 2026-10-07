@@ -65,7 +65,13 @@ class SandboxManager:
             state=SandboxLeaseState.CREATED,
         )
         active = created.model_copy(update={"state": SandboxLeaseState.ACTIVE})
-        self._profiles[profile.profile_id] = profile
+        existing_profile = self._profiles.get(profile.profile_id)
+        if existing_profile is not None and existing_profile != profile:
+            self._remove_root(root)
+            raise SandboxError(
+                "sandbox profile_id is already bound to different semantics"
+            )
+        self._profiles.setdefault(profile.profile_id, profile)
         self._leases[sandbox_id] = active
         return active
 
