@@ -28,8 +28,10 @@ def test_r13a_freezes_legacy_waiting_role_split_without_removing_it() -> None:
     runtime = _text("se/src/runtimes/agent/runtime.py")
     workflow = _text("se/src/runtimes/workflow/runtime.py")
 
-    assert 'WAITING_AGENT = "WAITING"' in schema
-    assert 'WAITING_FOR_CONNECTION = "WAITING"' in schema
+    # R13-D2 retires dead Python enum source aliases while preserving the
+    # raw legacy-input compatibility boundary frozen by R13-A.
+    assert 'WAITING_AGENT = "WAITING"' not in schema
+    assert 'WAITING_FOR_CONNECTION = "WAITING"' not in schema
     assert "_LEGACY_WAITING_STATES" in schema
     assert '"WAITING_FOR_CONNECTION": AgentExecutionWaitReason.CONNECTION' in schema
 

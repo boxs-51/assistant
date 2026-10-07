@@ -12,10 +12,6 @@ class AgentExecutionState(str, Enum):
     CREATED = "CREATED"
     RUNNING = "RUNNING"
     WAITING = "WAITING"
-    # Source-compatible aliases.  They serialize to the canonical wire value
-    # and must not be used by runtime logic.
-    WAITING_AGENT = "WAITING"
-    WAITING_FOR_CONNECTION = "WAITING"
     COMPLETED = "COMPLETED"
     FAILED = "FAILED"
     CANCELLED = "CANCELLED"
