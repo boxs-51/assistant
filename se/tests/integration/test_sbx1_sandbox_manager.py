@@ -52,7 +52,7 @@ def test_acquire_binds_unique_execution_owned_roots_and_default_deny_profile(
 
     profile = manager.profile_for(first)
     assert profile.network.mode is SandboxNetworkMode.NONE
-    assert profile.secrets.deny_by_default is True
+    assert profile.secrets.mode.value == "NONE"
     assert profile.secrets.allowed_names == ()
 
 
