@@ -106,7 +106,8 @@ def test_r13h_pins_bounded_removals_without_reopening_external_authority() -> No
     assert '"CONNECTION_RECONNECT"' not in resume
 
     for owner in (
-        "AE-R6 through AE-R12",
+        "AE-R6",
+        "AE-R12",
         "CTX #15",
         "CAS #74",
         "#156",
