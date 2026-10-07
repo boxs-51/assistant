@@ -12,6 +12,10 @@ from ....runtimes.capability.contracts.definition import (
     CapabilityIdempotency,
     CapabilityKind,
 )
+from ....runtimes.capability.contracts.target import (
+    canonical_target_payload,
+    coerce_capability_target,
+)
 from ....runtimes.capability.contracts.invocation import (
     CapabilityInvocation,
     CapabilityInvocationAttempt,
@@ -189,6 +193,12 @@ class SqlCapabilityInvocationStore:
             if invocation.remote_outcome_state is not None
             else None
         )
+        values.pop("target", None)
+        values["target_json"] = (
+            canonical_target_payload(invocation.target)
+            if invocation.target is not None
+            else None
+        )
         for field in ("arguments", "output", "error"):
             values[field] = jsonable_encoder(values[field])
         return values
@@ -205,6 +215,7 @@ class SqlCapabilityInvocationStore:
             execution_mode=CapabilityExecutionMode(record.execution_mode),
             idempotency=CapabilityIdempotency(record.idempotency),
             request_fingerprint=record.request_fingerprint,
+            target=coerce_capability_target(record.target_json),
             owner_user_id=record.owner_user_id,
             origin_client_id=record.origin_client_id,
             remote_outcome_state=(
