@@ -720,7 +720,7 @@ This specialization roadmap was re-anchored after the material roadmap/dependenc
 
 ```text
 exact revalidation main = b51f32ed3b67367bad74a3fb298b7448899ad631
-current-main Architecture = #2301 / 37627365451 = GREEN/GREEN
+current-main Architecture run 37629309626 = IN_PROGRESS at replacement creation; exact-new-main health gate remains OPEN until GREEN/GREEN
 prior APR-C0-A candidate = PR #280@ef6e4704855c035059bc463ebe8b34d8d0c5f447 (historical FINAL only)
 replacement class = EXACT 2 docs / ZERO production-runtime-schema-migration-test delta
 ```
