@@ -67,6 +67,46 @@ from .wait_policy import (
 logger = structlog.get_logger(__name__)
 
 
+def _tbo3_inference_resource_exhaustion_types() -> tuple[type[BaseException], ...]:
+    # Import UBQ authorities lazily. AgentRuntime is imported by fresh-process
+    # architecture/load tests before the complete SQL model registry is
+    # necessarily assembled; eager application-quota imports would register
+    # UBQ SQL models too early and make Base.metadata.create_all order-dependent.
+    from ...application.user_inference_quota import (
+        UserComputeQuotaExceededError,
+        UserCostQuotaExceededError,
+        UserInferenceQuotaExceededError,
+        UserTokenQuotaExceededError,
+    )
+
+    return (
+        UserInferenceQuotaExceededError,
+        UserTokenQuotaExceededError,
+        UserComputeQuotaExceededError,
+        UserCostQuotaExceededError,
+    )
+
+
+def _tbo3_task_tool_resource_exhaustion_codes() -> frozenset[str]:
+    from ...application.user_tool_quota import UserToolQuotaExceededError
+
+    return frozenset({UserToolQuotaExceededError.code})
+
+
+def _tbo3_pre_dispatch_tool_quota_codes() -> frozenset[str]:
+    from ...application.user_tool_quota import (
+        UserToolCapabilityQuotaExceededError,
+        UserToolQuotaExceededError,
+    )
+
+    return frozenset(
+        {
+            UserToolQuotaExceededError.code,
+            UserToolCapabilityQuotaExceededError.code,
+        }
+    )
+
+
 class ExecutionWaitExpiredError(ExecutionConflictError):
     """A durable WAITING execution reached its wall-clock expiry."""
 
@@ -174,6 +214,107 @@ class AgentRuntime:
         return (
             context.task_id is not None
             and self._task_budget_service is not None
+        )
+
+    def _is_tbo3_inference_resource_exhaustion(
+        self,
+        context: AgentExecutionContext,
+        exc: BaseException,
+    ) -> bool:
+        return (
+            self._uses_task_budget(context)
+            and isinstance(exc, _tbo3_inference_resource_exhaustion_types())
+        )
+
+    async def _is_tbo3_trusted_pre_dispatch_tool_quota_result(
+        self,
+        context: AgentExecutionContext,
+        result: ToolExecutionResult,
+    ) -> bool:
+        if (
+            not self._uses_task_budget(context)
+            or result.error_code not in _tbo3_pre_dispatch_tool_quota_codes()
+            or self._durable_store is None
+        ):
+            return False
+
+        # Canonical UBQ tool admission happens before CapabilityInvocation
+        # creation. Prove that durable absence rather than trusting a public
+        # error-code spelling that a post-dispatch driver could collide with.
+        uow_factory = getattr(self._durable_store, "uow_factory", None)
+        if not callable(uow_factory):
+            return False
+        async with uow_factory() as uow:
+            repository = getattr(uow, "capability_invocations", None)
+            getter = getattr(repository, "get_record", None)
+            if not callable(getter):
+                return False
+            invocation = await getter(result.invocation_id)
+            return invocation is None
+
+    def _is_tbo3_task_tool_resource_exhaustion(
+        self,
+        context: AgentExecutionContext,
+        result: ToolExecutionResult,
+    ) -> bool:
+        return (
+            self._uses_task_budget(context)
+            and result.error_code
+            in _tbo3_task_tool_resource_exhaustion_codes()
+            and dict(result.metadata).get("r7_commit_authority")
+            == "AGENT_PRE_DISPATCH"
+        )
+
+    async def _defer_tbo3_task_resource_exhaustion(
+        self,
+        context: AgentExecutionContext,
+        *,
+        record: AgentIteration | None,
+        iterations: Sequence[AgentIteration],
+        transcript: Sequence[InferenceMessage],
+        error_code: str,
+        error_message: str,
+        last_tool_results: Sequence[ToolExecutionResult] = (),
+    ) -> AgentExecutionResult:
+        # TBO-3 only selects the already-canonical AE WAITING publication
+        # boundary. It does not acquire ResumeClaim, wakeup, or quota authority.
+        context.waiting_checkpoint_transcript = [
+            item.model_dump(mode="json") for item in transcript
+        ]
+        context.waiting_pending_invocations = []
+        context.waiting_origin_connection_id = None
+
+        if record is not None and record.state not in {
+            AgentLoopState.COMPLETED,
+            AgentLoopState.CANCELLED,
+            AgentLoopState.TIMEOUT,
+            AgentLoopState.FAILED,
+        }:
+            record.close(
+                AgentLoopState.FAILED,
+                error_code=error_code,
+            )
+            await self._persist_iteration(record)
+            await self._publish(
+                AgentEventName.ITERATION_COMPLETED,
+                context,
+                iteration=record.iteration,
+                payload={
+                    "state": record.state.value,
+                    "error_code": error_code,
+                },
+            )
+
+        return AgentExecutionResult(
+            execution_id=context.execution_id,
+            agent_id=context.agent_id,
+            state=AgentLoopState.WAITING,
+            wait_reason=AgentExecutionWaitReason.RESOURCE,
+            iterations=tuple(iterations),
+            last_tool_results=tuple(last_tool_results),
+            usage=context.usage,
+            error_code=error_code,
+            error_message=error_message,
         )
 
     @staticmethod
@@ -2547,6 +2688,28 @@ class AgentRuntime:
                 latest_tool_results = tuple(
                     _order_tool_results(tool_requests, raw_tool_results)
                 )
+                # UBQ tool admission happens before CapabilityInvocation
+                # creation. Mark only its canonical quota denials as the
+                # existing R7 pre-dispatch commit authority so they become
+                # durable AgentToolResult truth instead of provisional remote
+                # outcomes. Capability-specific exhaustion remains a local
+                # failed tool result; only total exhaustion defers the Task.
+                provenance_bound_results: list[ToolExecutionResult] = []
+                for item in latest_tool_results:
+                    if await self._is_tbo3_trusted_pre_dispatch_tool_quota_result(
+                        context,
+                        item,
+                    ):
+                        item = item.model_copy(
+                            update={
+                                "metadata": {
+                                    **dict(item.metadata),
+                                    "r7_commit_authority": "AGENT_PRE_DISPATCH",
+                                }
+                            }
+                        )
+                    provenance_bound_results.append(item)
+                latest_tool_results = tuple(provenance_bound_results)
                 committed_batch: list[ToolExecutionResult] = []
                 uncommitted_tool_call_ids: set[str] = set()
                 for request, result in zip(tool_requests, latest_tool_results):
@@ -2671,6 +2834,38 @@ class AgentRuntime:
                 latest_tool_results = tuple(
                     _order_tool_results(tool_requests, committed_batch)
                 )
+
+                resource_denial = next(
+                    (
+                        item
+                        for item in latest_tool_results
+                        if self._is_tbo3_task_tool_resource_exhaustion(
+                            context,
+                            item,
+                        )
+                    ),
+                    None,
+                )
+                if resource_denial is not None:
+                    # Every result in this batch is committed before TBO-3
+                    # freezes the transcript. No denied logical invocation is
+                    # converted into an R7 pending-replay entry.
+                    transcript.extend(
+                        _tool_results_to_messages(latest_tool_results)
+                    )
+                    total_usage = context.usage
+                    return await self._defer_tbo3_task_resource_exhaustion(
+                        context,
+                        record=record,
+                        iterations=iterations,
+                        transcript=transcript,
+                        error_code=str(resource_denial.error_code),
+                        error_message=(
+                            resource_denial.error_message
+                            or str(resource_denial.error_code)
+                        ),
+                        last_tool_results=latest_tool_results,
+                    )
 
                 # ToolExecutionAdapter may update context.usage with per-tool
                 # accounting. Context is authoritative after the tool batch.
@@ -2854,6 +3049,19 @@ class AgentRuntime:
                 failure_domain = getattr(exc, "failure_domain", None) or "AGENT"
                 retryable = bool(getattr(exc, "retryable", False))
                 record = iterations[-1] if iterations else None
+                if self._is_tbo3_inference_resource_exhaustion(
+                    context,
+                    exc,
+                ):
+                    return await self._defer_tbo3_task_resource_exhaustion(
+                        context,
+                        record=record,
+                        iterations=iterations,
+                        transcript=transcript,
+                        error_code=str(error_code),
+                        error_message=str(exc),
+                        last_tool_results=latest_tool_results,
+                    )
                 if record is not None and record.state not in {
                     AgentLoopState.COMPLETED,
                     AgentLoopState.CANCELLED,
