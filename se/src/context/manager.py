@@ -5,6 +5,9 @@ import structlog
 import json
 from sqlalchemy.orm import selectinload
 
+from se.src.context.discovery import project_session_digest
+from se.src.context.search import ContextSearchResult, search_context_sources
+
 from ..domain.schemas.session import Session as SessionSchema
 from ..domain.schemas.context import ContextObject, Project, GatewayAttachment
 from ..domain.schemas.request import GatewayChatRequest, GatewayMessage
@@ -163,6 +166,52 @@ class ContextEngine:
                 session=session_schema,
                 accessible_files=accessible_files,
             )
+
+    async def _search_owner_wide_persisted_sessions(
+        self,
+        query: object,
+        identity: Identity,
+        *,
+        limit: int = 100,
+    ) -> ContextSearchResult:
+        """Search a bounded set of canonical persisted Sessions for one trusted owner."""
+
+        owner_user_id = identity.user_id
+        if (
+            not isinstance(owner_user_id, str)
+            or not owner_user_id.strip()
+            or owner_user_id != owner_user_id.strip()
+        ):
+            raise ValueError(
+                "owner-wide session search requires a normalized trusted user identity"
+            )
+        if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
+            raise ValueError("limit must be a positive integer")
+
+        bounded_limit = min(limit, 100)
+        async with self.uow_factory() as uow:
+            sessions = await uow.sessions.list_by_user_id(
+                owner_user_id,
+                limit=bounded_limit,
+            )
+            session_entries = []
+            for session in sessions:
+                if session.user_id != owner_user_id:
+                    raise ValueError("persisted session owner mismatch")
+                session_entries.append(
+                    (
+                        session,
+                        project_session_digest(
+                            session,
+                            title=session.title,
+                        ),
+                    )
+                )
+
+        return search_context_sources(
+            query,
+            sessions=session_entries,
+        )
 
     async def create_new_session(self, identity: Identity, project_id: Optional[str] = None) -> SessionSchema:
         """Tạo một session mới và lưu vào DB."""
