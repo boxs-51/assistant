@@ -159,7 +159,7 @@ def _reservation(connection, task_id: str, branch_id: str, fingerprint: str):
 def test_r8_b_remains_on_single_linear_migration_chain(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["27a_cas_f7_t_tool_media_projection"]
+    assert script.get_heads() == ["28a_tbo1_task_policy_representation"]
     assert (
         script.get_revision("21a_ctx_f5_memory_foundation").down_revision
         == "20a_cas_f5_binding_foundation"

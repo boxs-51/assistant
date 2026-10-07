@@ -23,6 +23,7 @@ from ...domain.schemas.multi_agent import (
     AgentTaskAggregateRequest,
     AgentTaskAggregateResponse,
     AgentTaskStatus,
+    TaskMode,
     TaskBranch,
 )
 from ...domain.schemas.agent_execution import (
@@ -87,6 +88,11 @@ class MultiAgentCoordinator:
     ) -> AgentTask:
         """Refresh the in-memory Task view from the durable CAS winner."""
         task.revision = int(getattr(record, "revision", task.revision))
+        task.task_mode = TaskMode(
+            str(getattr(record, "task_mode", task.task_mode.value))
+        )
+        task.task_horizon_at = getattr(record, "task_horizon_at", None)
+        task.review_horizon_at = getattr(record, "review_horizon_at", None)
         task.status = AgentTaskStatus(str(getattr(record, "status")))
         task.wait_reasons = list(
             getattr(record, "wait_reasons", None) or []
@@ -112,6 +118,9 @@ class MultiAgentCoordinator:
             parent_task_id=getattr(record, "parent_task_id", None),
             connection_id=getattr(record, "connection_id", None),
             client_id=getattr(record, "client_id", None),
+            task_mode=TaskMode(str(getattr(record, "task_mode", "FINITE"))),
+            task_horizon_at=getattr(record, "task_horizon_at", None),
+            review_horizon_at=getattr(record, "review_horizon_at", None),
             status=AgentTaskStatus(str(record.status)),
             wait_reasons=list(getattr(record, "wait_reasons", None) or []),
             input=dict(getattr(record, "input", None) or {}),
@@ -230,6 +239,9 @@ class MultiAgentCoordinator:
         parent_task_id: Optional[str] = None,
         connection_id: Optional[str] = None,
         client_id: Optional[str] = None,
+        task_mode: TaskMode = TaskMode.FINITE,
+        task_horizon_at: Optional[float] = None,
+        review_horizon_at: Optional[float] = None,
     ) -> AgentTask:
         session = self._require_session(session_id, identity)
         self._require_agent(assigned_agent_id, identity)
@@ -244,6 +256,9 @@ class MultiAgentCoordinator:
             parent_task_id=parent_task_id,
             connection_id=connection_id,
             client_id=client_id,
+            task_mode=task_mode,
+            task_horizon_at=task_horizon_at,
+            review_horizon_at=review_horizon_at,
             status=AgentTaskStatus.ASSIGNED,
             input=task_input,
             created_at=now,
@@ -266,6 +281,9 @@ class MultiAgentCoordinator:
             "parent_task_id": task.parent_task_id,
             "connection_id": task.connection_id,
             "client_id": task.client_id,
+            "task_mode": task.task_mode.value,
+            "task_horizon_at": task.task_horizon_at,
+            "review_horizon_at": task.review_horizon_at,
             "status": task.status.value,
             "wait_reasons": task.wait_reasons,
             "input": task.input,

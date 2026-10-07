@@ -22,6 +22,11 @@ class AgentTaskStatus(str, Enum):
     WAITING_FOR_CONNECTION = "WAITING"
 
 
+class TaskMode(str, Enum):
+    FINITE = "FINITE"
+    RECURRING = "RECURRING"
+
+
 class AgentMessageType(str, Enum):
     USER = "user.message"
     TASK_REQUEST = "task.request"
@@ -65,6 +70,9 @@ class AgentTask(GatewayBaseModel):
     parent_task_id: Optional[str] = None
     connection_id: Optional[str] = None
     client_id: Optional[str] = None
+    task_mode: TaskMode = TaskMode.FINITE
+    task_horizon_at: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    review_horizon_at: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
     status: AgentTaskStatus = AgentTaskStatus.CREATED
     wait_reasons: List[str] = Field(default_factory=list)
     input: Dict[str, Any] = Field(default_factory=dict)
@@ -130,6 +138,9 @@ class AgentTaskCreateRequest(GatewayBaseModel):
     input: Dict[str, Any] = Field(default_factory=dict)
     parent_task_id: Optional[str] = None
     connection_id: Optional[str] = None
+    task_mode: TaskMode = TaskMode.FINITE
+    task_horizon_at: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
+    review_horizon_at: Optional[float] = Field(default=None, ge=0, allow_inf_nan=False)
 
 
 class AgentTaskForkRequest(GatewayBaseModel):
