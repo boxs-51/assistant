@@ -42,7 +42,23 @@ from ...capability.contracts.error import (
 )
 from ...capability.contracts.invocation import ExistingInvocationContinuationMode
 from ...capability.contracts.implementation import CapabilityExecutionLocation
+from ...capability.contracts.target import (
+    CapabilityInvocationTarget,
+    ResourceScope,
+)
 from ...capability.catalog import CapabilityNotFoundError
+
+
+_SBX2_SANDBOX_CAPABILITY_IDS = frozenset(
+    {
+        "file.read",
+        "file.search",
+        "file.write",
+        "file.append",
+        "file.replace",
+        "glob.find",
+    }
+)
 
 
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
@@ -192,6 +208,13 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         if not await context.reserve_tool_call():
             return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
 
+        target = None
+        if request.capability_id in _SBX2_SANDBOX_CAPABILITY_IDS:
+            target = CapabilityInvocationTarget(
+                resource_scope=ResourceScope.SANDBOX,
+                resource_ref=context.execution_id,
+            )
+
         try:
             result = await self._capability_runtime.execute_capability(
                 capability_id=request.capability_id,
@@ -217,6 +240,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 workflow_id=context.workflow_id,
                 timeout_seconds=timeout,
                 cancellation_event=context.cancellation_event,
+                target=target,
                 metadata={
                     **context.metadata,
                     **request.metadata,
