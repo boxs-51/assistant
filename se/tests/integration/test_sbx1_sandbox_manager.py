@@ -8,9 +8,11 @@ import pytest
 from se.src.runtimes.capability.contracts.sandbox import (
     SandboxLeaseState,
     SandboxNetworkMode,
+    SandboxNetworkPolicy,
     SandboxProfile,
 )
 from se.src.runtimes.capability.sandbox import (
+    SandboxError,
     SandboxLeaseStateError,
     SandboxManager,
     SandboxPathError,
@@ -166,3 +168,36 @@ def test_destroy_from_active_performs_ordered_cleanup_idempotently(tmp_path):
     assert destroyed.state is SandboxLeaseState.DESTROYED
     assert not destroyed.root.exists()
     assert manager.destroy(destroyed) == destroyed
+
+def test_profile_id_conflict_fails_closed_without_substituting_existing_policy(
+    tmp_path,
+):
+    manager = _manager(tmp_path)
+    deny_profile = SandboxProfile(profile_id="shared-policy")
+    first = manager.acquire(
+        execution_id="exec-profile-a",
+        owner_user_id="user-profile",
+        profile=deny_profile,
+    )
+
+    conflicting = SandboxProfile(
+        profile_id="shared-policy",
+        network=SandboxNetworkPolicy(mode=SandboxNetworkMode.EGRESS),
+    )
+    with pytest.raises(SandboxError):
+        manager.acquire(
+            execution_id="exec-profile-b",
+            owner_user_id="user-profile",
+            profile=conflicting,
+        )
+
+    assert manager.profile_for(first) == deny_profile
+    assert manager.profile_for(first).network.mode is SandboxNetworkMode.NONE
+
+    equivalent = manager.acquire(
+        execution_id="exec-profile-c",
+        owner_user_id="user-profile",
+        profile=deny_profile.model_copy(),
+    )
+    assert manager.profile_for(equivalent) == deny_profile
+
