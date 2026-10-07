@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from se.src.runtimes.agent.contracts.inference import InferenceMessage
 from se.src.runtimes.agent.contracts.resume import (
     ResumeInvocationAction,
@@ -64,13 +66,16 @@ def _plan() -> ResumePlan:
     return replace(plan, plan_fingerprint=resume_plan_fingerprint(plan))
 
 
-def test_r7_f_trigger_vocabulary_normalizes_legacy_connection_spelling():
-    assert normalize_resume_trigger_type(
-        "CONNECTION_RECONNECT"
-    ) is ResumeTriggerType.CLIENT_RECONNECT
+def test_r7_f_trigger_vocabulary_rejects_legacy_connection_spelling():
+    with pytest.raises(ValueError):
+        normalize_resume_trigger_type("CONNECTION_RECONNECT")
+
     assert normalize_resume_trigger_type(
         ResumeTriggerType.CLIENT_RECONNECT
     ) is ResumeTriggerType.CLIENT_RECONNECT
+    assert normalize_resume_trigger_type(
+        "SERVER_RECOVERY"
+    ) is ResumeTriggerType.SERVER_RECOVERY
 
 
 def test_r7_f_plan_fingerprint_is_recomputable_and_semantic():
