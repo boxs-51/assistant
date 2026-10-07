@@ -12,6 +12,9 @@ from ....runtimes.capability.contracts.definition import (
     CapabilityIdempotency,
     CapabilityKind,
 )
+from ....runtimes.capability.contracts.target import (
+    canonical_capability_target_payload,
+)
 from ....runtimes.capability.contracts.invocation import (
     CapabilityInvocation,
     CapabilityInvocationAttempt,
@@ -175,8 +178,21 @@ class SqlCapabilityInvocationStore:
         self._uow_factory = uow_factory
 
     @staticmethod
-    def _values(invocation: CapabilityInvocation) -> dict:
+    def _target_payload(invocation: CapabilityInvocation) -> dict | None:
+        return canonical_capability_target_payload(invocation.target)
+
+    @classmethod
+    def _target_filter(cls, invocation: CapabilityInvocation):
+        payload = cls._target_payload(invocation)
+        if payload is None:
+            return CapabilityInvocationRecord.target_json.is_(None)
+        return CapabilityInvocationRecord.target_json == payload
+
+    @classmethod
+    def _values(cls, invocation: CapabilityInvocation) -> dict:
         values = invocation.model_dump(mode="python")
+        values.pop("target", None)
+        values["target_json"] = cls._target_payload(invocation)
         values["kind"] = invocation.kind.value
         values["execution_mode"] = invocation.execution_mode.value
         values["idempotency"] = invocation.idempotency.value
@@ -205,6 +221,7 @@ class SqlCapabilityInvocationStore:
             execution_mode=CapabilityExecutionMode(record.execution_mode),
             idempotency=CapabilityIdempotency(record.idempotency),
             request_fingerprint=record.request_fingerprint,
+            target=record.target_json,
             owner_user_id=record.owner_user_id,
             origin_client_id=record.origin_client_id,
             remote_outcome_state=(
@@ -331,6 +348,7 @@ class SqlCapabilityInvocationStore:
                 .where(
                     CapabilityInvocationRecord.invocation_id == invocation.invocation_id,
                     CapabilityInvocationRecord.revision == expected_revision,
+                    self._target_filter(invocation),
                 )
                 .values(**self._values(invocation))
             )
@@ -394,6 +412,7 @@ class SqlCapabilityInvocationStore:
                         CapabilityInvocationRecord.state
                         == CapabilityInvocationState.CREATED.value,
                         CapabilityInvocationRecord.attempt == 0,
+                        self._target_filter(invocation),
                     )
                     .values(**self._values(invocation))
                 )
@@ -442,6 +461,7 @@ class SqlCapabilityInvocationStore:
                     CapabilityInvocationRecord.state
                     == CapabilityInvocationState.DISPATCHING.value,
                     CapabilityInvocationRecord.attempt == 1,
+                    self._target_filter(invocation),
                 )
                 .values(**self._values(invocation))
             )
@@ -496,6 +516,7 @@ class SqlCapabilityInvocationStore:
                         == CapabilityInvocationState.WAITING.value,
                         CapabilityInvocationRecord.attempt
                         == expected_attempt,
+                        self._target_filter(invocation),
                     )
                     .values(**self._values(invocation))
                 )
@@ -573,6 +594,7 @@ class SqlCapabilityInvocationStore:
                     == CapabilityInvocationState.DISPATCHING.value,
                     CapabilityInvocationRecord.attempt
                     == invocation.attempt,
+                    self._target_filter(invocation),
                 )
                 .values(**self._values(invocation))
             )

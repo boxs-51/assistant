@@ -9,6 +9,10 @@ from ...kernel.base import BaseRuntime, HealthStatus, RuntimeContext, RuntimeMan
 from .registry import CapabilityRegistry, CapabilityState
 from .drivers.base import BaseCapabilityDriver
 from .contracts.context import CapabilityExecutionContext
+from .contracts.target import (
+    CapabilityInvocationTarget,
+    normalize_capability_target,
+)
 from .contracts.error import (
     CAPABILITY_CONTINUATION_ATTEMPT_CONFLICT,
     CAPABILITY_CONTINUATION_INVALID_STATE,
@@ -210,6 +214,7 @@ class CapabilityRuntime(BaseRuntime):
                 correlation_id=event.payload.get("correlation_id"),
                 trace_id=event.payload.get("trace_id"),
                 workflow_id=event.payload.get("workflow_id"),
+                target=event.payload.get("target"),
             )
 
             await self.event_bus.publish(BaseEvent(
@@ -493,6 +498,7 @@ class CapabilityRuntime(BaseRuntime):
             correlation_id=invocation.correlation_id,
             trace_id=invocation.trace_id,
             connection_id=target_connection_id,
+            target=invocation.target,
             workflow_id=invocation.workflow_id,
             attempt=invocation.attempt + 1,
             cancellation_event=cancellation_event,
@@ -650,6 +656,7 @@ class CapabilityRuntime(BaseRuntime):
             capability_id=invocation.capability_id,
             capability_version=invocation.capability_version,
             arguments=invocation.arguments,
+            target=invocation.target,
         )
         if recomputed != invocation.request_fingerprint:
             raise CapabilityError(
@@ -827,6 +834,20 @@ class CapabilityRuntime(BaseRuntime):
             )
         client_id = str(snapshot.metadata.get("client_id") or "")
         if (
+            invocation.target is not None
+            and invocation.target.resource_scope.value == "CLIENT_LOCAL"
+            and client_id != invocation.target.stable_client_id
+        ):
+            raise CapabilityError(
+                code="CAPABILITY_UNAUTHORIZED",
+                message="Continuation target stable client identity changed.",
+                category="AUTHORIZATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        if (
             not invocation.owner_user_id
             or snapshot.user_id != invocation.owner_user_id
             or not invocation.origin_client_id
@@ -975,6 +996,20 @@ class CapabilityRuntime(BaseRuntime):
 
         client_id = str(snapshot.metadata.get("client_id") or "")
         if (
+            invocation.target is not None
+            and invocation.target.resource_scope.value == "CLIENT_LOCAL"
+            and client_id != invocation.target.stable_client_id
+        ):
+            raise CapabilityError(
+                code="CAPABILITY_UNAUTHORIZED",
+                message="Continuation target stable client identity changed.",
+                category="AUTHORIZATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+        if (
             not invocation.owner_user_id
             or snapshot.user_id != invocation.owner_user_id
             or not invocation.origin_client_id
@@ -1074,6 +1109,7 @@ class CapabilityRuntime(BaseRuntime):
             "execution_mode",
             "idempotency",
             "request_fingerprint",
+            "target",
             "execution_id",
             "workflow_id",
             "tool_call_id",
@@ -1280,6 +1316,7 @@ class CapabilityRuntime(BaseRuntime):
         trace_id: str | None = None,
         connection_id: str | None = None,
         workflow_id: str | None = None,
+        target: CapabilityInvocationTarget | Mapping[str, Any] | None = None,
         timeout_seconds: float | None = None,
         cancellation_event: asyncio.Event | None = None,
         metadata: Optional[Dict[str, Any]] = None,
@@ -1295,6 +1332,19 @@ class CapabilityRuntime(BaseRuntime):
                 )
 
         request_metadata = dict(metadata or {})
+        metadata_target = request_metadata.get("target")
+        if target is not None and metadata_target is not None:
+            explicit_target = normalize_capability_target(target)
+            embedded_target = normalize_capability_target(metadata_target)
+            if explicit_target != embedded_target:
+                raise ValueError(
+                    "Explicit target does not match metadata['target']."
+                )
+            effective_target = explicit_target
+        else:
+            effective_target = normalize_capability_target(
+                target if target is not None else metadata_target
+            )
         effective_correlation_id = (
             correlation_id
             if correlation_id is not None
@@ -1320,6 +1370,7 @@ class CapabilityRuntime(BaseRuntime):
             identity,
             request_metadata,
             connection_id=connection_id,
+            target=effective_target,
         )
         if not driver:
             raise ValueError(
@@ -1379,6 +1430,7 @@ class CapabilityRuntime(BaseRuntime):
             correlation_id=effective_correlation_id,
             trace_id=effective_trace_id,
             connection_id=(connection_id or metadata_connection_id),
+            target=effective_target,
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
             cancellation_event=cancellation_event,
@@ -1393,6 +1445,13 @@ class CapabilityRuntime(BaseRuntime):
             )
             else None
         )
+        if (
+            selected_implementation is not None
+            and selected_implementation.location
+            is CapabilityExecutionLocation.CLIENT
+        ):
+            context.connection_id = selected_implementation.connection_id
+
         effective_implementation_id = (
             selected_implementation_id or f"legacy:{capability_id}"
         )
@@ -1415,6 +1474,7 @@ class CapabilityRuntime(BaseRuntime):
             capability_id=capability_id,
             capability_version=driver.definition.version,
             arguments=arguments,
+            target=effective_target,
         )
         candidate = CapabilityInvocation(
             invocation_id=context.invocation_id,
@@ -1424,6 +1484,7 @@ class CapabilityRuntime(BaseRuntime):
             execution_mode=driver.definition.execution_mode,
             idempotency=driver.definition.idempotency,
             request_fingerprint=request_fingerprint,
+            target=effective_target,
             owner_user_id=identity.user_id,
             origin_client_id=origin_client_id,
             remote_outcome_state=(
@@ -2345,6 +2406,7 @@ class CapabilityRuntime(BaseRuntime):
         metadata: Dict[str, Any],
         *,
         connection_id: str | None = None,
+        target: CapabilityInvocationTarget | None = None,
     ) -> tuple[BaseCapabilityDriver | None, str | None]:
         legacy_driver = self.registry.get_driver(capability_id)
         if self.catalog is None or not self.catalog.contains_definition(capability_id):
@@ -2363,6 +2425,7 @@ class CapabilityRuntime(BaseRuntime):
                 owner_id=identity.user_id,
                 connection_id=effective_connection_id,
                 scopes=frozenset(identity.scopes),
+                target=target,
             ),
             preferred_implementation_id=metadata.get(
                 "implementation_id"
@@ -2471,6 +2534,7 @@ class CapabilityRuntime(BaseRuntime):
             session_id=context.get("session_id"),
             connection_id=context.get("connection_id"),
             workflow_id=context.get("workflow_id"),
+            target=context.get("target"),
             metadata={
                 key: value
                 for key, value in context.items()
@@ -2481,6 +2545,7 @@ class CapabilityRuntime(BaseRuntime):
                     "request_id",
                     "session_id",
                     "workflow_id",
+                    "target",
                     "identity",
                 }
             },
