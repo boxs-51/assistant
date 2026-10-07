@@ -50,11 +50,9 @@ class ResumeTriggerType(str, Enum):
 
 
 def normalize_resume_trigger_type(value: "ResumeTriggerType | str") -> ResumeTriggerType:
-    """Normalize the pre-R7 connection trigger spelling without minting new values."""
+    """Validate canonical durable resume-trigger vocabulary."""
 
     raw = value.value if isinstance(value, ResumeTriggerType) else str(value)
-    if raw == "CONNECTION_RECONNECT":
-        raw = ResumeTriggerType.CLIENT_RECONNECT.value
     return ResumeTriggerType(raw)
 
 
