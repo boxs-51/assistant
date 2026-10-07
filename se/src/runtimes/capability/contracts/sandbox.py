@@ -23,7 +23,18 @@ class SandboxLeaseState(str, Enum):
     DESTROYED = "DESTROYED"
 
 
+class SandboxSymlinkPolicy(str, Enum):
+    DENY_ESCAPE = "DENY_ESCAPE"
+    DENY_ALL = "DENY_ALL"
+
+
 class SandboxNetworkMode(str, Enum):
+    NONE = "NONE"
+    RESTRICTED_EGRESS = "RESTRICTED_EGRESS"
+    EGRESS = "EGRESS"
+
+
+class SandboxSecretsMode(str, Enum):
     NONE = "NONE"
     ALLOWLIST = "ALLOWLIST"
 
@@ -33,15 +44,25 @@ class SandboxFilesystemLimits(BaseModel):
 
     max_bytes: int | None = Field(default=None, ge=0)
     max_files: int | None = Field(default=None, ge=0)
-    max_path_length: int | None = Field(default=None, ge=1)
+    root: str = "."
+    symlink_policy: SandboxSymlinkPolicy = SandboxSymlinkPolicy.DENY_ESCAPE
+
+    @field_validator("root")
+    @classmethod
+    def _sandbox_relative_root(cls, value: str) -> str:
+        if value != ".":
+            raise ValueError("SBX-1 filesystem.root must denote the lease root")
+        return value
 
 
 class SandboxProcessLimits(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     max_processes: int | None = Field(default=None, ge=0)
-    max_cpu_seconds: float | None = Field(default=None, ge=0)
     max_memory_bytes: int | None = Field(default=None, ge=0)
+    cpu_quota: float | None = Field(default=None, ge=0)
+    allowed_interpreters: tuple[str, ...] = ()
+    environment_allowlist: tuple[str, ...] = ()
 
 
 class SandboxIOLimits(BaseModel):
@@ -49,42 +70,46 @@ class SandboxIOLimits(BaseModel):
 
     max_stdout_bytes: int | None = Field(default=None, ge=0)
     max_stderr_bytes: int | None = Field(default=None, ge=0)
+    max_total_output_bytes: int | None = Field(default=None, ge=0)
 
 
 class SandboxNetworkPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     mode: SandboxNetworkMode = SandboxNetworkMode.NONE
-    allow_hosts: tuple[str, ...] = ()
+    allowed_hosts: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def _validate_allowlist(self) -> "SandboxNetworkPolicy":
-        if self.mode is SandboxNetworkMode.NONE and self.allow_hosts:
+    def _validate_mode(self) -> "SandboxNetworkPolicy":
+        if self.mode is SandboxNetworkMode.NONE and self.allowed_hosts:
             raise ValueError("network NONE cannot carry allowed hosts")
+        if (
+            self.mode is SandboxNetworkMode.RESTRICTED_EGRESS
+            and not self.allowed_hosts
+        ):
+            raise ValueError("RESTRICTED_EGRESS requires allowed_hosts")
+        if self.mode is SandboxNetworkMode.EGRESS and self.allowed_hosts:
+            raise ValueError("EGRESS does not use an allowed-host restriction")
         return self
-
-
-class SandboxEnvironmentPolicy(BaseModel):
-    model_config = ConfigDict(extra="forbid", frozen=True)
-
-    allowed_names: tuple[str, ...] = ()
 
 
 class SandboxSecretsPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    deny_by_default: bool = True
+    mode: SandboxSecretsMode = SandboxSecretsMode.NONE
     allowed_names: tuple[str, ...] = ()
 
     @model_validator(mode="after")
-    def _validate_default_deny(self) -> "SandboxSecretsPolicy":
-        if not self.deny_by_default:
-            raise ValueError("SBX-1 secrets policy must remain deny-by-default")
+    def _validate_mode(self) -> "SandboxSecretsPolicy":
+        if self.mode is SandboxSecretsMode.NONE and self.allowed_names:
+            raise ValueError("secrets NONE cannot carry allowed names")
+        if self.mode is SandboxSecretsMode.ALLOWLIST and not self.allowed_names:
+            raise ValueError("secrets ALLOWLIST requires allowed_names")
         return self
 
 
 class SandboxProfile(BaseModel):
-    """Immutable representation of sandbox isolation policy.
+    """Immutable representation of the canonical sandbox policy dimensions.
 
     SBX-1 represents limits only. Process/network enforcement belongs to later
     execution-boundary stages.
@@ -99,9 +124,6 @@ class SandboxProfile(BaseModel):
     process: SandboxProcessLimits = Field(default_factory=SandboxProcessLimits)
     io: SandboxIOLimits = Field(default_factory=SandboxIOLimits)
     network: SandboxNetworkPolicy = Field(default_factory=SandboxNetworkPolicy)
-    environment: SandboxEnvironmentPolicy = Field(
-        default_factory=SandboxEnvironmentPolicy
-    )
     secrets: SandboxSecretsPolicy = Field(default_factory=SandboxSecretsPolicy)
 
     @field_validator("profile_id")
@@ -148,7 +170,6 @@ class SandboxLease(BaseModel):
 
 __all__ = [
     "CapabilityExecutionBoundary",
-    "SandboxEnvironmentPolicy",
     "SandboxFilesystemLimits",
     "SandboxIOLimits",
     "SandboxLease",
@@ -157,5 +178,7 @@ __all__ = [
     "SandboxNetworkPolicy",
     "SandboxProcessLimits",
     "SandboxProfile",
+    "SandboxSecretsMode",
     "SandboxSecretsPolicy",
+    "SandboxSymlinkPolicy",
 ]
