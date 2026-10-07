@@ -2,33 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import faulthandler
-import os
-import sys
-
 import pytest
-from _pytest.reports import TestReport
-
-
-# Temporary DCS-1 CI diagnostic instrumentation. This stays inside the
-# released focused-test path and does not change production behavior.
-_DCS1_ORIGINAL_FROM_ITEM_AND_CALL = TestReport.from_item_and_call
-
-
-def _dcs1_diagnostic_from_item_and_call(item, call):
-    report = _DCS1_ORIGINAL_FROM_ITEM_AND_CALL(item, call)
-    if report.failed:
-        sys.stderr.write(
-            f"\nDCS1_DIAG_FAILED when={report.when} nodeid={report.nodeid}\n"
-        )
-        sys.stderr.flush()
-        os._exit(2)
-    return report
-
-
-TestReport.from_item_and_call = staticmethod(_dcs1_diagnostic_from_item_and_call)
-faulthandler.enable()
-faulthandler.dump_traceback_later(300, repeat=True)
 
 from se.src.domain.schemas.agent import AgentDefinition
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
@@ -48,6 +22,7 @@ from se.src.runtimes.agent.contracts.inference import (
     InferenceMessage,
     InferenceResponse,
 )
+from se.src.runtimes.agent.contracts.tool import ToolExecutionResult
 from se.src.runtimes.agent.contracts.selection import (
     CapabilitySelectionCandidate,
     CapabilitySelectionContext,
@@ -443,6 +418,132 @@ async def test_agent_runtime_rejects_non_selected_tool_before_executor_dispatch(
     assert result.error_code == "DCS_TOOL_NOT_SELECTED"
     assert executor.calls == 0
 
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_canonical_zero_tool_snapshot_still_fails_closed():
+    class _Builder:
+        async def build(self, context, request):
+            return AgentContextSnapshot(
+                execution_id=context.execution_id,
+                iteration=request.iteration,
+                messages=(InferenceMessage(role="user", content="hello"),),
+                tools=(),
+                metadata={"capability_ids": []},
+            )
+
+    class _Inference:
+        async def complete(self, request):
+            return InferenceResponse(
+                request_id=request.request_id,
+                execution_id=request.execution_id,
+                iteration=request.iteration,
+                message=InferenceMessage(
+                    role="assistant",
+                    content="",
+                    tool_calls=(
+                        {
+                            "id": "call-zero",
+                            "name": "terminal.run",
+                            "arguments": {"command": "echo forbidden"},
+                        },
+                    ),
+                ),
+                provider="test",
+                model="test",
+            )
+
+    class _Executor:
+        calls = 0
+
+        async def execute_many(self, context, requests, *, max_parallel):
+            self.calls += 1
+            raise AssertionError("zero-tool DCS snapshot reached executor")
+
+    executor = _Executor()
+    runtime = AgentRuntime(
+        context_builder=_Builder(),
+        inference=_Inference(),
+        tool_execution=executor,
+        execution_policy=DefaultAgentExecutionPolicy(),
+    )
+
+    result = await runtime._execute_loop(_context())
+
+    assert result.error_code == "DCS_TOOL_NOT_SELECTED"
+    assert executor.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_agent_runtime_unmarked_empty_snapshot_preserves_legacy_test_compatibility():
+    class _Builder:
+        async def build(self, context, request):
+            return AgentContextSnapshot(
+                execution_id=context.execution_id,
+                iteration=request.iteration,
+                messages=(InferenceMessage(role="user", content="legacy"),),
+                tools=(),
+            )
+
+    class _Inference:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            if self.calls == 1:
+                message = InferenceMessage(
+                    role="assistant",
+                    content="legacy synthetic call",
+                    tool_calls=(
+                        {
+                            "id": "legacy-call",
+                            "name": "terminal.run",
+                            "arguments": {"command": "echo legacy"},
+                        },
+                    ),
+                )
+            else:
+                message = InferenceMessage(role="assistant", content="done")
+            return InferenceResponse(
+                request_id=request.request_id,
+                execution_id=request.execution_id,
+                iteration=request.iteration,
+                message=message,
+                provider="test",
+                model="test",
+            )
+
+    class _Executor:
+        calls = 0
+
+        async def execute_many(self, context, requests, *, max_parallel):
+            self.calls += 1
+            request = requests[0]
+            return [
+                ToolExecutionResult(
+                    execution_id=request.execution_id,
+                    iteration=request.iteration,
+                    invocation_id=request.invocation_id,
+                    tool_call_id=request.tool_call_id,
+                    capability_id=request.capability_id,
+                    success=True,
+                    output={"ok": True},
+                )
+            ]
+
+    executor = _Executor()
+    runtime = AgentRuntime(
+        context_builder=_Builder(),
+        inference=_Inference(),
+        tool_execution=executor,
+        execution_policy=DefaultAgentExecutionPolicy(),
+    )
+
+    result = await runtime._execute_loop(_context())
+
+    assert result.output == "done"
+    assert executor.calls == 1
 
 def test_production_wires_selector_and_guard_precedes_tool_request_creation():
     main_source = Path("se/src/main.py").read_text(encoding="utf-8")
