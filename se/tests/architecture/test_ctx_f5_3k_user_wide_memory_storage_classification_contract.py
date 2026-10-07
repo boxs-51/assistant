@@ -18,6 +18,10 @@ MIGRATION_29A = Path(
     "se/src/infrastructure/storage/migrations/sql/versions/"
     "29a_crt1_capability_invocation_target.py"
 )
+MIGRATION_30A = Path(
+    "se/src/infrastructure/storage/migrations/sql/versions/"
+    "30a_ctx_f5_user_wide_memory_scope.py"
+)
 
 
 def _read(path: Path) -> str:
@@ -75,19 +79,23 @@ def test_ctx_f5_3k_freezes_exact_zero_production_claim() -> None:
     )
 
 
-def test_ctx_f5_3k_proves_preimplementation_memory_shape_is_owner_only() -> None:
+def test_ctx_f5_3k_p1_representation_is_user_wide_only_and_agent_private_closed() -> None:
     domain = _class(_read(MEMORY), "MemoryRecord")
     row = _class(_read(MEMORY_SQL), "MemoryRecordRow")
+    memory = _read(MEMORY)
+    memory_sql = _read(MEMORY_SQL)
 
     domain_fields = _annotated_names(domain)
     row_fields = _annotated_names(row)
 
     assert "owner_user_id" in domain_fields
     assert "owner_user_id" in row_fields
-    assert "memory_scope" not in domain_fields
-    assert "memory_scope" not in row_fields
+    assert "memory_scope" in domain_fields
+    assert "memory_scope" in row_fields
     assert "agent_instance_id" not in domain_fields
     assert "agent_instance_id" not in row_fields
+    assert 'MEMORY_SCOPE_USER_WIDE = "USER_WIDE"' in memory
+    assert "memory_scope IS NULL OR memory_scope = 'USER_WIDE'" in memory_sql
 
 
 def test_ctx_f5_3k_freezes_legacy_null_not_user_wide_semantics() -> None:
@@ -122,18 +130,26 @@ def test_ctx_f5_3k_freezes_first_value_and_agent_private_hold() -> None:
         assert phrase in contract
 
 
-def test_ctx_f5_3k_freezes_current_migration_parent_without_mutating_it() -> None:
+def test_ctx_f5_3k_p1_is_single_linear_child_of_frozen_migration_parent() -> None:
     contract = _normalized(CONTRACT)
-    migration = _read(MIGRATION_29A)
+    migration_29a = _read(MIGRATION_29A)
+    migration_30a = _read(MIGRATION_30A)
 
-    assert 'revision: str = "29a_crt1_capability_invocation_target"' in migration
+    assert 'revision: str = "29a_crt1_capability_invocation_target"' in migration_29a
     assert (
         'down_revision: Union[str, None] = "28a_tbo1_task_policy_representation"'
-        in migration
+        in migration_29a
     )
+    assert 'revision: str = "30a_ctx_f5_user_wide_memory_scope"' in migration_30a
+    assert (
+        'down_revision: Union[str, None] = "29a_crt1_capability_invocation_target"'
+        in migration_30a
+    )
+    assert 'sa.Column("memory_scope", sa.String(length=32), nullable=True)' in migration_30a
+    assert "server_default" not in migration_30a
+    assert "memory_scope IS NULL OR memory_scope = 'USER_WIDE'" in migration_30a
     assert "29a_crt1_capability_invocation_target" in contract
     assert "single linear child" in contract
-    assert "fresh PRE-CLAIM must re-resolve the exact migration parent" in contract
 
 
 def test_ctx_f5_3k_freezes_identity_stability_and_replay_conflict() -> None:
@@ -210,6 +226,7 @@ def test_ctx_f5_3k_freezes_identity_stability_and_replay_conflict() -> None:
     memory_id_source = ast.get_source_segment(memory, memory_id_function)
     assert memory_id_source is not None
     assert 'MEMORY_IDENTITY_DOMAIN.encode("utf-8")' in memory_id_source
+    assert '"memory_scope"' not in memory_id_source
     assert 'exclude={"created_at"}' in memory
 
     for phrase in (
@@ -264,23 +281,21 @@ def test_ctx_f5_3k_keeps_read_visibility_and_external_authority_closed() -> None
         assert phrase in contract
 
 
-def test_ctx_f5_3k_keeps_repository_and_production_unmodified() -> None:
+def test_ctx_f5_3k_p1_persists_scope_without_opening_producer_or_read_authority() -> None:
     contract = _normalized(CONTRACT)
     repository = _read(MEMORY_REPOSITORY)
+    admission = _read(MEMORY_ADMISSION)
 
     assert "class DurableMemoryRecordRepository" in repository
-    assert "memory_scope" not in repository
+    assert "memory_scope=row.memory_scope" in repository
+    assert '"memory_scope": record.memory_scope' in repository
+    assert "memory_scope" not in admission
 
     for phrase in (
-        "does not release:",
-        "any se/src/** implementation",
-        "Alembic migration",
-        "MemoryRecord field changes",
-        "MemoryRecordRow field changes",
-        "repository changes",
         "promotion/admission changes",
         "USER_WIDE producer/caller",
         "AGENT_PRIVATE implementation",
         "Memory read/search/access APIs",
+        "ContextBuilder/Working Set/ContextSnapshot",
     ):
         assert phrase in contract
