@@ -2403,7 +2403,12 @@ class AgentRuntime:
                 # metadata; preserve only that unmarked compatibility shape.
                 if snapshot.tools or "capability_ids" in snapshot.metadata:
                     ensure_selected_tool_calls(
-                        [item.name for item in snapshot.tools],
+                        [
+                            item.get("name")
+                            if isinstance(item, Mapping)
+                            else getattr(item, "name", None)
+                            for item in snapshot.tools
+                        ],
                         [tool_call.name for tool_call in response.message.tool_calls],
                     )
                 record.state = transition(record.state, AgentLoopState.TOOL_CALLING)
