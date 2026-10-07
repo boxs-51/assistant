@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 from types import SimpleNamespace
+from typing import Self
 
 import pytest
 
@@ -29,7 +30,7 @@ class _UnitOfWork:
         self.sessions = sessions
         self.commit_calls = 0
 
-    async def __aenter__(self) -> "_UnitOfWork":
+    async def __aenter__(self) -> Self:
         return self
 
     async def __aexit__(self, exc_type, exc, traceback) -> None:
