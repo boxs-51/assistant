@@ -11,6 +11,11 @@ from .contracts.implementation import (
     CapabilityExecutionLocation,
     CapabilityImplementation,
 )
+from .contracts.target import (
+    CapabilityInvocationTarget,
+    FallbackPolicy,
+    ResourceScope,
+)
 from .contracts.definition import (
     CapabilityDefinition,
     CapabilityEffect,
@@ -58,6 +63,7 @@ class CapabilityRequestContext:
     owner_id: Optional[str] = None
     connection_id: Optional[str] = None
     scopes: FrozenSet[str] = field(default_factory=frozenset)
+    target: CapabilityInvocationTarget | None = None
 
 
 class CapabilityAuthorizationPolicy:
@@ -137,7 +143,30 @@ class CapabilityRoutingPolicy:
             if item.implementation_id not in excluded_implementation_ids
         ]
 
-        if context.connection_id is not None:
+        target = context.target
+        if target is not None:
+            if (
+                target.fallback_policy is FallbackPolicy.NONE
+                and excluded_implementation_ids
+            ):
+                raise PermissionError(
+                    "Explicit target with fallback_policy=NONE cannot reroute."
+                )
+            candidates = [
+                item
+                for item in candidates
+                if self._matches_target(item, target)
+            ]
+            if (
+                target.resource_scope is ResourceScope.CLIENT_LOCAL
+                and context.connection_id is not None
+            ):
+                candidates = [
+                    item
+                    for item in candidates
+                    if item.connection_id == context.connection_id
+                ]
+        elif context.connection_id is not None:
             same_connection_clients = [
                 item
                 for item in candidates
@@ -151,15 +180,6 @@ class CapabilityRoutingPolicy:
                 item
                 for item in candidates
                 if item.location != CapabilityExecutionLocation.CLIENT
-            ]
-
-            foreign_clients = [
-                item
-                for item in candidates
-                if (
-                    item.location == CapabilityExecutionLocation.CLIENT
-                    and item.connection_id != context.connection_id
-                )
             ]
 
             # Foreign client is ALWAYS excluded.
@@ -184,10 +204,22 @@ class CapabilityRoutingPolicy:
             ]
 
         for implementation in candidates:
+            authorization_context = context
+            if (
+                target is not None
+                and target.resource_scope is ResourceScope.CLIENT_LOCAL
+                and context.connection_id is None
+            ):
+                authorization_context = CapabilityRequestContext(
+                    owner_id=context.owner_id,
+                    connection_id=implementation.connection_id,
+                    scopes=context.scopes,
+                    target=target,
+                )
             if self._authorization.authorize(
                 implementation,
                 required_scopes=definition.required_scopes,
-                context=context,
+                context=authorization_context,
                 connection_availability=self._connection_availability,
             ):
                 return implementation
@@ -196,6 +228,29 @@ class CapabilityRoutingPolicy:
             f"No authorized routable implementation for capability: "
             f"{capability_id}"
         )
+
+    @staticmethod
+    def _matches_target(
+        implementation: CapabilityImplementation,
+        target: CapabilityInvocationTarget,
+    ) -> bool:
+        if target.resource_scope is ResourceScope.CLIENT_LOCAL:
+            return (
+                implementation.location is CapabilityExecutionLocation.CLIENT
+                and str(implementation.metadata.get("client_id") or "")
+                == target.stable_client_id
+            )
+
+        declared = implementation.metadata.get("resource_scopes")
+        if declared is None:
+            declared = implementation.metadata.get("resource_scope")
+        if isinstance(declared, str):
+            scopes = frozenset({declared})
+        elif isinstance(declared, (list, tuple, set, frozenset)):
+            scopes = frozenset(str(value) for value in declared)
+        else:
+            scopes = frozenset()
+        return target.resource_scope.value in scopes
 
 
 __all__ = [

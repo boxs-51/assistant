@@ -4,12 +4,18 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from .contracts.target import (
+    CapabilityInvocationTarget,
+    canonical_capability_target_payload,
+)
+
 
 def capability_request_fingerprint(
     *,
     capability_id: str,
     capability_version: str,
     arguments: Mapping[str, Any],
+    target: CapabilityInvocationTarget | Mapping[str, Any] | None = None,
 ) -> str:
     """Return the R6 semantic identity for one logical capability request.
 
@@ -27,6 +33,9 @@ def capability_request_fingerprint(
         "capability_version": capability_version,
         "arguments": dict(arguments),
     }
+    canonical_target = canonical_capability_target_payload(target)
+    if canonical_target is not None:
+        payload["target"] = canonical_target
     encoded = json.dumps(
         payload,
         ensure_ascii=False,

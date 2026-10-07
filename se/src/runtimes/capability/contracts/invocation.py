@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .target import CapabilityInvocationTarget
 from .definition import (
     CapabilityExecutionMode,
     CapabilityIdempotency,
@@ -69,6 +70,7 @@ class CapabilityInvocation(BaseModel):
     execution_mode: CapabilityExecutionMode
     idempotency: CapabilityIdempotency = CapabilityIdempotency.UNKNOWN
     request_fingerprint: str | None = None
+    target: CapabilityInvocationTarget | None = None
     owner_user_id: str | None = None
     origin_client_id: str | None = None
     remote_outcome_state: RemoteOutcomeState | None = None
