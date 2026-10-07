@@ -44,6 +44,10 @@ from .contracts.invocation import (
     RemoteOutcomeState,
     TERMINAL_INVOCATION_STATES,
 )
+from .contracts.target import (
+    CapabilityInvocationTarget,
+    coerce_capability_target,
+)
 from .catalog import CapabilityCatalog
 from .contracts.implementation import (
     CapabilityExecutionLocation,
@@ -56,6 +60,7 @@ from .policy import (
     CapabilityAccessProfile,
     CapabilityRequestContext,
     CapabilityRoutingPolicy,
+    implementation_supports_target,
 )
 from ...runtimes.connection.registry import (
     ConnectionRegistry,
@@ -210,6 +215,7 @@ class CapabilityRuntime(BaseRuntime):
                 correlation_id=event.payload.get("correlation_id"),
                 trace_id=event.payload.get("trace_id"),
                 workflow_id=event.payload.get("workflow_id"),
+                target=event.payload.get("target"),
             )
 
             await self.event_bus.publish(BaseEvent(
@@ -493,6 +499,7 @@ class CapabilityRuntime(BaseRuntime):
             correlation_id=invocation.correlation_id,
             trace_id=invocation.trace_id,
             connection_id=target_connection_id,
+            target=invocation.target,
             workflow_id=invocation.workflow_id,
             attempt=invocation.attempt + 1,
             cancellation_event=cancellation_event,
@@ -650,6 +657,7 @@ class CapabilityRuntime(BaseRuntime):
             capability_id=invocation.capability_id,
             capability_version=invocation.capability_version,
             arguments=invocation.arguments,
+            target=invocation.target,
         )
         if recomputed != invocation.request_fingerprint:
             raise CapabilityError(
@@ -864,6 +872,7 @@ class CapabilityRuntime(BaseRuntime):
                     and str(item.metadata.get("client_id") or "")
                     == invocation.origin_client_id
                     and item.version == invocation.capability_version
+                    and implementation_supports_target(item, invocation.target)
                 )
             ]
         except Exception as exc:
@@ -1011,6 +1020,7 @@ class CapabilityRuntime(BaseRuntime):
                     and str(item.metadata.get("client_id") or "")
                     == invocation.origin_client_id
                     and item.version == invocation.capability_version
+                    and implementation_supports_target(item, invocation.target)
                 )
             ]
         except Exception as exc:
@@ -1074,6 +1084,7 @@ class CapabilityRuntime(BaseRuntime):
             "execution_mode",
             "idempotency",
             "request_fingerprint",
+            "target",
             "execution_id",
             "workflow_id",
             "tool_call_id",
@@ -1279,6 +1290,7 @@ class CapabilityRuntime(BaseRuntime):
         correlation_id: str | None = None,
         trace_id: str | None = None,
         connection_id: str | None = None,
+        target: CapabilityInvocationTarget | Mapping[str, Any] | None = None,
         workflow_id: str | None = None,
         timeout_seconds: float | None = None,
         cancellation_event: asyncio.Event | None = None,
@@ -1295,6 +1307,33 @@ class CapabilityRuntime(BaseRuntime):
                 )
 
         request_metadata = dict(metadata or {})
+        metadata_target = request_metadata.pop("target", None)
+        try:
+            if target is not None and metadata_target is not None:
+                explicit_target = coerce_capability_target(target)
+                metadata_semantic_target = coerce_capability_target(
+                    metadata_target
+                )
+                if explicit_target != metadata_semantic_target:
+                    raise ValueError(
+                        "Explicit target does not match metadata['target']."
+                    )
+                canonical_target = explicit_target
+            else:
+                canonical_target = coerce_capability_target(
+                    target if target is not None else metadata_target
+                )
+        except (TypeError, ValueError) as exc:
+            raise CapabilityError(
+                code="CAPABILITY_INVALID_TARGET",
+                message=str(exc),
+                category="VALIDATION",
+                retryable=False,
+                safe_for_client=True,
+                cause_type=type(exc).__name__,
+                capability_id=capability_id,
+                invocation_id=invocation_id,
+            ) from exc
         effective_correlation_id = (
             correlation_id
             if correlation_id is not None
@@ -1320,6 +1359,7 @@ class CapabilityRuntime(BaseRuntime):
             identity,
             request_metadata,
             connection_id=connection_id,
+            target=canonical_target,
         )
         if not driver:
             raise ValueError(
@@ -1329,6 +1369,14 @@ class CapabilityRuntime(BaseRuntime):
             raise PermissionError(
                 f"Capability '{capability_id}' is not authorized."
             )
+
+        effective_execution_connection_id = (
+            connection_id or metadata_connection_id
+        )
+        if isinstance(driver, RemoteClientDriver):
+            # A semantic target may resolve the active physical connection
+            # without the caller naming a transient connection generation.
+            effective_execution_connection_id = driver.connection_id
 
         tool_quota_enabled = (
             driver.definition.kind is CapabilityKind.TOOL
@@ -1378,7 +1426,8 @@ class CapabilityRuntime(BaseRuntime):
             branch_id=branch_id,
             correlation_id=effective_correlation_id,
             trace_id=effective_trace_id,
-            connection_id=(connection_id or metadata_connection_id),
+            connection_id=effective_execution_connection_id,
+            target=canonical_target,
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
             cancellation_event=cancellation_event,
@@ -1415,6 +1464,7 @@ class CapabilityRuntime(BaseRuntime):
             capability_id=capability_id,
             capability_version=driver.definition.version,
             arguments=arguments,
+            target=canonical_target,
         )
         candidate = CapabilityInvocation(
             invocation_id=context.invocation_id,
@@ -1424,6 +1474,7 @@ class CapabilityRuntime(BaseRuntime):
             execution_mode=driver.definition.execution_mode,
             idempotency=driver.definition.idempotency,
             request_fingerprint=request_fingerprint,
+            target=canonical_target,
             owner_user_id=identity.user_id,
             origin_client_id=origin_client_id,
             remote_outcome_state=(
@@ -1627,7 +1678,7 @@ class CapabilityRuntime(BaseRuntime):
                 arguments=arguments,
                 identity=identity,
                 request_metadata=request_metadata,
-                routing_connection_id=connection_id,
+                routing_connection_id=context.connection_id,
                 started=started,
                 allow_internal_retry=True,
                 canonical_agent_tool_hard_timeout=(
@@ -1786,7 +1837,7 @@ class CapabilityRuntime(BaseRuntime):
                 arguments=arguments,
                 identity=identity,
                 request_metadata=request_metadata,
-                routing_connection_id=connection_id,
+                routing_connection_id=context.connection_id,
                 started=started,
                 allow_internal_retry=True,
                 canonical_agent_tool_hard_timeout=(
@@ -1897,6 +1948,7 @@ class CapabilityRuntime(BaseRuntime):
                         identity,
                         retry_metadata,
                         connection_id=routing_connection_id,
+                        target=invocation.target,
                     )
                 )
             except Exception:
@@ -1920,6 +1972,7 @@ class CapabilityRuntime(BaseRuntime):
             invocation.implementation_id = effective_implementation_id
             invocation.driver_kind = effective_driver_kind
             invocation.connection_id = selected_implementation.connection_id
+            context.connection_id = selected_implementation.connection_id
             invocation.attempt += 1
             context.attempt = invocation.attempt
             self._bind_remote_dispatch_started(driver, invocation)
@@ -2345,9 +2398,14 @@ class CapabilityRuntime(BaseRuntime):
         metadata: Dict[str, Any],
         *,
         connection_id: str | None = None,
+        target: CapabilityInvocationTarget | None = None,
     ) -> tuple[BaseCapabilityDriver | None, str | None]:
         legacy_driver = self.registry.get_driver(capability_id)
         if self.catalog is None or not self.catalog.contains_definition(capability_id):
+            if target is not None:
+                raise PermissionError(
+                    "Explicit capability targets require catalog routing."
+                )
             return legacy_driver, None
         if self.routing_policy is None:
             raise RuntimeError(
@@ -2363,6 +2421,7 @@ class CapabilityRuntime(BaseRuntime):
                 owner_id=identity.user_id,
                 connection_id=effective_connection_id,
                 scopes=frozenset(identity.scopes),
+                target=target,
             ),
             preferred_implementation_id=metadata.get(
                 "implementation_id"
@@ -2470,6 +2529,7 @@ class CapabilityRuntime(BaseRuntime):
             request_id=context.get("request_id"),
             session_id=context.get("session_id"),
             connection_id=context.get("connection_id"),
+            target=context.get("target"),
             workflow_id=context.get("workflow_id"),
             metadata={
                 key: value
@@ -2482,6 +2542,7 @@ class CapabilityRuntime(BaseRuntime):
                     "session_id",
                     "workflow_id",
                     "identity",
+                    "target",
                 }
             },
         )

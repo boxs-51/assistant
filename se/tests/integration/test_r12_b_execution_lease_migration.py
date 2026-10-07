@@ -53,7 +53,7 @@ def test_r12_b_migration_is_linear_and_preserves_legacy_execution(
     config = _config(database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["28a_tbo1_task_policy_representation"]
+    assert script.get_heads() == ["29a_crt1_capability_invocation_target"]
     assert (
         script.get_revision("22a_r12_execution_lease_fence").down_revision
         == "21a_ctx_f5_memory_foundation"

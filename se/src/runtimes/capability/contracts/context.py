@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
 from ....domain.schemas.identity import Identity
+from .target import CapabilityInvocationTarget
 
 
 @dataclass(slots=True)
@@ -26,6 +27,7 @@ class CapabilityExecutionContext:
     correlation_id: str | None = None
     trace_id: str | None = None
     connection_id: str | None = None
+    target: CapabilityInvocationTarget | None = None
     workflow_id: str | None = None
     deadline: float | None = None
     attempt: int = 1
@@ -49,6 +51,7 @@ class CapabilityExecutionContext:
         correlation_id: str | None = None,
         trace_id: str | None = None,
         connection_id: str | None = None,
+        target: CapabilityInvocationTarget | None = None,
         workflow_id: str | None = None,
         timeout_seconds: float | None = None,
         attempt: int = 1,
@@ -75,6 +78,7 @@ class CapabilityExecutionContext:
             correlation_id=correlation_id,
             trace_id=trace_id,
             connection_id=connection_id,
+            target=target,
             workflow_id=workflow_id,
             deadline=deadline,
             attempt=attempt,

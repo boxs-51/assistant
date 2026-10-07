@@ -12,6 +12,10 @@ from ....runtimes.capability.contracts.definition import (
     CapabilityIdempotency,
     CapabilityKind,
 )
+from ....runtimes.capability.contracts.target import (
+    canonical_target_payload,
+    coerce_capability_target,
+)
 from ....runtimes.capability.contracts.invocation import (
     CapabilityInvocation,
     CapabilityInvocationAttempt,
@@ -175,7 +179,26 @@ class SqlCapabilityInvocationStore:
         self._uow_factory = uow_factory
 
     @staticmethod
-    def _values(invocation: CapabilityInvocation) -> dict:
+    def _target_payload(invocation: CapabilityInvocation) -> dict | None:
+        return (
+            canonical_target_payload(invocation.target)
+            if invocation.target is not None
+            else None
+        )
+
+    @classmethod
+    def _record_target_matches(
+        cls,
+        record: CapabilityInvocationRecord,
+        invocation: CapabilityInvocation,
+    ) -> bool:
+        stored = record.target_json
+        if stored is not None:
+            stored = dict(stored)
+        return stored == cls._target_payload(invocation)
+
+    @classmethod
+    def _values(cls, invocation: CapabilityInvocation) -> dict:
         values = invocation.model_dump(mode="python")
         values["kind"] = invocation.kind.value
         values["execution_mode"] = invocation.execution_mode.value
@@ -189,6 +212,8 @@ class SqlCapabilityInvocationStore:
             if invocation.remote_outcome_state is not None
             else None
         )
+        values.pop("target", None)
+        values["target_json"] = cls._target_payload(invocation)
         for field in ("arguments", "output", "error"):
             values[field] = jsonable_encoder(values[field])
         return values
@@ -205,6 +230,7 @@ class SqlCapabilityInvocationStore:
             execution_mode=CapabilityExecutionMode(record.execution_mode),
             idempotency=CapabilityIdempotency(record.idempotency),
             request_fingerprint=record.request_fingerprint,
+            target=coerce_capability_target(record.target_json),
             owner_user_id=record.owner_user_id,
             origin_client_id=record.origin_client_id,
             remote_outcome_state=(
@@ -326,6 +352,17 @@ class SqlCapabilityInvocationStore:
         self, invocation: CapabilityInvocation, expected_revision: int
     ) -> bool:
         async with self._uow_factory() as uow:
+            existing = await uow.session.get(
+                CapabilityInvocationRecord,
+                invocation.invocation_id,
+            )
+            if (
+                existing is None
+                or int(existing.revision) != expected_revision
+                or not self._record_target_matches(existing, invocation)
+            ):
+                await uow.rollback()
+                return False
             result = await uow.session.execute(
                 update(CapabilityInvocationRecord)
                 .where(
@@ -369,6 +406,7 @@ class SqlCapabilityInvocationStore:
                     or int(existing.revision) != expected_revision
                     or existing.state != CapabilityInvocationState.CREATED.value
                     or int(existing.attempt) != 0
+                    or not self._record_target_matches(existing, invocation)
                 ):
                     await uow.rollback()
                     return False
@@ -433,6 +471,19 @@ class SqlCapabilityInvocationStore:
             return False
 
         async with self._uow_factory() as uow:
+            existing = await uow.session.get(
+                CapabilityInvocationRecord,
+                invocation.invocation_id,
+            )
+            if (
+                existing is None
+                or int(existing.revision) != expected_revision
+                or existing.state != CapabilityInvocationState.DISPATCHING.value
+                or int(existing.attempt) != 1
+                or not self._record_target_matches(existing, invocation)
+            ):
+                await uow.rollback()
+                return False
             invocation_result = await uow.session.execute(
                 update(CapabilityInvocationRecord)
                 .where(
@@ -485,6 +536,19 @@ class SqlCapabilityInvocationStore:
 
         async with self._uow_factory() as uow:
             try:
+                existing = await uow.session.get(
+                    CapabilityInvocationRecord,
+                    invocation.invocation_id,
+                )
+                if (
+                    existing is None
+                    or int(existing.revision) != expected_revision
+                    or existing.state != CapabilityInvocationState.WAITING.value
+                    or int(existing.attempt) != expected_attempt
+                    or not self._record_target_matches(existing, invocation)
+                ):
+                    await uow.rollback()
+                    return False
                 result = await uow.session.execute(
                     update(CapabilityInvocationRecord)
                     .where(
@@ -562,6 +626,19 @@ class SqlCapabilityInvocationStore:
             return False
 
         async with self._uow_factory() as uow:
+            existing = await uow.session.get(
+                CapabilityInvocationRecord,
+                invocation.invocation_id,
+            )
+            if (
+                existing is None
+                or int(existing.revision) != expected_revision
+                or existing.state != CapabilityInvocationState.DISPATCHING.value
+                or int(existing.attempt) != invocation.attempt
+                or not self._record_target_matches(existing, invocation)
+            ):
+                await uow.rollback()
+                return False
             invocation_result = await uow.session.execute(
                 update(CapabilityInvocationRecord)
                 .where(

@@ -9,6 +9,7 @@ from ...connection.realtime import RealtimeMultiplexer
 from ..contracts.context import CapabilityExecutionContext
 from ..contracts.definition import CapabilityDefinition
 from ..fingerprint import capability_request_fingerprint
+from ..contracts.target import canonical_target_payload
 from .base import BaseCapabilityDriver
 
 
@@ -58,6 +59,20 @@ class RemoteClientDriver(BaseCapabilityDriver):
         if timeout is not None and timeout <= 0:
             raise asyncio.TimeoutError()
 
+        payload = {
+            "capability_id": self.name,
+            "capability_version": self.definition.version,
+            "arguments": dict(arguments),
+            "request_fingerprint": capability_request_fingerprint(
+                capability_id=self.name,
+                capability_version=self.definition.version,
+                arguments=arguments,
+                target=context.target,
+            ),
+        }
+        if context.target is not None:
+            payload["target"] = canonical_target_payload(context.target)
+
         envelope = RealtimeEnvelope(
             type="capability.invoke",
             message_id=f"msg-{uuid.uuid4().hex}",
@@ -66,16 +81,7 @@ class RemoteClientDriver(BaseCapabilityDriver):
             execution_id=context.execution_id,
             invocation_id=context.invocation_id,
             trace_id=context.trace_id or context.metadata.get("trace_id"),
-            payload={
-                "capability_id": self.name,
-                "capability_version": self.definition.version,
-                "arguments": dict(arguments),
-                "request_fingerprint": capability_request_fingerprint(
-                    capability_id=self.name,
-                    capability_version=self.definition.version,
-                    arguments=arguments,
-                ),
-            },
+            payload=payload,
         )
 
         try:
