@@ -6,7 +6,13 @@ from __future__ import annotations
 import argparse
 import sys
 import time
+from pathlib import Path
 from types import SimpleNamespace
+
+REPO_ROOT = Path(__file__).resolve().parents[2]
+repo_root_text = str(REPO_ROOT)
+if repo_root_text not in sys.path:
+    sys.path.insert(0, repo_root_text)
 
 from cl.src.core.client_runtime import ClientRuntime
 

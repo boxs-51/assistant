@@ -1,3 +1,6 @@
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -179,3 +182,23 @@ def test_r13_c_rollout_operator_bundle_rejects_malformed_relevant_log_line(tmp_p
 
     assert result == "HOLD"
     assert any("malformed R13-C event lines" in reason for reason in reasons)
+
+
+def test_r13_c_reconnect_probe_bootstraps_repo_root_for_direct_execution(tmp_path):
+    probe_path = OPS / "r13c_client_reconnect_probe.py"
+    env = os.environ.copy()
+    env.pop("PYTHONPATH", None)
+
+    completed = subprocess.run(
+        [sys.executable, str(probe_path), "--help"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert "--gateway-url" in completed.stdout
+    assert "pending-ticket publication path" in completed.stdout
