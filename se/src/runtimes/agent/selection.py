@@ -1,4 +1,4 @@
-"""Deterministic conservative DCS-1 selector."""
+"""Deterministic bounded DCS-2 capability selector."""
 from __future__ import annotations
 
 import re
@@ -177,14 +177,52 @@ def select_active_assigned_skills(
     return ActiveSkillSet(skills=tuple(active))
 
 
-class DeterministicCapabilitySelector:
-    """DCS-1 rule selector.
 
-    The selector consumes only candidates that have already passed the Agent
-    envelope, authorization and availability/routability gates.  It never adds
-    capabilities, never consumes Skill capability_hints and has no all-tools
-    uncertainty fallback.  DCS-2 owns ranking/grouping/expansion.
+def _capability_group(capability_id: str) -> str:
+    """Return deterministic metadata-only group identity for a logical capability."""
+    normalized = capability_id.strip().lower()
+    if not normalized:
+        return ""
+    return normalized.split(".", 1)[0]
+
+
+def _relevant_skill_hint_ids(
+    context: CapabilitySelectionContext,
+    *,
+    text: str,
+    text_words: set[str],
+) -> set[str]:
+    """Return only trusted, task-relevant hints that target eligible capabilities."""
+    eligible_ids = {
+        candidate.capability_id
+        for candidate in context.eligible_capabilities
+    }
+    hinted: set[str] = set()
+    for active_skill in context.active_skill_set.skills:
+        for hint in active_skill.descriptor.capability_hints:
+            capability_id = hint.capability_id
+            if capability_id not in eligible_ids:
+                continue
+            purpose = hint.purpose.strip().lower()
+            if not purpose:
+                continue
+            if purpose in text or _words(purpose).intersection(text_words):
+                hinted.add(capability_id)
+    return hinted
+
+
+class DeterministicCapabilitySelector:
+    """Bounded deterministic DCS-2 selector.
+
+    Candidates have already passed the Agent envelope, authorization and
+    availability/routability gates. Grouping and Skill hints are metadata-only
+    ranking signals and can never add a candidate outside that eligible set.
     """
+
+    def __init__(self, *, max_visible: int = 8) -> None:
+        if type(max_visible) is not int or max_visible < 1:
+            raise ValueError("max_visible must be a positive integer.")
+        self._max_visible = max_visible
 
     def select(
         self,
@@ -194,29 +232,76 @@ class DeterministicCapabilitySelector:
         text_words = _words(text)
         explicitly_requested = set(context.explicit_requested_capability_ids)
 
-        visible: list[str] = []
-        provenance: list[str] = []
-        for candidate in context.eligible_capabilities:
+        eligible_ids = {
+            candidate.capability_id
+            for candidate in context.eligible_capabilities
+        }
+        prior_eligible_ids = {
+            capability_id
+            for capability_id in prior_tool_ids
+            if capability_id in eligible_ids
+        }
+        expansion_groups = {
+            _capability_group(capability_id)
+            for capability_id in prior_eligible_ids
+            if _capability_group(capability_id)
+        }
+        hinted_ids = _relevant_skill_hint_ids(
+            context,
+            text=text,
+            text_words=text_words,
+        )
+
+        ranked: list[tuple[int, int, str, tuple[str, ...]]] = []
+        for index, candidate in enumerate(context.eligible_capabilities):
             capability_id = candidate.capability_id
+            group_id = _capability_group(capability_id)
+            score = 0
+            signals: list[str] = []
+
             if capability_id in explicitly_requested:
-                visible.append(capability_id)
-                provenance.append(f"explicit:{capability_id}")
-                continue
-            if capability_id in prior_tool_ids:
-                visible.append(capability_id)
-                provenance.append(f"prior-tool:{capability_id}")
-                continue
+                score += 1000
+                signals.append(f"explicit:{capability_id}")
+            if capability_id in prior_eligible_ids:
+                score += 800
+                signals.append(f"prior-tool:{capability_id}")
             if _candidate_matches(text, text_words, candidate):
-                visible.append(capability_id)
-                provenance.append(f"task-match:{capability_id}")
+                score += 500
+                signals.append(f"task-match:{capability_id}")
+            if capability_id in hinted_ids:
+                score += 300
+                signals.append(f"skill-hint:{capability_id}")
+            if (
+                group_id
+                and group_id in expansion_groups
+                and capability_id not in prior_eligible_ids
+            ):
+                score += 200
+                signals.append(f"group-expand:{group_id}:{capability_id}")
+
+            if score <= 0:
+                continue
+            ranked.append((-score, index, capability_id, tuple(signals)))
+
+        ranked.sort(key=lambda item: (item[0], item[1], item[2]))
+        selected = ranked[: self._max_visible]
+        visible = tuple(item[2] for item in selected)
+
+        provenance: list[str] = []
+        active_groups: list[str] = []
+        for _, _, capability_id, signals in selected:
+            provenance.extend(signals)
+            group_id = _capability_group(capability_id)
+            if group_id and group_id not in active_groups:
+                active_groups.append(group_id)
 
         working_set = CapabilityWorkingSet(
-            visible_capability_ids=tuple(visible),
-            active_groups=(),
+            visible_capability_ids=visible,
+            active_groups=tuple(active_groups),
             reason=(
-                "DCS1_DETERMINISTIC_TASK_MATCH"
+                "DCS2_BOUNDED_RANKED_SELECTION"
                 if visible
-                else "DCS1_ZERO_TOOL_FAST_PATH"
+                else "DCS2_ZERO_TOOL_FAST_PATH"
             ),
             provenance=tuple(provenance),
             revision=context.iteration,
