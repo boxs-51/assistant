@@ -424,6 +424,58 @@ A future document-format Skill may reference shared capabilities such as `docume
 
 ---
 
+## 7E. Agent Platform & Runtime Specialization namespace — APR-*
+
+Issue #278 owns the Agent Platform & Runtime Specialization roadmap. APR defines the
+long-lived Agent identity/profile/runtime composition contract and consumes adjacent
+authorities rather than absorbing them.
+
+Canonical stages:
+
+```text
+APR-C0-A  Agent runtime taxonomy + FAST_CONTROL contract
+APR-C0-B  APR namespace registration
+APR-P0    AgentDefinitionV2 / AgentProfile / AgentExecutionBinding contracts
+APR-X1    execution lanes / Event Sequencer contract
+APR-FC1   generic FAST_CONTROL platform semantics
+APR-RT1   realtime runtime contract
+APR-CU1   computer-interactive runtime contract
+APR-MD1   media-job/runtime integration
+APR-Q1    fault/safety/quality exit
+```
+
+Current coordination:
+
+```text
+Issue #278 = APR tracker / roadmap
+Issue #279 = APR-C0-A LANDED / CANONICAL / HEALTHY
+Issue #358 = APR-C0-B ACTIVE / CONTRACT-DOCS ONLY
+APR-P0+   = RESERVED / NOT CLAIMED
+```
+
+Ownership boundary:
+
+- APR owns Agent platform taxonomy, profile/runtime composition and generic
+  execution-lane contracts.
+- AIC owns stable user-owned `agent_instance_id`, Agent directory and communication.
+- AE owns durable Task/AgentExecution lifecycle, recovery, retries and state-machine
+  semantics.
+- Issue #156 / DCS / CRT / SBX own capability selection, routing and sandbox
+  boundaries.
+- CTX owns Memory, personalization, retrieval and ContextSnapshot authority.
+- AAT owns durable schedules/events/Agent-owned automation activation.
+- UBQ/TBO own renewable resource admission and Task orchestration policy.
+- Tools/PTC/providers own logical/physical operations and provider lowering.
+- CAS owns durable asset/media identity and lifecycle.
+- GAME-AUTO-CLIENT #221 owns the game-local FAST_CONTROL implementation; APR-FC1
+  is the generic platform contract and must converge with it rather than duplicate it.
+
+APR-P0 remains blocked until AIC-0 freezes canonical stable `agent_instance_id`.
+Publishing this namespace grants no production, schema, migration, runtime, Tool,
+Memory, scheduling, asset, quota or merge authority.
+
+---
+
 ## 8. PTC / Agent overlap boundary
 
 PTC-3 and AE-R10 may touch adjacent provider-routing/fallback code.
@@ -554,6 +606,7 @@ TBO -> TBO-*  Task Orchestration
 AAT -> AAT-*  Agent Automation & Triggers
 AIC -> AIC-*  Agent Interconnect & Communication
 SKV2 -> SKV2-* Skill Contract V2 / Skill Runtime
+APR -> APR-*  Agent Platform & Runtime Specialization
 ```
 
 Do not allocate a second independent `R10`, `T8`, or `F5` roadmap meaning.
