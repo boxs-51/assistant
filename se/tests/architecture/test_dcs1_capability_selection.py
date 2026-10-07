@@ -539,8 +539,10 @@ async def test_agent_runtime_unmarked_empty_snapshot_preserves_legacy_test_compa
         tool_execution=executor,
         execution_policy=DefaultAgentExecutionPolicy(),
     )
+    context = _context()
+    context.limits.max_iterations = 3
 
-    result = await runtime._execute_loop(_context())
+    result = await runtime._execute_loop(context)
 
     assert result.output == "done"
     assert executor.calls == 1
