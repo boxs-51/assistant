@@ -232,6 +232,23 @@ async def test_sbx2_driver_fails_closed_for_client_local_target(tmp_path: Path):
         await read.execute(context, {"file_paths": "note.txt"})
 
 
+@pytest.mark.asyncio
+async def test_sbx2_server_driver_rejects_untargeted_client_fallback(
+    tmp_path: Path,
+):
+    manager = SandboxManager(tmp_path / "sandboxes")
+    profile = SandboxProfile(profile_id="sbx2-file-glob")
+    read = _driver("file.read", manager, profile)
+    context = CapabilityExecutionContext.create(
+        identity=Identity(user_id="user-sbx2", auth_type="jwt"),
+        execution_id="exec-untargeted",
+        invocation_id="inv-untargeted",
+        target=None,
+    )
+    with pytest.raises(SandboxError):
+        await read.execute(context, {"file_paths": "note.txt"})
+
+
 def test_sbx2_loader_binds_exact_file_glob_ids_to_sandbox_driver(
     tmp_path: Path,
 ):
@@ -311,6 +328,7 @@ class _CaptureCapabilityRuntime:
 class _AgentContext:
     def __init__(self, *, connection_id=None):
         self.execution_id = "agent-exec"
+        self.agent_id = "agent-sbx2"
         self.connection_id = connection_id
         self.identity = Identity(user_id="user-sbx2", auth_type="jwt")
         self.remaining_seconds = 30.0
