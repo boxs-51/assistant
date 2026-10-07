@@ -4,29 +4,41 @@ import hashlib
 import json
 from typing import Any, Mapping
 
+from .contracts.target import (
+    CapabilityInvocationTarget,
+    canonical_target_payload,
+    coerce_capability_target,
+)
+
 
 def capability_request_fingerprint(
     *,
     capability_id: str,
     capability_version: str,
     arguments: Mapping[str, Any],
+    target: CapabilityInvocationTarget | Mapping[str, Any] | None = None,
 ) -> str:
-    """Return the R6 semantic identity for one logical capability request.
+    """Return the canonical R6 semantic identity for one logical request.
 
-    The caller must provide JSON-safe arguments. R6 deliberately rejects
-    Python-only values instead of silently inventing an encoding that a
-    different worker or client might serialize differently.
+    Legacy target=None deliberately preserves the exact historical payload.
+    A non-null target contributes only stable semantic resource identity; no
+    transient connection or physical implementation identifier participates.
     """
+
     if not capability_id:
         raise ValueError("capability_id must be non-empty")
     if not capability_version:
         raise ValueError("capability_version must be non-empty")
 
-    payload = {
+    payload: dict[str, Any] = {
         "capability_id": capability_id,
         "capability_version": capability_version,
         "arguments": dict(arguments),
     }
+    semantic_target = coerce_capability_target(target)
+    if semantic_target is not None:
+        payload["target"] = canonical_target_payload(semantic_target)
+
     encoded = json.dumps(
         payload,
         ensure_ascii=False,
