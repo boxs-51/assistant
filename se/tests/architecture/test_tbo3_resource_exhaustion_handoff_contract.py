@@ -198,7 +198,7 @@ def test_tbo3_preserves_taskbudget_resource_demotion() -> None:
     assert "UBQ-4 is the renewable resource authority." in budget
     assert "saturated compatibility counter" in budget
 
-    assert "must not restore renewable resource authority to TaskBudget" in normalized
+    assert "reinterpret saturated TaskBudget compatibility counters as renewable quota" in normalized
     assert "TaskBudget compatibility counters" in contract
     assert "remain saturated/read-only for canonical UBQ resources" in contract
 
