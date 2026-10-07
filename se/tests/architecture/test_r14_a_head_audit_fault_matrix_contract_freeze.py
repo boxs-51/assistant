@@ -102,7 +102,7 @@ def test_r14a_freezes_completed_semantic_mapping_and_bounded_gaps() -> None:
     assert "no HITL integration or E2E owner" in contract
     assert "GAP / NO REPAIR AUTHORITY" in contract
 
-    assert "A row classified as a GAP is not implementation authority." in contract
+    assert "A row classified as a GAP is not implementation authority." in semantic_contract
     assert "R14-A does not close either gap." in contract
 
 
