@@ -1248,3 +1248,112 @@ def test_r6_e11_timeout_is_not_rollback_proof_and_late_terminal_cannot_resurrect
             await _stop_uvicorn(server, server_task)
 
     asyncio.run(scenario())
+
+
+def test_r14_b_real_tcp_failure_after_running_before_target_entry_is_terminal_no_replay(
+    tmp_path,
+):
+    """Prove the exact post-dispatch / pre-side-effect cut over real TCP."""
+
+    class _FailAfterRunningLedger(ClientInvocationLedger):
+        def __init__(self, path):
+            super().__init__(path)
+            self.running_seen = threading.Event()
+            self.failure_count = 0
+
+        def mark_running(self, **kwargs):
+            record = super().mark_running(**kwargs)
+            self.running_seen.set()
+            self.failure_count += 1
+            raise RuntimeError(
+                "R14-B injected after RUNNING before target callable entry"
+            )
+
+    async def scenario():
+        app, catalog, connections = _build_gateway_app()
+        server, server_task, port = await _start_uvicorn(app)
+        generation = None
+        target_calls = []
+        server_calls = []
+        ledger = _FailAfterRunningLedger(tmp_path / "r14b-pre-side-effect.sqlite3")
+
+        def tool(value, **kwargs):
+            target_calls.append(value)
+            return {"source": "client", "value": value}
+
+        try:
+            generation = await _connect_client(
+                port=port,
+                registry=_client_registry(
+                    tool,
+                    idempotency=CapabilityIdempotency.NON_IDEMPOTENT,
+                ),
+                ledger=ledger,
+                connection_id="r14-b-pre-side-effect-k1",
+            )
+            runtime, store = _server_runtime(catalog, connections)
+            _add_server_implementation(
+                runtime,
+                catalog,
+                lambda context, arguments: (
+                    server_calls.append(context.invocation_id)
+                    or {"source": "server"}
+                ),
+            )
+
+            with pytest.raises(CapabilityError) as raised:
+                await _execute(
+                    runtime,
+                    invocation_id="r14-b-pre-side-effect",
+                    connection_id=generation.connection_id,
+                    max_attempts=2,
+                )
+
+            assert raised.value.code == "LOCAL_EXECUTION_FAILED"
+            assert ledger.running_seen.is_set()
+            assert ledger.failure_count == 1
+
+            record = _ledger_record(ledger, "r14-b-pre-side-effect")
+            assert record is not None
+            assert record.state is ClientInvocationLedgerState.TERMINAL
+            assert record.terminal_type == "error"
+            assert record.terminal_payload is not None
+            assert record.terminal_payload["code"] == "LOCAL_EXECUTION_FAILED"
+
+            persisted = await store.get("r14-b-pre-side-effect")
+            assert persisted is not None
+            assert persisted.state is CapabilityInvocationState.FAILED
+            assert (
+                persisted.remote_outcome_state
+                is RemoteOutcomeState.TERMINAL_COMMITTED
+            )
+
+            attempts = await store.list_attempts("r14-b-pre-side-effect")
+            assert len(attempts) == 1
+            assert target_calls == []
+            assert server_calls == []
+
+            reconciled = await runtime.reconcile_remote_invocation(
+                "r14-b-pre-side-effect",
+                generation.connection_id,
+                timeout=5.0,
+            )
+            assert reconciled.status is RemoteReconciliationStatus.TERMINAL
+            assert reconciled.terminal_type is not None
+            assert reconciled.terminal_type.value == "error"
+            assert reconciled.terminal_payload is not None
+            assert (
+                reconciled.terminal_payload["code"]
+                == "LOCAL_EXECUTION_FAILED"
+            )
+            assert target_calls == []
+            assert server_calls == []
+            assert len(await store.list_attempts("r14-b-pre-side-effect")) == 1
+        finally:
+            await _close_generation(
+                generation,
+                shutdown_dispatcher=True,
+            )
+            await _stop_uvicorn(server, server_task)
+
+    asyncio.run(scenario())
