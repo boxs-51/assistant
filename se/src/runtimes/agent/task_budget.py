@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
@@ -92,6 +93,16 @@ class TaskBudgetLegacyBecameEnrolledError(TaskBudgetConflictError):
 
 class TaskBudgetUnsupportedLegacyMirrorError(TaskBudgetError):
     code = "USER_BUDGET_UNSUPPORTED_LEGACY_MIRROR"
+
+
+class _TaskActivationEligibilityError(TaskBudgetError):
+    """Private TBO-2 activation denial with deterministic disposition code."""
+
+    def __init__(self, code: str, task_id: str) -> None:
+        self.code = str(code)
+        super().__init__(
+            f"AgentTask {task_id} is ineligible for new execution activation"
+        )
 
 
 class DelegationDepthExceededError(TaskBudgetError):
@@ -475,6 +486,7 @@ class TaskBudgetService:
         user_budget_dual_accounting=None,
         user_tool_quota_enabled: bool = False,
         user_inference_quota_enabled: bool = False,
+        wall_clock: Callable[[], float] | None = None,
     ) -> None:
         self._uow_factory = uow_factory
         self._default_limits = default_limits
@@ -485,6 +497,7 @@ class TaskBudgetService:
         self._user_inference_quota_enabled = bool(
             user_inference_quota_enabled
         )
+        self._wall_clock = wall_clock or time.time
 
     @property
     def default_limits(self) -> TaskBudgetLimits | None:
@@ -775,6 +788,40 @@ class TaskBudgetService:
                             f"AgentTask {task_id} is {current_state}, "
                             f"expected one of {sorted(allowed)}"
                         )
+
+                    # TBO-2 new-Execution activation eligibility is authoritative
+                    # only at the locked durable ASSIGNED -> RUNNING seam.
+                    # Preserve an idempotent RUNNING winner before consulting
+                    # horizon policy so an already-activated Task is never
+                    # retroactively denied.
+                    if target_state == "RUNNING" and current_state == target_state:
+                        await uow.commit()
+                        return task
+
+                    if current_state == "ASSIGNED" and target_state == "RUNNING":
+                        now = float(self._wall_clock())
+                        task_horizon_at = getattr(task, "task_horizon_at", None)
+                        if (
+                            task_horizon_at is not None
+                            and now >= float(task_horizon_at)
+                        ):
+                            raise _TaskActivationEligibilityError(
+                                "TASK_HORIZON_EXPIRED",
+                                task_id,
+                            )
+                        review_horizon_at = getattr(
+                            task,
+                            "review_horizon_at",
+                            None,
+                        )
+                        if (
+                            review_horizon_at is not None
+                            and now >= float(review_horizon_at)
+                        ):
+                            raise _TaskActivationEligibilityError(
+                                "REVIEW_REQUIRED",
+                                task_id,
+                            )
 
                     if target_state == "WAITING":
                         branches = await uow.agents.list_task_branches(task_id)
