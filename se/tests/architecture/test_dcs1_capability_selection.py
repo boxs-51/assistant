@@ -3,28 +3,30 @@ from __future__ import annotations
 from pathlib import Path
 
 import faulthandler
+import os
 import sys
 
 import pytest
-from _pytest.terminal import TerminalReporter
+from _pytest.reports import TestReport
 
 
 # Temporary DCS-1 CI diagnostic instrumentation. This stays inside the
 # released focused-test path and does not change production behavior.
-_DCS1_ORIGINAL_LOGREPORT = TerminalReporter.pytest_runtest_logreport
+_DCS1_ORIGINAL_FROM_ITEM_AND_CALL = TestReport.from_item_and_call
 
 
-def _dcs1_diagnostic_logreport(self, report):
+def _dcs1_diagnostic_from_item_and_call(item, call):
+    report = _DCS1_ORIGINAL_FROM_ITEM_AND_CALL(item, call)
     if report.failed:
         sys.stderr.write(
             f"\nDCS1_DIAG_FAILED when={report.when} nodeid={report.nodeid}\n"
         )
         sys.stderr.flush()
-        pytest.exit("DCS1_DIAG_STOP_AFTER_FIRST_FAILURE", returncode=2)
-    return _DCS1_ORIGINAL_LOGREPORT(self, report)
+        os._exit(2)
+    return report
 
 
-TerminalReporter.pytest_runtest_logreport = _dcs1_diagnostic_logreport
+TestReport.from_item_and_call = staticmethod(_dcs1_diagnostic_from_item_and_call)
 faulthandler.enable()
 faulthandler.dump_traceback_later(300, repeat=True)
 
