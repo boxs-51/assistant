@@ -43,6 +43,7 @@ class _LocalCapabilityPlan:
     definition: CapabilityDefinition
     driver: BaseCapabilityDriver
     implementation_metadata: dict[str, Any] = field(default_factory=dict)
+    sandbox_driver: BaseCapabilityDriver | None = None
     execution_locations: frozenset[CapabilityExecutionLocation] = field(
         default_factory=lambda: frozenset(
             {
@@ -141,19 +142,22 @@ def _build_canonical_v2_plans(
         )
         bind = deepcopy(export["bind"])
         bound_handler = _bound_handler(handler, bind)
+        driver: BaseCapabilityDriver = PythonCapabilityDriver(
+            definition,
+            bound_handler,
+        )
+        sandbox_driver = None
         if (
             capability_id in SANDBOX_FILE_CAPABILITY_IDS
             and sandbox_manager is not None
             and sandbox_profile is not None
         ):
-            driver: BaseCapabilityDriver = SandboxPythonCapabilityDriver(
+            sandbox_driver = SandboxPythonCapabilityDriver(
                 definition,
                 bound_handler,
                 sandbox_manager,
                 sandbox_profile,
             )
-        else:
-            driver = PythonCapabilityDriver(definition, bound_handler)
 
         plans.append(
             _LocalCapabilityPlan(
@@ -164,15 +168,8 @@ def _build_canonical_v2_plans(
                     "physical_tool": physical_name,
                     "physical_version": physical_version,
                     "bind": deepcopy(bind),
-                    **(
-                        {"resource_scopes": ["SANDBOX"]}
-                        if (
-                            capability_id in SANDBOX_FILE_CAPABILITY_IDS
-                            and sandbox_manager is not None
-                        )
-                        else {}
-                    ),
                 },
+                sandbox_driver=sandbox_driver,
                 execution_locations=execution_locations,
             )
         )
@@ -237,13 +234,18 @@ def _preflight_v2_registration(
             raise _MetadataV2Error(
                 f"tool definition already registered: {capability_id}"
             )
-        if (
-            CapabilityExecutionLocation.SERVER in plan.execution_locations
-            and runtime.driver_registry.get(implementation_id) is not None
-        ):
-            raise _MetadataV2Error(
-                f"implementation driver already bound: {implementation_id}"
-            )
+        if CapabilityExecutionLocation.SERVER in plan.execution_locations:
+            implementation_ids = [implementation_id]
+            if plan.sandbox_driver is not None:
+                implementation_ids.append(
+                    f"server:sandbox:{capability_id}"
+                )
+            for candidate_id in implementation_ids:
+                if runtime.driver_registry.get(candidate_id) is not None:
+                    raise _MetadataV2Error(
+                        "implementation driver already bound: "
+                        f"{candidate_id}"
+                    )
         if runtime.catalog is not None:
             if runtime.catalog.contains_definition(capability_id):
                 existing = runtime.catalog.get_definition(capability_id)
@@ -255,14 +257,18 @@ def _preflight_v2_registration(
                         "catalog definition already registered with a "
                         f"different contract: {capability_id}"
                     )
-            if (
-                CapabilityExecutionLocation.SERVER in plan.execution_locations
-                and runtime.catalog.contains_implementation(implementation_id)
-            ):
-                raise _MetadataV2Error(
-                    "catalog implementation already registered: "
-                    f"{implementation_id}"
-                )
+            if CapabilityExecutionLocation.SERVER in plan.execution_locations:
+                implementation_ids = [implementation_id]
+                if plan.sandbox_driver is not None:
+                    implementation_ids.append(
+                        f"server:sandbox:{capability_id}"
+                    )
+                for candidate_id in implementation_ids:
+                    if runtime.catalog.contains_implementation(candidate_id):
+                        raise _MetadataV2Error(
+                            "catalog implementation already registered: "
+                            f"{candidate_id}"
+                        )
 
 
 def _register_one(
@@ -329,6 +335,36 @@ def _register_one(
         runtime.registry.get_driver(definition.capability_id),
         replace=True,
     )
+
+    if plan.sandbox_driver is not None:
+        sandbox_implementation_id = (
+            f"server:sandbox:{definition.capability_id}"
+        )
+        if not runtime.catalog.contains_implementation(
+            sandbox_implementation_id
+        ):
+            sandbox_implementation = CapabilityImplementation.from_definition(
+                catalog_definition,
+                implementation_id=sandbox_implementation_id,
+                location=CapabilityExecutionLocation.SERVER,
+                driver_kind="PYTHON",
+                owner_type=CapabilityOwnerType.SYSTEM,
+                metadata={
+                    "kind": "TOOL",
+                    **plan.implementation_metadata,
+                    "resource_scopes": ["SANDBOX"],
+                },
+            )
+            runtime.catalog.register_implementation(sandbox_implementation)
+            runtime.catalog.transition_implementation(
+                sandbox_implementation_id,
+                CapabilityImplementationState.ENABLED,
+            )
+        runtime.driver_registry.bind(
+            sandbox_implementation_id,
+            plan.sandbox_driver,
+            replace=True,
+        )
 
 
 def register_local_tools(

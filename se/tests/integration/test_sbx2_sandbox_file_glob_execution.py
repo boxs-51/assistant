@@ -12,6 +12,7 @@ from se.src.runtimes.agent.adapters.tool import CapabilityToolExecutionAdapter
 from se.src.runtimes.agent.contracts.policy import PolicyDecision
 from se.src.runtimes.agent.contracts.tool import ToolExecutionRequest
 from se.src.runtimes.agent.runtime import AgentRuntime
+from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
 from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
 from se.src.runtimes.capability.contracts.sandbox import SandboxProfile
@@ -24,7 +25,12 @@ from se.src.runtimes.capability.drivers.sandbox_python_driver import (
     SANDBOX_FILE_CAPABILITY_IDS,
     SandboxPythonCapabilityDriver,
 )
-from se.src.runtimes.capability.local_tool_loader import _build_canonical_v2_plans
+from se.src.runtimes.capability.local_tool_loader import (
+    _build_canonical_v2_plans,
+    _register_one,
+)
+from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
+from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.capability.sandbox import (
     SandboxError,
     SandboxManager,
@@ -273,11 +279,15 @@ def test_sbx2_loader_binds_exact_file_glob_ids_to_sandbox_driver(
         SANDBOX_FILE_CAPABILITY_IDS
     )
     assert all(
-        isinstance(plan.driver, SandboxPythonCapabilityDriver)
+        isinstance(plan.driver, PythonCapabilityDriver)
         for plan in plans
     )
     assert all(
-        plan.implementation_metadata["resource_scopes"] == ["SANDBOX"]
+        isinstance(plan.sandbox_driver, SandboxPythonCapabilityDriver)
+        for plan in plans
+    )
+    assert all(
+        "resource_scopes" not in plan.implementation_metadata
         for plan in plans
     )
 
@@ -289,6 +299,89 @@ def test_sbx2_loader_binds_exact_file_glob_ids_to_sandbox_driver(
         isinstance(plan.driver, PythonCapabilityDriver)
         for plan in ordinary
     )
+    assert all(plan.sandbox_driver is None for plan in ordinary)
+
+
+class _ToolRegistry:
+    def __init__(self):
+        self._items = {}
+
+    def get(self, capability_id):
+        return self._items.get(capability_id)
+
+    def register(self, definition):
+        self._items[definition.name] = definition
+
+
+@pytest.mark.asyncio
+async def test_sbx2_keeps_direct_server_read_while_targeted_agent_uses_sandbox(
+    tmp_path: Path,
+):
+    manager = SandboxManager(tmp_path / "sandboxes")
+    profile = SandboxProfile(profile_id="sbx2-file-glob")
+    runtime = CapabilityRuntime(
+        catalog=CapabilityCatalog(),
+        routing_policy=CapabilityRoutingPolicy(),
+    )
+    tool_registry = _ToolRegistry()
+
+    plans = _build_canonical_v2_plans(
+        deepcopy(FILE_METADATA),
+        file_run,
+        sandbox_manager=manager,
+        sandbox_profile=profile,
+    )
+    for plan in plans:
+        _register_one(runtime, tool_registry, plan)
+
+    direct_host_file = tmp_path / "direct-host-readable.txt"
+    direct_host_file.write_text("direct-compatible")
+
+    direct_result = await runtime.execute_capability(
+        capability_id="file.read",
+        arguments={"file_paths": str(direct_host_file)},
+        identity=Identity(user_id="user-sbx2", auth_type="jwt"),
+        execution_id="direct-exec",
+        invocation_id="inv-direct",
+        metadata={"chat_execution_mode": "DIRECT"},
+    )
+    assert "direct-compatible" in str(direct_result.output)
+
+    legacy = runtime.catalog.get_implementation("server:file.read")
+    sandbox = runtime.catalog.get_implementation("server:sandbox:file.read")
+    assert "resource_scopes" not in legacy.metadata
+    assert sandbox.metadata["resource_scopes"] == ["SANDBOX"]
+    assert isinstance(
+        runtime.driver_registry.get("server:file.read"),
+        PythonCapabilityDriver,
+    )
+    assert isinstance(
+        runtime.driver_registry.get("server:sandbox:file.read"),
+        SandboxPythonCapabilityDriver,
+    )
+
+    await runtime.execute_capability(
+        capability_id="file.write",
+        arguments={"file_paths": "agent.txt", "content": "sandboxed"},
+        identity=Identity(user_id="user-sbx2", auth_type="jwt"),
+        execution_id="agent-exec",
+        caller_agent_execution_id="agent-exec",
+        invocation_id="inv-agent-write",
+        target=_target("agent-exec"),
+    )
+    lease = manager.current_for_execution("agent-exec")
+    assert (lease.root / "agent.txt").read_text() == "sandboxed"
+
+    with pytest.raises(SandboxPathError):
+        await runtime.execute_capability(
+            capability_id="file.read",
+            arguments={"file_paths": str(direct_host_file)},
+            identity=Identity(user_id="user-sbx2", auth_type="jwt"),
+            execution_id="agent-exec",
+            caller_agent_execution_id="agent-exec",
+            invocation_id="inv-agent-escape",
+            target=_target("agent-exec"),
+        )
 
 
 class _AllowToolPolicy:
