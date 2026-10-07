@@ -305,9 +305,9 @@ class _CaptureCapabilityRuntime:
 
 
 class _AgentContext:
-    def __init__(self):
+    def __init__(self, *, connection_id=None):
         self.execution_id = "agent-exec"
-        self.connection_id = None
+        self.connection_id = connection_id
         self.identity = Identity(user_id="user-sbx2", auth_type="jwt")
         self.remaining_seconds = 30.0
         self.remaining_iteration_seconds = 30.0
@@ -365,6 +365,30 @@ async def test_sbx2_agent_adapter_constructs_explicit_sandbox_target():
     assert target.resource_scope is ResourceScope.SANDBOX
     assert target.resource_ref == context.execution_id
     assert target.stable_client_id is None
+
+
+@pytest.mark.asyncio
+async def test_sbx2_agent_adapter_does_not_fallback_client_call_to_sandbox():
+    runtime = _CaptureCapabilityRuntime()
+    adapter = CapabilityToolExecutionAdapter(
+        runtime,
+        _AllowToolPolicy(),
+        _AllowExecutionPolicy(),
+    )
+    context = _AgentContext(connection_id="conn-client")
+    request = ToolExecutionRequest(
+        execution_id=context.execution_id,
+        iteration=1,
+        invocation_id="inv-client",
+        tool_call_id="tool-client",
+        capability_id="file.read",
+        connection_id="conn-client",
+        arguments={"file_paths": "note.txt"},
+    )
+
+    result = await adapter.execute(context, request)
+    assert result.success is True
+    assert runtime.kwargs["target"] is None
 
 
 @pytest.mark.asyncio
