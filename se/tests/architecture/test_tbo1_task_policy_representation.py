@@ -7,6 +7,7 @@ from se.src.agent.registry import AgentRegistry
 from se.src.domain.schemas.agent import AgentDefinition
 from se.src.domain.schemas.identity import Identity
 from se.src.domain.schemas.multi_agent import (
+    AgentTask,
     AgentTaskCreateRequest,
     TaskMode,
 )
@@ -81,6 +82,30 @@ def test_tbo1_negative_horizon_is_rejected_by_schema(field):
 
     with pytest.raises(ValidationError):
         AgentTaskCreateRequest(**values)
+
+
+@pytest.mark.parametrize("value", [float("inf"), float("-inf"), float("nan")])
+@pytest.mark.parametrize("field", ["task_horizon_at", "review_horizon_at"])
+def test_tbo1_non_finite_horizon_is_rejected_before_persistence(field, value):
+    create_values = {
+        "session_id": "session-1",
+        "assigned_agent_id": "worker",
+        field: value,
+    }
+    with pytest.raises(ValidationError):
+        AgentTaskCreateRequest(**create_values)
+
+    task_values = {
+        "task_id": "task-1",
+        "session_id": "session-1",
+        "created_by": "user-1",
+        "assigned_agent_id": "worker",
+        "created_at": 1.0,
+        "updated_at": 1.0,
+        field: value,
+    }
+    with pytest.raises(ValidationError):
+        AgentTask(**task_values)
 
 
 @pytest.mark.asyncio
