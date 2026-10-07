@@ -1355,6 +1355,14 @@ class CapabilityRuntime(BaseRuntime):
                 f"Capability '{capability_id}' is not authorized."
             )
 
+        effective_execution_connection_id = (
+            connection_id or metadata_connection_id
+        )
+        if isinstance(driver, RemoteClientDriver):
+            # A semantic target may resolve the active physical connection
+            # without the caller naming a transient connection generation.
+            effective_execution_connection_id = driver.connection_id
+
         tool_quota_enabled = (
             driver.definition.kind is CapabilityKind.TOOL
             and self.tool_quota_service is not None
@@ -1403,7 +1411,7 @@ class CapabilityRuntime(BaseRuntime):
             branch_id=branch_id,
             correlation_id=effective_correlation_id,
             trace_id=effective_trace_id,
-            connection_id=(connection_id or metadata_connection_id),
+            connection_id=effective_execution_connection_id,
             target=canonical_target,
             workflow_id=workflow_id,
             timeout_seconds=timeout_seconds,
@@ -1655,7 +1663,7 @@ class CapabilityRuntime(BaseRuntime):
                 arguments=arguments,
                 identity=identity,
                 request_metadata=request_metadata,
-                routing_connection_id=connection_id,
+                routing_connection_id=context.connection_id,
                 started=started,
                 allow_internal_retry=True,
                 canonical_agent_tool_hard_timeout=(
@@ -1814,7 +1822,7 @@ class CapabilityRuntime(BaseRuntime):
                 arguments=arguments,
                 identity=identity,
                 request_metadata=request_metadata,
-                routing_connection_id=connection_id,
+                routing_connection_id=context.connection_id,
                 started=started,
                 allow_internal_retry=True,
                 canonical_agent_tool_hard_timeout=(
