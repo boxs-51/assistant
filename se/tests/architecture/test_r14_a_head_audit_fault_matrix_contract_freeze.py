@@ -16,8 +16,13 @@ def _text(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
 
 
+def _semantic(text: str) -> str:
+    return " ".join(text.replace("**", "").replace("\x60", "").split())
+
+
 def test_r14a_pins_canonical_scope_and_two_file_claim() -> None:
     contract = CONTRACT.read_text(encoding="utf-8")
+    semantic_contract = _semantic(contract)
     roadmap = _text("docs/AGENT_EXECUTION_CONTINUATION_BRANCHING_ROADMAP_V2.md")
 
     assert "# Phase R14 — CI / Fault Injection / Production Exit Gates" in roadmap
@@ -66,13 +71,14 @@ def test_r14a_pins_canonical_scope_and_two_file_claim() -> None:
 
     assert "R14-A owns exactly two NEW files" in contract
     assert "There is no third path." in contract
-    assert "Production authority: NONE" in contract
-    assert "Fault-hook authority: NONE" in contract
-    assert "Merge authority: NONE" in contract
+    assert "Production authority: NONE" in semantic_contract
+    assert "Fault-hook authority: NONE" in semantic_contract
+    assert "Merge authority: NONE" in semantic_contract
 
 
 def test_r14a_freezes_completed_semantic_mapping_and_bounded_gaps() -> None:
     contract = CONTRACT.read_text(encoding="utf-8")
+    semantic_contract = _semantic(contract)
 
     for classification in (
         "COVERED_ARCHITECTURE_COMPOSED",
@@ -90,7 +96,7 @@ def test_r14a_freezes_completed_semantic_mapping_and_bounded_gaps() -> None:
 
     assert "R14-GAP-REMOTE-PRE-SIDE-EFFECT-1" in contract
     assert "dispatch accepted but local side-effect execution starts" not in contract
-    assert "after remote dispatch has been accepted but before local tool execution has begun" in contract
+    assert "after remote dispatch has been accepted but before local tool execution has begun" in semantic_contract
 
     assert "R14-GAP-HITL-E2E-1" in contract
     assert "no HITL integration or E2E owner" in contract
@@ -184,6 +190,7 @@ def test_r14a_binds_resume_branch_retry_checkpoint_and_budget_owners() -> None:
 
 def test_r14a_preserves_r13_ci_and_cross_track_authority_fences() -> None:
     contract = CONTRACT.read_text(encoding="utf-8")
+    semantic_contract = _semantic(contract)
     r13 = _text(
         "docs/agent_execution_r13/"
         "R13_H_COMPATIBILITY_REMOVAL_EXIT_MATRIX_B51F32ED.md"
