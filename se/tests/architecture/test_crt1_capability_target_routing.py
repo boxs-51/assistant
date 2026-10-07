@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from cl.src.core.capability_dispatcher import CapabilityDispatcher
 from se.src.runtimes.capability.catalog import CapabilityCatalog
@@ -20,6 +22,7 @@ from se.src.runtimes.capability.contracts.target import (
     ResourceScope,
     canonical_target_payload,
 )
+from se.src.domain.schemas.capability import CapabilityExecutionRequest
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.capability.contracts.error import CapabilityError
 from se.src.runtimes.capability.fingerprint import capability_request_fingerprint
@@ -29,6 +32,9 @@ from se.src.runtimes.capability.policy import (
     CapabilityRoutingPolicy,
 )
 from se.src.runtimes.connection.registry import ConnectionRegistry
+from se.src.transport.gateway.api.v1.capability_router import (
+    execute_capability as execute_capability_endpoint,
+)
 
 
 def _definition(capability_id: str = "crt.echo") -> CapabilityDefinition:
@@ -281,4 +287,26 @@ async def test_malformed_metadata_target_is_safe_validation_error():
     assert error.retryable is False
     assert error.safe_for_client is True
     assert error.cause_type == "TypeError"
+
+@pytest.mark.asyncio
+async def test_http_malformed_metadata_target_returns_422():
+    runtime = CapabilityRuntime()
+    body = CapabilityExecutionRequest(
+        arguments={"value": "x"},
+        metadata={"target": "CLIENT_LOCAL"},
+    )
+    container = SimpleNamespace(capability_runtime=runtime)
+
+    with pytest.raises(HTTPException) as exc_info:
+        await execute_capability_endpoint(
+            "crt.echo",
+            body,
+            Identity(user_id="user-crt", auth_type="jwt"),
+            container,
+        )
+
+    error = exc_info.value
+    assert error.status_code == 422
+    assert error.detail["code"] == "CAPABILITY_INVALID_TARGET"
+    assert error.detail["category"] == "VALIDATION"
 
