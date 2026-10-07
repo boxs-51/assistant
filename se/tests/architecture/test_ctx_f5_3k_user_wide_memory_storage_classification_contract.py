@@ -139,11 +139,77 @@ def test_ctx_f5_3k_freezes_current_migration_parent_without_mutating_it() -> Non
 def test_ctx_f5_3k_freezes_identity_stability_and_replay_conflict() -> None:
     contract = _normalized(CONTRACT)
     memory = _read(MEMORY)
+    tree = ast.parse(memory)
 
-    assert '"owner_user_id": source_ref.owner_user_id' in memory
-    assert '"promotion_authority_id": promotion_authority_id' in memory
-    assert '"content_digest": content_digest' in memory
-    assert '"memory_schema_version": memory_schema_version' in memory
+    identity_domain = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "MEMORY_IDENTITY_DOMAIN"
+            for target in node.targets
+        )
+    )
+    assert isinstance(identity_domain.value, ast.Constant)
+    assert identity_domain.value.value == "ctx-memory-v1"
+
+    memory_id_function = next(
+        node
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef) and node.name == "memory_id"
+    )
+    material_assignment = next(
+        node
+        for node in ast.walk(memory_id_function)
+        if isinstance(node, ast.Assign)
+        and any(
+            isinstance(target, ast.Name) and target.id == "material"
+            for target in node.targets
+        )
+    )
+    assert isinstance(material_assignment.value, ast.Dict)
+    material_keys = [
+        key.value
+        for key in material_assignment.value.keys
+        if isinstance(key, ast.Constant) and isinstance(key.value, str)
+    ]
+    assert material_keys == [
+        "owner_user_id",
+        "promotion_authority_id",
+        "source_context_source_id",
+        "content_digest",
+        "memory_schema_version",
+    ]
+
+    material_values = dict(zip(material_keys, material_assignment.value.values))
+
+    owner_value = material_values["owner_user_id"]
+    assert isinstance(owner_value, ast.Attribute)
+    assert owner_value.attr == "owner_user_id"
+    assert isinstance(owner_value.value, ast.Name)
+    assert owner_value.value.id == "source_ref"
+
+    promotion_value = material_values["promotion_authority_id"]
+    assert isinstance(promotion_value, ast.Name)
+    assert promotion_value.id == "promotion_authority_id"
+
+    source_context_value = material_values["source_context_source_id"]
+    assert isinstance(source_context_value, ast.Attribute)
+    assert source_context_value.attr == "context_source_id"
+    assert isinstance(source_context_value.value, ast.Name)
+    assert source_context_value.value.id == "source_ref"
+
+    content_digest_value = material_values["content_digest"]
+    assert isinstance(content_digest_value, ast.Name)
+    assert content_digest_value.id == "content_digest"
+
+    schema_version_value = material_values["memory_schema_version"]
+    assert isinstance(schema_version_value, ast.Name)
+    assert schema_version_value.id == "memory_schema_version"
+
+    memory_id_source = ast.get_source_segment(memory, memory_id_function)
+    assert memory_id_source is not None
+    assert 'MEMORY_IDENTITY_DOMAIN.encode("utf-8")' in memory_id_source
     assert 'exclude={"created_at"}' in memory
 
     for phrase in (
