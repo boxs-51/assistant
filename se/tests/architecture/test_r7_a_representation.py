@@ -81,7 +81,7 @@ def test_r7_a_contracts_are_immutable_and_have_no_accepted_claim_state():
         client_id="client-r7",
         connection_id="connection-r7-k2",
         wait_reason="CONNECTION",
-        trigger_type="CONNECTION_RECONNECT",
+        trigger_type="CLIENT_RECONNECT",
         plan_fingerprint="a" * 64,
         claim_expires_at=datetime.now(timezone.utc) + timedelta(seconds=30),
     )
@@ -157,7 +157,7 @@ async def test_r7_a_sql_repository_round_trips_multi_pending_and_claim_cas():
                     "client_id": "client-r7",
                     "connection_id": "connection-k2",
                     "wait_reason": "CONNECTION",
-                    "trigger_type": "CONNECTION_RECONNECT",
+                    "trigger_type": "CLIENT_RECONNECT",
                     "state": "CREATED",
                     "revision": 0,
                     "plan_fingerprint": "b" * 64,
