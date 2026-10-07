@@ -143,7 +143,7 @@ def test_crt1_migration_is_single_linear_nullable_no_backfill_and_reversible(
     )
     config = _config(database)
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [CRT1_REVISION]
+    assert script.get_heads() == ["30a_ctx_f5_user_wide_memory_scope"]
     assert script.get_revision(CRT1_REVISION).down_revision == PREVIOUS_REVISION
 
     command.upgrade(config, PREVIOUS_REVISION)

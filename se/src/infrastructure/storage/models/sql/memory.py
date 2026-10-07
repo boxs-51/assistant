@@ -25,6 +25,10 @@ class MemoryRecordRow(Base):
             "canonical_bytes >= 0",
             name="ck_memory_records_canonical_bytes_nonnegative",
         ),
+        CheckConstraint(
+            "memory_scope IS NULL OR memory_scope = 'USER_WIDE'",
+            name="ck_memory_records_scope",
+        ),
     )
 
     memory_id: Mapped[str] = mapped_column(String(64), primary_key=True)
@@ -34,6 +38,7 @@ class MemoryRecordRow(Base):
     )
     memory_schema_version: Mapped[int] = mapped_column(Integer, nullable=False)
     owner_user_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    memory_scope: Mapped[str | None] = mapped_column(String(32), nullable=True)
     source_context_source_id: Mapped[str] = mapped_column(
         String(64),
         nullable=False,

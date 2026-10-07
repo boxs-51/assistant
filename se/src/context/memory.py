@@ -25,6 +25,7 @@ from se.src.context.source_identity import (
 
 MEMORY_IDENTITY_DOMAIN = "ctx-memory-v1"
 MEMORY_SCHEMA_VERSION = 1
+MEMORY_SCOPE_USER_WIDE = "USER_WIDE"
 
 
 class MemoryRecordConflictError(RuntimeError):
@@ -165,6 +166,7 @@ class MemoryRecord(BaseModel):
     memory_schema_version: int = Field(default=MEMORY_SCHEMA_VERSION, ge=1)
     source_ref_snapshot: ContextSourceRef
     owner_user_id: str
+    memory_scope: str | None = None
     content_digest: str
     canonical_bytes: int = Field(ge=0)
     content: Any = None
@@ -181,6 +183,15 @@ class MemoryRecord(BaseModel):
     @classmethod
     def normalize_required_strings(cls, value: Any, info) -> str:
         return _require_non_empty(info.field_name, value)
+
+    @field_validator("memory_scope", mode="before")
+    @classmethod
+    def validate_memory_scope(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        if value != MEMORY_SCOPE_USER_WIDE:
+            raise ValueError("memory_scope must be USER_WIDE when present")
+        return value
 
     @field_validator("content", mode="before")
     @classmethod
@@ -241,6 +252,8 @@ def _validate_stored_record_shape(record: MemoryRecord) -> None:
         raise ValueError("canonical_bytes must be >= 0")
     if not isinstance(record.created_at, datetime):
         raise ValueError("created_at must be a datetime")
+    if record.memory_scope not in (None, MEMORY_SCOPE_USER_WIDE):
+        raise ValueError("memory_scope must be USER_WIDE when present")
 
     _validate_frozen_json(record.content, path="$.content")
     if not isinstance(record.metadata, MappingProxyType):
@@ -296,6 +309,7 @@ def create_memory_record(
     *,
     source_ref: ContextSourceRef,
     promotion_authority_id: str,
+    memory_scope: str | None = None,
     content: Any,
     metadata: Mapping[str, Any] | None = None,
     memory_schema_version: int = MEMORY_SCHEMA_VERSION,
@@ -316,6 +330,7 @@ def create_memory_record(
         memory_schema_version=memory_schema_version,
         source_ref_snapshot=source_ref,
         owner_user_id=source_ref.owner_user_id,
+        memory_scope=memory_scope,
         content_digest=digest,
         canonical_bytes=len(canonical),
         content=content,
