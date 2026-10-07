@@ -104,6 +104,30 @@ async def test_target_round_trips_through_sql_create_read_and_cas(tmp_path):
         assert reloaded is not None
         assert reloaded.target == target
         assert reloaded.revision == 1
+
+        mutated_target = target.model_copy(
+            update={"stable_client_id": "client-b"}
+        )
+        mutated = reloaded.model_copy(
+            update={
+                "target": mutated_target,
+                "request_fingerprint": capability_request_fingerprint(
+                    capability_id=reloaded.capability_id,
+                    capability_version=reloaded.capability_version,
+                    arguments=reloaded.arguments,
+                    target=mutated_target,
+                ),
+                "revision": 2,
+            }
+        )
+        assert await store.compare_and_set(
+            mutated,
+            expected_revision=1,
+        ) is False
+        unchanged = await store.get(item.invocation_id)
+        assert unchanged is not None
+        assert unchanged.target == target
+        assert unchanged.revision == 1
     finally:
         await driver.disconnect()
 

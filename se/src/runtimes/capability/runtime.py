@@ -1084,6 +1084,7 @@ class CapabilityRuntime(BaseRuntime):
             "execution_mode",
             "idempotency",
             "request_fingerprint",
+            "target",
             "execution_id",
             "workflow_id",
             "tool_call_id",
