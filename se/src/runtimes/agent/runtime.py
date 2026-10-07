@@ -57,6 +57,7 @@ from .contracts.resume import (
 from .persistence import ExecutionConflictError
 from .resume_claim import ResumeActivationError
 from .state_machine import AgentExecutionStateMachine
+from .selection import ensure_selected_tool_calls
 from .wait_policy import (
     ConfiguredExecutionWaitPolicy,
     ExecutionWaitPolicy,
@@ -2396,6 +2397,20 @@ class AgentRuntime:
                         usage=context.usage,
                     )
 
+                # Canonical assembler snapshots always carry capability_ids,
+                # including [] for the DCS zero-tool fast path. Legacy synthetic
+                # context builders may predate both Tool definitions and assembly
+                # metadata; preserve only that unmarked compatibility shape.
+                if snapshot.tools or "capability_ids" in snapshot.metadata:
+                    ensure_selected_tool_calls(
+                        [
+                            item.get("name")
+                            if isinstance(item, Mapping)
+                            else getattr(item, "name", None)
+                            for item in snapshot.tools
+                        ],
+                        [tool_call.name for tool_call in response.message.tool_calls],
+                    )
                 record.state = transition(record.state, AgentLoopState.TOOL_CALLING)
                 tool_requests = [
                     ToolExecutionRequest(

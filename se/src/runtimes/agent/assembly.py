@@ -4,15 +4,91 @@ from typing import Any, Mapping, Sequence
 
 from .contracts.context_assembly import AgentContextAssembly, AgentSystemPrompt
 from .contracts.inference import InferenceMessage, InferenceToolDefinition
+from .contracts.selection import (
+    CapabilitySelectionCandidate,
+    CapabilitySelectionContext,
+    CapabilityWorkingSet,
+)
+from .contracts.skills import (
+    ActiveSkill,
+    ActiveSkillSet,
+    SkillActivationSource,
+    SkillDescriptor,
+)
+from .selection import select_active_assigned_skills
 
 
 class DefaultAgentContextAssembler:
-    """Canonical Phase 6.11 system/capability/conversation assembly."""
+    """Canonical Agent context assembly with optional DCS selection."""
 
-    def __init__(self, system_prompt_provider, capability_resolver, skill_resolver=None) -> None:
+    def __init__(
+        self,
+        system_prompt_provider,
+        capability_resolver,
+        skill_resolver=None,
+        *,
+        selector=None,
+    ) -> None:
         self._system_prompt_provider = system_prompt_provider
         self._capability_resolver = capability_resolver
         self._skill_resolver = skill_resolver
+        self._selector = selector
+
+    async def _active_assigned_skills(
+        self,
+        *,
+        context,
+        resolved_skills,
+    ) -> ActiveSkillSet:
+        assigned_ids = tuple(getattr(context.agent, "skills", ()) or ())
+        if not assigned_ids or self._skill_resolver is None:
+            return ActiveSkillSet()
+
+        trusted_descriptors: dict[str, SkillDescriptor] = {}
+        descriptor_loader = getattr(self._skill_resolver, "list_descriptors", None)
+        if callable(descriptor_loader):
+            descriptors = await descriptor_loader(identity=context.identity)
+            trusted_descriptors = {
+                item.skill_id: item
+                for item in descriptors
+                if item.skill_id in assigned_ids
+            }
+
+        resolved_by_id = {item.skill_id: item for item in resolved_skills}
+        active: list[ActiveSkill] = []
+        for skill_id in assigned_ids:
+            descriptor = trusted_descriptors.get(skill_id)
+            if descriptor is None:
+                view = resolved_by_id.get(skill_id)
+                if view is None:
+                    continue
+                descriptor = SkillDescriptor(
+                    skill_id=view.skill_id,
+                    version=view.version,
+                    name=view.name,
+                    description=view.description,
+                    provenance="LEGACY_ASSIGNED",
+                )
+            active.append(
+                ActiveSkill(
+                    descriptor=descriptor,
+                    source=SkillActivationSource.ASSIGNED,
+                )
+            )
+        return ActiveSkillSet(skills=tuple(active))
+
+    @staticmethod
+    def _requested_ids(context, key: str) -> tuple[str, ...]:
+        raw = context.metadata.get(key, ())
+        if not isinstance(raw, (tuple, list, set, frozenset)):
+            return ()
+        return tuple(
+            dict.fromkeys(
+                item.strip()
+                for item in raw
+                if isinstance(item, str) and item.strip()
+            )
+        )
 
     async def assemble(
         self,
@@ -24,20 +100,110 @@ class DefaultAgentContextAssembler:
             agent=context.agent,
             context=context,
         )
-        capabilities = tuple(
+        eligible_capabilities = tuple(
             await self._capability_resolver.resolve(
                 agent_id=context.agent_id,
                 identity=context.identity,
             )
         )
-        skills = ()
+
+        resolved_skills = ()
         if self._skill_resolver is not None:
-            skills = tuple(
+            resolved_skills = tuple(
                 await self._skill_resolver.resolve(
                     agent_id=context.agent_id,
                     identity=context.identity,
                 )
             )
+
+        conversation = tuple(
+            InferenceMessage.model_validate(item)
+            for item in prior_messages
+            if item.get("role") != "system"
+        )
+        assigned_skill_set = await self._active_assigned_skills(
+            context=context,
+            resolved_skills=resolved_skills,
+        )
+
+        if self._selector is None:
+            # No-selector assemblers are the compatibility surface: preserve
+            # historical assigned/preloaded Skill activation and full eligible
+            # Tool projection. Canonical production wiring supplies a selector.
+            active_skill_set = assigned_skill_set
+            selected_capabilities = eligible_capabilities
+            working_set = CapabilityWorkingSet(
+                visible_capability_ids=tuple(
+                    item.capability_id for item in selected_capabilities
+                ),
+                active_groups=(),
+                reason="LEGACY_FULL_ELIGIBLE",
+                provenance=("LEGACY_COMPATIBILITY",),
+                revision=max(1, int(context.iteration or 0)),
+            )
+        else:
+            active_skill_set = select_active_assigned_skills(
+                assigned_skill_set,
+                conversation,
+                explicit_requested_skill_ids=self._requested_ids(
+                    context,
+                    "dcs_requested_skill_ids",
+                ),
+            )
+            selection = self._selector.select(
+                CapabilitySelectionContext(
+                    owner_user_id=(
+                        str(context.identity.user_id)
+                        if context.identity.user_id
+                        else None
+                    ),
+                    agent_id=context.agent_id,
+                    execution_id=context.execution_id,
+                    iteration=max(1, int(context.iteration or 0)),
+                    messages=conversation,
+                    eligible_capabilities=tuple(
+                        CapabilitySelectionCandidate(
+                            capability_id=item.capability_id,
+                            name=item.name,
+                            description=item.description,
+                        )
+                        for item in eligible_capabilities
+                    ),
+                    explicit_requested_capability_ids=(
+                        self._requested_ids(
+                            context,
+                            "dcs_requested_capability_ids",
+                        )
+                    ),
+                    active_skill_set=active_skill_set,
+                )
+            )
+            selected_ids = set(selection.working_set.visible_capability_ids)
+            eligible_ids = {
+                item.capability_id for item in eligible_capabilities
+            }
+            if not selected_ids.issubset(eligible_ids):
+                raise ValueError(
+                    "DCS selector returned capability outside eligible Agent envelope."
+                )
+            selected_capabilities = tuple(
+                item
+                for item in eligible_capabilities
+                if item.capability_id in selected_ids
+            )
+            working_set = selection.working_set
+            active_skill_set = selection.active_skill_set
+
+        active_skill_ids = {
+            item.descriptor.skill_id
+            for item in active_skill_set.skills
+        }
+        skills = tuple(
+            item
+            for item in resolved_skills
+            if item.skill_id in active_skill_ids
+        )
+
         if skills:
             skill_sections = []
             for skill in skills:
@@ -50,8 +216,10 @@ class DefaultAgentContextAssembler:
                 source=f"{system_prompt.source}+skills",
                 version=system_prompt.version,
             )
+
         if self._skill_resolver is not None and any(
-            item.capability_id == "skill.load" for item in capabilities
+            item.capability_id == "skill.load"
+            for item in selected_capabilities
         ):
             available = await self._skill_resolver.list_available(
                 identity=context.identity,
@@ -73,11 +241,7 @@ class DefaultAgentContextAssembler:
                     source=f"{system_prompt.source}+skill_catalog",
                     version=system_prompt.version,
                 )
-        conversation = tuple(
-            InferenceMessage.model_validate(item)
-            for item in prior_messages
-            if item.get("role") != "system"
-        )
+
         messages = (
             InferenceMessage(role="system", content=system_prompt.content),
             *conversation,
@@ -88,15 +252,17 @@ class DefaultAgentContextAssembler:
                 description=item.description,
                 parameters=dict(item.parameters),
             )
-            for item in capabilities
+            for item in selected_capabilities
         )
         return AgentContextAssembly(
             system_prompt=system_prompt,
-            capabilities=capabilities,
+            capabilities=selected_capabilities,
             skills=skills,
             constraints=context.limits.model_dump(mode="json"),
             messages=messages,
             tools=tools,
+            working_set=working_set,
+            active_skill_set=active_skill_set,
         )
 
 

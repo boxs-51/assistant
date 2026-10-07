@@ -7,6 +7,8 @@ from typing import Any, Mapping, Protocol, Sequence
 from pydantic import BaseModel, ConfigDict, Field
 
 from .inference import InferenceMessage, InferenceToolDefinition
+from .selection import CapabilityWorkingSet
+from .skills import ActiveSkillSet
 
 
 class AgentSystemPrompt(BaseModel):
@@ -52,6 +54,8 @@ class AgentContextAssembly(BaseModel):
     constraints: Mapping[str, Any] = Field(default_factory=dict)
     messages: tuple[InferenceMessage, ...] = ()
     tools: tuple[InferenceToolDefinition, ...] = ()
+    working_set: CapabilityWorkingSet | None = None
+    active_skill_set: ActiveSkillSet = Field(default_factory=ActiveSkillSet)
 
 
 class AgentSystemPromptProvider(Protocol):
