@@ -1,54 +1,32 @@
 from __future__ import annotations
 
 from copy import deepcopy
-import asyncio
+
 import pytest
-from sqlalchemy import delete, select
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
-    AgentIterationRecord,
-    AgentToolCallRecord,
-    AgentToolResultRecord,
-    AgentTranscriptChunkRecord,
-    AgentTranscriptPayloadNodeRecord,
-    AgentTranscriptRepresentationRecord,
-)
-from se.src.infrastructure.storage.models.sql.capability import (
-    CapabilityInvocationRecord,
 )
 from se.src.infrastructure.storage.models.sql.chat_data.session import (
     Session as ChatSessionRecord,
 )
 from se.src.infrastructure.storage.models.sql.base import Base
 from se.src.infrastructure.storage.repositories.agent import AgentRepository
-from se.src.infrastructure.storage.repositories.capability_invocations import (
-    CapabilityInvocationRepository,
-)
-from se.src.runtimes.agent.legacy_materialization import (
-    LegacyCheckpointMaterializationError,
-    parse_legacy_checkpoint_source,
-)
-from se.src.runtimes.agent import persistence as agent_persistence
-from se.src.runtimes.agent.persistence import (
-    DurableAgentStore,
-    ExecutionConflictError,
-)
+from se.src.runtimes.agent.persistence import DurableAgentStore
 
 
 class _Uow:
-    def __init__(self, sessions, repository_cls=AgentRepository):
+    def __init__(self, sessions):
         self._sessions = sessions
-        self._repository_cls = repository_cls
         self._ctx = None
 
     async def __aenter__(self):
         self._ctx = self._sessions()
         self.session = await self._ctx.__aenter__()
-        self.agents = self._repository_cls(self.session)
-        self.capability_invocations = CapabilityInvocationRepository(self.session)
+        self.agents = AgentRepository(self.session)
         return self
 
     async def __aexit__(self, exc_type, exc, tb):
@@ -65,66 +43,32 @@ class _Uow:
         await self.session.rollback()
 
 
-class _CaptureLogger:
-    def __init__(self) -> None:
-        self.infos: list[tuple[str, dict]] = []
-        self.warnings: list[tuple[str, dict]] = []
-
-    def info(self, event: str, **kwargs) -> None:
-        self.infos.append((event, dict(kwargs)))
-
-    def warning(self, event: str, **kwargs) -> None:
-        self.warnings.append((event, dict(kwargs)))
-
-
-async def _seed_legacy_waiting(
-    sessions,
-    *,
-    execution_state: str = "WAITING",
-    execution_wait_reason: str | None = "CONNECTION",
-):
-    checkpoint_id = "legacy-cp-1"
+async def _seed_legacy_waiting(sessions):
     continuation = {
-        "current_checkpoint_id": checkpoint_id,
+        "current_checkpoint_id": "legacy-cp-1",
         "checkpoints": {
-            checkpoint_id: {
-                "checkpoint_id": checkpoint_id,
+            "legacy-cp-1": {
+                "checkpoint_id": "legacy-cp-1",
                 "execution_id": "exec-legacy",
                 "session_id": "session-legacy",
                 "reason": "WAITING_FOR_CONNECTION",
                 "state": "WAITING",
                 "wait_reason": "CONNECTION",
-                "parent_checkpoint_id": None,
                 "origin_connection_id": "conn-k1",
-                "current_connection_id": None,
                 "pending_invocation_id": "inv-pending",
                 "pending_tool_call_id": "call-pending",
                 "pending_capability_id": "tool.remote",
                 "iteration": 2,
-                "transcript": [
-                    {"role": "user", "content": "run tools"},
-                    {
-                        "role": "tool",
-                        "tool_call_id": "call-committed",
-                        "content": "old committed projection",
-                    },
-                    {
-                        "role": "tool",
-                        "tool_call_id": "call-pending",
-                        "content": {
-                            "error_code": "REMOTE_OUTCOME_UNKNOWN"
-                        },
-                    },
-                ],
+                "transcript": [{"role": "user", "content": "legacy"}],
                 "metadata": {
                     "owner_user_id": "user-1",
                     "origin_client_id": "client-1",
-                    "server_continuation_available": True,
                 },
             }
         },
         "branches": {},
     }
+    frozen = deepcopy(continuation)
 
     async with sessions() as session:
         session.add(
@@ -140,8 +84,8 @@ async def _seed_legacy_waiting(
                 session_id="session-legacy",
                 agent_id="agent-1",
                 correlation_id="corr-1",
-                state=execution_state,
-                wait_reason=execution_wait_reason,
+                state="WAITING",
+                wait_reason="CONNECTION",
                 revision=4,
                 current_checkpoint_id=None,
                 bound_client_id=None,
@@ -151,87 +95,77 @@ async def _seed_legacy_waiting(
                 context_state={"continuation": continuation},
             )
         )
+        await session.commit()
+
+    return frozen
+
+
+async def _seed_canonical_waiting(sessions):
+    async with sessions() as session:
         session.add(
-            AgentIterationRecord(
-                id="iter-2",
-                execution_id="exec-legacy",
-                iteration=2,
-                state="WAITING_TOOL",
-                tool_call_ids=["call-committed", "call-pending"],
-            )
-        )
-        session.add_all(
-            [
-                AgentToolCallRecord(
-                    id="tool-row-1",
-                    execution_id="exec-legacy",
-                    iteration_id="iter-2",
-                    invocation_id="inv-committed",
-                    tool_call_id="call-committed",
-                    capability_id="tool.local",
-                    arguments={},
-                    status="COMPLETED",
-                ),
-                AgentToolCallRecord(
-                    id="tool-row-2",
-                    execution_id="exec-legacy",
-                    iteration_id="iter-2",
-                    invocation_id="inv-pending",
-                    tool_call_id="call-pending",
-                    capability_id="tool.remote",
-                    arguments={"x": 1},
-                    status="PENDING",
-                ),
-            ]
-        )
-        session.add(
-            AgentToolResultRecord(
-                id="result-committed",
-                execution_id="exec-legacy",
-                iteration_id="iter-2",
-                tool_call_id="call-committed",
-                invocation_id="inv-committed",
-                capability_id="tool.local",
-                success=True,
-                output={"ok": True},
-                retryable=False,
-                commit_state="COMMITTED",
-                attempt=1,
+            ChatSessionRecord(
+                id="session-canonical",
+                user_id="user-1",
+                organization_id=None,
             )
         )
         session.add(
-            CapabilityInvocationRecord(
-                invocation_id="inv-pending",
-                capability_id="tool.remote",
-                capability_version="1.0",
-                kind="TOOL",
-                execution_mode="ONE_SHOT",
-                idempotency="IDEMPOTENT",
-                request_fingerprint="f" * 64,
-                owner_user_id="user-1",
-                origin_client_id="client-1",
-                remote_outcome_state="OUTCOME_UNKNOWN",
-                implementation_id="impl-remote",
-                driver_kind="REMOTE_CLIENT",
+            AgentExecutionRecord(
+                id="exec-canonical",
+                session_id="session-canonical",
+                agent_id="agent-r7",
+                correlation_id="corr-canonical",
                 state="WAITING",
                 wait_reason="CONNECTION",
-                session_id="session-legacy",
-                execution_id="exec-legacy",
-                tool_call_id="call-pending",
-                connection_id="conn-k1",
-                attempt=1,
-                max_attempts=2,
-                arguments={"x": 1},
-                revision=3,
+                revision=4,
+                current_checkpoint_id="cp-canonical",
+                bound_client_id="client-1",
+                bound_connection_id=None,
+                remaining_active_budget_seconds=30.0,
+                request={},
+                context_state={},
             )
+        )
+        session.add(
+            AgentExecutionCheckpointRecord(
+                checkpoint_id="cp-canonical",
+                execution_id="exec-canonical",
+                execution_revision=4,
+                session_id="session-canonical",
+                iteration=1,
+                wait_reason="CONNECTION",
+                remaining_active_budget_seconds=30.0,
+                origin_client_id="client-1",
+                origin_connection_id="conn-old",
+                transcript_snapshot=[{"role": "assistant", "content": ""}],
+                metadata_json={},
+            )
+        )
+        await session.flush()
+        repo = AgentRepository(session)
+        await repo.save_checkpoint_pending_invocation(
+            {
+                "checkpoint_id": "cp-canonical",
+                "ordinal": 0,
+                "invocation_id": "inv-canonical",
+                "invocation_revision": 1,
+                "tool_call_id": "call-canonical",
+                "capability_id": "tool.remote",
+                "capability_version": "1.0",
+                "request_fingerprint": "f" * 64,
+                "idempotency": "IDEMPOTENT",
+                "observed_remote_outcome_state": "OUTCOME_UNKNOWN",
+                "origin_client_id": "client-1",
+                "origin_connection_id": "conn-old",
+            }
         )
         await session.commit()
 
 
 @pytest.mark.asyncio
-async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path):
+async def test_r13_c1_pending_ticket_path_does_not_materialize_legacy_json(tmp_path):
     engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-materialization.db').as_posix()}",
+        f"sqlite+aiosqlite:///{(tmp_path / 'r13-c1-retirement.db').as_posix()}",
         connect_args={"timeout": 5},
     )
     async with engine.begin() as connection:
@@ -239,119 +173,70 @@ async def test_r7_i_materializes_legacy_waiting_without_revision_change(tmp_path
 
     sessions = async_sessionmaker(engine, expire_on_commit=False)
     store = DurableAgentStore(lambda: _Uow(sessions))
+    frozen_continuation = await _seed_legacy_waiting(sessions)
 
     try:
-        await _seed_legacy_waiting(sessions)
-
-        checkpoint = await store.materialize_legacy_checkpoint(
-            "exec-legacy",
-            requested_checkpoint_id="legacy-cp-1",
-            target_user_id="user-1",
-            target_client_id="client-1",
+        assert not hasattr(DurableAgentStore, "materialize_legacy_checkpoint")
+        assert not hasattr(
+            DurableAgentStore,
+            "materialize_legacy_waiting_for_client",
         )
-
-        assert checkpoint is not None
-        assert checkpoint.checkpoint_id == "legacy-cp-1"
-        assert checkpoint.execution_revision == 4
-        assert checkpoint.origin_client_id == "client-1"
-        assert checkpoint.origin_connection_id == "conn-k1"
-        assert checkpoint.transcript_snapshot is None
-        assert checkpoint.transcript_ref is not None
-        assert checkpoint.transcript_version is not None
-
-        execution = await store.load_execution("exec-legacy")
-        assert execution.state == "WAITING"
-        assert execution.revision == 4
-        assert execution.current_checkpoint_id == "legacy-cp-1"
-        assert execution.bound_client_id == "client-1"
-        assert execution.bound_connection_id is None
-
-        pending = await store.load_checkpoint_pending_invocations(
-            "legacy-cp-1"
-        )
-        assert len(pending) == 1
-        assert pending[0].ordinal == 1
-        assert pending[0].invocation_id == "inv-pending"
-        assert pending[0].tool_call_id == "call-pending"
-        assert pending[0].capability_id == "tool.remote"
-        assert pending[0].capability_version == "1.0"
-        assert pending[0].request_fingerprint == "f" * 64
-        assert pending[0].idempotency == "IDEMPOTENT"
-        assert pending[0].observed_remote_outcome_state == "OUTCOME_UNKNOWN"
-
-        again = await store.materialize_legacy_checkpoint(
-            "exec-legacy",
-            requested_checkpoint_id="legacy-cp-1",
-            target_user_id="user-1",
-            target_client_id="client-1",
-        )
-        assert again == checkpoint
-
-        async with sessions() as session:
-            checkpoint_count = len(
-                (
-                    await session.execute(
-                        select(AgentExecutionCheckpointRecord).where(
-                            AgentExecutionCheckpointRecord.execution_id
-                            == "exec-legacy"
-                        )
-                    )
-                ).scalars().all()
-            )
-        assert checkpoint_count == 1
-        async with sessions() as session:
-            row = await session.get(
-                AgentExecutionCheckpointRecord,
-                "legacy-cp-1",
-            )
-            assert row.transcript_snapshot is None
-            assert row.transcript_ref is not None
-            assert row.transcript_version is not None
-            representation_count = len(
-                (
-                    await session.execute(
-                        select(AgentTranscriptRepresentationRecord)
-                    )
-                ).scalars().all()
-            )
-            assert representation_count == 1
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(
-    tmp_path,
-    monkeypatch,
-):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-ticket-replay.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(lambda: _Uow(sessions))
-    logger = _CaptureLogger()
-    monkeypatch.setattr(agent_persistence, "logger", logger)
-
-    try:
-        await _seed_legacy_waiting(sessions)
-        async with sessions() as session:
-            legacy_row = await session.get(AgentExecutionRecord, "exec-legacy")
-            legacy_continuation_before = deepcopy(
-                legacy_row.context_state["continuation"]
-            )
 
         tickets = await store.load_pending_resume_tickets(
             owner_user_id="user-1",
             client_id="client-1",
         )
+        assert tickets == ()
+
+        async with sessions() as session:
+            execution = (
+                await session.execute(
+                    select(AgentExecutionRecord).where(
+                        AgentExecutionRecord.id == "exec-legacy"
+                    )
+                )
+            ).scalar_one()
+            checkpoints = (
+                await session.execute(
+                    select(AgentExecutionCheckpointRecord).where(
+                        AgentExecutionCheckpointRecord.execution_id
+                        == "exec-legacy"
+                    )
+                )
+            ).scalars().all()
+
+        assert execution.revision == 4
+        assert execution.current_checkpoint_id is None
+        assert execution.bound_client_id is None
+        assert execution.context_state["continuation"] == frozen_continuation
+        assert checkpoints == []
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r13_c1_pending_ticket_path_preserves_canonical_normalized_waiting(tmp_path):
+    engine = create_async_engine(
+        f"sqlite+aiosqlite:///{(tmp_path / 'r13-c1-canonical-ticket.db').as_posix()}",
+        connect_args={"timeout": 5},
+    )
+    async with engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+
+    sessions = async_sessionmaker(engine, expire_on_commit=False)
+    store = DurableAgentStore(lambda: _Uow(sessions))
+    await _seed_canonical_waiting(sessions)
+
+    try:
+        tickets = await store.load_pending_resume_tickets(
+            owner_user_id="user-1",
+            client_id="client-1",
+        )
+
         assert tickets == (
             {
-                "execution_id": "exec-legacy",
-                "checkpoint_id": "legacy-cp-1",
+                "execution_id": "exec-canonical",
+                "checkpoint_id": "cp-canonical",
                 "revision": 4,
                 "wait_reason": "CONNECTION",
                 "wait_expires_at": None,
@@ -360,496 +245,5 @@ async def test_r7_i_waiting_ticket_replay_materializes_legacy_first(
                 "auto_resume_allowed": True,
             },
         )
-        assert logger.infos == [
-            (
-                "ae_r13_legacy_continuation_inventory",
-                {
-                    "candidate_count": 1,
-                    "continuation_candidate_count": 1,
-                    "missing_continuation_count": 0,
-                },
-            ),
-            (
-                "ae_r13_legacy_continuation_materialization_batch",
-                {
-                    "attempted_count": 1,
-                    "materialized_count": 1,
-                    "rejected_count": 0,
-                },
-            ),
-        ]
-        assert logger.warnings == []
-
-        async with sessions() as session:
-            legacy_row = await session.get(AgentExecutionRecord, "exec-legacy")
-            assert legacy_row.revision == 4
-            assert legacy_row.current_checkpoint_id == "legacy-cp-1"
-            assert (
-                legacy_row.context_state["continuation"]
-                == legacy_continuation_before
-            )
-            checkpoint = await session.get(
-                AgentExecutionCheckpointRecord,
-                "legacy-cp-1",
-            )
-            assert checkpoint is not None
-            assert checkpoint.execution_revision == 4
-            pending = await AgentRepository(
-                session
-            ).list_checkpoint_pending_invocations("legacy-cp-1")
-            assert len(pending) == 1
-            assert pending[0].invocation_id == "inv-pending"
-            assert pending[0].tool_call_id == "call-pending"
-
-        for _, fields in logger.infos:
-            assert set(fields).issubset(
-                {
-                    "candidate_count",
-                    "continuation_candidate_count",
-                    "missing_continuation_count",
-                    "attempted_count",
-                    "materialized_count",
-                    "rejected_count",
-                }
-            )
-            rendered = repr(fields)
-            for forbidden in (
-                "exec-legacy",
-                "user-1",
-                "client-1",
-                "session-legacy",
-                "legacy-cp-1",
-                "inv-pending",
-                "call-pending",
-                "tool.remote",
-                "run tools",
-            ):
-                assert forbidden not in rendered
-
-        logger.infos.clear()
-        tickets_again = await store.load_pending_resume_tickets(
-            owner_user_id="user-1",
-            client_id="client-1",
-        )
-        assert tickets_again == tickets
-        assert logger.infos == [
-            (
-                "ae_r13_legacy_continuation_inventory",
-                {
-                    "candidate_count": 0,
-                    "continuation_candidate_count": 0,
-                    "missing_continuation_count": 0,
-                },
-            ),
-            (
-                "ae_r13_legacy_continuation_materialization_batch",
-                {
-                    "attempted_count": 0,
-                    "materialized_count": 0,
-                    "rejected_count": 0,
-                },
-            ),
-        ]
-        assert logger.warnings == []
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_r7_i_unsafe_legacy_checkpoint_rolls_back_without_pointer(
-    tmp_path,
-    monkeypatch,
-):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-unsafe.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(lambda: _Uow(sessions))
-    logger = _CaptureLogger()
-    monkeypatch.setattr(agent_persistence, "logger", logger)
-
-    try:
-        await _seed_legacy_waiting(sessions)
-        async with sessions() as session:
-            await session.execute(
-                delete(CapabilityInvocationRecord).where(
-                    CapabilityInvocationRecord.invocation_id == "inv-pending"
-                )
-            )
-            await session.commit()
-
-        with pytest.raises(LegacyCheckpointMaterializationError) as exc:
-            await store.materialize_legacy_checkpoint(
-                "exec-legacy",
-                requested_checkpoint_id="legacy-cp-1",
-                target_user_id="user-1",
-                target_client_id="client-1",
-            )
-        assert exc.value.code == "CHECKPOINT_INCOMPLETE"
-
-        materialized = await store.materialize_legacy_waiting_for_client(
-            owner_user_id="user-1",
-            client_id="client-1",
-        )
-        assert materialized == ()
-        assert logger.infos == [
-            (
-                "ae_r13_legacy_continuation_inventory",
-                {
-                    "candidate_count": 1,
-                    "continuation_candidate_count": 1,
-                    "missing_continuation_count": 0,
-                },
-            ),
-            (
-                "ae_r13_legacy_continuation_materialization_batch",
-                {
-                    "attempted_count": 1,
-                    "materialized_count": 0,
-                    "rejected_count": 1,
-                },
-            ),
-        ]
-        assert logger.warnings == []
-
-        execution = await store.load_execution("exec-legacy")
-        assert execution.revision == 4
-        assert execution.current_checkpoint_id is None
-
-        async with sessions() as session:
-            rows = (
-                await session.execute(
-                    select(AgentExecutionCheckpointRecord).where(
-                        AgentExecutionCheckpointRecord.execution_id
-                        == "exec-legacy"
-                    )
-                )
-            ).scalars().all()
-        assert rows == []
-    finally:
-        await engine.dispose()
-
-
-class _RejectLegacyPointerRepository(AgentRepository):
-    async def bind_legacy_checkpoint_pointer(
-        self,
-        execution_id: str,
-        *,
-        expected_revision: int,
-        checkpoint_id: str,
-        bound_client_id: str | None,
-    ):
-        return None
-
-
-@pytest.mark.asyncio
-async def test_r11_d_legacy_pointer_loss_rolls_back_dual_graph_and_checkpoint(tmp_path):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r11-d-legacy-pointer-rollback.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(
-        lambda: _Uow(sessions, _RejectLegacyPointerRepository)
-    )
-
-    try:
-        await _seed_legacy_waiting(sessions)
-
-        with pytest.raises(
-            ExecutionConflictError,
-            match="lost the WAITING pointer race",
-        ):
-            await store.materialize_legacy_checkpoint(
-                "exec-legacy",
-                requested_checkpoint_id="legacy-cp-1",
-                target_user_id="user-1",
-                target_client_id="client-1",
-            )
-
-        async with sessions() as session:
-            repo = AgentRepository(session)
-            execution = await repo.get_execution("exec-legacy")
-            checkpoint = await repo.get_execution_checkpoint("legacy-cp-1")
-            pending = await repo.list_checkpoint_pending_invocations(
-                "legacy-cp-1"
-            )
-            assert execution.revision == 4
-            assert execution.current_checkpoint_id is None
-            assert checkpoint is None
-            assert pending == []
-            assert len(
-                (
-                    await session.execute(
-                        select(AgentTranscriptRepresentationRecord)
-                    )
-                ).scalars().all()
-            ) == 0
-            assert len(
-                (
-                    await session.execute(
-                        select(AgentTranscriptPayloadNodeRecord)
-                    )
-                ).scalars().all()
-            ) == 0
-            assert len(
-                (
-                    await session.execute(
-                        select(AgentTranscriptChunkRecord)
-                    )
-                ).scalars().all()
-            ) == 0
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_r7_i_materializes_pre_normalized_waiting_spelling(tmp_path):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-old-spelling.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(lambda: _Uow(sessions))
-
-    try:
-        await _seed_legacy_waiting(
-            sessions,
-            execution_state="WAITING_FOR_CONNECTION",
-            execution_wait_reason=None,
-        )
-        checkpoint = await store.materialize_legacy_checkpoint(
-            "exec-legacy",
-            target_user_id="user-1",
-            target_client_id="client-1",
-        )
-        assert checkpoint is not None
-
-        execution = await store.load_execution("exec-legacy")
-        assert execution.state == "WAITING"
-        assert execution.wait_reason == "CONNECTION"
-        assert execution.revision == 4
-        assert execution.current_checkpoint_id == "legacy-cp-1"
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_r7_i_preserves_checkpoint_time_pending_slot_after_late_commit(tmp_path):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-late-commit.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(lambda: _Uow(sessions))
-
-    try:
-        await _seed_legacy_waiting(sessions)
-        async with sessions() as session:
-            invocation = await session.get(
-                CapabilityInvocationRecord,
-                "inv-pending",
-            )
-            invocation.state = "COMPLETED"
-            invocation.wait_reason = None
-            invocation.remote_outcome_state = "TERMINAL_COMMITTED"
-            invocation.output = {"late": True}
-            invocation.revision = 4
-            session.add(
-                AgentToolResultRecord(
-                    id="result-pending-late",
-                    execution_id="exec-legacy",
-                    iteration_id="iter-2",
-                    tool_call_id="call-pending",
-                    invocation_id="inv-pending",
-                    capability_id="tool.remote",
-                    success=True,
-                    output={"late": True},
-                    retryable=False,
-                    commit_state="COMMITTED",
-                    attempt=1,
-                )
-            )
-            await session.commit()
-
-        checkpoint = await store.materialize_legacy_checkpoint(
-            "exec-legacy",
-            requested_checkpoint_id="legacy-cp-1",
-            target_user_id="user-1",
-            target_client_id="client-1",
-        )
-        assert checkpoint is not None
-
-        pending = await store.load_checkpoint_pending_invocations(
-            "legacy-cp-1"
-        )
-        assert len(pending) == 1
-        assert pending[0].ordinal == 1
-        assert pending[0].invocation_id == "inv-pending"
-        assert (
-            pending[0].observed_remote_outcome_state
-            == "TERMINAL_COMMITTED"
-        )
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_r7_i_legacy_continuation_json_is_read_only(tmp_path):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-read-only.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(lambda: _Uow(sessions))
-
-    try:
-        await _seed_legacy_waiting(sessions)
-        with pytest.raises(
-            ExecutionConflictError,
-            match="LEGACY_CONTINUATION_READ_ONLY",
-        ):
-            await store.update_checkpoint(
-                "exec-legacy",
-                {
-                    "context_state": {
-                        "continuation": {
-                            "current_checkpoint_id": "forged"
-                        }
-                    }
-                },
-            )
-
-        execution = await store.load_execution("exec-legacy")
-        assert (
-            execution.context_state["continuation"]["current_checkpoint_id"]
-            == "legacy-cp-1"
-        )
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_r7_i_existing_checkpoint_semantic_collision_fails_closed(tmp_path):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-collision.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(lambda: _Uow(sessions))
-
-    try:
-        await _seed_legacy_waiting(sessions)
-        execution = await store.load_execution("exec-legacy")
-        source = parse_legacy_checkpoint_source(
-            execution,
-            target_user_id="user-1",
-            target_client_id="client-1",
-        )
-
-        async with sessions() as session:
-            session.add(
-                AgentExecutionCheckpointRecord(
-                    checkpoint_id="legacy-cp-1",
-                    execution_id="exec-legacy",
-                    execution_revision=4,
-                    session_id="session-legacy",
-                    iteration=2,
-                    wait_reason="CONNECTION",
-                    remaining_active_budget_seconds=30.0,
-                    origin_client_id="client-1",
-                    origin_connection_id="conn-k1",
-                    transcript_snapshot=[
-                        {"role": "user", "content": "DIFFERENT"}
-                    ],
-                    legacy_source_key=source.legacy_source_key,
-                    metadata_json={},
-                )
-            )
-            await session.commit()
-
-        with pytest.raises(LegacyCheckpointMaterializationError) as exc:
-            await store.materialize_legacy_checkpoint(
-                "exec-legacy",
-                requested_checkpoint_id="legacy-cp-1",
-                target_user_id="user-1",
-                target_client_id="client-1",
-            )
-        assert exc.value.code == "LEGACY_CHECKPOINT_UNSAFE"
-
-        execution = await store.load_execution("exec-legacy")
-        assert execution.revision == 4
-        assert execution.current_checkpoint_id is None
-    finally:
-        await engine.dispose()
-
-
-@pytest.mark.asyncio
-async def test_r7_i_concurrent_materialization_converges_to_one_checkpoint(tmp_path):
-    engine = create_async_engine(
-        f"sqlite+aiosqlite:///{(tmp_path / 'r7-i-race.db').as_posix()}",
-        connect_args={"timeout": 5},
-    )
-    async with engine.begin() as connection:
-        await connection.run_sync(Base.metadata.create_all)
-
-    sessions = async_sessionmaker(engine, expire_on_commit=False)
-    store = DurableAgentStore(lambda: _Uow(sessions))
-
-    try:
-        await _seed_legacy_waiting(sessions)
-
-        outcomes = await asyncio.gather(
-            store.materialize_legacy_checkpoint(
-                "exec-legacy",
-                requested_checkpoint_id="legacy-cp-1",
-                target_user_id="user-1",
-                target_client_id="client-1",
-            ),
-            store.materialize_legacy_checkpoint(
-                "exec-legacy",
-                requested_checkpoint_id="legacy-cp-1",
-                target_user_id="user-1",
-                target_client_id="client-1",
-            ),
-        )
-
-        assert [item.checkpoint_id for item in outcomes] == [
-            "legacy-cp-1",
-            "legacy-cp-1",
-        ]
-        execution = await store.load_execution("exec-legacy")
-        assert execution.revision == 4
-        assert execution.current_checkpoint_id == "legacy-cp-1"
-
-        async with sessions() as session:
-            rows = (
-                await session.execute(
-                    select(AgentExecutionCheckpointRecord).where(
-                        AgentExecutionCheckpointRecord.execution_id
-                        == "exec-legacy"
-                    )
-                )
-            ).scalars().all()
-        assert len(rows) == 1
     finally:
         await engine.dispose()
