@@ -20,7 +20,14 @@ from .contracts.implementation import (
     CapabilityImplementationState,
     CapabilityOwnerType,
 )
+from .contracts.sandbox import SandboxProfile
+from .drivers.base import BaseCapabilityDriver
 from .drivers.python_driver import PythonCapabilityDriver
+from .drivers.sandbox_python_driver import (
+    SANDBOX_FILE_CAPABILITY_IDS,
+    SandboxPythonCapabilityDriver,
+)
+from .sandbox import SandboxManager
 
 
 class _MetadataV2Error(ValueError):
@@ -34,7 +41,7 @@ class _MetadataV2CommitError(RuntimeError):
 @dataclass(frozen=True)
 class _LocalCapabilityPlan:
     definition: CapabilityDefinition
-    driver: PythonCapabilityDriver
+    driver: BaseCapabilityDriver
     implementation_metadata: dict[str, Any] = field(default_factory=dict)
     execution_locations: frozenset[CapabilityExecutionLocation] = field(
         default_factory=lambda: frozenset(
@@ -73,6 +80,9 @@ def _bound_handler(
 def _build_canonical_v2_plans(
     metadata: dict[str, Any],
     handler: Callable[..., Any],
+    *,
+    sandbox_manager: SandboxManager | None = None,
+    sandbox_profile: SandboxProfile | None = None,
 ) -> list[_LocalCapabilityPlan]:
     """Build logical plans from the frozen T1 Metadata V2 manifest."""
     try:
@@ -88,6 +98,11 @@ def _build_canonical_v2_plans(
     physical_name = manifest["name"]
     physical_version = manifest["version"]
     plans: list[_LocalCapabilityPlan] = []
+
+    if (sandbox_manager is None) != (sandbox_profile is None):
+        raise _MetadataV2Error(
+            "sandbox manager and profile must be supplied together"
+        )
 
     for export in manifest["exports"]:
         capability_id = export["id"]
@@ -125,13 +140,25 @@ def _build_canonical_v2_plans(
             },
         )
         bind = deepcopy(export["bind"])
+        bound_handler = _bound_handler(handler, bind)
+        if (
+            capability_id in SANDBOX_FILE_CAPABILITY_IDS
+            and sandbox_manager is not None
+            and sandbox_profile is not None
+        ):
+            driver: BaseCapabilityDriver = SandboxPythonCapabilityDriver(
+                definition,
+                bound_handler,
+                sandbox_manager,
+                sandbox_profile,
+            )
+        else:
+            driver = PythonCapabilityDriver(definition, bound_handler)
+
         plans.append(
             _LocalCapabilityPlan(
                 definition=definition,
-                driver=PythonCapabilityDriver(
-                    definition,
-                    _bound_handler(handler, bind),
-                ),
+                driver=driver,
                 implementation_metadata={
                     "manifest_version": manifest["manifest_version"],
                     "physical_tool": physical_name,
@@ -300,6 +327,9 @@ def register_local_tools(
     runtime: Any,
     tool_registry: Any,
     tools_dir: Path,
+    *,
+    sandbox_manager: SandboxManager | None = None,
+    sandbox_profile: SandboxProfile | None = None,
 ) -> dict[str, str]:
     """Register local tool modules.
 
@@ -376,7 +406,12 @@ def register_local_tools(
                     raise ValueError(
                         "manifest_version must equal '2.0'"
                     )
-                plans = _build_canonical_v2_plans(metadata, handler)
+                plans = _build_canonical_v2_plans(
+                    metadata,
+                    handler,
+                    sandbox_manager=sandbox_manager,
+                    sandbox_profile=sandbox_profile,
+                )
                 _preflight_v2_registration(runtime, tool_registry, plans)
                 registered: list[str] = []
                 try:
