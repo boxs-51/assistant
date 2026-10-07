@@ -15,6 +15,7 @@ from se.src.runtimes.agent.runtime import AgentRuntime
 from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
 from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
+from se.src.runtimes.capability.contracts.error import CapabilityError
 from se.src.runtimes.capability.contracts.sandbox import SandboxProfile
 from se.src.runtimes.capability.contracts.target import (
     CapabilityInvocationTarget,
@@ -346,6 +347,7 @@ async def test_sbx2_keeps_direct_server_read_while_targeted_agent_uses_sandbox(
         metadata={"chat_execution_mode": "DIRECT"},
     )
     assert "direct-compatible" in str(direct_result.output)
+    assert direct_result.metadata["implementation_id"] == "server:file.read"
 
     legacy = runtime.catalog.get_implementation("server:file.read")
     sandbox = runtime.catalog.get_implementation("server:sandbox:file.read")
@@ -360,7 +362,7 @@ async def test_sbx2_keeps_direct_server_read_while_targeted_agent_uses_sandbox(
         SandboxPythonCapabilityDriver,
     )
 
-    await runtime.execute_capability(
+    sandbox_write = await runtime.execute_capability(
         capability_id="file.write",
         arguments={"file_paths": "agent.txt", "content": "sandboxed"},
         identity=Identity(user_id="user-sbx2", auth_type="jwt"),
@@ -369,10 +371,14 @@ async def test_sbx2_keeps_direct_server_read_while_targeted_agent_uses_sandbox(
         invocation_id="inv-agent-write",
         target=_target("agent-exec"),
     )
+    assert (
+        sandbox_write.metadata["implementation_id"]
+        == "server:sandbox:file.write"
+    )
     lease = manager.current_for_execution("agent-exec")
     assert (lease.root / "agent.txt").read_text() == "sandboxed"
 
-    with pytest.raises(SandboxPathError):
+    with pytest.raises(CapabilityError) as exc_info:
         await runtime.execute_capability(
             capability_id="file.read",
             arguments={"file_paths": str(direct_host_file)},
@@ -382,6 +388,8 @@ async def test_sbx2_keeps_direct_server_read_while_targeted_agent_uses_sandbox(
             invocation_id="inv-agent-escape",
             target=_target("agent-exec"),
         )
+    assert exc_info.value.code == "CAPABILITY_EXECUTION_FAILED"
+    assert exc_info.value.cause_type == "SandboxPathError"
 
 
 class _AllowToolPolicy:
