@@ -1957,6 +1957,7 @@ class CapabilityRuntime(BaseRuntime):
             invocation.implementation_id = effective_implementation_id
             invocation.driver_kind = effective_driver_kind
             invocation.connection_id = selected_implementation.connection_id
+            context.connection_id = selected_implementation.connection_id
             invocation.attempt += 1
             context.attempt = invocation.attempt
             self._bind_remote_dispatch_started(driver, invocation)
