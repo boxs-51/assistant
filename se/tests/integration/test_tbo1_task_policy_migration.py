@@ -11,6 +11,7 @@ from alembic.script import ScriptDirectory
 
 ROOT = Path(__file__).resolve().parents[3]
 TBO1_REVISION = "28a_tbo1_task_policy_representation"
+CURRENT_HEAD = "29a_crt1_capability_invocation_target"
 PREVIOUS_REVISION = "27a_cas_f7_t_tool_media_projection"
 
 
@@ -58,7 +59,7 @@ def test_tbo1_is_the_single_linear_migration_head(tmp_path: Path):
     config = _config(tmp_path / "unused.sqlite")
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == [TBO1_REVISION]
+    assert script.get_heads() == [CURRENT_HEAD]
     assert script.get_revision(TBO1_REVISION).down_revision == PREVIOUS_REVISION
 
 
