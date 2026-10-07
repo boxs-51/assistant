@@ -164,6 +164,14 @@ def _build_canonical_v2_plans(
                     "physical_tool": physical_name,
                     "physical_version": physical_version,
                     "bind": deepcopy(bind),
+                    **(
+                        {"resource_scopes": ["SANDBOX"]}
+                        if (
+                            capability_id in SANDBOX_FILE_CAPABILITY_IDS
+                            and sandbox_manager is not None
+                        )
+                        else {}
+                    ),
                 },
                 execution_locations=execution_locations,
             )
