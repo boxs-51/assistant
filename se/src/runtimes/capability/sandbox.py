@@ -40,6 +40,7 @@ class SandboxManager:
         self._base_root.mkdir(parents=True, exist_ok=True)
         self._leases: dict[str, SandboxLease] = {}
         self._profiles: dict[str, SandboxProfile] = {}
+        self._execution_leases: dict[str, str] = {}
 
     @property
     def base_root(self) -> Path:
@@ -74,6 +75,93 @@ class SandboxManager:
         self._profiles.setdefault(profile.profile_id, profile)
         self._leases[sandbox_id] = active
         return active
+
+    def acquire_for_execution(
+        self,
+        *,
+        execution_id: str,
+        owner_user_id: str,
+        profile: SandboxProfile,
+    ) -> SandboxLease:
+        """Acquire or reuse exactly one active lease for one execution."""
+        existing_id = self._execution_leases.get(execution_id)
+        if existing_id is not None:
+            existing = self._leases.get(existing_id)
+            if (
+                existing is None
+                or existing.state is SandboxLeaseState.DESTROYED
+            ):
+                self._execution_leases.pop(execution_id, None)
+            else:
+                if existing.execution_id != execution_id:
+                    raise SandboxLeaseNotFoundError(
+                        "sandbox execution identity mismatch"
+                    )
+                if existing.owner_user_id != owner_user_id:
+                    raise SandboxError(
+                        "sandbox execution is already bound to another owner"
+                    )
+                if existing.profile_id != profile.profile_id:
+                    raise SandboxError(
+                        "sandbox execution is already bound to another profile"
+                    )
+                bound_profile = self._profiles.get(existing.profile_id)
+                if bound_profile != profile:
+                    raise SandboxError(
+                        "sandbox execution profile semantics changed"
+                    )
+                if existing.state is not SandboxLeaseState.ACTIVE:
+                    raise SandboxLeaseStateError(
+                        "sandbox execution lease is not active"
+                    )
+                return existing
+
+        lease = self.acquire(
+            execution_id=execution_id,
+            owner_user_id=owner_user_id,
+            profile=profile,
+        )
+        self._execution_leases[execution_id] = lease.sandbox_id
+        return lease
+
+    def current_for_execution(self, execution_id: str) -> SandboxLease:
+        sandbox_id = self._execution_leases.get(execution_id)
+        if sandbox_id is None:
+            raise SandboxLeaseNotFoundError(execution_id)
+        stored = self._leases.get(sandbox_id)
+        if stored is None:
+            raise SandboxLeaseNotFoundError(sandbox_id)
+        if stored.execution_id != execution_id:
+            raise SandboxLeaseNotFoundError(
+                "sandbox execution identity mismatch"
+            )
+        return stored
+
+    def release_execution(
+        self,
+        execution_id: str,
+        *,
+        owner_user_id: str | None = None,
+    ) -> SandboxLease | None:
+        sandbox_id = self._execution_leases.get(execution_id)
+        if sandbox_id is None:
+            return None
+        stored = self._leases.get(sandbox_id)
+        if stored is None:
+            self._execution_leases.pop(execution_id, None)
+            return None
+        if stored.execution_id != execution_id:
+            raise SandboxLeaseNotFoundError(
+                "sandbox execution identity mismatch"
+            )
+        if (
+            owner_user_id is not None
+            and stored.owner_user_id != owner_user_id
+        ):
+            raise SandboxError(
+                "sandbox execution is bound to another owner"
+            )
+        return self.destroy(stored)
 
     def current(self, lease: SandboxLease) -> SandboxLease:
         stored = self._leases.get(lease.sandbox_id)
@@ -137,6 +225,11 @@ class SandboxManager:
             update={"state": SandboxLeaseState.DESTROYED}
         )
         self._leases[current.sandbox_id] = destroyed
+        if (
+            self._execution_leases.get(current.execution_id)
+            == current.sandbox_id
+        ):
+            self._execution_leases.pop(current.execution_id, None)
         return destroyed
 
     def resolve_path(
