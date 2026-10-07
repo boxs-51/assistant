@@ -62,6 +62,7 @@ from .wait_policy import (
     ConfiguredExecutionWaitPolicy,
     ExecutionWaitPolicy,
 )
+from ..capability.sandbox import SandboxManager
 
 
 logger = structlog.get_logger(__name__)
@@ -150,6 +151,7 @@ class AgentRuntime:
         wait_policy: ExecutionWaitPolicy | None = None,
         task_budget_service=None,
         f7t_canonicalizer=None,
+        sandbox_manager: SandboxManager | None = None,
     ) -> None:
         self._context_builder = context_builder
         self._inference = inference
@@ -162,6 +164,7 @@ class AgentRuntime:
             wait_policy or ConfiguredExecutionWaitPolicy()
         )
         self._f7t_canonicalizer = f7t_canonicalizer
+        self._sandbox_manager = sandbox_manager
         self._f7t_publication_tasks: set[asyncio.Task] = set()
         self._f7t_publication_accepting = f7t_canonicalizer is not None
 
@@ -2186,43 +2189,60 @@ class AgentRuntime:
         initial_tool_results: Sequence[ToolExecutionResult] = (),
     ) -> AgentExecutionResult:
         """Run exactly one durable AgentExecution lifecycle."""
-        revision = (
-            durable_revision
-            if durable_revision is not None
-            else await self._begin_durable_execution_owned(context)
-        )
         try:
-            result = await self._execute_loop(
-                context,
-                initial_tool_results=initial_tool_results,
+            revision = (
+                durable_revision
+                if durable_revision is not None
+                else await self._begin_durable_execution_owned(context)
             )
-        except asyncio.CancelledError:
-            await self._cancel_durable_revision(
-                context,
-                revision,
-                error_message="Agent execution cancelled.",
-            )
-            raise
-        except Exception as exc:
-            if revision is not None:
-                await self._transition_running_durable(
+            try:
+                result = await self._execute_loop(
+                    context,
+                    initial_tool_results=initial_tool_results,
+                )
+            except asyncio.CancelledError:
+                await self._cancel_durable_revision(
                     context,
                     revision,
-                    {
-                        "state": AgentExecutionState.FAILED.value,
-                        "wait_reason": None,
-                        "wait_expires_at": None,
-                        "error": str(exc),
-                        "completed_at": datetime.now(timezone.utc),
-                    },
+                    error_message="Agent execution cancelled.",
                 )
-            raise
-        result = await self._finish_durable_execution(
-            context,
-            result,
-            revision,
-        )
-        return result
+                raise
+            except Exception as exc:
+                if revision is not None:
+                    await self._transition_running_durable(
+                        context,
+                        revision,
+                        {
+                            "state": AgentExecutionState.FAILED.value,
+                            "wait_reason": None,
+                            "wait_expires_at": None,
+                            "error": str(exc),
+                            "completed_at": datetime.now(timezone.utc),
+                        },
+                    )
+                raise
+            result = await self._finish_durable_execution(
+                context,
+                result,
+                revision,
+            )
+            return result
+        finally:
+            if self._sandbox_manager is not None:
+                owner_user_id = str(
+                    getattr(context.identity, "user_id", "") or ""
+                )
+                try:
+                    self._sandbox_manager.release_execution(
+                        context.execution_id,
+                        owner_user_id=owner_user_id or None,
+                    )
+                except Exception as cleanup_error:
+                    logger.error(
+                        "sbx2_execution_sandbox_cleanup_failed",
+                        execution_id=context.execution_id,
+                        error_type=type(cleanup_error).__name__,
+                    )
 
     async def _execute_loop(
         self,
