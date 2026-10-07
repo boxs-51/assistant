@@ -20,6 +20,7 @@ def _dcs1_diagnostic_logreport(self, report):
             f"\nDCS1_DIAG_FAILED when={report.when} nodeid={report.nodeid}\n"
         )
         sys.stderr.flush()
+        pytest.exit("DCS1_DIAG_STOP_AFTER_FIRST_FAILURE", returncode=2)
     return _DCS1_ORIGINAL_LOGREPORT(self, report)
 
 
