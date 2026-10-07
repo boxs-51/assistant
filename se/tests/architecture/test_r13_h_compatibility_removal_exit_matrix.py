@@ -39,7 +39,7 @@ def test_r13h_keeps_timeout_compatibility_cross_track() -> None:
     se_schema = _text("se/src/domain/schemas/agent_execution.py")
     cl_schema = _text("cl/src/schemas/agent_execution.py")
 
-    assert "AgentExecutionLimits timeout dual-read compatibility | KEEP_CROSS_TRACK" in matrix
+    assert "`AgentExecutionLimits` timeout dual-read compatibility | KEEP_CROSS_TRACK" in matrix
     assert "Issue #147 / UBQ-5E/T-4" in matrix
 
     for source in (se_schema, cl_schema):
