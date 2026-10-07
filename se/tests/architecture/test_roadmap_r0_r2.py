@@ -58,7 +58,12 @@ def _context(execution_id: str = "exec-1") -> AgentExecutionContext:
 
 
 def test_r1_waiting_contract_and_legacy_normalization() -> None:
-    execution = _execution(state="WAITING_AGENT")
+    with pytest.raises(ValueError):
+        _execution(state="WAITING_AGENT")
+    with pytest.raises(ValueError):
+        _execution(state="WAITING_FOR_CONNECTION")
+
+    execution = _execution(state="WAITING", wait_reason="AGENT")
     assert execution.state is AgentExecutionState.WAITING
     assert execution.wait_reason is AgentExecutionWaitReason.AGENT
     assert execution.model_dump(mode="json")["state"] == "WAITING"

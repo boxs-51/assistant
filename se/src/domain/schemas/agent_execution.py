@@ -30,28 +30,17 @@ class AgentExecutionWaitReason(str, Enum):
     AGENT = "AGENT"
 
 
-_LEGACY_WAITING_STATES = {
-    "WAITING_FOR_CONNECTION": AgentExecutionWaitReason.CONNECTION,
-    "WAITING_AGENT": AgentExecutionWaitReason.AGENT,
-}
-
-
 def normalize_execution_waiting(
     state: AgentExecutionState | str,
     wait_reason: AgentExecutionWaitReason | str | None = None,
 ) -> tuple[AgentExecutionState, AgentExecutionWaitReason | None]:
-    """Normalize legacy execution state payloads at compatibility boundaries."""
+    """Validate canonical execution waiting state at the server boundary."""
     raw_state = state.value if isinstance(state, AgentExecutionState) else str(state)
-    legacy_reason = _LEGACY_WAITING_STATES.get(raw_state)
-    normalized_state = (
-        AgentExecutionState.WAITING
-        if legacy_reason is not None
-        else AgentExecutionState(raw_state)
-    )
+    normalized_state = AgentExecutionState(raw_state)
     normalized_reason = (
         AgentExecutionWaitReason(wait_reason)
         if wait_reason not in (None, AgentExecutionWaitReason.NONE, "NONE")
-        else legacy_reason
+        else None
     )
     if normalized_state is AgentExecutionState.WAITING and normalized_reason is None:
         raise ValueError("WAITING execution requires wait_reason")
