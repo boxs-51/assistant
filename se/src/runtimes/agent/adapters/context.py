@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import json
 from typing import Any, Mapping
 
 from ....domain.schemas.tool import GatewayToolResult
@@ -21,6 +22,22 @@ _F7T_SCREENSHOT_CAPABILITY_ID = "desktop.screenshot"
 _F7T_INLINE_CONTRACT = "F7T_INLINE_BASE64_V1"
 _F7T_SCREENSHOT_FILENAME = "desktop-screenshot.png"
 _F7T_SCREENSHOT_MAX_BYTES = 8_388_608
+
+
+def _estimate_model_visible_tool_tokens(
+    tools: list[InferenceToolDefinition],
+) -> int:
+    """Provider-neutral deterministic estimate for final model-visible Tool schemas."""
+    total_chars = 0
+    for tool in tools:
+        serialized = json.dumps(
+            tool.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        )
+        total_chars += len(serialized)
+    return max(0, (total_chars + 3) // 4)
 
 
 def _project_f7t_screenshot_output(output: Any) -> dict[str, Any] | None:
@@ -305,11 +322,16 @@ class ContextBuilderAdapter(ContextBuilderPort):
                 system_prompt_version=assembly.system_prompt.version,
                 constraints=dict(assembly.constraints),
             )
+        message_token_estimate = max(
+            0,
+            sum(len(str(message.content or "")) for message in history) // 4,
+        )
+        tool_schema_token_estimate = _estimate_model_visible_tool_tokens(tools)
         return AgentContextSnapshot(
             execution_id=context.execution_id,
             iteration=request.iteration,
             messages=tuple(history),
             tools=tuple(tools),
-            token_estimate=max(0, sum(len(str(message.content or "")) for message in history) // 4),
+            token_estimate=message_token_estimate + tool_schema_token_estimate,
             metadata=metadata,
         )
