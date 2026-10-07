@@ -25,7 +25,7 @@ def _read(path: Path) -> str:
 
 
 def _normalized(path: Path) -> str:
-    return " ".join(_read(path).split())
+    return " ".join(_read(path).replace("\`", "").split())
 
 
 def _class(source: str, name: str) -> ast.ClassDef:
@@ -127,7 +127,10 @@ def test_ctx_f5_3k_freezes_current_migration_parent_without_mutating_it() -> Non
     migration = _read(MIGRATION_29A)
 
     assert 'revision: str = "29a_crt1_capability_invocation_target"' in migration
-    assert 'down_revision: Union[str, None] = "28a_tbo1_task_policy_representation"' in migration
+    assert (
+        'down_revision: Union[str, None] = "28a_tbo1_task_policy_representation"'
+        in migration
+    )
     assert "29a_crt1_capability_invocation_target" in contract
     assert "single linear child" in contract
     assert "fresh PRE-CLAIM must re-resolve the exact migration parent" in contract
