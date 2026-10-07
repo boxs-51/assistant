@@ -182,11 +182,15 @@ class SqlCapabilityInvocationStore:
         return canonical_capability_target_payload(invocation.target)
 
     @classmethod
-    def _target_filter(cls, invocation: CapabilityInvocation):
-        payload = cls._target_payload(invocation)
-        if payload is None:
-            return CapabilityInvocationRecord.target_json.is_(None)
-        return CapabilityInvocationRecord.target_json == payload
+    def _record_target_matches(
+        cls,
+        record: CapabilityInvocationRecord,
+        invocation: CapabilityInvocation,
+    ) -> bool:
+        stored = record.target_json
+        if stored is not None:
+            stored = dict(stored)
+        return stored == cls._target_payload(invocation)
 
     @classmethod
     def _values(cls, invocation: CapabilityInvocation) -> dict:
@@ -343,12 +347,22 @@ class SqlCapabilityInvocationStore:
         self, invocation: CapabilityInvocation, expected_revision: int
     ) -> bool:
         async with self._uow_factory() as uow:
+            existing = await uow.session.get(
+                CapabilityInvocationRecord,
+                invocation.invocation_id,
+            )
+            if (
+                existing is None
+                or int(existing.revision) != expected_revision
+                or not self._record_target_matches(existing, invocation)
+            ):
+                await uow.rollback()
+                return False
             result = await uow.session.execute(
                 update(CapabilityInvocationRecord)
                 .where(
                     CapabilityInvocationRecord.invocation_id == invocation.invocation_id,
                     CapabilityInvocationRecord.revision == expected_revision,
-                    self._target_filter(invocation),
                 )
                 .values(**self._values(invocation))
             )
@@ -387,6 +401,7 @@ class SqlCapabilityInvocationStore:
                     or int(existing.revision) != expected_revision
                     or existing.state != CapabilityInvocationState.CREATED.value
                     or int(existing.attempt) != 0
+                    or not self._record_target_matches(existing, invocation)
                 ):
                     await uow.rollback()
                     return False
@@ -412,7 +427,6 @@ class SqlCapabilityInvocationStore:
                         CapabilityInvocationRecord.state
                         == CapabilityInvocationState.CREATED.value,
                         CapabilityInvocationRecord.attempt == 0,
-                        self._target_filter(invocation),
                     )
                     .values(**self._values(invocation))
                 )
@@ -452,6 +466,19 @@ class SqlCapabilityInvocationStore:
             return False
 
         async with self._uow_factory() as uow:
+            existing = await uow.session.get(
+                CapabilityInvocationRecord,
+                invocation.invocation_id,
+            )
+            if (
+                existing is None
+                or int(existing.revision) != expected_revision
+                or existing.state != CapabilityInvocationState.DISPATCHING.value
+                or int(existing.attempt) != 1
+                or not self._record_target_matches(existing, invocation)
+            ):
+                await uow.rollback()
+                return False
             invocation_result = await uow.session.execute(
                 update(CapabilityInvocationRecord)
                 .where(
@@ -461,7 +488,6 @@ class SqlCapabilityInvocationStore:
                     CapabilityInvocationRecord.state
                     == CapabilityInvocationState.DISPATCHING.value,
                     CapabilityInvocationRecord.attempt == 1,
-                    self._target_filter(invocation),
                 )
                 .values(**self._values(invocation))
             )
@@ -505,6 +531,19 @@ class SqlCapabilityInvocationStore:
 
         async with self._uow_factory() as uow:
             try:
+                existing = await uow.session.get(
+                    CapabilityInvocationRecord,
+                    invocation.invocation_id,
+                )
+                if (
+                    existing is None
+                    or int(existing.revision) != expected_revision
+                    or existing.state != CapabilityInvocationState.WAITING.value
+                    or int(existing.attempt) != expected_attempt
+                    or not self._record_target_matches(existing, invocation)
+                ):
+                    await uow.rollback()
+                    return False
                 result = await uow.session.execute(
                     update(CapabilityInvocationRecord)
                     .where(
@@ -516,7 +555,6 @@ class SqlCapabilityInvocationStore:
                         == CapabilityInvocationState.WAITING.value,
                         CapabilityInvocationRecord.attempt
                         == expected_attempt,
-                        self._target_filter(invocation),
                     )
                     .values(**self._values(invocation))
                 )
@@ -583,6 +621,19 @@ class SqlCapabilityInvocationStore:
             return False
 
         async with self._uow_factory() as uow:
+            existing = await uow.session.get(
+                CapabilityInvocationRecord,
+                invocation.invocation_id,
+            )
+            if (
+                existing is None
+                or int(existing.revision) != expected_revision
+                or existing.state != CapabilityInvocationState.DISPATCHING.value
+                or int(existing.attempt) != invocation.attempt
+                or not self._record_target_matches(existing, invocation)
+            ):
+                await uow.rollback()
+                return False
             invocation_result = await uow.session.execute(
                 update(CapabilityInvocationRecord)
                 .where(
@@ -594,7 +645,6 @@ class SqlCapabilityInvocationStore:
                     == CapabilityInvocationState.DISPATCHING.value,
                     CapabilityInvocationRecord.attempt
                     == invocation.attempt,
-                    self._target_filter(invocation),
                 )
                 .values(**self._values(invocation))
             )

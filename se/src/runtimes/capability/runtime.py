@@ -2410,6 +2410,10 @@ class CapabilityRuntime(BaseRuntime):
     ) -> tuple[BaseCapabilityDriver | None, str | None]:
         legacy_driver = self.registry.get_driver(capability_id)
         if self.catalog is None or not self.catalog.contains_definition(capability_id):
+            if target is not None:
+                raise RuntimeError(
+                    "Explicit capability target requires catalog routing."
+                )
             return legacy_driver, None
         if self.routing_policy is None:
             raise RuntimeError(
