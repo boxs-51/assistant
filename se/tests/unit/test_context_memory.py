@@ -8,6 +8,7 @@ import pytest
 from se.src.context.memory import (
     MEMORY_IDENTITY_DOMAIN,
     MEMORY_SCHEMA_VERSION,
+    MEMORY_SCOPE_USER_WIDE,
     InMemoryMemoryRecordRepository,
     MemoryRecord,
     MemoryRecordConflictError,
@@ -44,10 +45,12 @@ def _record(
     source=None,
     content=None,
     metadata=None,
+    memory_scope=None,
 ):
     return create_memory_record(
         source_ref=source or _source(),
         promotion_authority_id=promotion_authority_id,
+        memory_scope=memory_scope,
         content={"fact": "alpha"} if content is None else content,
         metadata={"kind": "test"} if metadata is None else metadata,
     )
@@ -56,6 +59,30 @@ def _record(
 def test_ctx_f5_1_identity_domain_and_schema_are_frozen():
     assert MEMORY_IDENTITY_DOMAIN == "ctx-memory-v1"
     assert MEMORY_SCHEMA_VERSION == 1
+
+
+def test_ctx_f5_3k_p1_user_wide_scope_is_explicit_and_identity_stable():
+    legacy = _record()
+    user_wide = _record(memory_scope=MEMORY_SCOPE_USER_WIDE)
+
+    assert legacy.memory_scope is None
+    assert user_wide.memory_scope == MEMORY_SCOPE_USER_WIDE
+    assert legacy.memory_id == user_wide.memory_id
+    assert memory_records_replay_equivalent(legacy, user_wide) is False
+
+
+def test_ctx_f5_3k_p1_rejects_unreleased_scope_values():
+    with pytest.raises(ValueError, match="memory_scope"):
+        _record(memory_scope="AGENT_PRIVATE")
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3k_p1_scope_mismatch_is_replay_conflict():
+    repository = InMemoryMemoryRecordRepository()
+    await repository.put(_record())
+
+    with pytest.raises(MemoryRecordConflictError, match="conflicting"):
+        await repository.put(_record(memory_scope=MEMORY_SCOPE_USER_WIDE))
 
 
 def test_ctx_f5_1_canonical_json_is_deterministic_and_rejects_non_json_containers():
