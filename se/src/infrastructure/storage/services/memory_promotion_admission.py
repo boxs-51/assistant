@@ -7,6 +7,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from se.src.context.memory import (
+    MEMORY_SCOPE_USER_WIDE,
     MemoryRecord,
     MemoryRecordConflictError,
     canonical_memory_bytes,
@@ -118,15 +119,15 @@ class DurableMemoryPromotionAdmission:
                     durable_intent_json = json.loads(durable.intent.model_dump_json())
                     metadata_snapshot = durable_intent_json["metadata"]
 
-                    expected = create_memory_record(
-                        source_ref=durable.intent.source_ref_snapshot,
-                        promotion_authority_id=durable.promotion_authority_id,
-                        content=content_snapshot,
-                        metadata=metadata_snapshot,
-                        memory_schema_version=durable.intent.memory_schema_version,
-                    )
-
                     if durable.state is DurablePromotionReservationState.ISSUED:
+                        expected = create_memory_record(
+                            source_ref=durable.intent.source_ref_snapshot,
+                            promotion_authority_id=durable.promotion_authority_id,
+                            memory_scope=MEMORY_SCOPE_USER_WIDE,
+                            content=content_snapshot,
+                            metadata=metadata_snapshot,
+                            memory_schema_version=durable.intent.memory_schema_version,
+                        )
                         existing = (
                             await memory_repository.get_by_promotion_authority(
                                 durable.promotion_authority_id
@@ -159,6 +160,14 @@ class DurableMemoryPromotionAdmission:
                             raise PromotionAdmissionConsumedMemoryMissingError(
                                 "CONSUMED reservation has no durable Memory"
                             )
+                        expected = create_memory_record(
+                            source_ref=durable.intent.source_ref_snapshot,
+                            promotion_authority_id=durable.promotion_authority_id,
+                            memory_scope=existing.memory_scope,
+                            content=content_snapshot,
+                            metadata=metadata_snapshot,
+                            memory_schema_version=durable.intent.memory_schema_version,
+                        )
                         if not memory_records_replay_equivalent(
                             existing,
                             expected,
