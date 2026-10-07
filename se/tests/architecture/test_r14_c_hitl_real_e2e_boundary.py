@@ -66,7 +66,10 @@ def test_r14_c_binds_approve_and_deny_to_real_agent_websocket_path() -> None:
     ):
         assert proof in source
 
-    assert "realtime.handle_inbound()" not in source
+    r14c = source[source.index("def _build_r14_c_high_risk_client_registry") :]
+    assert ".dispatch(" not in r14c
+    assert "handle_inbound(" not in r14c
+    assert "send_result(" not in r14c
     assert "manually injected capability.result" in source
 
 
