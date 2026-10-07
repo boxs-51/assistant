@@ -144,6 +144,8 @@ The first representation slice MUST NOT change:
 
 Caller-provided scope alone cannot authorize Memory creation or promotion.
 
+Explicitly, no automatic USER_WIDE promotion is released by CTX-F5-3K.
+
 The current promotion/admission chain may continue producing legacy/unclassified
 owner-only records until a separately released trusted USER_WIDE classification
 producer is claimed.
