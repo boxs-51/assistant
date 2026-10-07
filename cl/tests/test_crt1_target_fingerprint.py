@@ -119,3 +119,55 @@ def test_malformed_wire_target_fails_closed_before_local_execution():
         assert realtime.events[0][1]["code"] == "REMOTE_INVOCATION_CONFLICT"
     finally:
         dispatcher.shutdown()
+
+def test_client_local_target_for_different_installation_fails_closed():
+    called = []
+    registry = SimpleNamespace(
+        tools={
+            "crt.echo": {
+                "func": lambda **kwargs: called.append(kwargs),
+                "metadata": {
+                    "name": "crt.echo",
+                    "version": "1.0",
+                    "base_risk": "LOW",
+                },
+            }
+        }
+    )
+    realtime = _Realtime()
+    dispatcher = CapabilityDispatcher(
+        registry,
+        realtime,
+        client_id="client-a",
+    )
+    dispatcher.update_registration_snapshot(["crt.echo"])
+    target = _target()
+    target["stable_client_id"] = "client-b"
+    try:
+        dispatcher.dispatch(
+            {
+                "type": "capability.invoke",
+                "connection_id": "conn-1",
+                "invocation_id": "inv-foreign-client",
+                "payload": {
+                    "capability_id": "crt.echo",
+                    "capability_version": "1.0",
+                    "arguments": {"value": "x"},
+                    "target": target,
+                    "request_fingerprint": (
+                        CapabilityDispatcher._request_fingerprint(
+                            "crt.echo",
+                            "1.0",
+                            {"value": "x"},
+                            target,
+                        )
+                    ),
+                },
+            }
+        )
+        assert called == []
+        assert realtime.events
+        assert realtime.events[0][1]["code"] == "REMOTE_INVOCATION_CONFLICT"
+    finally:
+        dispatcher.shutdown()
+
