@@ -145,6 +145,17 @@ class CapabilityDispatcher:
             canonical_target = self._canonical_target_payload(
                 payload.get("target")
             )
+            if (
+                canonical_target is not None
+                and canonical_target["resource_scope"] == "CLIENT_LOCAL"
+                and (
+                    not self._client_id
+                    or canonical_target["stable_client_id"] != self._client_id
+                )
+            ):
+                raise ValueError(
+                    "CLIENT_LOCAL target does not match this client installation"
+                )
             request_fingerprint = self._request_fingerprint(
                 capability_id,
                 capability_version,
