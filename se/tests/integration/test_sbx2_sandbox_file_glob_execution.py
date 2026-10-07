@@ -259,6 +259,10 @@ def test_sbx2_loader_binds_exact_file_glob_ids_to_sandbox_driver(
         isinstance(plan.driver, SandboxPythonCapabilityDriver)
         for plan in plans
     )
+    assert all(
+        plan.implementation_metadata["resource_scopes"] == ["SANDBOX"]
+        for plan in plans
+    )
 
     ordinary = _build_canonical_v2_plans(
         deepcopy(FILE_METADATA),
