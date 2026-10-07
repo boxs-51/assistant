@@ -104,7 +104,7 @@ def test_ctx_f4c_preserves_f4b_finite_search_shape() -> None:
     assert "Search finite already-loaded F3 evidence with literal structural matching" in source
 
     for phrase in (
-        "finite already-loaded Session/Task/Branch evidence only",
+        "finite search over already-loaded Session/Task/Branch evidence only",
         "build_discovery_collection(...)",
         "literal field-local substring matching",
         "deterministic global context_source_id ordering",
