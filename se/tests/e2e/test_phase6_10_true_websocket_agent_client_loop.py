@@ -1086,8 +1086,10 @@ async def _run_r14_c_hitl_real_websocket_case(*, approved: bool):
         else:
             assert executed_tools == []
             assert tool_message.metadata["success"] is False
-            assert dict(tool_message.content)["error_code"] == "HITL_DENIED"
-            assert dict(tool_message.content)["error_message"] == f"Local user denied capability '{CAPABILITY_ID}'."
+            assert dict(tool_message.content) == {
+                "error_code": "HITL_DENIED",
+                "error_message": f"Local user denied capability '{CAPABILITY_ID}'.",
+            }
 
         return approvals, executed_tools, execution, inference
     finally:
