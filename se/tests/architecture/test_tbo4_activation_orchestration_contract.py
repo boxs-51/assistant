@@ -130,6 +130,39 @@ def test_tbo4_freezes_activation_decision_identity_and_replay() -> None:
     assert "allowed replay preserves the same bound execution" in contract
     assert "denied replay preserves zero executions" in contract
 
+    # A prior durable decision must win before even looking at ASSIGNED state.
+    assert (
+        "before examining Task source state or invoking TBO-2 / UBQ / R8"
+    ) in contract
+    assert (
+        "authenticate the trusted principal and enforce Task ownership/authorization"
+    ) in normalized
+    assert (
+        "read the canonical durable decision for the exact ActivationDecisionKey "
+        "under replay-safe transaction/CAS coordination"
+    ) in normalized
+    assert (
+        "if a durable decision exists, return/observe that persisted ALLOW or DENY"
+    ) in normalized
+    assert (
+        "NEVER reevaluate Task state, horizons, UBQ owner/eligibility or R8 admission "
+        "for the same key"
+    ) in normalized
+    assert (
+        "only if no decision exists" in normalized
+    )
+    assert (
+        "A persisted DENY is immutable for that key even if a transient "
+        "UBQ_ACTIVATION_DEFERRED or UBQ_OWNER_UNRESOLVED condition later clears "
+        "while the Task remains ASSIGNED."
+    ) in normalized
+    assert (
+        "a different trusted activation_request_id" in normalized
+    )
+    assert (
+        "A missing/corrupt decision receipt MUST fail closed" in normalized
+    )
+
     for disposition in (
         "ACTIVATION_ALLOWED",
         "ACTIVATION_REPLAY",
@@ -157,6 +190,21 @@ def test_tbo4_freezes_source_state_matrix_without_stealing_ae_continuation() -> 
     assert "DEFER_TO_AE_CONTINUATION" in contract
     assert "existing Execution resume remains AE-owned" in contract
     assert "RETRY/FORK/RESUME path" in contract
+    assert (
+        "only after a replay-safe lookup proves no durable decision exists "
+        "for the exact ActivationDecisionKey"
+    ) in normalized
+    assert (
+        "| ASSIGNED + no existing decision for key | evaluate TBO-2 horizons"
+    ) in normalized
+    assert (
+        "A same-key durable DENY must be returned unchanged without running "
+        "any later TBO-2, UBQ or R8 gate"
+    ) in normalized
+    assert (
+        "RUNNING + an existing same-key durable decision" in contract
+    )
+    assert "| ASSIGNED | evaluate TBO-2 horizons" not in contract
     assert "TASK_TERMINAL; no resurrection" in contract
     assert "task_mode = RECURRING does not by itself make a WAITING or terminal Task activation-ready" in contract
     assert "TBO-4 does not invent recurrence scheduling/cadence or terminal resurrection" in contract
@@ -297,6 +345,14 @@ def test_tbo4_preserves_aat_tbo5_boundary_and_exit_gate() -> None:
     ) in normalized
     assert "same decision key, many workers -> exactly one execution;" not in normalized
     assert "replay after process restart -> same durable decision/execution;" not in normalized
+    assert (
+        "same key replay after a durable UBQ_ACTIVATION_DEFERRED or "
+        "UBQ_OWNER_UNRESOLVED denial while Task remains ASSIGNED -> "
+        "unchanged denial, zero execution, no UBQ recheck/R8 admission; "
+        "only a new trusted decision key may request fresh evaluation"
+    ) in normalized
+    assert "6. Task horizon expired" in contract
+    assert "7. review horizon reached" in contract
 
     assert "exact scope remains 2 NEW / 2" in normalized
     assert "exact-head Linux + Windows Architecture is GREEN/GREEN" in normalized
