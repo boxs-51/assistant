@@ -14,6 +14,10 @@ MEMORY_REPOSITORY = Path("se/src/infrastructure/storage/repositories/memory.py")
 MEMORY_ADMISSION = Path(
     "se/src/infrastructure/storage/services/memory_promotion_admission.py"
 )
+B5_MEMORY_PROMOTION = Path(
+    "se/src/infrastructure/storage/services/"
+    "tool_response_payload_memory_promotion.py"
+)
 MIGRATION_29A = Path(
     "se/src/infrastructure/storage/migrations/sql/versions/"
     "29a_crt1_capability_invocation_target.py"
@@ -243,9 +247,43 @@ def test_ctx_f5_3k_freezes_identity_stability_and_replay_conflict() -> None:
 def test_ctx_f5_3k_preserves_promotion_admission_and_p3_boundary() -> None:
     contract = _normalized(CONTRACT)
     admission = _read(MEMORY_ADMISSION)
+    b5 = _read(B5_MEMORY_PROMOTION)
 
-    assert "create_memory_record(" in admission
-    assert "memory_scope" not in admission
+    admission_class = _class(admission, "DurableMemoryPromotionAdmission")
+    admit = next(
+        node
+        for node in admission_class.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "admit"
+    )
+    assert [arg.arg for arg in admit.args.kwonlyargs] == ["reservation", "content"]
+    assert "memory_scope" not in {
+        arg.arg for arg in (*admit.args.args, *admit.args.kwonlyargs)
+    }
+
+    assert "MEMORY_SCOPE_USER_WIDE" in admission
+    assert "memory_scope=MEMORY_SCOPE_USER_WIDE" in admission
+    assert "memory_scope=existing.memory_scope" in admission
+    assert "memory_records_replay_equivalent(" in admission
+    assert (
+        "if durable.state is DurablePromotionReservationState.REVOKED:"
+        in admission
+    )
+
+    b5_class = _class(b5, "DurableToolResponsePayloadMemoryPromotion")
+    promote = next(
+        node
+        for node in b5_class.body
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "promote"
+    )
+    assert [arg.arg for arg in promote.args.kwonlyargs] == [
+        "source_ref",
+        "owner_user_id",
+    ]
+    assert "memory_scope" not in {
+        arg.arg for arg in (*promote.args.args, *promote.args.kwonlyargs)
+    }
+    assert "reservation=handoff.reservation" in b5
+    assert "content=content_snapshot" in b5
 
     for phrase in (
         "Memory scope classification does not mint source authority",
@@ -281,15 +319,20 @@ def test_ctx_f5_3k_keeps_read_visibility_and_external_authority_closed() -> None
         assert phrase in contract
 
 
-def test_ctx_f5_3k_p1_persists_scope_without_opening_producer_or_read_authority() -> None:
+def test_ctx_f5_3k_p1_persists_scope_and_p2_opens_only_trusted_producer() -> None:
     contract = _normalized(CONTRACT)
     repository = _read(MEMORY_REPOSITORY)
     admission = _read(MEMORY_ADMISSION)
+    b5 = _read(B5_MEMORY_PROMOTION)
 
     assert "class DurableMemoryRecordRepository" in repository
     assert "memory_scope=row.memory_scope" in repository
     assert '"memory_scope": record.memory_scope' in repository
-    assert "memory_scope" not in admission
+
+    assert admission.count("memory_scope=MEMORY_SCOPE_USER_WIDE") == 1
+    assert admission.count("memory_scope=existing.memory_scope") == 1
+    assert "memory_scope=" not in b5
+    assert "agent_instance_id" not in admission
 
     for phrase in (
         "promotion/admission changes",

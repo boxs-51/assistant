@@ -8,6 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 import se.src.infrastructure.storage.core.unit_of_work  # noqa: F401
+from se.src.context.memory import MEMORY_SCOPE_USER_WIDE
 from se.src.context.source_identity import (
     ContextSourceKind,
     create_context_source_ref,
@@ -264,6 +265,8 @@ async def test_b5_first_promotion_consumes_reservation_and_fresh_retry_replays_m
 
         assert first.memory_id == replay.memory_id
         assert first.created_at == replay.created_at
+        assert first.memory_scope == MEMORY_SCOPE_USER_WIDE
+        assert replay.memory_scope == MEMORY_SCOPE_USER_WIDE
         assert first.content["message"] == "durable-memory"
         assert source_first.calls == 1
         assert source_retry.calls == 1
@@ -276,6 +279,14 @@ async def test_b5_first_promotion_consumes_reservation_and_fresh_retry_replays_m
             )
             assert durable is not None
             assert durable.state is DurablePromotionReservationState.CONSUMED
+            memory_row = (
+                await session.execute(
+                    select(MemoryRecordRow).where(
+                        MemoryRecordRow.promotion_authority_id == "authority-b5"
+                    )
+                )
+            ).scalar_one()
+            assert memory_row.memory_scope == MEMORY_SCOPE_USER_WIDE
     finally:
         await engine.dispose()
 
@@ -310,6 +321,7 @@ async def test_b5_concurrent_same_source_converges_to_one_memory_identity(tmp_pa
         )
 
         canonical = successes[0]
+        assert canonical.memory_scope == MEMORY_SCOPE_USER_WIDE
         assert all(
             success.memory_id == canonical.memory_id
             and success.promotion_authority_id == canonical.promotion_authority_id
@@ -344,6 +356,7 @@ async def test_b5_concurrent_same_source_converges_to_one_memory_identity(tmp_pa
         assert replay.memory_id == canonical.memory_id
         assert replay.promotion_authority_id == canonical.promotion_authority_id
         assert replay.created_at == canonical.created_at
+        assert replay.memory_scope == MEMORY_SCOPE_USER_WIDE
         assert source_retry.calls == 1
         assert await _row_count(sessions, PromotionReservationRow) == 1
         assert await _row_count(sessions, MemoryRecordRow) == 1

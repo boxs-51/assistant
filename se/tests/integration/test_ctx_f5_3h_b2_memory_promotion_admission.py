@@ -9,7 +9,11 @@ from sqlalchemy import text, update
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from se.src.context.memory import memory_content_digest
+from se.src.context.memory import (
+    MEMORY_SCOPE_USER_WIDE,
+    create_memory_record,
+    memory_content_digest,
+)
 from se.src.context.memory_promotion import (
     MemoryPromotionIntent,
     MemoryPromotionProofScope,
@@ -97,6 +101,31 @@ async def _seed_reservation(sessions, authority_id: str, intent: MemoryPromotion
         return durable
 
 
+async def _seed_consumed_memory(
+    sessions,
+    authority_id: str,
+    intent: MemoryPromotionIntent,
+    content,
+    *,
+    memory_scope: str | None,
+):
+    await _seed_reservation(sessions, authority_id, intent)
+    record = create_memory_record(
+        source_ref=intent.source_ref_snapshot,
+        promotion_authority_id=authority_id,
+        memory_scope=memory_scope,
+        content=content,
+        metadata=intent.metadata,
+        memory_schema_version=intent.memory_schema_version,
+    )
+    async with sessions() as session:
+        memory_repository = DurableMemoryRecordRepository(session)
+        winner = await memory_repository.put(record)
+        await DurablePromotionReservationRepository(session).mark_consumed(authority_id)
+        await session.commit()
+        return winner
+
+
 @pytest.mark.asyncio
 async def test_ctx_f5_3h_b2_sqlite_first_admission_and_consumed_replay_are_atomic():
     engine, sessions = await _database()
@@ -123,6 +152,7 @@ async def test_ctx_f5_3h_b2_sqlite_first_admission_and_consumed_replay_are_atomi
             reservation=reservation,
             content=content,
         )
+        assert first.memory_scope == MEMORY_SCOPE_USER_WIDE
 
         async with sessions() as session:
             reservation_repository = DurablePromotionReservationRepository(session)
@@ -134,6 +164,7 @@ async def test_ctx_f5_3h_b2_sqlite_first_admission_and_consumed_replay_are_atomi
             assert durable.state is DurablePromotionReservationState.CONSUMED
             assert persisted is not None
             assert persisted.memory_id == first.memory_id
+            assert persisted.memory_scope == MEMORY_SCOPE_USER_WIDE
             assert persisted.content["fact"] == ("alpha",)
 
         replay = await service.admit(
@@ -143,6 +174,7 @@ async def test_ctx_f5_3h_b2_sqlite_first_admission_and_consumed_replay_are_atomi
 
         assert replay.memory_id == first.memory_id
         assert replay.created_at == first.created_at
+        assert replay.memory_scope == MEMORY_SCOPE_USER_WIDE
 
         async with sessions() as session:
             durable = await DurablePromotionReservationRepository(session).get(
@@ -156,6 +188,59 @@ async def test_ctx_f5_3h_b2_sqlite_first_admission_and_consumed_replay_are_atomi
             assert durable.state is DurablePromotionReservationState.CONSUMED
             assert persisted is not None
             assert persisted.memory_id == first.memory_id
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "memory_scope",
+    [None, MEMORY_SCOPE_USER_WIDE],
+    ids=["legacy-null", "user-wide"],
+)
+async def test_ctx_f5_3k_p2_consumed_replay_preserves_existing_scope(memory_scope):
+    engine, sessions = await _database()
+    content = {"fact": ["rollout"]}
+    intent = _intent(content)
+    authority_id = (
+        "authority-h-b2-consumed-null"
+        if memory_scope is None
+        else "authority-h-b2-consumed-user-wide"
+    )
+    reservation = PromotionReservation(
+        promotion_authority_id=authority_id,
+        intent=intent,
+    )
+
+    try:
+        existing = await _seed_consumed_memory(
+            sessions,
+            authority_id,
+            intent,
+            content,
+            memory_scope=memory_scope,
+        )
+
+        replay = await DurableMemoryPromotionAdmission(sessions).admit(
+            reservation=reservation,
+            content={"fact": ["rollout"]},
+        )
+
+        assert replay.memory_id == existing.memory_id
+        assert replay.created_at == existing.created_at
+        assert replay.memory_scope == memory_scope
+
+        async with sessions() as session:
+            persisted = await DurableMemoryRecordRepository(
+                session
+            ).get_by_promotion_authority(authority_id)
+            durable = await DurablePromotionReservationRepository(session).get(
+                authority_id
+            )
+            assert persisted is not None
+            assert persisted.memory_scope == memory_scope
+            assert durable is not None
+            assert durable.state is DurablePromotionReservationState.CONSUMED
     finally:
         await engine.dispose()
 

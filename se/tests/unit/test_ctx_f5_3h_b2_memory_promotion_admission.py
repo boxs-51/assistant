@@ -7,6 +7,7 @@ import pytest
 from sqlalchemy.exc import SQLAlchemyError
 
 from se.src.context.memory import (
+    MEMORY_SCOPE_USER_WIDE,
     create_memory_record,
     memory_content_digest,
 )
@@ -93,10 +94,17 @@ def _reservation(authority_id: str, intent: MemoryPromotionIntent) -> PromotionR
     )
 
 
-def _memory(record: DurablePromotionReservationRecord, content, *, metadata=None):
+def _memory(
+    record: DurablePromotionReservationRecord,
+    content,
+    *,
+    metadata=None,
+    memory_scope=None,
+):
     return create_memory_record(
         source_ref=record.intent.source_ref_snapshot,
         promotion_authority_id=record.promotion_authority_id,
+        memory_scope=memory_scope,
         content=content,
         metadata=record.intent.metadata if metadata is None else metadata,
         memory_schema_version=record.intent.memory_schema_version,
@@ -259,6 +267,7 @@ async def test_ctx_f5_3h_b2_detaches_payload_before_first_session_await(monkeypa
 
     assert caller_content == {"fact": ["mutated"]}
     assert winner.content["fact"] == ("alpha",)
+    assert winner.memory_scope == MEMORY_SCOPE_USER_WIDE
     assert memory_repo.put_calls == [winner]
     assert reservation_repo.consume_calls == ["authority-detached"]
     assert sessions.calls == 1
@@ -396,6 +405,40 @@ async def test_ctx_f5_3h_b2_consumed_replay_is_read_only_and_exact(monkeypatch):
     )
 
     assert returned is existing
+    assert returned.memory_scope is None
+    assert memory_repo.put_calls == []
+    assert reservation_repo.consume_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ctx_f5_3k_p2_consumed_user_wide_replay_preserves_stored_scope(monkeypatch):
+    content = {"fact": "alpha"}
+    intent = _intent(content, suffix="user-wide")
+    durable = _durable(
+        authority_id="authority-consumed-user-wide",
+        intent=intent,
+        state=DurablePromotionReservationState.CONSUMED,
+    )
+    existing = _memory(
+        durable,
+        content,
+        memory_scope=MEMORY_SCOPE_USER_WIDE,
+    )
+    reservation_repo = _ReservationRepository(durable)
+    memory_repo = _MemoryRepository(existing=existing)
+    _install(
+        monkeypatch,
+        reservation_repository=reservation_repo,
+        memory_repository=memory_repo,
+    )
+
+    returned = await DurableMemoryPromotionAdmission(_SessionFactory()).admit(
+        reservation=_reservation(durable.promotion_authority_id, intent),
+        content=content,
+    )
+
+    assert returned is existing
+    assert returned.memory_scope == MEMORY_SCOPE_USER_WIDE
     assert memory_repo.put_calls == []
     assert reservation_repo.consume_calls == []
 
