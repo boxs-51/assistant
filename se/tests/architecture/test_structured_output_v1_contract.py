@@ -7,8 +7,12 @@ implemented structured-output capability.
 from __future__ import annotations
 
 import ast
+import hashlib
+import json
 import re
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -298,3 +302,138 @@ def test_so_c0_a_c08_cross_issue_authority_is_explicitly_closed() -> None:
             assert all(
                 not name.startswith(("se.src", "cl.src")) for name in imported
             )
+
+
+# Contract-only reference fixtures: prove stable, source-independent bytes and
+# reject ambiguous generated JSON without claiming current runtime enforcement.
+# The production implementation will require separate independent authority.
+JCS_SCHEMA_ENVELOPE = (
+    '{"name":"jcs_numeric_v1","revision":"STRUCTURED_OUTPUT_V1",'
+    '"schema":{"additionalProperties":false,"properties":'
+    '{"n":{"enum":[1],"type":"number"}},"required":["n"],'
+    '"type":"object"},"strict":true,"type":"json_schema"}'
+)
+JCS_SCHEMA_SHA256 = "fe0c0d88eeb1ec9ea16eb5daf905282cdd9249954c0172826956c3515b055045"
+JCS_NUMERIC_EDGE_BYTES = '{"a":1,"b":0,"c":1e+21,"d":1e-7,"e":0.000001}'
+JCS_NUMERIC_EDGE_SHA256 = "67611fb1557b34eff0be79a4442c41f4647f122d978cf12d2f36c32cb56f450b"
+JCS_UTF16_ORDER_BYTES = '{"a":1,"😀":2,"":3}'
+JCS_UTF16_ORDER_SHA256 = "8043baa23995777ba780997c1db8282dbe99a54db473636cd9ff149f37e4853e"
+
+
+def test_so_c0_p2_numeric_jcs_fixed_schema_fingerprint() -> None:
+    """RFC 8785 canonical *bytes* and digest, not a Python json.dumps substitute."""
+    text = _contract()
+    for marker in (
+        "RFC 8785",
+        "JSON Canonicalization Scheme",
+        "ECMAScript",
+        "IEEE-754",
+        "UTF-16",
+        "UTF-8",
+        "schema_revision",
+        "source lexeme",
+        "1.0",
+        "1e+21",
+        "0.000001",
+        "SHA-256 hex",
+        "OUTPUT_SCHEMA_INVALID",
+    ):
+        assert marker in text, marker
+
+    # Golden full semantic envelope; both [1] and [1.0] normalize to [1].
+    assert JCS_SCHEMA_ENVELOPE in text
+    assert JCS_SCHEMA_SHA256 in text
+    assert hashlib.sha256(JCS_SCHEMA_ENVELOPE.encode("utf-8")).hexdigest() == (
+        JCS_SCHEMA_SHA256
+    )
+    assert json.loads('{"enum":[1]}')["enum"] == json.loads(
+        '{"enum":[1.0]}'
+    )["enum"]
+    assert json.loads(JCS_SCHEMA_ENVELOPE)["schema"]["properties"]["n"] == {
+        "enum": [1],
+        "type": "number",
+    }
+
+
+def test_so_c0_p2_numeric_jcs_cross_language_edge_vectors() -> None:
+    text = _contract()
+    assert JCS_NUMERIC_EDGE_BYTES in text
+    assert JCS_NUMERIC_EDGE_SHA256 in text
+    assert hashlib.sha256(
+        JCS_NUMERIC_EDGE_BYTES.encode("utf-8")
+    ).hexdigest() == JCS_NUMERIC_EDGE_SHA256
+
+    # Compare semantic numeric values; a runtime implementation must prove
+    # its own ECMAScript number-to-string conversion matches these bytes.
+    for raw, canonical in (
+        ("1", "1"),
+        ("1.0", "1"),
+        ("-0", "0"),
+        ("-0.0", "0"),
+        ("1e21", "1e+21"),
+        ("1E+21", "1e+21"),
+        ("1e-7", "1e-7"),
+        ("1e-6", "0.000001"),
+    ):
+        assert json.loads(raw) == json.loads(canonical)
+        assert f"{raw}" in text
+        assert f"{canonical}" in text
+
+    assert JCS_UTF16_ORDER_BYTES in text
+    assert JCS_UTF16_ORDER_SHA256 in text
+    assert hashlib.sha256(
+        JCS_UTF16_ORDER_BYTES.encode("utf-8")
+    ).hexdigest() == JCS_UTF16_ORDER_SHA256
+    assert sorted(["", "😀", "a"], key=lambda key: key.encode("utf-16-be")) == [
+        "a", "😀", ""
+    ]
+
+
+def _reject_repeated_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Illustrative source-independent decoder hook, not a server implementation."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate generated JSON object member")
+        result[key] = value
+    return result
+
+
+@pytest.mark.parametrize("mode", ("JSON_OBJECT", "JSON_SCHEMA"))
+@pytest.mark.parametrize(
+    "raw",
+    [
+        r'{"status":"normal","status":"critical"}',
+        r'{"result":{"x":1,"x":2}}',
+        r'{"items":[{"x":1,"\u0078":2}]}',
+        r'{"status":"normal"}{"status":"critical"}',
+        r'{"result":{"a":1,"a":1}}',
+        r'{"\u0061":1,"a":2}',
+    ],
+)
+def test_so_c0_p2_generated_nested_duplicate_members_fail_closed(
+    mode: str, raw: str
+) -> None:
+    """A local parser *reference* for both modes, not a live provider validator."""
+    doc = _contract()
+    assert "every nesting level" in doc
+    assert "before any lossy mapping" in doc
+    assert "OUTPUT_JSON_INVALID" in doc
+    assert "JSON_OBJECT" in doc and "JSON_SCHEMA" in doc
+    assert mode in doc
+    if raw != r'{"\u0061":1,"a":2}':
+        assert raw in doc
+    with pytest.raises(ValueError):
+        json.loads(raw, object_pairs_hook=_reject_repeated_members)
+
+
+def test_so_c0_p2_duplicate_free_nested_json_is_not_rejected() -> None:
+    # Different nested objects may legally repeat the same property name.
+    source = '{"items":[{"x":1},{"x":2}],"status":"normal"}'
+    parsed = json.loads(source, object_pairs_hook=_reject_repeated_members)
+    assert parsed == {
+        "items": [{"x": 1}, {"x": 2}],
+        "status": "normal",
+    }
+    assert "no free retry" in _contract().lower()
+    assert "future production invariants only" in _contract().lower()
