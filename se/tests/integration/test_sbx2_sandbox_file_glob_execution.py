@@ -125,13 +125,22 @@ async def test_sbx2_file_glob_share_one_execution_root_and_block_host_escape(
     search = _driver("file.search", manager, profile)
     glob = _driver("glob.find", manager, profile)
 
-    await write.execute(context, {"file_paths": "note.txt", "content": "alpha"})
+    write_result = await write.execute(
+        context,
+        {"file_paths": "note.txt", "content": "alpha"},
+    )
+    assert write_result["data"]["path"] == "note.txt"
     lease = manager.current_for_execution("exec-a")
     root = lease.root
     assert (root / "note.txt").read_text() == "alpha"
 
-    await append.execute(context, {"file_paths": "note.txt", "content": " beta"})
-    await replace.execute(
+    append_result = await append.execute(
+        context,
+        {"file_paths": "note.txt", "content": " beta"},
+    )
+    assert append_result["data"]["path"] == "note.txt"
+
+    replace_result = await replace.execute(
         context,
         {
             "file_paths": "note.txt",
@@ -139,12 +148,28 @@ async def test_sbx2_file_glob_share_one_execution_root_and_block_host_escape(
             "replacements": "omega",
         },
     )
-    await search.execute(
+    assert replace_result["data"]["files"][0]["path"] == "note.txt"
+
+    search_result = await search.execute(
         context,
         {"file_paths": "note.txt", "queries": "omega"},
     )
-    await read.execute(context, {"file_paths": "note.txt"})
-    await glob.execute(context, {"pattern": "*.txt"})
+    assert search_result["data"]["files"][0]["path"] == "note.txt"
+
+    read_result = await read.execute(context, {"file_paths": "note.txt"})
+    assert read_result["data"]["path"] == "note.txt"
+
+    glob_result = await glob.execute(context, {"pattern": "*.txt"})
+    assert glob_result["data"]["root_dir"] == "."
+    returned_paths = [
+        match["path"] for match in glob_result["data"]["matches"]
+    ]
+    assert "note.txt" in returned_paths
+    chained_read = await read.execute(
+        context,
+        {"file_paths": returned_paths[0]},
+    )
+    assert chained_read["data"]["path"] == returned_paths[0]
 
     reused = manager.current_for_execution("exec-a")
     assert reused.sandbox_id == lease.sandbox_id
@@ -427,7 +452,7 @@ class _CaptureCapabilityRuntime:
 
 
 class _AgentContext:
-    def __init__(self, *, connection_id=None):
+    def __init__(self, *, connection_id=None, client_id=None):
         self.execution_id = "agent-exec"
         self.agent_id = "agent-sbx2"
         self.connection_id = connection_id
@@ -439,7 +464,11 @@ class _AgentContext:
             max_tool_calls=10,
         )
         self.tool_calls_used = 0
-        self.metadata = {}
+        self.metadata = (
+            {"client_id": client_id}
+            if client_id is not None
+            else {}
+        )
         self.request_id = "req"
         self.session_id = "session"
         self.task_id = "task"
@@ -491,14 +520,17 @@ async def test_sbx2_agent_adapter_constructs_explicit_sandbox_target():
 
 
 @pytest.mark.asyncio
-async def test_sbx2_agent_adapter_does_not_fallback_client_call_to_sandbox():
+async def test_sbx2_agent_adapter_constructs_explicit_client_local_target():
     runtime = _CaptureCapabilityRuntime()
     adapter = CapabilityToolExecutionAdapter(
         runtime,
         _AllowToolPolicy(),
         _AllowExecutionPolicy(),
     )
-    context = _AgentContext(connection_id="conn-client")
+    context = _AgentContext(
+        connection_id="conn-client",
+        client_id="client-stable",
+    )
     request = ToolExecutionRequest(
         execution_id=context.execution_id,
         iteration=1,
@@ -511,7 +543,36 @@ async def test_sbx2_agent_adapter_does_not_fallback_client_call_to_sandbox():
 
     result = await adapter.execute(context, request)
     assert result.success is True
-    assert runtime.kwargs["target"] is None
+    target = runtime.kwargs["target"]
+    assert target.resource_scope is ResourceScope.CLIENT_LOCAL
+    assert target.stable_client_id == "client-stable"
+    assert target.resource_ref is None
+
+
+@pytest.mark.asyncio
+async def test_sbx2_connection_bound_file_call_without_stable_client_fails_closed():
+    runtime = _CaptureCapabilityRuntime()
+    adapter = CapabilityToolExecutionAdapter(
+        runtime,
+        _AllowToolPolicy(),
+        _AllowExecutionPolicy(),
+    )
+    context = _AgentContext(connection_id="conn-client")
+    request = ToolExecutionRequest(
+        execution_id=context.execution_id,
+        iteration=1,
+        invocation_id="inv-client-missing-stable-id",
+        tool_call_id="tool-client-missing-stable-id",
+        capability_id="file.read",
+        connection_id="conn-client",
+        arguments={"file_paths": "note.txt"},
+    )
+
+    result = await adapter.execute(context, request)
+    assert result.success is False
+    assert result.error_code == "CAPABILITY_TARGET_UNAVAILABLE"
+    assert result.metadata["r7_commit_authority"] == "AGENT_PRE_DISPATCH"
+    assert runtime.kwargs is None
 
 
 @pytest.mark.asyncio
