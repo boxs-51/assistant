@@ -305,10 +305,10 @@ A future AAT delivery MUST pass through the same TBO-4 decision key, eligibility
 
 A future production implementation must prove at least:
 
-1. same decision key, one worker, repeated call -> same result and same execution identity;
-2. same decision key, many workers -> exactly one execution;
+1. same decision key, one worker, repeated call -> same durable decision; if ACTIVATION_ALLOWED, same canonical execution identity; if denied, zero execution identities;
+2. same decision key, many workers -> one durable canonical decision; if ACTIVATION_ALLOWED, exactly one execution binding and at most one local start; if denied, zero execution bindings and zero local starts;
 3. different decision keys racing one ASSIGNED Task -> at most one root activation;
-4. replay after process restart -> same durable decision/execution;
+4. replay after process restart -> same durable decision; if ACTIVATION_ALLOWED, the same bound execution identity; if denied, the same durable denial with zero execution;
 5. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
 6. review horizon reached -> REVIEW_REQUIRED, zero execution, zero Task WAITING fabrication;
 7. RUNNING Task -> no second root execution;
