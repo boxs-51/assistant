@@ -320,7 +320,7 @@ A future production implementation must prove at least:
 3. different decision keys racing one ASSIGNED Task -> at most one root activation;
 4. replay after process restart -> same durable decision; if persisted outcome ALLOW, the original bound execution identity even when response is ACTIVATION_REPLAY; if persisted outcome DENY, the same durable denial with zero execution;
 5. same key replay after a durable UBQ_ACTIVATION_DEFERRED or UBQ_OWNER_UNRESOLVED denial while Task remains ASSIGNED -> unchanged denial, zero execution, no UBQ recheck/R8 admission; only a new trusted decision key may request fresh evaluation;
-7. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
+6. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
 7. review horizon reached -> REVIEW_REQUIRED, zero execution, zero Task WAITING fabrication;
 8. RUNNING Task -> no second root execution;
 9. WAITING/RESOURCE -> DEFER_TO_AE_CONTINUATION, no new execution;
