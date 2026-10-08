@@ -224,15 +224,22 @@ def test_so_p1a_json_schema_integral_decimal_is_integer_without_coercion() -> No
 
 
 def test_so_p1a_schema_allows_eight_logical_nodes_but_not_nine() -> None:
-    node: dict[str, object] = {"type": "string"}
-    for _ in range(7):
-        node = {"type": "array", "items": node}
-    _assert_code(
-        lambda: validate_portable_schema(
-            json.dumps({"type": "array", "items": node}).encode()
-        ), "OUTPUT_SCHEMA_INVALID",
-    )
-    assert validate_portable_schema(json.dumps(node).encode())["type"] == "array"
+    def root(array_layers: int) -> bytes:
+        child: dict[str, object] = {"type": "string"}
+        for _ in range(array_layers):
+            child = {"type": "array", "items": child}
+        closed_root = {
+            "type": "object",
+            "properties": {"item": child},
+            "required": ["item"],
+            "additionalProperties": False,
+        }
+        return json.dumps(closed_root).encode()
+
+    # Root object (depth 1), six array nodes (2..7), string node (8).
+    assert validate_portable_schema(root(6))["type"] == "object"
+    # Root + seven array nodes + string node = 9: fail the *depth* gate.
+    _assert_code(lambda: validate_portable_schema(root(7)), "OUTPUT_SCHEMA_INVALID")
 
 
 def test_so_p1a_generated_duplicate_is_json_error_not_schema_mismatch() -> None:
