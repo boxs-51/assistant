@@ -185,7 +185,7 @@ def test_action_adoption_requires_fresh_observation_target_and_hitl() -> None:
         "reused window handle",
         "sandbox-to-host fallback",
         "Never guess first window",
-        "cannot authorize a side effect by itself",
+        "does not authorize a side effect by itself",
     )
 
 
