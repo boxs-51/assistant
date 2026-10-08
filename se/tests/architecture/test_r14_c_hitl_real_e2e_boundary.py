@@ -82,6 +82,10 @@ def test_r14_c_binds_approve_and_deny_to_real_agent_websocket_path() -> None:
     ):
         assert proof in source
 
+    # Both APPROVE and DENY must be nonretryable: checking only the
+    # APPROVE branch would miss an unsafe HITL_DENIED retry regression.
+    assert source.count('assert tool_message.metadata["retryable"] is False') == 2
+
     r14c = source[source.index("def _build_r14_c_high_risk_client_registry") :]
     assert ".dispatch(" not in r14c
     assert "handle_inbound(" not in r14c
