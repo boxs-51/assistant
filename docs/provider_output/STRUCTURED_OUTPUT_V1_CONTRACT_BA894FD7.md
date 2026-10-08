@@ -105,6 +105,22 @@ Schema identity is `SHA256(canonical JSON)` of `{"revision":"STRUCTURED_OUTPUT_V
 - Conservative V1 caps (proposal, must be verified against actual supported models at future production eligibility): 32 KiB canonical schema bytes, maximum nested depth 8, maximum total object properties 128, maximum enum values per node 64, maximum schema name length 64 and ASCII `^[A-Za-z][A-Za-z0-9_]*$`. Exceed => OUTPUT_SCHEMA_INVALID. Portable subset is a deliberately bounded compatibility subset, not a claim that every provider supports all schemas within it.
 - Validate schema syntax/metaschema and semantic limits before dispatch. Parse final output **without coercion** and validate the complete JSON instance. For example integer vs string, missing required, extra keys, truncated JSON, refusal and safety-filtered output all fail, including cases where native provider reports "success".
 
+### 1.4 Strict generated JSON parsing: duplicate object members are terminally invalid
+
+**Independent of the preceding schema-ingress duplicate-key gate**, **every** generated terminal text result in **both JSON_OBJECT and JSON_SCHEMA modes** MUST be parsed from the *exact assembled raw UTF-8 answer* by a strict JSON decoder that rejects duplicate object member names at **every nesting level**, including objects inside arrays, **before** application JSON Schema validation, Gateway success, AE/Session checkpoint/transcript persistence or public committed streaming response. This is mandatory even if the provider advertises native JSON/strict schema mode, claims a successful finish, or the duplicate values happen to be equal.
+
+- Key identity is compared **after JSON string escape decoding** but **without Unicode normalization**: `{"x":1,"\u0078":2}` is duplicate and invalid; JSON strings with different Unicode scalar sequences remain different. Do not silently choose first/last member, merge values, overwrite a Python `dict`, or trust a default `json.loads` / `JSON.parse` path that discards duplicates before the check.
+- The strict parser MUST operate on the original JSON token stream, using a duplicate-detecting per-object pair hook, streaming token parser or equivalent **before any lossy mapping or provider-specific text transformations**. Implementations may validate UTF-8/JSON syntax as part of that same pass. Reject trailing additional JSON documents, comments, leading prose, malformed escapes, unpaired surrogates, and non-finite literals as invalid syntax. Keep bounded byte/depth/timeout controls from the trusted request.
+- Concrete **generated-output** negative vectors, applied to **both** `JSON_OBJECT` and `JSON_SCHEMA`, including nested objects:
+  1. `{"status":"normal","status":"critical"}` — duplicate top-level `status`.
+  2. `{"result":{"x":1,"x":2}}` — duplicate nested `x`.
+  3. `{"items":[{"x":1,"\u0078":2}]}` — same decoded key inside array element.
+  4. `{"status":"normal"}{"status":"critical"}` — two top-level JSON documents, not one valid final result.
+  5. `{"result":{"a":1,"a":1}}` — duplicate even if values are identical.
+- On any duplicate generated member or malformed/multiple-document JSON, terminal error = **OUTPUT_JSON_INVALID** (no successful final, no coercion, no local-schema success). Preserve original provider usage/deadline/failure attribution; **no free retry**, silent fallback or alternate parser that discards duplicates. This is not a Tool arguments parser change; PTC tool input schema/validation stays separately owned.
+- For JSON_SCHEMA, run authoritative local schema validation **only after** strict duplicate-free JSON parsing succeeds; JSON_OBJECT must additionally require one top-level JSON object. A valid JSON shape but invalid JSON_SCHEMA instance uses **OUTPUT_SCHEMA_MISMATCH**. Streaming strict output remains provisional until this parsing and validation fence passes; unvalidated chunks cannot be published as a committed final.
+- This section freezes **future production invariants only**. SO-C0 architecture tests may provide an isolated, source-independent parser/reference example for these five vectors, but **do not imply** that current provider adapters, DIRECT/AGENT, Session regenerate or SSE already enforce them.
+
 ## 2. Provider-native compatibility / capability matrix
 
 The matrix describes **intended lowering on supported endpoint revisions only**; every actual model+provider+endpoint+schema+tool+stream combination requires capability evidence. Provider capability strings alone never grant eligibility.
@@ -150,7 +166,7 @@ Strict JSON_SCHEMA chunks are *provisional*. On the current SSE interface withou
 |---|---|---|
 | Unknown mode, malformed schema/dialect/hash, disallowed reference, excess caps | `OUTPUT_SCHEMA_INVALID` | Provider request sent / coercion |
 | Model/endpoint/schema/tool/stream combination unsupported | `OUTPUT_FORMAT_UNSUPPORTED` | Silent format downgrade |
-| Invalid JSON bytes or non-object JSON_OBJECT result | `OUTPUT_JSON_INVALID` | Gateway success |
+| Invalid JSON bytes, duplicate generated object members at any nested level, multiple JSON documents or non-object JSON_OBJECT result | `OUTPUT_JSON_INVALID` | Gateway success / checkpoint / streaming commit |
 | Valid JSON but missing key, wrong type, extra key, enum mismatch | `OUTPUT_SCHEMA_MISMATCH` | Correcting data to fit schema |
 | Truncated output, length finish, incomplete response | `OUTPUT_INCOMPLETE` | Committed transcript / terminal success |
 | Refusal / safety filter / policy-blocked generation | `OUTPUT_REFUSED` | Fake schema-conforming success |
