@@ -200,13 +200,23 @@ Any representation choice requires a separate production PRE-CLAIM.
 
 ## 9. Multi-worker winner/loser contract
 
-For two workers racing the same ActivationDecisionKey:
+For two workers racing the same ActivationDecisionKey, the durable decision is idempotent **but execution admission is conditional on the canonical disposition**:
 
 ~~~text
-exactly one canonical durable decision
-exactly one canonical execution binding
-at most one local execution start
+all same-key races:
+    exactly one canonical durable decision
+
+if canonical disposition == ACTIVATION_ALLOWED:
+    exactly one canonical execution binding
+    at most one local execution start
+
+if canonical disposition != ACTIVATION_ALLOWED:
+    exactly zero execution bindings
+    exactly zero local execution starts
+    same-key denied races converge on the same durable denial
 ~~~
+
+A denied request (including terminal, WAITING, horizon-expired, review-required, UBQ-deferred or unresolved-owner) MUST NOT create or bind an AgentExecution. Replaying that denial returns the same canonical decision without starting any work. ACTIVATION_REPLAY reports an existing canonical decision; it is not an independent execution-admission grant.
 
 A loser:
 - creates no duplicate AgentExecution;
