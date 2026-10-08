@@ -261,7 +261,7 @@ def test_architecture_does_not_claim_real_os_or_ui_e2e_pass() -> None:
     _has(
         _section("10. Evidence boundaries and exit gates"),
         "MAY NOT claim real computer-use E2E",
-        "actual host focus",
+        "OS isolation",
         "independent PRE-CLAIM",
         "bilateral CRT/SBX/Tools/AIC/CTX/CAS/UBQ/TBO/CL-UI/GAC approvals",
         "SQLite/PostgreSQL AE evidence",
