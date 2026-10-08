@@ -244,6 +244,8 @@ def validate_portable_schema(raw_schema: bytes) -> dict[str, Any]:
         raw_schema, code="OUTPUT_SCHEMA_INVALID",
         max_bytes=MAX_PROVISIONAL_SCHEMA_BYTES, max_depth=MAX_OUTPUT_DEPTH,
     )
+    if node.get("type") != "object":
+        _fail("OUTPUT_SCHEMA_INVALID")
     _validate_schema_node(node, depth=1, property_count=[0])
     return node
 
