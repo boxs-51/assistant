@@ -267,6 +267,49 @@ Concurrency may exist in work, observation arrival, reasoning and presentation.
 Canonical state adoption must remain deterministically serialized through a single
 sequencer boundary tied to AE durable authority.
 
+For multiple eligible observations produced from the same
+`source_execution_revision`, the sequencer MUST derive a stable adoption candidate
+order from immutable observation metadata, never callback arrival order.
+
+The conceptual stable key is:
+
+```text
+(
+  source_execution_revision,
+  semantic_priority,
+  source_kind,
+  source_identity,
+  completion_or_result_identity
+)
+```
+
+The future implementation MAY encode this key differently, but the values used for
+ordering MUST be stable across retry/recovery/replay and MUST NOT depend on
+wall-clock completion time, coroutine scheduling, publisher delivery order, or
+process-local insertion order.
+
+`semantic_priority` is a frozen conceptual precedence class, not a new durable
+state authority:
+
+```text
+1. AE-valid terminal/cancel/timeout/preemption control observations
+2. AE-valid HITL/dependency/recovery control observations
+3. Tool/Sub-Agent/provider completion observations
+4. user/realtime/environment input observations
+5. progress/presentation-only observations
+```
+
+Within the same precedence class, `source_kind`, `source_identity`, and
+`completion_or_result_identity` provide the deterministic tie-break. If any
+required stable identity is absent or ambiguous, adoption MUST fail closed or defer
+until a canonical identity is available; callback order MUST NOT be used as a
+fallback.
+
+This ordering only ranks candidates for serialized adoption. It does not override AE
+state/revision/CAS authority, HITL identity checks, capability authorization,
+idempotency/reconciliation ownership, cancellation semantics, or current-state
+revalidation before each adoption.
+
 Replay/recovery MUST NOT depend on wall-clock callback completion order, public
 event delivery order, publisher retry order or task scheduling order.
 
@@ -299,6 +342,7 @@ APR-X1 contract FINAL requires:
 - no production server ExecutionEventSequencer/DecisionCommit/AgentObservation/
   ResponseEmission implementation exists;
 - observation-before-adoption and one AE-backed durable commit boundary are frozen;
+- same-revision concurrent observations use a stable immutable-metadata adoption key and never callback order;
 - stale adoption fails closed;
 - response emission has zero durable-state authority;
 - checkpoint/restart/multi-worker authority remains AE-owned;
