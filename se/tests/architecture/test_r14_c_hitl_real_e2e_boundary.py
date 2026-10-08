@@ -66,10 +66,18 @@ def test_r14_c_binds_approve_and_deny_to_real_agent_websocket_path() -> None:
         "assert attempts[0].attempt_number == 1",
         "assert attempts[0].implementation_id == implementation_id",
         "assert attempts[0].connection_id == CONNECTION_ID",
-        "assert executed_tools == []",
-        'assert "HITL_DENIED" in serialized',
-        'assert "Local user denied capability" in serialized',
-        'assert "HITL_DENIED" not in serialized',
+        "assert tool_message.role == \"tool\"",
+        "assert tool_message.name == CAPABILITY_ID",
+        'assert tool_message.tool_call_id == "call-e2e-1"',
+        'assert tool_message.metadata["is_error"] is False',
+        'assert tool_message.metadata["error_code"] is None',
+        "assert dict(tool_message.content) == {",
+        '"echo": "hello-from-agent",',
+        '"executed_on": "client",',
+        'assert executed_tools == []',
+        'assert tool_message.metadata["is_error"] is True',
+        'assert tool_message.metadata["error_code"] == "HITL_DENIED"',
+        'assert "Local user denied capability" in tool_message.content',
     ):
         assert proof in source
 
