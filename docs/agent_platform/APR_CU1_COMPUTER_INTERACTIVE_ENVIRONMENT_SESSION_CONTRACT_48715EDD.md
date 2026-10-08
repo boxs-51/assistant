@@ -63,7 +63,7 @@ The following are design-only conceptual records, NOT public Python classes, pro
                       transport_generation, target_id, target_epoch,
                       grant_id, session_revision,
                       action_id, invocation_id, client_id, principal_id,
-                      capability_version, request_fingerprint, observed_effect,
+                      tool_id, capability_version, request_fingerprint, observed_effect,
                       result_id, result_status, observation_id,
                       uncertain_external_effect)
 
