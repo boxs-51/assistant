@@ -32,8 +32,10 @@ def _lease_relative_result_path(value: str, root: Path) -> str:
         return value
     try:
         relative = candidate.relative_to(root)
-    except ValueError:
-        return value
+    except ValueError as exc:
+        raise SandboxError(
+            "sandbox tool returned a path outside the active lease"
+        ) from exc
     rendered = relative.as_posix()
     return rendered if rendered else "."
 
