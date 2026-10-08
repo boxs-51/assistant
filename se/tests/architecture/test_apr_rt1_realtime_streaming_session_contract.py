@@ -160,7 +160,7 @@ def test_duplex_barge_in_and_cancel_order_stop_new_side_effects() -> None:
         "P3 caller deadline, TBO horizon",
         "P4 eligible next stream chunk/input/Tool progress event",
         "not merely muting playback",
-        "stop new emission and new Tool side effects",
+        "Stop new emission and new Tool side effects",
         "AE-R6 reconciliation",
         "never bypass AE durability",
     )
@@ -252,7 +252,7 @@ def test_realtime_not_fast_control_and_no_cross_owner_production_release() -> No
         "Agent identity, Memory",
         "Agent capability/runtime/sandbox",
         "FAST_CONTROL",
-        "new exact-main production PRE-CLAIM",
+        "fresh exact-main production PRE-CLAIM",
         "no production scope",
     )
 
