@@ -1060,8 +1060,13 @@ async def _run_r14_c_hitl_real_websocket_case(*, approved: bool):
         assert execution.state.value == "COMPLETED"
 
         second_request = inference.requests[1]
-        assert second_request.messages[-1].role == "tool"
-        serialized = repr(second_request.messages)
+        # Assert the exact last TOOL result delivered into the Agent's next
+        # inference request. Matching a substring across all messages could
+        # accidentally match the original assistant tool-call arguments.
+        tool_message = second_request.messages[-1]
+        assert tool_message.role == "tool"
+        assert tool_message.name == CAPABILITY_ID
+        assert tool_message.tool_call_id == "call-e2e-1"
 
         if approved:
             assert executed_tools == [
@@ -1071,12 +1076,18 @@ async def _run_r14_c_hitl_real_websocket_case(*, approved: bool):
                     "session_id": SESSION_ID,
                 }
             ]
-            assert "hello-from-agent" in serialized
-            assert "HITL_DENIED" not in serialized
+            assert tool_message.metadata["is_error"] is False
+            assert tool_message.metadata["error_code"] is None
+            assert dict(tool_message.content) == {
+                "echo": "hello-from-agent",
+                "executed_on": "client",
+                "connection_id": CONNECTION_ID,
+            }
         else:
             assert executed_tools == []
-            assert "HITL_DENIED" in serialized
-            assert "Local user denied capability" in serialized
+            assert tool_message.metadata["is_error"] is True
+            assert tool_message.metadata["error_code"] == "HITL_DENIED"
+            assert "Local user denied capability" in tool_message.content
 
         return approvals, executed_tools, execution, inference
     finally:
