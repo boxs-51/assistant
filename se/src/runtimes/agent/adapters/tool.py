@@ -209,17 +209,25 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
 
         target = None
-        if (
-            request.capability_id in _SBX2_SANDBOX_CAPABILITY_IDS
-            and context.connection_id is None
-        ):
-            # SBX-2 owns only server-side file/glob routing. A connection-bound
-            # Agent call retains the pre-existing client-local routing path and
-            # must never silently fall back to the server sandbox.
-            target = CapabilityInvocationTarget(
-                resource_scope=ResourceScope.SANDBOX,
-                resource_ref=context.execution_id,
-            )
+        if request.capability_id in _SBX2_SANDBOX_CAPABILITY_IDS:
+            if context.connection_id is None:
+                target = CapabilityInvocationTarget(
+                    resource_scope=ResourceScope.SANDBOX,
+                    resource_ref=context.execution_id,
+                )
+            else:
+                target = self._client_local_target(context)
+                if target is None:
+                    return self._failure(
+                        request,
+                        code="CAPABILITY_TARGET_UNAVAILABLE",
+                        message=(
+                            "Connection-bound file/glob execution requires "
+                            "a stable client identity."
+                        ),
+                        retryable=True,
+                        pre_dispatch=True,
+                    )
 
         try:
             result = await self._capability_runtime.execute_capability(
@@ -379,6 +387,51 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 retryable=normalized.retryable,
                 metadata=metadata,
             )
+
+    def _client_local_target(
+        self,
+        context: AgentExecutionContext,
+    ) -> CapabilityInvocationTarget | None:
+        connection_id = context.connection_id
+        if connection_id is None:
+            return None
+
+        metadata_client_id = str(context.metadata.get("client_id") or "")
+        registry_client_id = ""
+        registry = getattr(self._capability_runtime, "connection_registry", None)
+        getter = getattr(registry, "get", None)
+        if callable(getter):
+            try:
+                snapshot = getter(connection_id)
+            except Exception:
+                snapshot = None
+            if snapshot is not None:
+                snapshot_metadata = getattr(snapshot, "metadata", {}) or {}
+                metadata_get = getattr(snapshot_metadata, "get", None)
+                if callable(metadata_get):
+                    registry_client_id = str(
+                        metadata_get("client_id") or ""
+                    )
+
+        for candidate in (metadata_client_id, registry_client_id):
+            if candidate and candidate != candidate.strip():
+                return None
+
+        if (
+            metadata_client_id
+            and registry_client_id
+            and metadata_client_id != registry_client_id
+        ):
+            return None
+
+        stable_client_id = registry_client_id or metadata_client_id
+        if not stable_client_id:
+            return None
+
+        return CapabilityInvocationTarget(
+            resource_scope=ResourceScope.CLIENT_LOCAL,
+            stable_client_id=stable_client_id,
+        )
 
     async def execute_many(
         self,
