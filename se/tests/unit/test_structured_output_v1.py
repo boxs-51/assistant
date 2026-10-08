@@ -108,6 +108,27 @@ def test_so_p1a_json_depth_and_complexity_are_bounded() -> None:
     )
 
 
+def test_so_p1a_wide_object_counts_keys_and_values_in_node_budget() -> None:
+    from se.src.domain.structured_output_v1 import MAX_JSON_NODES
+
+    # Root contributes one node, and each member contributes its key + value.
+    def wide_object(members: int) -> bytes:
+        return b"{" + b",".join(
+            b'"k' + str(index).encode("ascii") + b'":0'
+            for index in range(members)
+        ) + b"}"
+
+    largest_valid = (MAX_JSON_NODES - 1) // 2
+    accepted = wide_object(largest_valid)
+    rejected = wide_object(largest_valid + 1)
+    assert len(rejected) < MAX_OUTPUT_BYTES
+    assert len(parse_json_object(accepted)) == largest_valid
+    _assert_code(
+        lambda: parse_json_object(rejected),
+        "OUTPUT_JSON_INVALID",
+    )
+
+
 def test_so_p1a_portable_schema_positive_closed_nested() -> None:
     schema = validate_portable_schema(_schema())
     assert schema["type"] == "object"
