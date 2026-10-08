@@ -8,6 +8,77 @@ from pathlib import Path
 
 from tools.v1 import terminal_tool
 
+from se.src.application.policy.authorization import AuthorizationService
+from se.src.runtimes.capability.catalog import CapabilityCatalog
+from se.src.runtimes.capability.local_tool_loader import register_local_tools
+from se.src.runtimes.capability.registry import CapabilityRegistry
+from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.tool.registry import ToolRegistry
+
+
+# Independent, committed terminal.run/launch output-schema snapshot.
+# Do NOT derive the expected value from tool_result_schema or TOOL_METADATA.
+_FROZEN_STRING = {"type": "string", "minLength": 1}
+_FROZEN_META = {
+    "type": "object",
+    "properties": {
+        "version": {"type": "string", "minLength": 1},
+        "truncated": {"type": "boolean"},
+        "warnings": {
+            "type": "array",
+            "items": {"type": "string", "minLength": 1},
+        },
+    },
+    "required": ["version", "truncated", "warnings"],
+    "additionalProperties": True,
+}
+_FROZEN_ERROR = {
+    "type": "object",
+    "properties": {
+        "code": {"type": "string", "pattern": "^[A-Z][A-Z0-9_]*$"},
+        "message": {"type": "string", "minLength": 1},
+        "retryable": {"type": "boolean"},
+        "details": {"type": "object"},
+    },
+    "required": ["code", "message", "retryable", "details"],
+    "additionalProperties": False,
+}
+FROZEN_TERMINAL_OUTPUT_SCHEMA = {
+    "type": "object",
+    "required": ["ok", "tool", "action", "data", "error", "meta"],
+    "properties": {
+        "ok": {"type": "boolean"},
+        "tool": _FROZEN_STRING,
+        "action": _FROZEN_STRING,
+        "data": {},
+        "error": {},
+        "meta": _FROZEN_META,
+    },
+    "additionalProperties": False,
+    "oneOf": [
+        {
+            "properties": {
+                "ok": {"const": True},
+                "tool": _FROZEN_STRING,
+                "action": _FROZEN_STRING,
+                "data": {},
+                "error": {"type": "null"},
+                "meta": _FROZEN_META,
+            },
+        },
+        {
+            "properties": {
+                "ok": {"const": False},
+                "tool": _FROZEN_STRING,
+                "action": _FROZEN_STRING,
+                "data": {"type": "null"},
+                "error": _FROZEN_ERROR,
+                "meta": _FROZEN_META,
+            },
+        },
+    ],
+}
+
 
 ROOT = Path(__file__).resolve().parents[3]
 CONTRACT = (
@@ -69,7 +140,7 @@ def test_t12_a_terminal_logical_ids_versions_and_public_schema_are_unchanged():
         assert export["input_schema"]["additionalProperties"] is False
         assert export["input_schema"]["required"] == ["command"]
         assert set(export["input_schema"]["properties"]) == expected_properties[name]
-        assert export["output_schema"] == terminal_tool.tool_result_schema({})
+        assert export["output_schema"] == FROZEN_TERMINAL_OUTPUT_SCHEMA
 
     assert exports["terminal.run"]["bind"] == {"action": "run"}
     assert exports["terminal.launch"]["bind"] == {"action": "launch"}
@@ -155,6 +226,37 @@ def test_t12_a_python_logical_ownership_and_network_default_none():
         "stdout/stderr/aggregate output",
         "generated-file containment",
     )
+
+
+
+def test_t12_a_canonical_python_is_absent_and_not_registered_by_real_loader():
+    # TV1-T12-A is a contract freeze: python.run MUST remain undiscoverable
+    # until a separate Tools V1 + SBX-3 production registration guard exists.
+    tools_dir = ROOT / "tools" / "v1"
+    assert not (tools_dir / "python_tool.py").exists(), (
+        "python.run physical module requires a separate production CLAIM "
+        "and sandbox-only registration/landing gate"
+    )
+
+    runtime = CapabilityRuntime(
+        registry=CapabilityRegistry(),
+        authorization=AuthorizationService(),
+        catalog=CapabilityCatalog(),
+    )
+    tool_registry = ToolRegistry(runtime.registry)
+    registered = register_local_tools(runtime, tool_registry, tools_dir)
+
+    assert "terminal.run" in registered
+    assert "terminal.launch" in registered
+    assert "python.run" not in registered
+    assert runtime.registry.get("python.run") is None
+    assert runtime.registry.get_driver("python.run") is None
+    assert tool_registry.get("python.run") is None
+    assert not runtime.catalog.contains_definition("python.run")
+    assert not runtime.catalog.contains_implementation("server:python.run")
+    assert not runtime.catalog.contains_implementation("server:sandbox:python.run")
+    assert runtime.driver_registry.get("server:python.run") is None
+    assert runtime.driver_registry.get("server:sandbox:python.run") is None
 
 
 def test_t12_a_loader_discovery_hazard_and_safe_atomic_landing_order():
