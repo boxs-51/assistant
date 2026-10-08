@@ -158,7 +158,7 @@ def test_conceptual_observation_action_and_result_bind_current_target() -> None:
     assert {"action_id", "result_status", "uncertain_external_effect"} <= fields["EnvironmentResult"]
     invocation_semantics = {
         "action_id", "invocation_id", "client_id", "principal_id",
-        "capability_version", "request_fingerprint",
+        "tool_id", "capability_version", "request_fingerprint",
     }
     assert invocation_semantics <= fields["EnvironmentAction"]
     assert invocation_semantics <= fields["EnvironmentResult"]
@@ -437,3 +437,39 @@ def test_action_snapshot_requires_exact_admitting_grant_and_late_result_retains_
         "non-authorizing reconciliation evidence only",
         "NEVER authorize G1 effect replay",
     )
+
+
+def test_late_tool_result_retains_original_canonical_tool_id() -> None:
+    fields = _records()
+    for name in ("EnvironmentAction", "EnvironmentResult"):
+        assert "tool_id" in fields[name], f"{name} missing tool_id"
+    records = _section("4. Conceptual environment-session records")
+    _has(
+        records,
+        "EnvironmentResult.tool_id MUST preserve the originally admitted EnvironmentAction.tool_id",
+        "canonical invocation record MUST corroborate the tool_id",
+        "capability_version and request_fingerprint",
+        "Reject a missing, substituted or inconsistent tool_id",
+        "never infer it from the currently selected Tool",
+    )
+    recovery = _section("7. Bounded observation and state reconciliation")
+    _has(
+        recovery,
+        "EnvironmentResult.tool_id",
+        "EnvironmentAction.tool_id",
+        "canonical invocation's immutable Tool identity",
+        "without creating new execution authority",
+    )
+    negatives = _section("9. Negative acceptance vectors and refusal semantics")
+    _has(
+        negatives,
+        "late Tool result missing tool_id",
+        "different from the original Action or canonical invocation",
+        "matching action_id/invocation_id",
+        "reject forged Tool provenance",
+        "never replay a NON_IDEMPOTENT effect",
+    )
+    ledger = _read(Path("cl/src/core/client_invocation_ledger.py"))
+    assert "PRIMARY KEY (client_id, principal_id, invocation_id)" in ledger
+    assert "capability_version" in ledger
+    assert "request_fingerprint" in ledger
