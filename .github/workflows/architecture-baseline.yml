@@ -45,3 +45,27 @@ jobs:
         run: python -m pip install -r requirements-test.txt
       - name: Run client contracts
         run: python -m pytest -q cl/tests
+
+  # Portable SE/Tools Windows baseline only; NOT SBX-3 OS containment proof.
+  windows-server-sandbox-baseline:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Run portable SE and Tools Windows baseline
+        run: >-
+          python -m pytest -q -ra
+          se/tests/integration/test_sbx1_sandbox_manager.py
+          se/tests/integration/test_sbx2_sandbox_file_glob_execution.py
+          tools/v1/test/test_terminal_tool.py
+          tools/v1/test/test_t12_a_sbx3_terminal_python_contract.py
