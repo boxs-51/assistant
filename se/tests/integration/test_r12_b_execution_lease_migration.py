@@ -53,7 +53,22 @@ def test_r12_b_migration_is_linear_and_preserves_legacy_execution(
     config = _config(database)
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["30a_ctx_f5_user_wide_memory_scope"]
+    assert (
+        len(script.get_heads()) == 1
+        and (
+            mh0_chain := tuple(
+                script.walk_revisions(base="base", head=script.get_heads()[0])
+            )
+        )
+        and mh0_chain[-1].down_revision is None
+        and all(
+            mh0_chain[i].down_revision == mh0_chain[i + 1].revision
+            for i in range(len(mh0_chain) - 1)
+        )
+        and "30a_ctx_f5_user_wide_memory_scope" in {
+            item.revision for item in mh0_chain
+        }
+    )
     assert (
         script.get_revision("22a_r12_execution_lease_fence").down_revision
         == "21a_ctx_f5_memory_foundation"

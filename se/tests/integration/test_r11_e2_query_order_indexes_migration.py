@@ -52,7 +52,22 @@ def _uses_temp_order(plan: list[str]) -> bool:
 
 def test_r11_e2_is_linear_child_of_cas_head(tmp_path: Path):
     script = ScriptDirectory.from_config(_config(tmp_path / "unused.sqlite"))
-    assert script.get_heads() == ["30a_ctx_f5_user_wide_memory_scope"]
+    assert (
+        len(script.get_heads()) == 1
+        and (
+            mh0_chain := tuple(
+                script.walk_revisions(base="base", head=script.get_heads()[0])
+            )
+        )
+        and mh0_chain[-1].down_revision is None
+        and all(
+            mh0_chain[i].down_revision == mh0_chain[i + 1].revision
+            for i in range(len(mh0_chain) - 1)
+        )
+        and "30a_ctx_f5_user_wide_memory_scope" in {
+            item.revision for item in mh0_chain
+        }
+    )
     assert (
         script.get_revision("21a_ctx_f5_memory_foundation").down_revision
         == "20a_cas_f5_binding_foundation"

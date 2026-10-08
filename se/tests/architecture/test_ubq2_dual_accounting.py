@@ -51,7 +51,22 @@ def test_ubq2_is_single_linear_alembic_head() -> None:
         str(ROOT / "se/src/infrastructure/storage/migrations/sql"),
     )
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["30a_ctx_f5_user_wide_memory_scope"]
+    assert (
+        len(script.get_heads()) == 1
+        and (
+            mh0_chain := tuple(
+                script.walk_revisions(base="base", head=script.get_heads()[0])
+            )
+        )
+        and mh0_chain[-1].down_revision is None
+        and all(
+            mh0_chain[i].down_revision == mh0_chain[i + 1].revision
+            for i in range(len(mh0_chain) - 1)
+        )
+        and "30a_ctx_f5_user_wide_memory_scope" in {
+            item.revision for item in mh0_chain
+        }
+    )
     assert (
         script.get_revision("26a_ubq2_dual_accounting_bridge").down_revision
         == "25a_ubq1_user_budget_foundation"
