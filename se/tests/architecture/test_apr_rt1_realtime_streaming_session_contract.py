@@ -289,7 +289,7 @@ def _conceptual_stream_fields() -> dict[str, tuple[str, ...]]:
     """Parse conceptual contract signatures; never instantiate production DTOs."""
     source = _read(CONTRACT)
     records = re.findall(
-        r"(?m)^(Stream(?:Open|Input|Chunk|Terminal|Cancel))\\(([\\s\\S]*?)\\)",
+        r"(?m)^(Stream(?:Open|Input|Chunk|Terminal|Cancel))\(([\s\S]*?)\)",
         source,
     )
     return {
