@@ -142,7 +142,7 @@ The current conservative TBO-4 activation matrix applies **only after a replay-s
 |---|---|
 | ASSIGNED + no existing decision for key | evaluate TBO-2 horizons, then UBQ activation gate, then R8 admission; atomically persist one ALLOW or DENY |
 | CREATED | TASK_NOT_ACTIVATION_READY |
-| RUNNING + same decision key | ACTIVATION_REPLAY bound to the canonical existing decision |
+| RUNNING + an existing same-key durable decision | handled by the earlier canonical receipt replay, not by this source-state evaluation |
 | RUNNING + different decision key | TASK_ALREADY_ACTIVE; no new root execution |
 | WAITING/RESOURCE | DEFER_TO_AE_CONTINUATION; existing Execution resume remains AE-owned |
 | any other WAITING reason | DEFER_TO_AE_CONTINUATION; no new execution |
@@ -320,17 +320,17 @@ A future production implementation must prove at least:
 3. different decision keys racing one ASSIGNED Task -> at most one root activation;
 4. replay after process restart -> same durable decision; if persisted outcome ALLOW, the original bound execution identity even when response is ACTIVATION_REPLAY; if persisted outcome DENY, the same durable denial with zero execution;
 5. same key replay after a durable UBQ_ACTIVATION_DEFERRED or UBQ_OWNER_UNRESOLVED denial while Task remains ASSIGNED -> unchanged denial, zero execution, no UBQ recheck/R8 admission; only a new trusted decision key may request fresh evaluation;
-6. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
-6. review horizon reached -> REVIEW_REQUIRED, zero execution, zero Task WAITING fabrication;
-7. RUNNING Task -> no second root execution;
-8. WAITING/RESOURCE -> DEFER_TO_AE_CONTINUATION, no new execution;
-9. terminal Task -> no resurrection;
-10. unresolved UBQ owner -> fail closed before R8 admission;
-11. UBQ activation gate -> zero window creation/rollover/debit/reservation/refund/reset;
-12. Supervisor collision -> no durable duplicate and no loser cleanup of winner;
-13. crash after R8 admission/before local start -> same execution on replay; R12 remains recovery authority;
-14. fork/retry/resume authority remains unchanged;
-15. future AAT duplicate delivery reuses the same decision identity under TBO-5, never bypassing TBO-4.
+7. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
+7. review horizon reached -> REVIEW_REQUIRED, zero execution, zero Task WAITING fabrication;
+8. RUNNING Task -> no second root execution;
+9. WAITING/RESOURCE -> DEFER_TO_AE_CONTINUATION, no new execution;
+10. terminal Task -> no resurrection;
+11. unresolved UBQ owner -> fail closed before R8 admission;
+12. UBQ activation gate -> zero window creation/rollover/debit/reservation/refund/reset;
+13. Supervisor collision -> no durable duplicate and no loser cleanup of winner;
+14. crash after R8 admission/before local start -> same execution on replay; R12 remains recovery authority;
+15. fork/retry/resume authority remains unchanged;
+16. future AAT duplicate delivery reuses the same decision identity under TBO-5, never bypassing TBO-4.
 
 ## 15. Exit gate for this contract parent
 
