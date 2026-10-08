@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import inspect
+from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from ..contracts.context import CapabilityExecutionContext
@@ -21,6 +22,65 @@ SANDBOX_FILE_CAPABILITY_IDS = frozenset(
         "glob.find",
     }
 )
+
+_SANDBOX_RESULT_PATH_KEYS = frozenset({"path", "root_dir"})
+
+
+def _lease_relative_result_path(value: str, root: Path) -> str:
+    candidate = Path(value)
+    if not candidate.is_absolute():
+        return value
+    try:
+        relative = candidate.relative_to(root)
+    except ValueError:
+        return value
+    rendered = relative.as_posix()
+    return rendered if rendered else "."
+
+
+def _externalize_sandbox_result_paths(
+    value: Any,
+    root: Path,
+    *,
+    field_name: str | None = None,
+) -> Any:
+    if isinstance(value, Mapping):
+        return {
+            key: _externalize_sandbox_result_paths(
+                item,
+                root,
+                field_name=str(key),
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [
+            _externalize_sandbox_result_paths(
+                item,
+                root,
+                field_name=field_name,
+            )
+            for item in value
+        ]
+    if isinstance(value, tuple):
+        return tuple(
+            _externalize_sandbox_result_paths(
+                item,
+                root,
+                field_name=field_name,
+            )
+            for item in value
+        )
+    if (
+        isinstance(value, str)
+        and field_name is not None
+        and (
+            field_name in _SANDBOX_RESULT_PATH_KEYS
+            or field_name.endswith("_paths")
+        )
+    ):
+        return _lease_relative_result_path(value, root)
+    return value
 
 
 class SandboxPythonCapabilityDriver(BaseCapabilityDriver):
@@ -102,8 +162,8 @@ class SandboxPythonCapabilityDriver(BaseCapabilityDriver):
 
         result = self._handler(**rewritten)
         if inspect.isawaitable(result):
-            return await result
-        return result
+            result = await result
+        return _externalize_sandbox_result_paths(result, lease.root)
 
 
 __all__ = [
