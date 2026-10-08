@@ -220,6 +220,19 @@ class _CloseBeforeResultRealtime(GatewayRealtimeClient):
         )
 
 
+class _CloseBeforeErrorRealtime(GatewayRealtimeClient):
+    """Lose the terminal error frame after the real SQLite ledger committed."""
+
+    def __init__(self, *args, error_close_event=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._error_close_event = error_close_event or threading.Event()
+
+    def send_error(self, invocation_id, **error):
+        self.close()
+        self._error_close_event.set()
+        return super().send_error(invocation_id, **error)
+
+
 class _BlockingResultRealtime(GatewayRealtimeClient):
     """Hold a real K1 terminal frame after ledger commit until the test releases it."""
 
@@ -267,8 +280,15 @@ async def _connect_client(
     dispatcher: CapabilityDispatcher | None = None,
     realtime_cls=GatewayRealtimeClient,
     realtime_kwargs: dict[str, Any] | None = None,
+    message_observer: Callable[[dict[str, Any]], None] | None = None,
 ) -> _ClientGeneration:
     holder: dict[str, Any] = {}
+
+    def _on_message(envelope: dict[str, Any]) -> bool:
+        if message_observer is not None:
+            message_observer(envelope)
+        return holder["capabilities"].handle_message(envelope)
+
     realtime = realtime_cls(
         f"http://127.0.0.1:{port}",
         {"Authorization": "Bearer r6-e"},
@@ -276,9 +296,7 @@ async def _connect_client(
         session_id=SESSION_ID,
         client_id=client_id,
         heartbeat_interval=60.0,
-        on_message=lambda envelope: holder["capabilities"].handle_message(
-            envelope
-        ),
+        on_message=_on_message,
         **dict(realtime_kwargs or {}),
     )
 
@@ -1253,7 +1271,7 @@ def test_r6_e11_timeout_is_not_rollback_proof_and_late_terminal_cannot_resurrect
 def test_r14_b_real_tcp_failure_after_running_before_target_entry_is_terminal_no_replay(
     tmp_path,
 ):
-    """Prove the exact post-dispatch / pre-side-effect cut over real TCP."""
+    """Prove the post-dispatch fault and actual TCP reconciliation without replay."""
 
     class _FailAfterRunningLedger(ClientInvocationLedger):
         def __init__(self, path):
@@ -1272,24 +1290,32 @@ def test_r14_b_real_tcp_failure_after_running_before_target_entry_is_terminal_no
     async def scenario():
         app, catalog, connections = _build_gateway_app()
         server, server_task, port = await _start_uvicorn(app)
-        generation = None
+        first = None
+        second = None
         target_calls = []
         server_calls = []
-        ledger = _FailAfterRunningLedger(tmp_path / "r14b-pre-side-effect.sqlite3")
+        close_seen = threading.Event()
+        observed_frames = []
+        ledger_path = tmp_path / "r14b-pre-side-effect.sqlite3"
+        ledger = _FailAfterRunningLedger(ledger_path)
+        invocation_id = "r14-b-pre-side-effect"
 
         def tool(value, **kwargs):
             target_calls.append(value)
             return {"source": "client", "value": value}
 
         try:
-            generation = await _connect_client(
+            registry = _client_registry(
+                tool,
+                idempotency=CapabilityIdempotency.NON_IDEMPOTENT,
+            )
+            first = await _connect_client(
                 port=port,
-                registry=_client_registry(
-                    tool,
-                    idempotency=CapabilityIdempotency.NON_IDEMPOTENT,
-                ),
+                registry=registry,
                 ledger=ledger,
                 connection_id="r14-b-pre-side-effect-k1",
+                realtime_cls=_CloseBeforeErrorRealtime,
+                realtime_kwargs={"error_close_event": close_seen},
             )
             runtime, store = _server_runtime(catalog, connections)
             _add_server_implementation(
@@ -1301,59 +1327,95 @@ def test_r14_b_real_tcp_failure_after_running_before_target_entry_is_terminal_no
                 ),
             )
 
+            # The client commits RUNNING and the injected pre-target fault
+            # becomes a durable terminal error. Lose ONLY the K1 error frame:
+            # the server cannot know the terminal outcome until K2 reconciles.
             with pytest.raises(CapabilityError) as raised:
                 await _execute(
                     runtime,
-                    invocation_id="r14-b-pre-side-effect",
-                    connection_id=generation.connection_id,
+                    invocation_id=invocation_id,
+                    connection_id=first.connection_id,
                     max_attempts=2,
                 )
 
-            assert raised.value.code == "LOCAL_EXECUTION_FAILED"
+            assert raised.value.code == REMOTE_OUTCOME_UNKNOWN
+            assert await asyncio.to_thread(close_seen.wait, 5.0)
             assert ledger.running_seen.is_set()
             assert ledger.failure_count == 1
 
-            record = _ledger_record(ledger, "r14-b-pre-side-effect")
+            record = _ledger_record(ledger, invocation_id)
             assert record is not None
             assert record.state is ClientInvocationLedgerState.TERMINAL
             assert record.terminal_type == "error"
             assert record.terminal_payload is not None
             assert record.terminal_payload["code"] == "LOCAL_EXECUTION_FAILED"
 
-            persisted = await store.get("r14-b-pre-side-effect")
+            persisted = await store.get(invocation_id)
             assert persisted is not None
-            assert persisted.state is CapabilityInvocationState.FAILED
-            assert (
-                persisted.remote_outcome_state
-                is RemoteOutcomeState.TERMINAL_COMMITTED
-            )
-
-            attempts = await store.list_attempts("r14-b-pre-side-effect")
+            assert persisted.state is CapabilityInvocationState.WAITING
+            assert persisted.wait_reason is CapabilityWaitReason.CONNECTION
+            assert persisted.remote_outcome_state is RemoteOutcomeState.OUTCOME_UNKNOWN
+            attempts = await store.list_attempts(invocation_id)
             assert len(attempts) == 1
             assert target_calls == []
             assert server_calls == []
 
+            await _close_generation(first, shutdown_dispatcher=True)
+            first = None
+
+            # A fresh client generation reads the durable SQLite terminal,
+            # receives the genuine server capability.reconcile WebSocket frame
+            # and responds over the real TCP connection (no direct dispatch).
+            recovered_ledger = ClientInvocationLedger(ledger_path)
+            second = await _connect_client(
+                port=port,
+                registry=registry,
+                ledger=recovered_ledger,
+                connection_id="r14-b-pre-side-effect-k2",
+                message_observer=observed_frames.append,
+            )
+            assert _ledger_record(recovered_ledger, invocation_id).state is (
+                ClientInvocationLedgerState.TERMINAL
+            )
+            before = await store.get(invocation_id)
+            assert before.state is CapabilityInvocationState.WAITING
+            assert before.remote_outcome_state is RemoteOutcomeState.OUTCOME_UNKNOWN
+
             reconciled = await runtime.reconcile_remote_invocation(
-                "r14-b-pre-side-effect",
-                generation.connection_id,
+                invocation_id,
+                second.connection_id,
                 timeout=5.0,
             )
+            assert len(observed_frames) == 1
+            assert observed_frames[0]["type"] == "capability.reconcile"
+            assert observed_frames[0]["invocation_id"] == invocation_id
+            assert observed_frames[0]["connection_id"] == second.connection_id
+            assert observed_frames[0]["payload"] == {
+                "capability_id": record.capability_id,
+                "capability_version": record.capability_version,
+                "request_fingerprint": record.request_fingerprint,
+            }
             assert reconciled.status is RemoteReconciliationStatus.TERMINAL
             assert reconciled.terminal_type is not None
             assert reconciled.terminal_type.value == "error"
             assert reconciled.terminal_payload is not None
-            assert (
-                reconciled.terminal_payload["code"]
-                == "LOCAL_EXECUTION_FAILED"
-            )
+            assert reconciled.terminal_payload["code"] == "LOCAL_EXECUTION_FAILED"
+
+            committed = await store.get(invocation_id)
+            assert committed is not None
+            assert committed.state is CapabilityInvocationState.FAILED
+            assert committed.remote_outcome_state is RemoteOutcomeState.TERMINAL_COMMITTED
+            assert committed.error is not None
+            assert committed.error["code"] == "LOCAL_EXECUTION_FAILED"
             assert target_calls == []
             assert server_calls == []
-            assert len(await store.list_attempts("r14-b-pre-side-effect")) == 1
+            assert ledger.failure_count == 1
+            assert len(await store.list_attempts(invocation_id)) == 1
         finally:
-            await _close_generation(
-                generation,
-                shutdown_dispatcher=True,
-            )
+            if second is not None:
+                await _close_generation(second, shutdown_dispatcher=True)
+            elif first is not None:
+                await _close_generation(first, shutdown_dispatcher=True)
             await _stop_uvicorn(server, server_task)
 
     asyncio.run(scenario())
