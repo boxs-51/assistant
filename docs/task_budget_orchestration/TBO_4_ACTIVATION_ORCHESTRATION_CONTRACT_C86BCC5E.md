@@ -123,6 +123,8 @@ ACTIVATION_CONFLICT
 
 These are orchestration dispositions, not new AgentTaskStatus or AgentExecutionState values.
 
+`ACTIVATION_REPLAY` is a response indicating that a pre-existing **durable canonical decision** was observed. It is NOT a third durable allow/deny outcome. Every replay MUST recover the underlying persisted allow-versus-denial outcome before applying execution-binding rules; an allowed replay preserves the same bound execution and a denied replay preserves zero executions.
+
 An allow decision does not itself grant inference/tool resource quota.
 
 ## 6. Source-state matrix
@@ -200,17 +202,18 @@ Any representation choice requires a separate production PRE-CLAIM.
 
 ## 9. Multi-worker winner/loser contract
 
-For two workers racing the same ActivationDecisionKey, the durable decision is idempotent **but execution admission is conditional on the canonical disposition**:
+For two workers racing the same ActivationDecisionKey, the durable decision is idempotent **but execution admission is conditional on the underlying persisted canonical allow/deny outcome, not on the response disposition**. In particular, `ACTIVATION_REPLAY` of a prior allow MUST retain the original binding, and MUST NOT be treated as a denial merely because its response disposition differs from `ACTIVATION_ALLOWED`:
 
 ~~~text
 all same-key races:
     exactly one canonical durable decision
 
-if canonical disposition == ACTIVATION_ALLOWED:
+if persisted canonical decision outcome == ALLOW:
     exactly one canonical execution binding
     at most one local execution start
+    allowed ACTIVATION_REPLAY observes the original execution binding
 
-if canonical disposition != ACTIVATION_ALLOWED:
+if persisted canonical decision outcome == DENY:
     exactly zero execution bindings
     exactly zero local execution starts
     same-key denied races converge on the same durable denial
@@ -305,10 +308,10 @@ A future AAT delivery MUST pass through the same TBO-4 decision key, eligibility
 
 A future production implementation must prove at least:
 
-1. same decision key, one worker, repeated call -> same durable decision; if ACTIVATION_ALLOWED, same canonical execution identity; if denied, zero execution identities;
-2. same decision key, many workers -> one durable canonical decision; if ACTIVATION_ALLOWED, exactly one execution binding and at most one local start; if denied, zero execution bindings and zero local starts;
+1. same decision key, one worker, repeated call -> same durable decision; if persisted outcome ALLOW, the original canonical execution identity even on ACTIVATION_REPLAY; if persisted outcome DENY, zero execution identities;
+2. same decision key, many workers -> one durable canonical decision; if persisted outcome ALLOW, exactly one execution binding and at most one local start even on ACTIVATION_REPLAY; if persisted outcome DENY, zero execution bindings and zero local starts;
 3. different decision keys racing one ASSIGNED Task -> at most one root activation;
-4. replay after process restart -> same durable decision; if ACTIVATION_ALLOWED, the same bound execution identity; if denied, the same durable denial with zero execution;
+4. replay after process restart -> same durable decision; if persisted outcome ALLOW, the original bound execution identity even when response is ACTIVATION_REPLAY; if persisted outcome DENY, the same durable denial with zero execution;
 5. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
 6. review horizon reached -> REVIEW_REQUIRED, zero execution, zero Task WAITING fabrication;
 7. RUNNING Task -> no second root execution;
