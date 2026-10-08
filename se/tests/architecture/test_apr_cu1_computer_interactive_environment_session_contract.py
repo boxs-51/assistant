@@ -317,7 +317,7 @@ def test_action_identity_is_canonical_ae_r6_invocation_not_parallel_ledger() -> 
         "(client_id, principal_id, invocation_id)",
         "capability_version",
         "request_fingerprint",
-        "different capability_version or request_fingerprint",
+        "different capability_id, capability_version or request_fingerprint",
         "same action_id with different invocation_id",
         "same invocation_id with different capability_version/request_fingerprint",
         "MUST fail closed before physical dispatch",
@@ -418,7 +418,7 @@ def test_action_snapshot_requires_exact_admitting_grant_and_late_result_retains_
     _has(
         execution,
         "SAME immutable admitting grant_id and admitted session_revision",
-        "MUST check exact grant identity/expected admitted session revision",
+        "exact grant identity/expected admitted session revision",
         "not merely existence of ANY active grant",
         "admitting grant expires/is revoked",
         "DIFFERENT grant_id becomes active",
@@ -457,7 +457,7 @@ def test_late_tool_result_retains_original_canonical_tool_id() -> None:
         recovery,
         "EnvironmentResult.tool_id",
         "EnvironmentAction.tool_id",
-        "canonical invocation's immutable Tool identity",
+        "EnvironmentResult.tool_id == EnvironmentAction.tool_id == original ClientInvocationRecord.capability_id",
         "without creating new execution authority",
     )
     negatives = _section("9. Negative acceptance vectors and refusal semantics")
