@@ -126,7 +126,7 @@ def test_tbo4_freezes_activation_decision_identity_and_replay() -> None:
     assert "reusing one activation_request_id for a different Task is a conflict" in contract
     assert "the key is idempotency identity, not authorization" in contract
     assert "ACTIVATION_REPLAY` is a response indicating that a pre-existing" in contract
-    assert "not a third durable allow/deny outcome" in contract
+    assert "NOT a third durable allow/deny outcome" in contract
     assert "allowed replay preserves the same bound execution" in contract
     assert "denied replay preserves zero executions" in contract
 
