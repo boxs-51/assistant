@@ -1304,6 +1304,10 @@ def test_r14_b_real_tcp_failure_after_running_before_target_entry_is_terminal_no
             target_calls.append(value)
             return {"source": "client", "value": value}
 
+        def capture_reconcile(envelope):
+            if envelope.get("type") == "capability.reconcile":
+                observed_frames.append(envelope)
+
         try:
             registry = _client_registry(
                 tool,
@@ -1372,7 +1376,7 @@ def test_r14_b_real_tcp_failure_after_running_before_target_entry_is_terminal_no
                 registry=registry,
                 ledger=recovered_ledger,
                 connection_id="r14-b-pre-side-effect-k2",
-                message_observer=observed_frames.append,
+                message_observer=capture_reconcile,
             )
             assert _ledger_record(recovered_ledger, invocation_id).state is (
                 ClientInvocationLedgerState.TERMINAL
