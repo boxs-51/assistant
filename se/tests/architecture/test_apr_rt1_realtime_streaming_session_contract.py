@@ -358,7 +358,7 @@ def test_all_stream_projections_bind_owner_session_execution_and_generation() ->
         "A late terminal carrying an old generation",
         "MUST be rejected",
         "On reconnect, a new transport generation",
-        "never silently inherit an old generation",
+        "No old-generation partial/input/cancel/terminal can be adopted",
         "freshly minted globally unique stream_request_id",
         "MUST NEVER be re-bound, reassigned, reused, or rebound",
         "immutable, append-only provenance entry",
