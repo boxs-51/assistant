@@ -166,6 +166,14 @@ class SandboxManager:
     def current(self, lease: SandboxLease) -> SandboxLease:
         stored = self._leases.get(lease.sandbox_id)
         if stored is None:
+            if lease.state is SandboxLeaseState.DESTROYED:
+                expected_root = self._base_root / lease.sandbox_id
+                if (
+                    lease.root == expected_root
+                    and not lease.root.exists()
+                    and not lease.root.is_symlink()
+                ):
+                    return lease
             raise SandboxLeaseNotFoundError(lease.sandbox_id)
         if (
             stored.identity != lease.identity
@@ -224,7 +232,7 @@ class SandboxManager:
         destroyed = current.model_copy(
             update={"state": SandboxLeaseState.DESTROYED}
         )
-        self._leases[current.sandbox_id] = destroyed
+        self._leases.pop(current.sandbox_id, None)
         if (
             self._execution_leases.get(current.execution_id)
             == current.sandbox_id
