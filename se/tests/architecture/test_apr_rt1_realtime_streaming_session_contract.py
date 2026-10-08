@@ -5,6 +5,7 @@ Tests verify frozen architecture fences, NOT an implemented streaming runtime.
 from __future__ import annotations
 
 import ast
+import re
 from pathlib import Path
 
 
@@ -281,4 +282,73 @@ def test_contract_only_evidence_final_and_wave_gates_remain_closed() -> None:
         "merge authority = NONE",
         "production PRE-CLAIM = HOLD / NOT RELEASED",
         "post-merge exact-new-main",
+    )
+
+
+def _conceptual_stream_fields() -> dict[str, tuple[str, ...]]:
+    """Parse conceptual contract signatures; never instantiate production DTOs."""
+    source = _read(CONTRACT)
+    records = re.findall(
+        r"(?m)^(Stream(?:Open|Input|Chunk|Terminal|Cancel))\\(([\\s\\S]*?)\\)",
+        source,
+    )
+    return {
+        name: tuple(piece.strip() for piece in arguments.split(","))
+        for name, arguments in records
+    }
+
+
+def test_duplex_stream_input_requires_actual_bounded_content_or_asset_ref() -> None:
+    records = _conceptual_stream_fields()
+    assert set(records) == {
+        "StreamOpen", "StreamInput", "StreamChunk", "StreamTerminal",
+        "StreamCancel",
+    }
+    assert "payload_type" in records["StreamInput"]
+    assert "inline_payload_or_immutable_payload_ref" in records["StreamInput"]
+    s = _section("4. Conceptual provider-neutral InferenceStream")
+    _require(
+        s,
+        "exactly one",
+        "bounded inline payload",
+        "scoped immutable payload reference",
+        "content identity/hash",
+        "media type, TTL and access authorization",
+        "payload_type alone is insufficient",
+        "No unspecified out-of-band input channel is allowed",
+        "Absent, expired, mutable, oversized, foreign or mismatched input content MUST fail closed",
+        "does not implement a new blob store",
+    )
+
+
+def test_all_stream_projections_bind_owner_session_execution_and_generation() -> None:
+    records = _conceptual_stream_fields()
+    required = {
+        "owner_user_id", "execution_id", "runtime_session_id", "connection_id",
+        "generation", "stream_request_id",
+    }
+    for record_name in (
+        "StreamOpen", "StreamInput", "StreamChunk", "StreamTerminal",
+        "StreamCancel",
+    ):
+        assert required <= set(records[record_name]), (
+            f"{record_name} missing mandatory provenance "
+            f"{sorted(required - set(records[record_name]))}"
+        )
+    assert {"agent_instance_id", "correlation_id"} <= set(records["StreamOpen"])
+    assert "terminal_id" in records["StreamTerminal"]
+    assert "chunk_sequence" in records["StreamChunk"]
+    assert {"input_sequence", "event_id"} <= set(records["StreamInput"])
+    s = _section("4. Conceptual provider-neutral InferenceStream")
+    _require(
+        s,
+        "mandatory immutable provenance fields",
+        "immutable stream-request-to-provenance binding",
+        "lifetime of the active request",
+        "bounded replay/terminal-retention horizon",
+        "currently authorized transport generation",
+        "A late terminal carrying an old generation",
+        "MUST be rejected",
+        "On reconnect, a new transport generation",
+        "never silently inherit an old generation",
     )
