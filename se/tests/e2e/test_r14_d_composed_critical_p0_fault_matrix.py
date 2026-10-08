@@ -1,8 +1,8 @@
 """AE-R14-D: composed critical-P0 remote recovery over real TCP.
 
 This is not a final production-exit certificate. R14-C's separate real
-Agent/HITL APPROVE/DENY tests have landed, and post-merge Architecture is
-GREEN, but their Wave's independent post-merge audit is not yet recorded.
+Agent/HITL APPROVE/DENY tests have landed and passed independent
+post-merge scoped audit in closed Wave #406 (main@bd521ef5).
 This K1/K2 test does NOT compose HITL with Agent resume/reconciliation;
 that P0 proof remains explicitly unverified.
 The R9-H SQLite Task/ResumeClaim invariant is tracked as a blocking defect
