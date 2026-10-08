@@ -129,7 +129,7 @@ def test_deadline_does_not_copy_client_monotonic_clock() -> None:
 
 
 def test_preemption_order_and_external_side_effects() -> None:
-    s = section("6. Preemption, cancellation and race precedence").lower()
+    s = section("6. Preemption, cancellation and race precedence").replace("**", "").lower()
     has_all(s, (
         "p0 trusted emergency stop",
         "p1 committed terminal ae state",
@@ -156,7 +156,7 @@ def test_preselected_working_set_no_full_dcs_each_tick() -> None:
 
 
 def test_strategy_is_advisory_and_safety_controller_has_veto() -> None:
-    has_all(section("8. Split fast policy from deep reasoning"), (
+    has_all(section("8. Split fast policy from deep reasoning").replace("**", ""), (
         "deep LLM/Agent reasoning runs off that critical path",
         "source session/epoch/revision",
         "confidence and validity/TTL",
