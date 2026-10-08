@@ -135,6 +135,11 @@ def _decode(raw: bytes, *, code: str, max_bytes: int, max_depth: int) -> dict[st
         if nodes > MAX_JSON_NODES or depth > max_depth:
             _fail(code)
         if type(current) is dict:
+            # Keys are nodes too: a very wide object must not evade the
+            # aggregate keys-and-values complexity budget.
+            nodes += len(current)
+            if nodes > MAX_JSON_NODES:
+                _fail(code)
             for key, item in current.items():
                 _valid_unicode(key, code)
                 pending.append((item, depth + 1))
