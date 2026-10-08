@@ -162,10 +162,11 @@ class TestTerminalToolV2(unittest.TestCase):
             "run",
         )
         self.assertEqual(data["exit_code"], 0)
-        self.assertEqual(data["stdout"], "  out\n\n")
-        self.assertEqual(data["stderr"], " err \n")
-        self.assertEqual(data["stdout_bytes"], len(b"  out\n\n"))
-        self.assertEqual(data["stderr_bytes"], len(b" err \n"))
+        eol = "\r\n" if os.name == "nt" else "\n"
+        self.assertEqual(data["stdout"], f"  out{eol}{eol}")
+        self.assertEqual(data["stderr"], f" err {eol}")
+        self.assertEqual(data["stdout_bytes"], len(f"  out{eol}{eol}".encode("utf-8")))
+        self.assertEqual(data["stderr_bytes"], len(f" err {eol}".encode("utf-8")))
         self.assertEqual(data["encoding"], "utf-8")
         self.assertEqual(data["cwd"], str(self.root.resolve()))
         self.assertIsInstance(data["duration_ms"], int)
@@ -178,7 +179,8 @@ class TestTerminalToolV2(unittest.TestCase):
         result = self.tool.run(command, encoding="utf-8")
         data = self.assert_ok(result, "run")
         self.assertEqual(data["exit_code"], 7)
-        self.assertEqual(data["stderr"], "bad\n")
+        eol = "\r\n" if os.name == "nt" else "\n"
+        self.assertEqual(data["stderr"], f"bad{eol}")
 
     def test_explicit_output_encoding(self):
         command = python_shell_command(
@@ -304,7 +306,8 @@ class TestTerminalToolV2(unittest.TestCase):
             self.tool.execute("run", command, encoding="utf-8"),
             "run",
         )
-        self.assertEqual(data["stdout"], "ok\n")
+        eol = "\r\n" if os.name == "nt" else "\n"
+        self.assertEqual(data["stdout"], f"ok{eol}")
 
         result = self.tool.execute("invalid", command)
         self.assert_error(result, "invalid", "INVALID_ARGUMENT")
