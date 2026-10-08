@@ -3,7 +3,7 @@
 The corresponding E2E file *executes* a new composed real TCP path.
 These architecture assertions alone do not establish correctness of a P0 flow.
 Existing R6/R7/R8/R9/R10/R12 evidence is reused, not silently upgraded to
-real restart E2E, and R14-C real HITL tests have landed, while their distinct Wave #406\nscoped post-merge independence gate is pending. Their separate HITL cases\ndo NOT by themselves establish K1/K2 reconciliation composed with Agent HITL.
+real restart E2E, and R14-C real HITL tests have landed under independently CLOSED Wave #406. Their separate HITL cases\ndo NOT by themselves establish K1/K2 reconciliation composed with Agent HITL.
 """
 
 from __future__ import annotations
@@ -137,7 +137,7 @@ SUITE_DISPOSITION = {
     "multi-worker-race": "INHERITED_SQL_INTEGRATION",
     "server-restart": "INHERITED_SQL_BACKED_REAL_E2E_R7_J",
     "client-restart": "INHERITED_REAL_E2E_R6_E4",
-    "HITL": "R14_C_LANDED_REAL_TCP_E2E_SCOPED_POSTMERGE_AUDIT_PENDING",
+    "HITL": "R14_C_CANONICAL_REAL_TCP_HITL_E2E_SCOPED_HEALTHY",
     "fault-injection": "PARTIAL_WITH_R9_H_P1_409",
 }
 
@@ -208,7 +208,7 @@ def test_r14_d_all_suite_classes_preserve_canonical_and_negative_gates():
     }
     assert set(SUITE_DISPOSITION) == expected_suites
     assert len(SUITE_DISPOSITION) == 17
-    # R14-C was user-authorized and is now in canonical main, with exact-main\n    # 3-job Architecture GREEN. Wave closure awaits independent health review.\n    assert SUITE_DISPOSITION["HITL"] == (\n        "R14_C_LANDED_REAL_TCP_E2E_SCOPED_POSTMERGE_AUDIT_PENDING"\n    )\n    c_tests = _test_names(R14_C_E2E)\n    assert "test_r14_c_hitl_approve_real_websocket_agent_path" in c_tests\n    assert "test_r14_c_hitl_deny_real_websocket_agent_path_fails_closed" in c_tests\n    # Two independently executable predecessor HITL outcomes do not imply\n    # real Agent-to-K1/K2 resume/reconcile composition in THIS D candidate.\n    assert "COMPOSED_AGENT_HITL_RECONCILIATION_GAP" in FINAL_EXIT_DISPOSITION
+    # R14-C was user-authorized, merged and independently scoped-healthy\n    # under closed Wave #406. This does not itself compose HITL with K1/K2.\n    assert SUITE_DISPOSITION["HITL"] == (\n        "R14_C_CANONICAL_REAL_TCP_HITL_E2E_SCOPED_HEALTHY"\n    )\n    c_tests = _test_names(R14_C_E2E)\n    assert "test_r14_c_hitl_approve_real_websocket_agent_path" in c_tests\n    assert "test_r14_c_hitl_deny_real_websocket_agent_path_fails_closed" in c_tests\n    # Two independently executable predecessor HITL outcomes do not imply\n    # real Agent-to-K1/K2 resume/reconcile composition in THIS D candidate.\n    assert "COMPOSED_AGENT_HITL_RECONCILIATION_GAP" in FINAL_EXIT_DISPOSITION
     assert "409" in SUITE_DISPOSITION["fault-injection"]
     assert "P1_409" in next(
         row.disposition
