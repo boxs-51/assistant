@@ -412,7 +412,7 @@ def test_action_snapshot_requires_exact_admitting_grant_and_late_result_retains_
         "original grant_id and admitted session_revision",
         "distinct replacement grant_id",
         "cannot retroactively validate its old physical execution",
-        "non-authorizing",
+        "NON-AUTHORIZING",
     )
     execution = _section("5. Freshness, target selection and state-sensitive dispatch")
     _has(
