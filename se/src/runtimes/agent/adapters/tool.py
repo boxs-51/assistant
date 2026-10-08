@@ -396,36 +396,29 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         if connection_id is None:
             return None
 
-        metadata_client_id = str(context.metadata.get("client_id") or "")
-        registry_client_id = ""
         registry = getattr(self._capability_runtime, "connection_registry", None)
         getter = getattr(registry, "get", None)
-        if callable(getter):
-            try:
-                snapshot = getter(connection_id)
-            except Exception:
-                snapshot = None
-            if snapshot is not None:
-                snapshot_metadata = getattr(snapshot, "metadata", {}) or {}
-                metadata_get = getattr(snapshot_metadata, "get", None)
-                if callable(metadata_get):
-                    registry_client_id = str(
-                        metadata_get("client_id") or ""
-                    )
+        if not callable(getter):
+            return None
+        try:
+            snapshot = getter(connection_id)
+        except Exception:
+            return None
 
-        for candidate in (metadata_client_id, registry_client_id):
-            if candidate and candidate != candidate.strip():
-                return None
-
-        if (
-            metadata_client_id
-            and registry_client_id
-            and metadata_client_id != registry_client_id
+        if str(getattr(snapshot, "user_id", "") or "") != str(
+            getattr(context.identity, "user_id", "") or ""
         ):
             return None
 
-        stable_client_id = registry_client_id or metadata_client_id
-        if not stable_client_id:
+        snapshot_metadata = getattr(snapshot, "metadata", {}) or {}
+        metadata_get = getattr(snapshot_metadata, "get", None)
+        if not callable(metadata_get):
+            return None
+        stable_client_id = str(metadata_get("client_id") or "")
+        if (
+            not stable_client_id
+            or stable_client_id != stable_client_id.strip()
+        ):
             return None
 
         return CapabilityInvocationTarget(
