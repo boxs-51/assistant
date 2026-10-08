@@ -237,6 +237,7 @@ Conceptual shape:
 ```text
 AgentExecutionBinding
   execution_id
+  owner_user_id?            # trusted/server-derived; co-present with agent_instance_id
   agent_instance_id?
 
   definition_id
@@ -262,12 +263,21 @@ This is a contract shape only. No production representation is created here.
 
 ### 6.2 AIC remains Agent-instance authority
 
-When `agent_instance_id` is present, it consumes canonical AIC identity.
+When `agent_instance_id` is present, the binding consumes the full canonical AIC identity tuple
+`(owner_user_id, agent_instance_id)`.
 
-APR-P0 MUST NOT mint or infer it.
+`owner_user_id` in this binding is trusted/server-derived authority. It is not accepted from
+caller-, model-, client-, connection-, request-, Memory-, Session-, Task-, Branch-, or
+source-supplied identity claims.
 
-On legacy compatibility paths where it is absent, the system MUST NOT infer
-`agent_instance_id` from:
+For an AIC-backed Agent-instance binding, `owner_user_id` and `agent_instance_id` are
+co-present or both absent. A bare `agent_instance_id` is insufficient to establish or restore
+Agent-instance ownership.
+
+APR-P0 MUST NOT mint or infer either identity component.
+
+On legacy compatibility paths where the trusted AIC tuple is absent, the system MUST NOT infer
+`owner_user_id` or `agent_instance_id` from:
 
 - `AgentDefinition.name`;
 - current definition-selection `agent_id`;
@@ -280,8 +290,11 @@ On legacy compatibility paths where it is absent, the system MUST NOT infer
 - runtime-session identity;
 - model output, request metadata, Memory metadata, or source metadata.
 
-Absence remains absence until separately canonical AIC/registration authority
-resolves a trusted binding.
+Absence remains absence until separately canonical AIC/registration authority resolves a trusted
+`(owner_user_id, agent_instance_id)` binding. If a future production design chooses not to store
+`owner_user_id` directly inside the binding record, it MUST instead resolve it from an
+independently persisted, server-derived execution-owner authority before validating the
+`agent_instance_id`; APR-P0 does not choose that storage mechanism.
 
 ### 6.3 Reproducible definition/profile binding
 
@@ -421,6 +434,7 @@ APR-P0 contract FINAL requires:
 - profile-is-not-grant and no-envelope-widening semantics are explicit;
 - `AgentDefinition.tools != InferenceRequest.tools` is preserved;
 - `AgentExecution.owner_instance_id != agent_instance_id` is explicit;
+- trusted `owner_user_id` is co-bound with `agent_instance_id` (or resolved from independently persisted server-derived execution-owner authority);
 - AIC/AE/DCS/SKV2/CTX/AAT/CAS/UBQ/TBO/Tools/GAC authority fences are preserved;
 - exact-head Linux Architecture is GREEN;
 - exact-head Windows Architecture is GREEN;
