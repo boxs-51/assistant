@@ -18,7 +18,7 @@ R14_A = Path(
     "R14_A_HEAD_AUDIT_FAULT_MATRIX_CONTRACT_FREEZE_10071F4E.md"
 )
 GAC_ACTION = Path("cl/src/game_automation/actions/action.py")
-SERVER_AGENT_ROOT = Path("se/src/runtimes/agent")
+SERVER_PRODUCTION_ROOT = Path("se/src")
 
 
 def _read(path: Path) -> str:
@@ -45,10 +45,10 @@ def _annotated_names(cls: ast.ClassDef) -> set[str]:
     }
 
 
-def _server_agent_source() -> str:
+def _server_production_source() -> str:
     return "\n".join(
         path.read_text(encoding="utf-8")
-        for path in sorted(SERVER_AGENT_ROOT.rglob("*.py"))
+        for path in sorted(SERVER_PRODUCTION_ROOT.rglob("*.py"))
     )
 
 
@@ -149,7 +149,7 @@ def test_apr_x1_keeps_public_agent_events_projection_only() -> None:
 
 
 def test_apr_x1_has_no_server_production_lane_types_yet() -> None:
-    server_source = _server_agent_source()
+    server_source = _server_production_source()
 
     for type_name in (
         "ExecutionEventSequencer",
@@ -185,20 +185,39 @@ def test_apr_x1_freezes_observation_before_adoption_and_stale_rejection() -> Non
         assert phrase in contract
 
 
-def test_apr_x1_response_emission_has_no_durable_state_authority() -> None:
+
+def test_apr_x1_freezes_stable_same_revision_observation_order() -> None:
     contract = _normalized(CONTRACT)
 
     for phrase in (
-        "ResponseEmission is presentation/output progress only",
-        "advance AgentExecution.revision",
-        "change execution state",
-        "mutate checkpoint truth",
-        "commit CTX Memory",
-        "authorize Tool/Skill/capability use",
-        "create retry/recovery truth",
-        "establish AgentInstance identity",
+        "For multiple eligible observations produced from the same source_execution_revision",
+        "the sequencer MUST derive a stable adoption candidate order from immutable observation metadata",
+        "source_execution_revision, semantic_priority, source_kind, source_identity, completion_or_result_identity",
+        "MUST NOT depend on wall-clock completion time, coroutine scheduling, publisher delivery order, or process-local insertion order",
+        "callback order MUST NOT be used as a fallback",
+        "This ordering only ranks candidates for serialized adoption",
+        "does not override AE state/revision/CAS authority",
     ):
         assert phrase in contract
+
+
+def test_apr_x1_response_emission_has_no_durable_state_authority() -> None:
+    contract = _normalized(CONTRACT)
+
+    prohibited_block = (
+        "Partial/streamed output MUST NOT by itself: "
+        "- advance AgentExecution.revision; "
+        "- change execution state; "
+        "- mutate checkpoint truth; "
+        "- commit CTX Memory; "
+        "- authorize Tool/Skill/capability use; "
+        "- finalize a side effect; "
+        "- create retry/recovery truth; "
+        "- establish AgentInstance identity."
+    )
+
+    assert "ResponseEmission is presentation/output progress only" in contract
+    assert prohibited_block in contract
 
 
 def test_apr_x1_preserves_restart_multi_worker_and_r14_boundaries() -> None:
