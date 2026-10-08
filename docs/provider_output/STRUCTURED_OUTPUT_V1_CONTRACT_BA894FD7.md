@@ -72,7 +72,30 @@ Conceptually immutable `OutputContract(revision, mode, schema_name?, strict?, no
 
 The pinned `schema_revision` is the literal `STRUCTURED_OUTPUT_V1`; it is included in both persisted output-contract identity and canonical fingerprint input. Canonical `schema_hash` is generated from the normalized schema envelope, not the provider-specific wire request.
 
-Canonical JSON bytes for hashing use UTF-8, lexicographically sorted object keys, no insignificant whitespace, deterministic numeric representation, original **semantic** string/enum values and `ensure_ascii=false`; reject duplicate JSON object members at ingress. Schema identity is `SHA256(canonical JSON)` of `{"revision":"STRUCTURED_OUTPUT_V1","type":"json_schema","name":<validated_name>,"strict":true,"schema":<validated_normalized_schema>}`. The hash is a *schema identity* not an authorization token; owners bind hash to execution identity, tenant and durable AE/Session record via separately authorized implementation. JSON_OBJECT and TEXT have deterministic mode/revision identities but no fabricated JSON schema. Hash and authoritative schema snapshot, not a mutable profile pointer alone, must be recoverable.
+**Normative canonicalization algorithm: RFC 8785 / JSON Canonicalization Scheme (JCS)**, applied to the complete **frozen normalized contract envelope**. **Do not use** ordinary Python `json.dumps(sort_keys=True)`, a generic sorted-key serializer, a language-native float `repr`, or an equivalent-looking implementation without RFC 8785 compatibility tests. JCS requires I-JSON input (RFC 7493), rejects duplicate object-member names at schema ingress *before* normalization, rejects invalid Unicode/lone surrogates and NaN/Infinity, and serializes all JSON numbers through the ECMAScript `JSON.stringify`/IEEE-754 binary64 rules (including the note-2 shortest roundtrip algorithm), with no nonstandard NaN literals. Canonical object members are sorted **recursively by UTF-16 code units** of decoded property names, not by UTF-8 bytes, Python Unicode code point ordering, locale or insertion order; array order is preserved. Strings are not Unicode-normalized; escaping is the exact RFC 8785/ECMAScript JSON escaping. Output UTF-8 bytes contain no BOM, no insignificant whitespace. Reject non-interoperable integer/precision inputs instead of silently rounding semantically significant schema constraints; integers outside the interoperable safe-integer range `[-(2**53-1), +(2**53-1)]` are rejected in V1 when supplied as JSON numeric schema constraints, and values requiring higher precision must be encoded as semantically suitable strings by a future separately reviewed schema mode. Provider lowering MUST NOT modify this canonical envelope.
+
+**Numeric canonicalization is not implementation-defined.** The following frozen test vectors are JSON numeric *input token* → RFC 8785 canonical *output token*, and apply equally to schema `enum` values and nested JSON numeric constraints:
+
+| Input numeric token | Canonical JCS token |
+|---|---|
+| `1` | `1` |
+| `1.0` | `1` |
+| `-0` / `-0.0` | `0` |
+| `1e21` / `1E+21` | `1e+21` |
+| `1e-7` | `1e-7` |
+| `1e-6` | `0.000001` |
+
+Two equivalent normalized JSON-schema envelopes differing only in the source lexeme `1` versus `1.0` MUST hash identically. The **full-envelope** JCS canonical UTF-8 bytes for the reference schema (the `enum` in its source can be `[1]` or `[1.0]`) are exactly:
+
+```json
+{"name":"jcs_numeric_v1","revision":"STRUCTURED_OUTPUT_V1","schema":{"additionalProperties":false,"properties":{"n":{"enum":[1],"type":"number"}},"required":["n"],"type":"object"},"strict":true,"type":"json_schema"}
+```
+
+**SHA-256 hex of those exact UTF-8 bytes:** `fe0c0d88eeb1ec9ea16eb5daf905282cdd9249954c0172826956c3515b055045`. Independent numeric edge reference bytes `{"a":1,"b":0,"c":1e+21,"d":1e-7,"e":0.000001}` have SHA-256 `67611fb1557b34eff0be79a4442c41f4647f122d978cf12d2f36c32cb56f450b`. JCS UTF-16 ordering reference `{"a":1,"😀":2,"":3}` has SHA-256 `8043baa23995777ba780997c1db8282dbe99a54db473636cd9ff149f37e4853e` (supplementary Unicode 😀 sorts before BMP U+E000). These bytes/hashes are portable goldens, not evidence of a production serializer. A future production implementation MUST prove the complete envelope and cross-language numeric + UTF-16 golden vectors on real serializer libraries before persisting `schema_hash`.
+
+Schema identity is `SHA256(canonical JSON)` of `{"revision":"STRUCTURED_OUTPUT_V1","type":"json_schema","name":<validated_name>,"strict":true,"schema":<validated_normalized_schema>}`, where `canonical JSON` specifically means the exact **RFC 8785 UTF-8 bytes**, not a provider-native request. The pinned `schema_revision` participates in the hash. The hash is a *schema identity*, not an authorization token; owners bind hash to execution identity, tenant and durable AE/Session record via separately authorized implementation. JSON_OBJECT and TEXT have deterministic mode/revision identities but no fabricated JSON schema. Hash and authoritative schema snapshot, not a mutable profile pointer alone, must be recoverable.
+
+**Cross-language recovery invariant:** ingress (Python), browser/client (JavaScript), persistent storage, and resumed provider-attempt logic either derive the **identical RFC 8785 canonical bytes and SHA256** from the same frozen semantic envelope or fail closed with `OUTPUT_SCHEMA_INVALID`; never accept a mismatch by reserializing with a language-native repr, never rewrite the pinned hash during recovery. Strictly distinguish a V1 schema's numeric `enum` value from a string `"1"` (hashes and validators must not coerce them).
 
 ### 1.3 Frozen portable JSON Schema V1 subset (proposed strict intersection)
 
