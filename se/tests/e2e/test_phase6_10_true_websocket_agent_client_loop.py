@@ -1028,6 +1028,25 @@ async def _run_r14_c_hitl_real_websocket_case(*, approved: bool):
 
         execution = await runtime.execute(context)
 
+        # The client ledger can hide a remote replay by returning its cached
+        # terminal result, so callback/effect counts alone are not sufficient.
+        # Check the *server* durable invocation/attempt ledger for both HITL
+        # outcomes before trusting the no-retry/no-fallback claim.
+        store = gateway_capability_runtime.invocation_lifecycle.store
+        invocations = [
+            item
+            for item in store.items.values()
+            if item.capability_id == CAPABILITY_ID
+        ]
+        assert len(invocations) == 1
+        invocation = invocations[0]
+        assert invocation.attempt == 1
+        attempts = await store.list_attempts(invocation.invocation_id)
+        assert len(attempts) == 1
+        assert attempts[0].attempt_number == 1
+        assert attempts[0].implementation_id == implementation_id
+        assert attempts[0].connection_id == CONNECTION_ID
+
         assert len(approvals) == 1
         approval = approvals[0]
         assert approval["name"] == CAPABILITY_ID
