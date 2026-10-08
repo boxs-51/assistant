@@ -100,11 +100,14 @@ Rules:
 6. the key is idempotency identity, not authorization; Task ownership and policy checks remain mandatory.
 
 A future production implementation MUST durably bind the decision key to exactly one canonical R8/AE execution admission or to a durable denial.
-The canonical ordering for **every** same-key request, before examining Task source state or invoking TBO-2 / UBQ / R8, is:
+The canonical ordering for **every** activation request, before examining Task source state or invoking TBO-2 / UBQ / R8, is:
 1. authenticate the trusted principal and enforce Task ownership/authorization (without minting any activation authority);
-2. read the canonical durable decision for the exact ActivationDecisionKey under replay-safe transaction/CAS coordination;
-3. **if a durable decision exists, return/observe that persisted ALLOW or DENY**; NEVER reevaluate Task state, horizons, UBQ owner/eligibility or R8 admission for the same key;
-4. **only if no decision exists**, evaluate source-state eligibility and decide/commit the first durable outcome through the canonical Task/R8 CAS boundary; competing same-key workers must observe one durable winner rather than replacing it.
+2. atomically enforce a **durable activation_request_id -> task_id uniqueness binding** across Tasks under trusted server-side transaction/CAS authority, before treating a missing composite-key receipt as a fresh request: if this request-id is already bound to a different Task, return ACTIVATION_CONFLICT with zero new execution and zero UBQ mutation; competing Tasks using the same request-id MUST NOT both pass the uniqueness gate;
+3. read the canonical durable decision for the exact ActivationDecisionKey under replay-safe transaction/CAS coordination;
+4. **if a durable decision exists, return/observe that persisted ALLOW or DENY**; NEVER reevaluate Task state, horizons, UBQ owner/eligibility or R8 admission for the same key;
+5. **only if no decision exists and the global request-id mapping has no competing Task**, evaluate source-state eligibility and decide/commit the first durable outcome through the canonical Task/R8 CAS boundary; competing same-key workers must observe one durable winner rather than replacing it.
+
+The request-id-to-Task binding and the first durable decision MUST be committed atomically (or guarded by an equivalent idempotent, crash-safe CAS protocol). A stale/incomplete association without a verifiable canonical decision MUST fail closed, not start a fresh execution. No new schema/index/repository representation is authorized by this contract-only CLAIM; if current persistence cannot guarantee global request-id uniqueness, production release requires a separate explicit PRE-CLAIM.
 
 A persisted DENY is immutable for that key even if a transient UBQ_ACTIVATION_DEFERRED or UBQ_OWNER_UNRESOLVED condition later clears while the Task remains ASSIGNED. Rechecking eligibility after such a denial requires a **different trusted activation_request_id** and its own fresh Task/R8 conflict and authorization checks; it is never an automatic same-key retry escalation. A persisted ALLOW remains bound to the original execution on replay, including after Task state changes. A missing/corrupt decision receipt MUST fail closed rather than reinterpret an existing admitted execution as a fresh request.
 This contract does not choose a schema path.
@@ -331,6 +334,7 @@ A future production implementation must prove at least:
 14. crash after R8 admission/before local start -> same execution on replay; R12 remains recovery authority;
 15. fork/retry/resume authority remains unchanged;
 16. future AAT duplicate delivery reuses the same decision identity under TBO-5, never bypassing TBO-4.
+17. two different Tasks using the same activation_request_id, including a multi-worker race -> one durable Task binding wins; the other receives ACTIVATION_CONFLICT before Task/UBQ/R8 fresh evaluation and creates zero execution; restart/replay cannot erase this conflict.
 
 ## 15. Exit gate for this contract parent
 
