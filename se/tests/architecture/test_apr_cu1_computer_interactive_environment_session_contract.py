@@ -336,3 +336,60 @@ def test_action_identity_is_canonical_ae_r6_invocation_not_parallel_ledger() -> 
         "changed capability_version/request_fingerprint",
         "without a second NON_IDEMPOTENT effect",
     )
+
+
+def test_late_result_reconciliation_never_reuses_expired_action_authority() -> None:
+    records = _section("4. Conceptual environment-session records")
+    _has(
+        records,
+        "NEW action dispatch, physical Tool effects and authority-bearing adoption",
+        "current generation, target epoch, session/grant lifetime and original owner",
+        "Previously dispatched, immutable EnvironmentResult evidence",
+        "NON-AUTHORIZING RECONCILIATION PATH",
+        "original",
+        "action_id ↔ invocation_id",
+        "current principal access to that invocation's evidence",
+        "DO NOT demand that the historical generation, target epoch or grant is still current",
+        "recording verified outcome evidence is NOT a new Tool permission",
+        "AE expected-revision/CAS",
+        "without reopening execution",
+    )
+    assert (
+        "All observation/action/result projections MUST validate current generation"
+        not in records
+    )
+    reconciliation = _section("7. Bounded observation and state reconciliation")
+    _has(
+        reconciliation,
+        "late authenticated canonical invocation outcome MUST NOT be discarded solely because",
+        "transport_generation, target_epoch, environment session or original grant",
+        "original action itself changed/closed its target",
+        "immutable, non-authorizing reconciliation observation",
+        "If the target is no longer available",
+        "Current AE terminal state cannot be rewritten or reopened",
+        "outcome evidence acceptance",
+        "authority-bearing state adoption",
+    )
+    lifecycle = _section("8. Lifecycle, quota, placement and delegation")
+    _has(
+        lifecycle,
+        "fail closed for any NEW execution",
+        "Historical authenticated Tool outcomes still enter the non-authorizing reconciliation path",
+        "never reacquire Tool permission from the old result",
+    )
+    negatives = _section("9. Negative acceptance vectors and refusal semantics")
+    _has(
+        negatives,
+        "late authenticated NON_IDEMPOTENT result arriving after reconnect",
+        "action-closed target",
+        "non-authorizing reconciliation evidence",
+        "without another click/type",
+        "AE terminal state regression",
+        "forged or mismatched late result",
+        "wrong original owner, invocation_id",
+        "reject without granting execution",
+    )
+    ledger = _read(Path("cl/src/core/client_invocation_ledger.py"))
+    assert "PRIMARY KEY (client_id, principal_id, invocation_id)" in ledger
+    assert "request_fingerprint" in ledger
+    assert "capability_version" in ledger
