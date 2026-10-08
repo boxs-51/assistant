@@ -138,6 +138,25 @@ def test_tbo4_freezes_activation_decision_identity_and_replay() -> None:
         "authenticate the trusted principal and enforce Task ownership/authorization"
     ) in normalized
     assert (
+        "atomically enforce a durable activation_request_id -> task_id uniqueness "
+        "binding across Tasks under trusted server-side transaction/CAS authority"
+    ) in _norm(contract.replace("**", ""))
+    assert (
+        "if this request-id is already bound to a different Task, return "
+        "ACTIVATION_CONFLICT with zero new execution and zero UBQ mutation"
+    ) in normalized
+    assert (
+        "competing Tasks using the same request-id MUST NOT both pass the uniqueness gate"
+    ) in normalized
+    assert (
+        "The request-id-to-Task binding and the first durable decision MUST "
+        "be committed atomically"
+    ) in normalized
+    assert (
+        "A stale/incomplete association without a verifiable canonical decision "
+        "MUST fail closed"
+    ) in normalized
+    assert (
         "read the canonical durable decision for the exact ActivationDecisionKey "
         "under replay-safe transaction/CAS coordination"
     ) in normalized
@@ -157,7 +176,7 @@ def test_tbo4_freezes_activation_decision_identity_and_replay() -> None:
         "while the Task remains ASSIGNED."
     ) in normalized
     assert (
-        "a different trusted activation_request_id" in normalized
+        "a **different trusted activation_request_id**" in contract
     )
     assert (
         "A missing/corrupt decision receipt MUST fail closed" in normalized
@@ -182,6 +201,7 @@ def test_tbo4_freezes_activation_decision_identity_and_replay() -> None:
 def test_tbo4_freezes_source_state_matrix_without_stealing_ae_continuation() -> None:
     tbo3 = _read(TBO3)
     contract = _read(DOC)
+    normalized = _norm(contract)
 
     assert "RESOURCE_DEFERRED" in tbo3
     assert "AgentExecutionWaitReason.RESOURCE" in tbo3
@@ -353,6 +373,12 @@ def test_tbo4_preserves_aat_tbo5_boundary_and_exit_gate() -> None:
     ) in normalized
     assert "6. Task horizon expired" in contract
     assert "7. review horizon reached" in contract
+    assert (
+        "two different Tasks using the same activation_request_id, including a "
+        "multi-worker race -> one durable Task binding wins; the other receives "
+        "ACTIVATION_CONFLICT before Task/UBQ/R8 fresh evaluation and creates "
+        "zero execution; restart/replay cannot erase this conflict"
+    ) in normalized
 
     assert "exact scope remains 2 NEW / 2" in normalized
     assert "exact-head Linux + Windows Architecture is GREEN/GREEN" in normalized
