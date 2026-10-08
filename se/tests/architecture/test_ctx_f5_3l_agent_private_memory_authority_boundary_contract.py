@@ -57,8 +57,6 @@ def test_ctx_f5_3l_contract_is_exact_two_new_paths_without_production_claim() ->
         "merge authority = NONE",
         "exact changed paths = 2 NEW / 2",
         "third path = PROHIBITED / replacement PRE-CLAIM",
-        "se/src/** delta = ZERO",
-        "cl/** delta = ZERO",
         "schema/migration delta = ZERO",
         "Memory model/repository/admission delta = ZERO",
         "runtime/API/router delta = ZERO",
@@ -70,6 +68,8 @@ def test_ctx_f5_3l_contract_is_exact_two_new_paths_without_production_claim() ->
     ):
         assert phrase in contract
 
+    assert "se/src/** delta = ZERO" in _read(CONTRACT)
+    assert "cl/** delta = ZERO" in _read(CONTRACT)
     assert "CTX_F5_3L_AGENT_PRIVATE_MEMORY_AUTHORITY_BOUNDARY_CONTRACT_7332AF46.md" in contract
     assert "test_ctx_f5_3l_agent_private_memory_authority_boundary_contract.py" in contract
 
