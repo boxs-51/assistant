@@ -54,19 +54,24 @@ The following are design-only conceptual records, NOT public Python classes, pro
                       environment_session_id, placement, connection_id,
                       transport_generation, target_id, target_epoch,
                       expected_observation_id, expected_observation_revision,
-                      action_id, tool_id, arguments_ref, approval_id,
-                      idempotency_class, deadline)
+                      action_id, invocation_id, client_id, principal_id,
+                      tool_id, capability_version, request_fingerprint,
+                      arguments_ref, approval_id, idempotency_class, deadline)
     EnvironmentResult(owner_user_id, agent_instance_id, execution_id,
                       environment_session_id, placement, connection_id,
                       transport_generation, target_id, target_epoch,
-                      action_id, observed_effect, result_id, result_status,
-                      observation_id, uncertain_external_effect)
+                      action_id, invocation_id, client_id, principal_id,
+                      capability_version, request_fingerprint, observed_effect,
+                      result_id, result_status, observation_id,
+                      uncertain_external_effect)
 
 Every record carries mandatory immutable provenance, and a trusted admission stores or derives an immutable session-to-owner-to-target binding scoped to the active session and bounded replay horizon. The binding, not a caller-provided ID string, is authoritative. All observation/action/result projections MUST validate current generation, target epoch, session/grant lifetime and original owner BEFORE execution or durable adoption.
 
 For observations, inline_payload_or_immutable_asset_ref MUST contain exactly one bounded inline payload or a scoped immutable CAS/F7-T asset reference. Source type, hash, length, media type, capture time, expiry and access-control scope are verified before the model sees it. A screenshot byte payload, DOM snapshot, window list or OCR text is untrusted observation DATA, not instructions or authorization. A missing, stale, oversized, foreign-owner, mutable or mismatched payload MUST fail closed. Asset references do not automatically become CTX Memory and do not grant physical host access.
 
 For actions, arguments_ref MUST be a validated bounded inline argument value or immutable request-scoped argument reference bound to tool_id, target_epoch, action_id and current grant. No untyped out-of-band action payload. A Tool output or a new observation cannot retroactively authorize its preceding action.
+
+The conceptual action_id is an Agent/UI session correlation identity, NOT a second Tool dispatch/recovery ledger. At trusted admission bind each action_id **one-to-one and immutably** to the AE-R6 canonical invocation_id and stable (client_id, principal_id, invocation_id) ledger key, along with exact tool_id, capability_version and immutable request_fingerprint of the target, arguments and side-effect semantics. The canonical `cl/src/core/client_invocation_ledger.py` rejects an invocation_id already bound to a different capability_version or request_fingerprint. A missing mapping, changed client/principal, same action_id with different invocation_id, or same invocation_id with different capability_version/request_fingerprint MUST fail closed before physical dispatch. Reconnect, retry, worker restart and lost acknowledgements MUST query/reconcile the canonical invocation outcome and ambiguous external effect under AE-R6 and Tools; NEVER mint a second invocation merely because an Agent action_id was replayed. No new APR action ledger or production invocation authority is created.
 
 ## 5. Freshness, target selection and state-sensitive dispatch
 
@@ -77,6 +82,8 @@ No potentially state-changing action may be dispatched based on a stale screensh
 4. match expected_observation_id + expected_observation_revision to current target state with a bounded freshness window;
 5. enforce DCS/CRT/SBX/Tools capability admission, Tool side-effect classification and required HITL approval_id prior to dispatch;
 6. record a unique action_id, bounded deadline, cancellation and idempotency/reconciliation policy.
+
+Pre-dispatch admission is necessary but NOT sufficient for queued/remote actions. At the **physical CLIENT_LOCAL/Tool execution boundary, immediately before the first external side effect**, the authoritative client/Tool executor MUST atomically revalidate against its live environment: authenticated owner/AgentInstance/AE eligibility, exact environment_session_id and current connection generation, CRT/SBX placement, target_id/target_epoch and current window/browser/DOM/geometry state fingerprint, foreground/focus target, expected_observation_id + expected_observation_revision or fresh equivalent trusted state version, active grant/revocation/deadline and per-invocation HITL approval_id. Validation MUST be serialized with initiation of the physical side effect against concurrent focus/target/approval changes: validation only upstream in an Agent queue or before dispatch is a TOCTOU bug. On changed or stale target state, focus or approval after dispatch but before execution, reject the invocation before click, type_text, drag, hotkey or browser submit. If the physical Tool/OS interface cannot atomically fence the state and effect, **FAIL CLOSED / REQUIRE NEW OBSERVATION** instead of guessing a foreground target. This conceptual boundary neither implements OS locking nor grants new runtime, client or Tool authority.
 
 Fail closed on ambiguous target, stale observation, reused window handle, expired grant, changed foreground focus, lost auth, unsupported browser target, cross-owner target or sandbox-to-host fallback. Never guess first window, click a nearby coordinate on changed geometry, or assume a previously focused app remains safe. A new observation can be requested under existing authority; it does not authorize a side effect by itself.
 
@@ -92,7 +99,7 @@ P0 security revoke/emergency stop takes precedence over P1 AE terminal/HITL deni
 
 Each observation has a capture ID, content hash, capture timestamp, target fingerprint, immutable target epoch, source_kind, media_type, bounded bytes and TTL. A screenshot from an expired connection, a stale DOM snapshot, a revoked CAS reference or a reused window ID is not admissible for a later action. Observation cache, screenshot history, replay and action result buffers have explicit limits; unbounded queues and unlimited replay are prohibited. Missing gaps or uncertain capture order fail closed.
 
-A lost response from an already dispatched NON_IDEMPOTENT Tool is an ambiguous external effect. Do not automatically replay mouse_click, drag, type_text, hotkey, window.focus or browser submission after timeout, reconnect or worker restart. Re-observe the same authorized target, inspect action_id and Tool-owned effect evidence, reconcile the outcome, and require fresh approval if needed. Exactly-once Tool execution cannot be inferred from a network ack. Idempotency classes originate with Tools, not the Agent prompt.
+A lost response from an already dispatched NON_IDEMPOTENT Tool is an ambiguous external effect. Do not automatically replay mouse_click, drag, type_text, hotkey, window.focus or browser submission after timeout, reconnect or worker restart. Re-observe the same authorized target, resolve action_id to its immutable AE-R6 invocation_id and canonical (client_id, principal_id, invocation_id, capability_version, request_fingerprint) ledger evidence, reconcile the outcome, and require fresh approval if needed. Conflicting semantic replay is forbidden even when action_id looks familiar. Exactly-once Tool execution cannot be inferred from a network ack. Idempotency classes originate with Tools, not the Agent prompt.
 
 Only AE expected-revision/CAS authorizes a durable transcript/checkpoint/terminal state. APR-X1 DecisionCommit is an adoption request, not persistence authority; its sequencer-local order is NOT AgentExecution.revision. Late Tool results, stale screenshots and resumed sessions cannot overwrite AE terminal state, create CTX Memory or mint AgentInstance authority. A session detach does not itself finish the AE execution; recovery decisions remain AE-owned.
 
@@ -111,7 +118,9 @@ The future executable admission/evidence owner MUST preserve at least these RED-
 - reused window_handle or different target_epoch after an observation;
 - stale transport_generation after reconnect with apparently valid action_id;
 - screenshot or DOM reference whose content hash, TTL, owner, target or grant changed;
-- foreground focus lost after approval but before dispatch;
+- foreground focus lost after approval but before dispatch, OR after dispatch while queued but before physical effect-boundary validation;
+- target_epoch or DOM/window/geometry fingerprint changes after admission but before actual click/type/browser effect, requiring an atomic execution-boundary fence or fail closed;
+- reused action_id mapped to a different invocation_id, or invocation_id replayed with changed capability_version/request_fingerprint, without a second NON_IDEMPOTENT effect;
 - high-risk Tool action lacking approval for exact invocation or with revoked grant;
 - ambiguous selector or multiple matching windows, with no arbitrary first-match;
 - CLIENT_LOCAL target silently rerouted to EPHEMERAL_SANDBOX or back to host;
