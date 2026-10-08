@@ -55,6 +55,17 @@ def test_r14_b_binds_real_tcp_post_dispatch_pre_side_effect_fault_owner() -> Non
         "RemoteOutcomeState.TERMINAL_COMMITTED",
         "RemoteReconciliationStatus.TERMINAL",
         'reconciled.terminal_type.value == "error"',
+        "class _CloseBeforeErrorRealtime(GatewayRealtimeClient):",
+        'assert raised.value.code == REMOTE_OUTCOME_UNKNOWN',
+        "persisted.state is CapabilityInvocationState.WAITING",
+        "persisted.remote_outcome_state is RemoteOutcomeState.OUTCOME_UNKNOWN",
+        "message_observer=observed_frames.append",
+        'assert len(observed_frames) == 1',
+        'assert observed_frames[0]["type"] == "capability.reconcile"',
+        'assert observed_frames[0]["invocation_id"] == invocation_id',
+        'assert observed_frames[0]["connection_id"] == second.connection_id',
+        '"request_fingerprint": record.request_fingerprint,',
+        "committed.state is CapabilityInvocationState.FAILED",
     ):
         assert proof in source
 
