@@ -269,6 +269,26 @@ def test_tbo4_preserves_aat_tbo5_boundary_and_exit_gate() -> None:
     ):
         assert token in contract
 
+    # Every acceptance case must preserve the Section 9 ALLOW-versus-denial split.
+    # A denial replay must never create an AgentExecution merely to pass a race test.
+    assert (
+        "same decision key, one worker, repeated call -> same durable decision; "
+        "if ACTIVATION_ALLOWED, same canonical execution identity; "
+        "if denied, zero execution identities"
+    ) in normalized
+    assert (
+        "same decision key, many workers -> one durable canonical decision; "
+        "if ACTIVATION_ALLOWED, exactly one execution binding and at most one local start; "
+        "if denied, zero execution bindings and zero local starts"
+    ) in normalized
+    assert (
+        "replay after process restart -> same durable decision; "
+        "if ACTIVATION_ALLOWED, the same bound execution identity; "
+        "if denied, the same durable denial with zero execution"
+    ) in normalized
+    assert "same decision key, many workers -> exactly one execution;" not in normalized
+    assert "replay after process restart -> same durable decision/execution;" not in normalized
+
     assert "exact scope remains 2 NEW / 2" in normalized
     assert "exact-head Linux + Windows Architecture is GREEN/GREEN" in normalized
     assert "independent contract FINAL finds no blocking P0/P1/P2" in normalized
