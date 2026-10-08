@@ -147,6 +147,7 @@ def test_apr_p0_freezes_definition_profile_and_binding_shapes() -> None:
         "skill_preference_or_ref",
         "AgentExecutionBinding",
         "execution_id",
+        "owner_user_id?",
         "agent_instance_id?",
         "active_runtime_profile",
         "runtime_session_id?",
@@ -199,7 +200,11 @@ def test_apr_p0_preserves_aic_and_ae_identity_authority() -> None:
         "AgentExecution.agent_id != agent_instance_id",
         "AgentExecution.owner_instance_id != agent_instance_id",
         "APR MUST NOT mint, persist, register, suspend, delete, reassign, or otherwise own agent_instance_id",
-        "Absence remains absence until separately canonical AIC/registration authority resolves a trusted binding",
+        "owner_user_id in this binding is trusted/server-derived authority",
+        "owner_user_id and agent_instance_id are co-present or both absent",
+        "A bare agent_instance_id is insufficient to establish or restore Agent-instance ownership",
+        "APR-P0 MUST NOT mint or infer either identity component",
+        "Absence remains absence until separately canonical AIC/registration authority resolves a trusted (owner_user_id, agent_instance_id) binding",
         "Persisting this binding into AgentExecution, checkpoints, continuation records, or storage requires a fresh AE/APR production PRE-CLAIM",
     ):
         assert phrase in contract
@@ -268,6 +273,7 @@ def test_apr_p0_exit_gate_requires_fresh_exact_head_evidence() -> None:
         "profile-is-not-grant and no-envelope-widening semantics are explicit",
         "AgentDefinition.tools != InferenceRequest.tools",
         "AgentExecution.owner_instance_id != agent_instance_id",
+        "trusted owner_user_id is co-bound with agent_instance_id",
         "exact-head Linux Architecture is GREEN",
         "exact-head Windows Architecture is GREEN",
         "independent APR-P0 contract FINAL is PASS",
