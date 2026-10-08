@@ -61,6 +61,7 @@ def test_r11_e2_is_linear_child_of_cas_head(tmp_path: Path):
                 script.walk_revisions(base="base", head=mh0_heads[0])
             )
         )
+        and all(not rev.dependencies for rev in mh0_revisions)
         and (
             mh0_parents := {
                 rev.revision: (

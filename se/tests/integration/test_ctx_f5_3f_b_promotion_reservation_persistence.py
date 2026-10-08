@@ -172,6 +172,7 @@ def test_ctx_f5_3f_b_migration_is_linear_and_downgrade_is_fail_closed(
                 script.walk_revisions(base="base", head=mh0_heads[0])
             )
         )
+        and all(not rev.dependencies for rev in mh0_revisions)
         and (
             mh0_parents := {
                 rev.revision: (

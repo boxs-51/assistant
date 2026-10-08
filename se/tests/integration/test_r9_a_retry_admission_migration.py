@@ -36,6 +36,7 @@ def test_r9_a_15a_is_single_head_after_r8(tmp_path: Path):
                 script.walk_revisions(base="base", head=mh0_heads[0])
             )
         )
+        and all(not rev.dependencies for rev in mh0_revisions)
         and (
             mh0_parents := {
                 rev.revision: (

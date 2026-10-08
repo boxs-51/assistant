@@ -1015,6 +1015,7 @@ def test_ctx_f5_2_migration_is_linear_and_upgrades_downgrades_real_sqlite(
                 script.walk_revisions(base="base", head=mh0_heads[0])
             )
         )
+        and all(not rev.dependencies for rev in mh0_revisions)
         and (
             mh0_parents := {
                 rev.revision: (
@@ -1146,6 +1147,7 @@ def test_ctx_f5_3k_p1_migration_is_nullable_no_backfill_restrictive_and_reversib
                 script.walk_revisions(base="base", head=mh0_heads[0])
             )
         )
+        and all(not rev.dependencies for rev in mh0_revisions)
         and (
             mh0_parents := {
                 rev.revision: (
