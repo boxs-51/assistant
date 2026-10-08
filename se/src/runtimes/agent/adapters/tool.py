@@ -42,7 +42,23 @@ from ...capability.contracts.error import (
 )
 from ...capability.contracts.invocation import ExistingInvocationContinuationMode
 from ...capability.contracts.implementation import CapabilityExecutionLocation
+from ...capability.contracts.target import (
+    CapabilityInvocationTarget,
+    ResourceScope,
+)
 from ...capability.catalog import CapabilityNotFoundError
+
+
+_SBX2_SANDBOX_CAPABILITY_IDS = frozenset(
+    {
+        "file.read",
+        "file.search",
+        "file.write",
+        "file.append",
+        "file.replace",
+        "glob.find",
+    }
+)
 
 
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
@@ -192,6 +208,27 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         if not await context.reserve_tool_call():
             return self._denied(request, "AGENT_TOOL_BUDGET_EXCEEDED")
 
+        target = None
+        if request.capability_id in _SBX2_SANDBOX_CAPABILITY_IDS:
+            if context.connection_id is None:
+                target = CapabilityInvocationTarget(
+                    resource_scope=ResourceScope.SANDBOX,
+                    resource_ref=context.execution_id,
+                )
+            else:
+                target = self._client_local_target(context)
+                if target is None:
+                    return self._failure(
+                        request,
+                        code="CAPABILITY_TARGET_UNAVAILABLE",
+                        message=(
+                            "Connection-bound file/glob execution requires "
+                            "a stable client identity."
+                        ),
+                        retryable=True,
+                        pre_dispatch=True,
+                    )
+
         try:
             result = await self._capability_runtime.execute_capability(
                 capability_id=request.capability_id,
@@ -217,6 +254,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 workflow_id=context.workflow_id,
                 timeout_seconds=timeout,
                 cancellation_event=context.cancellation_event,
+                target=target,
                 metadata={
                     **context.metadata,
                     **request.metadata,
@@ -349,6 +387,44 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 retryable=normalized.retryable,
                 metadata=metadata,
             )
+
+    def _client_local_target(
+        self,
+        context: AgentExecutionContext,
+    ) -> CapabilityInvocationTarget | None:
+        connection_id = context.connection_id
+        if connection_id is None:
+            return None
+
+        registry = getattr(self._capability_runtime, "connection_registry", None)
+        getter = getattr(registry, "get", None)
+        if not callable(getter):
+            return None
+        try:
+            snapshot = getter(connection_id)
+        except Exception:
+            return None
+
+        if str(getattr(snapshot, "user_id", "") or "") != str(
+            getattr(context.identity, "user_id", "") or ""
+        ):
+            return None
+
+        snapshot_metadata = getattr(snapshot, "metadata", {}) or {}
+        metadata_get = getattr(snapshot_metadata, "get", None)
+        if not callable(metadata_get):
+            return None
+        stable_client_id = str(metadata_get("client_id") or "")
+        if (
+            not stable_client_id
+            or stable_client_id != stable_client_id.strip()
+        ):
+            return None
+
+        return CapabilityInvocationTarget(
+            resource_scope=ResourceScope.CLIENT_LOCAL,
+            stable_client_id=stable_client_id,
+        )
 
     async def execute_many(
         self,

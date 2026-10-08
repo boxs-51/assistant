@@ -1,5 +1,6 @@
 from contextlib import asynccontextmanager
 from pathlib import Path
+import tempfile
 import asyncio
 from typing import Dict, Any, Tuple
 import uuid
@@ -92,6 +93,8 @@ from .runtimes.capability.registration import ClientCapabilityRegistrationServic
 from .runtimes.capability.policy import CapabilityRoutingPolicy
 from .runtimes.capability.local_tool_loader import register_local_tools
 from .runtimes.capability.builtins import register_builtin_support
+from .runtimes.capability.contracts.sandbox import SandboxProfile
+from .runtimes.capability.sandbox import SandboxManager
 from .runtimes.capability.invocation import CapabilityInvocationLifecycle
 from .runtimes.agent.coordinator import MultiAgentCoordinator
 from .runtimes.agent.persistence import (
@@ -1071,11 +1074,21 @@ async def bootstrap_runtime_kernel(
         container.bind_runtime(runtime_id, runtime_instance)
         kernel.register_runtime(runtime_instance)
 
+    sandbox_manager = SandboxManager(
+        Path(tempfile.gettempdir())
+        / f"assistant-agent-sandboxes-{uuid.uuid4().hex}"
+    )
+    sandbox_profile = SandboxProfile(profile_id="agent-file-glob-v1")
+
     if container.capability_runtime and hasattr(container.capability_runtime, "registry"):
         container.tool_registry = ToolRegistry(container.capability_runtime.registry)
         tools_dir = Path(__file__).resolve().parents[2] / "tools" / "v1"
         loaded_tools = register_local_tools(
-            container.capability_runtime, container.tool_registry, tools_dir
+            container.capability_runtime,
+            container.tool_registry,
+            tools_dir,
+            sandbox_manager=sandbox_manager,
+            sandbox_profile=sandbox_profile,
         )
         logger.info("Local tools discovered", tools=loaded_tools)
 
@@ -1150,6 +1163,7 @@ async def bootstrap_runtime_kernel(
         event_publisher=EventBusAgentEventPublisher(container.event_bus),
         task_budget_service=container.task_budget_service,
         f7t_canonicalizer=f7t_canonicalizer,
+        sandbox_manager=sandbox_manager,
     )
     builtin_support = register_builtin_support(container)
     container.multi_agent_coordinator.agent_authorizer = (
