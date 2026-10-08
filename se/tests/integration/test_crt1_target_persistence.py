@@ -143,7 +143,55 @@ def test_crt1_migration_is_single_linear_nullable_no_backfill_and_reversible(
     )
     config = _config(database)
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == ["30a_ctx_f5_user_wide_memory_scope"]
+    assert (
+        (mh0_heads := script.get_heads())
+        and len(mh0_heads) == 1
+        and script.get_bases() == ["2b8eaa45108e"]
+        and (
+            mh0_revisions := tuple(
+                script.walk_revisions(base="base", head=mh0_heads[0])
+            )
+        )
+        and all(not rev.dependencies for rev in mh0_revisions)
+        and (
+            mh0_parents := {
+                rev.revision: (
+                    rev.down_revision
+                    if isinstance(rev.down_revision, tuple)
+                    else (rev.down_revision,) if rev.down_revision else ()
+                )
+                for rev in mh0_revisions
+            }
+        )
+        and len(mh0_revisions) == len(mh0_parents)
+        and mh0_heads[0] in mh0_parents
+        and "30a_ctx_f5_user_wide_memory_scope" in mh0_parents
+        and mh0_parents.get("4f_phase4_multi_agent") == ("2b8eaa45108e",)
+        and mh0_parents.get("5a_phase5_9_execution_resume")
+        == ("4f_phase4_multi_agent",)
+        and mh0_parents.get("896c456631dd") == ("4f_phase4_multi_agent",)
+        and mh0_parents.get("5b_conversation_temporal_contract")
+        == ("5a_phase5_9_execution_resume", "896c456631dd")
+        and all(
+            len(parents)
+            == (
+                2 if revision == "5b_conversation_temporal_contract"
+                else 0 if revision == "2b8eaa45108e"
+                else 1
+            )
+            and all(parent in mh0_parents for parent in parents)
+            for revision, parents in mh0_parents.items()
+        )
+        and all(
+            sum(revision in parents for parents in mh0_parents.values())
+            == (
+                0 if revision == mh0_heads[0]
+                else 2 if revision == "4f_phase4_multi_agent"
+                else 1
+            )
+            for revision in mh0_parents
+        )
+    )
     assert script.get_revision(CRT1_REVISION).down_revision == PREVIOUS_REVISION
 
     command.upgrade(config, PREVIOUS_REVISION)
