@@ -43,6 +43,32 @@ _FROZEN_ERROR = {
     "required": ["code", "message", "retryable", "details"],
     "additionalProperties": False,
 }
+# Complete public input snapshots are independent of current tool constants.
+# Narrow numeric/type/schema changes must fail this contract gate.
+FROZEN_TERMINAL_INPUT_SCHEMAS = {
+    "terminal.run": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "command": {"type": "string", "minLength": 1, "maxLength": 32768},
+            "timeout": {"type": "integer", "minimum": 1, "maximum": 3600},
+            "cwd": {"type": "string", "minLength": 1, "maxLength": 4096},
+            "encoding": {"type": "string", "minLength": 1, "maxLength": 64},
+        },
+        "required": ["command"],
+    },
+    "terminal.launch": {
+        "type": "object",
+        "additionalProperties": False,
+        "properties": {
+            "command": {"type": "string", "minLength": 1, "maxLength": 32768},
+            "cwd": {"type": "string", "minLength": 1, "maxLength": 4096},
+        },
+        "required": ["command"],
+    },
+}
+
+
 FROZEN_TERMINAL_OUTPUT_SCHEMA = {
     "type": "object",
     "required": ["ok", "tool", "action", "data", "error", "meta"],
@@ -128,18 +154,12 @@ def test_t12_a_terminal_logical_ids_versions_and_public_schema_are_unchanged():
     exports = {entry["id"]: entry for entry in metadata["exports"]}
     assert set(exports) == {"terminal.run", "terminal.launch"}
 
-    expected_properties = {
-        "terminal.run": {"command", "cwd", "timeout", "encoding"},
-        "terminal.launch": {"command", "cwd"},
-    }
     for name, export in exports.items():
         assert export["version"] == "1.0"
         assert export["name"] == name
         assert export["base_risk"] == "HIGH"
         assert export["effects"] == ["EXECUTE", "EXTERNAL_SIDE_EFFECT"]
-        assert export["input_schema"]["additionalProperties"] is False
-        assert export["input_schema"]["required"] == ["command"]
-        assert set(export["input_schema"]["properties"]) == expected_properties[name]
+        assert export["input_schema"] == FROZEN_TERMINAL_INPUT_SCHEMAS[name]
         assert export["output_schema"] == FROZEN_TERMINAL_OUTPUT_SCHEMA
 
     assert exports["terminal.run"]["bind"] == {"action": "run"}
