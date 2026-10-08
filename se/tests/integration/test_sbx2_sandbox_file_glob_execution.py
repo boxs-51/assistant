@@ -200,6 +200,38 @@ async def test_sbx2_file_glob_share_one_execution_root_and_block_host_escape(
 
 
 @pytest.mark.asyncio
+async def test_sbx2_driver_fails_closed_if_tool_returns_path_outside_lease(
+    tmp_path: Path,
+):
+    manager = SandboxManager(tmp_path / "sandboxes")
+    profile = SandboxProfile(profile_id="sbx2-file-glob")
+    outside = tmp_path / "outside.txt"
+
+    def handler(**arguments):
+        del arguments
+        return {
+            "ok": True,
+            "tool": "file_tool",
+            "action": "read",
+            "data": {"path": str(outside.resolve())},
+            "error": None,
+            "meta": {"version": "test", "truncated": False, "warnings": []},
+        }
+
+    driver = SandboxPythonCapabilityDriver(
+        _definition("file.read"),
+        handler,
+        manager,
+        profile,
+    )
+    with pytest.raises(SandboxError, match="outside the active lease"):
+        await driver.execute(
+            _context("exec-outside-result"),
+            {"file_paths": "inside.txt"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_sbx2_execution_identity_owner_profile_and_restart_are_isolated(
     tmp_path: Path,
 ):
@@ -431,10 +463,27 @@ class _AllowExecutionPolicy:
 
 
 class _CaptureCapabilityRuntime:
-    def __init__(self):
+    def __init__(
+        self,
+        *,
+        stable_client_id="client-stable",
+        registry_user_id="user-sbx2",
+    ):
         self.kwargs = None
         self.catalog = None
         self.registry = SimpleNamespace(get=self._get)
+        metadata = (
+            {"client_id": stable_client_id}
+            if stable_client_id is not None
+            else {}
+        )
+        self.connection_registry = SimpleNamespace(
+            get=lambda connection_id: SimpleNamespace(
+                connection_id=connection_id,
+                user_id=registry_user_id,
+                metadata=metadata,
+            )
+        )
 
     def _get(self, capability_id):
         return SimpleNamespace(
@@ -551,13 +600,16 @@ async def test_sbx2_agent_adapter_constructs_explicit_client_local_target():
 
 @pytest.mark.asyncio
 async def test_sbx2_connection_bound_file_call_without_stable_client_fails_closed():
-    runtime = _CaptureCapabilityRuntime()
+    runtime = _CaptureCapabilityRuntime(stable_client_id=None)
     adapter = CapabilityToolExecutionAdapter(
         runtime,
         _AllowToolPolicy(),
         _AllowExecutionPolicy(),
     )
-    context = _AgentContext(connection_id="conn-client")
+    context = _AgentContext(
+        connection_id="conn-client",
+        client_id="untrusted-context-client",
+    )
     request = ToolExecutionRequest(
         execution_id=context.execution_id,
         iteration=1,
