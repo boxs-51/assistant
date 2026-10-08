@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 from pathlib import Path
 
 
@@ -82,9 +83,34 @@ def test_r14_c_binds_approve_and_deny_to_real_agent_websocket_path() -> None:
     ):
         assert proof in source
 
-    # Both APPROVE and DENY must be nonretryable: checking only the
-    # APPROVE branch would miss an unsafe HITL_DENIED retry regression.
-    assert source.count('assert tool_message.metadata["retryable"] is False') == 2
+    # Check the actual AST branch bodies, not a global source substring
+    # count: two copies under APPROVE cannot substitute for the DENY guard.
+    tree = ast.parse(source)
+    helpers = [
+        node for node in tree.body
+        if isinstance(node, ast.AsyncFunctionDef)
+        and node.name == "_run_r14_c_hitl_real_websocket_case"
+    ]
+    assert len(helpers) == 1
+    branches = [
+        node for node in ast.walk(helpers[0])
+        if isinstance(node, ast.If)
+        and isinstance(node.test, ast.Name)
+        and node.test.id == "approved"
+        and any(
+            "tool_message" in (ast.get_source_segment(source, stmt) or "")
+            for stmt in node.body
+        )
+    ]
+    assert len(branches) == 1
+    branch = branches[0]
+    guard = 'assert tool_message.metadata["retryable"] is False'
+    for statements in (branch.body, branch.orelse):
+        assert sum(
+            isinstance(stmt, ast.Assert)
+            and (ast.get_source_segment(source, stmt) or "").strip() == guard
+            for stmt in statements
+        ) == 1
 
     r14c = source[source.index("def _build_r14_c_high_risk_client_registry") :]
     assert ".dispatch(" not in r14c
