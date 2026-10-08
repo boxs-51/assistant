@@ -143,6 +143,20 @@ def test_so_p1a_invalid_schema_fails_closed(raw: bytes) -> None:
     _assert_code(lambda: validate_portable_schema(raw), "OUTPUT_SCHEMA_INVALID")
 
 
+
+@pytest.mark.parametrize("raw", [
+    b'{"type":"string"}',
+    b'{"type":"integer"}',
+    b'{"type":"array","items":{"type":"string"}}',
+])
+def test_so_p1a_schema_root_must_be_closed_object(raw: bytes) -> None:
+    _assert_code(lambda: validate_portable_schema(raw), "OUTPUT_SCHEMA_INVALID")
+    _assert_code(
+        lambda: validate_json_schema_result(b'{"a":1}', raw),
+        "OUTPUT_SCHEMA_INVALID",
+    )
+
+
 def test_so_p1a_schema_input_duplicate_key_provenance() -> None:
     # Raw input is mandatory; a dict already lost original duplicate members.
     _assert_code(
