@@ -51,6 +51,7 @@ from cl.src.core.capability_runtime import (
     CapabilityRuntime as ClientCapabilityRuntime,
 )
 from cl.src.core.realtime_client import GatewayRealtimeClient
+from cl.src.hitl.hitl_manager import HITLManager
 
 
 CONNECTION_ID = "e2e-client-01"
@@ -828,3 +829,293 @@ def test_real_websocket_disconnect_falls_back_to_server_same_invocation():
             await _stop_uvicorn(server, server_task)
 
     asyncio.run(scenario())
+
+
+def _build_r14_c_high_risk_client_registry():
+    executed = []
+
+    def desktop_echo(value: str, **kwargs):
+        executed.append(
+            {
+                "value": value,
+                "connection_id": kwargs.get("connection_id"),
+                "session_id": kwargs.get("session_id"),
+            }
+        )
+        return {
+            "echo": value,
+            "executed_on": "client",
+            "connection_id": kwargs.get("connection_id"),
+        }
+
+    registry = SimpleNamespace(
+        tools={
+            CAPABILITY_ID: {
+                "func": desktop_echo,
+                "metadata": {
+                    "name": CAPABILITY_ID,
+                    "description": "R14-C high-risk real client capability",
+                    "idempotency": "NON_IDEMPOTENT",
+                    "base_risk": "HIGH",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {
+                            "value": {"type": "string"},
+                        },
+                        "required": ["value"],
+                    },
+                },
+            }
+        }
+    )
+    return registry, executed
+
+
+async def _run_r14_c_hitl_real_websocket_case(*, approved: bool):
+    gateway_app, catalog, connection_runtime, identity = _build_gateway_app()
+    server, server_task, port = await _start_uvicorn(gateway_app)
+
+    client_registry, executed_tools = _build_r14_c_high_risk_client_registry()
+    approvals = []
+    hitl = HITLManager()
+
+    def approve_callback(payload):
+        approvals.append(dict(payload))
+        return approved
+
+    hitl.set_approval_callback(approve_callback)
+
+    client_realtime = None
+    client_dispatcher = None
+    client_capabilities = None
+
+    execution_id = (
+        "r14-c-hitl-approve-execution"
+        if approved
+        else "r14-c-hitl-deny-execution"
+    )
+
+    try:
+        client_dispatcher = CapabilityDispatcher(
+            client_registry,
+            None,
+            hitl=hitl,
+        )
+        client_realtime = GatewayRealtimeClient(
+            f"http://127.0.0.1:{port}",
+            {"Authorization": "Bearer phase6-e2e"},
+            connection_id=CONNECTION_ID,
+            session_id=SESSION_ID,
+            client_id=CLIENT_ID,
+            heartbeat_interval=60.0,
+            on_message=lambda envelope: (
+                client_capabilities.handle_message(envelope)
+            ),
+        )
+        client_dispatcher.realtime = client_realtime
+        client_capabilities = ClientCapabilityRuntime(
+            client_registry,
+            client_realtime,
+            client_id=CLIENT_ID,
+            owner_id=OWNER_ID,
+            dispatcher=client_dispatcher,
+        )
+
+        registered = await asyncio.to_thread(
+            client_realtime.connect,
+            wait_timeout=5.0,
+        )
+        assert registered["type"] == "connection.registered"
+
+        registration = await asyncio.to_thread(
+            client_capabilities.register,
+            timeout=5.0,
+        )
+        assert registration["type"] == "capability.registered"
+
+        implementation_id = f"{CONNECTION_ID}:{CAPABILITY_ID}"
+        await _wait_until_async(
+            lambda: catalog.get_implementation(implementation_id) is not None,
+            timeout=5.0,
+        )
+        implementation = catalog.get_implementation(implementation_id)
+        assert implementation is not None
+        assert implementation.connection_id == CONNECTION_ID
+
+        gateway_capability_registry = CapabilityRegistry()
+        gateway_capability_runtime = CapabilityRuntime(
+            registry=gateway_capability_registry,
+            authorization=AuthorizationService(),
+            catalog=catalog,
+            routing_policy=CapabilityRoutingPolicy(
+                connection_availability=connection_runtime.registry,
+            ),
+            connection_registry=connection_runtime.registry,
+            realtime=connection_runtime.realtime,
+        )
+
+        inference = DeterministicInference()
+        agent = AgentDefinition(
+            name="r14-c-hitl-e2e-agent",
+            goal="Execute a high-risk client-side tool.",
+            instruction="Use desktop.echo when required.",
+            tools=[CAPABILITY_ID],
+        )
+        agent_registry = AgentRegistry()
+        agent_registry.register(agent)
+        tool_policy = RegistryAgentToolPolicy(
+            agent_registry,
+            gateway_capability_registry,
+            AuthorizationService(),
+            capability_catalog=catalog,
+        )
+
+        temporal_tick = 0
+
+        def advancing_clock(zone):
+            nonlocal temporal_tick
+            value = (
+                datetime(
+                    2026,
+                    9,
+                    20,
+                    tzinfo=timezone.utc,
+                )
+                + timedelta(seconds=temporal_tick)
+            )
+            temporal_tick += 1
+            return value.astimezone(zone)
+
+        context_assembler = DefaultAgentContextAssembler(
+            DefaultAgentSystemPromptProvider(
+                TemporalContextProvider(advancing_clock)
+            ),
+            RegistryAgentCapabilityResolver(
+                agent_registry=agent_registry,
+                capability_registry=gateway_capability_registry,
+                capability_catalog=catalog,
+                tool_policy=tool_policy,
+            ),
+        )
+        context_builder = ContextBuilderAdapter(
+            E2EContextRuntime(),
+            gateway_capability_runtime,
+            tool_policy,
+            context_assembler=context_assembler,
+        )
+        tool_port = CapabilityToolExecutionAdapter(
+            gateway_capability_runtime,
+            tool_policy,
+            AllowExecutionPolicy(),
+        )
+        context = AgentExecutionContext.create(
+            execution_id=execution_id,
+            agent_id="r14-c-hitl-e2e-agent",
+            session_id=SESSION_ID,
+            correlation_id=f"{execution_id}-correlation",
+            identity=identity,
+            limits=AgentExecutionLimits(max_iterations=3),
+            connection_id=CONNECTION_ID,
+            agent=agent,
+            metadata={"constitution": "Respect explicit human approval."},
+        )
+        runtime = AgentRuntime(
+            context_builder=context_builder,
+            inference=inference,
+            tool_execution=tool_port,
+            execution_policy=AllowExecutionPolicy(),
+        )
+
+        execution = await runtime.execute(context)
+
+        # The client ledger can hide a remote replay by returning its cached
+        # terminal result, so callback/effect counts alone are not sufficient.
+        # Check the *server* durable invocation/attempt ledger for both HITL
+        # outcomes before trusting the no-retry/no-fallback claim.
+        store = gateway_capability_runtime.invocation_lifecycle.store
+        invocations = [
+            item
+            for item in store.items.values()
+            if item.capability_id == CAPABILITY_ID
+        ]
+        assert len(invocations) == 1
+        invocation = invocations[0]
+        assert invocation.attempt == 1
+        attempts = await store.list_attempts(invocation.invocation_id)
+        assert len(attempts) == 1
+        assert attempts[0].attempt_number == 1
+        assert attempts[0].implementation_id == implementation_id
+        assert attempts[0].connection_id == CONNECTION_ID
+
+        assert len(approvals) == 1
+        approval = approvals[0]
+        assert approval["name"] == CAPABILITY_ID
+        assert approval["risk_level"] == "HIGH"
+        assert "hello-from-agent" in approval["args"]
+        assert execution_id in approval["reason"]
+
+        assert inference.calls == 2
+        assert len(inference.requests) == 2
+        assert execution.output == "done"
+        assert execution.state.value == "COMPLETED"
+
+        second_request = inference.requests[1]
+        # Assert the exact last TOOL result delivered into the Agent's next
+        # inference request. Matching a substring across all messages could
+        # accidentally match the original assistant tool-call arguments.
+        tool_message = second_request.messages[-1]
+        assert tool_message.role == "tool"
+        assert tool_message.name == CAPABILITY_ID
+        assert tool_message.tool_call_id == "call-e2e-1"
+
+        if approved:
+            assert executed_tools == [
+                {
+                    "value": "hello-from-agent",
+                    "connection_id": CONNECTION_ID,
+                    "session_id": SESSION_ID,
+                }
+            ]
+            assert tool_message.metadata["success"] is True
+            assert tool_message.metadata["retryable"] is False
+            assert dict(tool_message.content) == {
+                "echo": "hello-from-agent",
+                "executed_on": "client",
+                "connection_id": CONNECTION_ID,
+            }
+        else:
+            assert executed_tools == []
+            assert tool_message.metadata["success"] is False
+            assert tool_message.metadata["retryable"] is False
+            assert dict(tool_message.content) == {
+                "error_code": "HITL_DENIED",
+                "error_message": f"Local user denied capability '{CAPABILITY_ID}'.",
+            }
+
+        return approvals, executed_tools, execution, inference
+    finally:
+        if client_realtime is not None:
+            await asyncio.to_thread(client_realtime.close)
+        if client_dispatcher is not None:
+            client_dispatcher.shutdown()
+        await _stop_uvicorn(server, server_task)
+
+
+def test_r14_c_hitl_approve_real_websocket_agent_path():
+    approvals, executed_tools, execution, inference = asyncio.run(
+        _run_r14_c_hitl_real_websocket_case(approved=True)
+    )
+    assert len(approvals) == 1
+    assert len(executed_tools) == 1
+    assert execution.state.value == "COMPLETED"
+    assert inference.calls == 2
+
+
+def test_r14_c_hitl_deny_real_websocket_agent_path_fails_closed():
+    approvals, executed_tools, execution, inference = asyncio.run(
+        _run_r14_c_hitl_real_websocket_case(approved=False)
+    )
+    assert len(approvals) == 1
+    assert executed_tools == []
+    assert execution.state.value == "COMPLETED"
+    assert inference.calls == 2
