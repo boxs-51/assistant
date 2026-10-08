@@ -285,7 +285,11 @@ CTX-F12  Observability / quality gates
 Current status:
 
 ```text
-EARLY-ACTIVE / CTX-F0 CONTRACT-FIRST / constrained by active AE ownership
+CTX-F0 contract-first: historical / COMPLETE.
+CTX-F0–F4 and released CTX-F5 predecessors through CTX-F5-3L-C0: LANDED / CANONICAL / HEALTHY / COMPLETE.
+Next provisional CTX-F5-3L-P1 AGENT_PRIVATE production: PRE-CLAIM EXTERNAL HOLD / NOT RELEASED.
+CTX-F6–F12: separately gated / production NOT RELEASED.
+Live CTX stage and authority: Issue #15 latest canonical override.
 ```
 
 The original AE-R14 production gate has been explicitly re-frozen earlier by the user. Early CTX work is allowed only when additive/isolated and non-owning with respect to active AE-R11/R12+ and Central Asset authorities. Cross-cutting Context/Asset integration still requires a fresh CAS audit.
