@@ -318,6 +318,14 @@ def test_duplex_stream_input_requires_actual_bounded_content_or_asset_ref() -> N
         "No unspecified out-of-band input channel is allowed",
         "Absent, expired, mutable, oversized, foreign or mismatched input content MUST fail closed",
         "does not implement a new blob store",
+        "canonical CAS authenticated asset READ/USE authority",
+        "AssetService.get_asset/open_content",
+        "necessary but NOT sufficient to authorize the Agent",
+        "CAS_AGENT_ASSET_GRANTS_ROADMAP.md",
+        "RESERVED / NOT OPEN",
+        "MUST be rejected until independently released CAS/Agent grant enforcement",
+        "explicitly does NOT fetch, open, resolve or follow references",
+        "NEVER an inbound reference dereference permission",
     )
 
 
@@ -351,4 +359,28 @@ def test_all_stream_projections_bind_owner_session_execution_and_generation() ->
         "MUST be rejected",
         "On reconnect, a new transport generation",
         "never silently inherit an old generation",
+        "freshly minted globally unique stream_request_id",
+        "MUST NEVER be re-bound, reassigned, reused, or rebound",
+        "immutable, append-only provenance entry",
+        "retain the old generation entry",
+        "A duplicate request ID crossing generations is a conflict",
     )
+
+
+def test_inbound_asset_ref_reuses_only_canonical_cas_read_path_not_f7t() -> None:
+    """Existing source proves user CAS read, not an Agent READ/USE grant."""
+    s = _section("4. Conceptual provider-neutral InferenceStream")
+    _require(s, "CAS authenticated asset READ/USE authority",
+             "CAS_AGENT_ASSET_GRANTS_ROADMAP.md",
+             "F7-T", "RESERVED / NOT OPEN")
+    asset_service = Path("se/src/application/assets/service.py").read_text(encoding="utf-8")
+    agent_grants = Path("docs/central_asset/CAS_AGENT_ASSET_GRANTS_ROADMAP.md").read_text(encoding="utf-8")
+    f7t = Path(
+        "docs/central_asset/CAS_F7_T_TOOL_GENERATED_MEDIA_CONTRACT_522B543E.md"
+    ).read_text(encoding="utf-8")
+    assert "async def get_asset(" in asset_service
+    assert "async def open_content(" in asset_service
+    assert "self._authorize(file_record, owner_user_id)" in asset_service
+    assert "RESERVED / NOT OPEN" in agent_grants
+    assert "READ" in agent_grants and "USE" in agent_grants
+    assert "F7-T does not fetch, open, resolve," in f7t
