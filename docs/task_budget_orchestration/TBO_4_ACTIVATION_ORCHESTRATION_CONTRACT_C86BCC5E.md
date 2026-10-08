@@ -100,6 +100,13 @@ Rules:
 6. the key is idempotency identity, not authorization; Task ownership and policy checks remain mandatory.
 
 A future production implementation MUST durably bind the decision key to exactly one canonical R8/AE execution admission or to a durable denial.
+The canonical ordering for **every** same-key request, before examining Task source state or invoking TBO-2 / UBQ / R8, is:
+1. authenticate the trusted principal and enforce Task ownership/authorization (without minting any activation authority);
+2. read the canonical durable decision for the exact ActivationDecisionKey under replay-safe transaction/CAS coordination;
+3. **if a durable decision exists, return/observe that persisted ALLOW or DENY**; NEVER reevaluate Task state, horizons, UBQ owner/eligibility or R8 admission for the same key;
+4. **only if no decision exists**, evaluate source-state eligibility and decide/commit the first durable outcome through the canonical Task/R8 CAS boundary; competing same-key workers must observe one durable winner rather than replacing it.
+
+A persisted DENY is immutable for that key even if a transient UBQ_ACTIVATION_DEFERRED or UBQ_OWNER_UNRESOLVED condition later clears while the Task remains ASSIGNED. Rechecking eligibility after such a denial requires a **different trusted activation_request_id** and its own fresh Task/R8 conflict and authorization checks; it is never an automatic same-key retry escalation. A persisted ALLOW remains bound to the original execution on replay, including after Task state changes. A missing/corrupt decision receipt MUST fail closed rather than reinterpret an existing admitted execution as a fresh request.
 This contract does not choose a schema path.
 If current R8 receipts cannot preserve the key without new representation, schema/repository work requires a fresh production PRE-CLAIM.
 
@@ -129,11 +136,11 @@ An allow decision does not itself grant inference/tool resource quota.
 
 ## 6. Source-state matrix
 
-The current conservative TBO-4 activation matrix is:
+The current conservative TBO-4 activation matrix applies **only after a replay-safe lookup proves no durable decision exists for the exact ActivationDecisionKey**. Existing decision lookup and trusted authorization ALWAYS precede this table, even if the Task is still ASSIGNED, WAITING or terminal. A same-key durable DENY must be returned unchanged without running any later TBO-2, UBQ or R8 gate; a same-key durable ALLOW must replay its original bound execution without starting another one.
 
 | Durable Task state / path | TBO-4 new-Execution disposition |
 |---|---|
-| ASSIGNED | evaluate TBO-2 horizons, then UBQ activation gate, then R8 admission |
+| ASSIGNED + no existing decision for key | evaluate TBO-2 horizons, then UBQ activation gate, then R8 admission; atomically persist one ALLOW or DENY |
 | CREATED | TASK_NOT_ACTIVATION_READY |
 | RUNNING + same decision key | ACTIVATION_REPLAY bound to the canonical existing decision |
 | RUNNING + different decision key | TASK_ALREADY_ACTIVE; no new root execution |
@@ -142,7 +149,7 @@ The current conservative TBO-4 activation matrix is:
 | COMPLETED, FAILED, CANCELLED | TASK_TERMINAL; no resurrection |
 | RETRY/FORK/RESUME path | existing R8/R9/R7 authority; not rewritten as TBO-4 root activation |
 
-For ASSIGNED, TBO-2 eligibility remains authoritative:
+For a fresh, previously undecided ASSIGNED request, TBO-2 eligibility remains authoritative:
 - TASK_HORIZON_EXPIRED dominates activation;
 - REVIEW_REQUIRED denies activation without manufacturing Task WAITING;
 - denial mutates no UBQ state and creates no AgentExecution.
@@ -202,7 +209,7 @@ Any representation choice requires a separate production PRE-CLAIM.
 
 ## 9. Multi-worker winner/loser contract
 
-For two workers racing the same ActivationDecisionKey, the durable decision is idempotent **but execution admission is conditional on the underlying persisted canonical allow/deny outcome, not on the response disposition**. In particular, `ACTIVATION_REPLAY` of a prior allow MUST retain the original binding, and MUST NOT be treated as a denial merely because its response disposition differs from `ACTIVATION_ALLOWED`:
+For two workers racing the same ActivationDecisionKey, **durable decision lookup/replay occurs before Task/UBQ/R8 reevaluation**; execution admission is conditional on the underlying persisted canonical allow/deny outcome, not on the response disposition. In particular, `ACTIVATION_REPLAY` of a prior allow MUST retain the original binding, and MUST NOT be treated as a denial merely because its response disposition differs from `ACTIVATION_ALLOWED`:
 
 ~~~text
 all same-key races:
@@ -312,7 +319,8 @@ A future production implementation must prove at least:
 2. same decision key, many workers -> one durable canonical decision; if persisted outcome ALLOW, exactly one execution binding and at most one local start even on ACTIVATION_REPLAY; if persisted outcome DENY, zero execution bindings and zero local starts;
 3. different decision keys racing one ASSIGNED Task -> at most one root activation;
 4. replay after process restart -> same durable decision; if persisted outcome ALLOW, the original bound execution identity even when response is ACTIVATION_REPLAY; if persisted outcome DENY, the same durable denial with zero execution;
-5. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
+5. same key replay after a durable UBQ_ACTIVATION_DEFERRED or UBQ_OWNER_UNRESOLVED denial while Task remains ASSIGNED -> unchanged denial, zero execution, no UBQ recheck/R8 admission; only a new trusted decision key may request fresh evaluation;
+6. Task horizon expired -> TASK_HORIZON_EXPIRED, zero execution, zero UBQ mutation;
 6. review horizon reached -> REVIEW_REQUIRED, zero execution, zero Task WAITING fabrication;
 7. RUNNING Task -> no second root execution;
 8. WAITING/RESOURCE -> DEFER_TO_AE_CONTINUATION, no new execution;
