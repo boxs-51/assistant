@@ -16,7 +16,7 @@ from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
 from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
 from se.src.runtimes.capability.contracts.error import CapabilityError
-from se.src.runtimes.capability.contracts.sandbox import SandboxProfile
+from se.src.runtimes.capability.contracts.sandbox import (\n    SandboxLeaseState,\n    SandboxProfile,\n)
 from se.src.runtimes.capability.contracts.target import (
     CapabilityInvocationTarget,
     ResourceScope,
@@ -673,6 +673,32 @@ async def test_sbx2_connection_bound_file_call_without_stable_client_fails_close
     assert result.error_code == "CAPABILITY_TARGET_UNAVAILABLE"
     assert result.metadata["r7_commit_authority"] == "AGENT_PRE_DISPATCH"
     assert runtime.kwargs is None
+
+
+def test_sbx2_release_evicts_destroyed_lease_tombstones(tmp_path: Path):
+    manager = SandboxManager(tmp_path / "sandboxes")
+    profile = SandboxProfile(profile_id="sbx2-file-glob")
+
+    last_destroyed = None
+    for index in range(32):
+        execution_id = f"exec-evict-{index}"
+        lease = manager.acquire_for_execution(
+            execution_id=execution_id,
+            owner_user_id="user-sbx2",
+            profile=profile,
+        )
+        last_destroyed = manager.release_execution(
+            execution_id,
+            owner_user_id="user-sbx2",
+        )
+        assert last_destroyed is not None
+        assert last_destroyed.state is SandboxLeaseState.DESTROYED
+        assert lease.sandbox_id not in manager._leases
+        assert manager.release_execution(execution_id) is None
+
+    assert manager._leases == {}
+    assert last_destroyed is not None
+    assert manager.destroy(last_destroyed) == last_destroyed
 
 
 @pytest.mark.asyncio
