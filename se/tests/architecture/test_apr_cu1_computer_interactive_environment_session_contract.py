@@ -162,6 +162,10 @@ def test_conceptual_observation_action_and_result_bind_current_target() -> None:
     }
     assert invocation_semantics <= fields["EnvironmentAction"]
     assert invocation_semantics <= fields["EnvironmentResult"]
+    grant_snapshot = {"grant_id", "session_revision"}
+    assert grant_snapshot <= fields["EnvironmentSession"]
+    assert grant_snapshot <= fields["EnvironmentAction"]
+    assert grant_snapshot <= fields["EnvironmentResult"]
 
 
 def test_bounded_observation_and_argument_payloads_are_authorized() -> None:
@@ -393,3 +397,43 @@ def test_late_result_reconciliation_never_reuses_expired_action_authority() -> N
     assert "PRIMARY KEY (client_id, principal_id, invocation_id)" in ledger
     assert "request_fingerprint" in ledger
     assert "capability_version" in ledger
+
+
+def test_action_snapshot_requires_exact_admitting_grant_and_late_result_retains_it() -> None:
+    records = _section("4. Conceptual environment-session records")
+    _has(
+        records,
+        "EnvironmentAction MUST snapshot immutable grant_id and admitted session_revision",
+        "exact trusted EnvironmentSession grant",
+        "Every EnvironmentResult MUST carry that same original grant_id",
+        "without silently rebinding to a renewed grant",
+        "replacement grant for the same target/session",
+        "DISTINCT grant_id",
+        "original grant_id and admitted session_revision",
+        "distinct replacement grant_id",
+        "cannot retroactively validate its old physical execution",
+        "nonauthorizing",
+    )
+    execution = _section("5. Freshness, target selection and state-sensitive dispatch")
+    _has(
+        execution,
+        "SAME immutable admitting grant_id and admitted session_revision",
+        "MUST check exact grant identity/expected admitted session revision",
+        "not merely existence of ANY active grant",
+        "admitting grant expires/is revoked",
+        "DIFFERENT grant_id becomes active",
+        "reject the queued action before any physical side effect",
+        "never elevate stale admission",
+    )
+    negatives = _section("9. Negative acceptance vectors and refusal semantics")
+    _has(
+        negatives,
+        "grant_id G1",
+        "new G2 becomes active",
+        "SAME owner/session/target",
+        "refuse physical effect despite active G2",
+        "no silent rebinding",
+        "authenticated late result for original admitted G1",
+        "non-authorizing reconciliation evidence only",
+        "NEVER authorize G1 effect replay",
+    )
