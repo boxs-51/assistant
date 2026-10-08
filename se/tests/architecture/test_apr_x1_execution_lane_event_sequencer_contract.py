@@ -218,7 +218,8 @@ def test_apr_x1_preserves_restart_multi_worker_and_r14_boundaries() -> None:
 
     assert "R14-GAP-REMOTE-PRE-SIDE-EFFECT-1" in r14
     assert "R14-GAP-HITL-E2E-1" in r14
-    assert "fault-hook authority" in r14
+    assert "Fault-hook authority" in r14
+    assert "zero R14 fault-hook transfer" in r14
 
 
 def test_apr_x1_preserves_sbx_runtime_ownership_hold() -> None:
