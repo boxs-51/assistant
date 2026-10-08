@@ -473,3 +473,62 @@ def test_late_tool_result_retains_original_canonical_tool_id() -> None:
     assert "PRIMARY KEY (client_id, principal_id, invocation_id)" in ledger
     assert "capability_version" in ledger
     assert "request_fingerprint" in ledger
+
+
+def test_tool_identity_maps_to_canonical_capability_id_on_action_and_result() -> None:
+    records = _section("4. Conceptual environment-session records")
+    _has(
+        records,
+        "tool_id MUST equal the exact canonical ClientInvocationRecord.capability_id",
+        "not an independent APR alias",
+        "trusted capability_id",
+        "Both EnvironmentAction.tool_id and EnvironmentResult.tool_id",
+        "same original ledger capability_id",
+        "not just Action.tool_id == Result.tool_id",
+        "Reject mismatched or missing capability_id",
+        "Action and Result agree on a forged tool_id",
+        "different capability_id, capability_version or request_fingerprint",
+    )
+    effect = _section("5. Freshness, target selection and state-sensitive dispatch")
+    _has(
+        effect,
+        "EnvironmentAction.tool_id against ClientInvocationRecord.capability_id",
+        "exact grant identity/expected admitted session revision",
+    )
+    recovery = _section("7. Bounded observation and state reconciliation")
+    _has(
+        recovery,
+        "EnvironmentResult.tool_id == EnvironmentAction.tool_id == original ClientInvocationRecord.capability_id",
+        "(client_id, principal_id, invocation_id)",
+        "canonical capability_version and request_fingerprint",
+    )
+    negatives = _section("9. Negative acceptance vectors and refusal semantics")
+    _has(
+        negatives,
+        "forged Action and Result sharing the SAME attacker-substituted tool_id",
+        "conflicting with original ClientInvocationRecord.capability_id",
+        "reject BOTH",
+        "even when invocation_id, capability_version and request_fingerprint agree",
+    )
+    ledger_source = _read(Path("cl/src/core/client_invocation_ledger.py"))
+    tree = ast.parse(ledger_source)
+    record = next(
+        node for node in tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "ClientInvocationRecord"
+    )
+    record_fields = {
+        stmt.target.id for stmt in record.body
+        if isinstance(stmt, ast.AnnAssign) and isinstance(stmt.target, ast.Name)
+    }
+    assert {
+        "client_id", "principal_id", "invocation_id", "capability_id",
+        "capability_version", "request_fingerprint",
+    } <= record_fields
+    assert "capability_id TEXT NOT NULL" in ledger_source
+    assert "PRIMARY KEY (client_id, principal_id, invocation_id)" in ledger_source
+    assert "existing.capability_id != capability_id" in ledger_source
+    assert "existing.capability_version != capability_version" in ledger_source
+    assert "existing.request_fingerprint != request_fingerprint" in ledger_source
+    fields = _records()
+    assert "tool_id" in fields["EnvironmentAction"]
+    assert "tool_id" in fields["EnvironmentResult"]
