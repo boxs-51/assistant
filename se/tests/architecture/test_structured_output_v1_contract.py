@@ -142,6 +142,39 @@ def test_so_c0_a_c03_provider_matrix_and_ptc_boundary() -> None:
     assert "not an output schema" in text
 
 
+def test_so_c0_a_c03_openai_json_object_requires_trusted_instruction() -> None:
+    """Read-only preflight specification, not provider/runtime enforcement."""
+    contract = _contract()
+    matrix = next(
+        row for row in contract.splitlines()
+        if row.startswith("| OpenAI **Chat Completions** |")
+    )
+    assert "JSON_OBJECT" in matrix
+    assert "trusted JSON output instruction before physical send" in matrix
+    assert "fail-closed preflight" in matrix
+    section = contract.split(
+        "**OpenAI Chat Completions JSON_OBJECT trusted-instruction preflight", 1
+    )[1].split("**PTC #8 boundary:**", 1)[0]
+    for required in (
+        "DIRECT",
+        "AGENT ordinary",
+        "AGENT recovery",
+        "Session regenerate",
+        "retries",
+        "fallback",
+        "trusted server-side eligibility gate",
+        "system/developer instruction layer",
+        "separate production authority",
+        "untrusted user/tool/model text",
+        "before dispatch",
+        "OUTPUT_FORMAT_UNSUPPORTED",
+        "zero provider attempts",
+        "no implementation",
+    ):
+        assert required.lower() in section.lower(), required
+    assert "JSON_SCHEMA" in section
+
+
 def test_so_c0_a_c03_current_provider_request_adapters_still_have_gaps() -> None:
     """Baseline truth test; pass means gaps were inventoried, not repaired."""
     openai = _read("se/src/provider/openai/converters/chats/request.py")
