@@ -240,6 +240,27 @@ def test_so_c0_a_c06_strict_stream_and_terminal_acceptance_are_frozen() -> None:
     assert "NOT" in text
 
 
+def test_so_c0_a_c06_stream_atomicity_covers_both_json_modes() -> None:
+    """Contract-only evidence: no pre-validation chunks for either JSON mode."""
+    stream_section = _contract().split(
+        "### Streaming, refusal, output terminality", 1
+    )[1].split("## 4. Canonical failure", 1)[0]
+    assert "JSON_OBJECT and JSON_SCHEMA chunks are *provisional*" in stream_section
+    for invariant in (
+        "both modes require bounded buffering",
+        "strict terminal JSON validation before committed SSE publication",
+        "For both JSON_OBJECT and JSON_SCHEMA",
+        "duplicate decoded keys at any nesting level",
+        "trailing JSON documents",
+        "non-object root BEFORE any SSE public chunk",
+        "JSON_SCHEMA additionally requires local schema validation",
+        "JSON_OBJECT must NOT skip the duplicate-key and single-object gates",
+        "typed error",
+        "atomically publish committed result",
+    ):
+        assert invariant in stream_section, invariant
+
+
 def test_so_c0_a_c07_error_matrix_is_complete_and_fails_closed() -> None:
     text = _contract()
     for code in (
