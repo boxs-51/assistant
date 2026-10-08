@@ -64,13 +64,26 @@ Runtime-session closure/disconnect is **not automatically an AE terminal transit
 The following are **conceptual contract records**, NOT production Python classes or an API release:
 
 ```text
-StreamOpen(execution_id, runtime_session_id, stream_request_id, model,
-           requested_modalities, capability_snapshot, caller_deadline)
-StreamInput(session_id, generation, input_sequence, event_id, payload_type)
-StreamChunk(request_id, generation, chunk_sequence, kind, provisional_payload)
-StreamTerminal(request_id, finish_reason, refusal_or_error, usage, final_payload)
-StreamCancel(request_id, generation, reason, acknowledged_sequence?)
+StreamOpen(owner_user_id, agent_instance_id, execution_id,
+           runtime_session_id, connection_id, generation, stream_request_id,
+           correlation_id, model, requested_modalities, capability_snapshot,
+           caller_deadline)
+StreamInput(owner_user_id, execution_id, runtime_session_id, connection_id,
+            generation, stream_request_id, input_sequence, event_id,
+            payload_type, inline_payload_or_immutable_payload_ref)
+StreamChunk(owner_user_id, execution_id, runtime_session_id, connection_id,
+            generation, stream_request_id, chunk_sequence, kind,
+            provisional_payload)
+StreamTerminal(owner_user_id, execution_id, runtime_session_id, connection_id,
+               generation, stream_request_id, terminal_id, finish_reason,
+               refusal_or_error, usage, final_payload)
+StreamCancel(owner_user_id, execution_id, runtime_session_id, connection_id,
+             generation, stream_request_id, reason, acknowledged_sequence?)
 ```
+
+For every conceptual record, `owner_user_id`, `execution_id`, `runtime_session_id`, `connection_id`, `generation` and `stream_request_id` are **mandatory immutable provenance fields**. A trusted admission creates an immutable stream-request-to-provenance binding for the lifetime of the active request and bounded replay/terminal-retention horizon; the binding binds authenticated owner, AgentInstance, AE execution, runtime session, live connection generation and provider request identity. Every partial, input, cancel and terminal MUST validate against that binding and the currently authorized transport generation before presentation/adoption. A late terminal carrying an old generation or missing provenance MUST be rejected even if `stream_request_id` happens to match a valid logical request. On reconnect, a new transport generation requires fresh authenticated admission and an explicitly minted or re-bound stream request identity; never silently inherit an old generation or accept an old terminal.
+
+`StreamInput.inline_payload_or_immutable_payload_ref` MUST carry **exactly one** of (a) a bounded inline payload whose type, byte-size ceiling and session authorization are validated or (b) a scoped immutable payload reference with validated owner, content identity/hash, length, media type, TTL and access authorization, resolved under the existing CAS/F7-T asset ownership contract. `payload_type` alone is insufficient. No unspecified out-of-band input channel is allowed. Absent, expired, mutable, oversized, foreign or mismatched input content MUST fail closed without new Tool dispatch. This conceptual reference does not implement a new blob store, binary socket, microphone capture or Audio/VAD runtime; the existing owners must independently release any future production realization.
 
 Admission MUST check the **actual provider/model/endpoint/mode capability**, independently for TEXT token streaming, AUDIO_INPUT, AUDIO_OUTPUT and true DUPLEX audio. Unsupported modalities MUST fail closed or negotiate an explicitly authorized compatible mode **before** publishing output; neither a provider marketing label nor an existing generic WebSocket implies support. No silent audio/video/VAD/speech codec guarantee.
 
