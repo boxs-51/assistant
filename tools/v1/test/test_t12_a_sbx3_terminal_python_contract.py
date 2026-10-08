@@ -201,7 +201,7 @@ def test_t12_a_owner_split_and_gate_chain_do_not_grant_production():
     _requires(
         "Tools V1 #371 (future PRE-CLAIM, NOT RELEASED)",
         "SBX-3 #164 (future PRE-CLAIM, NOT RELEASED)",
-        "fresh Linux/Windows Architecture and independent T12-A FINAL",
+        "Fresh Linux/Windows Architecture and independent T12-A FINAL",
         "re-audit #147 UBQ, AE-R14",
         "independent production PRE-CLAIM with exact pathset",
         "Production merges only with their applicable explicit wave authorization",
