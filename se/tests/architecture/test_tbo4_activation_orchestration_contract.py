@@ -125,6 +125,10 @@ def test_tbo4_freezes_activation_decision_identity_and_replay() -> None:
     assert "replay MUST NOT create a second AgentExecution" in contract
     assert "reusing one activation_request_id for a different Task is a conflict" in contract
     assert "the key is idempotency identity, not authorization" in contract
+    assert "ACTIVATION_REPLAY` is a response indicating that a pre-existing" in contract
+    assert "not a third durable allow/deny outcome" in contract
+    assert "allowed replay preserves the same bound execution" in contract
+    assert "denied replay preserves zero executions" in contract
 
     for disposition in (
         "ACTIVATION_ALLOWED",
@@ -197,16 +201,19 @@ def test_tbo4_reuses_r8_admission_and_freezes_multiworker_cas_semantics() -> Non
     ) in normalized
     assert "all same-key races: exactly one canonical durable decision" in normalized
     assert (
-        "if canonical disposition == ACTIVATION_ALLOWED: "
+        "if persisted canonical decision outcome == ALLOW: "
         "exactly one canonical execution binding "
-        "at most one local execution start"
+        "at most one local execution start "
+        "allowed ACTIVATION_REPLAY observes the original execution binding"
     ) in normalized
     assert (
-        "if canonical disposition != ACTIVATION_ALLOWED: "
+        "if persisted canonical decision outcome == DENY: "
         "exactly zero execution bindings "
         "exactly zero local execution starts "
         "same-key denied races converge on the same durable denial"
     ) in normalized
+    assert "if canonical disposition != ACTIVATION_ALLOWED:" not in contract
+    assert "response disposition differs from `ACTIVATION_ALLOWED`" in contract
     assert (
         "A denied request (including terminal, WAITING, horizon-expired, "
         "review-required, UBQ-deferred or unresolved-owner) MUST NOT create "
@@ -273,18 +280,20 @@ def test_tbo4_preserves_aat_tbo5_boundary_and_exit_gate() -> None:
     # A denial replay must never create an AgentExecution merely to pass a race test.
     assert (
         "same decision key, one worker, repeated call -> same durable decision; "
-        "if ACTIVATION_ALLOWED, same canonical execution identity; "
-        "if denied, zero execution identities"
+        "if persisted outcome ALLOW, the original canonical execution identity "
+        "even on ACTIVATION_REPLAY; if persisted outcome DENY, zero execution identities"
     ) in normalized
     assert (
         "same decision key, many workers -> one durable canonical decision; "
-        "if ACTIVATION_ALLOWED, exactly one execution binding and at most one local start; "
-        "if denied, zero execution bindings and zero local starts"
+        "if persisted outcome ALLOW, exactly one execution binding and at most one "
+        "local start even on ACTIVATION_REPLAY; "
+        "if persisted outcome DENY, zero execution bindings and zero local starts"
     ) in normalized
     assert (
         "replay after process restart -> same durable decision; "
-        "if ACTIVATION_ALLOWED, the same bound execution identity; "
-        "if denied, the same durable denial with zero execution"
+        "if persisted outcome ALLOW, the original bound execution identity even "
+        "when response is ACTIVATION_REPLAY; "
+        "if persisted outcome DENY, the same durable denial with zero execution"
     ) in normalized
     assert "same decision key, many workers -> exactly one execution;" not in normalized
     assert "replay after process restart -> same durable decision/execution;" not in normalized
