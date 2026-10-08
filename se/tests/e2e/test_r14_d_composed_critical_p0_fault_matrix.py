@@ -58,6 +58,7 @@ def test_r14_d_k1_result_loss_k2_wire_reconcile_late_k1_cannot_replay_or_rewrite
         ready = threading.Event()
         release_k1 = threading.Event()
         k1_result_send_finished = threading.Event()
+        late_k1_server_received = asyncio.Event()
         external_effects = []
         server_fallback_calls = []
         wire_reconciles = []
@@ -66,14 +67,35 @@ def test_r14_d_k1_result_loss_k2_wire_reconcile_late_k1_cannot_replay_or_rewrite
         first_connection_id = "r14-d-k1"
         second_connection_id = "r14-d-k2"
 
+        # Observe an actual frame after the gateway's real WebSocket receive
+        # loop has parsed and delivered it to the server connection runtime.
+        original_handle_realtime_message = connections.handle_realtime_message
+
+        async def observe_server_receipt(connection_id, envelope):
+            handled = await original_handle_realtime_message(connection_id, envelope)
+            if (
+                connection_id == first_connection_id
+                and envelope.type == "capability.result"
+                and envelope.invocation_id == invocation_id
+            ):
+                late_k1_server_received.set()
+            return handled
+
+        connections.handle_realtime_message = observe_server_receipt
+
         class LateFrameObservedRealtime(r6._BlockingResultRealtime):
             def send_result(self, invocation_id, result, **correlation):
-                try:
-                    return super().send_result(
-                        invocation_id, result, **correlation
-                    )
-                finally:
-                    k1_result_send_finished.set()
+                # K2 setup/reconciliation can exceed R6's inherited 5s
+                # barrier; time out explicitly rather than silently claiming
+                # that a failed or never-attempted K1 send has finished.
+                self._result_ready_event.set()
+                if not self._allow_send_event.wait(20.0):
+                    raise TimeoutError("R14-D late K1 result barrier timed out.")
+                sent = super().send_result(
+                    invocation_id, result, **correlation
+                )
+                k1_result_send_finished.set()
+                return sent
 
         def non_idempotent_target(value, **kwargs):
             external_effects.append(value)
@@ -170,11 +192,15 @@ def test_r14_d_k1_result_loss_k2_wire_reconcile_late_k1_cannot_replay_or_rewrite
             assert attempts_before[0].attempt_number == 1
             assert attempts_before[0].connection_id == first_connection_id
 
-            # Release the old terminal result *after* authoritative K2 commit.
-            # Observe the send_result completion, not an arbitrary long sleep.
+            # K1 has not transmitted its result before K2's durable commit.
+            assert not late_k1_server_received.is_set()
+
+            # Release the old result only after the authoritative K2 commit.
+            # Require BOTH a successful client send and receipt through the
+            # gateway's actual WebSocket handler, not a sleep or a finally.
             release_k1.set()
             assert await asyncio.to_thread(k1_result_send_finished.wait, 5.0)
-            await asyncio.sleep(0.2)  # Give the real WebSocket read loop a turn.
+            await asyncio.wait_for(late_k1_server_received.wait(), timeout=5.0)
             after_late = await store.get(invocation_id)
             attempts_after = await store.list_attempts(invocation_id)
             assert after_late is not None
@@ -191,6 +217,7 @@ def test_r14_d_k1_result_loss_k2_wire_reconcile_late_k1_cannot_replay_or_rewrite
                 await r6._close_generation(second, shutdown_dispatcher=True)
             if first is not None:
                 await r6._close_generation(first, shutdown_dispatcher=True)
+            connections.handle_realtime_message = original_handle_realtime_message
             await r6._stop_uvicorn(server, server_task)
 
     asyncio.run(scenario())
