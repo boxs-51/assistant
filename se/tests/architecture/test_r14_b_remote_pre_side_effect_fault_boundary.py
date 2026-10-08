@@ -46,7 +46,8 @@ def test_r14_b_binds_real_tcp_post_dispatch_pre_side_effect_fault_owner() -> Non
     assert "R14-B injected after RUNNING before target callable entry" in source
 
     for proof in (
-        'assert raised.value.code == "LOCAL_EXECUTION_FAILED"',
+        'assert record.terminal_payload["code"] == "LOCAL_EXECUTION_FAILED"',
+        'assert committed.error["code"] == "LOCAL_EXECUTION_FAILED"',
         "assert ledger.running_seen.is_set()",
         "assert ledger.failure_count == 1",
         "assert target_calls == []",
