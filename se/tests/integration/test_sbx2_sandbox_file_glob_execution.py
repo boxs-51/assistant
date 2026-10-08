@@ -16,7 +16,10 @@ from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
 from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
 from se.src.runtimes.capability.contracts.error import CapabilityError
-from se.src.runtimes.capability.contracts.sandbox import (\n    SandboxLeaseState,\n    SandboxProfile,\n)
+from se.src.runtimes.capability.contracts.sandbox import (
+    SandboxLeaseState,
+    SandboxProfile,
+)
 from se.src.runtimes.capability.contracts.target import (
     CapabilityInvocationTarget,
     ResourceScope,
