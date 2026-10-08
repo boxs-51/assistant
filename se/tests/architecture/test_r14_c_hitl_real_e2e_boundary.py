@@ -69,15 +69,15 @@ def test_r14_c_binds_approve_and_deny_to_real_agent_websocket_path() -> None:
         "assert tool_message.role == \"tool\"",
         "assert tool_message.name == CAPABILITY_ID",
         'assert tool_message.tool_call_id == "call-e2e-1"',
-        'assert tool_message.metadata["is_error"] is False',
-        'assert tool_message.metadata["error_code"] is None',
+        'assert tool_message.metadata["success"] is True',
+        'assert tool_message.metadata["retryable"] is False',
         "assert dict(tool_message.content) == {",
         '"echo": "hello-from-agent",',
         '"executed_on": "client",',
         'assert executed_tools == []',
-        'assert tool_message.metadata["is_error"] is True',
-        'assert tool_message.metadata["error_code"] == "HITL_DENIED"',
-        'assert "Local user denied capability" in tool_message.content',
+        'assert tool_message.metadata["success"] is False',
+        'assert dict(tool_message.content)["error_code"] == "HITL_DENIED"',
+        'dict(tool_message.content)["error_message"] == f"Local user denied capability',
     ):
         assert proof in source
 
