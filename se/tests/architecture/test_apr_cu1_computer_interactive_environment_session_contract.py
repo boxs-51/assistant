@@ -156,6 +156,12 @@ def test_conceptual_observation_action_and_result_bind_current_target() -> None:
         "arguments_ref", "idempotency_class",
     } <= fields["EnvironmentAction"]
     assert {"action_id", "result_status", "uncertain_external_effect"} <= fields["EnvironmentResult"]
+    invocation_semantics = {
+        "action_id", "invocation_id", "client_id", "principal_id",
+        "capability_version", "request_fingerprint",
+    }
+    assert invocation_semantics <= fields["EnvironmentAction"]
+    assert invocation_semantics <= fields["EnvironmentResult"]
 
 
 def test_bounded_observation_and_argument_payloads_are_authorized() -> None:
@@ -269,4 +275,64 @@ def test_architecture_does_not_claim_real_os_or_ui_e2e_pass() -> None:
         "independent auditor PASS",
         "explicit user authorization",
         "no merge authority",
+    )
+
+
+def test_queued_action_revalidates_at_physical_effect_boundary() -> None:
+    s = _section("5. Freshness, target selection and state-sensitive dispatch")
+    _has(
+        s,
+        "physical CLIENT_LOCAL/Tool execution boundary",
+        "immediately before the first external side effect",
+        "MUST atomically revalidate",
+        "window/browser/DOM/geometry state fingerprint",
+        "foreground/focus target",
+        "expected_observation_id + expected_observation_revision",
+        "per-invocation HITL approval_id",
+        "serialized with initiation of the physical side effect",
+        "TOCTOU bug",
+        "after dispatch but before execution",
+        "FAIL CLOSED / REQUIRE NEW OBSERVATION",
+        "neither implements OS locking nor grants new runtime",
+    )
+    negative = _section("9. Negative acceptance vectors and refusal semantics")
+    _has(
+        negative,
+        "after dispatch while queued but before physical effect-boundary validation",
+        "target_epoch or DOM/window/geometry fingerprint changes",
+        "atomic execution-boundary fence or fail closed",
+    )
+
+
+def test_action_identity_is_canonical_ae_r6_invocation_not_parallel_ledger() -> None:
+    s = _section("4. Conceptual environment-session records")
+    _has(
+        s,
+        "one-to-one and immutably",
+        "AE-R6 canonical invocation_id",
+        "(client_id, principal_id, invocation_id)",
+        "capability_version",
+        "request_fingerprint",
+        "different capability_version or request_fingerprint",
+        "same action_id with different invocation_id",
+        "same invocation_id with different capability_version/request_fingerprint",
+        "MUST fail closed before physical dispatch",
+        "NEVER mint a second invocation",
+        "No new APR action ledger",
+    )
+    source = _read(Path("cl/src/core/client_invocation_ledger.py"))
+    assert "PRIMARY KEY (client_id, principal_id, invocation_id)" in source
+    assert "request_fingerprint" in source
+    assert "capability_version" in source
+    assert "invocation_id is already bound to different request semantics." in source
+    _has(
+        _section("7. Bounded observation and state reconciliation"),
+        "resolve action_id to its immutable AE-R6 invocation_id",
+        "Conflicting semantic replay is forbidden",
+    )
+    _has(
+        _section("9. Negative acceptance vectors and refusal semantics"),
+        "action_id mapped to a different invocation_id",
+        "changed capability_version/request_fingerprint",
+        "without a second NON_IDEMPOTENT effect",
     )
