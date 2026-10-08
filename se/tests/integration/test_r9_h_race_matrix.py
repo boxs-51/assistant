@@ -6,6 +6,8 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from se.src.infrastructure.storage.repositories.agent import AgentRepository
+
 from se.src.runtimes.agent.contracts.resume import (
     ResumeClaimConsumeSpec,
     ResumeClaimIntent,
@@ -642,9 +644,136 @@ async def test_r9_h_resume_claim_create_vs_adopt_never_leaves_created_claim(tmp_
         assert task.status == "COMPLETED"
         assert claim is None or claim.state == "REJECTED"
         assert claim is None or claim.rejection_code == "TASK_RESOLVED"
-        for outcome in outcomes:
-            if isinstance(outcome, ResumeClaimRejected):
-                assert outcome.code == "TASK_TERMINAL"
+        claim_outcome, adopt_outcome = outcomes
+        if isinstance(claim_outcome, BaseException):
+            assert isinstance(claim_outcome, ResumeClaimRejected), repr(claim_outcome)
+            assert claim_outcome.code == "TASK_TERMINAL"
+        else:
+            assert claim_outcome.resume_request_id == resume_request_id
+        # return_exceptions=True must never hide an ADOPT failure, including
+        # SQLite busy, exhausted retries, or an unrelated lifecycle error.
+        assert not isinstance(adopt_outcome, BaseException), repr(adopt_outcome)
+        assert adopt_outcome.task_id == source["task_id"]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.parametrize(
+    "schedule", ("claim_commits_first", "adopt_commits_first", "adopt_scans_first")
+)
+@pytest.mark.asyncio
+async def test_r9_h_resume_claim_adopt_isolation_ordering_diagnostic(
+    tmp_path, schedule
+):
+    """Exercise real SQLite sessions in two winning orders and the scan gap.
+
+    The ADOPT scan barrier awaits *after* the actual database SELECT but
+    before Task CAS. It never mocks a lock, overrides an ORM result, or
+    changes production transaction semantics. On unfixed SQLite, the
+    adopt_scans_first case is expected to expose the orphan CREATED claim
+    and remain RED until a separately approved production repair.
+    """
+    adopt_scanned = asyncio.Event()
+    release_adopt = asyncio.Event()
+    trace = []
+
+    class _AdoptScanBarrierRepository(AgentRepository):
+        async def list_created_resume_claims_for_task_for_update(self, task_id):
+            claims = await super().list_created_resume_claims_for_task_for_update(
+                task_id
+            )
+            if schedule == "adopt_scans_first":
+                trace.append(("adopt_scanned", tuple(c.claim_id for c in claims)))
+                adopt_scanned.set()
+                await asyncio.wait_for(release_adopt.wait(), timeout=15)
+            return claims
+
+    engine, sessions, service, planner = await _setup(
+        tmp_path,
+        name=f"r9_h_isolation_{schedule}.sqlite",
+        repository_cls=_AdoptScanBarrierRepository,
+    )
+    try:
+        source = await _seed_source(
+            sessions, service, planner, task_id=f"task-r9-h-{schedule}"
+        )
+        fork = await service.consume_fork_plan(source["plan"])
+        await service.finish_task_scoped_execution(
+            source["task_id"],
+            execution_id=fork.execution_id,
+            source_revision=1,
+            transition_values={
+                "state": "COMPLETED",
+                "result": {"winner": "fork"},
+                "completed_at": datetime.now(timezone.utc),
+            },
+            delegated=False,
+        )
+
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        resume_request_id = f"resume-create-{source['task_id']}"
+        intent = ResumeClaimIntent(
+            resume_request_id=resume_request_id,
+            execution_id=source["source_execution_id"],
+            checkpoint_id=source["checkpoint_id"],
+            expected_execution_revision=2,
+            plan_fingerprint="c" * 64,
+            user_id="user-r8-d",
+            client_id=None,
+            connection_id=None,
+            wait_reason="RESOURCE",
+            trigger_type=ResumeTriggerType.RESOURCE_READY,
+            claim_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+
+        async def adopt():
+            result = await service.adopt_branch(
+                source["task_id"], fork.branch_id, target_user_id="user-r8-d"
+            )
+            trace.append(("adopt_committed", result.task_revision))
+            return result
+
+        if schedule == "claim_commits_first":
+            created = await store.get_or_create_resume_claim(intent)
+            assert created.resume_request_id == resume_request_id
+            trace.append(("claim_committed", created.claim_id))
+            adopted = await adopt()
+        elif schedule == "adopt_commits_first":
+            adopted = await adopt()
+            with pytest.raises(ResumeClaimRejected) as rejection:
+                await store.get_or_create_resume_claim(intent)
+            assert rejection.value.code == "TASK_TERMINAL"
+            trace.append(("claim_rejected", rejection.value.code))
+        else:
+            adopt_task = asyncio.create_task(adopt())
+            try:
+                await asyncio.wait_for(adopt_scanned.wait(), timeout=15)
+                # The SELECT in the real ADOPT UoW must have seen no claim.
+                assert trace == [("adopt_scanned", ())]
+                created = await asyncio.wait_for(
+                    store.get_or_create_resume_claim(intent), timeout=15
+                )
+                assert created.resume_request_id == resume_request_id
+                trace.append(("claim_committed", created.claim_id))
+            finally:
+                release_adopt.set()
+                adopted = await asyncio.wait_for(adopt_task, timeout=20)
+
+        assert adopted.task_id == source["task_id"]
+        async with _Uow(sessions) as uow:
+            task = await uow.agents.get_task(source["task_id"])
+            claim = await uow.agents.get_resume_claim_by_request_id(
+                resume_request_id
+            )
+        # These durability assertions intentionally remain strict. No
+        # assertion waiver is allowed when the SQLite interleaving is RED.
+        assert task.status == "COMPLETED", (schedule, trace, task.status)
+        assert claim is None or claim.state == "REJECTED", (
+            schedule, trace, None if claim is None else claim.state
+        )
+        assert claim is None or claim.rejection_code == "TASK_RESOLVED", (
+            schedule, trace, None if claim is None else claim.rejection_code
+        )
     finally:
         await engine.dispose()
 
