@@ -232,6 +232,54 @@ async def test_sbx2_driver_fails_closed_if_tool_returns_path_outside_lease(
 
 
 @pytest.mark.asyncio
+async def test_sbx2_result_projection_rejects_symlink_escape(
+    tmp_path: Path,
+):
+    manager = SandboxManager(tmp_path / "sandboxes")
+    profile = SandboxProfile(profile_id="sbx2-file-glob")
+    lease = manager.acquire_for_execution(
+        execution_id="exec-symlink-result",
+        owner_user_id="user-sbx2",
+        profile=profile,
+    )
+    outside_dir = tmp_path / "outside-dir"
+    outside_dir.mkdir()
+    secret = outside_dir / "secret.txt"
+    secret.write_text("host-secret")
+    link = lease.root / "escape-dir"
+    try:
+        link.symlink_to(outside_dir, target_is_directory=True)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"directory symlink/reparse creation unsupported: {exc}")
+
+    def handler(**arguments):
+        del arguments
+        return {
+            "ok": True,
+            "tool": "find_by_glob",
+            "action": "find",
+            "data": {
+                "root_dir": str(lease.root),
+                "matches": [{"path": str(link / "secret.txt")}],
+            },
+            "error": None,
+            "meta": {"version": "test", "truncated": False, "warnings": []},
+        }
+
+    driver = SandboxPythonCapabilityDriver(
+        _definition("glob.find"),
+        handler,
+        manager,
+        profile,
+    )
+    with pytest.raises(SandboxError, match="outside the active lease"):
+        await driver.execute(
+            _context("exec-symlink-result"),
+            {"pattern": "escape-dir/*"},
+        )
+
+
+@pytest.mark.asyncio
 async def test_sbx2_execution_identity_owner_profile_and_restart_are_isolated(
     tmp_path: Path,
 ):
