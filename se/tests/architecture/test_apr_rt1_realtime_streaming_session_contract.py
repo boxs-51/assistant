@@ -30,7 +30,13 @@ def _read(path: Path) -> str:
 
 
 def _norm(text: str) -> str:
-    return " ".join(text.replace("`", "").replace("**", "").split())
+    return " ".join(
+        text.replace("`", "")
+        .replace("/**", "/__RT1_GLOBSTAR__")
+        .replace("**", "")
+        .replace("/__RT1_GLOBSTAR__", "/**")
+        .split()
+    )
 
 
 def _contract() -> str:
@@ -239,7 +245,7 @@ def test_realtime_not_fast_control_and_no_cross_owner_production_release() -> No
     _require(
         _section("2. Source-grounded baseline and capability boundaries"),
         "REALTIME != FAST_CONTROL",
-        "Activating either profile does not grant more Tools",
+        "activating either profile does not grant more Tools",
     )
     _require(_norm(_read(APR_FC1)), "FAST_CONTROL")
     s = _section("10. Explicit cross-owner dependency exit matrix")
