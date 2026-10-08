@@ -146,11 +146,6 @@ def test_so_p1a_portable_schema_positive_closed_nested() -> None:
     b'{"type":"array","items":{"type":"string"},"additionalProperties":false}',
     b'{"type":"array"}',
     b'{"type":["string","null"]}',
-    b'{"type":"string","enum":[1]}',
-    b'{"type":"integer","enum":[true]}',
-    b'{"type":"integer","enum":[1,1]}',
-    b'{"type":"string","enum":[]}',
-    b'{"type":"number","enum":[1,1.0]}',
     b'{"type":"object","properties":{"x":{"type":"string"}},"required":[],"additionalProperties":false}',
     b'{"type":"object","properties":{},"required":["unknown"],"additionalProperties":false}',
     b'{"type":"object","properties":{},"required":["x","x"],"additionalProperties":false}',
@@ -178,6 +173,24 @@ def test_so_p1a_schema_root_must_be_closed_object(raw: bytes) -> None:
     )
 
 
+
+@pytest.mark.parametrize("member_schema", [
+    {"type": "string", "enum": [1]},
+    {"type": "integer", "enum": [True]},
+    {"type": "integer", "enum": [1, 1]},
+    {"type": "string", "enum": []},
+    {"type": "number", "enum": [1, 1.0]},
+])
+def test_so_p1a_nested_invalid_enum_is_checked_beyond_root_gate(
+    member_schema: dict[str, object],
+) -> None:
+    # Valid closed object root forces actual enum validation.
+    _assert_code(
+        lambda: validate_portable_schema(_schema({"value": member_schema})),
+        "OUTPUT_SCHEMA_INVALID",
+    )
+
+
 def test_so_p1a_schema_input_duplicate_key_provenance() -> None:
     # Raw input is mandatory; a dict already lost original duplicate members.
     _assert_code(
@@ -197,14 +210,14 @@ def test_so_p1a_schema_depth_property_and_enum_limits() -> None:
     for _ in range(10):
         schema = {"type": "array", "items": schema}
     _assert_code(
-        lambda: validate_portable_schema(json.dumps(schema).encode()),
+        lambda: validate_portable_schema(_schema({"deep": schema})),
         "OUTPUT_SCHEMA_INVALID",
     )
     props = {f"p{i}": {"type": "boolean"} for i in range(129)}
     _assert_code(lambda: validate_portable_schema(_schema(props)), "OUTPUT_SCHEMA_INVALID")
     _assert_code(
         lambda: validate_portable_schema(
-            json.dumps({"type": "string", "enum": [str(i) for i in range(65)]}).encode()
+            _schema({"value": {"type": "string", "enum": [str(i) for i in range(65)]}})
         ), "OUTPUT_SCHEMA_INVALID",
     )
     _assert_code(
