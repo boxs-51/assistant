@@ -437,3 +437,8 @@ def test_so_c0_p2_duplicate_free_nested_json_is_not_rejected() -> None:
     }
     assert "no free retry" in _contract().lower()
     assert "future production invariants only" in _contract().lower()
+
+
+def test_so_c0_a_c03_gemini_enum_contract() -> None:
+    assert '"mimeType":"APPLICATION_JSON"' in _contract()
+    assert 'responseMimeType="application/json"' in _contract()
