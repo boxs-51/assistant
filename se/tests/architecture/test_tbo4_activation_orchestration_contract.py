@@ -195,9 +195,27 @@ def test_tbo4_reuses_r8_admission_and_freezes_multiworker_cas_semantics() -> Non
         "bind ActivationDecisionKey -> UBQ non-mutating activation gate "
         "-> R8 atomic root execution admission"
     ) in normalized
-    assert "exactly one canonical durable decision" in contract
-    assert "exactly one canonical execution binding" in contract
-    assert "at most one local execution start" in contract
+    assert "all same-key races: exactly one canonical durable decision" in normalized
+    assert (
+        "if canonical disposition == ACTIVATION_ALLOWED: "
+        "exactly one canonical execution binding "
+        "at most one local execution start"
+    ) in normalized
+    assert (
+        "if canonical disposition != ACTIVATION_ALLOWED: "
+        "exactly zero execution bindings "
+        "exactly zero local execution starts "
+        "same-key denied races converge on the same durable denial"
+    ) in normalized
+    assert (
+        "A denied request (including terminal, WAITING, horizon-expired, "
+        "review-required, UBQ-deferred or unresolved-owner) MUST NOT create "
+        "or bind an AgentExecution."
+    ) in normalized
+    assert (
+        "ACTIVATION_REPLAY reports an existing canonical decision; "
+        "it is not an independent execution-admission grant."
+    ) in normalized
     assert "creates no duplicate AgentExecution" in contract
     assert "performs no winner cleanup mutation" in contract
     assert "different key is never permission to create a sibling root execution" in contract
