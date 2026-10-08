@@ -165,7 +165,7 @@ def _matches_type(value: Any, kind: str) -> bool:
         return type(value) is str
     if kind == "integer":
         # V1 conservative lexical integer test: 1.0 is a number, not an int.
-        return type(value) is int
+        return type(value) is int or (type(value) is Decimal and value == value.to_integral_value())
     if kind == "number":
         return type(value) in (int, Decimal)
     if kind == "boolean":
@@ -242,7 +242,7 @@ def validate_portable_schema(raw_schema: bytes) -> dict[str, Any]:
     """
     node = _decode(
         raw_schema, code="OUTPUT_SCHEMA_INVALID",
-        max_bytes=MAX_PROVISIONAL_SCHEMA_BYTES, max_depth=MAX_SCHEMA_DEPTH + 2,
+        max_bytes=MAX_PROVISIONAL_SCHEMA_BYTES, max_depth=MAX_OUTPUT_DEPTH,
     )
     _validate_schema_node(node, depth=1, property_count=[0])
     return node
