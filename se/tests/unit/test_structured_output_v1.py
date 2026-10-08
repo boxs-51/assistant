@@ -183,7 +183,6 @@ def test_so_p1a_schema_depth_property_and_enum_limits() -> None:
 @pytest.mark.parametrize("response", [
     b'{"status":"normal","count":"3","details":{"ok":true}}',
     b'{"status":"normal","count":true,"details":{"ok":true}}',
-    b'{"status":"normal","count":3.0,"details":{"ok":true}}',
     b'{"status":"normal","count":3,"details":{"ok":"true"}}',
     b'{"status":"normal","count":3,"details":{"ok":true},"extra":1}',
     b'{"status":"normal","count":3,"details":{}}',
@@ -195,6 +194,31 @@ def test_so_p1a_schema_mismatch_never_coerces(response: bytes) -> None:
         lambda: validate_json_schema_result(response, _schema()),
         "OUTPUT_SCHEMA_MISMATCH",
     )
+
+
+
+def test_so_p1a_json_schema_integral_decimal_is_integer_without_coercion() -> None:
+    result = validate_json_schema_result(
+        b'{"status":"normal","count":3.0,"details":{"ok":true}}', _schema()
+    )
+    assert result["count"] == Decimal("3.0")
+    _assert_code(
+        lambda: validate_json_schema_result(
+            b'{"status":"normal","count":3.5,"details":{"ok":true}}', _schema()
+        ), "OUTPUT_SCHEMA_MISMATCH",
+    )
+
+
+def test_so_p1a_schema_allows_eight_logical_nodes_but_not_nine() -> None:
+    node: dict[str, object] = {"type": "string"}
+    for _ in range(7):
+        node = {"type": "array", "items": node}
+    _assert_code(
+        lambda: validate_portable_schema(
+            json.dumps({"type": "array", "items": node}).encode()
+        ), "OUTPUT_SCHEMA_INVALID",
+    )
+    assert validate_portable_schema(json.dumps(node).encode())["type"] == "array"
 
 
 def test_so_p1a_generated_duplicate_is_json_error_not_schema_mismatch() -> None:
