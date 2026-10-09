@@ -1191,11 +1191,14 @@ async def test_r9_h_e1_no_budget_terminal_disallows_replay_and_late_claim(
         intent = _e1_intent(plan, f"rr-r9-h-e1-{terminal_status}")
         first = await store.get_or_create_resume_claim(intent)
 
-        # This is the actual service-less legacy Task-terminal update path,
-        # not TaskBudgetService.  The SQLite Task has NO Budget record.
-        await store.update_task(
+        # Exercise the new bounded service-less terminal durability seam,
+        # not generic update_task() and not TaskBudgetService.  The SQLite Task
+        # has NO Budget record, matching coordinator legacy authority.
+        await store.terminalize_legacy_task_and_reject_resume_claims(
             task_id,
-            {"status": terminal_status, "wait_reasons": []},
+            allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
+            target_state=terminal_status,
+            values={"wait_reasons": []},
         )
         with pytest.raises(ResumePlanRejected) as terminal:
             await planner.build_resume_plan(
