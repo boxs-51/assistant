@@ -507,15 +507,20 @@ class MultiAgentCoordinator:
             await asyncio.gather(runner, return_exceptions=True)
 
         if self.durable_store and self.task_budget_service is None:
-            await self.durable_store.update_task(
-                task.task_id,
-                {
-                    "status": task.status.value,
-                    "wait_reasons": task.wait_reasons,
-                    "output": task.output,
-                    "error": task.error,
-                },
+            durable = (
+                await self.durable_store
+                .terminalize_legacy_task_and_reject_resume_claims(
+                    task.task_id,
+                    allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
+                    target_state=AgentTaskStatus.CANCELLED.value,
+                    values={
+                        "wait_reasons": task.wait_reasons,
+                        "output": task.output,
+                        "error": task.error,
+                    },
+                )
             )
+            self._sync_task_from_record(task, durable)
         return task
 
     async def start_task(self, task_id: str, identity: Identity, executor) -> AgentTask:
@@ -758,12 +763,34 @@ class MultiAgentCoordinator:
             task.error = execution.error
 
         if self.durable_store and self.task_budget_service is None:
-            await self.durable_store.update_task(task.task_id, {
-                "status": task.status.value,
+            durable_values = {
                 "wait_reasons": task.wait_reasons,
                 "output": task.output,
                 "error": task.error,
-            })
+            }
+            if target_status is AgentTaskStatus.WAITING:
+                await self.durable_store.update_task(
+                    task.task_id,
+                    {
+                        "status": task.status.value,
+                        **durable_values,
+                    },
+                )
+            else:
+                durable = (
+                    await self.durable_store
+                    .terminalize_legacy_task_and_reject_resume_claims(
+                        task.task_id,
+                        allowed_source_states=(
+                            "ASSIGNED",
+                            "RUNNING",
+                            "WAITING",
+                        ),
+                        target_state=target_status.value,
+                        values=durable_values,
+                    )
+                )
+                self._sync_task_from_record(task, durable)
         return execution
 
     async def execute_parallel(self, task_ids: List[str], identity: Identity, executor, max_parallel: int = 4):
