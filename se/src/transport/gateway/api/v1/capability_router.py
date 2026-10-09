@@ -248,12 +248,13 @@ async def list_capabilities(
     catalog = _catalog(container)
     runtime = container.capability_runtime
     result = []
+    durable_skill_authority = runtime.publication_authority is not None
     for definition in catalog.list_definitions():
         try:
             definition_kind = definition.kind
         except ValueError:
             continue
-        if definition_kind is CapabilityKind.SKILL:
+        if definition_kind is CapabilityKind.SKILL and durable_skill_authority:
             continue
         if not _authorization(container).is_allowed(identity, definition):
             continue
@@ -266,7 +267,7 @@ async def list_capabilities(
                 catalog.list_implementations(definition.capability_id),
             )
         )
-    if kind in (None, CapabilityKind.SKILL):
+    if durable_skill_authority and kind in (None, CapabilityKind.SKILL):
         try:
             for definition in await runtime.list_visible_context_skills(identity):
                 result.append(_response(CapabilityKind.SKILL, definition, []))
