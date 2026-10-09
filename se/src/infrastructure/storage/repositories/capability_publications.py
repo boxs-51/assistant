@@ -132,6 +132,16 @@ class CapabilityPublicationRepository:
             )
         ).scalar_one_or_none()
 
+    async def _read(self, capability_id: str):
+        async with self._session_factory() as session:
+            return (
+                await session.execute(
+                    select(CapabilityPublicationRecord).where(
+                        CapabilityPublicationRecord.capability_id == capability_id
+                    )
+                )
+            ).scalar_one_or_none()
+
     async def _insert_reservation(
         self,
         *,
@@ -189,6 +199,15 @@ class CapabilityPublicationRepository:
         except PublicationConflict:
             raise
         except IntegrityError as exc:
+            current = await self._read(capability_id)
+            if current is not None and (
+                current.capability_kind == kind.value
+                and current.origin_class == origin_class
+                and current.origin_fingerprint == fingerprint
+                and current.publisher_type == publisher_type
+                and current.publisher_id == publisher_id
+            ):
+                return current
             raise PublicationConflict(
                 f"Capability id '{capability_id}' was concurrently reserved."
             ) from exc
@@ -297,6 +316,18 @@ class CapabilityPublicationRepository:
         except PublicationConflict:
             raise
         except IntegrityError as exc:
+            current = await self._read(definition.capability_id)
+            if current is not None and (
+                current.capability_kind == definition.kind.value
+                and current.origin_class == ORIGIN_CALLER
+                and current.origin_fingerprint == fingerprint
+                and current.publisher_type == PUBLISHER_USER
+                and current.publisher_id == publisher_id
+                and current.purpose == PURPOSE_DIRECT
+                and current.state == STATE_ACTIVE
+                and current.payload_digest == digest
+            ):
+                return current
             raise PublicationConflict(
                 f"Capability id '{definition.capability_id}' was concurrently published."
             ) from exc
