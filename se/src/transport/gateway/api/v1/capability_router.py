@@ -33,6 +33,7 @@ from .....infrastructure.storage.repositories.capability_publications import (
     PublicationAuthorityUnavailable,
     PublicationConflict,
     PublicationPermissionDenied,
+    PublicationStaleRevision,
 )
 from .....runtimes.capability.contracts.result import CapabilityResult
 from .....runtimes.capability.drivers.agent_driver import AgentCapabilityDriver
@@ -72,7 +73,7 @@ def _raise_publication_http(exc: Exception):
         ) from exc
     if isinstance(exc, PublicationPermissionDenied):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
-    if isinstance(exc, PublicationConflict):
+    if isinstance(exc, (PublicationConflict, PublicationStaleRevision)):
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     raise exc
 
@@ -211,7 +212,7 @@ async def register_capability(body: CapabilityRegistration, identity: Identity =
         try:
             await runtime.publish_caller_context_skill(definition, identity=identity)
             return _response(CapabilityKind.SKILL, definition, [])
-        except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+        except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
             _raise_publication_http(exc)
 
     try:
@@ -232,7 +233,7 @@ async def register_capability(body: CapabilityRegistration, identity: Identity =
             implementation = catalog.register_implementation(implementation)
         runtime.registry.register_definition(definition)
         return _response(body.kind, definition, [implementation])
-    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
         _raise_publication_http(exc)
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -269,7 +270,7 @@ async def list_capabilities(
         try:
             for definition in await runtime.list_visible_context_skills(identity):
                 result.append(_response(CapabilityKind.SKILL, definition, []))
-        except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+        except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
             _raise_publication_http(exc)
     return sorted(result, key=lambda item: item.capability_id)
 
@@ -303,7 +304,7 @@ async def register_tool_capability(body: GatewayToolDefinition, identity: Identi
         return _response(CapabilityKind.TOOL, definition, [implementation])
     except HTTPException:
         raise
-    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
         _raise_publication_http(exc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -395,7 +396,7 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
             )
             implementations.append(implementation)
         return _response(CapabilityKind.AGENT, definition, implementations)
-    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
         _raise_publication_http(exc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -449,7 +450,7 @@ async def register_skill_capability(body: SkillDefinition, identity: Identity = 
         return _response(CapabilityKind.SKILL, definition, [])
     except HTTPException:
         raise
-    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
         _raise_publication_http(exc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
@@ -465,7 +466,7 @@ async def revoke_skill_capability(
         await container.capability_runtime.revoke_caller_context_skill(
             capability_id, identity=identity
         )
-    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
         _raise_publication_http(exc)
     return None
 
@@ -520,7 +521,7 @@ async def get_capability(
         definition = await container.capability_runtime.get_visible_context_skill(
             capability_id, identity
         )
-    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied) as exc:
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
         _raise_publication_http(exc)
     if definition is None:
         raise HTTPException(status_code=404, detail=f"Unknown capability: {capability_id}")
