@@ -860,6 +860,78 @@ async def test_r9_h_aggregate_vs_source_mutation_preserves_snapshot(tmp_path):
         await engine.dispose()
 
 
+@pytest.mark.parametrize("terminal_kind", ("cancel", "terminalize"))
+@pytest.mark.asyncio
+async def test_r9_h_p1g_create_vs_terminal_writer_rejects_actionable_claim(
+    tmp_path, terminal_kind
+):
+    """CREATE racing CANCEL/TERMINALIZE must not survive Task terminal state."""
+    engine, sessions, service, planner = await _setup(
+        tmp_path, name=f"r9_h_p1g_create_{terminal_kind}.sqlite"
+    )
+    try:
+        source = await _seed_source(
+            sessions,
+            service,
+            planner,
+            task_id=f"task-r9-h-p1g-{terminal_kind}",
+        )
+        store = DurableAgentStore(lambda: _Uow(sessions))
+        intent = ResumeClaimIntent(
+            resume_request_id=f"resume-{source['task_id']}",
+            execution_id=source["source_execution_id"],
+            checkpoint_id=source["checkpoint_id"],
+            expected_execution_revision=2,
+            plan_fingerprint="d" * 64,
+            user_id="user-r8-d",
+            client_id=None,
+            connection_id=None,
+            wait_reason="RESOURCE",
+            trigger_type=ResumeTriggerType.RESOURCE_READY,
+            claim_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+        )
+
+        async def terminal_writer():
+            if terminal_kind == "cancel":
+                return await service.cancel_task(source["task_id"])
+            return await service.terminalize_task(
+                source["task_id"],
+                allowed_source_states=("RUNNING",),
+                target_state="FAILED",
+                values={"error": "r9-h-p1g-terminal"},
+            )
+
+        create_outcome, terminal_outcome = await asyncio.gather(
+            store.get_or_create_resume_claim(intent),
+            terminal_writer(),
+            return_exceptions=True,
+        )
+        assert not isinstance(terminal_outcome, BaseException), repr(
+            terminal_outcome
+        )
+        if isinstance(create_outcome, BaseException):
+            assert isinstance(create_outcome, ResumeClaimRejected), repr(
+                create_outcome
+            )
+            assert create_outcome.code == "TASK_TERMINAL"
+
+        async with _Uow(sessions) as uow:
+            task = await uow.agents.get_task(source["task_id"])
+            claim = await uow.agents.get_resume_claim_by_request_id(
+                intent.resume_request_id
+            )
+            await uow.commit()
+
+        expected_status = (
+            "CANCELLED" if terminal_kind == "cancel" else "FAILED"
+        )
+        assert task.status == expected_status
+        assert claim is None or claim.state == "REJECTED"
+        assert claim is None or claim.rejection_code == "TASK_RESOLVED"
+    finally:
+        await engine.dispose()
+
+
 # D0-L0-E1 TEST-ONLY amendment (#409): actual no-TaskBudget / R7-D preflight.
 #
 # This uses a fresh on-disk SQLite database and real repositories, an R6 SQL
@@ -1221,6 +1293,20 @@ async def test_r9_h_e1_no_budget_terminal_disallows_replay_and_late_claim(
         # to expose this P1 failure; don't xfail or delete the orphan.
         replay = await store.get_or_create_resume_claim(intent)
         assert replay.claim_id == first.claim_id
+        assert replay.state == "REJECTED"
+        assert replay.rejection_code == "TASK_RESOLVED"
+
+        # plan -> terminal -> R7-G rebind must preserve the durable rejected
+        # winner rather than resurrecting CREATED on the newer generation.
+        rebound = await store.rebind_created_resume_claim(
+            first.claim_id,
+            plan=plan,
+            resume_request_id=first.resume_request_id,
+        )
+        assert rebound.claim_id == first.claim_id
+        assert rebound.state == "REJECTED"
+        assert rebound.rejection_code == "TASK_RESOLVED"
+
         async with factory() as uow:
             task = await uow.agents.get_task(task_id)
             budget = await uow.agents.get_task_budget(task_id)
