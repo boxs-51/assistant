@@ -277,15 +277,15 @@ class CapabilityPublicationRepository:
                         raise PublicationConflict(
                             f"Capability id '{definition.capability_id}' belongs to another origin."
                         )
-                    if current.state == STATE_REVOKED:
-                        current.state = STATE_ACTIVE
+                    was_revoked = current.state == STATE_REVOKED
                     if current.purpose == PURPOSE_NAMESPACE:
                         current.purpose = PURPOSE_DIRECT
                     elif current.purpose != PURPOSE_DIRECT:
                         raise PublicationConflict("Incompatible publication purpose.")
-                    if current.payload_digest == digest and current.state == STATE_ACTIVE:
+                    if current.payload_digest == digest and not was_revoked:
                         return current
                     current.revision += 1
+                    current.state = STATE_ACTIVE
                     current.visibility = VISIBILITY_OWNER
                     current.recipient_user_id = publisher_id
                     current.canonical_definition = canonical
