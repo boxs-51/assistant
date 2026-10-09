@@ -80,6 +80,9 @@ from ...application.user_tool_quota import (
     UserToolQuotaConflictError,
     UserToolQuotaError,
 )
+from ...infrastructure.storage.repositories.capability_publications import (
+    PublicationAuthorityUnavailable,
+)
 from .validation import JsonSchemaCapabilityArgumentValidator
 
 ContinuationDispatchGuard = Callable[
@@ -105,6 +108,7 @@ class CapabilityRuntime(BaseRuntime):
         invocation_lifecycle: CapabilityInvocationLifecycle | None = None,
         tool_quota_service: Any | None = None,
         argument_validator: Any | None = None,
+        publication_authority: Any | None = None,
     ):
         manifest = RuntimeManifest(
             id="capability_runtime",
@@ -122,6 +126,7 @@ class CapabilityRuntime(BaseRuntime):
         self.driver_registry = driver_registry or CapabilityDriverRegistry()
         self.invocation_lifecycle = invocation_lifecycle or CapabilityInvocationLifecycle()
         self.tool_quota_service = tool_quota_service
+        self.publication_authority = publication_authority
         self.argument_validator = (
             argument_validator or JsonSchemaCapabilityArgumentValidator()
         )
@@ -258,6 +263,120 @@ class CapabilityRuntime(BaseRuntime):
     def register_capability(self, driver: BaseCapabilityDriver):
         return self.registry.register_capability(driver)
 
+    def _require_publication_authority(self):
+        if self.publication_authority is None:
+            raise PublicationAuthorityUnavailable(
+                "Durable Skill publication authority is not configured."
+            )
+        return self.publication_authority
+
+    async def publish_caller_context_skill(
+        self,
+        definition: CapabilityDefinition,
+        *,
+        identity: Identity,
+    ) -> CapabilityDefinition:
+        publisher_id = str(identity.user_id or "")
+        if not publisher_id:
+            raise PermissionError("Authenticated principal is required.")
+        authority = self._require_publication_authority()
+        await authority.publish_user_context(
+            definition,
+            publisher_id=publisher_id,
+        )
+        return definition
+
+    async def reserve_caller_namespace(
+        self,
+        definition: CapabilityDefinition,
+        *,
+        identity: Identity,
+    ):
+        publisher_id = str(identity.user_id or "")
+        if not publisher_id:
+            raise PermissionError("Authenticated principal is required.")
+        authority = self.publication_authority
+        if authority is None:
+            return None
+        return await authority.reserve_user_namespace(
+            definition,
+            publisher_id=publisher_id,
+        )
+
+    async def reserve_system_namespace(self, definition: CapabilityDefinition):
+        authority = self.publication_authority
+        if authority is None:
+            return None
+        return await authority.reserve_system_namespace(definition)
+
+    async def publish_system_direct_context(
+        self, definition: CapabilityDefinition
+    ) -> CapabilityDefinition:
+        authority = self._require_publication_authority()
+        await authority.publish_system_direct_context(definition)
+        return definition
+
+    async def revoke_caller_context_skill(
+        self,
+        capability_id: str,
+        *,
+        identity: Identity,
+    ) -> None:
+        publisher_id = str(identity.user_id or "")
+        if not publisher_id:
+            raise PermissionError("Authenticated principal is required.")
+        authority = self._require_publication_authority()
+        await authority.revoke_user_context(
+            capability_id,
+            publisher_id=publisher_id,
+        )
+
+    async def get_direct_context_skills(self, identity: Identity):
+        if self.publication_authority is not None:
+            definitions = await self.publication_authority.list_visible_definitions(
+                identity
+            )
+            return sorted(
+                (
+                    definition
+                    for definition in definitions
+                    if definition.kind is CapabilityKind.SKILL
+                    and definition.execution_mode
+                    is CapabilityExecutionMode.CONTEXT_ONLY
+                    and self.authorization.is_allowed(identity, definition)
+                ),
+                key=lambda item: item.capability_id,
+            )
+
+        # Without the durable authority, caller-origin Skills must never become
+        # a local security fallback. Preserve only genuinely server-managed
+        # legacy context definitions.
+        if self.catalog is None:
+            return []
+        return sorted(
+            (
+                definition
+                for definition in self.catalog.list_definitions()
+                if definition.kind is CapabilityKind.SKILL
+                and definition.execution_mode
+                is CapabilityExecutionMode.CONTEXT_ONLY
+                and definition.metadata.get("server_managed") is True
+                and self.authorization.is_allowed(identity, definition)
+            ),
+            key=lambda item: item.capability_id,
+        )
+
+    async def list_visible_context_skills(self, identity: Identity):
+        return await self.get_direct_context_skills(identity)
+
+    async def get_visible_context_skill(
+        self, capability_id: str, identity: Identity
+    ):
+        for definition in await self.get_direct_context_skills(identity):
+            if definition.capability_id == capability_id:
+                return definition
+        return None
+
     async def get_available_capabilities(
         self,
         identity: Identity,
@@ -277,6 +396,7 @@ class CapabilityRuntime(BaseRuntime):
                 if definition.capability_id not in known_ids
                 and definition.kind is CapabilityKind.SKILL
                 and definition.execution_mode is CapabilityExecutionMode.CONTEXT_ONLY
+                and definition.metadata.get("server_managed") is True
                 and self.authorization.is_allowed(identity, definition)
                 and CapabilityAccessPolicy.allows(definition, access_profile)
             )
