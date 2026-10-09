@@ -1,0 +1,181 @@
+# CI417-A1 temporary, non-mergeable evidence workflow.
+# Intended ONLY for a dedicated, separately audited one-ADD diagnostic branch.
+# NOT native sandbox certification. No workflow_dispatch / pull_request_target / secrets.
+name: CI417 A1 Temporary Windows Expected-RED Evidence
+
+on:
+  push:
+    branches:
+      - ci417-a1-expected-red-20261010
+
+permissions:
+  contents: read
+
+jobs:
+  windows-a1-negative-evidence:
+    name: Windows A1 expected-RED (${{ matrix.owner }})
+    runs-on: windows-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - owner: se-164-pr441
+            head: b8ee5d4b87c96293dbb3f4fa49f105d84c8fe46e
+            blob: 3cd155c5a0e68e80d75cf9a42f4a585e951feb7f
+            testfile: se/tests/architecture/test_sbx3_process_isolation.py
+            target: se/tests/architecture/test_sbx3_process_isolation.py::test_d0_native_process_backend_is_unimplemented_on_frozen_base
+            expectedcount: '4'
+          - owner: tools-371-pr443
+            head: d0b09731b8e621725b2182d6c45649d113b99c53
+            blob: 307c24811b9698543d40c8fe5b6631390dc4ca54
+            testfile: tools/v1/test/test_t12_b_sbx3_terminal_spawn_lease.py
+            target: tools/v1/test/test_t12_b_sbx3_terminal_spawn_lease.py::test_d0_native_backend_source_availability_is_only_observation
+            expectedcount: '6'
+    steps:
+      - name: Checkout frozen exact PR HEAD into disposable directory
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.head }}
+          path: candidate
+          persist-credentials: false
+
+      - name: Install pinned Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12.10'
+
+      - name: Install existing test dependencies from frozen checkout
+        working-directory: candidate
+        shell: pwsh
+        run: python -m pip install -r requirements-test.txt
+
+      - name: Execute bounded 0/1/2 source-presence matrix on exact HEAD
+        shell: pwsh
+        working-directory: candidate
+        env:
+          EXPECTED_HEAD: ${{ matrix.head }}
+          EXPECTED_BLOB: ${{ matrix.blob }}
+          TEST_FILE: ${{ matrix.testfile }}
+          TEST_NODE: ${{ matrix.target }}
+          EXPECTED_BASELINE: ${{ matrix.expectedcount }}
+          OWNER_KEY: ${{ matrix.owner }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          $root = (Get-Location).Path
+          $reportDir = Join-Path $env:RUNNER_TEMP 'ci417-a1-evidence'
+          New-Item -ItemType Directory -Path $reportDir -Force | Out-Null
+
+          # Exact Git provenance; no arbitrary SHA from event inputs.
+          $actualHead = (& git rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualHead -cne $env:EXPECTED_HEAD) {
+            throw "EXACT_HEAD_MISMATCH expected=$($env:EXPECTED_HEAD) actual=$actualHead"
+          }
+          $actualBlob = (& git hash-object -- $env:TEST_FILE).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualBlob -cne $env:EXPECTED_BLOB) {
+            throw "SOURCE_BLOB_MISMATCH expected=$($env:EXPECTED_BLOB) actual=$actualBlob"
+          }
+          $py = (& python --version 2>&1 | Out-String).Trim()
+          if ($LASTEXITCODE -ne 0 -or $py -ne 'Python 3.12.10') {
+            throw "PYTHON_VERSION_MISMATCH actual=$py"
+          }
+          $backend = Join-Path $root 'se/src/runtimes/capability/sandbox_process.py'
+          $driver = Join-Path $root 'se/src/runtimes/capability/drivers/sandbox_terminal_driver.py'
+          if ((Test-Path -LiteralPath $backend) -or (Test-Path -LiteralPath $driver)) {
+            throw 'PRECONDITION_FAILURE native source is already present in candidate'
+          }
+          $results = [System.Collections.Generic.List[object]]::new()
+
+          function Invoke-Case {
+            param(
+              [string]$CaseName,
+              [string]$Selector,
+              [int]$ExpectedTests,
+              [int]$ExpectedExit,
+              [int]$ExpectedFailures,
+              [string]$FailureMarker
+            )
+            $outPath = Join-Path $reportDir "$CaseName.stdout.txt"
+            $errPath = Join-Path $reportDir "$CaseName.stderr.txt"
+            $junit = Join-Path $reportDir "$CaseName.junit.xml"
+            & python -m pytest -q -ra "--junitxml=$junit" $Selector 1> $outPath 2> $errPath
+            $exit = [int]$LASTEXITCODE
+            if (-not (Test-Path -LiteralPath $junit)) { throw "${CaseName}: JUNIT_MISSING exit=$exit" }
+            [xml]$doc = Get-Content -Raw -LiteralPath $junit
+            $suite = $doc.SelectSingleNode('//testsuite')
+            if ($null -eq $suite) { throw "${CaseName}: JUNIT_SUITE_MISSING" }
+            $tests = [int]$suite.GetAttribute('tests')
+            $fails = [int]$suite.GetAttribute('failures')
+            $errors = [int]$suite.GetAttribute('errors')
+            $skipped = [int]$suite.GetAttribute('skipped')
+            $pass = $exit -eq $ExpectedExit -and $tests -eq $ExpectedTests -and
+                    $fails -eq $ExpectedFailures -and $errors -eq 0 -and $skipped -eq 0
+            if ($FailureMarker) {
+              $failure = $suite.SelectSingleNode('.//testcase/failure')
+              if ($null -eq $failure -or -not $failure.OuterXml.Contains($FailureMarker)) {
+                $pass = $false
+              }
+            }
+            $results.Add([pscustomobject]@{
+              scenario=$CaseName; selector=$Selector; exit_code=$exit;
+              tests=$tests; failures=$fails; errors=$errors; skipped=$skipped;
+              required_marker=$FailureMarker; expected_red=$($ExpectedExit -eq 1);
+              gate_passed=$pass
+            })
+            $results | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $reportDir 'scenarios.json') -Encoding utf8
+            if (-not $pass) {
+              throw "${CaseName}: GATE_FAIL exit=$exit tests=$tests failures=$fails errors=$errors skipped=$skipped marker=$FailureMarker"
+            }
+            Write-Host "CI417 VERIFIED $CaseName tests=$tests expected_exit=$exit required_marker=$FailureMarker"
+          }
+
+          try {
+            # 0/2: all frozen existing tests must pass (not a native OS security pass).
+            Invoke-Case -CaseName 'zero-of-two' -Selector $env:TEST_FILE `
+              -ExpectedTests ([int]$env:EXPECTED_BASELINE) -ExpectedExit 0 -ExpectedFailures 0 -FailureMarker ''
+
+            # 1/2: both single-file permutations must be hard RED for the precise reason.
+            New-Item -ItemType Directory -Path (Split-Path -Parent $backend) -Force | Out-Null
+            Set-Content -LiteralPath $backend -Value '# CI417 SOURCE-PRESENCE-ONLY MARKER; NEVER IMPORT/EXECUTE' -Encoding utf8
+            Invoke-Case -CaseName 'one-of-two-backend-only' -Selector $env:TEST_NODE `
+              -ExpectedTests 1 -ExpectedExit 1 -ExpectedFailures 1 -FailureMarker 'PARTIAL_NATIVE_INSTALLATION'
+            Remove-Item -LiteralPath $backend -Force
+
+            New-Item -ItemType Directory -Path (Split-Path -Parent $driver) -Force | Out-Null
+            Set-Content -LiteralPath $driver -Value '# CI417 SOURCE-PRESENCE-ONLY MARKER; NEVER IMPORT/EXECUTE' -Encoding utf8
+            Invoke-Case -CaseName 'one-of-two-driver-only' -Selector $env:TEST_NODE `
+              -ExpectedTests 1 -ExpectedExit 1 -ExpectedFailures 1 -FailureMarker 'PARTIAL_NATIVE_INSTALLATION'
+
+            # 2/2: presence of both markers MUST remain hard RED, not source-only PASS.
+            Set-Content -LiteralPath $backend -Value '# CI417 SOURCE-PRESENCE-ONLY MARKER; NEVER IMPORT/EXECUTE' -Encoding utf8
+            Invoke-Case -CaseName 'two-of-two' -Selector $env:TEST_NODE `
+              -ExpectedTests 1 -ExpectedExit 1 -ExpectedFailures 1 -FailureMarker 'NATIVE_OS_SECURITY_NOT_CERTIFIED'
+          }
+          finally {
+            # Only ephemeral marker files in this runner checkout; never modify owner branches.
+            if (Test-Path -LiteralPath $backend) { Remove-Item -LiteralPath $backend -Force }
+            if (Test-Path -LiteralPath $driver) { Remove-Item -LiteralPath $driver -Force }
+          }
+          if ((Test-Path -LiteralPath $backend) -or (Test-Path -LiteralPath $driver)) {
+            throw 'MARKER_CLEANUP_FAILURE'
+          }
+          $provenance = [ordered]@{
+            kind='CI417_A1_SYNTHETIC_SOURCE_PRESENCE_ONLY'; owner=$env:OWNER_KEY;
+            runner_os=$env:RUNNER_OS; python=$py; head=$actualHead;
+            git_blob=$actualBlob; expected_source_file=$env:TEST_FILE;
+            scenario_count=$results.Count; no_production_edits=$true;
+            native_linux_windows_security_certified=$false
+          }
+          $provenance | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $reportDir 'provenance.json') -Encoding utf8
+          if ($results.Count -ne 4) { throw 'SCENARIO_COUNT_MISMATCH' }
+          Write-Host "CI417 A1 NEGATIVE CONTROLS VERIFIED: $env:OWNER_KEY (0/2 baseline PASS; 1/2 RED in both directions; 2/2 RED)"
+
+      - name: Preserve runner stdout, stderr, JUnit and provenance even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ci417-a1-windows-${{ matrix.owner }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/ci417-a1-evidence/
+          if-no-files-found: warn
+          retention-days: 7
