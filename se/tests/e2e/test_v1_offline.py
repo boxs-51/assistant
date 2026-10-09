@@ -38,12 +38,170 @@ from se.src.runtimes.capability.registration import ClientCapabilityRegistration
 from se.src.runtimes.capability.catalog import CapabilityCatalog
 from se.src.runtimes.capability.registry import CapabilityRegistry
 from se.src.runtimes.capability.runtime import CapabilityRuntime
+from se.src.runtimes.capability.contracts.definition import (
+    CapabilityDefinition,
+    CapabilityExecutionMode,
+    CapabilityKind,
+)
+from se.src.infrastructure.storage.repositories.capability_publications import (
+    PublicationConflict,
+    PublicationPermissionDenied,
+)
 from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.runtimes.workflow.runtime import WorkflowRuntime
 from se.src.runtimes.chat import DirectChatRuntime
 from se.src.runtimes.agent.adapters.inference import ProviderInferenceAdapter
 from se.src.transport.gateway.authentication.dependency import get_current_identity, verify_admin_ip, get_api_key_service
 from se.src.transport.gateway.dependencies import get_container, get_auth
+
+
+class InMemorySkillPublicationAuthority:
+    """Production-interface test double; never used by production code."""
+
+    def __init__(self):
+        self.records = {}
+        self.observer_catalog = None
+
+    @staticmethod
+    def _publisher(identity_or_id):
+        if isinstance(identity_or_id, str):
+            return identity_or_id
+        return str(getattr(identity_or_id, "user_id", "") or "")
+
+    async def publish_user_context(self, definition, *, publisher_id):
+        publisher_id = self._publisher(publisher_id)
+        current = self.records.get(definition.capability_id)
+        if current is not None and (
+            current["publisher_type"] != "USER"
+            or current["publisher_id"] != publisher_id
+        ):
+            raise PublicationConflict("Capability id belongs to another publisher.")
+        self.records[definition.capability_id] = {
+            "definition": definition,
+            "publisher_type": "USER",
+            "publisher_id": publisher_id,
+            "visibility": "OWNER_ONLY",
+            "state": "ACTIVE",
+            "purpose": "DIRECT_CONTEXT",
+        }
+        if self.observer_catalog is not None:
+            self.observer_catalog.register_definition(definition, allow_update=True)
+        return self.records[definition.capability_id]
+
+    async def reserve_user_namespace(self, definition, *, publisher_id):
+        publisher_id = self._publisher(publisher_id)
+        current = self.records.get(definition.capability_id)
+        if current is not None and (
+            current["publisher_type"] != "USER"
+            or current["publisher_id"] != publisher_id
+        ):
+            raise PublicationConflict("Capability id belongs to another publisher.")
+        if current is None:
+            self.records[definition.capability_id] = {
+                "definition": None,
+                "publisher_type": "USER",
+                "publisher_id": publisher_id,
+                "visibility": "NONE",
+                "state": "ACTIVE",
+                "purpose": "NAMESPACE_RESERVATION",
+                "kind": definition.kind,
+            }
+        return self.records[definition.capability_id]
+
+    async def reserve_system_namespace(self, definition, *, publisher_id="assistant-bootstrap"):
+        self._reserve_system_sync(definition, publisher_id=publisher_id)
+        return self.records[definition.capability_id]
+
+    def _reserve_system_sync(self, definition, *, publisher_id="assistant-bootstrap"):
+        current = self.records.get(definition.capability_id)
+        if current is not None and (
+            current["publisher_type"] != "SYSTEM"
+            or current.get("kind", definition.kind) != definition.kind
+        ):
+            raise PublicationConflict("Capability id belongs to another publisher.")
+        if current is None:
+            self.records[definition.capability_id] = {
+                "definition": None,
+                "publisher_type": "SYSTEM",
+                "publisher_id": publisher_id,
+                "visibility": "NONE",
+                "state": "ACTIVE",
+                "purpose": "NAMESPACE_RESERVATION",
+                "kind": definition.kind,
+            }
+
+    async def publish_system_direct_context(
+        self, definition, *, publisher_id="assistant-bootstrap"
+    ):
+        self.publish_system_direct_context_sync(
+            definition, publisher_id=publisher_id
+        )
+        return self.records[definition.capability_id]
+
+    def publish_system_direct_context_sync(
+        self, definition, *, publisher_id="assistant-bootstrap"
+    ):
+        self._reserve_system_sync(definition, publisher_id=publisher_id)
+        self.records[definition.capability_id] = {
+            "definition": definition,
+            "publisher_type": "SYSTEM",
+            "publisher_id": publisher_id,
+            "visibility": "SERVER_PUBLIC",
+            "state": "ACTIVE",
+            "purpose": "DIRECT_CONTEXT",
+            "kind": definition.kind,
+        }
+
+    async def revoke_user_context(self, capability_id, *, publisher_id):
+        current = self.records.get(capability_id)
+        if (
+            current is None
+            or current["publisher_type"] != "USER"
+            or current["publisher_id"] != publisher_id
+        ):
+            raise PublicationPermissionDenied("Unknown caller Skill publication.")
+        current["state"] = "REVOKED"
+        return current
+
+    async def list_visible_definitions(self, identity):
+        user_id = str(getattr(identity, "user_id", "") or "")
+        result = []
+        for current in self.records.values():
+            if current["state"] != "ACTIVE" or current["purpose"] != "DIRECT_CONTEXT":
+                continue
+            if current["visibility"] == "SERVER_PUBLIC" or (
+                current["visibility"] == "OWNER_ONLY"
+                and current["publisher_id"] == user_id
+            ):
+                result.append(current["definition"])
+        return sorted(result, key=lambda item: item.capability_id)
+
+    async def get_visible_definition(self, capability_id, identity):
+        for definition in await self.list_visible_definitions(identity):
+            if definition.capability_id == capability_id:
+                return definition
+        return None
+
+
+class OfflineObserverCapabilityCatalog(CapabilityCatalog):
+    """Nonauthoritative compatibility projection used only by this fixture."""
+
+    def __init__(self, authority):
+        super().__init__()
+        self._publication_authority = authority
+
+    def register_definition(self, definition, *args, **kwargs):
+        registered = super().register_definition(definition, *args, **kwargs)
+        metadata = dict(registered.metadata or {})
+        if (
+            metadata.get("server_managed") is True
+            and metadata.get("provenance") == "SERVER_TEST_FIXTURE"
+            and str(metadata.get("instruction") or "").strip()
+        ):
+            self._publication_authority.publish_system_direct_context_sync(
+                registered
+            )
+        return registered
 
 
 class InlineEventBus:
@@ -403,7 +561,9 @@ def offline_app():
         get_all=lambda: list(tool_store.values()),
     )
 
-    catalog=CapabilityCatalog()
+    publication_authority = InMemorySkillPublicationAuthority()
+    catalog = OfflineObserverCapabilityCatalog(publication_authority)
+    publication_authority.observer_catalog = catalog
     connection_runtime=ConnectionRuntime()
     connection_runtime.registration_service=ClientCapabilityRegistrationService(catalog, connection_runtime.registry)
     container = SimpleNamespace(
@@ -423,6 +583,7 @@ def offline_app():
             registry=CapabilityRegistry(),
             catalog=catalog,
             routing_policy=CapabilityRoutingPolicy(),
+            publication_authority=publication_authority,
         ),
         connection_runtime=connection_runtime
     )
@@ -670,9 +831,70 @@ async def test_direct_chat_injects_registered_context_skill_into_provider_reques
 
 
 @pytest.mark.asyncio
+async def test_generic_declarative_context_skill_is_owner_direct_only(
+    offline_app: FastAPI,
+):
+    container = offline_app.state.container
+    transport = httpx.ASGITransport(app=offline_app)
+    async with httpx.AsyncClient(
+        transport=transport, base_url="http://testserver"
+    ) as client:
+        response = await client.post(
+            "/v1/capabilities/",
+            json={
+                "kind": "SKILL",
+                "location": "DECLARATIVE",
+                "driver_kind": "DECLARATIVE",
+                "owner_type": "USER",
+                "owner_id": "offline-user",
+                "implementation_id": "observer-only:skill.generic",
+                "definition": {
+                    "id": "skill.generic",
+                    "name": "skill.generic",
+                    "description": "Generic context skill",
+                    "kind": "SKILL",
+                    "execution_kind": "SKILL",
+                    "execution_mode": "CONTEXT_ONLY",
+                    "source": "HTTP_CALLER",
+                    "metadata": {"instruction": "GENERIC OWNER CONTEXT"},
+                },
+            },
+        )
+        assert response.status_code == 201, response.text
+        assert response.json()["implementations"] == []
+
+        bad = await client.post(
+            "/v1/capabilities/",
+            json={
+                "kind": "TOOL",
+                "location": "DECLARATIVE",
+                "driver_kind": "DECLARATIVE",
+                "owner_type": "USER",
+                "owner_id": "offline-user",
+                "implementation_id": "bad-kind",
+                "definition": {
+                    "id": "skill.bad-kind",
+                    "name": "skill.bad-kind",
+                    "description": "Bad mismatch",
+                    "kind": "SKILL",
+                    "execution_kind": "SKILL",
+                    "execution_mode": "CONTEXT_ONLY",
+                    "source": "HTTP_CALLER",
+                    "metadata": {"instruction": "MUST NOT PUBLISH"},
+                },
+            },
+        )
+        assert bad.status_code == 422
+    assert "skill.bad-kind" not in container.capability_runtime.publication_authority.records
+    assert not container.capability_runtime.catalog.contains_definition("skill.bad-kind")
+
+
+@pytest.mark.asyncio
 async def test_executable_skill_runs_from_capability_api_through_provider_runtime(
     offline_app: FastAPI,
 ):
+    """P1A intentionally keeps caller executable Skills outside the rollout."""
+    container = offline_app.state.container
     transport = httpx.ASGITransport(app=offline_app)
     async with httpx.AsyncClient(
         transport=transport, base_url="http://testserver"
@@ -688,28 +910,11 @@ async def test_executable_skill_runs_from_capability_api_through_provider_runtim
                 "metadata": {"model": "mock-chat"},
             },
         )
-        assert registered.status_code == 201, registered.text
-        assert registered.json()["implementations"][0]["driver_kind"] == "SKILL_RUNTIME"
-
-        executed = await client.post(
-            "/v1/capabilities/skill.review-executable/execute",
-            json={
-                "invocation_id": "inv-skill-e2e",
-                "arguments": {"prompt": "draft text"},
-                "metadata": {
-                    "model": "mock-chat",
-                    "routing": {"prefer_provider": "mock"},
-                },
-            },
-        )
-
-    assert executed.status_code == 200, executed.text
-    payload = executed.json()
-    assert payload["invocation_id"] == "inv-skill-e2e"
-    assert payload["output"]["message"]["content"] == "mock:draft text"
-    assert payload["metadata"]["implementation_id"] == (
-        "server:skill:skill.review-executable"
+    assert registered.status_code == 422, registered.text
+    assert not container.capability_runtime.catalog.contains_definition(
+        "skill.review-executable"
     )
+    assert "skill.review-executable" not in container.capability_runtime.publication_authority.records
 
 
 @pytest.mark.asyncio
@@ -1015,6 +1220,13 @@ async def test_v1_capability_control_plane_registers_tool_skill_and_agent(offlin
             "skills": ["cap.review"],
         }
         registered_agent = await client.post("/v1/capabilities/agents", json=agent_payload)
+        assert registered_agent.status_code == 422, registered_agent.text
+
+        # P1A keeps caller SQL-only Skill authority out of AGENT/DCS. Agent
+        # registration itself remains supported when it does not depend on it.
+        agent_payload["name"] = "cap-agent-no-caller-skill"
+        agent_payload["skills"] = []
+        registered_agent = await client.post("/v1/capabilities/agents", json=agent_payload)
         assert registered_agent.status_code == 201, registered_agent.text
         assert registered_agent.json()["kind"] == "AGENT"
 
@@ -1036,7 +1248,7 @@ async def test_v1_capability_control_plane_registers_tool_skill_and_agent(offlin
 
         agents = await client.get("/v1/agents/")
         assert agents.status_code == 200
-        assert any(item["name"] == "cap-agent" for item in agents.json())
+        assert any(item["name"] == "cap-agent-no-caller-skill" for item in agents.json())
 
         tools = await client.get("/v1/tools/")
         assert tools.status_code == 200
