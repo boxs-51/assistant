@@ -170,6 +170,9 @@ jobs:
           $provenance | ConvertTo-Json -Depth 7 | Set-Content -LiteralPath (Join-Path $reportDir 'provenance.json') -Encoding utf8
           if ($results.Count -ne 4) { throw 'SCENARIO_COUNT_MISMATCH' }
           Write-Host "CI417 A1 NEGATIVE CONTROLS VERIFIED: $env:OWNER_KEY (0/2 baseline PASS; 1/2 RED in both directions; 2/2 RED)"
+          # GitHub pwsh wrapper otherwise propagates LASTEXITCODE=1 from last expected-RED pytest.
+          # Only reached after every bounded scenario and marker-cleanup gate passed.
+          exit 0
 
       - name: Preserve runner stdout, stderr, JUnit and provenance even on failure
         if: always()
