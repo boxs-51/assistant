@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import uuid
 from types import SimpleNamespace
@@ -155,6 +156,32 @@ async def test_two_worker_owner_read_collision_restart_and_revoke():
             )
         finally:
             await engine_c.dispose()
+    finally:
+        await engine_b.dispose()
+        await engine_a.dispose()
+
+
+@pytest.mark.asyncio
+async def test_same_origin_concurrent_publish_is_idempotent():
+    dsn = _require_pg()
+    suffix = uuid.uuid4().hex
+    capability_id = f"sec-p1a-idempotent-{suffix}"
+    definition = _definition(capability_id, f"SAME_ORIGIN_{suffix}")
+    publisher_id = f"owner-{suffix}"
+
+    engine_a, worker_a = await _authority(dsn)
+    engine_b, worker_b = await _authority(dsn)
+    try:
+        first, second = await asyncio.gather(
+            worker_a.publish_user_context(definition, publisher_id=publisher_id),
+            worker_b.publish_user_context(definition, publisher_id=publisher_id),
+        )
+        assert first.capability_id == capability_id
+        assert second.capability_id == capability_id
+        visible = await worker_b.list_visible_definitions(
+            SimpleNamespace(user_id=publisher_id, scopes=set(), permissions=[])
+        )
+        assert sum(item.capability_id == capability_id for item in visible) == 1
     finally:
         await engine_b.dispose()
         await engine_a.dispose()
