@@ -296,23 +296,21 @@ class CapabilityPublicationRepository:
                         raise PublicationConflict(
                             f"Capability id '{definition.capability_id}' belongs to another origin."
                         )
-                    was_revoked = current.state == STATE_REVOKED
+                    if current.state == STATE_REVOKED:
+                        raise PublicationConflict(
+                            "Revoked Skill publication remains tombstoned in P1A."
+                        )
                     if current.purpose == PURPOSE_NAMESPACE:
-                        current.purpose = PURPOSE_DIRECT
-                    elif current.purpose != PURPOSE_DIRECT:
+                        raise PublicationStaleRevision(
+                            "Namespace promotion requires an explicit revision-CAS API."
+                        )
+                    if current.purpose != PURPOSE_DIRECT:
                         raise PublicationConflict("Incompatible publication purpose.")
-                    if current.payload_digest == digest and not was_revoked:
+                    if current.payload_digest == digest:
                         return current
-                    current.revision += 1
-                    current.state = STATE_ACTIVE
-                    current.visibility = VISIBILITY_OWNER
-                    current.recipient_user_id = publisher_id
-                    current.canonical_definition = canonical
-                    current.instruction = instruction
-                    current.payload_digest = digest
-                    current.updated_at = now
-                    await session.flush()
-                    return current
+                    raise PublicationStaleRevision(
+                        "Changed Skill content requires explicit expected-revision CAS."
+                    )
         except PublicationConflict:
             raise
         except IntegrityError as exc:
@@ -370,12 +368,18 @@ class CapabilityPublicationRepository:
                         and current.publisher_id == publisher_id
                     ):
                         raise PublicationConflict("SYSTEM namespace origin mismatch.")
-                    if (
-                        current.purpose == PURPOSE_DIRECT
-                        and current.state == STATE_ACTIVE
-                        and current.payload_digest == digest
-                    ):
-                        return current
+                    if current.state == STATE_REVOKED:
+                        raise PublicationConflict(
+                            "Revoked SYSTEM namespace remains permanently fenced."
+                        )
+                    if current.purpose == PURPOSE_DIRECT:
+                        if current.payload_digest == digest:
+                            return current
+                        raise PublicationStaleRevision(
+                            "Changed server-public content requires expected-revision CAS."
+                        )
+                    if current.purpose != PURPOSE_NAMESPACE:
+                        raise PublicationConflict("Incompatible SYSTEM publication purpose.")
                     current.purpose = PURPOSE_DIRECT
                     current.visibility = VISIBILITY_SERVER_PUBLIC
                     current.recipient_user_id = None
