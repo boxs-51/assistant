@@ -844,6 +844,35 @@ async def test_direct_chat_injects_registered_context_skill_into_provider_reques
 
 
 @pytest.mark.asyncio
+async def test_caller_skill_without_durable_authority_fails_closed(
+    offline_app: FastAPI,
+):
+    container = offline_app.state.container
+    authority = container.capability_runtime.publication_authority
+    container.capability_runtime.publication_authority = None
+    try:
+        transport = httpx.ASGITransport(app=offline_app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            response = await client.post(
+                "/v1/capabilities/skills",
+                json={
+                    "name": "skill.no-authority",
+                    "description": "Must fail closed",
+                    "instruction": "MUST NEVER ENTER LOCAL AUTHORITY",
+                    "execution_mode": "CONTEXT_ONLY",
+                },
+            )
+        assert response.status_code == 503, response.text
+        assert not container.capability_runtime.catalog.contains_definition(
+            "skill.no-authority"
+        )
+    finally:
+        container.capability_runtime.publication_authority = authority
+
+
+@pytest.mark.asyncio
 async def test_generic_declarative_context_skill_is_owner_direct_only(
     offline_app: FastAPI,
 ):
