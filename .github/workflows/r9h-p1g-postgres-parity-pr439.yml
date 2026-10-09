@@ -1,0 +1,459 @@
+name: R9-H P1G PostgreSQL Parity PR439
+
+on:
+  push:
+    branches:
+      - ci/r9h-p1g-pg-parity-pr439-527239d
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_SHA: 527239d3395f9647f808a290847a5208640233c0
+  R9H_POSTGRES_URL: postgresql+asyncpg://r9h:r9h@127.0.0.1:5432/r9h
+
+jobs:
+  postgres-parity:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: r9h
+          POSTGRES_PASSWORD: r9h
+          POSTGRES_DB: r9h
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U r9h -d r9h"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    steps:
+      - name: Checkout exact PR439 candidate
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ env.CANDIDATE_SHA }}
+          fetch-depth: 1
+
+      - name: Verify exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          actual="$(git rev-parse HEAD)"
+          echo "Expected: $CANDIDATE_SHA"
+          echo "Actual:   $actual"
+          test "$actual" = "$CANDIDATE_SHA"
+
+      - name: Setup Python 3.12.10
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+
+      - name: Install test dependencies and PostgreSQL DBAPI
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pip install -r requirements-test.txt
+          python -m pip install asyncpg==0.32.0
+
+      - name: Run exact-head PostgreSQL concurrency parity
+        shell: bash
+        run: |
+          set -euo pipefail
+          cat > /tmp/run_r9h_pg_parity.py <<'PY'
+          from __future__ import annotations
+
+          import asyncio
+          import json
+          import os
+          import time
+          import traceback
+          from datetime import datetime, timedelta, timezone
+          from pathlib import Path
+
+          import asyncpg
+          import sqlalchemy
+          from sqlalchemy import text
+          from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+          import se.tests.integration.test_r9_h_race_matrix as m
+          from se.src.domain.schemas.task_budget import TaskBudgetPolicy
+          from se.src.infrastructure.storage.models.sql.base import Base
+          from se.src.infrastructure.storage.repositories.agent import AgentRepository
+          from se.src.runtimes.agent.contracts.resume import ResumeClaimIntent, ResumeTriggerType
+          from se.src.runtimes.agent.fork_planning import AgentForkPlanningService
+          from se.src.runtimes.agent.persistence import DurableAgentStore
+          from se.src.runtimes.agent.resume_claim import ResumeClaimRejected
+          from se.src.runtimes.agent.task_budget import TaskBudgetService
+          from se.tests.integration.test_r7_f_resume_claim_atomicity import _Uow as ResumeUow
+          from se.tests.integration.test_r8_d_atomic_fork_consume import _Uow, _limits
+
+          URL = os.environ["R9H_POSTGRES_URL"]
+          CANDIDATE_SHA = os.environ["CANDIDATE_SHA"]
+          TMP = Path("/tmp/r9h-pg")
+          TMP.mkdir(parents=True, exist_ok=True)
+
+          results = []
+          metadata = {
+              "candidate_sha": CANDIDATE_SHA,
+              "sqlalchemy_version": sqlalchemy.__version__,
+              "asyncpg_version": asyncpg.__version__,
+              "github_run_id": os.environ.get("GITHUB_RUN_ID"),
+          }
+
+          async def _reset_engine():
+              engine = create_async_engine(URL, pool_pre_ping=True)
+              async with engine.begin() as conn:
+                  if conn.dialect.name != "postgresql":
+                      raise AssertionError(f"expected postgresql, got {conn.dialect.name}")
+                  await conn.run_sync(Base.metadata.drop_all)
+                  await conn.run_sync(Base.metadata.create_all)
+              return engine
+
+          async def _pg_setup(
+              _tmp_path,
+              *,
+              name="ignored.sqlite",
+              limits=None,
+              repository_cls=AgentRepository,
+          ):
+              engine = await _reset_engine()
+              sessions = async_sessionmaker(engine, expire_on_commit=False)
+              factory = lambda: _Uow(sessions, repository_cls)
+              service = TaskBudgetService(
+                  factory,
+                  default_limits=limits or _limits(),
+                  default_policy=TaskBudgetPolicy(version="r9-h-pg-parity"),
+                  max_conflict_retries=24,
+              )
+              store = DurableAgentStore(factory)
+              planner = AgentForkPlanningService(store)
+              return engine, sessions, service, planner
+
+          async def _pg_resume_setup(_tmp_path, _name):
+              engine = await _reset_engine()
+              sessions = async_sessionmaker(engine, expire_on_commit=False)
+              factory = lambda: ResumeUow(sessions)
+              return engine, sessions, factory, DurableAgentStore(factory)
+
+          m._setup = _pg_setup
+          m._resume_setup = _pg_resume_setup
+
+          async def record_case(name, awaitable):
+              started = time.monotonic()
+              try:
+                  await awaitable
+              except BaseException as exc:
+                  results.append(
+                      {
+                          "case": name,
+                          "result": "FAIL",
+                          "seconds": round(time.monotonic() - started, 3),
+                          "error": f"{type(exc).__name__}: {exc}",
+                      }
+                  )
+                  traceback.print_exc()
+              else:
+                  results.append(
+                      {
+                          "case": name,
+                          "result": "PASS",
+                          "seconds": round(time.monotonic() - started, 3),
+                      }
+                  )
+
+          async def postgres_metadata():
+              engine = create_async_engine(URL)
+              try:
+                  async with engine.connect() as conn:
+                      metadata["server_version"] = (
+                          await conn.execute(text("SHOW server_version"))
+                      ).scalar_one()
+                      metadata["transaction_isolation"] = (
+                          await conn.execute(text("SHOW transaction_isolation"))
+                      ).scalar_one()
+                      metadata["dialect"] = conn.dialect.name
+              finally:
+                  await engine.dispose()
+
+          async def task_fence_probe():
+              fence_acquired = asyncio.Event()
+              release_fence = asyncio.Event()
+
+              class FenceProbeRepository(AgentRepository):
+                  armed = False
+
+                  async def lock_task_gc_serialization_fence(self, task_id):
+                      task = await super().lock_task_gc_serialization_fence(task_id)
+                      if type(self).armed:
+                          fence_acquired.set()
+                          await asyncio.wait_for(release_fence.wait(), timeout=15)
+                      return task
+
+              engine, sessions, service, planner = await _pg_setup(
+                  TMP, repository_cls=FenceProbeRepository
+              )
+              try:
+                  source = await m._seed_source(
+                      sessions,
+                      service,
+                      planner,
+                      task_id="task-r9-h-pg-fence",
+                  )
+                  fork = await service.consume_fork_plan(source["plan"])
+                  await service.finish_task_scoped_execution(
+                      source["task_id"],
+                      execution_id=fork.execution_id,
+                      source_revision=1,
+                      transition_values={
+                          "state": "COMPLETED",
+                          "result": {"winner": "fork"},
+                          "completed_at": datetime.now(timezone.utc),
+                      },
+                      delegated=False,
+                  )
+
+                  store = DurableAgentStore(lambda: _Uow(sessions))
+                  intent = ResumeClaimIntent(
+                      resume_request_id="resume-task-r9-h-pg-fence",
+                      execution_id=source["source_execution_id"],
+                      checkpoint_id=source["checkpoint_id"],
+                      expected_execution_revision=2,
+                      plan_fingerprint="p" * 64,
+                      user_id="user-r8-d",
+                      client_id=None,
+                      connection_id=None,
+                      wait_reason="RESOURCE",
+                      trigger_type=ResumeTriggerType.RESOURCE_READY,
+                      claim_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                  )
+
+                  FenceProbeRepository.armed = True
+                  adopt_task = asyncio.create_task(
+                      service.adopt_branch(
+                          source["task_id"],
+                          fork.branch_id,
+                          target_user_id="user-r8-d",
+                      )
+                  )
+                  await asyncio.wait_for(fence_acquired.wait(), timeout=15)
+
+                  create_task = asyncio.create_task(store.get_or_create_resume_claim(intent))
+                  await asyncio.sleep(0.35)
+                  if create_task.done():
+                      outcome = await asyncio.gather(create_task, return_exceptions=True)
+                      raise AssertionError(
+                          f"concurrent CREATE bypassed held PostgreSQL Task row fence: {outcome!r}"
+                      )
+
+                  release_fence.set()
+                  adopted = await asyncio.wait_for(adopt_task, timeout=20)
+                  if adopted.task_id != source["task_id"]:
+                      raise AssertionError("unexpected ADOPT task winner")
+
+                  create_outcome = await asyncio.wait_for(
+                      asyncio.gather(create_task, return_exceptions=True), timeout=20
+                  )
+                  value = create_outcome[0]
+                  if not isinstance(value, ResumeClaimRejected):
+                      raise AssertionError(
+                          f"CREATE after terminal fence must reject, got {value!r}"
+                      )
+                  if value.code != "TASK_TERMINAL":
+                      raise AssertionError(f"unexpected rejection code {value.code}")
+
+                  async with _Uow(sessions) as uow:
+                      task = await uow.agents.get_task(source["task_id"])
+                      claim = await uow.agents.get_resume_claim_by_request_id(
+                          intent.resume_request_id
+                      )
+                      await uow.commit()
+                  if task.status != "COMPLETED":
+                      raise AssertionError(task.status)
+                  if claim is not None and claim.state == "CREATED":
+                      raise AssertionError("terminal Task retained actionable CREATED")
+              finally:
+                  release_fence.set()
+                  await engine.dispose()
+
+          async def terminal_order(kind, order):
+              engine, sessions, service, planner = await _pg_setup(TMP)
+              try:
+                  source = await m._seed_source(
+                      sessions,
+                      service,
+                      planner,
+                      task_id=f"task-r9-h-pg-{kind}-{order}",
+                  )
+                  store = DurableAgentStore(lambda: _Uow(sessions))
+                  intent = ResumeClaimIntent(
+                      resume_request_id=f"resume-{source['task_id']}",
+                      execution_id=source["source_execution_id"],
+                      checkpoint_id=source["checkpoint_id"],
+                      expected_execution_revision=2,
+                      plan_fingerprint="q" * 64,
+                      user_id="user-r8-d",
+                      client_id=None,
+                      connection_id=None,
+                      wait_reason="RESOURCE",
+                      trigger_type=ResumeTriggerType.RESOURCE_READY,
+                      claim_expires_at=datetime.now(timezone.utc) + timedelta(hours=1),
+                  )
+
+                  async def terminal_writer():
+                      if kind == "cancel":
+                          return await service.cancel_task(source["task_id"])
+                      return await service.terminalize_task(
+                          source["task_id"],
+                          allowed_source_states=("RUNNING",),
+                          target_state="FAILED",
+                          values={"error": "pg-parity-terminal"},
+                      )
+
+                  if order == "create_first":
+                      created = await store.get_or_create_resume_claim(intent)
+                      if created.state != "CREATED":
+                          raise AssertionError(created.state)
+                      await terminal_writer()
+                  else:
+                      await terminal_writer()
+                      try:
+                          await store.get_or_create_resume_claim(intent)
+                      except ResumeClaimRejected as exc:
+                          if exc.code != "TASK_TERMINAL":
+                              raise
+                      else:
+                          raise AssertionError("late CREATE unexpectedly succeeded")
+
+                  async with _Uow(sessions) as uow:
+                      task = await uow.agents.get_task(source["task_id"])
+                      claim = await uow.agents.get_resume_claim_by_request_id(
+                          intent.resume_request_id
+                      )
+                      await uow.commit()
+
+                  expected = "CANCELLED" if kind == "cancel" else "FAILED"
+                  if task.status != expected:
+                      raise AssertionError((task.status, expected))
+                  if claim is not None and claim.state == "CREATED":
+                      raise AssertionError("terminal Task retained CREATED")
+                  if claim is not None and claim.rejection_code != "TASK_RESOLVED":
+                      raise AssertionError(claim.rejection_code)
+              finally:
+                  await engine.dispose()
+
+          async def final_invariant_query():
+              engine = create_async_engine(URL)
+              try:
+                  async with engine.connect() as conn:
+                      actionable = (
+                          await conn.execute(
+                              text(
+                                  """
+                                  SELECT count(*)
+                                  FROM agent_resume_claims c
+                                  JOIN agent_executions e ON e.id = c.execution_id
+                                  JOIN agent_tasks t ON t.id = e.task_id
+                                  WHERE t.status IN ('COMPLETED','FAILED','CANCELLED')
+                                    AND c.state = 'CREATED'
+                                  """
+                              )
+                          )
+                      ).scalar_one()
+                      metadata["final_terminal_created_count"] = int(actionable)
+                      if int(actionable) != 0:
+                          raise AssertionError(
+                              f"terminal Task => CREATED invariant violated: {actionable}"
+                          )
+              finally:
+                  await engine.dispose()
+
+          async def main():
+              await postgres_metadata()
+
+              for schedule in (
+                  "claim_commits_first",
+                  "adopt_commits_first",
+                  "adopt_scans_first",
+              ):
+                  await record_case(
+                      f"adopt_create::{schedule}",
+                      m.test_r9_h_resume_claim_adopt_isolation_ordering_diagnostic(
+                          TMP, schedule
+                      ),
+                  )
+
+              await record_case("adopt_create::real_for_update_probe", task_fence_probe())
+
+              for kind in ("cancel", "terminalize"):
+                  for order in ("create_first", "terminal_first"):
+                      await record_case(
+                          f"{kind}_create::{order}",
+                          terminal_order(kind, order),
+                      )
+
+              for terminal_mode in ("complete", "cancel"):
+                  await record_case(
+                      f"legacy_no_budget::{terminal_mode}",
+                      m.test_r9_h_p1g_service_less_coordinator_terminalizes_claim_atomically(
+                          TMP, terminal_mode
+                      ),
+                  )
+
+              await record_case(
+                  "taskless_r7f::positive",
+                  m.test_r9_h_e1_real_sqlite_r7_connection_plan_without_task_budget(
+                      TMP, False
+                  ),
+              )
+
+              for status in ("COMPLETED", "CANCELLED"):
+                  await record_case(
+                      f"replay_rebind_after_terminal::{status}",
+                      m.test_r9_h_e1_no_budget_terminal_disallows_replay_and_late_claim(
+                          TMP, status
+                      ),
+                  )
+
+              await record_case("fresh_final_invariant_query", final_invariant_query())
+
+              evidence = {"metadata": metadata, "results": results}
+              with open("/tmp/r9h-pg-evidence.json", "w", encoding="utf-8") as f:
+                  json.dump(evidence, f, indent=2, sort_keys=True)
+
+              print(json.dumps(evidence, indent=2, sort_keys=True))
+              failures = [item for item in results if item["result"] != "PASS"]
+              if failures:
+                  raise SystemExit(1)
+
+          asyncio.run(main())
+          PY
+
+          python /tmp/run_r9h_pg_parity.py
+
+      - name: Show repository dirtiness guard
+        if: always()
+        shell: bash
+        run: |
+          echo "Candidate HEAD: $(git rev-parse HEAD)"
+          echo "Tracked diff after parity:"
+          git diff --exit-code
+          echo "Untracked files (runtime caches are evidence-neutral):"
+          git status --short
+
+      - name: Upload PostgreSQL parity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: r9h-p1g-postgres-parity-pr439-${{ env.CANDIDATE_SHA }}
+          path: /tmp/r9h-pg-evidence.json
+          if-no-files-found: warn
