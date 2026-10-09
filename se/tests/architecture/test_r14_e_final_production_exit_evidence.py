@@ -28,7 +28,7 @@ NEGATIVE_GATES = {
     "EVIDENCE_CLASS": "GAP_LEDGER_ONLY",
     "LEDGER_STATUS": "GAP_LEDGER_FINAL_EXIT_HOLD_NOT_CERTIFIED",
     "REVIEWED_MAIN": MAIN,
-    "CANONICAL_POLICY": "85_v2.5.2",
+    "CANONICAL_POLICY": "85_v2.5",
     "OWNER_CLAIM_REF": "359_6075119391",
     "INDEPENDENT_PRECLAIM_REF": "359_6075047756",
     "MAIN_ARCH_RUN": LINUX_RUN,
@@ -142,6 +142,7 @@ def test_r14_e_g0_negative_metadata_is_exact_and_unwaived() -> None:
         "server-owned durable SQL process-crash/restart",
         "same SHA had a Windows-client R6-D 2-second result-wait RED",
         "R13 compatibility dispositions",
+        "currently operative",
     ):
         assert required in document
 
