@@ -941,6 +941,10 @@ async def test_r9_h_p1g_create_vs_terminal_writer_rejects_actionable_claim(
 # The original budget-backed D0 SQLite race remains intentionally unwaived.
 from types import SimpleNamespace
 
+from se.src.agent.registry import AgentRegistry
+from se.src.domain.schemas.identity import Identity
+from se.src.domain.schemas.multi_agent import AgentTaskStatus
+from se.src.runtimes.agent.coordinator import MultiAgentCoordinator
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentExecutionCheckpointRecord,
     AgentExecutionRecord,
@@ -1234,6 +1238,99 @@ async def test_r9_h_e1_real_sqlite_r7_connection_plan_without_task_budget(
                 claim = await uow.agents.get_resume_claim(first.claim_id)
                 assert claim.state == "CREATED"
                 await uow.commit()
+    finally:
+        await engine.dispose()
+
+
+
+@pytest.mark.parametrize("terminal_mode", ("complete", "cancel"))
+@pytest.mark.asyncio
+async def test_r9_h_p1g_service_less_coordinator_terminalizes_claim_atomically(
+    tmp_path, terminal_mode
+):
+    """Real DurableAgentStore wiring must close Task and CREATED together."""
+    engine, sessions, factory, store = await _resume_setup(
+        tmp_path, f"r9-h-p1g-coordinator-{terminal_mode}.sqlite"
+    )
+    task_id = f"r9-h-p1g-coordinator-{terminal_mode}"
+    try:
+        await _r9_h_e1_seed_sqlite_waiting(
+            sessions, factory, store, task_id=task_id
+        )
+        planner, _connections = _r9_h_e1_planner_with_real_k2(factory, store)
+        plan = await planner.build_resume_plan(
+            _E1_EXECUTION,
+            _E1_CHECKPOINT,
+            target_user_id=_E1_USER,
+            target_client_id=_E1_CLIENT,
+            target_connection_id=_E1_K2,
+        )
+        claim = await store.get_or_create_resume_claim(
+            _e1_intent(plan, f"rr-r9-h-p1g-coordinator-{terminal_mode}")
+        )
+
+        async with factory() as uow:
+            durable_task = await uow.agents.get_task(task_id)
+            assert await uow.agents.get_task_budget(task_id) is None
+            await uow.commit()
+
+        coordinator = MultiAgentCoordinator(
+            AgentRegistry(),
+            durable_store=store,
+        )
+        coordinator._sessions[_E1_SESSION] = SimpleNamespace(
+            owner_user_id=_E1_USER
+        )
+        local_task = coordinator._task_from_record(durable_task)
+        coordinator._tasks[task_id] = local_task
+        identity = Identity(
+            user_id=_E1_USER,
+            auth_type="api_key",
+            scopes={"*"},
+        )
+
+        if terminal_mode == "cancel":
+            terminal_task = await coordinator.cancel_task_and_wait(
+                task_id, identity
+            )
+            assert terminal_task.status is AgentTaskStatus.CANCELLED
+            expected_status = "CANCELLED"
+        else:
+            # Legacy service-less execution can have process-local RUNNING
+            # while the last durable Task view is WAITING. The atomic helper
+            # accepts both as source states and makes the terminal winner
+            # authoritative.
+            local_task.status = AgentTaskStatus.RUNNING
+
+            async def executor(
+                _task,
+                *,
+                identity,
+                execution_id,
+                correlation_id,
+                parent_execution_id,
+            ):
+                return {"completed": True}
+
+            execution = await coordinator.execute_task(
+                task_id,
+                identity,
+                executor,
+            )
+            assert execution.state.value == "COMPLETED"
+            assert local_task.status is AgentTaskStatus.COMPLETED
+            expected_status = "COMPLETED"
+
+        async with factory() as uow:
+            task = await uow.agents.get_task(task_id)
+            durable_claim = await uow.agents.get_resume_claim(claim.claim_id)
+            budget = await uow.agents.get_task_budget(task_id)
+            await uow.commit()
+
+        assert task.status == expected_status
+        assert budget is None
+        assert durable_claim.state == "REJECTED"
+        assert durable_claim.rejection_code == "TASK_RESOLVED"
     finally:
         await engine.dispose()
 
