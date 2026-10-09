@@ -46,6 +46,7 @@ from se.src.runtimes.capability.contracts.definition import (
 from se.src.infrastructure.storage.repositories.capability_publications import (
     PublicationConflict,
     PublicationPermissionDenied,
+    PublicationStaleRevision,
 )
 from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.runtimes.workflow.runtime import WorkflowRuntime
@@ -71,11 +72,23 @@ class InMemorySkillPublicationAuthority:
     async def publish_user_context(self, definition, *, publisher_id):
         publisher_id = self._publisher(publisher_id)
         current = self.records.get(definition.capability_id)
-        if current is not None and (
-            current["publisher_type"] != "USER"
-            or current["publisher_id"] != publisher_id
-        ):
-            raise PublicationConflict("Capability id belongs to another publisher.")
+        if current is not None:
+            if (
+                current["publisher_type"] != "USER"
+                or current["publisher_id"] != publisher_id
+            ):
+                raise PublicationConflict("Capability id belongs to another publisher.")
+            if current["state"] == "REVOKED":
+                raise PublicationConflict("Revoked publication remains tombstoned.")
+            if current["purpose"] != "DIRECT_CONTEXT":
+                raise PublicationStaleRevision(
+                    "Namespace promotion requires explicit revision CAS."
+                )
+            if current["definition"] == definition:
+                return current
+            raise PublicationStaleRevision(
+                "Changed Skill content requires explicit expected-revision CAS."
+            )
         self.records[definition.capability_id] = {
             "definition": definition,
             "publisher_type": "USER",
