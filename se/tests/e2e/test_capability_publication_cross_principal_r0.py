@@ -60,7 +60,8 @@ class _TwoTokenAuthenticator(AuthenticatorInterface):
         return Identity(auth_type="api_key", user_id=user_id, permissions=[])
 
 
-@dataclass
+# Keep synthetic Bearer credentials out of pytest argument/fixture reprs.
+@dataclass(repr=False)
 class _Harness:
     app: object
     tokens: dict[str, str]
