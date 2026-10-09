@@ -438,7 +438,7 @@ jobs:
           asyncio.run(main())
           PY
 
-          python /tmp/run_r9h_pg_parity.py
+          PYTHONPATH="$GITHUB_WORKSPACE" python /tmp/run_r9h_pg_parity.py
 
       - name: Show repository dirtiness guard
         if: always()
