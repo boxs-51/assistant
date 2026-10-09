@@ -148,6 +148,113 @@ jobs:
           m._setup = _pg_setup
           m._resume_setup = _pg_resume_setup
 
+          async def _pg_e1_seed_waiting(sessions, factory, store, *, task_id):
+              """PostgreSQL-safe form of the existing E1 seed with explicit FK ordering."""
+              if task_id is not None:
+                  await store.save_task(
+                      {
+                          "id": task_id,
+                          "session_id": m._E1_SESSION,
+                          "created_by": m._E1_USER,
+                          "assigned_agent_id": m._E1_AGENT,
+                          "revision": 0,
+                          "status": "WAITING",
+                          "wait_reasons": ["CONNECTION"],
+                          "input": {"source": "r9-h-e1-pg"},
+                      }
+                  )
+              prefix = [{"role": "user", "content": "R9-H E1 persisted reconnect"}]
+              async with factory() as uow:
+                  if task_id is not None:
+                      task = await uow.agents.get_task(task_id)
+                      assert task is not None and task.status == "WAITING"
+                      assert await uow.agents.get_task_budget(task_id) is None
+
+                  uow.session.add(
+                      m.AgentExecutionRecord(
+                          id=m._E1_EXECUTION,
+                          task_id=task_id,
+                          session_id=m._E1_SESSION,
+                          agent_id=m._E1_AGENT,
+                          correlation_id="corr-r9-h-e1",
+                          state="WAITING",
+                          wait_reason="CONNECTION",
+                          revision=2,
+                          current_checkpoint_id=m._E1_CHECKPOINT,
+                          bound_client_id=m._E1_CLIENT,
+                          remaining_active_budget_seconds=20.0,
+                          transcript=prefix,
+                          request={},
+                          context_state={"request_id": "request-r9-h-e1"},
+                      )
+                  )
+                  await uow.session.flush()
+
+                  iteration_id = "r9-h-e1-iteration-1"
+                  uow.session.add(
+                      m.AgentIterationRecord(
+                          id=iteration_id,
+                          execution_id=m._E1_EXECUTION,
+                          iteration=1,
+                          state="WAITING_TOOL",
+                          tool_call_ids=[m._E1_TOOL_CALL],
+                          transcript=prefix,
+                      )
+                  )
+                  r6 = m._e1_invocation_values()
+                  r6["remote_outcome_state"] = "NOT_DISPATCHED"
+                  uow.session.add(m.CapabilityInvocationRecord(**r6))
+                  await uow.session.flush()
+
+                  uow.session.add(
+                      m.AgentToolCallRecord(
+                          id="r9-h-e1-tool-call",
+                          execution_id=m._E1_EXECUTION,
+                          iteration_id=iteration_id,
+                          invocation_id=m._E1_INVOCATION,
+                          tool_call_id=m._E1_TOOL_CALL,
+                          capability_id=m._E1_CAPABILITY,
+                          arguments={"value": "x"},
+                          status="PENDING",
+                      )
+                  )
+                  uow.session.add(
+                      m.AgentExecutionCheckpointRecord(
+                          checkpoint_id=m._E1_CHECKPOINT,
+                          execution_id=m._E1_EXECUTION,
+                          execution_revision=2,
+                          session_id=m._E1_SESSION,
+                          task_id=task_id,
+                          iteration=1,
+                          wait_reason="CONNECTION",
+                          remaining_active_budget_seconds=20.0,
+                          origin_client_id=m._E1_CLIENT,
+                          origin_connection_id=m._E1_K1,
+                          transcript_snapshot=prefix,
+                          metadata_json={},
+                      )
+                  )
+                  await uow.session.flush()
+                  await uow.agents.save_checkpoint_pending_invocation(
+                      {
+                          "checkpoint_id": m._E1_CHECKPOINT,
+                          "ordinal": 0,
+                          "invocation_id": m._E1_INVOCATION,
+                          "invocation_revision": r6["revision"],
+                          "tool_call_id": m._E1_TOOL_CALL,
+                          "capability_id": m._E1_CAPABILITY,
+                          "capability_version": "1.0",
+                          "request_fingerprint": m._E1_FINGERPRINT,
+                          "idempotency": "IDEMPOTENT",
+                          "observed_remote_outcome_state": "NOT_DISPATCHED",
+                          "origin_client_id": m._E1_CLIENT,
+                          "origin_connection_id": m._E1_K1,
+                      }
+                  )
+                  await uow.commit()
+
+          m._r9_h_e1_seed_sqlite_waiting = _pg_e1_seed_waiting
+
           async def record_case(name, awaitable):
               started = time.monotonic()
               try:
