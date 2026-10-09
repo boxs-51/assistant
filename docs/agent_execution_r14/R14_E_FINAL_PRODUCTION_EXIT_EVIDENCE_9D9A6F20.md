@@ -8,7 +8,7 @@
 EVIDENCE_CLASS=GAP_LEDGER_ONLY
 LEDGER_STATUS=GAP_LEDGER_FINAL_EXIT_HOLD_NOT_CERTIFIED
 REVIEWED_MAIN=604a1abae68ea17a68b78fcad59be9865d0fe2c4
-CANONICAL_POLICY=85_v2.5.2
+CANONICAL_POLICY=85_v2.5
 OWNER_CLAIM_REF=359_6075119391
 INDEPENDENT_PRECLAIM_REF=359_6075047756
 MAIN_ARCH_RUN=37855824005
@@ -32,6 +32,8 @@ R13_KEEP_STABLE_ERROR=PRESERVE
 R13_KEEP_HISTORICAL_MIGRATION=PRESERVE
 R13_SUPERSEDED_ALREADY=PRESERVE
 ```
+
+**Policy provenance:** `CANONICAL_POLICY` names the **currently operative** repository Policy #85 v2.5, with role/scope-based owner–auditor review and no UUID eligibility gate. Older PRE-CLAIM/CLAIM references preserve their original historical review conditions; they do not confer current independent FINAL, Wave, production or merge authority. This metadata change does not certify R14-E exit.
 
 **Evidence semantics:** `INHERITED` means an existing scoped executable selector, not independently observed execution or one newly composed P0 flow. The reported Linux Architecture job is an aggregate run; none of the individual selectors below is claimed to have a separately inspected job outcome. `BLOCKED` = known live defect, `GAP` = absent composed proof, `NOT_RUN` = no matching exercise, and no row is promoted to runtime `PASS`.
 
