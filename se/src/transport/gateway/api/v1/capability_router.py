@@ -248,6 +248,9 @@ async def list_capabilities(
     catalog = _catalog(container)
     runtime = container.capability_runtime
     result = []
+    # Preserve legacy/internal authorized Skill listings only when the
+    # durable publication authority is absent; once configured, SQL is the
+    # canonical Skill visibility boundary.
     durable_skill_authority = runtime.publication_authority is not None
     for definition in catalog.list_definitions():
         try:
