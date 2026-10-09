@@ -1627,7 +1627,9 @@ class TaskBudgetService:
                 async with self._uow_factory() as uow:
                     # Frozen R9 order: Task -> Budget -> sorted Branches ->
                     # selected Execution -> CREATED claims -> CAS mutations.
-                    task = await uow.agents.get_task_for_update(task_id)
+                    task = await uow.agents.lock_task_gc_serialization_fence(
+                        task_id
+                    )
                     budget = await uow.agents.get_task_budget_for_update(task_id)
                     branches = await uow.agents.list_task_branches_for_update(
                         task_id
