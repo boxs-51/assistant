@@ -34,6 +34,7 @@ from ...domain.schemas.agent_execution import (
 from ...domain.schemas.agent_execution import AgentExecutionLimits
 from .state_machine import AgentExecutionStateMachine
 from .ids import AgentExecutionIdFactory
+from .persistence import DurableAgentStore
 
 
 class MultiAgentCoordinator:
@@ -462,6 +463,75 @@ class MultiAgentCoordinator:
         task.updated_at = time.time()
         return task
 
+    async def _persist_service_less_task_state(
+        self,
+        task: AgentTask,
+        *,
+        allowed_source_states,
+        target_status: AgentTaskStatus,
+    ):
+        """Persist service-less Task state without weakening durable P1G safety.
+
+        The production DurableAgentStore must use the atomic Task+ResumeClaim
+        terminal helper. Lightweight protocol/test stores predate that method;
+        they retain the legacy update_task adapter only so coordinator contract
+        tests do not become a new production storage interface.
+        """
+
+        if self.durable_store is None:
+            return None
+
+        values = {
+            "wait_reasons": task.wait_reasons,
+            "output": task.output,
+            "error": task.error,
+        }
+        if target_status is AgentTaskStatus.WAITING:
+            await self.durable_store.update_task(
+                task.task_id,
+                {
+                    "status": target_status.value,
+                    **values,
+                },
+            )
+            return None
+
+        if isinstance(self.durable_store, DurableAgentStore):
+            return (
+                await self.durable_store
+                .terminalize_legacy_task_and_reject_resume_claims(
+                    task.task_id,
+                    allowed_source_states=allowed_source_states,
+                    target_state=target_status.value,
+                    values=values,
+                )
+            )
+
+        terminalize = getattr(
+            self.durable_store,
+            "terminalize_legacy_task_and_reject_resume_claims",
+            None,
+        )
+        if callable(terminalize):
+            return await terminalize(
+                task.task_id,
+                allowed_source_states=allowed_source_states,
+                target_state=target_status.value,
+                values=values,
+            )
+
+        # Compatibility adapter for non-production minimal durable-store test
+        # doubles. Production wiring uses DurableAgentStore and can never take
+        # this branch.
+        await self.durable_store.update_task(
+            task.task_id,
+            {
+                "status": target_status.value,
+                **values,
+            },
+        )
+        return None
+
     async def cancel_task_and_wait(
         self,
         task_id: str,
@@ -507,20 +577,13 @@ class MultiAgentCoordinator:
             await asyncio.gather(runner, return_exceptions=True)
 
         if self.durable_store and self.task_budget_service is None:
-            durable = (
-                await self.durable_store
-                .terminalize_legacy_task_and_reject_resume_claims(
-                    task.task_id,
-                    allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
-                    target_state=AgentTaskStatus.CANCELLED.value,
-                    values={
-                        "wait_reasons": task.wait_reasons,
-                        "output": task.output,
-                        "error": task.error,
-                    },
-                )
+            durable = await self._persist_service_less_task_state(
+                task,
+                allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
+                target_status=AgentTaskStatus.CANCELLED,
             )
-            self._sync_task_from_record(task, durable)
+            if durable is not None:
+                self._sync_task_from_record(task, durable)
         return task
 
     async def start_task(self, task_id: str, identity: Identity, executor) -> AgentTask:
@@ -763,33 +826,12 @@ class MultiAgentCoordinator:
             task.error = execution.error
 
         if self.durable_store and self.task_budget_service is None:
-            durable_values = {
-                "wait_reasons": task.wait_reasons,
-                "output": task.output,
-                "error": task.error,
-            }
-            if target_status is AgentTaskStatus.WAITING:
-                await self.durable_store.update_task(
-                    task.task_id,
-                    {
-                        "status": task.status.value,
-                        **durable_values,
-                    },
-                )
-            else:
-                durable = (
-                    await self.durable_store
-                    .terminalize_legacy_task_and_reject_resume_claims(
-                        task.task_id,
-                        allowed_source_states=(
-                            "ASSIGNED",
-                            "RUNNING",
-                            "WAITING",
-                        ),
-                        target_state=target_status.value,
-                        values=durable_values,
-                    )
-                )
+            durable = await self._persist_service_less_task_state(
+                task,
+                allowed_source_states=("ASSIGNED", "RUNNING", "WAITING"),
+                target_status=target_status,
+            )
+            if durable is not None:
                 self._sync_task_from_record(task, durable)
         return execution
 
