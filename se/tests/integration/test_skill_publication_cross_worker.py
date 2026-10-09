@@ -14,6 +14,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from se.src.infrastructure.storage.repositories.capability_publications import (
     CapabilityPublicationRepository,
     PublicationConflict,
+    PublicationStaleRevision,
 )
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
@@ -140,6 +141,14 @@ async def test_two_worker_owner_read_collision_restart_and_revoke():
                 publisher_id=other.user_id,
             )
 
+        # P1A has no client expected_revision field, so a same-owner changed
+        # payload fails closed rather than silently advancing the revision.
+        with pytest.raises(PublicationStaleRevision):
+            await worker_b.publish_user_context(
+                _definition(capability_id, "OWNER_CHANGED_WITHOUT_CAS"),
+                publisher_id=owner.user_id,
+            )
+
         # A fresh engine/session pair models a worker restart with no local preload.
         engine_c, restarted_worker = await _authority(dsn)
         try:
@@ -154,6 +163,11 @@ async def test_two_worker_owner_read_collision_restart_and_revoke():
                 item.capability_id != capability_id
                 for item in await restarted_worker.list_visible_definitions(owner)
             )
+            with pytest.raises(PublicationConflict):
+                await restarted_worker.publish_user_context(
+                    definition,
+                    publisher_id=owner.user_id,
+                )
         finally:
             await engine_c.dispose()
     finally:
