@@ -890,6 +890,123 @@ async def test_generic_declarative_context_skill_is_owner_direct_only(
 
 
 @pytest.mark.asyncio
+async def test_direct_rechecks_skill_after_revoke_between_provider_rounds(
+    offline_app: FastAPI,
+):
+    from se.src.domain.schemas.message import GatewayMessage
+    from se.src.domain.schemas.response import GatewayChoice, GatewayResponse
+    from se.src.domain.schemas.tool import FunctionCall, GatewayToolCall
+    from se.src.runtimes.capability.contracts.definition import (
+        CapabilityDefinition,
+        CapabilityEffect,
+    )
+    from se.src.runtimes.capability.drivers.python_driver import PythonCapabilityDriver
+
+    container = offline_app.state.container
+    identity = Identity(auth_type="jwt", user_id="offline-user")
+    skill_id = "skill.revoked-between-rounds"
+    marker_text = "REVOKE_BEFORE_SECOND_PROVIDER_SEND"
+
+    async def revoke_skill():
+        await container.capability_runtime.revoke_caller_context_skill(
+            skill_id,
+            identity=identity,
+        )
+        return {"revoked": True}
+
+    tool_definition = CapabilityDefinition(
+        id="security.revoke-skill",
+        name="security.revoke-skill",
+        description="Revoke the test Skill between inference rounds",
+        input_schema={"type": "object"},
+        effects={CapabilityEffect.READ},
+    )
+    container.capability_runtime.register_capability(
+        PythonCapabilityDriver(tool_definition, revoke_skill)
+    )
+
+    provider = container.provider_runtime.providers["mock"]
+    original_chat = provider.chat.chat
+    captured = []
+
+    async def scripted_chat(**kwargs):
+        body = kwargs.get("body") or {}
+        captured.append(body)
+        if len(captured) == 1:
+            message = GatewayMessage(
+                role="assistant",
+                content="",
+                tool_calls=[
+                    GatewayToolCall(
+                        id="revoke-call",
+                        function=FunctionCall(
+                            name="security.revoke-skill",
+                            arguments="{}",
+                        ),
+                    )
+                ],
+            )
+        else:
+            message = GatewayMessage(role="assistant", content="done")
+        return GatewayResponse(
+            id=f"revoke-round-{len(captured)}",
+            model=body.get("model") or "mock-chat",
+            choices=[
+                GatewayChoice(
+                    index=0,
+                    message=message,
+                    finish_reason="stop",
+                )
+            ],
+            metadata={"provider": "mock"},
+        )
+
+    transport = httpx.ASGITransport(app=offline_app)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            registered = await client.post(
+                "/v1/capabilities/skills",
+                json={
+                    "name": skill_id,
+                    "description": "Revocation freshness probe",
+                    "instruction": marker_text,
+                    "execution_mode": "CONTEXT_ONLY",
+                },
+            )
+            assert registered.status_code == 201, registered.text
+
+            provider.chat.chat = scripted_chat
+            response = await client.post(
+                "/v1/chat/completions",
+                json={
+                    "model": "mock-chat",
+                    "agent_enabled": False,
+                    "messages": [{"role": "user", "content": "run"}],
+                    "metadata": {"routing": {"prefer_provider": "mock"}},
+                },
+            )
+    finally:
+        provider.chat.chat = original_chat
+
+    assert response.status_code == 200, response.text
+    assert len(captured) == 2
+    first_system = "\n".join(
+        item.get("content", "")
+        for item in captured[0]["messages"]
+        if item.get("role") == "system"
+    )
+    second_system = "\n".join(
+        item.get("content", "")
+        for item in captured[1]["messages"]
+        if item.get("role") == "system"
+    )
+    assert marker_text in first_system
+    assert marker_text not in second_system
+
+
+@pytest.mark.asyncio
 async def test_executable_skill_runs_from_capability_api_through_provider_runtime(
     offline_app: FastAPI,
 ):
