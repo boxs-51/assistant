@@ -871,12 +871,8 @@ class TaskBudgetService:
         target_state: str,
         values: dict[str, Any] | None = None,
     ):
-        """Atomically terminalize AgentTask and close its TaskBudget.
+        """Atomically terminalize AgentTask, TaskBudget and resumability."""
 
-        Any already-terminal Task is authoritative.  This makes completion
-        after cancellation and repeated cancellation fail closed without
-        resurrecting or rewriting the durable winner.
-        """
         target_state = str(target_state)
         if target_state not in _TASK_TERMINAL_STATES:
             raise ValueError(
@@ -891,7 +887,12 @@ class TaskBudgetService:
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
-                    task = await uow.agents.get_task_for_update(task_id)
+                    # P1G serialization order starts with a real Task writer
+                    # fence.  SQLite obtains it through the repository no-op
+                    # UPDATE; row-locking dialects use the existing FOR UPDATE.
+                    task = await uow.agents.lock_task_gc_serialization_fence(
+                        task_id
+                    )
                     if task is None:
                         raise TaskBudgetRequiredError(
                             f"Unknown AgentTask: {task_id}"
@@ -913,6 +914,7 @@ class TaskBudgetService:
                         budget_record.incarnation_generation
                     )
                     current_state = str(task.status)
+                    now_utc = datetime.now(timezone.utc)
 
                     if current_state in _TASK_TERMINAL_STATES:
                         if budget.state is TaskBudgetState.OPEN:
@@ -922,7 +924,7 @@ class TaskBudgetService:
                                     budget.revision,
                                     {
                                         "state": TaskBudgetState.CLOSED.value,
-                                        "closed_at": datetime.now(timezone.utc),
+                                        "closed_at": now_utc,
                                     },
                                     expected_incarnation_generation=(
                                         expected_generation
@@ -932,6 +934,8 @@ class TaskBudgetService:
                             if closed is None:
                                 await uow.rollback()
                                 continue
+                        # Do not reinterpret repeated terminalization as a
+                        # historical orphan-claim cleanup pass.
                         await uow.commit()
                         return task
 
@@ -961,6 +965,10 @@ class TaskBudgetService:
                             f"expected one of {sorted(allowed)}"
                         )
 
+                    claims = (
+                        await uow.agents
+                        .list_created_resume_claims_for_task_for_update(task_id)
+                    )
                     updated_task = await uow.agents.compare_and_set_task(
                         task_id,
                         task.revision,
@@ -976,12 +984,31 @@ class TaskBudgetService:
                             budget.revision,
                             {
                                 "state": TaskBudgetState.CLOSED.value,
-                                "closed_at": datetime.now(timezone.utc),
+                                "closed_at": now_utc,
                             },
                             expected_incarnation_generation=expected_generation,
                         )
                     )
                     if updated_budget is None:
+                        await uow.rollback()
+                        continue
+
+                    claim_conflict = False
+                    for claim in claims:
+                        changed = await uow.agents.compare_and_set_resume_claim(
+                            claim.claim_id,
+                            int(claim.revision),
+                            "CREATED",
+                            {
+                                "state": "REJECTED",
+                                "rejection_code": "TASK_RESOLVED",
+                                "rejected_at": now_utc,
+                            },
+                        )
+                        if changed is None:
+                            claim_conflict = True
+                            break
+                    if claim_conflict:
                         await uow.rollback()
                         continue
 
@@ -997,20 +1024,13 @@ class TaskBudgetService:
             f"AgentTask/TaskBudget terminal CAS conflicts exhausted for "
             f"{task_id}"
         )
-
     async def cancel_task(
         self,
         task_id: str,
         *,
         values: dict[str, Any] | None = None,
     ):
-        """Cancel Task authority and settle exact dormant R8 FORK executions.
-
-        Fork consume precharges active execution capacity before a process-local
-        runner exists. Cancellation therefore races activation on E2 revision 1
-        and releases capacity only for the exact ForkAdmission-backed
-        preactivation rows it wins.
-        """
+        """Cancel Task authority and settle exact dormant R8 admissions."""
 
         normalized = _normalize_task_store_values(values or {})
         normalized["status"] = "CANCELLED"
@@ -1018,9 +1038,12 @@ class TaskBudgetService:
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
-                    # Frozen R8-F serialization order:
-                    # Task -> TaskBudget -> Branch(es) -> E2 revision CAS.
-                    task = await uow.agents.get_task_for_update(task_id)
+                    # Frozen P1G/R8 order:
+                    # Task writer fence -> TaskBudget -> sorted Branches ->
+                    # relevant Executions -> CREATED claims -> CAS mutations.
+                    task = await uow.agents.lock_task_gc_serialization_fence(
+                        task_id
+                    )
                     if task is None:
                         raise TaskBudgetRequiredError(
                             f"Unknown AgentTask: {task_id}"
@@ -1087,10 +1110,8 @@ class TaskBudgetService:
                     cancelled_aggregates = 0
                     cancelled_delegated = 0
 
-                    # Lock every TaskBranch once, in the repository's canonical
-                    # branch_id order, before inspecting admission receipts.
-                    # FORK/RETRY receipts are ordered by creation/request id and
-                    # therefore must never drive branch-row lock acquisition.
+                    # Lock every TaskBranch once, in canonical branch_id order,
+                    # before reading admission-backed execution authority.
                     locked_branches = (
                         await uow.agents.list_task_branches_for_update(task_id)
                     )
@@ -1150,8 +1171,6 @@ class TaskBudgetService:
                             )
                         )
                         if cancelled is None:
-                            # Activation won revision 1. Do not mutate or
-                            # account the durable winner here.
                             continue
                         cancelled_forks += 1
                         if execution.parent_execution_id is not None:
@@ -1271,6 +1290,18 @@ class TaskBudgetService:
                             "active_parallel_agents."
                         )
 
+                    # Only a newly won terminal transition is responsible for
+                    # rejecting currently actionable claims.  A repeated
+                    # CANCELLED call is not a historical cleanup operation.
+                    claims = ()
+                    if current_state != "CANCELLED":
+                        claims = (
+                            await uow.agents
+                            .list_created_resume_claims_for_task_for_update(
+                                task_id
+                            )
+                        )
+
                     updated_task = task
                     if current_state != "CANCELLED":
                         updated_task = await uow.agents.compare_and_set_task(
@@ -1309,6 +1340,25 @@ class TaskBudgetService:
                         await uow.rollback()
                         continue
 
+                    claim_conflict = False
+                    for claim in claims:
+                        changed = await uow.agents.compare_and_set_resume_claim(
+                            claim.claim_id,
+                            int(claim.revision),
+                            "CREATED",
+                            {
+                                "state": "REJECTED",
+                                "rejection_code": "TASK_RESOLVED",
+                                "rejected_at": now_utc,
+                            },
+                        )
+                        if changed is None:
+                            claim_conflict = True
+                            break
+                    if claim_conflict:
+                        await uow.rollback()
+                        continue
+
                     await uow.commit()
                     return updated_task
             except OperationalError as exc:
@@ -1320,7 +1370,6 @@ class TaskBudgetService:
         raise TaskBudgetConflictError(
             f"AgentTask cancellation conflicts exhausted for {task_id}"
         )
-
     async def discard_branch(
         self,
         task_id: str,
@@ -1338,7 +1387,9 @@ class TaskBudgetService:
         for _ in range(self._max_conflict_retries):
             try:
                 async with self._uow_factory() as uow:
-                    task = await uow.agents.get_task_for_update(task_id)
+                    task = await uow.agents.lock_task_gc_serialization_fence(
+                        task_id
+                    )
                     budget = await uow.agents.get_task_budget_for_update(task_id)
                     branches = await uow.agents.list_task_branches_for_update(
                         task_id
