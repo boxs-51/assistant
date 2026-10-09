@@ -1,8 +1,8 @@
 """SBX-3 OS-D0: bounded, non-executing discovery; NOT native isolation proof.
 
-Policy #85 v3.1 / #164 independent one-ADD PRE-CLAIM:
+Historical #164 one-ADD D0 PRE-CLAIM (before active Policy #85 v2.5):
 https://github.com/boxs-51/assistant/issues/164#issuecomment-6073330338
-Owner exact-path CLAIM:
+Owner historical exact-path D0 CLAIM:
 https://github.com/boxs-51/assistant/issues/164#issuecomment-6073351305
 
 These tests deliberately NEVER invoke a legacy host shell, run an Agent command,
@@ -98,19 +98,41 @@ def test_d0_temp_only_lease_canary_enforces_owner_and_cleanup(
 def test_d0_native_process_backend_is_unimplemented_on_frozen_base(
     record_property,
 ):
-    """Source absence is factual, not a successful native-security result."""
+    """A1 three-state gate: source presence cannot certify native isolation."""
     observed = {
         "sandbox_process": _NATIVE_SE_BACKEND.is_file(),
         "sandbox_terminal_driver": _NATIVE_SE_TERMINAL_DRIVER.is_file(),
     }
+    present_count = sum(observed.values())
     record_property("SBX3_D0_SOURCE_OBSERVATION", str(observed))
-    record_property("SBX3_NATIVE_OS_CONFINEMENT", "NOT_IMPLEMENTED/NOT_PROVEN")
-    assert observed == {
-        "sandbox_process": False,
-        "sandbox_terminal_driver": False,
-    }, (
-        "Native source changed after frozen D0 baseline; separately audit "
-        "the source/test successor before interpreting this diagnostic"
+    record_property("SBX3_NATIVE_OS_CONFINEMENT", "NOT_PROVEN")
+    record_property("SBX3_CI417_C2", "NOT_ELIGIBLE")
+
+    if present_count == 0:
+        # Portable D0 diagnostics remain GREEN, but native security is absent.
+        record_property("SBX3_D0_NATIVE_STATE", "NOT_IMPLEMENTED")
+        record_property("SBX3_NATIVE_OS_CONFINEMENT", "NOT_IMPLEMENTED/NOT_PROVEN")
+        return
+
+    if present_count == 1:
+        # Do not canonically land an incomplete process/terminal native pair.
+        record_property("SBX3_D0_NATIVE_STATE", "PARTIAL_NATIVE_INSTALLATION")
+        pytest.fail(
+            "PARTIAL_NATIVE_INSTALLATION: exactly one native sandbox source "
+            "exists; deny Agent terminal dispatch and complete independent "
+            "source/test review before any integration",
+            pytrace=False,
+        )
+
+    # Both filenames existing is not Linux/Windows kernel confinement proof.
+    # A separately released B0 native-security test successor must supersede
+    # this fail-closed gate only after actual supported-host evidence passes.
+    record_property("SBX3_D0_NATIVE_STATE", "NATIVE_OS_SECURITY_NOT_CERTIFIED")
+    pytest.fail(
+        "NATIVE_OS_SECURITY_NOT_CERTIFIED: both native sources are present "
+        "but pre-first-instruction Linux/Windows process, filesystem, network "
+        "NONE, owner/lease/revoke and descendant cleanup remain unproven",
+        pytrace=False,
     )
 
 
