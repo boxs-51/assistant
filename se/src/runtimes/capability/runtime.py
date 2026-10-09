@@ -348,23 +348,31 @@ class CapabilityRuntime(BaseRuntime):
                 key=lambda item: item.capability_id,
             )
 
-        # Without the durable authority, caller-origin Skills must never become
-        # a local security fallback. Preserve only genuinely server-managed
-        # legacy context definitions.
-        if self.catalog is None:
-            return []
-        return sorted(
-            (
+        # Without the durable authority, caller-origin Catalog Skills must
+        # never become a local security fallback. Preserve only internal
+        # runtime-registered Skills plus explicitly server-managed Catalog
+        # definitions for legacy/offline server-owned operation.
+        definitions = [
+            driver.definition
+            for driver in self.registry.get_all_drivers()
+            if driver.definition.kind is CapabilityKind.SKILL
+            and driver.definition.execution_mode
+            is CapabilityExecutionMode.CONTEXT_ONLY
+            and self.authorization.is_allowed(identity, driver)
+        ]
+        known_ids = {item.capability_id for item in definitions}
+        if self.catalog is not None:
+            definitions.extend(
                 definition
                 for definition in self.catalog.list_definitions()
-                if definition.kind is CapabilityKind.SKILL
+                if definition.capability_id not in known_ids
+                and definition.kind is CapabilityKind.SKILL
                 and definition.execution_mode
                 is CapabilityExecutionMode.CONTEXT_ONLY
                 and definition.metadata.get("server_managed") is True
                 and self.authorization.is_allowed(identity, definition)
-            ),
-            key=lambda item: item.capability_id,
-        )
+            )
+        return sorted(definitions, key=lambda item: item.capability_id)
 
     async def list_visible_context_skills(self, identity: Identity):
         return await self.get_direct_context_skills(identity)
