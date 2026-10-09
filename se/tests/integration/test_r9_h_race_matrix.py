@@ -746,18 +746,52 @@ async def test_r9_h_resume_claim_adopt_isolation_ordering_diagnostic(
             trace.append(("claim_rejected", rejection.value.code))
         else:
             adopt_task = asyncio.create_task(adopt())
+            create_task = None
             try:
                 await asyncio.wait_for(adopt_scanned.wait(), timeout=15)
-                # The SELECT in the real ADOPT UoW must have seen no claim.
+                # The real ADOPT SELECT saw an empty predicate.
                 assert trace == [("adopt_scanned", ())]
-                created = await asyncio.wait_for(
-                    store.get_or_create_resume_claim(intent), timeout=15
+                claim_started = asyncio.Event()
+
+                async def create_after_real_adopt_scan():
+                    # Signal the CREATE *attempt*, not an impossible-to-
+                    # guarantee commit while a correct Task fence is held.
+                    trace.append(("claim_attempt_started", resume_request_id))
+                    claim_started.set()
+                    value = await store.get_or_create_resume_claim(intent)
+                    trace.append(("claim_committed", value.claim_id))
+                    return value
+
+                create_task = asyncio.create_task(
+                    create_after_real_adopt_scan()
                 )
-                assert created.resume_request_id == resume_request_id
-                trace.append(("claim_committed", created.claim_id))
+                await asyncio.wait_for(claim_started.wait(), timeout=15)
+                # Let CREATE reach its real SQL work. Under a production
+                # writer fence it may block until ADOPT finishes; never
+                # require the CREATE transaction to commit before releasing.
+                await asyncio.sleep(0)
             finally:
                 release_adopt.set()
+
+            if create_task is None:
                 adopted = await asyncio.wait_for(adopt_task, timeout=20)
+            else:
+                claim_outcome, adopted = await asyncio.wait_for(
+                    asyncio.gather(
+                        create_task, adopt_task, return_exceptions=True
+                    ),
+                    timeout=20,
+                )
+                # Fail on genuine SQLite busy/timeout or any unrelated fault.
+                assert not isinstance(adopted, BaseException), repr(adopted)
+                if isinstance(claim_outcome, BaseException):
+                    assert isinstance(
+                        claim_outcome, ResumeClaimRejected
+                    ), repr(claim_outcome)
+                    assert claim_outcome.code == "TASK_TERMINAL"
+                    trace.append(("claim_rejected", claim_outcome.code))
+                else:
+                    assert claim_outcome.resume_request_id == resume_request_id
 
         assert adopted.task_id == source["task_id"]
         async with _Uow(sessions) as uow:
