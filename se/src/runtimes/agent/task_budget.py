@@ -1119,12 +1119,13 @@ class TaskBudgetService:
                         item.branch_id: item for item in locked_branches
                     }
 
+                    fork_candidates = []
                     receipts = await uow.agents.list_task_fork_admissions(
                         task_id
                     )
                     for receipt in receipts:
                         branch = branch_map.get(receipt.branch_id)
-                        execution = await uow.agents.get_execution(
+                        execution = await uow.agents.get_execution_for_update(
                             receipt.execution_id
                         )
                         if branch is None or execution is None:
@@ -1156,32 +1157,16 @@ class TaskBudgetService:
                             and execution.bound_client_id is None
                             and execution.bound_connection_id is None
                         )
-                        if not exact_preactivation:
-                            continue
+                        if exact_preactivation:
+                            fork_candidates.append((receipt, execution))
 
-                        cancelled = (
-                            await uow.agents
-                            .compare_and_set_fork_preactivation_cancel(
-                                execution.id,
-                                task_id=task_id,
-                                branch_id=receipt.branch_id,
-                                base_execution_id=receipt.source_execution_id,
-                                base_checkpoint_id=receipt.source_checkpoint_id,
-                                completed_at=now_utc,
-                            )
-                        )
-                        if cancelled is None:
-                            continue
-                        cancelled_forks += 1
-                        if execution.parent_execution_id is not None:
-                            cancelled_delegated += 1
-
+                    retry_candidates = []
                     retry_receipts = (
                         await uow.agents.list_task_retry_admissions(task_id)
                     )
                     for receipt in retry_receipts:
                         branch = branch_map.get(receipt.branch_id)
-                        execution = await uow.agents.get_execution(
+                        execution = await uow.agents.get_execution_for_update(
                             receipt.execution_id
                         )
                         if branch is None or execution is None:
@@ -1203,32 +1188,16 @@ class TaskBudgetService:
                             and execution.bound_client_id is None
                             and execution.bound_connection_id is None
                         )
-                        if not exact_preactivation:
-                            continue
-                        cancelled = (
-                            await uow.agents
-                            .compare_and_set_retry_preactivation_cancel(
-                                execution.id,
-                                task_id=task_id,
-                                branch_id=receipt.branch_id,
-                                source_execution_id=(
-                                    receipt.source_execution_id
-                                ),
-                                completed_at=now_utc,
-                            )
-                        )
-                        if cancelled is None:
-                            continue
-                        cancelled_retries += 1
-                        if execution.parent_execution_id is not None:
-                            cancelled_delegated += 1
+                        if exact_preactivation:
+                            retry_candidates.append((receipt, execution))
 
+                    aggregate_candidates = []
                     aggregate_receipts = (
                         await uow.agents.list_task_aggregate_admissions(task_id)
                     )
                     for receipt in aggregate_receipts:
                         branch = branch_map.get(receipt.target_branch_id)
-                        execution = await uow.agents.get_execution(
+                        execution = await uow.agents.get_execution_for_update(
                             receipt.execution_id
                         )
                         if branch is None or execution is None:
@@ -1250,8 +1219,58 @@ class TaskBudgetService:
                             and execution.bound_client_id is None
                             and execution.bound_connection_id is None
                         )
-                        if not exact_preactivation:
+                        if exact_preactivation:
+                            aggregate_candidates.append((receipt, execution))
+
+                    # All Task/Budget/Branch/Execution authority has now been
+                    # read. Scan CREATED claims before the first mutation.
+                    claims = ()
+                    if current_state != "CANCELLED":
+                        claims = (
+                            await uow.agents
+                            .list_created_resume_claims_for_task_for_update(
+                                task_id
+                            )
+                        )
+
+                    for receipt, execution in fork_candidates:
+                        cancelled = (
+                            await uow.agents
+                            .compare_and_set_fork_preactivation_cancel(
+                                execution.id,
+                                task_id=task_id,
+                                branch_id=receipt.branch_id,
+                                base_execution_id=receipt.source_execution_id,
+                                base_checkpoint_id=receipt.source_checkpoint_id,
+                                completed_at=now_utc,
+                            )
+                        )
+                        if cancelled is None:
                             continue
+                        cancelled_forks += 1
+                        if execution.parent_execution_id is not None:
+                            cancelled_delegated += 1
+
+                    for receipt, execution in retry_candidates:
+                        cancelled = (
+                            await uow.agents
+                            .compare_and_set_retry_preactivation_cancel(
+                                execution.id,
+                                task_id=task_id,
+                                branch_id=receipt.branch_id,
+                                source_execution_id=(
+                                    receipt.source_execution_id
+                                ),
+                                completed_at=now_utc,
+                            )
+                        )
+                        if cancelled is None:
+                            continue
+                        cancelled_retries += 1
+                        if execution.parent_execution_id is not None:
+                            cancelled_delegated += 1
+
+                    for _receipt, execution in aggregate_candidates:
                         cancelled = await uow.agents.compare_and_set_execution(
                             execution.id,
                             1,
@@ -1288,18 +1307,6 @@ class TaskBudgetService:
                         raise TaskBudgetConflictError(
                             "Fork cancellation would underflow "
                             "active_parallel_agents."
-                        )
-
-                    # Only a newly won terminal transition is responsible for
-                    # rejecting currently actionable claims.  A repeated
-                    # CANCELLED call is not a historical cleanup operation.
-                    claims = ()
-                    if current_state != "CANCELLED":
-                        claims = (
-                            await uow.agents
-                            .list_created_resume_claims_for_task_for_update(
-                                task_id
-                            )
                         )
 
                     updated_task = task
@@ -1729,7 +1736,7 @@ class TaskBudgetService:
                     now_utc = datetime.now(timezone.utc)
                     release_active = 0
                     release_parallel = 0
-                    preactivation_conflict = False
+                    loser_preactivations = []
                     for loser in open_branches:
                         if loser.branch_id == branch_id:
                             continue
@@ -1797,10 +1804,8 @@ class TaskBudgetService:
 
                         if matching_receipts == 0:
                             # RUNNING@1 is also used by pre-R9/root lifecycles.
-                            # Without an immutable FORK/RETRY/AGGREGATE receipt
-                            # R9 has no authority to reinterpret or cancel it;
-                            # preserve the established controlled-completion
-                            # behavior for that owner.
+                            # Without immutable admission provenance R9 has no
+                            # authority to cancel that owner.
                             continue
                         if (
                             matching_receipts != 1
@@ -1813,7 +1818,19 @@ class TaskBudgetService:
                                 "Admission-backed loser RUNNING@1 execution "
                                 "has ambiguous or activated authority.",
                             )
+                        loser_preactivations.append(loser_execution)
 
+                    # All relevant Execution authority is read before CREATED
+                    # claims; all mutations begin only after this scan.
+                    claims = (
+                        await uow.agents
+                        .list_created_resume_claims_for_task_for_update(
+                            task_id
+                        )
+                    )
+
+                    preactivation_conflict = False
+                    for loser_execution in loser_preactivations:
                         cancelled = await uow.agents.compare_and_set_execution(
                             loser_execution.id,
                             1,
@@ -1848,12 +1865,6 @@ class TaskBudgetService:
                             "ADOPT would underflow active_parallel_agents.",
                         )
 
-                    claims = (
-                        await uow.agents
-                        .list_created_resume_claims_for_task_for_update(
-                            task_id
-                        )
-                    )
                     updated_task = await uow.agents.compare_and_set_task(
                         task_id,
                         int(task.revision),
