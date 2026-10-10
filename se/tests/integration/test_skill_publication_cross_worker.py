@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.repositories.capability_publications import (
     CapabilityPublicationRepository,
+    PublicationAuthorityUnavailable,
     PublicationConflict,
     PublicationStaleRevision,
 )
@@ -247,3 +248,216 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
     finally:
         await engine_b.dispose()
         await engine_a.dispose()
+
+
+async def _assert_provider_not_called_on_authority_fault(authority, identity):
+    """Exercise the genuine DIRECT unsent-call boundary, with a provider spy."""
+    from se.src.runtimes.chat.direct import DirectChatRuntime
+
+    class _Runtime:
+        async def get_available_capabilities(self, _identity, _profile):
+            return []
+
+        async def get_direct_context_skills(self, _identity):
+            return await authority.list_visible_definitions(_identity)
+
+    class _Provider:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete(self, _request):
+            self.calls += 1
+            raise AssertionError("provider must not be called on authority failure")
+
+    provider = _Provider()
+    direct = DirectChatRuntime(inference=provider, capability_runtime=_Runtime())
+    with pytest.raises(PublicationAuthorityUnavailable):
+        await direct.execute(
+            messages=(),
+            identity=identity,
+            session_id="sec-p1b-authority-fault",
+            model="offline",
+        )
+    assert provider.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_post_start_wrong_schema_head_blocks_provider_before_send():
+    """Real PG: a changed Alembic head after startup cannot authorize Skill text."""
+    dsn = _require_pg()
+    engine, authority = await _authority(dsn)
+    suffix = uuid.uuid4().hex
+    identity = SimpleNamespace(user_id=f"owner-{suffix}", scopes=set(), permissions=[])
+    definition = _definition(f"sec-p1b-head-{suffix}", "NEVER_SEND_ON_BAD_HEAD")
+    try:
+        await authority.publish_user_context(definition, publisher_id=identity.user_id)
+        assert any(
+            item.capability_id == definition.capability_id
+            for item in await authority.list_visible_definitions(identity)
+        )
+        async with engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    "UPDATE skill_publications.alembic_version_skill_publications "
+                    "SET version_num = :invalid WHERE version_num = :valid"
+                ),
+                {"invalid": "skillpub_unauthorized_head", "valid": "skillpub_0001"},
+            )
+            assert result.rowcount == 1
+        try:
+            await _assert_provider_not_called_on_authority_fault(authority, identity)
+            with pytest.raises(PublicationAuthorityUnavailable):
+                await authority.publish_user_context(
+                    _definition(f"sec-p1b-head-new-{suffix}", "DENY_WRITES"),
+                    publisher_id=identity.user_id,
+                )
+        finally:
+            async with engine.begin() as connection:
+                result = await connection.execute(
+                    text(
+                        "UPDATE skill_publications.alembic_version_skill_publications "
+                        "SET version_num = :valid WHERE version_num = :invalid"
+                    ),
+                    {"valid": "skillpub_0001", "invalid": "skillpub_unauthorized_head"},
+                )
+                assert result.rowcount == 1
+        assert any(
+            item.capability_id == definition.capability_id
+            for item in await authority.list_visible_definitions(identity)
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_post_start_missing_version_table_blocks_provider_before_send():
+    """Real PG DDL loss: do not silently rely on startup readiness."""
+    dsn = _require_pg()
+    engine, authority = await _authority(dsn)
+    suffix = uuid.uuid4().hex
+    identity = SimpleNamespace(user_id=f"owner-{suffix}", scopes=set(), permissions=[])
+    try:
+        await authority.publish_user_context(
+            _definition(f"sec-p1b-missing-head-{suffix}", "NEVER_SEND_ON_MISSING_SCHEMA"),
+            publisher_id=identity.user_id,
+        )
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    "ALTER TABLE skill_publications.alembic_version_skill_publications "
+                    "RENAME TO alembic_version_skill_publications_fault"
+                )
+            )
+        try:
+            await _assert_provider_not_called_on_authority_fault(authority, identity)
+        finally:
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        "ALTER TABLE skill_publications.alembic_version_skill_publications_fault "
+                        "RENAME TO alembic_version_skill_publications"
+                    )
+                )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_post_start_postgres_transport_loss_blocks_provider_before_send():
+    """Start against real PG, then inject a genuinely unreachable TCP endpoint."""
+    from sqlalchemy.engine import make_url
+
+    dsn = _require_pg()
+    engine, authority = await _authority(dsn)
+    suffix = uuid.uuid4().hex
+    identity = SimpleNamespace(user_id=f"owner-{suffix}", scopes=set(), permissions=[])
+    broken_engine = None
+    original_factory = authority._session_factory
+    try:
+        await authority.publish_user_context(
+            _definition(f"sec-p1b-db-loss-{suffix}", "NEVER_SEND_WHEN_PG_UNREACHABLE"),
+            publisher_id=identity.user_id,
+        )
+        unreachable = make_url(dsn).set(host="127.0.0.1", port=1)
+        broken_engine = create_async_engine(
+            unreachable, pool_pre_ping=True, connect_args={"timeout": 1}
+        )
+        authority._session_factory = async_sessionmaker(
+            broken_engine, expire_on_commit=False
+        )
+        await _assert_provider_not_called_on_authority_fault(authority, identity)
+    finally:
+        authority._session_factory = original_factory
+        if broken_engine is not None:
+            await broken_engine.dispose()
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_real_postgres_reservation_survives_local_catalog_bind_failure():
+    """Execute the actual generic register route; inject failure after SQL fence."""
+    from fastapi import HTTPException
+
+    from se.src.runtimes.capability.contracts.implementation import (
+        CapabilityExecutionLocation,
+    )
+    from se.src.transport.gateway.api.v1.capability_router import (
+        register_capability,
+    )
+
+    dsn = _require_pg()
+    engine, authority = await _authority(dsn)
+    suffix = uuid.uuid4().hex
+    capability_id = f"sec-p1b-failed-local-bind-{suffix}"
+    definition = CapabilityDefinition(
+        id=capability_id,
+        name=capability_id,
+        description="Injected local catalog failure after durable reservation",
+        kind=CapabilityKind.TOOL,
+        execution_kind="TOOL",
+        execution_mode=CapabilityExecutionMode.ONE_SHOT,
+    )
+    identity = SimpleNamespace(user_id=f"owner-{suffix}", scopes=set(), permissions=[])
+
+    class _FailingCatalog:
+        def register_definition(self, _definition):
+            raise ValueError("injected local catalog bind failure")
+
+    class _Runtime:
+        catalog = _FailingCatalog()
+
+        async def reserve_caller_namespace(self, value, *, identity):
+            return await authority.reserve_user_namespace(
+                value, publisher_id=identity.user_id
+            )
+
+    container = SimpleNamespace(capability_runtime=_Runtime())
+    body = SimpleNamespace(
+        location=CapabilityExecutionLocation.SERVER,
+        owner_id=identity.user_id,
+        kind=CapabilityKind.TOOL,
+        definition=definition,
+    )
+    try:
+        with pytest.raises(HTTPException) as exc:
+            await register_capability(body, identity, container)
+        assert exc.value.status_code == 422
+        assert all(
+            item.capability_id != capability_id
+            for item in await authority.list_visible_definitions(identity)
+        )
+        restarted_engine, restarted = await _authority(dsn)
+        try:
+            with pytest.raises(PublicationConflict):
+                await restarted.reserve_user_namespace(
+                    definition, publisher_id=f"another-{suffix}"
+                )
+            with pytest.raises(PublicationConflict):
+                await restarted.publish_user_context(
+                    _definition(capability_id, "INJECTED_CROSS_ORIGIN_TAKEOVER"),
+                    publisher_id=f"another-{suffix}",
+                )
+        finally:
+            await restarted_engine.dispose()
+    finally:
+        await engine.dispose()

@@ -100,21 +100,32 @@ class CapabilityPublicationRepository:
             f"Skill publication authority unavailable ({type(exc).__name__})."
         )
 
+    async def _require_schema_head(self, session) -> None:
+        """Fail closed if the durable SQL authority has drifted since startup.
+
+        Check through the same session used for the following publication
+        read/write, rather than relying on a boot-time schema-head snapshot.
+        """
+        try:
+            version = (
+                await session.execute(
+                    text(
+                        f"SELECT version_num FROM {SKILL_PUBLICATION_SCHEMA}."
+                        f"{SKILL_PUBLICATION_VERSION_TABLE}"
+                    )
+                )
+            ).scalar_one()
+        except (SQLAlchemyError, OSError, ValueError) as exc:
+            raise self._wrap_unavailable(exc) from exc
+        if version != SKILL_PUBLICATION_HEAD:
+            raise PublicationAuthorityUnavailable(
+                "Skill publication schema head mismatch."
+            )
+
     async def ensure_ready(self) -> None:
         try:
             async with self._session_factory() as session:
-                version = (
-                    await session.execute(
-                        text(
-                            f"SELECT version_num FROM {SKILL_PUBLICATION_SCHEMA}."
-                            f"{SKILL_PUBLICATION_VERSION_TABLE}"
-                        )
-                    )
-                ).scalar_one()
-                if version != SKILL_PUBLICATION_HEAD:
-                    raise PublicationAuthorityUnavailable(
-                        "Skill publication schema head mismatch."
-                    )
+                await self._require_schema_head(session)
                 await session.execute(
                     select(CapabilityPublicationRecord.capability_id).limit(1)
                 )
@@ -134,6 +145,7 @@ class CapabilityPublicationRepository:
 
     async def _read(self, capability_id: str):
         async with self._session_factory() as session:
+            await self._require_schema_head(session)
             return (
                 await session.execute(
                     select(CapabilityPublicationRecord).where(
@@ -162,6 +174,7 @@ class CapabilityPublicationRepository:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
+                    await self._require_schema_head(session)
                     current = await self._locked(session, capability_id)
                     if current is None:
                         current = CapabilityPublicationRecord(
@@ -263,6 +276,7 @@ class CapabilityPublicationRepository:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
+                    await self._require_schema_head(session)
                     current = await self._locked(session, definition.capability_id)
                     if current is None:
                         current = CapabilityPublicationRecord(
@@ -355,6 +369,7 @@ class CapabilityPublicationRepository:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
+                    await self._require_schema_head(session)
                     current = await self._locked(session, definition.capability_id)
                     if current is None:
                         raise PublicationConflict(
@@ -402,6 +417,7 @@ class CapabilityPublicationRepository:
         try:
             async with self._session_factory() as session:
                 async with session.begin():
+                    await self._require_schema_head(session)
                     current = await self._locked(session, capability_id)
                     if current is None or current.purpose != PURPOSE_DIRECT:
                         raise PublicationPermissionDenied("Unknown caller Skill publication.")
@@ -434,6 +450,7 @@ class CapabilityPublicationRepository:
             )
         try:
             async with self._session_factory() as session:
+                await self._require_schema_head(session)
                 rows = (
                     await session.execute(
                         select(CapabilityPublicationRecord)
@@ -448,7 +465,7 @@ class CapabilityPublicationRepository:
                 return [_definition_from_record(row) for row in rows]
         except PublicationAuthorityError:
             raise
-        except (SQLAlchemyError, DBAPIError, ValueError) as exc:
+        except (SQLAlchemyError, DBAPIError, ValueError, OSError) as exc:
             raise self._wrap_unavailable(exc) from exc
 
     async def get_visible_definition(
