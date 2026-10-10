@@ -168,17 +168,34 @@ jobs:
           $svc = Get-Service | Where-Object { $_.Name -like 'postgresql-x64-17*' } | Select-Object -First 1
           if (-not $svc) { throw "Real Windows PostgreSQL 17 service missing" }
           if ($svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
-          $ready = $false
+          # Chocolatey's installer may select its default 5432 instead of
+          # honoring a requested port. Probe native sockets independently of
+          # authentication, then verify the actual postgres password.
+          $pgReady = Join-Path $pgbin 'pg_isready.exe'
+          if (-not (Test-Path $pgReady)) { throw "Native pg_isready.exe missing" }
+          $readyPort = $null
           for ($n = 0; $n -lt 40; $n++) {
-            & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -tAc 'SELECT 1' 2>$null | Out-Null
-            if ($LASTEXITCODE -eq 0) { $ready = $true; break }
+            foreach ($candidatePort in @(55432, 5432)) {
+              & $pgReady -h 127.0.0.1 -p $candidatePort -U postgres -d postgres *> $null
+              if ($LASTEXITCODE -eq 0) { $readyPort = $candidatePort; break }
+            }
+            if ($null -ne $readyPort) { break }
             Start-Sleep -Seconds 2
           }
-          if (-not $ready) { throw "Real Windows PostgreSQL TCP endpoint unavailable on port 55432" }
-          $version = (& $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -tAc 'SHOW server_version').Trim()
+          if ($null -eq $readyPort) {
+            $state = (Get-Service -Name $svc.Name).Status
+            throw "Native PostgreSQL service status=$state but no ready socket on 55432/5432"
+          }
+          Write-Output "WINDOWS_NATIVE_PG_READY_PORT=$readyPort"
+          & $psql -h 127.0.0.1 -p $readyPort -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc 'SELECT 1'
+          if ($LASTEXITCODE -ne 0) { throw "Native PostgreSQL socket accepting but credential check failed" }
+          $version = (& $psql -h 127.0.0.1 -p $readyPort -U postgres -d postgres -tAc 'SHOW server_version').Trim()
           if (-not $version.StartsWith('17.11')) { throw "Expected Windows PostgreSQL 17.11, got $version" }
-          & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE security_p1b'
+          & $psql -h 127.0.0.1 -p $readyPort -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE security_p1b'
           if ($LASTEXITCODE -ne 0) { throw "Cannot create isolated P1B database" }
+          $selectedDsn = "postgresql+asyncpg://postgres:$($env:PGPASSWORD)@127.0.0.1:$readyPort/security_p1b"
+          $env:ASSISTANT_SKILL_PUBLICATION_DATABASE_URL = $selectedDsn
+          Add-Content -LiteralPath $env:GITHUB_ENV -Value "ASSISTANT_SKILL_PUBLICATION_DATABASE_URL=$selectedDsn"
           Write-Output "WINDOWS_NATIVE_PG_VERSION=$version"
       - name: Install pinned test dependencies
         shell: pwsh
