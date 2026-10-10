@@ -280,9 +280,16 @@ def test_two_worker_owner_read_collision_restart_and_revoke():
         process_b.join(timeout=10)
         assert process_b.exitcode == 0, "Child B did not terminate cleanly"
 
+        # The original publisher A also exits: the successor must use only PG.
+        assert _request_spawned_worker(process_a, channel_a, "stop")["ok"]
+        process_a.join(timeout=10)
+        assert process_a.exitcode == 0, "Original publisher did not exit cleanly"
+        process_a2, channel_a2 = _start_spawned_publication_worker(context, dsn)
+        workers.append((process_a2, channel_a2))
+
         process_c, channel_c = _start_spawned_publication_worker(context, dsn)
         workers.append((process_c, channel_c))
-        assert process_c.pid != process_a.pid
+        assert process_c.pid != process_a2.pid
         restarted_view = _request_spawned_worker(
             process_c, channel_c, "visible",
             capability_id=capability_id, user_id=owner_id,
@@ -291,7 +298,7 @@ def test_two_worker_owner_read_collision_restart_and_revoke():
         assert restarted_view["instructions"] == [instruction]
 
         assert _request_spawned_worker(
-            process_a, channel_a, "revoke",
+            process_a2, channel_a2, "revoke",
             capability_id=capability_id, publisher_id=owner_id,
         )["ok"]
         assert _request_spawned_worker(
