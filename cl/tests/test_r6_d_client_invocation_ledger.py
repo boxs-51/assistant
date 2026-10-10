@@ -1,3 +1,4 @@
+import sqlite3
 import time
 from types import SimpleNamespace
 
@@ -271,21 +272,144 @@ def test_prepared_restart_can_execute_only_after_explicit_invoke(tmp_path):
     )
 
     called = []
+    timeline = []
+    callback_futures = []
+    started = time.monotonic()
+
+    def note(phase, detail=None):
+        # Append-only test-local markers: no synchronization, waits, or I/O in
+        # the worker/callback path. Values and IDs in this fixture are synthetic.
+        timeline.append((phase, round(time.monotonic() - started, 6), detail))
+
+    def side_effect(value):
+        note("target.enter")
+        called.append(value)
+        note("target.exit")
+        return {"value": value}
+
     realtime = _Realtime("conn-2")
     dispatcher = _dispatcher(
-        _registry(lambda value: called.append(value) or {"value": value}),
+        _registry(side_effect),
         realtime,
         ClientInvocationLedger(path),
     )
+
+    # Trace exactly this dispatcher's SQLite mutations, retaining the
+    # original implementation and exception behavior. No global monkeypatch.
+    worker_ledger = dispatcher.invocation_ledger
+    for operation in ("mark_running", "commit_terminal"):
+        original = getattr(worker_ledger, operation)
+
+        def traced_operation(*args, _operation=operation, _original=original, **kwargs):
+            note(f"{_operation}.enter")
+            try:
+                result = _original(*args, **kwargs)
+            except BaseException as exc:
+                note(f"{_operation}.error", type(exc).__name__)
+                raise
+            note(f"{_operation}.exit")
+            return result
+
+        setattr(worker_ledger, operation, traced_operation)
+
+    original_complete = dispatcher._complete
+
+    def traced_complete(invocation_id, future):
+        callback_futures.append(future)
+        note("callback.enter")
+        try:
+            return original_complete(invocation_id, future)
+        except BaseException as exc:
+            note("callback.error", type(exc).__name__)
+            raise
+        finally:
+            note("callback.exit")
+
+    dispatcher._complete = traced_complete
+
+    def failure_snapshot():
+        # Failure-side only. SQLite read is query-only with zero wait budget:
+        # a locked/unreadable row is UNOBSERVABLE, never a second 5s timeout.
+        snapshot = {"ledger": "UNOBSERVABLE"}
+        connection = None
+        try:
+            connection = sqlite3.connect(str(path), timeout=0.0)
+            connection.execute("PRAGMA busy_timeout = 0")
+            connection.execute("PRAGMA query_only = ON")
+            row = connection.execute(
+                """
+                SELECT state, terminal_type, terminal_payload
+                FROM client_invocations
+                WHERE client_id = ? AND principal_id = ? AND invocation_id = ?
+                """,
+                ("client-1", "user-1", "inv-1"),
+            ).fetchone()
+            snapshot["ledger"] = (
+                {"state": row[0], "terminal_type": row[1],
+                 "terminal_payload": (row[2] or "")[:256]}
+                if row is not None else "MISSING"
+            )
+        except sqlite3.Error as exc:
+            snapshot["ledger"] = f"UNOBSERVABLE:{type(exc).__name__}"
+        finally:
+            if connection is not None:
+                connection.close()
+
+        # Do not acquire the dispatcher lock, which could be held by a
+        # blocked commit/send callback at the 2s failure boundary.
+        invocation = dispatcher._invocations.get("inv-1")
+        future = (
+            callback_futures[-1]
+            if callback_futures else
+            (invocation.future if invocation is not None else None)
+        )
+        if future is None:
+            snapshot["future"] = "UNOBSERVABLE"
+        else:
+            done = future.done()
+            cancelled = future.cancelled()
+            snapshot["future"] = {
+                "running": future.running(),
+                "done": done,
+                "cancelled": cancelled,
+            }
+            if done and not cancelled:
+                try:
+                    error = future.exception(timeout=0)
+                    snapshot["future"]["exception"] = (
+                        type(error).__name__ if error is not None else None
+                    )
+                except BaseException as exc:
+                    snapshot["future"]["exception"] = (
+                        f"UNOBSERVABLE:{type(exc).__name__}"
+                    )
+        snapshot["events"] = [
+            (kind, str(payload)[:256])
+            for kind, _invocation_id, payload in list(realtime.events)[:16]
+        ]
+        snapshot["called"] = list(called)
+        snapshot["timeline"] = list(timeline)[-32:]
+        return snapshot
+
     try:
+        note("reconcile.enter")
         _reconcile(dispatcher, fingerprint=fingerprint)
+        note("reconcile.exit")
         assert realtime.events[0][2]["status"] == "UNKNOWN"
         assert realtime.events[0][2]["ledger_state"] == "PREPARED"
         assert called == []
 
         realtime.events.clear()
+        note("dispatch.enter")
         dispatcher.dispatch(_invoke(dispatcher, "conn-2"))
-        _wait(lambda: any(item[0] == "result" for item in realtime.events))
+        note("dispatch.exit")
+        try:
+            # Preserve the original real-result predicate and 2.0s deadline.
+            _wait(lambda: any(item[0] == "result" for item in realtime.events))
+        except AssertionError as exc:
+            raise AssertionError(
+                f"{exc}; R6-D-WIN-D0 diagnostic={failure_snapshot()!r}"
+            ) from exc
         assert called == ["x"]
         record = ledger.get(
             client_id="client-1",
