@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import multiprocessing
 import os
 import uuid
 from types import SimpleNamespace
@@ -105,76 +106,209 @@ async def test_skill_publication_migration_head_and_table_exist():
         await engine.dispose()
 
 
-@pytest.mark.asyncio
-async def test_two_worker_owner_read_collision_restart_and_revoke():
+def _spawned_publication_worker(connection, dsn: str) -> None:
+    """Process-local SQLAlchemy engine and event loop, safe under Windows spawn."""
+    async def serve():
+        engine, authority = await _authority(dsn)
+        try:
+            connection.send({"ready": True, "pid": os.getpid()})
+            while True:
+                action, data = connection.recv()
+                if action == "stop":
+                    connection.send({"ok": True, "pid": os.getpid()})
+                    return
+                try:
+                    if action == "publish":
+                        await authority.publish_user_context(
+                            _definition(data["capability_id"], data["instruction"]),
+                            publisher_id=data["publisher_id"],
+                        )
+                        response = {"ok": True}
+                    elif action == "revoke":
+                        await authority.revoke_user_context(
+                            data["capability_id"], publisher_id=data["publisher_id"]
+                        )
+                        response = {"ok": True}
+                    elif action == "visible":
+                        identity = SimpleNamespace(
+                            user_id=data["user_id"], scopes=set(), permissions=[]
+                        )
+                        definitions = await authority.list_visible_definitions(identity)
+                        visible = [
+                            item for item in definitions
+                            if item.capability_id == data["capability_id"]
+                        ]
+                        response = {
+                            "ok": True,
+                            "ids": [item.capability_id for item in visible],
+                            "instructions": [
+                                item.metadata.get("instruction") for item in visible
+                            ],
+                        }
+                    else:
+                        raise ValueError("Unrecognized worker command")
+                except Exception as exc:
+                    # Never include a DSN or SQL exception message in test output.
+                    response = {"ok": False, "error": type(exc).__name__}
+                connection.send({"pid": os.getpid(), **response})
+        finally:
+            await engine.dispose()
+
+    try:
+        asyncio.run(serve())
+    except BaseException as exc:
+        try:
+            connection.send({
+                "ready": False, "pid": os.getpid(), "error": type(exc).__name__
+            })
+        except (OSError, EOFError):
+            pass
+        raise SystemExit(1) from None
+    finally:
+        connection.close()
+
+
+def _start_spawned_publication_worker(context, dsn: str):
+    parent, child = context.Pipe(duplex=True)
+    process = context.Process(
+        target=_spawned_publication_worker,
+        args=(child, dsn),
+        name="security-p1a-real-pg-worker",
+    )
+    process.start()
+    child.close()
+    try:
+        assert parent.poll(60), "Spawned worker readiness timeout"
+        assert parent.recv() == {"ready": True, "pid": process.pid}, (
+            "Spawned worker startup failure (sensitive details suppressed)"
+        )
+        assert process.pid != os.getpid()
+    except BaseException:
+        if process.is_alive():
+            process.terminate()
+        process.join(timeout=10)
+        if process.is_alive():
+            process.kill()
+            process.join(timeout=10)
+        parent.close()
+        raise
+    return process, parent
+
+
+def _request_spawned_worker(process, connection, action: str, **data):
+    assert process.is_alive(), "Spawned worker exited before request"
+    connection.send((action, data))
+    assert connection.poll(45), "Spawned worker request timeout"
+    answer = connection.recv()
+    assert answer["pid"] == process.pid, "Worker reply not from expected PID"
+    return answer
+
+
+def _close_spawned_workers(workers):
+    for process, connection in reversed(workers):
+        try:
+            if process.is_alive():
+                try:
+                    connection.send(("stop", {}))
+                    if connection.poll(5):
+                        connection.recv()
+                except (OSError, EOFError, BrokenPipeError):
+                    pass
+                process.join(timeout=10)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=10)
+            if process.is_alive():
+                process.kill()
+                process.join(timeout=10)
+        finally:
+            connection.close()
+
+
+def test_two_worker_owner_read_collision_restart_and_revoke():
+    """A/B are real spawned OS processes; B is exited and a fresh C reads PG."""
     dsn = _require_pg()
     suffix = uuid.uuid4().hex
     capability_id = f"sec-p1a-worker-{suffix}"
-    definition = _definition(capability_id, f"OWNER_ONLY_{suffix}")
-    owner = SimpleNamespace(user_id=f"owner-{suffix}", scopes=set(), permissions=[])
-    other = SimpleNamespace(user_id=f"other-{suffix}", scopes=set(), permissions=[])
-
-    engine_a, worker_a = await _authority(dsn)
-    engine_b, worker_b = await _authority(dsn)
+    instruction = f"OWNER_ONLY_{suffix}"
+    owner_id = f"owner-{suffix}"
+    other_id = f"other-{suffix}"
+    context = multiprocessing.get_context("spawn")
+    workers = []
     try:
-        await worker_a.publish_user_context(
-            definition,
-            publisher_id=owner.user_id,
+        process_a, channel_a = _start_spawned_publication_worker(context, dsn)
+        workers.append((process_a, channel_a))
+        process_b, channel_b = _start_spawned_publication_worker(context, dsn)
+        workers.append((process_b, channel_b))
+        assert process_a.pid != process_b.pid, "A and B share a PID"
+
+        assert _request_spawned_worker(
+            process_a, channel_a, "publish",
+            capability_id=capability_id, instruction=instruction,
+            publisher_id=owner_id,
+        )["ok"]
+        owner_view = _request_spawned_worker(
+            process_b, channel_b, "visible",
+            capability_id=capability_id, user_id=owner_id,
         )
+        assert owner_view["ids"] == [capability_id]
+        assert owner_view["instructions"] == [instruction]
+        assert _request_spawned_worker(
+            process_b, channel_b, "visible",
+            capability_id=capability_id, user_id=other_id,
+        )["ids"] == []
 
-        visible_owner = await worker_b.list_visible_definitions(owner)
-        assert [item.capability_id for item in visible_owner if item.capability_id == capability_id] == [
-            capability_id
-        ]
-        assert definition.metadata["instruction"] == next(
-            item.metadata["instruction"]
-            for item in visible_owner
-            if item.capability_id == capability_id
+        foreign = _request_spawned_worker(
+            process_b, channel_b, "publish",
+            capability_id=capability_id, instruction="FOREIGN_REPLACEMENT",
+            publisher_id=other_id,
         )
-        assert all(
-            item.capability_id != capability_id
-            for item in await worker_b.list_visible_definitions(other)
+        assert foreign == {
+            "pid": process_b.pid, "ok": False, "error": "PublicationConflict"
+        }
+        stale = _request_spawned_worker(
+            process_b, channel_b, "publish",
+            capability_id=capability_id, instruction="OWNER_CHANGED_WITHOUT_CAS",
+            publisher_id=owner_id,
         )
+        assert stale == {
+            "pid": process_b.pid, "ok": False, "error": "PublicationStaleRevision"
+        }
 
-        with pytest.raises(PublicationConflict):
-            await worker_b.publish_user_context(
-                _definition(capability_id, "FOREIGN_REPLACEMENT"),
-                publisher_id=other.user_id,
-            )
+        # This closes the actual child PID, not merely one engine/session.
+        assert _request_spawned_worker(process_b, channel_b, "stop")["ok"]
+        process_b.join(timeout=10)
+        assert process_b.exitcode == 0, "Child B did not terminate cleanly"
 
-        # P1A has no client expected_revision field, so a same-owner changed
-        # payload fails closed rather than silently advancing the revision.
-        with pytest.raises(PublicationStaleRevision):
-            await worker_b.publish_user_context(
-                _definition(capability_id, "OWNER_CHANGED_WITHOUT_CAS"),
-                publisher_id=owner.user_id,
-            )
+        process_c, channel_c = _start_spawned_publication_worker(context, dsn)
+        workers.append((process_c, channel_c))
+        assert process_c.pid != process_a.pid
+        restarted_view = _request_spawned_worker(
+            process_c, channel_c, "visible",
+            capability_id=capability_id, user_id=owner_id,
+        )
+        assert restarted_view["ids"] == [capability_id]
+        assert restarted_view["instructions"] == [instruction]
 
-        # A fresh engine/session pair models a worker restart with no local preload.
-        engine_c, restarted_worker = await _authority(dsn)
-        try:
-            restarted = await restarted_worker.list_visible_definitions(owner)
-            assert any(item.capability_id == capability_id for item in restarted)
-
-            await worker_a.revoke_user_context(
-                capability_id,
-                publisher_id=owner.user_id,
+        assert _request_spawned_worker(
+            process_a, channel_a, "revoke",
+            capability_id=capability_id, publisher_id=owner_id,
+        )["ok"]
+        assert _request_spawned_worker(
+            process_c, channel_c, "visible",
+            capability_id=capability_id, user_id=owner_id,
+        )["ids"] == []
+        for publisher_id in (other_id, owner_id):
+            denied = _request_spawned_worker(
+                process_c, channel_c, "publish",
+                capability_id=capability_id, instruction=instruction,
+                publisher_id=publisher_id,
             )
-            assert all(
-                item.capability_id != capability_id
-                for item in await restarted_worker.list_visible_definitions(owner)
-            )
-            with pytest.raises(PublicationConflict):
-                await restarted_worker.publish_user_context(
-                    definition,
-                    publisher_id=owner.user_id,
-                )
-        finally:
-            await engine_c.dispose()
+            assert denied == {
+                "pid": process_c.pid, "ok": False, "error": "PublicationConflict"
+            }
     finally:
-        await engine_b.dispose()
-        await engine_a.dispose()
-
+        _close_spawned_workers(workers)
 
 @pytest.mark.asyncio
 async def test_same_origin_concurrent_publish_is_idempotent():
