@@ -105,13 +105,15 @@ def test_d0_native_process_backend_is_unimplemented_on_frozen_base(
     }
     present_count = sum(observed.values())
     record_property("SBX3_D0_SOURCE_OBSERVATION", str(observed))
-    record_property("SBX3_NATIVE_OS_CONFINEMENT", "NOT_PROVEN")
+    record_property(
+        "SBX3_NATIVE_OS_CONFINEMENT",
+        "NOT_IMPLEMENTED/NOT_PROVEN" if present_count == 0 else "NOT_PROVEN",
+    )
     record_property("SBX3_CI417_C2", "NOT_ELIGIBLE")
 
     if present_count == 0:
         # Portable D0 diagnostics remain GREEN, but native security is absent.
         record_property("SBX3_D0_NATIVE_STATE", "NOT_IMPLEMENTED")
-        record_property("SBX3_NATIVE_OS_CONFINEMENT", "NOT_IMPLEMENTED/NOT_PROVEN")
         return
 
     if present_count == 1:
