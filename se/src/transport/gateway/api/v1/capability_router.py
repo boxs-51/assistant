@@ -29,9 +29,14 @@ from .....runtimes.capability.contracts.skill_manifest import (
     SKILL_RUNTIME_RESERVED_METADATA_KEYS,
 )
 from .....runtimes.capability.contracts.error import CapabilityError
+from .....infrastructure.storage.repositories.capability_publications import (
+    PublicationAuthorityUnavailable,
+    PublicationConflict,
+    PublicationPermissionDenied,
+    PublicationStaleRevision,
+)
 from .....runtimes.capability.contracts.result import CapabilityResult
 from .....runtimes.capability.drivers.agent_driver import AgentCapabilityDriver
-from .....runtimes.capability.drivers.skill_driver import ExecutableSkillCapabilityDriver
 from ...authentication.dependency import get_current_identity
 from ...dependencies import get_container
 
@@ -57,6 +62,90 @@ def _response(kind: CapabilityKind, definition: CapabilityDefinition, implementa
         capability_id=definition.capability_id, kind=kind.value,
         definition=definition.model_dump(mode="json", by_alias=True),
         implementations=[item.model_dump(mode="json") for item in implementations],
+    )
+
+
+def _raise_publication_http(exc: Exception):
+    if isinstance(exc, PublicationAuthorityUnavailable):
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Durable Skill publication authority is unavailable.",
+        ) from exc
+    if isinstance(exc, PublicationPermissionDenied):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    if isinstance(exc, (PublicationConflict, PublicationStaleRevision)):
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    raise exc
+
+
+def _validated_generic_caller_skill(body: CapabilityRegistration) -> CapabilityDefinition:
+    definition = body.definition
+    if body.kind is not definition.kind:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Capability kind must match definition.kind.",
+        )
+    if definition.kind is not CapabilityKind.SKILL:
+        raise HTTPException(status_code=422, detail="Expected a Skill definition.")
+    if body.owner_type is not CapabilityOwnerType.USER:
+        raise HTTPException(
+            status_code=422,
+            detail="Caller Skill owner_type must be USER.",
+        )
+    if definition.source != "HTTP_CALLER":
+        raise HTTPException(
+            status_code=422,
+            detail="Caller Skill source must be HTTP_CALLER.",
+        )
+    if definition.execution_mode is not CapabilityExecutionMode.CONTEXT_ONLY:
+        raise HTTPException(
+            status_code=422,
+            detail="Executable caller Skills are outside the P1A publication boundary.",
+        )
+    allowed_location = (
+        body.location is CapabilityExecutionLocation.DECLARATIVE
+        and body.driver_kind == "DECLARATIVE"
+    ) or (
+        body.location is CapabilityExecutionLocation.SERVER
+        and body.driver_kind == "DECLARATIVE"
+    )
+    if not allowed_location:
+        raise HTTPException(
+            status_code=422,
+            detail="Caller context Skill requires DECLARATIVE driver semantics.",
+        )
+    metadata = dict(definition.metadata or {})
+    allowed_caller_keys = {"instruction"}
+    reserved = sorted(
+        set(metadata).intersection(
+            SKILL_RUNTIME_RESERVED_METADATA_KEYS.difference(allowed_caller_keys)
+        )
+    )
+    if reserved:
+        raise HTTPException(
+            status_code=422,
+            detail="Skill metadata contains runtime-reserved keys: " + ", ".join(reserved),
+        )
+    instruction = str(metadata.get("instruction") or "").strip()
+    if not instruction:
+        raise HTTPException(status_code=422, detail="Skill instruction must not be empty.")
+    return definition.model_copy(
+        update={
+            "execution_kind": "SKILL",
+            "metadata": {
+                **metadata,
+                "instruction": instruction,
+                "kind": "SKILL",
+                "server_managed": False,
+                "runtime_owned": True,
+                "lazy": False,
+                "loaded": True,
+                "schema_version": "1",
+                "skill_id": definition.capability_id,
+                "provenance": "HTTP_CALLER",
+                "ownership": "CALLER_REGISTERED",
+            },
+        }
     )
 
 
@@ -110,11 +199,26 @@ def _ensure_server_tool_implementation(container: ApplicationContainer, definiti
 
 @router.post("/", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
 async def register_capability(body: CapabilityRegistration, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
-    if body.location.value == "CLIENT":
+    if body.location is CapabilityExecutionLocation.CLIENT:
         raise HTTPException(status_code=422, detail="Client capabilities must register through /v1/events/ws.")
     if body.owner_id not in (None, identity.user_id):
         raise HTTPException(status_code=403, detail="Cannot register a capability for another owner.")
+    if body.kind is not body.definition.kind:
+        raise HTTPException(status_code=422, detail="Capability kind must match definition.kind.")
+
+    runtime = container.capability_runtime
+    if body.definition.kind is CapabilityKind.SKILL:
+        definition = _validated_generic_caller_skill(body)
+        try:
+            await runtime.publish_caller_context_skill(definition, identity=identity)
+            return _response(CapabilityKind.SKILL, definition, [])
+        except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+            _raise_publication_http(exc)
+
     try:
+        # When the durable namespace authority is configured, caller-created
+        # non-Skill IDs are fenced as USER-origin before local side effects.
+        await runtime.reserve_caller_namespace(body.definition, identity=identity)
         catalog = _catalog(container)
         definition = catalog.register_definition(body.definition)
         implementation = CapabilityImplementation.from_definition(
@@ -127,8 +231,10 @@ async def register_capability(body: CapabilityRegistration, identity: Identity =
             implementation = catalog.get_implementation(implementation.implementation_id)
         else:
             implementation = catalog.register_implementation(implementation)
-        container.capability_runtime.registry.register_definition(definition)
+        runtime.registry.register_definition(definition)
         return _response(body.kind, definition, [implementation])
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+        _raise_publication_http(exc)
     except (ValueError, PermissionError) as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -140,13 +246,17 @@ async def list_capabilities(
     container: ApplicationContainer = Depends(get_container),
 ):
     catalog = _catalog(container)
+    runtime = container.capability_runtime
     result = []
+    durable_skill_authority = runtime.publication_authority is not None
     for definition in catalog.list_definitions():
-        if not _authorization(container).is_allowed(identity, definition):
-            continue
         try:
             definition_kind = definition.kind
         except ValueError:
+            continue
+        if definition_kind is CapabilityKind.SKILL and durable_skill_authority:
+            continue
+        if not _authorization(container).is_allowed(identity, definition):
             continue
         if kind is not None and definition_kind is not kind:
             continue
@@ -157,7 +267,13 @@ async def list_capabilities(
                 catalog.list_implementations(definition.capability_id),
             )
         )
-    return result
+    if durable_skill_authority and kind in (None, CapabilityKind.SKILL):
+        try:
+            for definition in await runtime.list_visible_context_skills(identity):
+                result.append(_response(CapabilityKind.SKILL, definition, []))
+        except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+            _raise_publication_http(exc)
+    return sorted(result, key=lambda item: item.capability_id)
 
 
 @router.post("/tools", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
@@ -180,12 +296,17 @@ async def register_tool_capability(body: GatewayToolDefinition, identity: Identi
                     "Use the client WebSocket registration path for remote tools."
                 ),
             )
+        await container.capability_runtime.reserve_caller_namespace(
+            definition, identity=identity
+        )
         definition = _catalog(container).register_definition(definition)
         container.tool_registry.register(body)
         implementation = _ensure_server_tool_implementation(container, definition)
         return _response(CapabilityKind.TOOL, definition, [implementation])
     except HTTPException:
         raise
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+        _raise_publication_http(exc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -220,7 +341,10 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
         raise HTTPException(status_code=422, detail=f"Unknown skills: {', '.join(missing_skills)}")
     invalid_skills = [
         name for name in body.skills
-        if str(catalog.get_definition(name).metadata.get("kind", "")).upper() != "SKILL"
+        if (
+            str(catalog.get_definition(name).metadata.get("kind", "")).upper() != "SKILL"
+            or catalog.get_definition(name).metadata.get("server_managed") is not True
+        )
     ]
     if invalid_skills:
         raise HTTPException(status_code=422, detail=f"Not skill capabilities: {', '.join(invalid_skills)}")
@@ -231,6 +355,9 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
         metadata={"kind": "AGENT", "agent": body.model_dump(mode="json")},
     )
     try:
+        await container.capability_runtime.reserve_caller_namespace(
+            definition, identity=identity
+        )
         definition = catalog.register_definition(definition)
         container.agent_registry.register(body)
         implementations = []
@@ -270,6 +397,8 @@ async def register_agent_capability(body: AgentDefinition, identity: Identity = 
             )
             implementations.append(implementation)
         return _response(CapabilityKind.AGENT, definition, implementations)
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+        _raise_publication_http(exc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
@@ -300,7 +429,6 @@ def _trusted_legacy_skill_metadata(body: SkillDefinition) -> dict:
 
 @router.post("/skills", response_model=CapabilityRegistrationResponse, status_code=status.HTTP_201_CREATED)
 async def register_skill_capability(body: SkillDefinition, identity: Identity = Depends(get_current_identity), container: ApplicationContainer = Depends(get_container)):
-    catalog = _catalog(container)
     try:
         metadata = _trusted_legacy_skill_metadata(body)
         definition = CapabilityDefinition(
@@ -309,41 +437,39 @@ async def register_skill_capability(body: SkillDefinition, identity: Identity = 
             kind=CapabilityKind.SKILL,
             execution_mode=CapabilityExecutionMode(body.execution_mode),
             effects=set(body.effects),
+            source="HTTP_CALLER",
             metadata=metadata,
         )
-        definition = catalog.register_definition(definition, allow_update=True)
-        container.capability_runtime.registry.register_definition(definition)
-        implementations = []
         if definition.execution_mode is not CapabilityExecutionMode.CONTEXT_ONLY:
-            inference_port = getattr(container, "inference_port", None)
-            if inference_port is None:
-                raise ValueError("Executable skills require the inference runtime.")
-            driver = ExecutableSkillCapabilityDriver(
-                definition, body.instruction, inference_port
+            raise HTTPException(
+                status_code=422,
+                detail="Executable caller Skills are outside the P1A publication boundary.",
             )
-            container.capability_runtime.register_capability(driver)
-            implementation_id = f"server:skill:{definition.capability_id}"
-            implementation = CapabilityImplementation.from_definition(
-                definition,
-                implementation_id=implementation_id,
-                location=CapabilityExecutionLocation.SERVER,
-                driver_kind="SKILL_RUNTIME",
-                owner_type=CapabilityOwnerType.SYSTEM,
-            )
-            if not catalog.contains_implementation(implementation_id):
-                catalog.register_implementation(implementation)
-                implementation = catalog.transition_implementation(
-                    implementation_id, CapabilityImplementationState.ENABLED
-                )
-            else:
-                implementation = catalog.get_implementation(implementation_id)
-            container.capability_runtime.driver_registry.bind(
-                implementation_id, driver, replace=True
-            )
-            implementations.append(implementation)
-        return _response(CapabilityKind.SKILL, definition, implementations)
+        await container.capability_runtime.publish_caller_context_skill(
+            definition, identity=identity
+        )
+        return _response(CapabilityKind.SKILL, definition, [])
+    except HTTPException:
+        raise
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+        _raise_publication_http(exc)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.delete("/skills/{capability_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def revoke_skill_capability(
+    capability_id: str,
+    identity: Identity = Depends(get_current_identity),
+    container: ApplicationContainer = Depends(get_container),
+):
+    try:
+        await container.capability_runtime.revoke_caller_context_skill(
+            capability_id, identity=identity
+        )
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+        _raise_publication_http(exc)
+    return None
 
 
 @router.post("/{capability_id}/execute", response_model=CapabilityResult)
@@ -381,12 +507,23 @@ async def get_capability(
     identity: Identity = Depends(get_current_identity),
     container: ApplicationContainer = Depends(get_container),
 ):
+    catalog = _catalog(container)
+    if catalog.contains_definition(capability_id):
+        local = catalog.get_definition(capability_id)
+        if local.kind is not CapabilityKind.SKILL:
+            if not _authorization(container).is_allowed(identity, local):
+                raise HTTPException(status_code=404, detail=f"Unknown capability: {capability_id}")
+            return _response(
+                local.kind,
+                local,
+                catalog.list_implementations(capability_id),
+            )
     try:
-        catalog = _catalog(container)
-        definition = catalog.get_definition(capability_id)
-        if not _authorization(container).is_allowed(identity, definition):
-            raise HTTPException(status_code=404, detail=f"Unknown capability: {capability_id}")
-        kind = definition.kind
-        return _response(kind, definition, catalog.list_implementations(capability_id))
-    except ValueError as exc:
-        raise HTTPException(status_code=404, detail=str(exc)) from exc
+        definition = await container.capability_runtime.get_visible_context_skill(
+            capability_id, identity
+        )
+    except (PublicationAuthorityUnavailable, PublicationConflict, PublicationPermissionDenied, PublicationStaleRevision) as exc:
+        _raise_publication_http(exc)
+    if definition is None:
+        raise HTTPException(status_code=404, detail=f"Unknown capability: {capability_id}")
+    return _response(CapabilityKind.SKILL, definition, [])

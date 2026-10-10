@@ -11,10 +11,6 @@ from ..agent.contracts.inference import (
     InferenceResponse,
     InferenceToolDefinition,
 )
-from ..capability.contracts.definition import (
-    CapabilityExecutionMode,
-    CapabilityKind,
-)
 from ..capability.policy import CapabilityAccessProfile
 from ..context.temporal import TemporalContextProvider
 from .contracts import DirectChatPolicy
@@ -56,15 +52,6 @@ class DirectChatRuntime:
             identity,
             CapabilityAccessProfile.DIRECT_READ_ONLY,
         )
-        all_authorized = await self._capability_runtime.get_available_capabilities(
-            identity,
-            CapabilityAccessProfile.AGENT_POLICY,
-        )
-        context_skills = [
-            item for item in all_authorized
-            if item.kind is CapabilityKind.SKILL
-            and item.execution_mode is CapabilityExecutionMode.CONTEXT_ONLY
-        ]
         tools = tuple(
             InferenceToolDefinition(
                 name=item.capability_id,
@@ -74,15 +61,20 @@ class DirectChatRuntime:
             for item in executable
         )
         allowed_capability_ids = {item.capability_id for item in executable}
-        skill_text = "\n\n".join(
-            str(item.metadata.get("instruction", "")).strip()
-            for item in context_skills
-            if str(item.metadata.get("instruction", "")).strip()
-        )
         execution_id = f"direct_{uuid.uuid4().hex}"
         calls_used = 0
 
         for iteration in range(1, self._policy.max_tool_rounds + 2):
+            # Security linearization point: re-resolve the current durable
+            # Skill authority immediately before every unsent provider call.
+            context_skills = (
+                await self._capability_runtime.get_direct_context_skills(identity)
+            )
+            skill_text = "\n\n".join(
+                str(item.metadata.get("instruction", "")).strip()
+                for item in context_skills
+                if str(item.metadata.get("instruction", "")).strip()
+            )
             temporal = self._temporal.current(timezone_name)
             system_content = temporal.as_system_text()
             if skill_text:
