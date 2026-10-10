@@ -21,8 +21,8 @@ jobs:
       matrix:
         include:
           - owner: se-164-pr441
-            head: b8ee5d4b87c96293dbb3f4fa49f105d84c8fe46e
-            blob: 3cd155c5a0e68e80d75cf9a42f4a585e951feb7f
+            head: b860a215c816650afd8d72137c39f2c98adff703
+            blob: 9db90bc61ee4d59c61c1a835ea942b2e4c382334
             testfile: se/tests/architecture/test_sbx3_process_isolation.py
             target: se/tests/architecture/test_sbx3_process_isolation.py::test_d0_native_process_backend_is_unimplemented_on_frozen_base
             expectedcount: '4'
