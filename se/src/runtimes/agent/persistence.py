@@ -3866,9 +3866,10 @@ class DurableAgentStore:
     ) -> ResumeClaim:
         """CAS one retryable CREATED claim onto a newer connection generation.
 
-        This operation acquires no execution/budget authority and never extends
-        claim TTL.  Non-CREATED winners are returned unchanged so the transport
-        can replay the durable outcome of a concurrent consumer.
+        A read-only locator transaction may identify the Task, but Task-linked
+        CREATED authority is always revalidated in a fresh Task-writer-fenced
+        transaction.  Non-CREATED winners remain authoritative and claim TTL is
+        never extended.
         """
 
         if not plan.target_user_id:
@@ -3894,7 +3895,67 @@ class DurableAgentStore:
 
         for _ in range(8):
             try:
+                # Locator-only UoW.  It MUST close before a Task-scoped writer
+                # fence is acquired so SQLite never upgrades a stale read
+                # snapshot into the authoritative writer transaction.
+                async with self.uow_factory() as locator_uow:
+                    locator_record = await locator_uow.agents.get_resume_claim(
+                        claim_id
+                    )
+                    if locator_record is None:
+                        await locator_uow.commit()
+                        raise ResumeClaimRejected(
+                            "STALE_RESUME_CLAIM",
+                            "ResumeClaim does not exist.",
+                        )
+                    if locator_record.state != ResumeClaimState.CREATED.value:
+                        result = self._resume_claim_contract(locator_record)
+                        await locator_uow.commit()
+                        return result
+                    if not self._created_claim_can_rebind_to_plan(
+                        locator_record,
+                        plan,
+                        resume_request_id,
+                    ):
+                        await locator_uow.commit()
+                        raise ResumeClaimRejected(
+                            "RESUME_REQUEST_CONFLICT",
+                            "CREATED ResumeClaim differs by more than "
+                            "connection generation.",
+                        )
+                    locator_execution = await locator_uow.agents.get_execution(
+                        locator_record.execution_id
+                    )
+                    if locator_execution is None:
+                        await locator_uow.commit()
+                        raise ResumeClaimRejected(
+                            "STALE_RESUME_CLAIM",
+                            "ResumeClaim execution no longer exists.",
+                        )
+                    locator_task_id = locator_execution.task_id
+                    if locator_task_id != plan.task_id:
+                        await locator_uow.commit()
+                        raise ResumeClaimRejected(
+                            "RESUME_REQUEST_CONFLICT",
+                            "ResumeClaim Task lineage differs from ResumePlan.",
+                        )
+                    await locator_uow.commit()
+
                 async with self.uow_factory() as uow:
+                    task = None
+                    if locator_task_id is not None:
+                        task = (
+                            await uow.agents.lock_task_gc_serialization_fence(
+                                locator_task_id
+                            )
+                        )
+                        if task is None:
+                            await uow.rollback()
+                            raise ResumeClaimRejected(
+                                "TASK_TERMINAL",
+                                "ResumeClaim AgentTask no longer exists.",
+                            )
+
                     record = await uow.agents.get_resume_claim(claim_id)
                     if record is None:
                         await uow.commit()
@@ -3902,15 +3963,10 @@ class DurableAgentStore:
                             "STALE_RESUME_CLAIM",
                             "ResumeClaim does not exist.",
                         )
-
                     if record.state != ResumeClaimState.CREATED.value:
-                        # A concurrent consume/reject/expire won after the
-                        # transport loaded CREATED.  Preserve that winner for
-                        # normal replay instead of trying to migrate it.
                         result = self._resume_claim_contract(record)
                         await uow.commit()
                         return result
-
                     if not self._created_claim_can_rebind_to_plan(
                         record,
                         plan,
@@ -3921,6 +3977,41 @@ class DurableAgentStore:
                             "RESUME_REQUEST_CONFLICT",
                             "CREATED ResumeClaim differs by more than "
                             "connection generation.",
+                        )
+
+                    execution = await uow.agents.get_execution(record.execution_id)
+                    if (
+                        execution is None
+                        or execution.id != plan.execution_id
+                        or execution.task_id != locator_task_id
+                    ):
+                        await uow.rollback()
+                        raise ResumeClaimRejected(
+                            "RESUME_REQUEST_CONFLICT",
+                            "ResumeClaim execution lineage changed.",
+                        )
+
+                    if (
+                        task is not None
+                        and str(task.status) in _TASK_TERMINAL_STATES
+                    ):
+                        rejected = await uow.agents.compare_and_set_resume_claim(
+                            claim_id,
+                            int(record.revision),
+                            ResumeClaimState.CREATED.value,
+                            {
+                                "state": ResumeClaimState.REJECTED.value,
+                                "rejection_code": "TASK_RESOLVED",
+                                "rejected_at": datetime.now(timezone.utc),
+                            },
+                        )
+                        if rejected is None:
+                            await uow.rollback()
+                            continue
+                        await uow.commit()
+                        raise ResumeClaimRejected(
+                            "TASK_TERMINAL",
+                            "Terminal AgentTask cannot rebind a ResumeClaim.",
                         )
 
                     if (
@@ -3957,7 +4048,6 @@ class DurableAgentStore:
             "ResumeClaim connection rebind conflicts exhausted.",
             retryable=True,
         )
-
     async def record_resume_claim_handoff(
         self,
         claim_id: str,
@@ -4045,8 +4135,10 @@ class DurableAgentStore:
     ) -> ResumeClaim:
         """Persist one idempotent CREATED resume intent.
 
-        Retrying the same resume_request_id never extends claim TTL and never
-        acquires AgentExecution or TaskBudget authority.
+        Retrying the same resume_request_id never extends claim TTL.  Task-linked
+        CREATE and CREATED replay use a fresh Task-writer-fenced authoritative
+        transaction so a terminal Task can never publish actionable CREATED
+        authority.
         """
 
         if not intent.resume_request_id:
@@ -4084,48 +4176,121 @@ class DurableAgentStore:
 
         for _ in range(8):
             try:
-                async with self.uow_factory() as uow:
-                    existing = await uow.agents.get_resume_claim_by_request_id(
-                        intent.resume_request_id
+                # Locate immutable Task lineage in a read-only transaction.
+                # Close it before opening the authoritative writer UoW.
+                async with self.uow_factory() as locator_uow:
+                    locator_existing = (
+                        await locator_uow.agents.get_resume_claim_by_request_id(
+                            intent.resume_request_id
+                        )
                     )
-                    if existing is not None:
-                        if not self._claim_intent_matches(existing, intent):
+                    if locator_existing is not None:
+                        if not self._claim_intent_matches(
+                            locator_existing, intent
+                        ):
+                            await locator_uow.commit()
                             raise ResumeClaimRejected(
                                 "RESUME_REQUEST_CONFLICT",
                                 "resume_request_id was reused with different semantics.",
                             )
-                        result = self._resume_claim_contract(existing)
-                        await uow.commit()
-                        return result
+                        if (
+                            locator_existing.state
+                            != ResumeClaimState.CREATED.value
+                        ):
+                            result = self._resume_claim_contract(locator_existing)
+                            await locator_uow.commit()
+                            return result
 
-                    # Task-scoped ResumeClaim creation must serialize with R9
-                    # ADOPT. Reading the execution does not acquire authority;
-                    # the Task row is the first lock, matching ADOPT's frozen
-                    # order. If ADOPT already won, no new CREATED claim may
-                    # commit. If claim creation wins first, ADOPT will observe
-                    # and reject that CREATED claim before completing the Task.
-                    execution = await uow.agents.get_execution(
+                    locator_execution = await locator_uow.agents.get_execution(
                         intent.execution_id
                     )
-                    if execution is None:
+                    if locator_execution is None:
+                        await locator_uow.commit()
                         raise ResumeClaimRejected(
                             "STALE_RESUME_CLAIM",
                             "ResumeClaim execution no longer exists.",
                         )
-                    if execution.task_id is not None:
-                        task = await uow.agents.get_task_for_update(
-                            execution.task_id
+                    locator_task_id = locator_execution.task_id
+                    await locator_uow.commit()
+
+                async with self.uow_factory() as uow:
+                    task = None
+                    if locator_task_id is not None:
+                        task = (
+                            await uow.agents.lock_task_gc_serialization_fence(
+                                locator_task_id
+                            )
                         )
                         if task is None:
-                            raise ResumeClaimRejected(
-                                "STALE_RESUME_CLAIM",
-                                "ResumeClaim AgentTask no longer exists.",
-                            )
-                        if str(task.status) in _TASK_TERMINAL_STATES:
+                            await uow.rollback()
                             raise ResumeClaimRejected(
                                 "TASK_TERMINAL",
-                                "Terminal AgentTask cannot create a ResumeClaim.",
+                                "ResumeClaim AgentTask no longer exists.",
                             )
+
+                    existing = (
+                        await uow.agents.get_resume_claim_by_request_id(
+                            intent.resume_request_id
+                        )
+                    )
+                    if existing is not None:
+                        if not self._claim_intent_matches(existing, intent):
+                            await uow.commit()
+                            raise ResumeClaimRejected(
+                                "RESUME_REQUEST_CONFLICT",
+                                "resume_request_id was reused with different semantics.",
+                            )
+                        if existing.state != ResumeClaimState.CREATED.value:
+                            result = self._resume_claim_contract(existing)
+                            await uow.commit()
+                            return result
+
+                    execution = await uow.agents.get_execution(
+                        intent.execution_id
+                    )
+                    if (
+                        execution is None
+                        or execution.task_id != locator_task_id
+                    ):
+                        await uow.rollback()
+                        raise ResumeClaimRejected(
+                            "STALE_RESUME_CLAIM",
+                            "ResumeClaim execution lineage changed.",
+                        )
+
+                    if task is not None:
+                        if str(task.status) in _TASK_TERMINAL_STATES:
+                            if (
+                                existing is not None
+                                and existing.state
+                                == ResumeClaimState.CREATED.value
+                            ):
+                                rejected = (
+                                    await uow.agents.compare_and_set_resume_claim(
+                                        existing.claim_id,
+                                        int(existing.revision),
+                                        ResumeClaimState.CREATED.value,
+                                        {
+                                            "state": ResumeClaimState.REJECTED.value,
+                                            "rejection_code": "TASK_RESOLVED",
+                                            "rejected_at": datetime.now(
+                                                timezone.utc
+                                            ),
+                                        },
+                                    )
+                                )
+                                if rejected is None:
+                                    await uow.rollback()
+                                    continue
+                                await uow.commit()
+                            else:
+                                await uow.rollback()
+                            raise ResumeClaimRejected(
+                                "TASK_TERMINAL",
+                                "Terminal AgentTask cannot create or replay "
+                                "a CREATED ResumeClaim.",
+                            )
+
                         if execution.branch_id is not None:
                             branch_record = await uow.agents.get_task_branch(
                                 execution.branch_id
@@ -4137,11 +4302,17 @@ class DurableAgentStore:
                                 or branch_record.current_execution_id
                                 != execution.id
                             ):
+                                await uow.rollback()
                                 raise ResumeClaimRejected(
                                     "BRANCH_NOT_OPEN",
                                     "Resolved or non-current TaskBranch cannot "
                                     "create a ResumeClaim.",
                                 )
+
+                    if existing is not None:
+                        result = self._resume_claim_contract(existing)
+                        await uow.commit()
+                        return result
 
                     record = await uow.agents.save_resume_claim(values)
                     result = self._resume_claim_contract(record)
@@ -4149,7 +4320,7 @@ class DurableAgentStore:
                     return result
             except IntegrityError:
                 # UNIQUE(resume_request_id) is the durable creation fence.
-                # Re-read the winner in a fresh transaction.
+                # Re-locate the winner in a fresh transaction.
                 continue
             except OperationalError as exc:
                 message = str(exc).lower()
@@ -4162,7 +4333,6 @@ class DurableAgentStore:
             "ResumeClaim creation conflicts exhausted.",
             retryable=True,
         )
-
     @staticmethod
     def _claim_matches_plan(record, spec: ResumeClaimConsumeSpec) -> bool:
         plan = spec.plan
@@ -6347,6 +6517,109 @@ class DurableAgentStore:
             context.resume_revision = getattr(execution, "revision", 0)
             await uow.commit()
             return context
+
+    async def terminalize_legacy_task_and_reject_resume_claims(
+        self,
+        task_id: str,
+        *,
+        allowed_source_states,
+        target_state: str,
+        values: Dict[str, Any] | None = None,
+    ):
+        """Atomically terminalize one legacy no-TaskBudget Task and its claims.
+
+        This is deliberately narrow: it is only for service-less coordinator
+        terminal durability.  A TaskBudget row means authority belongs to
+        TaskBudgetService and therefore fails closed here.
+        """
+
+        target_state = str(target_state)
+        if target_state not in _TASK_TERMINAL_STATES:
+            raise ValueError(
+                "target_state must be COMPLETED, FAILED or CANCELLED"
+            )
+        allowed = {str(item) for item in allowed_source_states}
+        if not allowed:
+            raise ValueError("allowed_source_states must not be empty")
+        normalized = _normalize_json_fields(
+            dict(values or {}),
+            _TASK_JSON_FIELDS,
+            path="agent_tasks",
+        )
+        normalized["status"] = target_state
+
+        for _ in range(8):
+            try:
+                async with self.uow_factory() as uow:
+                    task = await uow.agents.lock_task_gc_serialization_fence(
+                        task_id
+                    )
+                    if task is None:
+                        await uow.rollback()
+                        raise LookupError(f"Unknown AgentTask: {task_id}")
+
+                    budget = await uow.agents.get_task_budget_for_update(task_id)
+                    if budget is not None:
+                        await uow.rollback()
+                        raise TaskConflictError(
+                            "Legacy terminalization encountered a TaskBudget."
+                        )
+
+                    current_state = str(task.status)
+                    if current_state in _TASK_TERMINAL_STATES:
+                        await uow.commit()
+                        return task
+                    if current_state not in allowed:
+                        await uow.rollback()
+                        raise TaskConflictError(
+                            f"AgentTask {task_id} is {current_state}, "
+                            f"expected one of {sorted(allowed)}"
+                        )
+
+                    claims = (
+                        await uow.agents
+                        .list_created_resume_claims_for_task_for_update(task_id)
+                    )
+                    updated_task = await uow.agents.compare_and_set_task(
+                        task_id,
+                        int(task.revision),
+                        normalized,
+                    )
+                    if updated_task is None:
+                        await uow.rollback()
+                        continue
+
+                    now_utc = datetime.now(timezone.utc)
+                    claim_conflict = False
+                    for claim in claims:
+                        changed = await uow.agents.compare_and_set_resume_claim(
+                            claim.claim_id,
+                            int(claim.revision),
+                            ResumeClaimState.CREATED.value,
+                            {
+                                "state": ResumeClaimState.REJECTED.value,
+                                "rejection_code": "TASK_RESOLVED",
+                                "rejected_at": now_utc,
+                            },
+                        )
+                        if changed is None:
+                            claim_conflict = True
+                            break
+                    if claim_conflict:
+                        await uow.rollback()
+                        continue
+
+                    await uow.commit()
+                    return updated_task
+            except OperationalError as exc:
+                message = str(exc).lower()
+                if "locked" in message or "busy" in message:
+                    continue
+                raise
+
+        raise TaskConflictError(
+            f"Legacy AgentTask terminalization conflicts exhausted for {task_id}"
+        )
 
     async def update_task(self, task_id: str, values: Dict[str, Any]):
         values = _normalize_json_fields(
