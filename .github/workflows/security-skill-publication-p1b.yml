@@ -165,38 +165,41 @@ jobs:
           $pgbin = Join-Path $env:ProgramFiles 'PostgreSQL\17\bin'
           $psql = Join-Path $pgbin 'psql.exe'
           if (-not (Test-Path $psql)) { throw "Native PostgreSQL 17 binaries not found" }
-          $svc = Get-Service | Where-Object { $_.Name -like 'postgresql-x64-17*' } | Select-Object -First 1
-          if (-not $svc) { throw "Real Windows PostgreSQL 17 service missing" }
-          if ($svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
-          # Chocolatey's installer may select its default 5432 instead of
-          # honoring a requested port. Probe native sockets independently of
-          # authentication, then verify the actual postgres password.
+          # Do NOT connect to the runner's pre-existing PostgreSQL on 5432.
+          # Provision an independent, native PostgreSQL 17.11 cluster from the
+          # newly installed Windows binaries and bind ONLY to loopback 55432.
+          $initdb = Join-Path $pgbin 'initdb.exe'
+          $pgctl = Join-Path $pgbin 'pg_ctl.exe'
           $pgReady = Join-Path $pgbin 'pg_isready.exe'
-          if (-not (Test-Path $pgReady)) { throw "Native pg_isready.exe missing" }
-          $readyPort = $null
-          for ($n = 0; $n -lt 40; $n++) {
-            foreach ($candidatePort in @(55432, 5432)) {
-              & $pgReady -h 127.0.0.1 -p $candidatePort -U postgres -d postgres *> $null
-              if ($LASTEXITCODE -eq 0) { $readyPort = $candidatePort; break }
-            }
-            if ($null -ne $readyPort) { break }
-            Start-Sleep -Seconds 2
+          foreach ($binary in @($initdb, $pgctl, $pgReady)) {
+            if (-not (Test-Path $binary)) { throw "Native PostgreSQL binary missing" }
           }
-          if ($null -eq $readyPort) {
-            $state = (Get-Service -Name $svc.Name).Status
-            throw "Native PostgreSQL service status=$state but no ready socket on 55432/5432"
+          $data = Join-Path $env:RUNNER_TEMP 'sec408-p1b-pg17-isolated'
+          $serverLog = Join-Path $env:RUNNER_TEMP 'sec408-p1b-pg17-server.log'
+          $passwordFile = Join-Path $env:RUNNER_TEMP 'sec408-p1b-initdb-password.txt'
+          [System.IO.File]::WriteAllText($passwordFile, $env:PGPASSWORD, (New-Object System.Text.UTF8Encoding($false)))
+          try {
+            & $initdb "--pgdata=$data" "--username=postgres" "--pwfile=$passwordFile" "--auth-host=scram-sha-256" "--auth-local=scram-sha-256" "--encoding=UTF8" "--no-instructions"
+            if ($LASTEXITCODE -ne 0) { throw "Isolated Windows initdb failed" }
           }
-          Write-Output "WINDOWS_NATIVE_PG_READY_PORT=$readyPort"
-          & $psql -h 127.0.0.1 -p $readyPort -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc 'SELECT 1'
-          if ($LASTEXITCODE -ne 0) { throw "Native PostgreSQL socket accepting but credential check failed" }
-          $version = (& $psql -h 127.0.0.1 -p $readyPort -U postgres -d postgres -tAc 'SHOW server_version').Trim()
+          finally {
+            Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
+          }
+          & $pgctl -D $data -l $serverLog -o "-h 127.0.0.1 -p 55432" -w -t 60 start
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $serverLog) { Get-Content $serverLog | Select-Object -Last 25 }
+            throw "Isolated native Windows pg_ctl start failed"
+          }
+          & $pgReady -h 127.0.0.1 -p 55432 -U postgres -d postgres
+          if ($LASTEXITCODE -ne 0) { throw "New isolated Windows PostgreSQL socket unavailable" }
+          & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc 'SELECT 1'
+          if ($LASTEXITCODE -ne 0) { throw "New isolated Windows PostgreSQL credential check failed" }
+          $version = (& $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -tAc 'SHOW server_version').Trim()
           if (-not $version.StartsWith('17.11')) { throw "Expected Windows PostgreSQL 17.11, got $version" }
-          & $psql -h 127.0.0.1 -p $readyPort -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE security_p1b'
+          & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE security_p1b'
           if ($LASTEXITCODE -ne 0) { throw "Cannot create isolated P1B database" }
-          $selectedDsn = "postgresql+asyncpg://postgres:$($env:PGPASSWORD)@127.0.0.1:$readyPort/security_p1b"
-          $env:ASSISTANT_SKILL_PUBLICATION_DATABASE_URL = $selectedDsn
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "ASSISTANT_SKILL_PUBLICATION_DATABASE_URL=$selectedDsn"
-          Write-Output "WINDOWS_NATIVE_PG_VERSION=$version"
+          Write-Output "WINDOWS_NATIVE_ISOLATED_PG_VERSION=$version"
+          Write-Output "WINDOWS_NATIVE_ISOLATED_PORT=55432"
       - name: Install pinned test dependencies
         shell: pwsh
         run: |
