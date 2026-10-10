@@ -1,0 +1,290 @@
+# SECURITY #408 P1B — admin-direct, non-merge, evidence-only workflow.
+# Authorized by repository admin in current chat (issue #408 comment #6098561332).
+# Independent prospective PRE-CLAIM remains outstanding; this is NOT a formal Security FINAL.
+name: Security P1B PostgreSQL evidence (admin-direct)
+
+on:
+  push:
+    branches:
+      - security-p1b-evidence-20261010
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-p1b-admin-evidence
+  cancel-in-progress: false
+
+jobs:
+  linux-postgres-security:
+    name: linux-postgres-security
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: P1BRunnerOnly-2026
+          POSTGRES_DB: security_p1b
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d security_p1b"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      ASSISTANT_SECURITY_PG_E2E: "1"
+      ASSISTANT_SKILL_PUBLICATION_DATABASE_URL: postgresql+asyncpg://postgres:P1BRunnerOnly-2026@127.0.0.1:55432/security_p1b
+      P1B_EVIDENCE_DIR: p1b-evidence-linux
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-runtime.txt
+            requirements-test.txt
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Capture versions and assert real PostgreSQL 17.11 + migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$P1B_EVIDENCE_DIR"
+          python -m alembic -c alembic_skill_publications.ini upgrade head
+          python - <<'PY'
+          import asyncio, importlib.metadata, os
+          from pathlib import Path
+          from sqlalchemy import text
+          from sqlalchemy.ext.asyncio import create_async_engine
+
+          async def verify():
+              engine = create_async_engine(os.environ["ASSISTANT_SKILL_PUBLICATION_DATABASE_URL"])
+              try:
+                  async with engine.connect() as connection:
+                      version = (await connection.execute(text("SHOW server_version"))).scalar_one()
+                      head = (await connection.execute(text("SELECT version_num FROM skill_publications.alembic_version_skill_publications"))).scalar_one()
+                      table = (await connection.execute(text("SELECT to_regclass('skill_publications.capability_publications')"))).scalar_one()
+                  assert version.startswith("17.11"), f"Wrong PostgreSQL version: {version}"
+                  assert head == "skillpub_0001", f"Wrong migration head: {head}"
+                  assert table == "skill_publications.capability_publications", f"Missing table: {table}"
+                  report = (
+                      f"git={os.environ['GITHUB_SHA']}\n"
+                      f"platform=linux\npostgresql={version}\n"
+                      f"python={__import__('sys').version.split()[0]}\n"
+                      f"asyncpg={importlib.metadata.version('asyncpg')}\n"
+                      f"sqlalchemy={importlib.metadata.version('sqlalchemy')}\n"
+                      f"alembic={importlib.metadata.version('alembic')}\n"
+                      f"schema_head={head}\n"
+                  )
+                  Path(os.environ["P1B_EVIDENCE_DIR"], "provenance.txt").write_text(report)
+                  print(report)
+              finally:
+                  await engine.dispose()
+
+          asyncio.run(verify())
+          PY
+      - name: Require exact eight reviewed PostgreSQL nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess, sys
+          from pathlib import Path
+          expected = {
+              "test_skill_publication_migration_head_and_table_exist",
+              "test_two_worker_owner_read_collision_restart_and_revoke",
+              "test_same_origin_concurrent_publish_is_idempotent",
+              "test_system_namespace_blocks_caller_and_materializes_public_skill",
+              "test_post_start_wrong_schema_head_blocks_provider_before_send",
+              "test_post_start_missing_version_table_blocks_provider_before_send",
+              "test_post_start_postgres_transport_loss_blocks_provider_before_send",
+              "test_real_postgres_reservation_survives_local_catalog_bind_failure",
+          }
+          target = "se/tests/integration/test_skill_publication_cross_worker.py"
+          check = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", target], capture_output=True, text=True)
+          Path("p1b-evidence-linux/collection.txt").write_text(check.stdout + check.stderr)
+          prefix = target + "::"
+          found = {line.strip().removeprefix(prefix) for line in check.stdout.splitlines() if line.strip().startswith(prefix)}
+          assert check.returncode == 0 and found == expected, f"Node manifest mismatch: expected={sorted(expected)}, got={sorted(found)}, return={check.returncode}"
+          print(f"Exact reviewed P1B PostgreSQL manifest: {len(found)} nodes")
+          PY
+      - name: Run all eight real PostgreSQL security tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra --junitxml="$P1B_EVIDENCE_DIR/junit.xml" se/tests/integration/test_skill_publication_cross_worker.py
+          python - <<'PY'
+          from xml.etree import ElementTree as ET
+          root = ET.parse("p1b-evidence-linux/junit.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          assert suite is not None
+          result = {key: int(suite.attrib.get(key, "0")) for key in ("tests", "failures", "errors", "skipped")}
+          assert result == {"tests": 8, "failures": 0, "errors": 0, "skipped": 0}, f"P1B evidence not GREEN: {result}"
+          print(f"REAL_POSTGRES_SECURITY_8_OF_8_PASS {result}")
+          PY
+      - name: Upload Linux PG evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-p1b-linux-pg-17-11
+          path: p1b-evidence-linux/
+          if-no-files-found: warn
+
+  windows-postgres-security:
+    name: windows-postgres-security
+    runs-on: windows-latest
+    timeout-minutes: 55
+    env:
+      PGPASSWORD: P1BRunnerOnly-2026
+      ASSISTANT_SECURITY_PG_E2E: "1"
+      ASSISTANT_SKILL_PUBLICATION_DATABASE_URL: postgresql+asyncpg://postgres:P1BRunnerOnly-2026@127.0.0.1:55432/security_p1b
+      P1B_EVIDENCE_DIR: p1b-evidence-windows
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-runtime.txt
+            requirements-test.txt
+      - name: Install native Windows PostgreSQL 17.11 (no Docker)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install postgresql17 --version=17.11.0 -y --no-progress --params "/Password:$env:PGPASSWORD /Port:55432"
+          if ($LASTEXITCODE -ne 0) { throw "PostgreSQL 17.11 Chocolatey installation failed: $LASTEXITCODE" }
+          $pgbin = Join-Path $env:ProgramFiles 'PostgreSQL\17\bin'
+          $psql = Join-Path $pgbin 'psql.exe'
+          if (-not (Test-Path $psql)) { throw "Native PostgreSQL 17 binaries not found" }
+          # Do NOT connect to the runner's pre-existing PostgreSQL on 5432.
+          # Provision an independent, native PostgreSQL 17.11 cluster from the
+          # newly installed Windows binaries and bind ONLY to loopback 55432.
+          $initdb = Join-Path $pgbin 'initdb.exe'
+          $pgctl = Join-Path $pgbin 'pg_ctl.exe'
+          $pgReady = Join-Path $pgbin 'pg_isready.exe'
+          foreach ($binary in @($initdb, $pgctl, $pgReady)) {
+            if (-not (Test-Path $binary)) { throw "Native PostgreSQL binary missing" }
+          }
+          $data = Join-Path $env:RUNNER_TEMP 'sec408-p1b-pg17-isolated'
+          $serverLog = Join-Path $env:RUNNER_TEMP 'sec408-p1b-pg17-server.log'
+          $passwordFile = Join-Path $env:RUNNER_TEMP 'sec408-p1b-initdb-password.txt'
+          [System.IO.File]::WriteAllText($passwordFile, $env:PGPASSWORD, (New-Object System.Text.UTF8Encoding($false)))
+          try {
+            & $initdb "--pgdata=$data" "--username=postgres" "--pwfile=$passwordFile" "--auth-host=scram-sha-256" "--auth-local=scram-sha-256" "--encoding=UTF8" "--no-instructions"
+            if ($LASTEXITCODE -ne 0) { throw "Isolated Windows initdb failed" }
+          }
+          finally {
+            Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
+          }
+          & $pgctl -D $data -l $serverLog -o "-h 127.0.0.1 -p 55432" -w -t 60 start
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $serverLog) { Get-Content $serverLog | Select-Object -Last 25 }
+            throw "Isolated native Windows pg_ctl start failed"
+          }
+          & $pgReady -h 127.0.0.1 -p 55432 -U postgres -d postgres
+          if ($LASTEXITCODE -ne 0) { throw "New isolated Windows PostgreSQL socket unavailable" }
+          & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc 'SELECT 1'
+          if ($LASTEXITCODE -ne 0) { throw "New isolated Windows PostgreSQL credential check failed" }
+          $version = (& $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -tAc 'SHOW server_version').Trim()
+          if (-not $version.StartsWith('17.11')) { throw "Expected Windows PostgreSQL 17.11, got $version" }
+          & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE security_p1b'
+          if ($LASTEXITCODE -ne 0) { throw "Cannot create isolated P1B database" }
+          Write-Output "WINDOWS_NATIVE_ISOLATED_PG_VERSION=$version"
+          Write-Output "WINDOWS_NATIVE_ISOLATED_PORT=55432"
+      - name: Install pinned test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-test.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Python dependency installation failed' }
+      - name: Assert real PostgreSQL migration and capture sanitized versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:P1B_EVIDENCE_DIR | Out-Null
+          python -m alembic -c alembic_skill_publications.ini upgrade head
+          if ($LASTEXITCODE -ne 0) { throw 'Real Windows PG Alembic migration failed' }
+          @'
+          import asyncio, importlib.metadata, os, sys
+          from pathlib import Path
+          from sqlalchemy import text
+          from sqlalchemy.ext.asyncio import create_async_engine
+          async def verify():
+              engine = create_async_engine(os.environ["ASSISTANT_SKILL_PUBLICATION_DATABASE_URL"])
+              try:
+                  async with engine.connect() as connection:
+                      version = (await connection.execute(text("SHOW server_version"))).scalar_one()
+                      head = (await connection.execute(text("SELECT version_num FROM skill_publications.alembic_version_skill_publications"))).scalar_one()
+                      table = (await connection.execute(text("SELECT to_regclass('skill_publications.capability_publications')"))).scalar_one()
+                  assert version.startswith("17.11"), version
+                  assert head == "skillpub_0001", head
+                  assert table == "skill_publications.capability_publications", table
+                  report = (f"git={os.environ['GITHUB_SHA']}\nplatform=windows-native\n"
+                            f"postgresql={version}\npython={sys.version.split()[0]}\n"
+                            f"asyncpg={importlib.metadata.version('asyncpg')}\n"
+                            f"sqlalchemy={importlib.metadata.version('sqlalchemy')}\n"
+                            f"alembic={importlib.metadata.version('alembic')}\nschema_head={head}\n")
+                  Path(os.environ["P1B_EVIDENCE_DIR"], "provenance.txt").write_text(report)
+                  print(report)
+              finally:
+                  await engine.dispose()
+          asyncio.run(verify())
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows real PostgreSQL verification failed' }
+      - name: Require exact eight reviewed PostgreSQL nodes
+        shell: pwsh
+        run: |
+          @'
+          import subprocess, sys, os
+          from pathlib import Path
+          expected = {
+              "test_skill_publication_migration_head_and_table_exist",
+              "test_two_worker_owner_read_collision_restart_and_revoke",
+              "test_same_origin_concurrent_publish_is_idempotent",
+              "test_system_namespace_blocks_caller_and_materializes_public_skill",
+              "test_post_start_wrong_schema_head_blocks_provider_before_send",
+              "test_post_start_missing_version_table_blocks_provider_before_send",
+              "test_post_start_postgres_transport_loss_blocks_provider_before_send",
+              "test_real_postgres_reservation_survives_local_catalog_bind_failure",
+          }
+          target = "se/tests/integration/test_skill_publication_cross_worker.py"
+          check = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", target], capture_output=True, text=True)
+          Path(os.environ["P1B_EVIDENCE_DIR"], "collection.txt").write_text(check.stdout + check.stderr)
+          prefix = target + "::"
+          found = {line.strip().removeprefix(prefix) for line in check.stdout.splitlines() if line.strip().startswith(prefix)}
+          assert check.returncode == 0 and found == expected, f"Node manifest mismatch: {sorted(found)}; exit={check.returncode}"
+          print(f"Exact reviewed P1B PostgreSQL manifest: {len(found)} nodes")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows P1B eight-node collection mismatch' }
+      - name: Run eight real Windows PostgreSQL security tests
+        shell: pwsh
+        run: |
+          python -m pytest -q -ra --junitxml="$env:P1B_EVIDENCE_DIR/junit.xml" se/tests/integration/test_skill_publication_cross_worker.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows real PostgreSQL security tests RED' }
+          @'
+          from xml.etree import ElementTree as ET
+          import os
+          from pathlib import Path
+          root = ET.parse(Path(os.environ["P1B_EVIDENCE_DIR"]) / "junit.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          assert suite is not None
+          result = {key: int(suite.attrib.get(key, "0")) for key in ("tests", "failures", "errors", "skipped")}
+          assert result == {"tests": 8, "failures": 0, "errors": 0, "skipped": 0}, f"P1B Windows evidence not GREEN: {result}"
+          print(f"REAL_WINDOWS_POSTGRES_SECURITY_8_OF_8_PASS {result}")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows P1B JUnit acceptance mismatch' }
+      - name: Upload Windows PG evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-p1b-windows-native-pg-17-11
+          path: p1b-evidence-windows/
+          if-no-files-found: warn
