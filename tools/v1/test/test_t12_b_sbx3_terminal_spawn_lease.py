@@ -1,4 +1,4 @@
-"""TV1-T12-B-D0: Tools-owned diagnostic only; NOT native OS security certification.
+"""TV1-T12-B-D0/A1: Tools-owned compatibility gate; NOT native OS certification.
 
 Scope: #371, independent one-ADD PRE-CLAIM
 https://github.com/boxs-51/assistant/issues/371#issuecomment-6074397930
@@ -160,11 +160,35 @@ def test_d0_native_backend_source_availability_is_only_observation(record_proper
         "native_terminal_driver": _NATIVE_TERMINAL_DRIVER.is_file(),
     }
     record_property("TOOLS_D0_SOURCE_OBSERVATION", str(sources))
-    record_property("TOOLS_D0_NATIVE_OS_SECURITY", "NOT_IMPLEMENTED/NOT_PROVEN")
-    assert sources == {
-        "native_process_backend": False,
-        "native_terminal_driver": False,
-    }, "Native sources changed: independently review D0 successor before reuse"
+
+    # A1 is a compatibility guard, not native-execution proof. Both sources
+    # must be present before native testing can even begin; their presence
+    # alone does not demonstrate confinement on Linux or Windows.
+    present_count = sum(sources.values())
+    if present_count == 1:
+        record_property("TOOLS_D0_NATIVE_STATE", "PARTIAL_NATIVE_INSTALLATION")
+        record_property("TOOLS_D0_NATIVE_OS_SECURITY", "NOT_PROVEN")
+        record_property("CI_PHASE_B_NATIVE", "NOT_ELIGIBLE")
+        pytest.fail(
+            "PARTIAL_NATIVE_INSTALLATION: native process backend and terminal "
+            "driver must be introduced together; Agent dispatch remains denied",
+            pytrace=False,
+        )
+    if present_count == 2:
+        record_property("TOOLS_D0_NATIVE_STATE", "NATIVE_OS_SECURITY_NOT_CERTIFIED")
+        record_property("TOOLS_D0_NATIVE_OS_SECURITY", "NOT_PROVEN")
+        record_property("CI_PHASE_B_NATIVE", "NOT_ELIGIBLE")
+        pytest.fail(
+            "NATIVE_OS_SECURITY_NOT_CERTIFIED: source presence is not native "
+            "Linux+Windows pre-instruction isolation and lifetime proof; "
+            "separately released B0 security tests are required",
+            pytrace=False,
+        )
+
+    # Both sources absent: these six portable D0 checks are diagnostic only.
+    record_property("TOOLS_D0_NATIVE_STATE", "NOT_IMPLEMENTED")
+    record_property("TOOLS_D0_NATIVE_OS_SECURITY", "NOT_PROVEN")
+    record_property("CI_PHASE_B_NATIVE", "NOT_ELIGIBLE")
 
 
 def test_d0_trusted_direct_popen_observation_is_not_an_agent_escape(record_property):
