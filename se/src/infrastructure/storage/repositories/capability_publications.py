@@ -256,6 +256,95 @@ class CapabilityPublicationRepository:
             publisher_id=publisher_id,
         )
 
+    async def reserve_user_namespaces(
+        self,
+        definitions: Iterable[CapabilityDefinition],
+        *,
+        publisher_id: str,
+    ) -> None:
+        """Atomically reserve a whole client-registration batch across workers.
+
+        WebSocket clients must not reach the process-local Catalog until the
+        same PostgreSQL origin fence used by HTTP has accepted every logical
+        ID. An invalid/colliding member rolls back the *entire* reservation
+        transaction. Locks are acquired in deterministic ID order.
+        """
+        if not publisher_id or not publisher_id.strip():
+            raise PublicationPermissionDenied("Authenticated publisher is required.")
+        batch: dict[str, CapabilityDefinition] = {}
+        for definition in definitions:
+            identifier = definition.capability_id
+            if identifier in batch:
+                raise PublicationConflict(
+                    f"Duplicate capability id in reservation batch: {identifier}"
+                )
+            batch[identifier] = definition
+        if not batch:
+            return
+
+        now = _now()
+        try:
+            async with self._session_factory() as session:
+                async with session.begin():
+                    await self._require_schema_head(session)
+                    for identifier in sorted(batch):
+                        definition = batch[identifier]
+                        kind = definition.kind.value
+                        fingerprint = _origin_fingerprint(
+                            capability_id=identifier,
+                            kind=kind,
+                            origin_class=ORIGIN_CALLER,
+                            publisher_type=PUBLISHER_USER,
+                            publisher_id=publisher_id,
+                        )
+                        current = await self._locked(session, identifier)
+                        if current is not None:
+                            if not (
+                                current.capability_kind == kind
+                                and current.origin_class == ORIGIN_CALLER
+                                and current.origin_fingerprint == fingerprint
+                                and current.publisher_type == PUBLISHER_USER
+                                and current.publisher_id == publisher_id
+                                and current.state == STATE_ACTIVE
+                            ):
+                                raise PublicationConflict(
+                                    f"Capability id '{identifier}' is already reserved."
+                                )
+                            continue
+                        session.add(
+                            CapabilityPublicationRecord(
+                                capability_id=identifier,
+                                capability_kind=kind,
+                                origin_class=ORIGIN_CALLER,
+                                origin_fingerprint=fingerprint,
+                                purpose=PURPOSE_NAMESPACE,
+                                publisher_type=PUBLISHER_USER,
+                                publisher_id=publisher_id,
+                                visibility=VISIBILITY_NONE,
+                                recipient_user_id=None,
+                                revision=1,
+                                state=STATE_ACTIVE,
+                                canonical_definition=None,
+                                instruction=None,
+                                payload_digest=None,
+                                created_at=now,
+                                updated_at=now,
+                            )
+                        )
+                        # Force uniqueness checking inside this transaction,
+                        # before any local Catalog mutation can occur.
+                        await session.flush()
+        except PublicationConflict:
+            raise
+        except IntegrityError as exc:
+            # A parallel worker won the unique-ID race. Prior inserts in the
+            # same batch were rolled back with the SQL transaction.
+            raise PublicationConflict(
+                "Capability namespace was concurrently reserved."
+            ) from exc
+        except (SQLAlchemyError, DBAPIError) as exc:
+            raise self._wrap_unavailable(exc) from exc
+
     async def publish_user_context(
         self, definition: CapabilityDefinition, *, publisher_id: str
     ) -> CapabilityPublicationRecord:
