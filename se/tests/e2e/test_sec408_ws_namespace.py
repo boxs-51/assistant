@@ -156,46 +156,53 @@ async def test_ws_durable_preflight_rejects_bad_owner_invalid_batch_and_sql_faul
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("reconnect", [False, True])
-async def test_ws_disconnect_or_replacement_during_sql_cannot_resurrect_binding(reconnect):
+async def test_ws_disconnect_or_replacement_during_sql_cannot_resurrect_binding():
+    """Both disconnect and new-registry replacement must not resurrect a bind."""
     from se.src.runtimes.capability.registration import ClientRegistrationError
 
-    catalog, service = _service("alice", "client-a", "connection-a")
-    started, release = asyncio.Event(), asyncio.Event()
+    for reconnect in (False, True):
+        catalog, service = _service("alice", "client-a", "connection-a")
+        started, release = asyncio.Event(), asyncio.Event()
 
-    class _PausedAuthority(_AtomicFakeAuthority):
-        async def reserve_user_namespaces(self, definitions, *, publisher_id):
-            started.set()
-            await asyncio.wait_for(release.wait(), timeout=5)
-            await super().reserve_user_namespaces(
-                definitions, publisher_id=publisher_id
-            )
+        class _PausedAuthority(_AtomicFakeAuthority):
+            async def reserve_user_namespaces(self, definitions, *, publisher_id):
+                started.set()
+                await asyncio.wait_for(release.wait(), timeout=5)
+                await super().reserve_user_namespaces(
+                    definitions, publisher_id=publisher_id
+                )
 
-    authority = _PausedAuthority()
-    task = asyncio.create_task(service.register_durable(
-        _request("alice", "client-a", "connection-a", "resurrection"),
-        user_id="alice", publication_authority=authority,
-    ))
-    try:
-        await asyncio.wait_for(started.wait(), timeout=5)
-        service.connections.disconnect("connection-a")
-        if reconnect:
-            service.connections.unregister("connection-a")
-            service.connections.register(
-                session_id="replacement-session",
-                connection_id="connection-a",
-                user_id="alice",
-                metadata={"client_id": "client-a"},
-            )
-            service.connections.activate("connection-a")
-    finally:
-        release.set()
-    with pytest.raises(ClientRegistrationError):
-        await asyncio.wait_for(task, timeout=5)
-    assert not catalog.contains_definition("resurrection")
-    # A committed namespace remains non-public, never a stale enabled local
-    # implementation that survives after connection disconnect.
-    assert authority.owners["resurrection"] == ("alice", "TOOL")
+        authority = _PausedAuthority()
+        task = asyncio.create_task(service.register_durable(
+            _request("alice", "client-a", "connection-a", "resurrection"),
+            user_id="alice", publication_authority=authority,
+        ))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=5)
+            service.connections.disconnect("connection-a")
+            if reconnect:
+                # The lifecycle registry intentionally NEVER reuses an ID,
+                # even after unregister. Simulate a fresh registry after a
+                # restart, with the same wire ID but a different session.
+                replacement = ConnectionRegistry()
+                replacement.register(
+                    session_id="replacement-session",
+                    connection_id="connection-a",
+                    user_id="alice",
+                    metadata={"client_id": "client-a"},
+                )
+                replacement.activate("connection-a")
+                service.connections = replacement
+        finally:
+            release.set()
+
+        with pytest.raises(ClientRegistrationError):
+            await asyncio.wait_for(task, timeout=5)
+        assert not catalog.contains_definition("resurrection")
+        # SQL reservation is only a non-public tombstone/namespace;
+        # no ENABLED local implementation may survive disconnection.
+        assert authority.owners["resurrection"] == ("alice", "TOOL")
+
 
 def test_real_websocket_capability_ingress_uses_durable_fence():
     """An actual ASGI WS message must await SQL fence before Catalog mutation."""
