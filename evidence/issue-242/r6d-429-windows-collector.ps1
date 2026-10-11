@@ -152,10 +152,16 @@ try {
     Push-Location -LiteralPath $worktree
     $didPush = $true
 
-    $actualHead = (& git rev-parse HEAD | Select-Object -First 1).Trim()
-    $actualBlob = (& git hash-object -- $testFile | Select-Object -First 1).Trim()
-    if ($actualHead -ne $expectedHead -or $actualBlob -ne $expectedBlob) {
-        throw "Frozen HEAD / R6-D test Git blob mismatch."
+    # Keep command output and its exit status coupled: avoid a native Git |
+    # Select-Object pipeline, whose $LASTEXITCODE is not reliable in PS 5.1.
+    $headOutput = @(& git -C $worktree rev-parse HEAD)
+    $headExit = $LASTEXITCODE
+    $actualHead = if ($headOutput.Count -eq 1) { ([string]$headOutput[0]).Trim() } else { "" }
+    $blobOutput = @(& git -C $worktree hash-object -- $testFile)
+    $blobExit = $LASTEXITCODE
+    $actualBlob = if ($blobOutput.Count -eq 1) { ([string]$blobOutput[0]).Trim() } else { "" }
+    if ($headExit -ne 0 -or $blobExit -ne 0 -or $actualHead -ne $expectedHead -or $actualBlob -ne $expectedBlob) {
+        throw "Frozen HEAD / R6-D test Git blob mismatch: head_exit=$headExit head=$actualHead blob_exit=$blobExit blob=$actualBlob expected_head=$expectedHead expected_blob=$expectedBlob"
     }
     if (@(& git status --porcelain).Count -gt 0) {
         throw "Isolated worktree is not clean."
@@ -292,16 +298,33 @@ try {
             Write-Warning "Preserving the first non-PASS. No retry-to-PASS."
             break
         }
-        $blobAfter = (& git hash-object -- $testFile | Select-Object -First 1).Trim()
-        if ($LASTEXITCODE -ne 0 -or $blobAfter -ne $expectedBlob) {
-            $overall = "STOPPED_SOURCE_CHANGED"
-            throw "R6-D test changed while running."
+        # Mandatory post-attempt source integrity gate: capture Git's exit
+        # status immediately (without a pipeline), and preserve observed hash
+        # values before declaring a genuine source drift.
+        $blobOutputAfter = @(& git -C $worktree hash-object -- $testFile)
+        $blobExitAfter = $LASTEXITCODE
+        $blobAfter = if ($blobOutputAfter.Count -eq 1) { ([string]$blobOutputAfter[0]).Trim() } else { "" }
+        $integrityRow = [ordered]@{
+            attempt = $i
+            git_exit_code = $blobExitAfter
+            observed_blob = $blobAfter
+            expected_blob = $expectedBlob
+            match = [bool]($blobExitAfter -eq 0 -and $blobOutputAfter.Count -eq 1 -and $blobAfter -eq $expectedBlob)
+        }
+        [IO.File]::AppendAllText((Join-Path $out "source-integrity.jsonl"), ($integrityRow | ConvertTo-Json -Compress) + [Environment]::NewLine, $utf8)
+        if (-not $integrityRow["match"]) {
+            $overall = "STOPPED_SOURCE_INTEGRITY_HOLD"
+            throw "R6-D source integrity HOLD: git_exit=$blobExitAfter observed_blob='$blobAfter' expected_blob='$expectedBlob'; examine source-integrity.jsonl."
         }
     }
 }
 catch {
     $experimentError = $_.Exception.ToString()
-    $overall = "COLLECTOR_SETUP_OR_RUNTIME_ERROR"
+    # Preserve a previously established source-integrity HOLD; it must not
+    # be overwritten by a generic setup error during the catch path.
+    if ($overall -ne "STOPPED_SOURCE_INTEGRITY_HOLD") {
+        $overall = "COLLECTOR_SETUP_OR_RUNTIME_ERROR"
+    }
     [IO.File]::WriteAllText((Join-Path $out "collector-error.txt"), $experimentError, $utf8)
 }
 finally {
