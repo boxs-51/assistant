@@ -1,0 +1,484 @@
+# Security #408 actual-current-source technical evidence; diagnostic-only.
+# Repository procedures suspended; no retroactive audit/custody claims.
+# Do not merge this evidence-only branch; parent pinned to dc238b2f5c2077fb674aced1def4f4b7aa365365.
+name: Security G3 dc238b2f PostgreSQL 17.11 (Linux + native Windows)
+
+on:
+  push:
+    branches:
+      - evidence/sec408-g3-dc238b2f-20261012
+
+permissions:
+  contents: read
+
+concurrency:
+  group: evidence/sec408-g3-dc238b2f-20261012
+  cancel-in-progress: false
+
+jobs:
+  linux-postgres-g3:
+    name: linux-postgres-g3
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      ASSISTANT_SECURITY_PG_E2E: "1"
+      G3_SOURCE_PARENT: dc238b2f5c2077fb674aced1def4f4b7aa365365
+      G3_TEST_BLOB: dcde0cb0a1761501bc0a23f09785ae022a6626c9
+      G3_OFFLINE_BLOB: 77312dedaf27a1a6e41fed86d2161aa6ac690cfe
+      G3_RUNTIME_BLOB: d028422673c02d164e9f51462343342bb555841e
+      G3_EVIDENCE_DIR: g3-evidence-linux
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify one-ADD commit and frozen spawned G3 parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$G3_SOURCE_PARENT"
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git diff --name-status HEAD^ HEAD)" = $'A\t.github/workflows/security-skill-publication-g3-dc238b2f-evidence.yml'
+          test "$(git hash-object se/tests/integration/test_skill_publication_cross_worker.py)" = "$G3_TEST_BLOB"
+          test "$(git hash-object se/tests/e2e/test_v1_offline.py)" = "$G3_OFFLINE_BLOB"
+          test "$(git hash-object requirements-runtime.txt)" = "$G3_RUNTIME_BLOB"
+          echo "G3_ONE_ADD_PARENT_AND_G3_BLOB=PASS"
+      - name: Provision masked ephemeral Linux PostgreSQL 17.11
+        shell: bash
+        run: |
+          set -euo pipefail
+          password="$(python -c 'import secrets; print(secrets.token_urlsafe(32))')"
+          echo "::add-mask::$password"
+          dsn="postgresql+asyncpg://postgres:${password}@127.0.0.1:55432/security_g3"
+          echo "::add-mask::$dsn"
+          printf 'ASSISTANT_SKILL_PUBLICATION_DATABASE_URL=%s\n' "$dsn" >> "$GITHUB_ENV"
+          docker run -d --rm --name "sec408-g3-${GITHUB_RUN_ID}" --publish 127.0.0.1:55432:5432 \
+            --env POSTGRES_USER=postgres --env POSTGRES_PASSWORD="$password" \
+            --env POSTGRES_DB=security_g3 postgres:17.11 >/dev/null
+          ready=0
+          for attempt in $(seq 1 60); do
+            if docker exec "sec408-g3-${GITHUB_RUN_ID}" pg_isready -U postgres -d security_g3 >/dev/null 2>&1; then
+              ready=1
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" -eq 1 || { echo 'Isolated Linux PostgreSQL not ready'; exit 1; }
+          echo 'LINUX_MASKED_PG_READY=YES'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-runtime.txt
+            requirements-test.txt
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Capture versions and assert real PostgreSQL 17.11 + migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$G3_EVIDENCE_DIR"
+          python -m alembic -c alembic_skill_publications.ini upgrade head
+          python - <<'PY'
+          import asyncio, importlib.metadata, os
+          from pathlib import Path
+          from sqlalchemy import text
+          from sqlalchemy.ext.asyncio import create_async_engine
+
+          async def verify():
+              engine = create_async_engine(os.environ["ASSISTANT_SKILL_PUBLICATION_DATABASE_URL"])
+              try:
+                  async with engine.connect() as connection:
+                      version = (await connection.execute(text("SHOW server_version"))).scalar_one()
+                      head = (await connection.execute(text("SELECT version_num FROM skill_publications.alembic_version_skill_publications"))).scalar_one()
+                      table = (await connection.execute(text("SELECT to_regclass('skill_publications.capability_publications')"))).scalar_one()
+                  assert version.startswith("17.11"), f"Wrong PostgreSQL version: {version}"
+                  assert importlib.metadata.version("asyncpg") == "0.32.0"
+                  assert __import__("sys").version.split()[0] == "3.12.10"
+                  assert head == "skillpub_0001", f"Wrong migration head: {head}"
+                  assert table == "skill_publications.capability_publications", f"Missing table: {table}"
+                  report = (
+                      f"git={os.environ['GITHUB_SHA']}\n"
+                      f"platform=linux\npostgresql={version}\n"
+                      f"python={__import__('sys').version.split()[0]}\n"
+                      f"asyncpg={importlib.metadata.version('asyncpg')}\n"
+                      f"sqlalchemy={importlib.metadata.version('sqlalchemy')}\n"
+                      f"alembic={importlib.metadata.version('alembic')}\n"
+                      f"schema_head={head}\n"
+                  )
+                  Path(os.environ["G3_EVIDENCE_DIR"], "provenance.txt").write_text(report)
+                  print(report)
+              finally:
+                  await engine.dispose()
+
+          asyncio.run(verify())
+          PY
+      - name: Require exact eight reviewed PostgreSQL nodes
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import subprocess, sys
+          from pathlib import Path
+          expected = {
+              "test_skill_publication_migration_head_and_table_exist",
+              "test_two_worker_owner_read_collision_restart_and_revoke",
+              "test_same_origin_concurrent_publish_is_idempotent",
+              "test_system_namespace_blocks_caller_and_materializes_public_skill",
+              "test_post_start_wrong_schema_head_blocks_provider_before_send",
+              "test_post_start_missing_version_table_blocks_provider_before_send",
+              "test_post_start_postgres_transport_loss_blocks_provider_before_send",
+              "test_real_postgres_reservation_survives_local_catalog_bind_failure",
+          }
+          target = "se/tests/integration/test_skill_publication_cross_worker.py"
+          check = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", target], capture_output=True, text=True)
+          Path("g3-evidence-linux/collection.txt").write_text(check.stdout + check.stderr)
+          prefix = target + "::"
+          found = {line.strip().removeprefix(prefix) for line in check.stdout.splitlines() if line.strip().startswith(prefix)}
+          assert check.returncode == 0 and found == expected, f"Node manifest mismatch: expected={sorted(expected)}, got={sorted(found)}, return={check.returncode}"
+          print(f"Exact reviewed G3 PostgreSQL manifest: {len(found)} nodes")
+          PY
+      - name: Run all eight real PostgreSQL security tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra -o xfail_strict=true --junitxml="$G3_EVIDENCE_DIR/junit.xml" se/tests/integration/test_skill_publication_cross_worker.py
+          python - <<'PY'
+          from xml.etree import ElementTree as ET
+          root = ET.parse("g3-evidence-linux/junit.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          assert suite is not None
+          result = {key: int(suite.attrib.get(key, "0")) for key in ("tests", "failures", "errors", "skipped")}
+          assert result == {"tests": 8, "failures": 0, "errors": 0, "skipped": 0}, f"G3 evidence not GREEN: {result}"
+          print(f"REAL_POSTGRES_SECURITY_8_OF_8_PASS {result}")
+          PY
+      - name: Verify five required offline tests (manifest and JUnit)
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys, subprocess
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          expected = ["test_caller_skill_without_durable_authority_fails_closed","test_generic_declarative_context_skill_is_owner_direct_only","test_direct_rechecks_skill_after_revoke_between_provider_rounds","test_executable_skill_runs_from_capability_api_through_provider_runtime","test_v1_capability_control_plane_registers_tool_skill_and_agent"]
+          path = 'se/tests/e2e/test_v1_offline.py'
+          nodes = [f'{path}::{name}' for name in expected]
+          rootdir = Path(os.environ['G3_EVIDENCE_DIR'])
+          rootdir.mkdir(parents=True, exist_ok=True)
+          col = subprocess.run([sys.executable, '-m', 'pytest', '--collect-only', '-q', *nodes], capture_output=True, text=True, timeout=180)
+          (rootdir / 'offline-collection.txt').write_text(col.stdout + col.stderr, encoding='utf-8')
+          found = [line.strip() for line in col.stdout.splitlines() if line.strip().startswith(path + '::')]
+          assert col.returncode == 0 and len(found) == 5 and set(found) == set(nodes), f'Offline manifest mismatch: {found}'
+          junit = rootdir / 'offline-junit.xml'
+          run = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-ra', '-o', 'xfail_strict=true', f'--junitxml={junit}', *nodes], capture_output=True, text=True, timeout=600)
+          (rootdir / 'offline-pytest-log.txt').write_text(run.stdout + run.stderr, encoding='utf-8')
+          print(run.stdout[-1200:])
+          assert run.returncode == 0, f'Offline suite nonzero exit={run.returncode}'
+          root = ET.parse(junit).getroot()
+          suite = root if root.tag == 'testsuite' else root.find('testsuite')
+          assert suite is not None
+          res = {k: int(suite.attrib.get(k, '0')) for k in ('tests', 'failures', 'errors', 'skipped')}
+          cases = [i.attrib['name'] for i in suite.iter('testcase')]
+          assert res == {'tests': 5, 'failures': 0, 'errors': 0, 'skipped': 0} and len(cases) == 5 and set(cases) == set(expected), f'Offline JUnit mismatch: {res} {cases}'
+          print(f'OFFLINE_5_OF_5_VERIFIED {res}')
+          PY
+      - name: Verify isolated Linux teardown and redact evidence
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$G3_EVIDENCE_DIR"
+          container="sec408-g3-${GITHUB_RUN_ID}"
+          if docker ps -a --format '{{.Names}}' | grep -Fxq "$container"; then
+            docker rm -f "$container" >/dev/null
+          fi
+          if docker ps -a --format '{{.Names}}' | grep -Fxq "$container"; then
+            echo 'Linux PostgreSQL teardown did not complete'
+            exit 1
+          fi
+          printf 'LINUX_ISOLATED_PG_TEARDOWN=VERIFIED_EMPTY\n' > "$G3_EVIDENCE_DIR/teardown.txt"
+          python - <<'PY'
+          import hashlib, os
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          dsn = os.getenv("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL", "")
+          secret = urlsplit(dsn).password if dsn else ""
+          tokens = [t for t in (dsn, secret) if t]
+          root = Path(os.environ["G3_EVIDENCE_DIR"])
+          hashes = []
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or p.name == "sha256-manifest.txt":
+                  continue
+              if p.suffix in (".txt", ".xml", ".log", ".json"):
+                  data = p.read_text(encoding="utf-8", errors="replace")
+                  for token in tokens:
+                      data = data.replace(token, "[REDACTED]")
+                  p.write_text(data, encoding="utf-8")
+              hashes.append(hashlib.sha256(p.read_bytes()).hexdigest()+"  "+str(p.relative_to(root)))
+          (root / "sha256-manifest.txt").write_text("\n".join(hashes)+"\n", encoding="utf-8")
+          print("LINUX_G3_SANITIZED_ARTIFACTS="+str(len(hashes)))
+          PY
+      - name: Upload Linux PG evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-g3-d2-linux-pg-17-11
+          path: g3-evidence-linux/
+          if-no-files-found: error
+
+  windows-postgres-g3:
+    name: windows-postgres-g3
+    runs-on: windows-latest
+    timeout-minutes: 55
+    env:
+      ASSISTANT_SECURITY_PG_E2E: "1"
+      G3_SOURCE_PARENT: dc238b2f5c2077fb674aced1def4f4b7aa365365
+      G3_TEST_BLOB: dcde0cb0a1761501bc0a23f09785ae022a6626c9
+      G3_OFFLINE_BLOB: 77312dedaf27a1a6e41fed86d2161aa6ac690cfe
+      G3_RUNTIME_BLOB: d028422673c02d164e9f51462343342bb555841e
+      G3_EVIDENCE_DIR: g3-evidence-windows
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - name: Verify one-ADD commit and frozen spawned G3 parent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD^).Trim() -ne $env:G3_SOURCE_PARENT) { throw 'Incorrect P1A parent' }
+          if ((git rev-parse HEAD).Trim() -ne $env:GITHUB_SHA) { throw 'Workflow head mismatch' }
+          $delta = @(git diff --name-status HEAD^ HEAD)
+          if ($delta.Count -ne 1 -or $delta[0] -ne "A`t.github/workflows/security-skill-publication-g3-dc238b2f-evidence.yml") { throw 'Not exactly one new workflow file' }
+          if ((git hash-object se/tests/integration/test_skill_publication_cross_worker.py).Trim() -ne $env:G3_TEST_BLOB) { throw 'G3 test blob mismatch' }
+          if ((git hash-object se/tests/e2e/test_v1_offline.py).Trim() -ne $env:G3_OFFLINE_BLOB) { throw 'Offline test blob mismatch' }
+          if ((git hash-object requirements-runtime.txt).Trim() -ne $env:G3_RUNTIME_BLOB) { throw 'Runtime requirements blob mismatch' }
+          Write-Output 'G3_ONE_ADD_PARENT_AND_G3_BLOB=PASS'
+      - name: Prepare masked ephemeral Windows PostgreSQL credentials
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $password = 'G3-' + [Guid]::NewGuid().ToString('N')
+          Write-Output "::add-mask::$password"
+          $dsn = "postgresql+asyncpg://postgres:${password}@127.0.0.1:55432/security_g3"
+          Write-Output "::add-mask::$dsn"
+          "PGPASSWORD=$password" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "ASSISTANT_SKILL_PUBLICATION_DATABASE_URL=$dsn" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Output 'WINDOWS_EPHEMERAL_PG_CREDENTIALS_MASKED=YES'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            requirements-runtime.txt
+            requirements-test.txt
+      - name: Install native Windows PostgreSQL 17.11 (no Docker)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          choco install postgresql17 --version=17.11.0 -y --no-progress --params "/Password:$env:PGPASSWORD /Port:55432"
+          if ($LASTEXITCODE -ne 0) { throw "PostgreSQL 17.11 Chocolatey installation failed: $LASTEXITCODE" }
+          $pgbin = Join-Path $env:ProgramFiles 'PostgreSQL\17\bin'
+          $psql = Join-Path $pgbin 'psql.exe'
+          if (-not (Test-Path $psql)) { throw "Native PostgreSQL 17 binaries not found" }
+          # Do NOT connect to the runner's pre-existing PostgreSQL on 5432.
+          # Provision an independent, native PostgreSQL 17.11 cluster from the
+          # newly installed Windows binaries and bind ONLY to loopback 55432.
+          $initdb = Join-Path $pgbin 'initdb.exe'
+          $pgctl = Join-Path $pgbin 'pg_ctl.exe'
+          $pgReady = Join-Path $pgbin 'pg_isready.exe'
+          foreach ($binary in @($initdb, $pgctl, $pgReady)) {
+            if (-not (Test-Path $binary)) { throw "Native PostgreSQL binary missing" }
+          }
+          $data = Join-Path $env:RUNNER_TEMP 'sec408-g3-pg17-isolated'
+          $serverLog = Join-Path $env:RUNNER_TEMP 'sec408-g3-pg17-server.log'
+          $passwordFile = Join-Path $env:RUNNER_TEMP 'sec408-g3-initdb-password.txt'
+          [System.IO.File]::WriteAllText($passwordFile, $env:PGPASSWORD, (New-Object System.Text.UTF8Encoding($false)))
+          try {
+            & $initdb "--pgdata=$data" "--username=postgres" "--pwfile=$passwordFile" "--auth-host=scram-sha-256" "--auth-local=scram-sha-256" "--encoding=UTF8" "--no-instructions"
+            if ($LASTEXITCODE -ne 0) { throw "Isolated Windows initdb failed" }
+          }
+          finally {
+            Remove-Item -LiteralPath $passwordFile -Force -ErrorAction SilentlyContinue
+          }
+          & $pgctl -D $data -l $serverLog -o "-h 127.0.0.1 -p 55432" -w -t 60 start
+          if ($LASTEXITCODE -ne 0) {
+            if (Test-Path $serverLog) { Get-Content $serverLog | Select-Object -Last 25 }
+            throw "Isolated native Windows pg_ctl start failed"
+          }
+          & $pgReady -h 127.0.0.1 -p 55432 -U postgres -d postgres
+          if ($LASTEXITCODE -ne 0) { throw "New isolated Windows PostgreSQL socket unavailable" }
+          & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -v ON_ERROR_STOP=1 -tAc 'SELECT 1'
+          if ($LASTEXITCODE -ne 0) { throw "New isolated Windows PostgreSQL credential check failed" }
+          $version = (& $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -tAc 'SHOW server_version').Trim()
+          if (-not $version.StartsWith('17.11')) { throw "Expected Windows PostgreSQL 17.11, got $version" }
+          & $psql -h 127.0.0.1 -p 55432 -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE security_g3'
+          if ($LASTEXITCODE -ne 0) { throw "Cannot create isolated G3 database" }
+          Write-Output "WINDOWS_NATIVE_ISOLATED_PG_VERSION=$version"
+          Write-Output "WINDOWS_NATIVE_ISOLATED_PORT=55432"
+      - name: Install pinned test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-test.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Pinned Python dependency installation failed' }
+      - name: Assert real PostgreSQL migration and capture sanitized versions
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:G3_EVIDENCE_DIR | Out-Null
+          python -m alembic -c alembic_skill_publications.ini upgrade head
+          if ($LASTEXITCODE -ne 0) { throw 'Real Windows PG Alembic migration failed' }
+          @'
+          import asyncio, importlib.metadata, os, sys
+          from pathlib import Path
+          from sqlalchemy import text
+          from sqlalchemy.ext.asyncio import create_async_engine
+          async def verify():
+              engine = create_async_engine(os.environ["ASSISTANT_SKILL_PUBLICATION_DATABASE_URL"])
+              try:
+                  async with engine.connect() as connection:
+                      version = (await connection.execute(text("SHOW server_version"))).scalar_one()
+                      head = (await connection.execute(text("SELECT version_num FROM skill_publications.alembic_version_skill_publications"))).scalar_one()
+                      table = (await connection.execute(text("SELECT to_regclass('skill_publications.capability_publications')"))).scalar_one()
+                  assert version.startswith("17.11"), version
+                  assert importlib.metadata.version("asyncpg") == "0.32.0"
+                  assert sys.version.split()[0] == "3.12.10"
+                  assert head == "skillpub_0001", head
+                  assert table == "skill_publications.capability_publications", table
+                  report = (f"git={os.environ['GITHUB_SHA']}\nplatform=windows-native\n"
+                            f"postgresql={version}\npython={sys.version.split()[0]}\n"
+                            f"asyncpg={importlib.metadata.version('asyncpg')}\n"
+                            f"sqlalchemy={importlib.metadata.version('sqlalchemy')}\n"
+                            f"alembic={importlib.metadata.version('alembic')}\nschema_head={head}\n")
+                  Path(os.environ["G3_EVIDENCE_DIR"], "provenance.txt").write_text(report)
+                  print(report)
+              finally:
+                  await engine.dispose()
+          asyncio.run(verify())
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows real PostgreSQL verification failed' }
+      - name: Require exact eight reviewed PostgreSQL nodes
+        shell: pwsh
+        run: |
+          @'
+          import subprocess, sys, os
+          from pathlib import Path
+          expected = {
+              "test_skill_publication_migration_head_and_table_exist",
+              "test_two_worker_owner_read_collision_restart_and_revoke",
+              "test_same_origin_concurrent_publish_is_idempotent",
+              "test_system_namespace_blocks_caller_and_materializes_public_skill",
+              "test_post_start_wrong_schema_head_blocks_provider_before_send",
+              "test_post_start_missing_version_table_blocks_provider_before_send",
+              "test_post_start_postgres_transport_loss_blocks_provider_before_send",
+              "test_real_postgres_reservation_survives_local_catalog_bind_failure",
+          }
+          target = "se/tests/integration/test_skill_publication_cross_worker.py"
+          check = subprocess.run([sys.executable, "-m", "pytest", "--collect-only", "-q", target], capture_output=True, text=True)
+          Path(os.environ["G3_EVIDENCE_DIR"], "collection.txt").write_text(check.stdout + check.stderr)
+          prefix = target + "::"
+          found = {line.strip().removeprefix(prefix) for line in check.stdout.splitlines() if line.strip().startswith(prefix)}
+          assert check.returncode == 0 and found == expected, f"Node manifest mismatch: {sorted(found)}; exit={check.returncode}"
+          print(f"Exact reviewed G3 PostgreSQL manifest: {len(found)} nodes")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows G3 eight-node collection mismatch' }
+      - name: Run eight real Windows PostgreSQL security tests
+        shell: pwsh
+        run: |
+          python -m pytest -q -ra -o xfail_strict=true --junitxml="$env:G3_EVIDENCE_DIR/junit.xml" se/tests/integration/test_skill_publication_cross_worker.py
+          if ($LASTEXITCODE -ne 0) { throw 'Windows real PostgreSQL security tests RED' }
+          @'
+          from xml.etree import ElementTree as ET
+          import os
+          from pathlib import Path
+          root = ET.parse(Path(os.environ["G3_EVIDENCE_DIR"]) / "junit.xml").getroot()
+          suite = root if root.tag == "testsuite" else root.find("testsuite")
+          assert suite is not None
+          result = {key: int(suite.attrib.get(key, "0")) for key in ("tests", "failures", "errors", "skipped")}
+          assert result == {"tests": 8, "failures": 0, "errors": 0, "skipped": 0}, f"G3 Windows evidence not GREEN: {result}"
+          print(f"REAL_WINDOWS_POSTGRES_SECURITY_8_OF_8_PASS {result}")
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows G3 JUnit acceptance mismatch' }
+      - name: Verify five required offline tests (manifest and JUnit)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import os, sys, subprocess
+          from pathlib import Path
+          from xml.etree import ElementTree as ET
+          expected = ["test_caller_skill_without_durable_authority_fails_closed","test_generic_declarative_context_skill_is_owner_direct_only","test_direct_rechecks_skill_after_revoke_between_provider_rounds","test_executable_skill_runs_from_capability_api_through_provider_runtime","test_v1_capability_control_plane_registers_tool_skill_and_agent"]
+          path = 'se/tests/e2e/test_v1_offline.py'
+          nodes = [f'{path}::{name}' for name in expected]
+          rootdir = Path(os.environ['G3_EVIDENCE_DIR'])
+          rootdir.mkdir(parents=True, exist_ok=True)
+          col = subprocess.run([sys.executable, '-m', 'pytest', '--collect-only', '-q', *nodes], capture_output=True, text=True, timeout=180)
+          (rootdir / 'offline-collection.txt').write_text(col.stdout + col.stderr, encoding='utf-8')
+          found = [line.strip() for line in col.stdout.splitlines() if line.strip().startswith(path + '::')]
+          assert col.returncode == 0 and len(found) == 5 and set(found) == set(nodes), f'Offline manifest mismatch: {found}'
+          junit = rootdir / 'offline-junit.xml'
+          run = subprocess.run([sys.executable, '-m', 'pytest', '-q', '-ra', '-o', 'xfail_strict=true', f'--junitxml={junit}', *nodes], capture_output=True, text=True, timeout=600)
+          (rootdir / 'offline-pytest-log.txt').write_text(run.stdout + run.stderr, encoding='utf-8')
+          print(run.stdout[-1200:])
+          assert run.returncode == 0, f'Offline suite nonzero exit={run.returncode}'
+          root = ET.parse(junit).getroot()
+          suite = root if root.tag == 'testsuite' else root.find('testsuite')
+          assert suite is not None
+          res = {k: int(suite.attrib.get(k, '0')) for k in ('tests', 'failures', 'errors', 'skipped')}
+          cases = [i.attrib['name'] for i in suite.iter('testcase')]
+          assert res == {'tests': 5, 'failures': 0, 'errors': 0, 'skipped': 0} and len(cases) == 5 and set(cases) == set(expected), f'Offline JUnit mismatch: {res} {cases}'
+          print(f'OFFLINE_5_OF_5_VERIFIED {res}')
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Offline five-node test gate RED' }
+      - name: Verify native Windows teardown and redact evidence
+        if: always()
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          New-Item -ItemType Directory -Force -Path $env:G3_EVIDENCE_DIR | Out-Null
+          $pgctl = Join-Path $env:ProgramFiles 'PostgreSQL\17\bin\pg_ctl.exe'
+          $data = Join-Path $env:RUNNER_TEMP 'sec408-g3-pg17-isolated'
+          Remove-Item -LiteralPath (Join-Path $env:RUNNER_TEMP 'sec408-g3-initdb-password.txt') -ErrorAction SilentlyContinue -Force
+          if (Test-Path $data) {
+            if (-not (Test-Path $pgctl)) { throw 'Native pg_ctl absent for teardown' }
+            & $pgctl -D $data status 2>$null
+            if ($LASTEXITCODE -eq 0) {
+              & $pgctl -D $data -m immediate -w -t 60 stop
+              if ($LASTEXITCODE -ne 0) { throw 'Native PostgreSQL stop failed' }
+            }
+            & $pgctl -D $data status 2>$null
+            if ($LASTEXITCODE -eq 0) { throw 'Native PostgreSQL descendant not empty' }
+          }
+          'WINDOWS_NATIVE_PG_TEARDOWN=VERIFIED_EMPTY' | Set-Content (Join-Path $env:G3_EVIDENCE_DIR 'teardown.txt')
+          @'
+          import hashlib, os
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          dsn = os.getenv("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL", "")
+          secret = urlsplit(dsn).password if dsn else ""
+          tokens = [t for t in (dsn, secret, os.getenv("PGPASSWORD", "")) if t]
+          root = Path(os.environ["G3_EVIDENCE_DIR"])
+          hashes = []
+          for p in sorted(root.rglob("*")):
+              if not p.is_file() or p.name == "sha256-manifest.txt":
+                  continue
+              if p.suffix in (".txt", ".xml", ".log", ".json"):
+                  data = p.read_text(encoding="utf-8", errors="replace")
+                  for token in tokens:
+                      data = data.replace(token, "[REDACTED]")
+                  p.write_text(data, encoding="utf-8")
+              hashes.append(hashlib.sha256(p.read_bytes()).hexdigest()+"  "+str(p.relative_to(root)))
+          (root / "sha256-manifest.txt").write_text("\n".join(hashes)+"\n", encoding="utf-8")
+          print("WINDOWS_G3_SANITIZED_ARTIFACTS="+str(len(hashes)))
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Native Windows G3 evidence sanitization failed' }
+      - name: Upload Windows PG evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: security-g3-d2-windows-native-pg-17-11
+          path: g3-evidence-windows/
+          if-no-files-found: error
