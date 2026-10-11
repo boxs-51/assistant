@@ -154,6 +154,49 @@ async def test_ws_durable_preflight_rejects_bad_owner_invalid_batch_and_sql_faul
     assert authority.owners["ok"] == ("alice", "TOOL")
 
 
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reconnect", [False, True])
+async def test_ws_disconnect_or_replacement_during_sql_cannot_resurrect_binding(reconnect):
+    from se.src.runtimes.capability.registration import ClientRegistrationError
+
+    catalog, service = _service("alice", "client-a", "connection-a")
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class _PausedAuthority(_AtomicFakeAuthority):
+        async def reserve_user_namespaces(self, definitions, *, publisher_id):
+            started.set()
+            await asyncio.wait_for(release.wait(), timeout=5)
+            await super().reserve_user_namespaces(
+                definitions, publisher_id=publisher_id
+            )
+
+    authority = _PausedAuthority()
+    task = asyncio.create_task(service.register_durable(
+        _request("alice", "client-a", "connection-a", "resurrection"),
+        user_id="alice", publication_authority=authority,
+    ))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        service.connections.disconnect("connection-a")
+        if reconnect:
+            service.connections.unregister("connection-a")
+            service.connections.register(
+                session_id="replacement-session",
+                connection_id="connection-a",
+                user_id="alice",
+                metadata={"client_id": "client-a"},
+            )
+            service.connections.activate("connection-a")
+    finally:
+        release.set()
+    with pytest.raises(ClientRegistrationError):
+        await asyncio.wait_for(task, timeout=5)
+    assert not catalog.contains_definition("resurrection")
+    # A committed namespace remains non-public, never a stale enabled local
+    # implementation that survives after connection disconnect.
+    assert authority.owners["resurrection"] == ("alice", "TOOL")
+
 def test_real_websocket_capability_ingress_uses_durable_fence():
     """An actual ASGI WS message must await SQL fence before Catalog mutation."""
     catalog = CapabilityCatalog()
@@ -273,6 +316,44 @@ async def test_real_postgres_ws_atomic_batch_and_concurrent_http_owner_fence():
                 user_id="alice", publication_authority=authority_a,
             )
         assert not catalog_a.contains_definition(http_first)
+
+        # Two workers of the SAME principal can concurrently reserve an
+        # identical ID; matching immutable rows must replay idempotently.
+        identical = f"{prefix}-same-origin"
+        catalog_same, service_same = _service(
+            "alice", "client-same", "connection-same"
+        )
+        same_outcomes = await asyncio.wait_for(
+            asyncio.gather(
+                service_a.register_durable(
+                    _request("alice", "client-a", "connection-a", identical),
+                    user_id="alice", publication_authority=authority_a,
+                ),
+                service_same.register_durable(
+                    _request(
+                        "alice", "client-same", "connection-same", identical
+                    ),
+                    user_id="alice", publication_authority=authority_b,
+                ),
+                return_exceptions=True,
+            ), timeout=30,
+        )
+        assert all(isinstance(result, list) for result in same_outcomes), [
+            type(result).__name__ for result in same_outcomes
+        ]
+        assert catalog_a.contains_definition(identical)
+        assert catalog_same.contains_definition(identical)
+        async with engine_a.connect() as connection:
+            row = (
+                await connection.execute(
+                    text(
+                        "SELECT count(*), min(publisher_id) FROM "
+                        "skill_publications.capability_publications "
+                        "WHERE capability_id = :id"
+                    ), {"id": identical},
+                )
+            ).one()
+        assert tuple(row) == (1, "alice")
 
         # Simultaneous WS A vs WS B on different engine/session instances.
         shared = f"{prefix}-shared"
