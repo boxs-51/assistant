@@ -337,11 +337,33 @@ class CapabilityPublicationRepository:
         except PublicationConflict:
             raise
         except IntegrityError as exc:
-            # A parallel worker won the unique-ID race. Prior inserts in the
-            # same batch were rolled back with the SQL transaction.
-            raise PublicationConflict(
-                "Capability namespace was concurrently reserved."
-            ) from exc
+            # The failed batch transaction is rolled back. A concurrent
+            # worker may have committed the SAME immutable owner/kind rows:
+            # permit exact idempotent retry only if EVERY requested ID now
+            # exists with the matching active origin. A partially satisfied
+            # batch is still a conflict; never infer success from one row.
+            for identifier in sorted(batch):
+                definition = batch[identifier]
+                current = await self._read(identifier)
+                fingerprint = _origin_fingerprint(
+                    capability_id=identifier,
+                    kind=definition.kind.value,
+                    origin_class=ORIGIN_CALLER,
+                    publisher_type=PUBLISHER_USER,
+                    publisher_id=publisher_id,
+                )
+                if current is None or not (
+                    current.capability_kind == definition.kind.value
+                    and current.origin_class == ORIGIN_CALLER
+                    and current.origin_fingerprint == fingerprint
+                    and current.publisher_type == PUBLISHER_USER
+                    and current.publisher_id == publisher_id
+                    and current.state == STATE_ACTIVE
+                ):
+                    raise PublicationConflict(
+                        "Capability namespace was concurrently reserved."
+                    ) from exc
+            return
         except (SQLAlchemyError, DBAPIError) as exc:
             raise self._wrap_unavailable(exc) from exc
 
