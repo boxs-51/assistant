@@ -310,10 +310,12 @@ class CapabilityRuntime(BaseRuntime):
         return await authority.reserve_system_namespace(definition)
 
     async def publish_system_direct_context(
-        self, definition: CapabilityDefinition
+        self, definition: CapabilityDefinition, *, expected_revision: int
     ) -> CapabilityDefinition:
         authority = self._require_publication_authority()
-        await authority.publish_system_direct_context(definition)
+        await authority.publish_system_direct_context(
+            definition, expected_revision=expected_revision
+        )
         return definition
 
     async def revoke_caller_context_skill(
