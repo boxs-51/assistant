@@ -350,6 +350,7 @@ class CapabilityPublicationRepository:
         self,
         definition: CapabilityDefinition,
         *,
+        expected_revision: int,
         publisher_id: str = "assistant-bootstrap",
     ) -> CapabilityPublicationRecord:
         if definition.kind is not CapabilityKind.SKILL:
@@ -386,6 +387,17 @@ class CapabilityPublicationRepository:
                     if current.state == STATE_REVOKED:
                         raise PublicationConflict(
                             "Revoked SYSTEM namespace remains permanently fenced."
+                        )
+                    # The trusted publisher must use the revision it read
+                    # before materializing the instruction. Row locks alone
+                    # cannot distinguish a stale publisher from a fresh one.
+                    if (
+                        not isinstance(expected_revision, int)
+                        or isinstance(expected_revision, bool)
+                        or expected_revision != current.revision
+                    ):
+                        raise PublicationStaleRevision(
+                            "Trusted SYSTEM publication requires the current expected_revision."
                         )
                     if current.purpose == PURPOSE_DIRECT:
                         if current.payload_digest == digest:
