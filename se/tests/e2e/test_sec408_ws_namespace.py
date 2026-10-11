@@ -94,7 +94,7 @@ class _AtomicFakeAuthority:
 
 
 @pytest.mark.asyncio
-async def test_ws_durable_preflight_rejects_bad_owner_invalid_batch_and_sql_fault():
+async def test_ws_durable_preflight_rejects_bad_owner_invalid_batch_and_sql_fault(monkeypatch):
     from se.src.infrastructure.storage.repositories.capability_publications import (
         PublicationAuthorityUnavailable, PublicationConflict,
     )
@@ -102,6 +102,36 @@ async def test_ws_durable_preflight_rejects_bad_owner_invalid_batch_and_sql_faul
     catalog, service = _service("alice", "client-a", "connection-a")
     authority = _AtomicFakeAuthority()
     valid = _request("alice", "client-a", "connection-a", "ok")
+
+    # Deliberate local-only legacy mode remains supported with no configured
+    # SQL DSN. A missing runtime authority with an EXPLICIT DSN must reject,
+    # not silently turn a multi-worker publication into local-only Catalog.
+    from se.src.runtimes.capability.registration import ClientRegistrationError
+    with monkeypatch.context() as env:
+        env.delenv("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL", raising=False)
+        legacy_catalog, legacy_service = _service(
+            "alice", "client-a", "connection-a"
+        )
+        legacy_registered = await legacy_service.register_durable(
+            valid, user_id="alice", publication_authority=None,
+        )
+        assert len(legacy_registered) == 1
+        assert legacy_catalog.contains_definition("ok")
+
+    with monkeypatch.context() as env:
+        env.setenv(
+            "ASSISTANT_SKILL_PUBLICATION_DATABASE_URL",
+            "postgresql+asyncpg://configured-but-not-initialized",
+        )
+        strict_catalog, strict_service = _service(
+            "alice", "client-a", "connection-a"
+        )
+        with pytest.raises(ClientRegistrationError):
+            await strict_service.register_durable(
+                valid, user_id="alice", publication_authority=None,
+            )
+        assert not strict_catalog.contains_definition("ok")
+
     with pytest.raises(PermissionError):
         await service.register_durable(
             valid, user_id=None, publication_authority=authority
