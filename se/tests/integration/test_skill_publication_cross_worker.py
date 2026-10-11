@@ -18,6 +18,7 @@ from se.src.infrastructure.storage.repositories.capability_publications import (
     CapabilityPublicationRepository,
     PublicationAuthorityUnavailable,
     PublicationConflict,
+    PublicationPermissionDenied,
     PublicationStaleRevision,
 )
 from se.src.runtimes.capability.contracts.definition import (
@@ -671,6 +672,42 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
             catalog=CapabilityCatalog(), authorization=authorization,
             publication_authority=worker_a,
         )
+        # Authenticated API keys with no user_id are not user publication
+        # principals. Reject before any SQL row/namespace mutation, never
+        # permit accidental api_key_id/user_id collision or an uncaught 500.
+        for key_auth_type in ("api_key", "admin_key"):
+            key_identity = Identity(
+                auth_type=key_auth_type, api_key_id=f"key-{suffix}",
+            )
+            rejected_id = f"sec-p1a-key-denied-{suffix}-{key_auth_type}"
+            rejected_definition = _definition(
+                rejected_id, "MUST_NOT_PUBLISH_API_KEY"
+            )
+            with pytest.raises(PublicationPermissionDenied):
+                await runtime_a.publish_caller_context_skill(
+                    rejected_definition, identity=key_identity
+                )
+            with pytest.raises(PublicationPermissionDenied):
+                await runtime_a.reserve_caller_namespace(
+                    rejected_definition, identity=key_identity
+                )
+            with pytest.raises(PublicationPermissionDenied):
+                await runtime_a.revoke_caller_context_skill(
+                    rejected_id, identity=key_identity
+                )
+            async with engine_b.connect() as connection:
+                record = (
+                    await connection.execute(
+                        text(
+                            "SELECT capability_id FROM "
+                            "skill_publications.capability_publications "
+                            "WHERE capability_id = :capability_id"
+                        ),
+                        {"capability_id": rejected_id},
+                    )
+                ).scalar_one_or_none()
+            assert record is None
+
         loader = LocalSupportLoader(
             SimpleNamespace(
                 capability_runtime=runtime_a,
