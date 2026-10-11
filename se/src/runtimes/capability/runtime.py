@@ -82,6 +82,7 @@ from ...application.user_tool_quota import (
 )
 from ...infrastructure.storage.repositories.capability_publications import (
     PublicationAuthorityUnavailable,
+    PublicationPermissionDenied,
 )
 from .validation import JsonSchemaCapabilityArgumentValidator
 
@@ -270,15 +271,28 @@ class CapabilityRuntime(BaseRuntime):
             )
         return self.publication_authority
 
+    @staticmethod
+    def _caller_user_publisher_id(identity: Identity) -> str:
+        """Do not misidentify API-key IDs as user-owned publication principals.
+
+        P1A ownership and DIRECT recipient ACLs are user_id based. Credentials
+        without a user identity must fail closed with an HTTP-mappable 403
+        before any SQL reservation or process-local Catalog mutation.
+        """
+        publisher_id = str(identity.user_id or "").strip()
+        if not publisher_id:
+            raise PublicationPermissionDenied(
+                "User identity is required for caller capability publication."
+            )
+        return publisher_id
+
     async def publish_caller_context_skill(
         self,
         definition: CapabilityDefinition,
         *,
         identity: Identity,
     ) -> CapabilityDefinition:
-        publisher_id = str(identity.user_id or "")
-        if not publisher_id:
-            raise PermissionError("Authenticated principal is required.")
+        publisher_id = self._caller_user_publisher_id(identity)
         authority = self._require_publication_authority()
         await authority.publish_user_context(
             definition,
@@ -292,9 +306,7 @@ class CapabilityRuntime(BaseRuntime):
         *,
         identity: Identity,
     ):
-        publisher_id = str(identity.user_id or "")
-        if not publisher_id:
-            raise PermissionError("Authenticated principal is required.")
+        publisher_id = self._caller_user_publisher_id(identity)
         authority = self.publication_authority
         if authority is None:
             return None
@@ -324,9 +336,7 @@ class CapabilityRuntime(BaseRuntime):
         *,
         identity: Identity,
     ) -> None:
-        publisher_id = str(identity.user_id or "")
-        if not publisher_id:
-            raise PermissionError("Authenticated principal is required.")
+        publisher_id = self._caller_user_publisher_id(identity)
         authority = self._require_publication_authority()
         await authority.revoke_user_context(
             capability_id,
