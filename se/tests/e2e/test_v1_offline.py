@@ -1416,6 +1416,104 @@ async def test_v1_capability_control_plane_registers_tool_skill_and_agent(offlin
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("auth_type", ["api_key", "admin_key"])
+async def test_api_key_only_identity_fails_closed_for_caller_publication(
+    offline_app: FastAPI, auth_type: str,
+):
+    """API keys without user_id must be rejected with 403, not a 500/SQL write.
+
+    P1A caller ownership is user-scoped. Mapping an API key into the user ID
+    namespace would require a separate authenticated principal/ACL contract.
+    """
+    container = offline_app.state.container
+    original_override = offline_app.dependency_overrides[get_current_identity]
+    authority = container.capability_runtime.publication_authority
+    original_records = set(authority.records)
+    blocked_ids = {
+        "sec408-key-specialized",
+        "sec408-key-generic",
+        "sec408-key-tool",
+        "sec408-key-agent",
+    }
+    offline_app.dependency_overrides[get_current_identity] = lambda: Identity(
+        auth_type=auth_type, api_key_id="sec408-api-key-only",
+        permissions=["admin:read", "admin:write"], scopes={"profile", "email"},
+    )
+    try:
+        async with httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=offline_app),
+            base_url="http://testserver",
+        ) as client:
+            specialized = await client.post(
+                "/v1/capabilities/skills",
+                json={
+                    "name": "sec408-key-specialized",
+                    "description": "must not publish via API key only",
+                    "instruction": "MUST_NOT_PUBLISH",
+                },
+            )
+            generic = await client.post(
+                "/v1/capabilities/",
+                json={
+                    "kind": "SKILL",
+                    "location": "DECLARATIVE",
+                    "driver_kind": "DECLARATIVE",
+                    "owner_type": "USER",
+                    "implementation_id": "key:skill.generic",
+                    "definition": {
+                        "id": "sec408-key-generic",
+                        "name": "sec408-key-generic",
+                        "description": "Denied API-key skill",
+                        "kind": "SKILL",
+                        "execution_kind": "SKILL",
+                        "execution_mode": "CONTEXT_ONLY",
+                        "source": "HTTP_CALLER",
+                        "metadata": {"instruction": "MUST_NOT_PUBLISH"},
+                    },
+                },
+            )
+            tool = await client.post(
+                "/v1/capabilities/",
+                json={
+                    "kind": "TOOL",
+                    "location": "DECLARATIVE",
+                    "driver_kind": "DECLARATIVE",
+                    "owner_type": "USER",
+                    "implementation_id": "key:tool.generic",
+                    "definition": {
+                        "id": "sec408-key-tool",
+                        "name": "sec408-key-tool",
+                        "description": "Denied API-key tool namespace",
+                        "kind": "TOOL",
+                    },
+                },
+            )
+            agent = await client.post(
+                "/v1/capabilities/agents",
+                json={
+                    "name": "sec408-key-agent",
+                    "goal": "Denied API-key agent namespace",
+                    "instruction": "MUST_NOT_REGISTER",
+                    "tools": [],
+                    "skills": [],
+                },
+            )
+            revoke = await client.delete(
+                "/v1/capabilities/skills/sec408-key-specialized"
+            )
+        for response in (specialized, generic, tool, agent, revoke):
+            assert response.status_code == 403, response.text
+            assert "User identity is required" in response.text
+        assert set(authority.records) == original_records
+        assert not any(
+            container.capability_runtime.catalog.contains_definition(item)
+            for item in blocked_ids
+        )
+    finally:
+        offline_app.dependency_overrides[get_current_identity] = original_override
+
+
+@pytest.mark.asyncio
 async def test_skill_gateway_descriptor_contract_legacy_vs_durable(offline_app: FastAPI):
     """Stage A: legacy GET descriptors differ from SQL-published DIRECT views.
 
