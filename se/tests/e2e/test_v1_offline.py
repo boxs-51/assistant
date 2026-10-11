@@ -121,6 +121,45 @@ class InMemorySkillPublicationAuthority:
             }
         return self.records[definition.capability_id]
 
+    async def reserve_user_namespaces(self, definitions, *, publisher_id):
+        """Test double of atomic PostgreSQL namespace batch admission.
+
+        Validate the complete immutable origin set before mutating any
+        process-local record. Production uses the SQL transaction; this
+        in-memory implementation is only for portable offline Gateway tests.
+        """
+        publisher_id = self._publisher(publisher_id)
+        if not publisher_id:
+            raise PublicationPermissionDenied("Authenticated owner required.")
+        batch = list(definitions)
+        ids = [definition.capability_id for definition in batch]
+        if len(ids) != len(set(ids)):
+            raise PublicationConflict("Duplicate namespace ID in batch.")
+        for definition in batch:
+            current = self.records.get(definition.capability_id)
+            if current is not None and not (
+                current["publisher_type"] == "USER"
+                and current["publisher_id"] == publisher_id
+                and current["state"] == "ACTIVE"
+                and current["purpose"] == "NAMESPACE_RESERVATION"
+                and current["kind"] == definition.kind
+            ):
+                raise PublicationConflict(
+                    "Namespace was reserved by another origin or purpose."
+                )
+        for definition in batch:
+            if definition.capability_id not in self.records:
+                self.records[definition.capability_id] = {
+                    "definition": None,
+                    "publisher_type": "USER",
+                    "publisher_id": publisher_id,
+                    "visibility": "NONE",
+                    "state": "ACTIVE",
+                    "purpose": "NAMESPACE_RESERVATION",
+                    "kind": definition.kind,
+                }
+        return [self.records[identifier] for identifier in ids]
+
     async def reserve_system_namespace(self, definition, *, publisher_id="assistant-bootstrap"):
         self._reserve_system_sync(definition, publisher_id=publisher_id)
         return self.records[definition.capability_id]
