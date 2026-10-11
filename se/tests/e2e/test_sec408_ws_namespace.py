@@ -222,7 +222,11 @@ async def test_real_postgres_ws_atomic_batch_and_concurrent_http_owner_fence():
         pytest.skip("Real PG WS evidence requires ASSISTANT_SECURITY_PG_E2E=1")
     dsn = os.getenv("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL", "")
     assert dsn.startswith("postgresql+asyncpg://")
-    command.upgrade(Config("alembic_skill_publications.ini"), "head")
+    # Alembic manages its own event loop; do not invoke its asyncio.run()
+    # from the event loop owned by pytest-asyncio.
+    await asyncio.to_thread(
+        command.upgrade, Config("alembic_skill_publications.ini"), "head"
+    )
     engine_a = create_async_engine(dsn, pool_pre_ping=True)
     engine_b = create_async_engine(dsn, pool_pre_ping=True)
     authority_a = CapabilityPublicationRepository(
