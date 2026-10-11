@@ -653,6 +653,147 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
         assert tuple(row) == (
             "DIRECT_CONTEXT", 2, "SERVER_PUBLIC", f"SERVER_PUBLIC_{suffix}"
         )
+
+        # Stage-A P1-L0/L1: actual manifest discovery and authorized AGENT
+        # skill.load may materialize a private body, but MUST NOT mint PUBLIC.
+        from pathlib import Path
+        from se.src.application.policy.authorization import AuthorizationService
+        from se.src.domain.schemas.identity import Identity
+        from se.src.runtimes.capability.catalog import CapabilityCatalog
+        from se.src.runtimes.capability.contracts.context import CapabilityExecutionContext
+        from se.src.runtimes.capability.local_support_loader import (
+            LocalSupportLoader, SkillLoadDriver,
+        )
+        from se.src.runtimes.capability.runtime import CapabilityRuntime
+
+        authorization = AuthorizationService()
+        runtime_a = CapabilityRuntime(
+            catalog=CapabilityCatalog(), authorization=authorization,
+            publication_authority=worker_a,
+        )
+        loader = LocalSupportLoader(
+            SimpleNamespace(
+                capability_runtime=runtime_a,
+                authorization_service=authorization,
+            ),
+            Path(__file__).resolve().parents[3] / "skills" / "v1",
+            Path(__file__).resolve().parents[3] / "agents" / "__p1a_no_agents__",
+        )
+        discovered = set(loader.discover()["skills"])
+        builtin_ids = {"skill-command-safety", "skill-web-research"}
+        assert builtin_ids.issubset(discovered), (
+            "Expected installed trusted manifest Skills were not discovered"
+        )
+        agent_identity = Identity(auth_type="jwt", user_id=f"agent-{suffix}")
+        context = CapabilityExecutionContext.create(
+            identity=agent_identity, execution_id=f"agent-exec-{suffix}",
+            caller_agent_execution_id=f"agent-exec-{suffix}",
+        )
+        load_driver = SkillLoadDriver(
+            runtime_a.catalog.get_definition("skill.load"), loader
+        )
+        for builtin_id in sorted(builtin_ids):
+            discovered_definition = runtime_a.catalog.get_definition(builtin_id)
+            assert discovered_definition.metadata["lazy"] is True
+            assert discovered_definition.metadata["loaded"] is False
+            assert not discovered_definition.metadata.get("instruction")
+            namespace = await worker_a.reserve_system_namespace(
+                discovered_definition
+            )
+            assert (namespace.purpose, namespace.visibility, namespace.instruction) == (
+                "NAMESPACE_RESERVATION", "NONE", None
+            )
+            assert await worker_b.get_visible_definition(
+                builtin_id, agent_identity
+            ) is None
+            loaded = await load_driver.execute(
+                context, {"skill_id": builtin_id}
+            )
+            assert loaded["instruction"].strip()
+            assert loader.is_loaded(builtin_id)
+            # A local AGENT load does not change the durable SQL record.
+            async with engine_b.connect() as connection:
+                row = (
+                    await connection.execute(
+                        text(
+                            "SELECT purpose, visibility, instruction, revision "
+                            "FROM skill_publications.capability_publications "
+                            "WHERE capability_id = :capability_id"
+                        ),
+                        {"capability_id": builtin_id},
+                    )
+                ).one()
+            assert tuple(row) == ("NAMESPACE_RESERVATION", "NONE", None, 1)
+            assert await worker_b.get_visible_definition(
+                builtin_id, agent_identity
+            ) is None
+        # A fresh SQL engine simulates cold reader/restart (not an OS crash).
+        cold_engine, cold_authority = await _authority(dsn)
+        try:
+            cold_runtime = CapabilityRuntime(
+                catalog=runtime_a.catalog, authorization=authorization,
+                publication_authority=cold_authority,
+            )
+            assert not builtin_ids.intersection(
+                item.capability_id
+                for item in await cold_runtime.get_direct_context_skills(
+                    agent_identity
+                )
+            )
+        finally:
+            await cold_engine.dispose()
+
+        # Stage-A P1-POS: explicit SERVER publisher seam, never the load path.
+        # SQL listing is origin/visibility only; actual DIRECT applies ACL.
+        protected_id = f"sec-p1a-scoped-system-{suffix}"
+        protected = definition.model_copy(
+            update={
+                "id": protected_id, "name": protected_id,
+                "require_auth": True,
+                "required_scopes": ["skill.public.read"],
+                "metadata": {
+                    **definition.metadata,
+                    "instruction": f"SCOPED_PUBLIC_{suffix}",
+                    "loaded": True,
+                    "required_permissions": ["skill.public.access"],
+                },
+            }
+        )
+        protected_namespace = await worker_a.reserve_system_namespace(protected)
+        with pytest.raises(PublicationConflict):
+            await worker_a.publish_system_direct_context(
+                protected.model_copy(
+                    update={"metadata": {**protected.metadata, "instruction": ""}}
+                ),
+                expected_revision=protected_namespace.revision,
+            )
+        protected_published = await worker_a.publish_system_direct_context(
+            protected, expected_revision=protected_namespace.revision
+        )
+        assert protected_published.revision == protected_namespace.revision + 1
+        allowed = Identity(
+            auth_type="jwt", user_id=f"allowed-{suffix}",
+            scopes={"skill.public.read"}, permissions=["skill.public.access"],
+        )
+        denied = Identity(auth_type="jwt", user_id=f"denied-{suffix}")
+        direct_runtime = CapabilityRuntime(
+            catalog=runtime_a.catalog, authorization=authorization,
+            publication_authority=worker_b,
+        )
+        allowed_skills = await direct_runtime.get_direct_context_skills(allowed)
+        actual = next(
+            item for item in allowed_skills
+            if item.capability_id == protected_id
+        )
+        assert actual.metadata["instruction"] == f"SCOPED_PUBLIC_{suffix}"
+        assert actual.require_auth and actual.required_scopes == ["skill.public.read"]
+        assert actual.metadata["required_permissions"] == ["skill.public.access"]
+        assert protected_id not in {
+            item.capability_id
+            for item in await direct_runtime.get_direct_context_skills(denied)
+        }
+        # SQL record-level public visibility does not override DIRECT ACL.
+        assert await worker_b.get_visible_definition(protected_id, denied) is not None
     finally:
         await engine_b.dispose()
         await engine_a.dispose()
