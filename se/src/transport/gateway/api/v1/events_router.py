@@ -1191,7 +1191,20 @@ async def websocket_endpoint(
                         )
                         if request.connection_id != active_connection_id:
                             raise ValueError("Capability connection_id does not match active connection")
-                        registered = registration_service.register(request)
+                        # The HTTP and WebSocket ingresses MUST share the
+                        # durable cross-worker namespace fence. Await SQL
+                        # reservation of the entire validated client batch
+                        # before the registration service writes its Catalog.
+                        capability_runtime = getattr(
+                            container, "capability_runtime", None
+                        )
+                        registered = await registration_service.register_durable(
+                            request,
+                            user_id=identity.user_id,
+                            publication_authority=getattr(
+                                capability_runtime, "publication_authority", None
+                            ),
+                        )
                         await _send_realtime(
                             websocket,
                             RealtimeEnvelope(
