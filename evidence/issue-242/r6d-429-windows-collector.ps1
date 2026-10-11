@@ -165,9 +165,40 @@ try {
     & $basePython -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw "venv creation failed." }
     $python = Join-Path $venv "Scripts\python.exe"
-    $venvVersionProbe = 'import sys; print(sys.version_info.major,sys.version_info.minor,sys.version_info.micro,sep=chr(46))'
-    $ver = (& $python -c $venvVersionProbe | Select-Object -First 1).Trim()
-    if ($LASTEXITCODE -ne 0 -or $ver -ne "3.12.10") { throw "venv Python is not 3.12.10: $ver" }
+    # Use a real process exit code: PowerShell 5.1 may leave $LASTEXITCODE
+    # stale after an external-command | Select-Object pipeline. Native --version
+    # avoids both Python -c quoting and pipeline-exit ambiguities.
+    $versionStart = New-Object System.Diagnostics.ProcessStartInfo
+    $versionStart.FileName = $python
+    $versionStart.Arguments = "--version"
+    $versionStart.UseShellExecute = $false
+    $versionStart.CreateNoWindow = $true
+    $versionStart.RedirectStandardOutput = $true
+    $versionStart.RedirectStandardError = $true
+    $versionChild = New-Object System.Diagnostics.Process
+    $versionChild.StartInfo = $versionStart
+    $verOutput = ""
+    $verErrors = ""
+    $versionExitCode = $null
+    try {
+        if (-not $versionChild.Start()) { throw "Could not launch isolated venv Python." }
+        $verOutTask = $versionChild.StandardOutput.ReadToEndAsync()
+        $verErrTask = $versionChild.StandardError.ReadToEndAsync()
+        if (-not $versionChild.WaitForExit(15000)) {
+            try { $versionChild.Kill() } catch { }
+            throw "venv Python --version timed out after 15 seconds."
+        }
+        $versionExitCode = [int]$versionChild.ExitCode
+        $verOutput = $verOutTask.Result.Trim()
+        $verErrors = $verErrTask.Result.Trim()
+    }
+    finally { $versionChild.Dispose() }
+    $versionMessage = ($verOutput + " " + $verErrors).Trim()
+    if ($versionExitCode -ne 0 -or $versionMessage -ne "Python 3.12.10") {
+        throw "venv Python verification failed: exit=$versionExitCode; reported='$versionMessage'; required='Python 3.12.10'."
+    }
+    $ver = "3.12.10"
+    Write-Host "Verified isolated venv Python $ver (exit=$versionExitCode)"
     Write-Host "Installing pinned repository test requirements..."
     & $python -m pip install -r requirements-test.txt
     if ($LASTEXITCODE -ne 0) { throw "Test requirements installation failed." }
