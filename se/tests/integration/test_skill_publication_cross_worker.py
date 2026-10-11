@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import multiprocessing
 import os
+import subprocess
+import sys
 import uuid
 from types import SimpleNamespace
 
@@ -20,6 +22,7 @@ from se.src.infrastructure.storage.repositories.capability_publications import (
 )
 from se.src.runtimes.capability.contracts.definition import (
     CapabilityDefinition,
+    CapabilityEffect,
     CapabilityExecutionMode,
     CapabilityKind,
 )
@@ -338,6 +341,53 @@ async def test_same_origin_concurrent_publish_is_idempotent():
             SimpleNamespace(user_id=publisher_id, scopes=set(), permissions=[])
         )
         assert sum(item.capability_id == capability_id for item in visible) == 1
+
+        # Same principal/current content must replay across separate PG engines
+        # regardless of effect-set insertion order; changed content must not.
+        effect_id = f"sec-p1a-effect-set-{suffix}"
+        with_effects_a = _definition(effect_id, f"EFFECT_SET_{suffix}").model_copy(
+            update={"effects": {CapabilityEffect.WRITE, CapabilityEffect.READ}}
+        )
+        with_effects_b = _definition(effect_id, f"EFFECT_SET_{suffix}").model_copy(
+            update={"effects": {CapabilityEffect.READ, CapabilityEffect.WRITE}}
+        )
+        first_effect_row = await worker_a.publish_user_context(
+            with_effects_a, publisher_id=publisher_id
+        )
+        replay_effect_row = await worker_b.publish_user_context(
+            with_effects_b, publisher_id=publisher_id
+        )
+        assert first_effect_row.revision == replay_effect_row.revision == 1
+        with pytest.raises(PublicationStaleRevision):
+            await worker_b.publish_user_context(
+                with_effects_b.model_copy(
+                    update={"metadata": {
+                        **with_effects_b.metadata, "instruction": "CHANGED_WITHOUT_CAS"
+                    }}
+                ), publisher_id=publisher_id,
+            )
+
+        # Distinct Python hash seeds exercise genuine cross-process set ordering.
+        seed_script = (
+            "from se.src.runtimes.capability.contracts.definition import "
+            "CapabilityDefinition, CapabilityEffect; "
+            "from se.src.infrastructure.storage.repositories.capability_publications "
+            "import _canonical_definition, _digest; "
+            "definition = CapabilityDefinition(id='seed-check', name='seed-check', "
+            "description='seed-check', effects={CapabilityEffect.READ, "
+            "CapabilityEffect.WRITE, CapabilityEffect.EXECUTE, "
+            "CapabilityEffect.EXTERNAL_SIDE_EFFECT, CapabilityEffect.PRIVILEGED}); "
+            "print(_digest(_canonical_definition(definition)))"
+        )
+        seed_digests = {
+            subprocess.check_output(
+                [sys.executable, "-c", seed_script],
+                env={**os.environ, "PYTHONHASHSEED": str(seed)},
+                text=True, timeout=30,
+            ).strip()
+            for seed in (1, 2, 19, 73)
+        }
+        assert len(seed_digests) == 1
 
         # Different authenticated USER origins compete for one immutable ID.
         # Independent engines and simultaneous start force real PG unique-row

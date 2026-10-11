@@ -76,7 +76,12 @@ def _origin_fingerprint(
 
 
 def _canonical_definition(definition: CapabilityDefinition) -> dict:
-    return definition.model_dump(mode="json", by_alias=True)
+    """Canonicalize declared set-valued fields without reordering JSON arrays."""
+    canonical = definition.model_dump(mode="json", by_alias=True)
+    # effects is Set[CapabilityEffect]. Its iteration order is hash-seed-dependent.
+    # Keep ordered required_scopes and schema/input arrays byte-for-byte intact.
+    canonical["effects"] = sorted(effect.value for effect in definition.effects)
+    return canonical
 
 
 def _definition_from_record(row: CapabilityPublicationRecord) -> CapabilityDefinition:
