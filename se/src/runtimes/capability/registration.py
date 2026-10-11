@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from typing import Any, Dict, List
 
@@ -199,6 +200,17 @@ class ClientCapabilityRegistrationService:
         # Caller models are mutable: freeze the request before awaiting SQL.
         owned_request = request.model_copy(deep=True)
         definitions, implementations = self._preflight(owned_request)
+        # This repository deliberately retains local-only legacy operation
+        # when no PostgreSQL DSN is configured. Once the operator explicitly
+        # configures durable publication, a missing authority must NEVER
+        # degrade WebSocket registrations into process-local Catalog writes.
+        if (
+            publication_authority is None
+            and str(os.environ.get("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL") or "").strip()
+        ):
+            raise ClientRegistrationError(
+                "Configured durable capability namespace authority is unavailable."
+            )
         initial_snapshot = self.connections.get(owned_request.connection_id)
         initial_socket = self.connections.get_socket(owned_request.connection_id)
         if publication_authority is not None and definitions:
