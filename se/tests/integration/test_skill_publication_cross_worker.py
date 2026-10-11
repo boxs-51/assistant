@@ -692,6 +692,7 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
         load_driver = SkillLoadDriver(
             runtime_a.catalog.get_definition("skill.load"), loader
         )
+        private_agent_instructions = []
         for builtin_id in sorted(builtin_ids):
             discovered_definition = runtime_a.catalog.get_definition(builtin_id)
             assert discovered_definition.metadata["lazy"] is True
@@ -710,6 +711,7 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
                 context, {"skill_id": builtin_id}
             )
             assert loaded["instruction"].strip()
+            private_agent_instructions.append(loaded["instruction"])
             assert loader.is_loaded(builtin_id)
             # A local AGENT load does not change the durable SQL record.
             async with engine_b.connect() as connection:
@@ -794,6 +796,172 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
         }
         # SQL record-level public visibility does not override DIRECT ACL.
         assert await worker_b.get_visible_definition(protected_id, denied) is not None
+
+        # PR440 P1A Stage-A compatibility contract (choice A):
+        # Legacy no-SQL Gateway GET exposes authorized lazy *descriptors*;
+        # SQL Gateway GET exposes only explicitly published DIRECT_CONTEXT.
+        # AGENT may discover authorized descriptors, but neither discovery
+        # nor skill.load grants a public SQL/DIRECT instruction publication.
+        # Drive the actual GET routes, not repository-only methods.
+        import httpx
+        from fastapi import FastAPI
+        from se.src.runtimes.capability.policy import CapabilityAccessProfile
+        from se.src.runtimes.agent.contracts.inference import (
+            InferenceMessage, InferenceResponse,
+        )
+        from se.src.runtimes.chat.direct import DirectChatRuntime
+        from se.src.transport.gateway.api.v1 import capability_router
+        from se.src.transport.gateway.authentication.dependency import (
+            get_current_identity,
+        )
+        from se.src.transport.gateway.dependencies import get_container
+
+        async def _gateway_snapshot(active_runtime, viewer, ids):
+            app = FastAPI()
+            app.include_router(capability_router.router)
+            app.dependency_overrides[get_container] = lambda: SimpleNamespace(
+                capability_runtime=active_runtime,
+            )
+            app.dependency_overrides[get_current_identity] = lambda: viewer
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app),
+                base_url="http://testserver",
+            ) as client:
+                listed = await client.get(
+                    "/v1/capabilities/", params={"kind": "SKILL"}
+                )
+                assert listed.status_code == 200, listed.text
+                details = {}
+                for capability_id in ids:
+                    response = await client.get(
+                        f"/v1/capabilities/{capability_id}"
+                    )
+                    assert response.status_code in (200, 404), response.text
+                    details[capability_id] = response
+                return listed.json(), details
+
+        legacy_runtime = CapabilityRuntime(
+            catalog=runtime_a.catalog, authorization=authorization,
+        )
+        legacy_list, legacy_details = await _gateway_snapshot(
+            legacy_runtime, agent_identity, sorted(builtin_ids)
+        )
+        legacy_by_id = {
+            item["capability_id"]: item for item in legacy_list
+        }
+        for builtin_id in builtin_ids:
+            assert builtin_id in legacy_by_id
+            assert legacy_details[builtin_id].status_code == 200
+            descriptor = legacy_details[builtin_id].json()["definition"]
+            assert descriptor["metadata"]["lazy"] is True
+            assert descriptor["metadata"]["loaded"] is False
+            assert not descriptor["metadata"].get("instruction")
+
+        sql_list, sql_details = await _gateway_snapshot(
+            direct_runtime, agent_identity, sorted(builtin_ids)
+        )
+        assert not builtin_ids.intersection(
+            item["capability_id"] for item in sql_list
+        )
+        assert all(
+            sql_details[builtin_id].status_code == 404
+            for builtin_id in builtin_ids
+        )
+        agent_visible = {
+            item.capability_id for item in
+            await runtime_a.get_available_capabilities(
+                agent_identity, CapabilityAccessProfile.AGENT_POLICY
+            )
+        }
+        assert builtin_ids.issubset(agent_visible)
+        assert not builtin_ids.intersection(
+            item.capability_id
+            for item in await direct_runtime.get_direct_context_skills(
+                agent_identity
+            )
+        )
+
+        # Explicitly restricted server descriptor remains AGENT-only for
+        # authorized principals, without a PG publication or DIRECT bypass.
+        restricted_id = f"sec-p1a-agent-only-{suffix}"
+        original = runtime_a.catalog.get_definition(
+            "skill-command-safety"
+        )
+        runtime_a.catalog.register_definition(original.model_copy(update={
+            "id": restricted_id,
+            "name": restricted_id,
+            "require_auth": True,
+            "required_scopes": ["skill.public.read"],
+            "metadata": {
+                **original.metadata,
+                "required_permissions": ["skill.public.access"],
+            },
+        }))
+        assert restricted_id in {
+            item.capability_id for item in
+            await runtime_a.get_available_capabilities(
+                allowed, CapabilityAccessProfile.AGENT_POLICY
+            )
+        }
+        assert restricted_id not in {
+            item.capability_id for item in
+            await runtime_a.get_available_capabilities(
+                denied, CapabilityAccessProfile.AGENT_POLICY
+            )
+        }
+
+        permitted_list, permitted_details = await _gateway_snapshot(
+            direct_runtime, allowed, [protected_id, restricted_id]
+        )
+        assert protected_id in {
+            item["capability_id"] for item in permitted_list
+        }
+        assert permitted_details[protected_id].status_code == 200
+        assert permitted_details[protected_id].json()["definition"][
+            "metadata"
+        ]["instruction"] == f"SCOPED_PUBLIC_{suffix}"
+        assert permitted_details[restricted_id].status_code == 404
+
+        forbidden_list, forbidden_details = await _gateway_snapshot(
+            direct_runtime, denied, [protected_id, restricted_id]
+        )
+        assert protected_id not in {
+            item["capability_id"] for item in forbidden_list
+        }
+        assert forbidden_details[protected_id].status_code == 404
+        assert forbidden_details[restricted_id].status_code == 404
+
+        class _CaptureProvider:
+            def __init__(self):
+                self.requests = []
+
+            async def complete(self, request):
+                self.requests.append(request)
+                return InferenceResponse(
+                    request_id=request.request_id,
+                    execution_id=request.execution_id,
+                    iteration=request.iteration,
+                    message=InferenceMessage(role="assistant", content="ok"),
+                    provider="offline", model="offline",
+                )
+
+        provider = _CaptureProvider()
+        chat = DirectChatRuntime(
+            inference=provider, capability_runtime=direct_runtime,
+        )
+        for viewer, expected_public in (
+            (allowed, True), (denied, False), (agent_identity, False)
+        ):
+            await chat.execute(
+                messages=(), identity=viewer,
+                session_id=f"sec-p1a-gateway-{suffix}", model="offline",
+            )
+            system_text = provider.requests[-1].messages[0].content
+            assert (f"SCOPED_PUBLIC_{suffix}" in system_text) is expected_public
+            assert all(
+                instruction not in system_text
+                for instruction in private_agent_instructions
+            )
     finally:
         await engine_b.dispose()
         await engine_a.dispose()
