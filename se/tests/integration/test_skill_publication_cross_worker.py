@@ -338,6 +338,78 @@ async def test_same_origin_concurrent_publish_is_idempotent():
             SimpleNamespace(user_id=publisher_id, scopes=set(), permissions=[])
         )
         assert sum(item.capability_id == capability_id for item in visible) == 1
+
+        # Different authenticated USER origins compete for one immutable ID.
+        # Independent engines and simultaneous start force real PG unique-row
+        # arbitration; submission order is reversed on the second round.
+        for reverse in (False, True):
+            race_id = f"sec-p1a-user-race-{suffix}-{int(reverse)}"
+            owners = (f"owner-a-{suffix}", f"owner-b-{suffix}")
+            instructions = (f"WIN_A_{suffix}", f"WIN_B_{suffix}")
+            contenders = [
+                (worker_a, owners[0], instructions[0]),
+                (worker_b, owners[1], instructions[1]),
+            ]
+            if reverse:
+                contenders.reverse()
+            start = asyncio.Event()
+            entered = 0
+
+            async def contender(worker, owner_id, instruction):
+                nonlocal entered
+                entered += 1
+                if entered == 2:
+                    start.set()
+                await asyncio.wait_for(start.wait(), timeout=10)
+                return await worker.publish_user_context(
+                    _definition(race_id, instruction), publisher_id=owner_id
+                )
+
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(
+                    *(contender(*item) for item in contenders),
+                    return_exceptions=True,
+                ),
+                timeout=30,
+            )
+            winners = [
+                item for item, result in zip(contenders, outcomes)
+                if not isinstance(result, BaseException)
+            ]
+            losers = [result for result in outcomes if isinstance(result, BaseException)]
+            assert len(winners) == 1 and len(losers) == 1, outcomes
+            assert isinstance(losers[0], PublicationConflict), type(losers[0]).__name__
+            winner_worker, winner_id, winner_instruction = winners[0]
+            async with engine_a.connect() as connection:
+                row = (
+                    await connection.execute(
+                        text(
+                            "SELECT publisher_type, publisher_id, origin_class, purpose, "
+                            "revision, state, instruction FROM "
+                            "skill_publications.capability_publications "
+                            "WHERE capability_id = :capability_id"
+                        ),
+                        {"capability_id": race_id},
+                    )
+                ).one()
+            assert tuple(row) == (
+                "USER", winner_id, "CALLER_HTTP", "DIRECT_CONTEXT",
+                1, "ACTIVE", winner_instruction,
+            )
+            for identity in owners:
+                visible = await worker_b.list_visible_definitions(
+                    SimpleNamespace(user_id=identity, scopes=set(), permissions=[])
+                )
+                matches = [item for item in visible if item.capability_id == race_id]
+                assert len(matches) == int(identity == winner_id)
+                if matches:
+                    assert matches[0].metadata["instruction"] == winner_instruction
+            loser_id = next(owner for owner in owners if owner != winner_id)
+            with pytest.raises(PublicationConflict):
+                await winner_worker.publish_user_context(
+                    _definition(race_id, "MUST_NOT_REPLACE_WINNER"),
+                    publisher_id=loser_id,
+                )
     finally:
         await engine_b.dispose()
         await engine_a.dispose()
@@ -370,7 +442,98 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
     engine_a, worker_a = await _authority(dsn)
     engine_b, worker_b = await _authority(dsn)
     try:
-        await worker_a.reserve_system_namespace(definition)
+
+        # Opposing trusted SYSTEM and caller USER originate from separate real
+        # PG engines. Neither origin may replace whichever won the unique ID.
+        for reverse in (False, True):
+            race_id = f"sec-p1a-system-user-race-{suffix}-{int(reverse)}"
+            system_definition = definition.model_copy(
+                update={"id": race_id, "name": race_id}
+            )
+            user_instruction = f"UNTRUSTED_{suffix}_{int(reverse)}"
+            user_definition = _definition(race_id, user_instruction)
+            user_id = f"race-caller-{suffix}"
+            start = asyncio.Event()
+            entered = 0
+
+            async def system_contender():
+                nonlocal entered
+                entered += 1
+                if entered == 2:
+                    start.set()
+                await asyncio.wait_for(start.wait(), timeout=10)
+                return await worker_a.reserve_system_namespace(system_definition)
+
+            async def user_contender():
+                nonlocal entered
+                entered += 1
+                if entered == 2:
+                    start.set()
+                await asyncio.wait_for(start.wait(), timeout=10)
+                return await worker_b.publish_user_context(
+                    user_definition, publisher_id=user_id
+                )
+
+            calls = (user_contender, system_contender) if reverse else (
+                system_contender, user_contender
+            )
+            outcomes = await asyncio.wait_for(
+                asyncio.gather(*(call() for call in calls), return_exceptions=True),
+                timeout=30,
+            )
+            winners = [result for result in outcomes if not isinstance(result, BaseException)]
+            losers = [result for result in outcomes if isinstance(result, BaseException)]
+            assert len(winners) == 1 and len(losers) == 1, outcomes
+            assert isinstance(losers[0], PublicationConflict), type(losers[0]).__name__
+            async with engine_a.connect() as connection:
+                row = (
+                    await connection.execute(
+                        text(
+                            "SELECT publisher_type, publisher_id, origin_class, purpose, "
+                            "revision, state, instruction FROM "
+                            "skill_publications.capability_publications "
+                            "WHERE capability_id = :capability_id"
+                        ),
+                        {"capability_id": race_id},
+                    )
+                ).one()
+            assert row.revision == 1 and row.state == "ACTIVE"
+            if row.publisher_type == "SYSTEM":
+                assert row.origin_class == "SYSTEM_BOOTSTRAP"
+                assert row.purpose == "NAMESPACE_RESERVATION"
+                assert row.instruction is None
+                with pytest.raises(PublicationConflict):
+                    await worker_b.publish_user_context(
+                        user_definition, publisher_id=user_id
+                    )
+                with pytest.raises(PublicationConflict):
+                    await worker_b.reserve_user_namespace(
+                        user_definition, publisher_id=user_id
+                    )
+                assert not any(
+                    item.capability_id == race_id
+                    for item in await worker_b.list_visible_definitions(any_identity)
+                )
+            else:
+                assert row.publisher_type == "USER" and row.publisher_id == user_id
+                assert row.origin_class == "CALLER_HTTP"
+                assert row.purpose == "DIRECT_CONTEXT"
+                assert row.instruction == user_instruction
+                with pytest.raises(PublicationConflict):
+                    await worker_a.reserve_system_namespace(system_definition)
+                assert all(
+                    item.capability_id != race_id
+                    for item in await worker_a.list_visible_definitions(any_identity)
+                )
+                caller_identity = SimpleNamespace(
+                    user_id=user_id, scopes=set(), permissions=[]
+                )
+                assert any(
+                    item.capability_id == race_id
+                    for item in await worker_b.list_visible_definitions(caller_identity)
+                )
+        reservation = await worker_a.reserve_system_namespace(definition)
+        assert reservation.revision == 1
         assert all(
             item.capability_id != capability_id
             for item in await worker_b.list_visible_definitions(any_identity)
@@ -382,10 +545,64 @@ async def test_system_namespace_blocks_caller_and_materializes_public_skill():
                 publisher_id=f"attacker-{suffix}",
             )
 
-        await worker_a.publish_system_direct_context(definition)
+        # Explicit expected-revision CAS: a stale trusted materialization
+        # cannot promote or mutate the canonical reservation.
+        with pytest.raises(PublicationStaleRevision):
+            await worker_a.publish_system_direct_context(
+                definition, expected_revision=reservation.revision - 1
+            )
+        with pytest.raises(TypeError):
+            await worker_a.publish_system_direct_context(definition)
+        async with engine_b.connect() as connection:
+            row = (
+                await connection.execute(
+                    text(
+                        "SELECT purpose, revision, visibility, instruction "
+                        "FROM skill_publications.capability_publications "
+                        "WHERE capability_id = :capability_id"
+                    ),
+                    {"capability_id": capability_id},
+                )
+            ).one()
+        assert tuple(row) == ("NAMESPACE_RESERVATION", 1, "NONE", None)
+        published_record = await worker_a.publish_system_direct_context(
+            definition, expected_revision=reservation.revision
+        )
+        assert published_record.revision == reservation.revision + 1
+        with pytest.raises(PublicationStaleRevision):
+            await worker_b.publish_system_direct_context(
+                definition, expected_revision=reservation.revision
+            )
+        same_origin = await worker_b.publish_system_direct_context(
+            definition, expected_revision=published_record.revision
+        )
+        assert same_origin.revision == published_record.revision
+        changed_definition = definition.model_copy(
+            update={"metadata": {
+                **definition.metadata, "instruction": "MUST_NOT_REPLACE_SERVER_PUBLIC"
+            }}
+        )
+        with pytest.raises(PublicationStaleRevision):
+            await worker_b.publish_system_direct_context(
+                changed_definition, expected_revision=same_origin.revision
+            )
         visible = await worker_b.list_visible_definitions(any_identity)
         published = next(item for item in visible if item.capability_id == capability_id)
         assert published.metadata["instruction"] == f"SERVER_PUBLIC_{suffix}"
+        async with engine_b.connect() as connection:
+            row = (
+                await connection.execute(
+                    text(
+                        "SELECT purpose, revision, visibility, instruction "
+                        "FROM skill_publications.capability_publications "
+                        "WHERE capability_id = :capability_id"
+                    ),
+                    {"capability_id": capability_id},
+                )
+            ).one()
+        assert tuple(row) == (
+            "DIRECT_CONTEXT", 2, "SERVER_PUBLIC", f"SERVER_PUBLIC_{suffix}"
+        )
     finally:
         await engine_b.dispose()
         await engine_a.dispose()
