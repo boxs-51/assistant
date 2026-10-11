@@ -196,15 +196,29 @@ class ClientCapabilityRegistrationService:
             raise PermissionError(
                 "Authenticated user does not own capability registration."
             )
-        definitions, implementations = self._preflight(request)
+        # Caller models are mutable: freeze the request before awaiting SQL.
+        owned_request = request.model_copy(deep=True)
+        definitions, implementations = self._preflight(owned_request)
+        initial_snapshot = self.connections.get(owned_request.connection_id)
+        initial_socket = self.connections.get_socket(owned_request.connection_id)
         if publication_authority is not None and definitions:
             await publication_authority.reserve_user_namespaces(
                 tuple(definitions.values()), publisher_id=authenticated_owner
             )
-            # HTTP / another ingress may have changed local state during the
-            # awaited SQL transaction. Recheck without writing before commit.
-            self._validate_existing_definitions(definitions)
-            self._validate_existing_implementations(implementations)
+            # The socket might have disconnected or been replaced while PG
+            # was running. An old request must never resurrect an ENABLED
+            # Catalog binding on a closed/reused connection.
+            definitions, implementations = self._preflight(owned_request)
+            current = self.connections.get(owned_request.connection_id)
+            if (
+                current.connected_at != initial_snapshot.connected_at
+                or current.session_id != initial_snapshot.session_id
+                or self.connections.get_socket(owned_request.connection_id)
+                is not initial_socket
+            ):
+                raise ClientRegistrationError(
+                    "Connection changed during durable capability reservation."
+                )
         return self._commit(definitions, implementations)
 
     def unregister_connection(self, connection_id: str) -> int:
