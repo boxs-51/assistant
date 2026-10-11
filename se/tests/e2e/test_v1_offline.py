@@ -1414,6 +1414,93 @@ async def test_v1_capability_control_plane_registers_tool_skill_and_agent(offlin
         assert any(item["name"] == "cap.echo" for item in tools.json())
 
 
+
+@pytest.mark.asyncio
+async def test_skill_gateway_descriptor_contract_legacy_vs_durable(offline_app: FastAPI):
+    """Stage A: legacy GET descriptors differ from SQL-published DIRECT views.
+
+    The offline authority is an interface double. Real PostgreSQL CAS, restart
+    and two-OS proof live in test_skill_publication_cross_worker.py.
+    """
+    from pathlib import Path
+
+    from se.src.runtimes.capability.local_support_loader import LocalSupportLoader
+    from se.src.runtimes.capability.policy import CapabilityAccessProfile
+
+    container = offline_app.state.container
+    runtime = container.capability_runtime
+    loader = LocalSupportLoader(
+        SimpleNamespace(
+            capability_runtime=runtime,
+            authorization_service=runtime.authorization,
+        ),
+        Path(__file__).resolve().parents[3] / "skills" / "v1",
+        Path(__file__).resolve().parents[3] / "agents" / "__p1a_no_agents__",
+    )
+    builtin_ids = {"skill-command-safety", "skill-web-research"}
+    assert builtin_ids.issubset(set(loader.discover()["skills"]))
+    for builtin_id in builtin_ids:
+        descriptor = runtime.catalog.get_definition(builtin_id)
+        assert descriptor.metadata["lazy"] is True
+        assert descriptor.metadata["loaded"] is False
+        assert not descriptor.metadata.get("instruction")
+
+    authority = runtime.publication_authority
+    transport = httpx.ASGITransport(app=offline_app)
+    try:
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver"
+        ) as client:
+            # The legacy API exposed manifest descriptors (without bodies).
+            runtime.publication_authority = None
+            legacy = await client.get(
+                "/v1/capabilities/", params={"kind": "SKILL"}
+            )
+            assert legacy.status_code == 200, legacy.text
+            legacy_ids = {
+                item["capability_id"] for item in legacy.json()
+            }
+            assert builtin_ids.issubset(legacy_ids)
+            for builtin_id in builtin_ids:
+                detail = await client.get(
+                    f"/v1/capabilities/{builtin_id}"
+                )
+                assert detail.status_code == 200, detail.text
+                metadata = detail.json()["definition"]["metadata"]
+                assert metadata["lazy"] and not metadata["loaded"]
+                assert not metadata.get("instruction")
+
+            # With durable authority configured, API list/detail are
+            # publication-only; Catalog/AGENT discovery must not be promoted.
+            runtime.publication_authority = authority
+            durable = await client.get(
+                "/v1/capabilities/", params={"kind": "SKILL"}
+            )
+            assert durable.status_code == 200, durable.text
+            assert not builtin_ids.intersection(
+                item["capability_id"] for item in durable.json()
+            )
+            for builtin_id in builtin_ids:
+                detail = await client.get(
+                    f"/v1/capabilities/{builtin_id}"
+                )
+                assert detail.status_code == 404, detail.text
+
+            identity = Identity(auth_type="jwt", user_id="offline-user")
+            available = await runtime.get_available_capabilities(
+                identity, CapabilityAccessProfile.AGENT_POLICY
+            )
+            assert builtin_ids.issubset(
+                item.capability_id for item in available
+            )
+            assert not builtin_ids.intersection(
+                item.capability_id
+                for item in await runtime.get_direct_context_skills(identity)
+            )
+    finally:
+        runtime.publication_authority = authority
+
+
 def test_v1_client_capabilities_websocket_registration(offline_app: FastAPI):
     """Test dang ky Client Capabilities (Tool, Skill, Agent) qua WebSocket flow."""
     with TestClient(offline_app) as client:
