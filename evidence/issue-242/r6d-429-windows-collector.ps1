@@ -57,7 +57,9 @@ if ($remote -notin $allowedOrigins) {
 Write-Host "Verified repository origin: $remote"
 
 # Probe the exact Python executable, rather than trusting a command name.
-$probe = 'import sys; print("R6D_PYTHON_EXE="+sys.executable); print("R6D_PYTHON_VERSION="+".".join(map(str,sys.version_info[:3])))'
+# Avoid embedded string quotes in Python -c: Windows PowerShell 5.1/native argv
+# rewriting can strip those quotes, causing SyntaxError hidden by old preflight.
+$probe = 'import sys; print(sys.executable); print(sys.version_info.major,sys.version_info.minor,sys.version_info.micro,sep=chr(46))'
 function Resolve-Python31210 {
     param([string]$Exe, [string[]]$PrefixArgs = @(), [string]$Label)
     try {
@@ -69,20 +71,15 @@ function Resolve-Python31210 {
         }
     }
     catch {
-        Write-Host "Python probe [$Label]: unavailable."
+        Write-Host "Python probe [$Label]: failed: $($_.Exception.Message)"
         return $null
     }
-    $path = ""
-    $version = ""
-    foreach ($line in $lines) {
-        $part = [string]$line
-        if ($part.StartsWith("R6D_PYTHON_EXE=")) {
-            $path = $part.Substring("R6D_PYTHON_EXE=".Length).Trim()
-        }
-        if ($part.StartsWith("R6D_PYTHON_VERSION=")) {
-            $version = $part.Substring("R6D_PYTHON_VERSION=".Length).Trim()
-        }
+    if ($lines.Count -ne 2) {
+        Write-Host "Python probe [$Label]: expected 2 lines (exe, version); got $($lines.Count)."
+        return $null
     }
+    $path = ([string]$lines[0]).Trim()
+    $version = ([string]$lines[1]).Trim()
     if ($version -ne "3.12.10") {
         Write-Host "Python probe [$Label]: found '$version'; required 3.12.10."
         return $null
@@ -115,6 +112,7 @@ else {
     if (-not $basePython) {
         foreach ($candidate in @(
             (Join-Path $repo ".venv\Scripts\python.exe"),
+            (Join-Path $repo "venv\Scripts\python.exe"),
             (Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"),
             (Join-Path $env:ProgramFiles "Python312\python.exe")
         )) {
@@ -167,7 +165,8 @@ try {
     & $basePython -m venv $venv
     if ($LASTEXITCODE -ne 0) { throw "venv creation failed." }
     $python = Join-Path $venv "Scripts\python.exe"
-    $ver = (& $python -c "import sys; print('.'.join(map(str,sys.version_info[:3])))" | Select-Object -First 1).Trim()
+    $venvVersionProbe = 'import sys; print(sys.version_info.major,sys.version_info.minor,sys.version_info.micro,sep=chr(46))'
+    $ver = (& $python -c $venvVersionProbe | Select-Object -First 1).Trim()
     if ($LASTEXITCODE -ne 0 -or $ver -ne "3.12.10") { throw "venv Python is not 3.12.10: $ver" }
     Write-Host "Installing pinned repository test requirements..."
     & $python -m pip install -r requirements-test.txt
