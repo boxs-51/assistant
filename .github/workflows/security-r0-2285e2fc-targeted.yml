@@ -1,0 +1,95 @@
+name: Security R0 2285e2fc Linux Windows targeted
+on:
+  push:
+    branches:
+      - evidence/sec408-r0-2285e2fc-targeted-20261012
+permissions:
+  contents: read
+concurrency:
+  group: sec408-r0-2285e2fc-targeted
+  cancel-in-progress: false
+jobs:
+  linux-r0:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      SOURCE_PARENT: 2285e2fcb433b348681b15d60a569033288b3210
+      R0_PARENT: 766da55cf9bca1cde22ffd90b40058f6d9263d64
+      R0_BLOB: 4849b2a6a85f0538badf2e6444b3d35a9b93547b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Verify immutable ancestry and workflow one-ADD
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$R0_PARENT"
+          test "$(git rev-parse HEAD^^)" = "$SOURCE_PARENT"
+          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/security-r0-2285e2fc-targeted.yml"
+          test "$(git diff --name-status HEAD^ HEAD | cut -f1)" = "A"
+          test "$(git hash-object se/tests/e2e/test_capability_publication_cross_principal_r0.py)" = "$R0_BLOB"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Require six real R0 cases and archive JUnit
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p r0-evidence
+          python -m pytest -q -ra -o xfail_strict=true --junitxml=r0-evidence/junit.xml se/tests/e2e/test_capability_publication_cross_principal_r0.py
+          python -c 'import xml.etree.ElementTree as E; a=E.parse("r0-evidence/junit.xml"); s=list(a.iter("testsuite")); assert len(s)==1; d=s[0].attrib; actual=tuple(int(d.get(k,0)) for k in ("tests","failures","errors","skipped")); assert actual==(6,0,0,0),actual; print("R0_SIX_OF_SIX_VERIFIED",actual)'
+          printf 'source=%s\nr0_parent=%s\nsha=%s\nplatform=linux\nfixture=STRATEGY_SIMULATED\n' "$SOURCE_PARENT" "$R0_PARENT" "$GITHUB_SHA" > r0-evidence/provenance.txt
+      - name: Upload Linux R0
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec408-r0-2285e2fc-linux
+          path: r0-evidence/
+          if-no-files-found: warn
+  windows-r0:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    env:
+      SOURCE_PARENT: 2285e2fcb433b348681b15d60a569033288b3210
+      R0_PARENT: 766da55cf9bca1cde22ffd90b40058f6d9263d64
+      R0_BLOB: 4849b2a6a85f0538badf2e6444b3d35a9b93547b
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 3
+      - name: Verify immutable ancestry and workflow one-ADD
+        shell: pwsh
+        run: |
+          if ((git rev-parse HEAD^).Trim() -ne $env:R0_PARENT) { throw 'R0 parent mismatch' }
+          if ((git rev-parse HEAD^^).Trim() -ne $env:SOURCE_PARENT) { throw 'Source parent mismatch' }
+          if (((git diff --name-only HEAD^ HEAD).Trim()) -ne '.github/workflows/security-r0-2285e2fc-targeted.yml') { throw 'Unexpected file path' }
+          if (((git diff --name-status HEAD^ HEAD).Trim().Split()[0]) -ne 'A') { throw 'Not a sole ADD' }
+          if ((git hash-object se/tests/e2e/test_capability_publication_cross_principal_r0.py).Trim() -ne $env:R0_BLOB) { throw 'R0 immutable blob changed' }
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: requirements-test.txt
+      - name: Install pinned dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Require six real R0 cases and archive JUnit
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path r0-evidence | Out-Null
+          python -m pytest -q -ra -o xfail_strict=true --junitxml=r0-evidence/junit.xml se/tests/e2e/test_capability_publication_cross_principal_r0.py
+          if ($LASTEXITCODE -ne 0) { throw 'R0 pytest failed' }
+          python -c 'import xml.etree.ElementTree as E; a=E.parse("r0-evidence/junit.xml"); s=list(a.iter("testsuite")); assert len(s)==1; d=s[0].attrib; actual=tuple(int(d.get(k,0)) for k in ("tests","failures","errors","skipped")); assert actual==(6,0,0,0),actual; print("R0_SIX_OF_SIX_VERIFIED",actual)'
+          if ($LASTEXITCODE -ne 0) { throw 'R0 JUnit mismatch' }
+          @("source=$env:SOURCE_PARENT","r0_parent=$env:R0_PARENT","sha=$env:GITHUB_SHA","platform=windows","fixture=STRATEGY_SIMULATED") | Set-Content r0-evidence/provenance.txt
+      - name: Upload Windows R0
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec408-r0-2285e2fc-windows
+          path: r0-evidence/
+          if-no-files-found: warn
