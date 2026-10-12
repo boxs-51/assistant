@@ -475,6 +475,9 @@ async def test_r7c_historical_native_committed_prefix_is_denied_before_resume_mo
                 wait_reason="CONNECTION", revision=2,
                 current_checkpoint_id=checkpoint_id, request={},
             ))
+            # Match PostgreSQL FK semantics rather than relying on SQLite's
+            # permissive flush order for raw-string child identities.
+            await uow.session.flush()
             uow.session.add(AgentIterationRecord(
                 id="a1-prefix-old-iteration", execution_id=exec_id,
                 iteration=1, state="COMPLETED", tool_call_ids=["call-old"],
