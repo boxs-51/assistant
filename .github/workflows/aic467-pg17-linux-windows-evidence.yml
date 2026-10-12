@@ -59,6 +59,35 @@ jobs:
               finally:
                   await c.close()
           asyncio.run(check())'
+      - name: Negative control — original 5b MUST fail on pristine PG17 Alembic history
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags --depth=1 origin main
+          python -c '
+          import pathlib, subprocess, sys
+          p = pathlib.Path("se/src/infrastructure/storage/migrations/sql/versions/5b_conversation_temporal_contract.py")
+          modern = p.read_bytes()
+          try:
+              pristine = subprocess.check_output(["git", "show", "FETCH_HEAD:" + p.as_posix()])
+              assert pristine != modern, "negative control must replace changed 5b source"
+              p.write_bytes(pristine)
+              blob = subprocess.check_output(["git", "hash-object", str(p)], text=True).strip()
+              assert blob == "20be86d8e3852027e411a0b16e0a8015993b4998", blob
+              command = [
+                  sys.executable, "-m", "pytest", "-q",
+                  "se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[postgresql]",
+              ]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
+              output = result.stdout + "\n" + result.stderr
+              print(output[-4000:])
+              assert result.returncode != 0, "negative control unexpectedly PASSED with original 5b"
+              assert "StringDataRightTruncationError" in output and "alembic_version" in output, "negative failed for unrelated reason"
+              print("AIC_PG17_PRISTINE_5B_NEGATIVE_CONTROL_PASS", flush=True)
+          finally:
+              p.write_bytes(modern)
+              assert p.read_bytes() == modern
+          '
       - name: Run AIC integration and architecture matrix, strict no skips
         shell: bash
         run: |
@@ -120,6 +149,37 @@ jobs:
               finally:
                   await c.close()
           asyncio.run(check())'
+      - name: Negative control — original 5b MUST fail on pristine PG17 Alembic history
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags --depth=1 origin main
+          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch historical 5b baseline" }
+          python -c '
+          import pathlib, subprocess, sys
+          p = pathlib.Path("se/src/infrastructure/storage/migrations/sql/versions/5b_conversation_temporal_contract.py")
+          modern = p.read_bytes()
+          try:
+              pristine = subprocess.check_output(["git", "show", "FETCH_HEAD:" + p.as_posix()])
+              assert pristine != modern, "negative control must replace changed 5b source"
+              p.write_bytes(pristine)
+              blob = subprocess.check_output(["git", "hash-object", str(p)], text=True).strip()
+              assert blob == "20be86d8e3852027e411a0b16e0a8015993b4998", blob
+              command = [
+                  sys.executable, "-m", "pytest", "-q",
+                  "se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[postgresql]",
+              ]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
+              output = result.stdout + "\n" + result.stderr
+              print(output[-4000:])
+              assert result.returncode != 0, "negative control unexpectedly PASSED with original 5b"
+              assert "StringDataRightTruncationError" in output and "alembic_version" in output, "negative failed for unrelated reason"
+              print("AIC_PG17_PRISTINE_5B_NEGATIVE_CONTROL_PASS", flush=True)
+          finally:
+              p.write_bytes(modern)
+              assert p.read_bytes() == modern
+          '
+          if ($LASTEXITCODE -ne 0) { throw "Negative 5b control failed" }
       - name: Run Windows AIC integration and architecture matrix, strict no skips
         shell: pwsh
         run: |
