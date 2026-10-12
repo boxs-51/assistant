@@ -2,6 +2,9 @@
 from sqlalchemy import CheckConstraint, ForeignKey, Integer, String
 from sqlalchemy.orm import Mapped, mapped_column
 from ..base import Base
+# Base.metadata.create_all is called by isolated AE/UBQ tests without the
+# full user_data import aggregator. Register the FK target in that path.
+from ..user_data.user import User  # noqa: F401
 
 
 class AgentInstanceIdReservationRecord(Base):
