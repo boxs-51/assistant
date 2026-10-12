@@ -150,6 +150,9 @@ class _TestTreeGate:
     def require_registered(self, identity):
         assert identity == self.expected
 
+    def require_known_tree(self, identity):
+        assert identity == self.expected
+
     def require_verified_empty(self, identity):
         self.reads += 1
         assert identity == self.expected
@@ -196,6 +199,72 @@ def test_manager_native_root_quarantined_until_authority_readback(tmp_path):
     destroyed = manager.destroy(lease)
     assert destroyed.state is SandboxLeaseState.DESTROYED
     assert not lease.root.exists()
+
+
+def test_restart_reattach_quarantines_native_root_until_os_proof(tmp_path):
+    """Manager restart flow; gate is mocked, NOT a native OS PASS."""
+    base = (tmp_path / "shared-roots").resolve()
+    gate = _TestTreeGate()
+    profile = SandboxProfile(profile_id="native-recover")
+    original = SandboxManager(base, native_tree_authority=gate)
+    lease = original.acquire_for_execution(
+        execution_id="exec-d2",
+        owner_user_id="owner-d2",
+        profile=profile,
+    )
+    identity = SpawnIdentity(
+        owner_id=lease.owner_user_id,
+        execution_id=lease.execution_id,
+        tool_call_id="call-d2",
+        sandbox_id=lease.sandbox_id,
+        lease_generation="gen-1",
+    )
+    gate.expected = identity
+    original.bind_native_tree(lease, identity)
+    token = original.resolve_path(lease, "survivor.txt")
+    token.write_text("preserve across restart", encoding="utf-8")
+
+    # New worker has no old in-memory lease map, but the filesystem remains.
+    recovered_manager = SandboxManager(base, native_tree_authority=gate)
+    recovered = recovered_manager.reattach_native_after_restart(
+        lease, profile, identity
+    )
+    assert recovered.state is SandboxLeaseState.CLEANUP
+    assert token.read_text(encoding="utf-8") == "preserve across restart"
+    with pytest.raises(SandboxLeaseStateError):
+        recovered_manager.resolve_path(recovered, "no-new-effects")
+    with pytest.raises(SandboxLeaseStateError, match="VERIFIED_EMPTY"):
+        recovered_manager.destroy(recovered)
+    assert token.exists()
+
+    gate.allowed = True  # control-flow stub, NOT authenticated OS proof
+    assert recovered_manager.destroy(recovered).state is SandboxLeaseState.DESTROYED
+    assert not token.exists()
+
+
+def test_restart_with_missing_os_scope_never_adopts_or_deletes_root(tmp_path):
+    base = (tmp_path / "shared-roots").resolve()
+    original = SandboxManager(base)
+    profile = SandboxProfile(profile_id="native-recover")
+    lease = original.acquire_for_execution(
+        execution_id="exec-d2",
+        owner_user_id="owner-d2",
+        profile=profile,
+    )
+    token = original.resolve_path(lease, "survivor.txt")
+    token.write_text("protected", encoding="utf-8")
+    authority = LinuxCgroupTreeAuthority(tmp_path / "tree.sqlite")
+    restarted = SandboxManager(base, native_tree_authority=authority)
+    identity = SpawnIdentity(
+        owner_id=lease.owner_user_id,
+        execution_id=lease.execution_id,
+        tool_call_id="call-d2",
+        sandbox_id=lease.sandbox_id,
+        lease_generation="gen-1",
+    )
+    with pytest.raises(SandboxLeaseStateError, match="cannot be reattached"):
+        restarted.reattach_native_after_restart(lease, profile, identity)
+    assert token.read_text(encoding="utf-8") == "protected"
 
 
 def test_manager_rejects_foreign_native_binding_before_spawn(tmp_path):
