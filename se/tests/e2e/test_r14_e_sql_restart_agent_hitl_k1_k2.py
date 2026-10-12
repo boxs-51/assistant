@@ -168,6 +168,12 @@ class _HoldK1TerminalFrame(GatewayRealtimeClient):
         self.terminal_ready = terminal_ready
         self.release_terminal = release_terminal
 
+    def send_error(self, invocation_id, **error):
+        self.terminal_ready.set()
+        if not self.release_terminal.wait(60):
+            raise TimeoutError("K1 denial send was not released")
+        return super().send_error(invocation_id, **error)
+
     def send_result(self, invocation_id, result, **correlation):
         self.terminal_ready.set()
         if not self.release_terminal.wait(60):
