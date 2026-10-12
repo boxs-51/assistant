@@ -291,7 +291,7 @@ def postgres_url(tmp_path):
     assert init.returncode == 0, "Native PG initdb failed: " + init.stderr[-2500:]
     start = subprocess.run(
         [str(binaries / "pg_ctl"), "-D", str(data), "-l", str(log),
-         "-o", f"-F -h 127.0.0.1 -p {port}", "-w", "start"],
+         "-o", f"-F -h 127.0.0.1 -k {tmp_path} -p {port}", "-w", "start"],
         capture_output=True, text=True, timeout=40, check=False,
     )
     assert start.returncode == 0, (
