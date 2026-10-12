@@ -6,7 +6,13 @@ from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String, T
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
-from ..user_data.user import User  # noqa: F401 - register users metadata for isolated Agent create_all
+# Agent-only test suites create Base.metadata without importing the gateway's
+# full UoW. Register the complete referenced users aggregate so both FK
+# resolution and SQLAlchemy relationship mapper configuration remain valid.
+from ..user_data import (  # noqa: F401
+    api_key, application, member, oauth_account, organization,
+    pending_registration, permission, user,
+)
 
 
 class AgentInstanceReservationRecord(Base):
