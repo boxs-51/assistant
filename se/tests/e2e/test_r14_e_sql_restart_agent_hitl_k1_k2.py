@@ -286,8 +286,10 @@ async def _hard_kill(process) -> int:
 
 async def run_physical_hard_restart_witness(
     tmp_path, *, postgres_url: str | None = None,
+    scenario: str = "approve_terminal",
 ):
-    """Verify real S1 hard kill/S2 recovery using SQLite or actual PostgreSQL."""
+    """Reproduce real K1-to-K2 hard restart for a selected consent fault cut."""
+    assert scenario in {"approve_terminal", "deny_terminal"}
     db_path = tmp_path / "server.sqlite3"
     sink_path = tmp_path / "independent_effects.sqlite3"
     ledger_path = tmp_path / "client.sqlite3"
@@ -306,16 +308,16 @@ async def run_physical_hard_restart_witness(
         approvals_in_memory = []
         hitl = HITLManager()
 
-        def approve_high_risk(request):
+        def decide_high_risk(request):
             approvals_in_memory.append(request)
             with sqlite3.connect(sink_path) as db:
                 db.execute(
                     "INSERT INTO approvals(risk_level) VALUES (?)",
                     (request["risk_level"],),
                 )
-            return True
+            return scenario != "deny_terminal"
 
-        hitl.set_approval_callback(approve_high_risk)
+        hitl.set_approval_callback(decide_high_risk)
 
         def one_external_effect(value: str, **kwargs):
             invocation_id = kwargs.get("invocation_id")
@@ -339,7 +341,9 @@ async def run_physical_hard_restart_witness(
         assert await asyncio.to_thread(terminal_ready.wait, 20.0), (
             "K1 never reached the after-effect/before-wire cut"
         )
-        assert _sink_count(sink_path, "effects") == 1
+        assert _sink_count(sink_path, "effects") == (
+            0 if scenario == "deny_terminal" else 1
+        )
         assert _sink_count(sink_path, "approvals") == 1
         assert len(approvals_in_memory) == 1
         assert approvals_in_memory[0]["risk_level"] == "HIGH"
@@ -359,6 +363,11 @@ async def run_physical_hard_restart_witness(
         )
         assert record is not None
         assert record.state is ClientInvocationLedgerState.TERMINAL
+        assert record.terminal_type == (
+            "error" if scenario == "deny_terminal" else "result"
+        )
+        if scenario == "deny_terminal":
+            assert record.terminal_payload["code"] == "HITL_DENIED"
         killed_pid = await _hard_kill(s1)
         release_terminal.set()
         k1.dispatcher.shutdown()
@@ -418,10 +427,14 @@ async def run_physical_hard_restart_witness(
         )
         assert result is not None and result.commit_state == "COMMITTED"
         assert result.invocation_id == original_invocation
-        assert result.success is True
-        assert result.output == {
-            "source": "k1-durable", "value": "r7-j", "effect_count": 1,
-        }
+        if scenario == "deny_terminal":
+            assert result.success is False
+            assert result.error_code == "HITL_DENIED"
+        else:
+            assert result.success is True
+            assert result.output == {
+                "source": "k1-durable", "value": "r7-j", "effect_count": 1,
+            }
         invocation = await invocation_store.get(original_invocation)
         attempts = await invocation_store.list_attempts(original_invocation)
         assert invocation is not None and invocation.state.value == "COMPLETED"
@@ -452,6 +465,7 @@ async def run_physical_hard_restart_witness(
                 )).scalar_one()
             _atomic_json(tmp_path / "postgres17-result.json", {
                 "backend": "postgresql",
+                "scenario": scenario,
                 "version_num": version,
                 "database": database,
                 "s1_pid": killed_pid,
@@ -464,7 +478,9 @@ async def run_physical_hard_restart_witness(
                 "k2_connection_id": k2.connection_id,
             })
 
-        assert _sink_count(sink_path, "effects") == 1
+        assert _sink_count(sink_path, "effects") == (
+            0 if scenario == "deny_terminal" else 1
+        )
         assert _sink_count(sink_path, "approvals") == 1
         assert resumed_approvals == []
         assert k2.pending_resume_tickets == ()
@@ -493,6 +509,12 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
 ):
     """Preserve the original portable SQLite evidence unchanged."""
     await run_physical_hard_restart_witness(tmp_path)
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_r14_e_denied_terminal_reconciles_after_real_s1_kill(tmp_path):
+    await run_physical_hard_restart_witness(tmp_path, scenario="deny_terminal")
 
 
 if __name__ == "__main__" and len(sys.argv) == 5 and sys.argv[1] == "--r14e-child":
