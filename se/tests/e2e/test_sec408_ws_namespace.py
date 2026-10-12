@@ -42,6 +42,28 @@ def _definition(capability_id: str) -> CapabilityDefinition:
     )
 
 
+
+def test_missing_and_explicit_logical_id_hash_to_identical_contract():
+    from se.src.infrastructure.storage.repositories.capability_publications import (
+        _canonical_definition, _digest,
+    )
+
+    name = "sec408-normalized-optional-id"
+    implicit = _definition(name)
+    implicit.id = None
+    explicit = _definition(name)
+    assert implicit.capability_id == explicit.capability_id == name
+    assert _canonical_definition(implicit)["id"] == name
+    assert _digest(_canonical_definition(implicit)) == _digest(
+        _canonical_definition(explicit)
+    )
+    divergent = _definition(name)
+    divergent.required_scopes = ["privileged"]
+    assert _digest(_canonical_definition(implicit)) != _digest(
+        _canonical_definition(divergent)
+    )
+
+
 def _request(user: str, client: str, connection: str, *ids: str):
     return ClientCapabilityRegistration(
         owner_id=user, client_id=client, connection_id=connection,
@@ -434,6 +456,35 @@ async def test_real_postgres_ws_atomic_batch_and_concurrent_http_owner_fence():
             await authority_b.reserve_user_namespace(
                 changed_http, publisher_id="alice"
             )
+
+        # Equivalent missing-optional-ID and explicit id=name definitions
+        # are the SAME logical contract for HTTP and WS cross-worker digest.
+        canonical_name = f"{prefix}-optional-id"
+        without_id = _definition(canonical_name)
+        without_id.id = None
+        with_id = _definition(canonical_name)
+        await authority_a.reserve_user_namespace(
+            without_id, publisher_id="alice"
+        )
+        await authority_b.reserve_user_namespace(
+            with_id, publisher_id="alice"
+        )
+        ws_name = f"{prefix}-optional-ws-id"
+        missing_ws_id = _request(
+            "alice", "client-a", "connection-a", ws_name
+        )
+        missing_ws_id.capabilities[0].definition.id = None
+        explicit_ws_id = _request(
+            "alice", "client-same", "connection-same", ws_name
+        )
+        await service_a.register_durable(
+            missing_ws_id, user_id="alice", publication_authority=authority_a
+        )
+        await service_same.register_durable(
+            explicit_ws_id, user_id="alice", publication_authority=authority_b
+        )
+        assert catalog_a.contains_definition(ws_name)
+        assert catalog_same.contains_definition(ws_name)
 
         # Same-principal WebSocket replay with a different definition MUST
         # fail before any local Catalog side effects, not appear idempotent.
