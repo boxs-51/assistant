@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import platform
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -73,9 +74,11 @@ class KernelOwnedTreeRecoveryTests(unittest.TestCase):
             identity = self._identity()
             cg = recorder.enroll(identity)
             spawned = Path(tmp) / "descendant.pid"
+            nested = cg / "nested"
+            nested.mkdir()
             worker_script = (
                 "import os, pathlib, subprocess, sys\n"
-                f"leaf = pathlib.Path({str(cg)!r})\n"
+                f"leaf = pathlib.Path({str(nested)!r})\n"
                 "leaf.joinpath('cgroup.procs').write_text(str(os.getpid()),"
                 "encoding='ascii')\n"
                 "child = subprocess.Popen([sys.executable, '-c',"
@@ -133,6 +136,63 @@ class KernelOwnedTreeRecoveryTests(unittest.TestCase):
             self.assertEqual((cg / "cgroup.procs").read_text("ascii").strip(), "")
             with self.assertRaises(CgroupTreeMismatch):
                 restored.recover_and_verify_empty(identity)
+            nested.rmdir()
+            cg.rmdir()
+
+    def test_real_crash_between_kernel_empty_and_receipt_commit(self) -> None:
+        delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
+        if not delegated:
+            self.skipTest("KERNEL_CGROUP_POSITIVE_NOT_RUN: no delegated root")
+        with tempfile.TemporaryDirectory(prefix="sbx3-receipt-crash-") as tmp:
+            journal = Path(tmp) / "state.sqlite"
+            first = LinuxCgroupTreeLedger(Path(delegated), journal)
+            identity = self._identity()
+            cg = first.enroll(identity)
+            observed = Path(tmp) / "kernel-empty-observed"
+            script = (
+                "import pathlib, time\n"
+                "from se.src.runtimes.capability.native_tree_cgroup_b0 "
+                "import LinuxCgroupTreeLedger, CgroupTreeIdentity\n"
+                f"ledger = LinuxCgroupTreeLedger(pathlib.Path({delegated!r}), "
+                f"pathlib.Path({str(journal)!r}))\n"
+                f"identity = CgroupTreeIdentity({identity.owner_id!r}, "
+                f"{identity.execution_id!r}, {identity.sandbox_id!r}, "
+                f"{identity.generation!r})\n"
+                "original = ledger._load\n"
+                "counter = [0]\n"
+                "def intercept(value):\n"
+                "    answer = original(value)\n"
+                "    counter[0] += 1\n"
+                "    if counter[0] == 2:\n"
+                f"        pathlib.Path({str(observed)!r}).write_text('kernel-empty')\n"
+                "        time.sleep(90)\n"
+                "    return answer\n"
+                "ledger._load = intercept\n"
+                "ledger.recover_and_verify_empty(identity)\n"
+            )
+            process = subprocess.Popen([sys.executable, "-c", script])
+            try:
+                deadline = time.monotonic() + 12
+                while not observed.is_file() and time.monotonic() < deadline:
+                    if process.poll() is not None:
+                        self.fail("recovery process exited before kernel proof")
+                    time.sleep(.05)
+                self.assertTrue(observed.is_file(), "kernel verification seam not reached")
+            finally:
+                process.kill()
+                process.wait(timeout=10)
+            # Child crashed AFTER cgroup.kill but BEFORE durable state CAS.
+            with sqlite3.connect(journal) as db:
+                status = db.execute(
+                    "SELECT state FROM native_cgroup_trees WHERE sandbox_id=?",
+                    (identity.sandbox_id,),
+                ).fetchone()[0]
+            self.assertEqual(status, "ENROLLED")
+            witness = LinuxCgroupTreeLedger(
+                Path(delegated), journal
+            ).recover_and_verify_empty(identity)
+            self.assertEqual(witness.generation, identity.generation)
+            self.assertFalse(witness.production_usable)
             cg.rmdir()
 
     def test_kernel_enrollment_refuses_generation_path_reuse(self) -> None:
