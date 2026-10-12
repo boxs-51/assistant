@@ -156,3 +156,90 @@ async def test_operator_trusted_selection_preserves_acl_and_actual_sql_revision(
         assert definition.metadata["required_permissions"] == ["allowed-permission"]
         assert definition.metadata["instruction"] == "trusted-only instruction"
         assert revision == 9
+
+
+@pytest.mark.asyncio
+async def test_real_postgres_operator_trusted_publication_and_race_fence(monkeypatch):
+    """Native PostgreSQL: operator-only positive, durable ACL, bad-origin reject."""
+    import asyncio
+    import os
+    import uuid
+
+    from alembic import command
+    from alembic.config import Config
+    from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+
+    from se.src.infrastructure.storage.repositories.capability_publications import (
+        CapabilityPublicationRepository, PublicationConflict,
+    )
+
+    if os.getenv("ASSISTANT_SECURITY_PG_E2E") != "1":
+        pytest.skip("native PostgreSQL attested publisher test is opt-in")
+    dsn = str(os.environ.get("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL") or "")
+    assert dsn.startswith("postgresql+asyncpg://")
+    # Alembic's env.py drives its own event loop.
+    await asyncio.to_thread(
+        command.upgrade, Config("alembic_skill_publications.ini"), "head"
+    )
+    engine = create_async_engine(dsn, pool_pre_ping=True)
+    repo = CapabilityPublicationRepository(
+        async_sessionmaker(engine, expire_on_commit=False)
+    )
+
+    class _SqlRuntime(_Runtime):
+        async def publish_system_direct_context(
+            self, definition, *, expected_revision
+        ):
+            await self.publication_authority.publish_system_direct_context(
+                definition, expected_revision=expected_revision
+            )
+
+    name = "sec408-trusted-" + uuid.uuid4().hex
+    collision = "sec408-collision-" + uuid.uuid4().hex
+    try:
+        await repo.ensure_ready()
+        definition = _skill(name)
+        container = _container({name: definition}, authority=repo)
+        container.capability_runtime = _SqlRuntime(repo)
+        monkeypatch.setenv("ASSISTANT_SKILL_PUBLICATION_TRUSTED_IDS", name)
+        assert await _publish_explicit_trusted_bootstrap_skills(
+            container, [name]
+        ) == (name,)
+        visible = await repo.get_visible_definition(
+            name, SimpleNamespace(user_id="authorized")
+        )
+        assert visible is not None
+        assert visible.capability_id == name
+        assert visible.require_auth is True
+        assert visible.required_scopes == ["allowed-scope"]
+        assert visible.metadata["required_permissions"] == [
+            "allowed-permission"
+        ]
+        assert visible.metadata["instruction"] == "trusted-only instruction"
+
+        # Startup idempotency is granted only for the same immutable digest
+        # and owner after PostgreSQL CAS validation.
+        assert await _publish_explicit_trusted_bootstrap_skills(
+            container, [name]
+        ) == (name,)
+
+        # A caller-owned row must NEVER be promoted into SYSTEM PUBLIC.
+        await repo.reserve_user_namespace(
+            _skill(collision), publisher_id="untrusted-principal"
+        )
+        bad_container = _container(
+            {collision: _skill(collision)}, authority=repo
+        )
+        bad_container.capability_runtime = _SqlRuntime(repo)
+        monkeypatch.setenv(
+            "ASSISTANT_SKILL_PUBLICATION_TRUSTED_IDS", collision
+        )
+        with pytest.raises(PublicationConflict):
+            await _publish_explicit_trusted_bootstrap_skills(
+                bad_container, [collision]
+            )
+        assert await repo.get_visible_definition(
+            collision, SimpleNamespace(user_id="untrusted-principal")
+        ) is None
+    finally:
+        await engine.dispose()
