@@ -403,9 +403,11 @@ class AgentResumePlanningService:
                 tool_call_id,
             )
             if committed is not None:
+                # Legacy coverage-only snapshots need not materialize the
+                # result columns. Real durable rows retain full identity.
                 require_no_uncertified_agent_success(
-                    str(committed.capability_id),
-                    committed.success is True,
+                    str(getattr(committed, "capability_id", "")),
+                    getattr(committed, "success", None) is True,
                 )
             if committed is None:
                 missing.append(tool_call_id)
