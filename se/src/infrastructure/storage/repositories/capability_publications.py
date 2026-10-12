@@ -167,6 +167,7 @@ class CapabilityPublicationRepository:
         origin_class: str,
         publisher_type: str,
         publisher_id: str,
+        definition_digest: str | None = None,
     ) -> CapabilityPublicationRecord:
         fingerprint = _origin_fingerprint(
             capability_id=capability_id,
@@ -196,7 +197,7 @@ class CapabilityPublicationRepository:
                             state=STATE_ACTIVE,
                             canonical_definition=None,
                             instruction=None,
-                            payload_digest=None,
+                            payload_digest=definition_digest,
                             created_at=now,
                             updated_at=now,
                         )
@@ -209,6 +210,14 @@ class CapabilityPublicationRepository:
                         and current.origin_fingerprint == fingerprint
                         and current.publisher_type == publisher_type
                         and current.publisher_id == publisher_id
+                        and (
+                            origin_class != ORIGIN_CALLER
+                            or (
+                                current.purpose == PURPOSE_NAMESPACE
+                                and current.state == STATE_ACTIVE
+                                and current.payload_digest == definition_digest
+                            )
+                        )
                     ):
                         return current
                     raise PublicationConflict(
@@ -224,6 +233,14 @@ class CapabilityPublicationRepository:
                 and current.origin_fingerprint == fingerprint
                 and current.publisher_type == publisher_type
                 and current.publisher_id == publisher_id
+                and (
+                    origin_class != ORIGIN_CALLER
+                    or (
+                        current.purpose == PURPOSE_NAMESPACE
+                        and current.state == STATE_ACTIVE
+                        and current.payload_digest == definition_digest
+                    )
+                )
             ):
                 return current
             raise PublicationConflict(
@@ -254,6 +271,7 @@ class CapabilityPublicationRepository:
             origin_class=ORIGIN_CALLER,
             publisher_type=PUBLISHER_USER,
             publisher_id=publisher_id,
+            definition_digest=_digest(_canonical_definition(definition)),
         )
 
     async def reserve_user_namespaces(
@@ -282,6 +300,12 @@ class CapabilityPublicationRepository:
         if not batch:
             return
 
+        # Reservation idempotence requires a matching normalized logical
+        # contract, not merely a matching owner/kind/ID origin fingerprint.
+        digests = {
+            identifier: _digest(_canonical_definition(definition))
+            for identifier, definition in batch.items()
+        }
         now = _now()
         try:
             async with self._session_factory() as session:
@@ -305,7 +329,9 @@ class CapabilityPublicationRepository:
                                 and current.origin_fingerprint == fingerprint
                                 and current.publisher_type == PUBLISHER_USER
                                 and current.publisher_id == publisher_id
+                                and current.purpose == PURPOSE_NAMESPACE
                                 and current.state == STATE_ACTIVE
+                                and current.payload_digest == digests[identifier]
                             ):
                                 raise PublicationConflict(
                                     f"Capability id '{identifier}' is already reserved."
@@ -326,7 +352,7 @@ class CapabilityPublicationRepository:
                                 state=STATE_ACTIVE,
                                 canonical_definition=None,
                                 instruction=None,
-                                payload_digest=None,
+                                payload_digest=digests[identifier],
                                 created_at=now,
                                 updated_at=now,
                             )
@@ -358,7 +384,9 @@ class CapabilityPublicationRepository:
                     and current.origin_fingerprint == fingerprint
                     and current.publisher_type == PUBLISHER_USER
                     and current.publisher_id == publisher_id
+                    and current.purpose == PURPOSE_NAMESPACE
                     and current.state == STATE_ACTIVE
+                    and current.payload_digest == digests[identifier]
                 ):
                     raise PublicationConflict(
                         "Capability namespace was concurrently reserved."
