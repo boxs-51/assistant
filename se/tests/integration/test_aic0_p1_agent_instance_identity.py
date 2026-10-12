@@ -367,6 +367,76 @@ async def test_aic_native_postgres_nonkey_status_update_lock(postgres_url):
         await admin.dispose()
 
 
+@pytest.mark.asyncio
+async def test_aic_pg17_live_insert_serializes_against_nonkey_reservation_writer(postgres_url):
+    """An ACTIVE marker + non-key reservation writer must block LIVE INSERT.
+
+    A plain existence query plus FK key-share is insufficient: the physical
+    no-key-update lock is compatible with key-share but not PG FOR SHARE.
+    This is an actual two-connection PG17 negative concurrency regression.
+    """
+    schema = "aic426_race_" + uuid4().hex[:12]
+    admin = create_async_engine(postgres_url)
+    async with admin.begin() as c:
+        version = int((await c.execute(text("SHOW server_version_num"))).scalar_one())
+        if not 170000 <= version < 180000:
+            pytest.skip("this gate requires PostgreSQL 17")
+        await c.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        await _tables(engine, dialect="postgresql")
+        await _user(engine)
+        async with engine.begin() as setup:
+            await setup.execute(text(
+                "INSERT INTO aic_instance_reservations "
+                "(agent_instance_id,state,generation) "
+                "VALUES ('fenced-race','ACTIVE',1)"
+            ))
+        async with engine.connect() as writer, engine.connect() as contender:
+            # Hold the same row-lock class a normal non-key UPDATE uses.
+            await writer.execute(text(
+                "SELECT agent_instance_id FROM aic_instance_reservations "
+                "WHERE agent_instance_id='fenced-race' FOR NO KEY UPDATE"
+            ))
+            await contender.execute(text("SET LOCAL lock_timeout='250ms'"))
+            with pytest.raises(DBAPIError) as locked:
+                await contender.execute(text(
+                    "INSERT INTO aic_instance_live "
+                    "(agent_instance_id,owner_user_id,definition_id,"
+                    "definition_version,lifecycle_state,generation) "
+                    "VALUES ('fenced-race','alice','def','v1','ACTIVE',1)"
+                ))
+            pg_error = locked.value.orig
+            sqlstate = (
+                getattr(pg_error, "sqlstate", None)
+                or getattr(pg_error, "pgcode", None)
+                or getattr(getattr(pg_error, "__cause__", None), "sqlstate", None)
+            )
+            assert sqlstate == "55P03", f"expected reservation-lock conflict, got {pg_error}"
+            await contender.rollback()
+            await writer.rollback()
+        # No stale trigger authorization: a fresh legitimate bind is accepted
+        # only after the concurrent writer releases its reservation lock.
+        async with engine.begin() as fresh:
+            await fresh.execute(text(
+                "INSERT INTO aic_instance_live "
+                "(agent_instance_id,owner_user_id,definition_id,"
+                "definition_version,lifecycle_state,generation) "
+                "VALUES ('fenced-race','alice','def','v1','ACTIVE',1)"
+            ))
+            assert (await fresh.execute(text(
+                "SELECT COUNT(*) FROM aic_instance_live "
+                "WHERE agent_instance_id='fenced-race'"
+            ))).scalar_one() == 1
+    finally:
+        await engine.dispose()
+        async with admin.begin() as c:
+            await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
+
+
 def _run_aic_migration(sync_connection, *, direction: str):
     previous = MIG.op
     try:
