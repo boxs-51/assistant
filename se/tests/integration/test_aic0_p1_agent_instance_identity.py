@@ -7,6 +7,8 @@ import asyncio
 import importlib
 import os
 import sqlite3
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -134,39 +136,180 @@ def test_downgrade_refuses_nonempty_identity_history(file_database):
     engine.dispose()
 
 
-@pytest.mark.skipif(not os.getenv("AIC_TEST_POSTGRES_URL"), reason="Real PostgreSQL URL not configured")
-def test_postgresql_real_nonkey_owner_status_conflict():
-    from uuid import uuid4
-    # Real PostgreSQL two independently checked-out physical connections.
-    # A matched, committed users row is MANDATORY; SELECT FOR SHARE on a
-    # missing row would acquire no row-lock and generate a false positive.
-    from sqlalchemy import create_engine
-    url = os.environ["AIC_TEST_POSTGRES_URL"]
-    owner_id = "aic-lock-" + str(uuid4())
-    engine = create_engine(url)
+
+def _install_exact_ubq_user_delete_guards(cx, monkeypatch):
+    """Execute the exact raw trigger statements from immutable 25a/26a.
+
+    This is scoped DDL coexistence, not a full Alembic upgrade witness.
+    """
+    ubq25 = importlib.import_module(
+        "se.src.infrastructure.storage.migrations.sql.versions.25a_ubq1_user_budget_foundation"
+    )
+    ubq26 = importlib.import_module(
+        "se.src.infrastructure.storage.migrations.sql.versions.26a_ubq2_dual_accounting_bridge"
+    )
+    for name in ("user_budget_policies", "user_budget_accounts",
+                 "user_budget_windows", "user_tool_budget_usage",
+                 "user_budget_reservations", "user_budget_task_bindings"):
+        cx.execute(f"CREATE TABLE {name} (owner_user_id TEXT NOT NULL)")
+    def install_25a(sql):
+        if "CREATE TRIGGER trg_ubq_user_history_delete" in sql:
+            cx.execute(sql)
+    def install_26a(sql):
+        if "CREATE TRIGGER trg_ubq2_user_binding_delete_restrict" in sql:
+            cx.execute(sql)
+    with monkeypatch.context() as mp:
+        mp.setattr(ubq25, "_execute_sqlite_trigger", install_25a)
+        mp.setattr(ubq26, "_sqlite", install_26a)
+        ubq25._create_sqlite_triggers()
+        ubq26._create_sqlite_triggers()
+    found = {row[0] for row in cx.execute(
+        "SELECT name FROM sqlite_master WHERE type='trigger'"
+    )}
+    assert {"trg_ubq_user_history_delete",
+            "trg_ubq2_user_binding_delete_restrict",
+            "trg_aic_users_live_delete"} <= found
+
+
+@pytest.mark.parametrize("history", ["none", "ubq25", "ubq26"])
+def test_real_ubq_25a_26a_user_delete_trigger_coexistence(
+    file_database, monkeypatch, history
+):
+    cx = _connect(file_database)
     try:
-        with engine.begin() as seed:
-            seed.execute(text(
+        _install_exact_ubq_user_delete_guards(cx, monkeypatch)
+        _register(cx)
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_USER_DELETE_DENIED"):
+            cx.execute("DELETE FROM users WHERE id='alice'")
+        # The ownerless marker is never deleted; the exact AIC LIVE
+        # predicate stops applying after authorized atomic retirement.
+        cx.execute(
+            "UPDATE aic_instance_id_reservations SET status='RETIRED' "
+            "WHERE agent_instance_id='a1'"
+        )
+        cx.execute("DELETE FROM aic_instance_live WHERE agent_instance_id='a1'")
+        if history == "ubq25":
+            cx.execute("INSERT INTO user_budget_policies(owner_user_id) VALUES ('alice')")
+        elif history == "ubq26":
+            cx.execute("INSERT INTO user_budget_task_bindings(owner_user_id) VALUES ('alice')")
+        if history == "none":
+            assert cx.execute("DELETE FROM users WHERE id='alice'").rowcount == 1
+        else:
+            with pytest.raises(sqlite3.IntegrityError, match="UBQ"):
+                cx.execute("DELETE FROM users WHERE id='alice'")
+        assert cx.execute(
+            "SELECT status FROM aic_instance_id_reservations WHERE agent_instance_id='a1'"
+        ).fetchone() == ("RETIRED",)
+    finally:
+        cx.close()
+
+
+def test_crash_restart_preserves_committed_marker_and_rolls_back_inflight(file_database):
+    with _connect(file_database) as cx:
+        _register(cx)
+        cx.execute(
+            "UPDATE aic_instance_id_reservations SET status='RETIRED' "
+            "WHERE agent_instance_id='a1'"
+        )
+        cx.execute("DELETE FROM aic_instance_live WHERE agent_instance_id='a1'")
+    crash = """
+import sqlite3, os, sys
+cx=sqlite3.connect(sys.argv[1])
+cx.execute('PRAGMA foreign_keys=OFF')
+cx.execute("BEGIN IMMEDIATE")
+cx.execute("INSERT INTO aic_instance_id_reservations VALUES ('uncommitted','RETIRED')")
+os._exit(93)
+"""
+    proc = subprocess.run([sys.executable, "-c", crash, str(file_database)],
+                          check=False, capture_output=True, timeout=12)
+    assert proc.returncode == 93, proc.stderr.decode(errors="replace")
+    with _connect(file_database) as cx:
+        assert cx.execute(
+            "SELECT status FROM aic_instance_id_reservations WHERE agent_instance_id='a1'"
+        ).fetchone() == ("RETIRED",)
+        assert cx.execute(
+            "SELECT COUNT(*) FROM aic_instance_id_reservations "
+            "WHERE agent_instance_id='uncommitted'"
+        ).fetchone()[0] == 0
+        with pytest.raises(sqlite3.IntegrityError):
+            cx.execute("INSERT INTO aic_instance_id_reservations VALUES ('a1','LIVE')")
+
+
+def test_status_before_create_and_delete_before_create_fk_off(file_database):
+    with _connect(file_database) as cx:
+        cx.execute("UPDATE users SET status='inactive' WHERE id='alice'")
+    with _connect(file_database) as cx:
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_OWNER_INVALID"):
+            _register(cx)
+        cx.rollback()
+    # Direct raw DELETE before CREATE -> no owner can be rebound.
+    with _connect(file_database) as cx:
+        cx.execute("DELETE FROM users WHERE id='alice'")
+    with _connect(file_database) as cx:
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_OWNER_INVALID"):
+            _register(cx)
+
+
+def test_live_direct_owner_reassignment_and_invalid_generation_fail(file_database):
+    with _connect(file_database) as cx:
+        _register(cx)
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_MUTATION_DENIED"):
+            cx.execute("UPDATE aic_instance_live SET owner_user_id='bob' WHERE agent_instance_id='a1'")
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_MUTATION_DENIED"):
+            cx.execute("UPDATE aic_instance_live SET generation=99 WHERE agent_instance_id='a1'")
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_RESERVATION_IMMUTABLE"):
+            cx.execute("UPDATE aic_instance_id_reservations SET status='RETIRED' WHERE agent_instance_id='absent'")
+
+
+def test_real_identity_contract_does_not_use_nonexistent_auth_flag():
+    from se.src.domain.schemas.identity import Identity
+    from se.src.application.agent_instance import AgentInstanceService
+    from se.src.domain.schemas.agent_instance import AgentInstanceDenied
+    valid = Identity(auth_type="jwt", user_id="user-123")
+    assert AgentInstanceService.trusted_user_id(valid) == "user-123"
+    for kind in ("api_key", "admin_key", "guest"):
+        with pytest.raises(AgentInstanceDenied):
+            AgentInstanceService.trusted_user_id(Identity(auth_type=kind, user_id="user-123"))
+    with pytest.raises(AgentInstanceDenied):
+        AgentInstanceService.trusted_user_id(Identity(auth_type="jwt"))
+
+
+@pytest.mark.asyncio
+async def test_postgresql17_real_nonkey_owner_status_lock_conflict():
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("AIC_TEST_POSTGRES_URL not set; native PostgreSQL 17 required")
+    from uuid import uuid4
+    from sqlalchemy.ext.asyncio import create_async_engine
+    from sqlalchemy import text as sqltext
+    from sqlalchemy.exc import DBAPIError
+    dsn = os.environ["AIC_TEST_POSTGRES_URL"]
+    assert dsn.startswith("postgresql+asyncpg://"), "Real asyncpg driver required"
+    engine = create_async_engine(dsn, pool_pre_ping=True)
+    owner_id = "aic-lock-" + str(uuid4())
+    try:
+        async with engine.connect() as seed:
+            v = (await seed.execute(sqltext("SHOW server_version_num"))).scalar_one()
+            assert 170000 <= int(v) < 180000, f"require PostgreSQL 17, got {v}"
+            await seed.execute(sqltext(
                 "INSERT INTO users(id,email,password_hash,status) "
                 "VALUES (:id,:email,'disabled','active')"
             ), {"id": owner_id, "email": owner_id + "@example.invalid"})
-        with engine.connect() as a, engine.connect() as b:
-            tx_a = a.begin()
-            tx_b = b.begin()
-            try:
-                locked = a.execute(text(
-                    "SELECT id FROM users WHERE id=:id FOR SHARE"
-                ), {"id": owner_id}).scalar_one()
-                assert locked == owner_id
-                b.execute(text("SET LOCAL lock_timeout='200ms'"))
-                with pytest.raises(DBAPIError):
-                    b.execute(text(
-                        "UPDATE users SET status='inactive' WHERE id=:id"
-                    ), {"id": owner_id})
-            finally:
-                tx_b.rollback()
-                tx_a.rollback()
-        with engine.begin() as cleanup:
-            cleanup.execute(text("DELETE FROM users WHERE id=:id"), {"id": owner_id})
+            await seed.commit()
+        async with engine.connect() as a, engine.connect() as b:
+            await a.begin()
+            locked = (await a.execute(sqltext(
+                "SELECT id FROM users WHERE id=:id FOR SHARE"
+            ), {"id": owner_id})).scalar_one()
+            assert locked == owner_id
+            await b.begin()
+            await b.execute(sqltext("SET LOCAL lock_timeout='200ms'"))
+            with pytest.raises(DBAPIError):
+                await b.execute(sqltext(
+                    "UPDATE users SET status='inactive' WHERE id=:id"
+                ), {"id": owner_id})
+            await b.rollback()
+            await a.rollback()
+        async with engine.begin() as cleanup:
+            await cleanup.execute(sqltext("DELETE FROM users WHERE id=:id"), {"id": owner_id})
     finally:
-        engine.dispose()
+        await engine.dispose()
