@@ -645,3 +645,304 @@ def test_s0_existing_journal_upgrade_preserves_replay_history(tmp_path):
             _same_generation("post-upgrade"), invocation_id="post-upgrade-inv",
             deadline_unix=time.time() + 90,
         )
+
+
+def test_s0_empty_generation_revocation_persists_and_denies_new_mint(tmp_path):
+    path = tmp_path / "s0-empty.sqlite"
+    journal = DurableNativeInvocationAuthorityB0(path)
+    assert journal.revoke_generation(
+        owner_id="owner-revoked", execution_id="exec-revoked",
+        sandbox_id="sandbox-revoked", lease_generation="g-1",
+    ) == 0
+    reopened = DurableNativeInvocationAuthorityB0(path)
+    with pytest.raises(NativeAuthorityDeniedB0):
+        reopened.mint_diagnostic(
+            _same_generation("fresh-tool"), invocation_id="fresh-invocation",
+            deadline_unix=time.time() + 90,
+        )
+    with sqlite3.connect(path) as sql:
+        assert sql.execute("SELECT COUNT(*) FROM attempts").fetchone()[0] == 0
+        assert sql.execute("SELECT COUNT(*) FROM native_invocation_authority_b0").fetchone()[0] == 0
+
+
+def test_s0_existing_tickets_burn_and_fresh_mint_denied(tmp_path):
+    journal = DurableNativeInvocationAuthorityB0(tmp_path / "s0-multi.sqlite")
+    tokens = [
+        journal.mint_diagnostic(
+            _same_generation("issued-" + str(i)), invocation_id="i-" + str(i),
+            deadline_unix=time.time() + 100,
+        )
+        for i in range(3)
+    ]
+    assert journal.revoke_generation(
+        owner_id="owner-revoked", execution_id="exec-revoked",
+        sandbox_id="sandbox-revoked", lease_generation="g-1",
+    ) == 3
+    for token in tokens:
+        assert journal.state(token.identity) == ("DENIED", "PREFLIGHT_DENIED")
+    with pytest.raises(NativeAuthorityDeniedB0):
+        journal.mint_diagnostic(
+            _same_generation("fresh"), invocation_id="fresh-i",
+            deadline_unix=time.time() + 90,
+        )
+
+
+def test_s0_revoke_idempotent_tombstone_irreversible(tmp_path):
+    path = tmp_path / "s0-repeat.sqlite"
+    journal = DurableNativeInvocationAuthorityB0(path)
+    scope = dict(owner_id="owner-revoked", execution_id="exec-revoked",
+                 sandbox_id="sandbox-revoked", lease_generation="g-1")
+    assert journal.revoke_generation(**scope) == 0
+    with sqlite3.connect(path) as sql:
+        original = sql.execute(
+            "SELECT revoked_at_unix FROM native_generation_revocations_b0"
+        ).fetchone()
+        assert original is not None
+    for _ in range(3):
+        assert journal.revoke_generation(**scope) == 0
+    with sqlite3.connect(path) as sql:
+        assert sql.execute(
+            "SELECT revoked_at_unix FROM native_generation_revocations_b0"
+        ).fetchone() == original
+    assert not hasattr(journal, "unrevoke_generation")
+    with pytest.raises(NativeAuthorityDeniedB0):
+        DurableNativeInvocationAuthorityB0(path).mint_diagnostic(
+            _same_generation("future"), invocation_id="future",
+            deadline_unix=time.time() + 90,
+        )
+
+
+def test_s0_stale_forged_expired_preflight_never_escapes_revoke(tmp_path):
+    path = tmp_path / "s0-forgeries.sqlite"
+    journal = DurableNativeInvocationAuthorityB0(path)
+    ticket = journal.mint_diagnostic(
+        _same_generation("pre-revoke"), invocation_id="pre-revoke-inv",
+        deadline_unix=time.time() + 90,
+    )
+    journal.revoke_generation(
+        owner_id="owner-revoked", execution_id="exec-revoked",
+        sandbox_id="sandbox-revoked", lease_generation="g-1",
+    )
+    candidates = (
+        ticket,
+        replace(ticket, _secret=bytes([0x77]) * 32),
+        replace(ticket, sandbox_id="foreign-sandbox"),
+    )
+    with patch.object(subprocess, "Popen") as spawn:
+        for forged in candidates:
+            with pytest.raises(NativeAuthorityDeniedB0):
+                journal.deny_before_spawn(forged)
+        with patch(
+            "se.src.runtimes.capability.native_invocation_authority_b0.time.time",
+            return_value=ticket.deadline_unix + 1,
+        ):
+            with pytest.raises(NativeAuthorityDeniedB0):
+                journal.deny_before_spawn(ticket)
+        spawn.assert_not_called()
+    assert journal.state(ticket.identity) == ("DENIED", "PREFLIGHT_DENIED")
+
+
+def test_s0_two_process_mint_vs_revoke_serializable(tmp_path):
+    """Twenty independent OS-worker races, each with a new generation."""
+    path = tmp_path / "s0-twenty-races.sqlite"
+    DurableNativeInvocationAuthorityB0(path)
+    for index in range(20):
+        generation = f"race-{index}"
+        tool_id = f"call-{index}"
+        gate = tmp_path / f"race-{index}.go"
+        header = (
+            "import pathlib,sys,time\n"
+            "from se.src.runtimes.capability.native_invocation_authority_b0 "
+            "import DurableNativeInvocationAuthorityB0, NativeAuthorityDeniedB0\n"
+            "from se.src.runtimes.capability.native_broker_b0 import SpawnIdentity\n"
+            f"j=DurableNativeInvocationAuthorityB0({str(path)!r})\n"
+            f"while not pathlib.Path({str(gate)!r}).exists(): time.sleep(.002)\n"
+        )
+        revoker = header + (
+            "j.revoke_generation(owner_id='owner-revoked',"
+            "execution_id='exec-revoked',sandbox_id='sandbox-revoked',"
+            f"lease_generation={generation!r})\n"
+        )
+        minter = header + (
+            "try:\n"
+            f" j.mint_diagnostic(SpawnIdentity('owner-revoked','exec-revoked',{tool_id!r},"
+            f"'sandbox-revoked',{generation!r}),"
+            f"invocation_id={'inv-'+tool_id!r},deadline_unix=time.time()+90)\n"
+            "except NativeAuthorityDeniedB0: pass\n"
+        )
+        workers = [
+            subprocess.Popen(
+                [sys.executable, "-c", script], stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            for script in (revoker, minter)
+        ]
+        gate.touch()
+        for worker in workers:
+            _, stderr = worker.communicate(timeout=30)
+            assert worker.returncode == 0, stderr.decode("utf-8", "replace")[-1200:]
+        with sqlite3.connect(path) as sql:
+            assert sql.execute(
+                """SELECT COUNT(*) FROM native_invocation_authority_b0
+                   WHERE lease_generation=? AND state='ISSUED'""",
+                (generation,),
+            ).fetchone()[0] == 0
+            assert sql.execute(
+                """SELECT COUNT(*) FROM attempts
+                   WHERE lease_generation=? AND state='RESERVED'""",
+                (generation,),
+            ).fetchone()[0] == 0
+        with pytest.raises(NativeAuthorityDeniedB0):
+            DurableNativeInvocationAuthorityB0(path).mint_diagnostic(
+                _same_generation("after-" + tool_id, generation),
+                invocation_id="after-" + tool_id,
+                deadline_unix=time.time() + 90,
+            )
+
+
+def test_s0_two_process_preflight_vs_revoke_single_winner(tmp_path):
+    path = tmp_path / "s0-preflight-race.sqlite"
+    journal = DurableNativeInvocationAuthorityB0(path)
+    token = journal.mint_diagnostic(
+        _same_generation("preflight-race"), invocation_id="preflight-inv",
+        deadline_unix=time.time() + 90,
+    )
+    gate = tmp_path / "preflight-go"
+    header = (
+        "import pathlib,time\n"
+        "from se.src.runtimes.capability.native_invocation_authority_b0 "
+        "import DurableNativeInvocationAuthorityB0,NativeAuthorityDeniedB0,"
+        "OpaqueSpawnAuthorityB0\n"
+        f"j=DurableNativeInvocationAuthorityB0({str(path)!r})\n"
+        f"while not pathlib.Path({str(gate)!r}).exists(): time.sleep(.002)\n"
+    )
+    preflight = header + (
+        f"token=OpaqueSpawnAuthorityB0({token.owner_id!r},{token.execution_id!r},"
+        f"{token.tool_call_id!r},{token.invocation_id!r},{token.sandbox_id!r},"
+        f"{token.lease_generation!r},{token.deadline_unix!r},"
+        f"bytes.fromhex({token._secret.hex()!r}))\n"
+        "try: j.deny_before_spawn(token)\n"
+        "except NativeAuthorityDeniedB0: pass\n"
+    )
+    revoker = header + (
+        "j.revoke_generation(owner_id='owner-revoked',"
+        "execution_id='exec-revoked',sandbox_id='sandbox-revoked',"
+        "lease_generation='g-1')\n"
+    )
+    workers = [
+        subprocess.Popen(
+            [sys.executable, "-c", script], stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        for script in (preflight, revoker)
+    ]
+    gate.touch()
+    for worker in workers:
+        _, stderr = worker.communicate(timeout=30)
+        assert worker.returncode == 0, stderr.decode("utf-8", "replace")[-1200:]
+    assert journal.state(token.identity) == ("DENIED", "PREFLIGHT_DENIED")
+    with pytest.raises(NativeAuthorityDeniedB0):
+        journal.mint_diagnostic(
+            _same_generation("post-preflight"), invocation_id="post-preflight",
+            deadline_unix=time.time() + 90,
+        )
+
+
+def test_s0_os_exit_after_revoke_commit_preserves_tombstone(tmp_path):
+    """A separate process crashes after COMMIT and restart still denies mint."""
+    path = tmp_path / "s0-postcommit.sqlite"
+    DurableNativeInvocationAuthorityB0(path)
+    script = (
+        "import os\n"
+        "from se.src.runtimes.capability.native_invocation_authority_b0 "
+        "import DurableNativeInvocationAuthorityB0\n"
+        f"j=DurableNativeInvocationAuthorityB0({str(path)!r})\n"
+        "assert j.revoke_generation(owner_id='owner-revoked',"
+        "execution_id='exec-revoked',sandbox_id='sandbox-revoked',"
+        "lease_generation='g-1')==0\n"
+        "os._exit(93)\n"
+    )
+    worker = subprocess.run(
+        [sys.executable, "-c", script], capture_output=True, timeout=30,
+    )
+    assert worker.returncode == 93, worker.stderr.decode("utf-8", "replace")[-1200:]
+    with pytest.raises(NativeAuthorityDeniedB0):
+        DurableNativeInvocationAuthorityB0(path).mint_diagnostic(
+            _same_generation("post-exit"), invocation_id="post-exit",
+            deadline_unix=time.time() + 90,
+        )
+
+
+def test_s0_os_exit_before_commit_rolls_back_atomically(tmp_path):
+    """Execute real revoke_generation, force os._exit at its SQL COMMIT boundary."""
+    path = tmp_path / "s0-precommit.sqlite"
+    journal = DurableNativeInvocationAuthorityB0(path)
+    token = journal.mint_diagnostic(
+        _same_generation("precommit"), invocation_id="precommit-inv",
+        deadline_unix=time.time() + 90,
+    )
+    child = (
+        "import os,sqlite3\n"
+        "from se.src.runtimes.capability.native_invocation_authority_b0 "
+        "import DurableNativeInvocationAuthorityB0\n"
+        f"path={str(path)!r}\n"
+        "j=DurableNativeInvocationAuthorityB0(path)\n"
+        "class CrashAtCommit(sqlite3.Connection):\n"
+        " def execute(self, sql, *args, **kwargs):\n"
+        "  if sql.strip().upper() == 'COMMIT': os._exit(94)\n"
+        "  return super().execute(sql,*args,**kwargs)\n"
+        "def connect_fault():\n"
+        " db=sqlite3.connect(path,timeout=15,isolation_level=None,factory=CrashAtCommit)\n"
+        " db.execute('PRAGMA synchronous=FULL')\n"
+        " return db\n"
+        "j.attempts._connect=connect_fault\n"
+        "j.revoke_generation(owner_id='owner-revoked',"
+        "execution_id='exec-revoked',sandbox_id='sandbox-revoked',"
+        "lease_generation='g-1')\n"
+        "os._exit(29)\n"
+    )
+    worker = subprocess.run(
+        [sys.executable, "-c", child], capture_output=True, timeout=30,
+    )
+    assert worker.returncode == 94, worker.stderr.decode("utf-8", "replace")[-1200:]
+    assert journal.state(token.identity) == ("RESERVED", "ISSUED")
+    with sqlite3.connect(path) as sql:
+        assert sql.execute(
+            "SELECT COUNT(*) FROM native_generation_revocations_b0"
+        ).fetchone()[0] == 0
+    # Crash-before-COMMIT was NOT a successful revoke. Explicit recovery must
+    # fence uncertainty; a later real revoke commits the permanent tombstone.
+    assert journal.revoke_generation(
+        owner_id="owner-revoked", execution_id="exec-revoked",
+        sandbox_id="sandbox-revoked", lease_generation="g-1",
+    ) == 1
+    with pytest.raises(NativeAuthorityDeniedB0):
+        journal.mint_diagnostic(
+            _same_generation("after-real-revoke"), invocation_id="after-revoke",
+            deadline_unix=time.time() + 90,
+        )
+
+
+def test_s0_restart_reconcile_never_resurrects_generation(tmp_path):
+    path = tmp_path / "s0-reconcile.sqlite"
+    journal = DurableNativeInvocationAuthorityB0(path)
+    scope = dict(owner_id="owner-revoked", execution_id="exec-revoked",
+                 sandbox_id="sandbox-revoked", lease_generation="g-1")
+    assert journal.revoke_generation(**scope) == 0
+    other = journal.mint_diagnostic(
+        _same_generation("other-uncertain", "g-2"),
+        invocation_id="other-uncertain-inv", deadline_unix=time.time() + 90,
+    )
+    restarted = DurableNativeInvocationAuthorityB0(path)
+    assert restarted.reconcile_after_restart() == 1
+    assert restarted.state(other.identity) == ("OUTCOME_UNKNOWN", "OUTCOME_UNKNOWN")
+    assert restarted.reconcile_after_restart() == 0
+    with pytest.raises(NativeAuthorityDeniedB0):
+        restarted.mint_diagnostic(
+            _same_generation("after-reconcile"), invocation_id="after-reconcile",
+            deadline_unix=time.time() + 90,
+        )
+    with sqlite3.connect(path) as sql:
+        assert sql.execute(
+            "SELECT COUNT(*) FROM native_generation_revocations_b0"
+        ).fetchone()[0] == 1
