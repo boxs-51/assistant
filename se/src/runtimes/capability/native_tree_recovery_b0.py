@@ -199,10 +199,18 @@ class LinuxCgroupTreeAuthority:
         return ref, str(row[6])
 
     def require_registered(self, identity: SpawnIdentity) -> None:
-        """Check persisted OS binding even after worker crash; no receipt."""
+        """Check persisted OS binding before untrusted process spawn."""
         _, state = self._get(identity)
         if state != "REGISTERED":
             raise NativeTreeHold("native tree not fresh/registered")
+
+    def require_known_tree(self, identity: SpawnIdentity) -> None:
+        """Reattach a persisted OS-owned scope without granting any SUCCESS.
+
+        Restarted managers must recover into CLEANUP/QUARANTINE, never ACTIVE.
+        VERIFIED_EMPTY still requires separate fresh OS readback.
+        """
+        self._get(identity)
 
     @staticmethod
     def _read_kv(path: Path) -> dict[str, str]:
