@@ -558,6 +558,7 @@ class AgentRecoveryExecutionService:
         *,
         iteration: int,
     ) -> ToolExecutionResult:
+        require_native_record(record, phase="recovery_record_to_model")
         return ToolExecutionResult(
             execution_id=record.execution_id,
             iteration=iteration,
