@@ -30,6 +30,21 @@ class AgentInstanceRepository:
             raise AgentInstanceDenied("AIC requires a fresh caller UoW session")
         dialect = self.session.get_bind().dialect.name
         if dialect == "sqlite":
+            # SQLite :memory: / shared-cache URI databases can reuse one physical
+            # connection between nominally distinct AsyncSessions. AIC's
+            # cross-connection owner-status ordering is not established there.
+            # Refuse these backends BEFORE the first SQL statement.
+            database = self.session.get_bind().url.database
+            if (
+                not isinstance(database, str)
+                or not database
+                or database == ":memory:"
+                or (
+                    database.startswith("file:")
+                    and (":memory:" in database or "mode=memory" in database)
+                )
+            ):
+                raise AgentInstanceDenied("AIC SQLite in-memory backend unsupported")
             # SQLAlchemy Session autobegin is virtual until the first statement;
             # explicit BEGIN IMMEDIATE is first physical statement on its connection.
             try:
