@@ -5,6 +5,8 @@ on:
     paths:
       - "se/src/runtimes/capability/native_broker_b0.py"
       - "se/src/runtimes/capability/sandbox.py"
+      - "se/src/runtimes/capability/native_root_custody_b0.py"
+      - "se/tests/architecture/test_sbx3_root_crossprocess_custody.py"
       - "se/tests/architecture/test_sbx3_native_broker_b0.py"
       - "se/tests/architecture/test_sbx3_native_root_recovery_barrier.py"
       - "se/tests/architecture/test_sbx3_manager_witness_audit.py"
@@ -50,6 +52,7 @@ jobs:
           se/tests/architecture/test_sbx3_native_broker_b0.py
           se/tests/architecture/test_sbx3_native_root_recovery_barrier.py
           se/tests/architecture/test_sbx3_manager_witness_audit.py
+          se/tests/architecture/test_sbx3_root_crossprocess_custody.py
       - name: Distinguish test output from production certification
         if: always()
         run: |
@@ -74,6 +77,7 @@ jobs:
           se/tests/architecture/test_sbx3_native_broker_b0.py
           se/tests/architecture/test_sbx3_native_root_recovery_barrier.py
           se/tests/architecture/test_sbx3_manager_witness_audit.py
+          se/tests/architecture/test_sbx3_root_crossprocess_custody.py
       - name: Native Windows isolation certification status
         if: always()
         shell: pwsh
