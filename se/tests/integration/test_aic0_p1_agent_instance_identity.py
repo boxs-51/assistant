@@ -971,6 +971,10 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
             return (await cx.execute(text(sql), params or {})).scalar_one()
 
     async def require_revision(revision):
+        # Alembic CLI runs in a separate process; PostgreSQL asyncpg caches
+        # prepared statements across physical connections. After external DDL,
+        # discard only the test pool (not schema/history) before reading.
+        await engine.dispose()
         assert await read_scalar("SELECT version_num FROM alembic_version") == revision
 
     try:
