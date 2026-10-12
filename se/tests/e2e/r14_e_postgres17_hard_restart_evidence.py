@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 
+import asyncpg
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -47,4 +48,23 @@ async def test_postgres17_real_s1_kill_and_k2_rediscovery(tmp_path, scenario):
     finally:
         await engine.dispose()
 
-    await run_physical_hard_restart_witness(tmp_path, postgres_url=url)
+    # Each parameter has a distinct fresh database. Never let pre-existing
+    # execution/claim rows from the previous hard-restart scenario pass a gate.
+    database_names = {
+        "approve_terminal": "r14e_p1a_approve",
+        "deny_terminal": "r14e_p1a_deny",
+        "effect_before_terminal": "r14e_p1a_unknown",
+    }
+    database_name = database_names[scenario]
+    admin = await asyncpg.connect(
+        url.replace("postgresql+asyncpg://", "postgresql://", 1)
+    )
+    try:
+        await admin.execute(f"CREATE DATABASE {database_name}")
+    finally:
+        await admin.close()
+
+    scoped_url = url.rsplit("/", 1)[0] + "/" + database_name
+    await run_physical_hard_restart_witness(
+        tmp_path, postgres_url=scoped_url, scenario=scenario,
+    )
