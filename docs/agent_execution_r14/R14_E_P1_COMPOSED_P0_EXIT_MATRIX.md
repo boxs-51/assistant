@@ -55,3 +55,21 @@ The Linux Architecture baseline uses `python -m pytest -q` and continues to sele
 Historical transparent REDs: first #38220694644 was a missing pytest `--basetemp` parent directory in workflow; #38221022969 then reached real PG schema and revealed `sessions.user_id` FK parent flush ordering. Both were fixed without loosening FK, hard-kill, effect or no-replay assertions. Targeted PostgreSQL Linux and Windows were each **1 passed** in #38221413008. Neither RED is recast as product defect or hidden. The full Architecture run for the final documentation HEAD must be separately consumed; no implicit production PASS is granted by this test-only document.
 
 No merge is requested.
+
+
+## 2026-10-12 — E-P1A extended negative fault-cuts and accounting candidate
+
+**New candidate test cases (implementation pending exact-HEAD CI evidence):**
+
+- `approve_terminal`: HIGH-risk approve, durable K1 TERMINAL and independent external effect before the K1 result wire is withheld, real S1 OS kill, new S2, K2 reconciles one result without replay.
+- `deny_terminal`: HIGH-risk deny becomes durable `TERMINAL/error/HITL_DENIED` before the K1 error wire is withheld; external effect count stays **zero**; S2/K2 preserves terminal denial, and capability invocation is expected to be `FAILED` rather than `COMPLETED`.
+- `effect_before_terminal`: K1 runs NON_IDEMPOTENT callable, commits one effect to independent SQLite, then blocks BEFORE returning and committing CL TERMINAL. S1 dies after K1 disconnect and durable WAITING checkpoint. K2 must reconcile authentic `UNKNOWN` over real WebSocket with CL ledger `RUNNING`; fail-closed planning is permitted to defer **without creating** a ResumeClaim. No second attempt, no committed success projection and no duplicate effect are allowed.
+
+Each scenario uses its own fresh `r14e_p1a_*` PostgreSQL 17 database, while the original SQLite tests each use isolated pytest directories. A single database reused across scenarios would be invalid evidence because the R7-J fixture carries fixed Task/Execution IDs.
+
+**Accounting witness (test-only; not a production configuration change):**
+The test harness now binds a real `TaskBudgetService` to S1 and S2, creates an authenticated owner-associated Task and TaskBudget, and examines durable `agent_tasks`, `agent_task_budgets` and `agent_task_budget_reservations` from independent SQL. Required invariants include exactly one NEW_EXECUTION and TOOL_CALL reservation, `used_executions=1`, `used_tool_calls=1`, `active_executions=0` at stable evidence readback and no duplicate reservation key. UBQ2 dual-accounting enrollment is enabled in the test's UoW; one owner binding, one mirrored TOOL_CALL bridge and the corresponding `SETTLED` user-budget reservation of one unit are asserted.
+
+**Hard evidence boundary:** this covers UBQ2 shadow dual-accounting for an admitted TaskBudget tool call. It is NOT a claim that UBQ3 finite user-tool quota or UBQ4 inference quota under multitenant contention, multiworker simultaneous admissions, PostgreSQL database-server failover, E-P1B pending HITL, or global AE-R14-E exit are certified. These remain separate gates.
+
+**CI declaration:** the targeted SQLite jobs select the whole test module and PostgreSQL 17 jobs select the three parametrized fault cuts; no skip/xfail and no SQLite substitution for PostgreSQL. Earlier 4/4 APPROVE-only PASS is historical positive-cut evidence. Do not call this extension FINAL until the exact-head native Ubuntu/Windows PostgreSQL 17 + SQLite jobs and Architecture jobs report terminal success, with raw artifacts inspected. Failures must remain RED until repaired. No merge.
