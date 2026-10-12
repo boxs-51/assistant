@@ -978,14 +978,19 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
         assert await read_scalar("SELECT version_num FROM alembic_version") == revision
 
     try:
-        # Start a pristine database at its default Alembic version table.
-        # This intentionally performs no test-side stamp, ALTER or revision
-        # bypass: historical migration 5b itself must support PG17 before
-        # the full populated 24a→25a→26a→30a→31a upgrade can be certified.
-        # Untouched historical 5b is a known negative control (VARCHAR(32)).
-        # Execute all ancestors with genuine out-of-process Alembic CLI.
+        # Execute actual ancestors on a completely pristine database.
+        # env.py MUST make long Alembic version IDs safe on PostgreSQL itself,
+        # without any test SQL widening, stamping, or fake historical DDL.
         _aic_run_real_alembic(url, "24a_r12_stale_lease_scan_index")
         await require_revision("24a_r12_stale_lease_scan_index")
+        if backend == "postgresql":
+            assert await read_scalar("""
+                SELECT character_maximum_length
+                  FROM information_schema.columns
+                 WHERE table_schema=current_schema()
+                   AND table_name='alembic_version'
+                   AND column_name='version_num'
+            """) >= 255
         async with engine.begin() as cx:
             if backend == "sqlite":
                 await cx.exec_driver_sql("PRAGMA foreign_keys=OFF")
@@ -1129,3 +1134,114 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
             async with admin.connect() as c:
                 await c.execute(text("DROP DATABASE IF EXISTS " + db_name + " WITH (FORCE)"))
             await admin.dispose()
+
+
+
+@pytest.mark.parametrize("scenario", ["preexisting_32", "invalid_shape", "concurrent_runner"])
+@pytest.mark.asyncio
+async def test_aic_pg17_alembic_version_preflight_fail_closed(
+    request, scenario
+):
+    """Production Alembic must preserve prior version data and deny bad states."""
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("requires real PostgreSQL 17, not a SQLite substitute")
+    from pathlib import Path
+    from sqlalchemy.engine import make_url
+
+    parent_url = request.getfixturevalue("postgres_url")
+    admin = create_async_engine(parent_url, isolation_level="AUTOCOMMIT")
+    name = "aic_version_gate_" + uuid4().hex[:14]
+    async with admin.connect() as conn:
+        ver = int((await conn.execute(text("SHOW server_version_num"))).scalar_one())
+        assert 170000 <= ver < 180000
+        await conn.execute(text("CREATE DATABASE " + name))
+    url = make_url(parent_url).set(database=name).render_as_string(
+        hide_password=False
+    )
+    engine = create_async_engine(url)
+    try:
+        if scenario == "preexisting_32":
+            # Install actual short-revision history, then reproduce historical
+            # VARCHAR(32) bookkeeping before the first long revision.
+            _aic_run_real_alembic(url, "896c456631dd")
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "ALTER TABLE alembic_version "
+                    "ALTER COLUMN version_num TYPE VARCHAR(32)"
+                ))
+            await engine.dispose()
+            _aic_run_real_alembic(url, "5b_conversation_temporal_contract")
+            async with engine.connect() as conn:
+                row = (await conn.execute(text(
+                    "SELECT version_num FROM alembic_version"
+                ))).scalar_one()
+                assert row == "5b_conversation_temporal_contract"
+                size = (await conn.execute(text("""
+                    SELECT character_maximum_length
+                    FROM information_schema.columns
+                    WHERE table_schema=current_schema()
+                    AND table_name='alembic_version'
+                    AND column_name='version_num'
+                """))).scalar_one()
+                assert size >= 255
+        elif scenario == "invalid_shape":
+            async with engine.begin() as conn:
+                await conn.execute(text(
+                    "CREATE TABLE alembic_version(version_num TEXT)"
+                ))
+                await conn.execute(text(
+                    "INSERT INTO alembic_version VALUES ('legacy-marker')"
+                ))
+            root = Path(__file__).resolve().parents[3]
+            proc = subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini",
+                 "upgrade", "24a_r12_stale_lease_scan_index"],
+                env=dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=url),
+                cwd=str(root), check=False, capture_output=True,
+                text=True, timeout=180,
+            )
+            assert proc.returncode != 0
+            assert "Unsafe PostgreSQL Alembic version table shape" in proc.stderr
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    "SELECT version_num FROM alembic_version"
+                ))).scalar_one() == "legacy-marker"
+                assert (await conn.execute(text("""
+                    SELECT data_type FROM information_schema.columns
+                    WHERE table_schema=current_schema()
+                    AND table_name='alembic_version'
+                    AND column_name='version_num'
+                """))).scalar_one() == "text"
+        else:
+            # Advisory lock deliberately held by a distinct physical backend;
+            # a second migrator MUST fail before schema/version mutation.
+            root = Path(__file__).resolve().parents[3]
+            async with engine.connect() as owner:
+                held = (await owner.execute(text(
+                    "SELECT pg_try_advisory_lock(1977,156426)"
+                ))).scalar_one()
+                assert held
+                await owner.commit()
+                try:
+                    proc = subprocess.run(
+                        [sys.executable, "-m", "alembic", "-c", "alembic.ini",
+                         "upgrade", "24a_r12_stale_lease_scan_index"],
+                        env=dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=url),
+                        cwd=str(root), capture_output=True, text=True,
+                        check=False, timeout=180,
+                    )
+                    assert proc.returncode != 0
+                    assert "Concurrent PostgreSQL Alembic migration denied" in proc.stderr
+                finally:
+                    assert (await owner.execute(text(
+                        "SELECT pg_advisory_unlock(1977,156426)"
+                    ))).scalar_one()
+                    await owner.commit()
+            _aic_run_real_alembic(url, "24a_r12_stale_lease_scan_index")
+    finally:
+        await engine.dispose()
+        async with admin.connect() as conn:
+            await conn.execute(text(
+                "DROP DATABASE IF EXISTS " + name + " WITH (FORCE)"
+            ))
+        await admin.dispose()
