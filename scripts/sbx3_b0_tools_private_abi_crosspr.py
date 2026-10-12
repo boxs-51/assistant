@@ -306,12 +306,12 @@ def run_pinned_tools_negative_suite() -> None:
         check=False, capture_output=True, text=True, timeout=120,
     )
     print(result.stdout)
-    if result.returncode != 0 or not re.search(r"\\b52 passed\\b", result.stdout):
+    if result.returncode != 0 or not re.search(r"\b52 passed\b", result.stdout):
         raise AssertionError(
             f"Pinned Tools 52 negative tests failed: exit={result.returncode}; "
             f"stderr={result.stderr[-2000:]}"
         )
-    if re.search(r"\\b(skipped|xfailed|xpassed|failed|error)\\b", result.stdout):
+    if re.search(r"\b(skipped|xfailed|xpassed|failed|error)\b", result.stdout):
         raise AssertionError("Pinned Tools negative tests were weakened")
     print("SBX3_PINNED_TOOLS_52_NEGATIVE_TESTS=PASS_SYNTHETIC_ONLY")
 
