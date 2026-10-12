@@ -15,6 +15,7 @@ from contextlib import closing
 import sqlite3
 import stat
 import subprocess
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -72,6 +73,7 @@ class DurableAttemptLedger:
         if self.path.is_symlink():
             raise ValueError("broker database cannot be a symbolic link")
         with closing(self._connect()) as db:
+            self._enable_wal(db)
             db.execute(
                 """CREATE TABLE IF NOT EXISTS attempts (
                     execution_id TEXT NOT NULL,
@@ -85,11 +87,35 @@ class DurableAttemptLedger:
                 )"""
             )
 
+    @staticmethod
+    def _enable_wal(db: sqlite3.Connection) -> None:
+        # PRAGMA journal_mode requires an exclusive bootstrap window.
+        # SQLite busy_timeout is not guaranteed to wait through a competing
+        # journal-mode transition: bound retries preserve the concurrency
+        # requirement without weakening FULL durability or uniqueness.
+        for attempt in range(8):
+            try:
+                mode = db.execute("PRAGMA journal_mode=WAL").fetchone()
+                if not mode or str(mode[0]).lower() != "wal":
+                    raise B0LedgerConflict("durable WAL journal unavailable")
+                return
+            except sqlite3.OperationalError as exc:
+                if "locked" not in str(exc).lower() and "busy" not in str(exc).lower():
+                    raise
+                if attempt == 7:
+                    raise B0LedgerConflict(
+                        "durable WAL bootstrap remained locked; deny attempt"
+                    ) from exc
+                time.sleep(0.02 * (attempt + 1))
+
     def _connect(self) -> sqlite3.Connection:
         db = sqlite3.connect(str(self.path), timeout=15, isolation_level=None)
-        db.execute("PRAGMA journal_mode=WAL")
-        db.execute("PRAGMA synchronous=FULL")
-        db.execute("PRAGMA busy_timeout=15000")
+        try:
+            db.execute("PRAGMA busy_timeout=15000")
+            db.execute("PRAGMA synchronous=FULL")
+        except BaseException:
+            db.close()
+            raise
         return db
 
     def reserve(self, identity: SpawnIdentity) -> None:
