@@ -207,23 +207,34 @@ async def _start_child(root: Path, role: str, port: int, logs: list):
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(repo_root), env.get("PYTHONPATH", "")) if part
     )
-    process = await asyncio.create_subprocess_exec(
-        sys.executable, str(Path(__file__).resolve()),
-        "--r14e-child", role, str(root), str(port),
+    # Popen works with the Windows Selector and Proactor event loop policies.
+    # asyncio.create_subprocess_exec can be unsupported under Selector policy.
+    process = subprocess.Popen(
+        [sys.executable, str(Path(__file__).resolve()),
+         "--r14e-child", role, str(root), str(port)],
         cwd=str(repo_root), env=env, stdout=log, stderr=subprocess.STDOUT,
     )
-    receipt = await _await_file(root / f"{role}-ready.json", timeout=45.0)
+    try:
+        receipt = await _await_file(root / f"{role}-ready.json", timeout=45.0)
+    except Exception as exc:
+        if process.poll() is None:
+            process.kill()
+        await asyncio.to_thread(process.wait, 15)
+        raise AssertionError(
+            f"Child {role} failed before ready: "
+            + path.read_text(encoding="utf-8", errors="replace")[-5000:]
+        ) from exc
     assert receipt["pid"] == process.pid
-    assert process.returncode is None
+    assert process.poll() is None
     return process
 
 
 async def _hard_kill(process) -> int:
-    assert process.returncode is None, "S1 already exited before the hard kill"
+    assert process.poll() is None, "S1 already exited before the hard kill"
     pid = process.pid
     process.kill()  # SIGKILL on POSIX; TerminateProcess on Windows
-    await asyncio.wait_for(process.wait(), timeout=15.0)
-    assert process.returncode != 0
+    code = await asyncio.to_thread(process.wait, 15)
+    assert code != 0
     return pid
 
 
@@ -389,7 +400,7 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
         if engine is not None:
             await engine.dispose()
         for process in (s1, s2):
-            if process is not None and process.returncode is None:
+            if process is not None and process.poll() is None:
                 await _hard_kill(process)
         for handle in logs:
             handle.close()
