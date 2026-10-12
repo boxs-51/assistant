@@ -5966,6 +5966,11 @@ class DurableAgentStore:
                     != "COMMITTED"
                 ):
                     continue
+                # R7-C safe-prefix messages are model-facing on connection
+                # resume. A historical native SQL COMMITTED/SUCCESS is not an
+                # authenticated privileged OS receipt, even when the active
+                # batch is independently reconciled.
+                require_native_record(durable, phase="R7_prefix_COMMITTED")
                 result.append(
                     {
                         "role": "tool",
