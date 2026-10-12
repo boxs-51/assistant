@@ -13,6 +13,7 @@ from .contracts.sandbox import (
     SandboxLeaseState,
     SandboxProfile,
 )
+from .native_root_custody_b0 import NativeRootCustodyGate
 
 
 class SandboxError(RuntimeError):
@@ -81,6 +82,9 @@ class SandboxManager:
         control_stat = self._quarantine_dir.stat()
         self._quarantine_identity = (control_stat.st_dev, control_stat.st_ino)
         self._require_quarantine_dir()
+        # Common stable-inode OS mutex across independent manager workers.
+        # A missing, redirected or substituted lock must deny root teardown.
+        self._root_custody = NativeRootCustodyGate(self._quarantine_dir)
         self._leases: dict[str, SandboxLease] = {}
         self._profiles: dict[str, SandboxProfile] = {}
         self._execution_leases: dict[str, str] = {}
@@ -198,26 +202,38 @@ class SandboxManager:
         current = self.current(lease)
         if current.state is not SandboxLeaseState.ACTIVE:
             raise SandboxLeaseStateError("native enrollment requires ACTIVE lease")
-        self._assert_owned_root(current, current.root.resolve(strict=False))
-        marker = self._native_quarantine_marker(current.sandbox_id)
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        fd = os.open(marker, flags, 0o600)
-        try:
-            with os.fdopen(fd, "w", encoding="utf-8") as file:
-                file.write(current.sandbox_id + "\\n")
-                file.flush()
-                os.fsync(file.fileno())
-            # Persist the directory entry too on platforms supporting it.
-            if os.name == "posix":
-                directory_fd = os.open(marker.parent, os.O_RDONLY)
-                try:
-                    os.fsync(directory_fd)
-                finally:
-                    os.close(directory_fd)
-        except BaseException:
-            # A partial marker is STILL quarantined: never delete it.
-            raise
-        self._enrolled_native_ids.add(current.sandbox_id)
+        # Keep the same OS lock as root removal from the first root-state
+        # check until the marker is fsynced. This closes the cooperative
+        # cross-process check/delete-vs-enroll TOCTOU.
+        with self._root_custody.hold():
+            if (
+                not current.root.is_dir()
+                or current.root.is_symlink()
+                or self._is_junction(current.root)
+            ):
+                raise NativeTreeUnverifiedError(
+                    "sandbox root disappeared before native enrollment"
+                )
+            self._assert_owned_root(current, current.root.resolve(strict=False))
+            marker = self._native_quarantine_marker(current.sandbox_id)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            fd = os.open(marker, flags, 0o600)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as file:
+                    file.write(current.sandbox_id + "\\n")
+                    file.flush()
+                    os.fsync(file.fileno())
+                # Persist the directory entry too on platforms supporting it.
+                if os.name == "posix":
+                    directory_fd = os.open(marker.parent, os.O_RDONLY)
+                    try:
+                        os.fsync(directory_fd)
+                    finally:
+                        os.close(directory_fd)
+            except BaseException:
+                # A partial marker is STILL quarantined: never delete it.
+                raise
+            self._enrolled_native_ids.add(current.sandbox_id)
 
     @staticmethod
     def _is_junction(path: Path) -> bool:
@@ -475,19 +491,23 @@ class SandboxManager:
 
     @_lifecycle_serialized
     def _remove_root(self, root: Path) -> None:
-        # Every destructive entry point, including acquire rollback and
-        # direct _remove_root callers, must enforce the same quarantine gate.
-        self._require_native_root_empty(root)
-        if not root.exists() and not root.is_symlink():
-            return
-        if root.is_symlink():
-            root.unlink(missing_ok=True)
-            return
-        is_junction = getattr(root, "is_junction", None)
-        if callable(is_junction) and is_junction():
-            root.rmdir()
-            return
-        shutil.rmtree(root)
+        # The OS-level lock also covers the actual recursive delete, not just
+        # the marker check. A concurrent enroller either commits its marker
+        # first (delete denied), or observes the root already gone (spawn denied).
+        with self._root_custody.hold():
+            # Every destructive entry point, including acquire rollback and
+            # direct _remove_root callers, must enforce the same quarantine gate.
+            self._require_native_root_empty(root)
+            if not root.exists() and not root.is_symlink():
+                return
+            if root.is_symlink():
+                root.unlink(missing_ok=True)
+                return
+            is_junction = getattr(root, "is_junction", None)
+            if callable(is_junction) and is_junction():
+                root.rmdir()
+                return
+            shutil.rmtree(root)
 
 
 __all__ = [
