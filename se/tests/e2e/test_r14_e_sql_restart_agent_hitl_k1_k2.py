@@ -149,6 +149,16 @@ async def _serve_child(role: str, root: Path, port: int) -> None:
     budget_service = _task_budget_service(state.sessions)
     state.agent_runtime._task_budget_service = budget_service
     if role == "s1":
+        # UBQ2 enrollment resolves a real owner row. The PostgreSQL fixture
+        # already seeds the FK user; SQLite's legacy fixture does not.
+        async with state.sessions() as session:
+            if await session.get(User, r7j.USER_ID) is None:
+                session.add(User(
+                    id=r7j.USER_ID,
+                    email="r14e-p1a-owner@example.invalid",
+                    password_hash="test-only",
+                ))
+                await session.commit()
         await budget_service.create_task_with_budget({
             "id": TASK_ID,
             "session_id": r7j.SESSION_ID,
@@ -157,7 +167,7 @@ async def _serve_child(role: str, root: Path, port: int) -> None:
             "status": "ASSIGNED",
             "wait_reasons": [],
             "input": {"prompt": "r14e-p1a"},
-        })
+        }, identity=state.identity)
         await budget_service.transition_task(
             TASK_ID,
             allowed_source_states=("ASSIGNED",),
