@@ -12,6 +12,7 @@ import os
 from uuid import uuid4
 
 import pytest
+import pytest_asyncio
 from sqlalchemy import text
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
@@ -71,7 +72,7 @@ async def _create(sessions, uid="alice"):
         return instance_id
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def sqlite_aic(tmp_path):
     engine = create_async_engine(
         "sqlite+aiosqlite:///" + str(tmp_path / "aic426.sqlite"),
