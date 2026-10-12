@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import stat
 from functools import wraps
 from threading import RLock
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -61,7 +62,17 @@ class SandboxManager:
         self._quarantine_dir = self._base_root / ".sbx3-native-quarantine"
         if self._quarantine_dir.is_symlink() or self._is_junction(self._quarantine_dir):
             raise NativeTreeUnverifiedError("native quarantine path is redirected")
+        # A vanished control directory alongside orphan execution roots is
+        # ambiguous after restart: never recreate it and erase the evidence.
+        if not self._quarantine_dir.exists() and any(
+            entry.name.startswith("sbx-") for entry in self._base_root.iterdir()
+        ):
+            raise NativeTreeUnverifiedError(
+                "quarantine registry missing alongside existing sandbox roots"
+            )
         self._quarantine_dir.mkdir(mode=0o700, exist_ok=True)
+        control_stat = self._quarantine_dir.stat()
+        self._quarantine_identity = (control_stat.st_dev, control_stat.st_ino)
         self._require_quarantine_dir()
         self._leases: dict[str, SandboxLease] = {}
         self._profiles: dict[str, SandboxProfile] = {}
@@ -215,6 +226,15 @@ class SandboxManager:
         ):
             raise NativeTreeUnverifiedError(
                 "trusted quarantine directory is absent or redirected"
+            )
+        control = directory.stat()
+        if (
+            (control.st_dev, control.st_ino) != self._quarantine_identity
+            or (os.name == "posix" and
+                bool(control.st_mode & (stat.S_IWGRP | stat.S_IWOTH)))
+        ):
+            raise NativeTreeUnverifiedError(
+                "quarantine registry identity or permissions changed"
             )
 
     def _native_quarantine_marker(self, sandbox_id: str) -> Path:
