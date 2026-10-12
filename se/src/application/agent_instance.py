@@ -1,5 +1,5 @@
 """Nonwired AIC facade. No route, worker lease or execution authority."""
-from ....domain.schemas.agent_instance import AgentInstanceDenied
+from ..domain.schemas.agent_instance import AgentInstanceDenied
 
 
 class AgentInstanceService:
