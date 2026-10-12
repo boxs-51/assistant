@@ -96,6 +96,16 @@ class DurableNativeInvocationAuthorityB0:
                     PRIMARY KEY (execution_id, tool_call_id)
                 )"""
             )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS native_generation_revocations_b0 (
+                    owner_id TEXT NOT NULL,
+                    execution_id TEXT NOT NULL,
+                    sandbox_id TEXT NOT NULL,
+                    lease_generation TEXT NOT NULL,
+                    revoked_at_unix REAL NOT NULL,
+                    PRIMARY KEY (owner_id, execution_id, sandbox_id, lease_generation)
+                )"""
+            )
 
     def mint_diagnostic(
         self, identity: SpawnIdentity, *, invocation_id: str,
@@ -117,6 +127,22 @@ class DurableNativeInvocationAuthorityB0:
         with closing(self.attempts._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                # This durable generation tombstone is checked under the SAME
+                # cross-process writer lock as the new tool_call reservation.
+                # It cannot be bypassed with a fresh invocation ID.
+                revoked = db.execute(
+                    """SELECT 1 FROM native_generation_revocations_b0
+                       WHERE owner_id=? AND execution_id=? AND sandbox_id=?
+                         AND lease_generation=?""",
+                    (
+                        identity.owner_id, identity.execution_id,
+                        identity.sandbox_id, identity.lease_generation,
+                    ),
+                ).fetchone()
+                if revoked is not None:
+                    raise NativeAuthorityDeniedB0(
+                        "native generation permanently revoked: new mint denied"
+                    )
                 db.execute(
                     """INSERT INTO attempts VALUES (?, ?, ?, ?, ?, 'RESERVED')""",
                     (
@@ -161,6 +187,19 @@ class DurableNativeInvocationAuthorityB0:
         with closing(self.attempts._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                revoked = db.execute(
+                    """SELECT 1 FROM native_generation_revocations_b0
+                       WHERE owner_id=? AND execution_id=? AND sandbox_id=?
+                         AND lease_generation=?""",
+                    (
+                        authority.owner_id, authority.execution_id,
+                        authority.sandbox_id, authority.lease_generation,
+                    ),
+                ).fetchone()
+                if revoked is not None:
+                    raise NativeAuthorityDeniedB0(
+                        "native generation permanently revoked: preflight denied"
+                    )
                 row = db.execute(
                     """SELECT owner_id, sandbox_id, lease_generation,
                               invocation_id, deadline_unix, credential_hash, state
@@ -243,6 +282,13 @@ class DurableNativeInvocationAuthorityB0:
         with closing(self.attempts._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
+                # Insert tombstone even if there are ZERO outstanding tokens;
+                # duplicate revoke is idempotent and may not reopen generation.
+                db.execute(
+                    """INSERT OR IGNORE INTO native_generation_revocations_b0
+                       VALUES (?, ?, ?, ?, ?)""",
+                    (*scope, time.time()),
+                )
                 rows = db.execute(
                     """SELECT tool_call_id FROM native_invocation_authority_b0
                        WHERE owner_id=? AND execution_id=? AND sandbox_id=?
