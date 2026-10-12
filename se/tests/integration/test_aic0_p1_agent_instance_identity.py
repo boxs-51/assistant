@@ -21,7 +21,7 @@ import pytest_asyncio
 from sqlalchemy import text
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy.exc import DatabaseError
+from sqlalchemy.exc import DatabaseError, DBAPIError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.domain.schemas.identity import Identity
@@ -327,10 +327,19 @@ async def test_aic_native_postgres_nonkey_status_update_lock(postgres_url):
             # AIC CREATE takes FOR SHARE on users; a normal status UPDATE conflicts.
             await AgentInstanceRepository(creator).create("alice", "d", "v")
             await updater.execute(text("SET LOCAL lock_timeout = '250ms'"))
-            with pytest.raises(DatabaseError):
+            with pytest.raises(DBAPIError) as locked:
                 await updater.execute(
                     text("UPDATE users SET status='inactive' WHERE id='alice'")
                 )
+            # asyncpg maps a PostgreSQL lock_timeout to SQLAlchemy DBAPIError,
+            # not SQLAlchemy DatabaseError. Require the exact lock SQLSTATE.
+            pg_error = locked.value.orig
+            sqlstate = (
+                getattr(pg_error, "sqlstate", None)
+                or getattr(pg_error, "pgcode", None)
+                or getattr(getattr(pg_error, "__cause__", None), "sqlstate", None)
+            )
+            assert sqlstate == "55P03"
             await updater.rollback()
             await creator.commit()
             await updater.execute(
@@ -343,7 +352,7 @@ async def test_aic_native_postgres_nonkey_status_update_lock(postgres_url):
             await s.rollback()
         # Database-layer owner deletion must also fail when AIC live binding exists.
         async with sessions() as s:
-            with pytest.raises(DatabaseError):
+            with pytest.raises(DBAPIError, match="AIC_LIVE_OWNER_DELETE_DENIED"):
                 await s.execute(text("DELETE FROM users WHERE id='alice'"))
             await s.rollback()
         async with engine.begin() as conn:
