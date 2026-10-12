@@ -16,6 +16,7 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+from unittest.mock import patch
 import subprocess
 import sys
 import threading
@@ -34,6 +35,8 @@ from cl.src.core.realtime_client import GatewayRealtimeClient
 from cl.src.hitl.hitl_manager import HITLManager
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.infrastructure.storage.models.sql.agent import AgentResumeClaimRecord
+from se.src.infrastructure.storage.models.sql.chat_data.session import Session as ChatSessionRecord
+from se.src.infrastructure.storage.models.sql.user_data.user import User
 from se.src.infrastructure.storage.repositories.capability_invocations import SqlCapabilityInvocationStore
 from se.src.runtimes.agent.contracts.context import AgentExecutionContext
 from se.src.runtimes.agent.persistence import DurableAgentStore
@@ -59,16 +62,44 @@ async def _await_file(path: Path, *, timeout: float = 25.0) -> dict:
 async def _serve_child(role: str, root: Path, port: int) -> None:
     """Separate interpreter/process. Do not fake S1 death with graceful stop."""
     db_path = root / "server.sqlite3"
-    state = await r7j._build_server(
-        root,
-        db_path=db_path,
-        initialize_schema=(role == "s1"),
-        seed_session=(role == "s1"),
-    )
+    postgres_url = os.environ.get("R14_E_P1A_CHILD_SQL_URL")
+    if postgres_url:
+        # Inject a REAL PostgreSQL/asyncpg engine into the existing full
+        # R7-J Agent/WS/SQL harness; do not emulate SQL or modify runtime.
+        with patch.object(
+            r7j, "create_async_engine",
+            side_effect=lambda *_args, **_kwargs: create_async_engine(
+                postgres_url, pool_pre_ping=True,
+            ),
+        ):
+            state = await r7j._build_server(
+                root, db_path=db_path,
+                initialize_schema=(role == "s1"), seed_session=False,
+            )
+        if role == "s1":
+            # SQLite's original fixture skips FK enforcement, but PostgreSQL
+            # requires the real owner user before the session foreign key.
+            async with state.sessions() as session:
+                session.add(User(
+                    id=r7j.USER_ID,
+                    email="r14e-pg17-user@example.invalid",
+                    password_hash="test-only-not-an-account",
+                ))
+                session.add(ChatSessionRecord(
+                    id=r7j.SESSION_ID, user_id=r7j.USER_ID,
+                    organization_id=None, status="active",
+                ))
+                await session.commit()
+    else:
+        state = await r7j._build_server(
+            root, db_path=db_path,
+            initialize_schema=(role == "s1"), seed_session=(role == "s1"),
+        )
     server, server_task, _ = await _start_fixed_gateway(state.app, port)
     _atomic_json(root / f"{role}-ready.json", {
         "pid": os.getpid(), "port": port, "role": role,
-        "db_path": str(db_path),
+        "db_path": str(db_path) if not postgres_url else "postgresql://redacted",
+        "backend": "postgresql" if postgres_url else "sqlite",
     })
     if role == "s1":
         await _await_file(root / "s1-start.json")
@@ -198,11 +229,17 @@ def _sink_count(path: Path, table: str) -> int:
         return int(db.execute(f"SELECT count(*) FROM {table}").fetchone()[0])
 
 
-async def _start_child(root: Path, role: str, port: int, logs: list):
+async def _start_child(
+    root: Path, role: str, port: int, logs: list, *, postgres_url=None,
+):
     path = root / f"{role}.log"
     log = path.open("ab", buffering=0)
     logs.append(log)
     env = dict(os.environ)
+    if postgres_url is None:
+        env.pop("R14_E_P1A_CHILD_SQL_URL", None)
+    else:
+        env["R14_E_P1A_CHILD_SQL_URL"] = postgres_url
     repo_root = Path(__file__).resolve().parents[3]
     env["PYTHONPATH"] = os.pathsep.join(
         part for part in (str(repo_root), env.get("PYTHONPATH", "")) if part
@@ -238,12 +275,10 @@ async def _hard_kill(process) -> int:
     return pid
 
 
-@pytest.mark.e2e
-@pytest.mark.asyncio
-async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
-    tmp_path,
+async def run_physical_hard_restart_witness(
+    tmp_path, *, postgres_url: str | None = None,
 ):
-    """A real child PID dies; S2 must reuse CL terminal, never run side effect."""
+    """Verify real S1 hard kill/S2 recovery using SQLite or actual PostgreSQL."""
     db_path = tmp_path / "server.sqlite3"
     sink_path = tmp_path / "independent_effects.sqlite3"
     ledger_path = tmp_path / "client.sqlite3"
@@ -255,7 +290,9 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
     engine = None
     try:
         s1_port = r7j._free_port()
-        s1 = await _start_child(tmp_path, "s1", s1_port, logs)
+        s1 = await _start_child(
+            tmp_path, "s1", s1_port, logs, postgres_url=postgres_url,
+        )
 
         approvals_in_memory = []
         hitl = HITLManager()
@@ -319,7 +356,9 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
         k1 = None
 
         s2_port = r7j._free_port()
-        s2 = await _start_child(tmp_path, "s2", s2_port, logs)
+        s2 = await _start_child(
+            tmp_path, "s2", s2_port, logs, postgres_url=postgres_url,
+        )
         assert s2.pid != killed_pid
 
         def forbidden_second_effect(value: str, **kwargs):
@@ -346,9 +385,13 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
         await asyncio.to_thread(k2.start)
 
         # Read the SAME server SQL database from outside both processes.
-        engine = create_async_engine(
-            f"sqlite+aiosqlite:///{db_path.as_posix()}",
-            connect_args={"timeout": 5},
+        engine = (
+            create_async_engine(postgres_url, pool_pre_ping=True)
+            if postgres_url else
+            create_async_engine(
+                f"sqlite+aiosqlite:///{db_path.as_posix()}",
+                connect_args={"timeout": 5},
+            )
         )
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         uow_factory = lambda: r7j._SqliteUow(sessions)
@@ -389,6 +432,29 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
         assert len(claims) == 1 and claims[0].state == "CONSUMED"
         assert claims[0].connection_id == k2.connection_id
 
+        if postgres_url:
+            async with engine.connect() as connection:
+                version = int((await connection.exec_driver_sql(
+                    "SHOW server_version_num"
+                )).scalar_one())
+                assert 170000 <= version < 180000, version
+                database = (await connection.exec_driver_sql(
+                    "SELECT current_database()"
+                )).scalar_one()
+            _atomic_json(tmp_path / "postgres17-result.json", {
+                "backend": "postgresql",
+                "version_num": version,
+                "database": database,
+                "s1_pid": killed_pid,
+                "s2_pid": s2.pid,
+                "agent_state": row.state,
+                "claim_state": claims[0].state,
+                "attempts": [a.attempt_number for a in attempts],
+                "effects": _sink_count(sink_path, "effects"),
+                "approvals": _sink_count(sink_path, "approvals"),
+                "k2_connection_id": k2.connection_id,
+            })
+
         assert _sink_count(sink_path, "effects") == 1
         assert _sink_count(sink_path, "approvals") == 1
         assert resumed_approvals == []
@@ -409,6 +475,15 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
                 await _hard_kill(process)
         for handle in logs:
             handle.close()
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
+    tmp_path,
+):
+    """Preserve the original portable SQLite evidence unchanged."""
+    await run_physical_hard_restart_witness(tmp_path)
 
 
 if __name__ == "__main__" and len(sys.argv) == 5 and sys.argv[1] == "--r14e-child":
