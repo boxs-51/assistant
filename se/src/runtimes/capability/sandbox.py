@@ -1,8 +1,14 @@
 from __future__ import annotations
 
 import shutil
+from threading import RLock
+from typing import TYPE_CHECKING
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from uuid import uuid4
+
+if TYPE_CHECKING:
+    from .native_broker_b0 import SpawnIdentity
+    from .native_tree_recovery_b0 import LinuxCgroupTreeAuthority
 
 from .contracts.sandbox import (
     SandboxLease,
@@ -30,7 +36,12 @@ class SandboxPathError(SandboxError):
 class SandboxManager:
     """Own execution-scoped ephemeral roots without granting host-path authority."""
 
-    def __init__(self, base_root: Path | str) -> None:
+    def __init__(
+        self,
+        base_root: Path | str,
+        *,
+        native_tree_authority: "LinuxCgroupTreeAuthority | None" = None,
+    ) -> None:
         raw_base = Path(base_root).expanduser()
         if not raw_base.is_absolute():
             raise ValueError("sandbox base_root must be an explicit absolute path")
@@ -41,6 +52,37 @@ class SandboxManager:
         self._leases: dict[str, SandboxLease] = {}
         self._profiles: dict[str, SandboxProfile] = {}
         self._execution_leases: dict[str, str] = {}
+        # D2 staged opt-in only. Production native spawn remains DISABLED.
+        # All legacy SBX-1/2 manager instances preserve their semantics.
+        self._native_tree_authority = native_tree_authority
+        self._native_tree_leases: dict[str, "SpawnIdentity"] = {}
+        self._native_root_lock = RLock()
+
+    def bind_native_tree(
+        self, lease: SandboxLease, identity: "SpawnIdentity"
+    ) -> None:
+        """Trusted-only pre-spawn bind; never exposed as a model capability.
+
+        Native process launch must not occur until this succeeds. Root cleanup
+        subsequently fails closed unless the *real OS* reattachment attests a
+        generation-specific fenced empty cgroup.
+        """
+        with self._native_root_lock:
+            stored = self.current(lease)
+            if stored.state is not SandboxLeaseState.ACTIVE:
+                raise SandboxLeaseStateError("cannot bind non-active native lease")
+            if (
+                identity.sandbox_id != stored.sandbox_id
+                or identity.owner_id != stored.owner_user_id
+                or identity.execution_id != stored.execution_id
+            ):
+                raise SandboxLeaseStateError("native OS tree identity mismatch")
+            if self._native_tree_authority is None:
+                raise SandboxLeaseStateError("native OS tree authority unavailable")
+            self._native_tree_authority.require_registered(identity)
+            if stored.sandbox_id in self._native_tree_leases:
+                raise SandboxLeaseStateError("native tree already bound")
+            self._native_tree_leases[stored.sandbox_id] = identity
 
     @property
     def base_root(self) -> Path:
@@ -228,7 +270,24 @@ class SandboxManager:
                 f"cannot destroy sandbox from {current.state.value}"
             )
 
-        self._remove_root(current.root)
+        # Root deletion must not precede a broker-authenticated, OS-backed
+        # tree-empty readback. Unknown/stale/crashed OS state quarantines the
+        # root in CLEANUP. The gate is inactive for legacy SBX-1/2 leases.
+        with self._native_root_lock:
+            native_identity = self._native_tree_leases.get(current.sandbox_id)
+            if native_identity is not None:
+                if self._native_tree_authority is None:
+                    raise SandboxLeaseStateError("native OS authority unavailable")
+                try:
+                    self._native_tree_authority.require_verified_empty(
+                        native_identity
+                    )
+                except Exception as exc:
+                    raise SandboxLeaseStateError(
+                        "native root deletion HOLD: VERIFIED_EMPTY unproven"
+                    ) from exc
+            self._remove_root(current.root)
+            self._native_tree_leases.pop(current.sandbox_id, None)
         destroyed = current.model_copy(
             update={"state": SandboxLeaseState.DESTROYED}
         )
