@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import platform
+import signal
 import subprocess
 import sys
 import tempfile
@@ -92,6 +93,62 @@ class SupervisedNativeKernelTests(unittest.TestCase):
                 if child.poll() is None:
                     child.kill()
                 child.wait(timeout=10)
+            cgroup.rmdir()
+
+    def test_real_foreign_parent_stopped_process_denied_before_admission(self) -> None:
+        delegated = self._delegated()
+        with tempfile.TemporaryDirectory(prefix="sbx3-foreign-parent-") as tmp:
+            root = Path(tmp)
+            report = root / "child.pid"
+            ledger = LinuxCgroupTreeLedger(delegated, root / "native.sqlite")
+            identity = _identity()
+            cgroup = ledger.enroll(identity)
+            launcher = (
+                "import pathlib, subprocess, sys\n"
+                "child=subprocess.Popen([sys.executable, '-c', "
+                "'import os,signal,time; os.kill(os.getpid(),signal.SIGSTOP); "
+                "time.sleep(90)'])\n"
+                f"pathlib.Path({str(report)!r}).write_text(str(child.pid))\n"
+                "child.wait()\n"
+            )
+            foreign_parent = subprocess.Popen(
+                [sys.executable, "-c", launcher],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            child_pid = None
+            try:
+                deadline = time.monotonic() + 10
+                while not report.exists() and time.monotonic() < deadline:
+                    self.assertIsNone(foreign_parent.poll())
+                    time.sleep(.02)
+                self.assertTrue(report.exists())
+                child_pid = int(report.read_text())
+                stopped = False
+                while time.monotonic() < deadline:
+                    status = Path("/proc") / str(child_pid) / "status"
+                    if status.is_file() and any(
+                        line.startswith("State:") and line.split(":", 1)[1].strip().startswith("T")
+                        for line in status.read_text().splitlines()
+                    ):
+                        stopped = True
+                        break
+                    time.sleep(.02)
+                self.assertTrue(stopped)
+                with NativeTreeLifecycleFence(ledger).admit_spawn(identity) as gate:
+                    with self.assertRaises(NativeSpawnFenceDenied):
+                        gate.admit_stopped_process(child_pid)
+                self.assertNotIn(
+                    str(child_pid),
+                    (cgroup / "cgroup.procs").read_text("ascii").split(),
+                )
+            finally:
+                if child_pid is not None:
+                    try:
+                        os.kill(child_pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                foreign_parent.wait(timeout=10)
+            assert not ledger.recover_and_verify_empty(identity).production_usable
             cgroup.rmdir()
 
     def test_real_worker_crash_before_admission_kills_stopped_child(self) -> None:
