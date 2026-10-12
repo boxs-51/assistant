@@ -1,0 +1,136 @@
+name: AIC467 Real PostgreSQL 17 Linux Windows Evidence
+
+on:
+  push:
+    branches:
+      - evidence/156-aic467-legacy-alembic-pg17-20261012
+  pull_request:
+    paths:
+      - ".github/workflows/aic467-pg17-linux-windows-evidence.yml"
+      - "se/tests/integration/test_aic0_p1_agent_instance_identity.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Exact-parent diagnostic: evidence branch is precisely one workflow ADD
+# on top of canonical draft PR #467. Do not merge this evidence child.
+jobs:
+  postgresql17-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: aic_p1a
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aic_p1a"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install real PG and suite dependencies
+        run: |
+          python -m pip install -r requirements-test.txt
+          python -m pip install asyncpg==0.32.0
+      - name: Require actual PostgreSQL 17 server (no sqlite fallback)
+        shell: bash
+        run: |
+          python -c 'import asyncio,os,asyncpg
+          from sqlalchemy.engine.url import make_url
+          async def check():
+              u=make_url(os.environ["AIC_TEST_POSTGRES_URL"])
+              c=await asyncpg.connect(host=u.host,port=u.port or 5432,user=u.username,password=u.password,database=u.database)
+              try:
+                  v=int(await c.fetchval("SHOW server_version_num"))
+                  print("Real PG server_version_num:",v,flush=True)
+                  assert 170000<=v<180000,"PostgreSQL 17 required"
+              finally:
+                  await c.close()
+          asyncio.run(check())'
+      - name: Run AIC integration and architecture matrix, strict no skips
+        shell: bash
+        run: |
+          mkdir -p aic467-pg17-evidence
+          python -m pytest -q -ra \
+            --junitxml=aic467-pg17-evidence/linux-junit.xml \
+            se/tests/integration/test_aic0_p1_agent_instance_identity.py \
+            se/tests/architecture/test_aic0_p1_identity_production_boundary.py
+          python -c 'from xml.etree import ElementTree as E; r=E.parse("aic467-pg17-evidence/linux-junit.xml").getroot(); suites=[r] if r.tag=="testsuite" else r.findall("testsuite"); print([(x.get("tests"),x.get("failures"),x.get("errors"),x.get("skipped")) for x in suites]); assert all(int(x.get("skipped","0"))==0 and int(x.get("failures","0"))==0 and int(x.get("errors","0"))==0 for x in suites)'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aic467-pg17-linux
+          path: aic467-pg17-evidence/
+          if-no-files-found: warn
+
+  postgresql17-windows:
+    runs-on: windows-2025
+    timeout-minutes: 30
+    env:
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
+      PGPASSWORD: root
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Start actual native Windows PostgreSQL 17 and isolated database
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $service = Get-Service -Name "postgresql-x64-17" -ErrorAction Stop
+          Set-Service -Name $service.Name -StartupType Manual
+          if ($service.Status -ne "Running") { Start-Service -Name $service.Name }
+          if ((Get-Service -Name $service.Name).Status -ne "Running") { throw "PG17 service not running" }
+          $psql = Join-Path $env:PGBIN "psql.exe"
+          if (!(Test-Path $psql)) { throw "native PG17 psql missing" }
+          $v = & $psql -h 127.0.0.1 -U postgres -d postgres -tAc "SHOW server_version_num"
+          if ($LASTEXITCODE -ne 0 -or [int]($v.Trim()) -lt 170000 -or [int]($v.Trim()) -ge 180000) { throw "expected real PG17: $v" }
+          & $psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE aic_p1a"
+          if ($LASTEXITCODE -ne 0) { throw "CREATE DATABASE failed" }
+      - name: Install real PG and suite dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-test.txt
+          python -m pip install asyncpg==0.32.0
+      - name: Require actual PostgreSQL 17 server (no sqlite fallback)
+        shell: pwsh
+        run: |
+          python -c 'import asyncio,os,asyncpg
+          from sqlalchemy.engine.url import make_url
+          async def check():
+              u=make_url(os.environ["AIC_TEST_POSTGRES_URL"])
+              c=await asyncpg.connect(host=u.host,port=u.port or 5432,user=u.username,password=u.password,database=u.database)
+              try:
+                  v=int(await c.fetchval("SHOW server_version_num"))
+                  print("Real PG server_version_num:",v,flush=True)
+                  assert 170000<=v<180000,"PostgreSQL 17 required"
+              finally:
+                  await c.close()
+          asyncio.run(check())'
+      - name: Run Windows AIC integration and architecture matrix, strict no skips
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path aic467-pg17-evidence | Out-Null
+          python -m pytest -q -ra --junitxml=aic467-pg17-evidence/windows-junit.xml se/tests/integration/test_aic0_p1_agent_instance_identity.py se/tests/architecture/test_aic0_p1_identity_production_boundary.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c 'from xml.etree import ElementTree as E; r=E.parse("aic467-pg17-evidence/windows-junit.xml").getroot(); suites=[r] if r.tag=="testsuite" else r.findall("testsuite"); print([(x.get("tests"),x.get("failures"),x.get("errors"),x.get("skipped")) for x in suites]); assert all(int(x.get("skipped","0"))==0 and int(x.get("failures","0"))==0 and int(x.get("errors","0"))==0 for x in suites)'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aic467-pg17-windows
+          path: aic467-pg17-evidence/
+          if-no-files-found: warn
