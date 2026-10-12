@@ -54,6 +54,7 @@ from .contracts.resume import (
     ResumePlan,
     resume_plan_fingerprint,
 )
+from .native_receipt_verifier import require_native_receipt, require_native_record
 from .persistence import ExecutionConflictError
 from .resume_claim import ResumeActivationError
 from .state_machine import AgentExecutionStateMachine
@@ -598,6 +599,7 @@ class AgentRuntime:
                 record = None
         if record is None:
             return None
+        require_native_record(record, phase="runtime_COMMITTED_readthrough")
         if getattr(record, "commit_state", "PROVISIONAL") != "COMMITTED":
             return None
         expected_identity = {
@@ -613,6 +615,7 @@ class AgentRuntime:
                     f"Committed tool-result {key} does not match resume request: "
                     f"{actual!r} != {expected!r}."
                 )
+        require_native_record(record, phase="runtime_model_readthrough")
         source_result_id = getattr(record, "id", None)
         if isinstance(source_result_id, str) and source_result_id:
             self._schedule_f7t_publication_for_committed_result(
@@ -1256,6 +1259,9 @@ class AgentRuntime:
         result: ToolExecutionResult,
         iteration_id: str,
     ) -> None:
+        require_native_receipt(
+            result.capability_id, result.success, phase="runtime_before_persist",
+        )
         if self._durable_store is None:
             return
         await self._durable_store.save_tool_result(
