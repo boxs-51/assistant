@@ -15,6 +15,9 @@ from ...infrastructure.storage.repositories.capability_invocations import (
 from ...infrastructure.storage.transcript_representation import (
     canonical_transcript_messages,
 )
+from ..capability.native_tree_recovery_b0 import (
+    require_no_uncertified_agent_success,
+)
 from ..capability.contracts.definition import CapabilityIdempotency
 from ..capability.contracts.invocation import (
     CapabilityInvocationState,
@@ -2991,6 +2994,13 @@ class DurableAgentStore:
         Local/server outcomes commit immediately. A linked remote invocation is
         model-consumable only after R6 marks its outcome TERMINAL_COMMITTED.
         """
+        # D2: even if a future direct/recovery caller bypasses Agent adapter,
+        # never persist a successful native command without a trusted broker
+        # receipt. This intentionally does not trust serialized metadata.
+        require_no_uncertified_agent_success(
+            str(values.get("capability_id") or ""),
+            values.get("success") is True,
+        )
         values = _normalize_json_fields(
             values, _TOOL_RESULT_JSON_FIELDS, path="agent_tool_results"
         )
