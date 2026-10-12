@@ -73,3 +73,50 @@ The test harness now binds a real `TaskBudgetService` to S1 and S2, creates an a
 **Hard evidence boundary:** this covers UBQ2 shadow dual-accounting for an admitted TaskBudget tool call. It is NOT a claim that UBQ3 finite user-tool quota or UBQ4 inference quota under multitenant contention, multiworker simultaneous admissions, PostgreSQL database-server failover, E-P1B pending HITL, or global AE-R14-E exit are certified. These remain separate gates.
 
 **CI declaration:** the targeted SQLite jobs select the whole test module and PostgreSQL 17 jobs select the three parametrized fault cuts; no skip/xfail and no SQLite substitution for PostgreSQL. Earlier 4/4 APPROVE-only PASS is historical positive-cut evidence. Do not call this extension FINAL until the exact-head native Ubuntu/Windows PostgreSQL 17 + SQLite jobs and Architecture jobs report terminal success, with raw artifacts inspected. Failures must remain RED until repaired. No merge.
+
+## 2026-10-12 — Two-OS-worker terminalization race (new strict PostgreSQL node)
+
+The earlier fixture deliberately leaves the **AgentTask RUNNING** after the
+underlying `AgentExecution=COMPLETED`. That is not proof that `terminalize_task`
+is broken: the fixture creates and activates the task, exercises its Agent
+recovery path, but does not invoke the separate Task terminalization authority.
+
+Added an **explicit, non-skippable PostgreSQL-only node** in
+`se/tests/e2e/r14_e_postgres17_hard_restart_evidence.py`:
+`test_postgres17_two_os_workers_terminalize_one_task_once`.
+
+1. Start from an independently verified, real S1/S2 hard-kill-and-K2
+   APPROVE_TERMINAL recovery scenario in its own
+   `r14e_p1a_terminal_race` database.
+2. After S2 exits, verify actual `Task.status=RUNNING`,
+   `TaskBudget.state=OPEN` and `active_executions=0`. Retain its exact Task
+   revision and independent effect/ledger receipts.
+3. Launch two **separate Python worker OS processes** with separate PostgreSQL
+   async engines and separate SQL transactions. Both signal ready, wait behind
+   a parent-controlled file barrier, and call production
+   `TaskBudgetService.terminalize_task(..., target_state=COMPLETED)` against
+   the **same** Task and TaskBudget.
+4. Require two different worker PIDs, both observing the same terminal
+   `COMPLETED` winner at exactly original Task revision +1. Independently read
+   `Task.status=COMPLETED`, `TaskBudget.state=CLOSED` and
+   `closed_at != NULL` from PostgreSQL; require no duplicate execution/tool
+   reservation, no duplicate UBQ2 TOOL_CALL bridge and exactly one
+   `SETTLED` user-budget reservation with amount one.
+5. A later opposing `FAILED` terminal request must not resurrect or rewrite
+   the terminal Task. Verify absence of `CREATED` ResumeClaims and retain
+   the two worker logs, ready/result PID receipts, and final SQL summary JSON
+   in the dedicated PostgreSQL artifact.
+
+The dedicated Linux container and **native Windows PostgreSQL 17** jobs now
+select the entire explicit PostgreSQL evidence file, rather than only the
+three parametric K1/K2 fault-cut nodes. Missing drivers/databases, worker
+failures, double revision increments or incorrect terminal state must FAIL.
+This additional test is a **single-Task two-OS-worker terminal-state CAS
+race**, not a claim of simultaneously competing K2 clients, full UBQ3/UBQ4
+multi-tenant quota isolation or general database-service failover. The
+original E-P1B pending-human-consent and native sandbox certification remain
+outside this test.
+
+**Evidence status:** candidate is pending exact-head terminal Linux/Windows
+CI and raw PG artifacts. Do not infer PASS from earlier green runs, and do
+not merge.
