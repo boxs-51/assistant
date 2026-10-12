@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from uuid import uuid4
@@ -25,6 +26,10 @@ class SandboxLeaseStateError(SandboxError):
 
 class SandboxPathError(SandboxError):
     pass
+
+
+class NativeTreeUnverifiedError(SandboxError):
+    """A native tree cannot be proven empty; retain its sandbox root."""
 
 
 class SandboxManager:
@@ -137,6 +142,48 @@ class SandboxManager:
             )
         return stored
 
+    # Native B0 is not production-wired. This marker is an irreversible
+    # quarantine tombstone, NOT an OS VERIFIED_EMPTY receipt. A future
+    # authenticated OS broker must own clearing it with a generation fence.
+    _NATIVE_QUARANTINE_MARKER = ".sbx3-native-tree-unverified"
+
+    def quarantine_native_tree(self, lease: SandboxLease) -> None:
+        """Durably reject root deletion if any native process might exist.
+
+        Must execute before any experimental native dispatch. Creation is
+        exclusive, and the tombstone survives application/worker restart.
+        The marker carries no positive authority and never enables replay.
+        """
+        current = self.current(lease)
+        if current.state is not SandboxLeaseState.ACTIVE:
+            raise SandboxLeaseStateError("native enrollment requires ACTIVE lease")
+        self._assert_owned_root(current, current.root.resolve(strict=False))
+        marker = current.root / self._NATIVE_QUARANTINE_MARKER
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(marker, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write(current.sandbox_id + "\\n")
+                file.flush()
+                os.fsync(file.fileno())
+            # Persist the directory entry too on platforms supporting it.
+            if os.name == "posix":
+                directory_fd = os.open(current.root, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except BaseException:
+            # A partial marker is STILL quarantined: never delete it.
+            raise
+
+    def _require_native_root_empty(self, root: Path) -> None:
+        marker = root / self._NATIVE_QUARANTINE_MARKER
+        if marker.exists() or marker.is_symlink():
+            raise NativeTreeUnverifiedError(
+                "native tree quarantined: trusted OS VERIFIED_EMPTY absent"
+            )
+
     def release_execution(
         self,
         execution_id: str,
@@ -228,6 +275,7 @@ class SandboxManager:
                 f"cannot destroy sandbox from {current.state.value}"
             )
 
+        self._require_native_root_empty(current.root)
         self._remove_root(current.root)
         destroyed = current.model_copy(
             update={"state": SandboxLeaseState.DESTROYED}
@@ -304,6 +352,7 @@ class SandboxManager:
 
 __all__ = [
     "SandboxError",
+    "NativeTreeUnverifiedError",
     "SandboxLeaseNotFoundError",
     "SandboxLeaseStateError",
     "SandboxManager",
