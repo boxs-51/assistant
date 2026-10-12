@@ -29,6 +29,11 @@ TOOLS_PATH = "tools/v1/terminal_tool.py"
 def assert_exact_cross_pr_source() -> None:
     root = pathlib.Path(__file__).resolve().parent.parent
     os.chdir(root)
+    # When launched as "python scripts/...", sys.path[0] is scripts/ rather
+    # than repo root. Import SE and Tools from the exact checkout, not ambient
+    # globally installed packages.
+    if str(root) not in sys.path:
+        sys.path.insert(0, str(root))
     # Tests run on the SE child branch, so its parent commit remains exact
     # unless the workflow is explicitly re-anchored and reviewed.
     ancestral = subprocess.run(
