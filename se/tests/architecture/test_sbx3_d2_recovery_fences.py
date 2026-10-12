@@ -107,13 +107,14 @@ class _TestTreeGate:
     def __init__(self):
         self.allowed = False
         self.reads = 0
+        self.expected = None
 
     def require_registered(self, identity):
-        assert identity == _identity()
+        assert identity == self.expected
 
     def require_verified_empty(self, identity):
         self.reads += 1
-        assert identity == _identity()
+        assert identity == self.expected
         if not self.allowed:
             raise NativeTreeHold("unknown real OS state")
 
@@ -129,6 +130,14 @@ def test_manager_native_root_quarantined_until_authority_readback(tmp_path):
         owner_user_id=identity.owner_id,
         profile=SandboxProfile(profile_id="native-b0-d2"),
     )
+    identity = SpawnIdentity(
+        owner_id=identity.owner_id,
+        execution_id=identity.execution_id,
+        tool_call_id=identity.tool_call_id,
+        sandbox_id=lease.sandbox_id,
+        lease_generation=identity.lease_generation,
+    )
+    gate.expected = identity
     manager.bind_native_tree(lease, identity)
     marker = manager.resolve_path(lease, "proof.txt")
     marker.write_text("root must remain", encoding="utf-8")
