@@ -258,7 +258,7 @@ def test_live_direct_owner_reassignment_and_invalid_generation_fail(file_databas
         with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_MUTATION_DENIED"):
             cx.execute("UPDATE aic_instance_live SET generation=99 WHERE agent_instance_id='a1'")
         with pytest.raises(sqlite3.IntegrityError, match="AIC_RESERVATION_IMMUTABLE"):
-            cx.execute("UPDATE aic_instance_id_reservations SET status='RETIRED' WHERE agent_instance_id='absent'")
+            cx.execute("UPDATE aic_instance_id_reservations SET status='BROKEN' WHERE agent_instance_id='a1'")
 
 
 def test_real_identity_contract_does_not_use_nonexistent_auth_flag():
