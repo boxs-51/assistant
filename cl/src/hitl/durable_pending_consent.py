@@ -201,12 +201,8 @@ class DurablePendingConsentStore:
                     "Denied, expired or potentially executed consent is immutable"
                 )
             if old["expires_at"] <= self._now():
-                db.execute(
-                    "UPDATE durable_hitl_pending "
-                    "SET state='EXPIRED', revision=revision+1 "
-                    "WHERE client_id=? AND principal_id=? AND invocation_id=?",
-                    keys[:3],
-                )
+                # Deliberately do not reissue expired authority; the old
+                # immutable deadline still denies every caller after restart.
                 raise ConsentNotRecoverable("Original consent has expired")
             db.execute(
                 "UPDATE durable_hitl_pending SET state='PENDING', "
