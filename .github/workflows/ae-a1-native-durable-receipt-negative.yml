@@ -9,6 +9,7 @@ on:
       - "se/src/runtimes/agent/recovery_execution.py"
       - "se/src/runtimes/agent/resume_planning.py"
       - "se/src/runtimes/agent/safe_point_reconstruction.py"
+      - "se/src/runtimes/agent/fork_planning.py"
       - "se/tests/architecture/test_ae_a1_native_durable_receipt_failclosed.py"
       - "se/tests/architecture/ae_a1_pg17_receipt_evidence.py"
       - "docs/agent_execution_r14/R14_E_A1_NATIVE_DURABLE_RECEIPT_FENCE.md"
