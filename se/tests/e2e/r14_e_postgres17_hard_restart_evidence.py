@@ -152,10 +152,14 @@ async def test_postgres17_two_os_workers_terminalize_one_task_once(tmp_path):
             handles.append(output)
             env = dict(os.environ)
             env["R14_E_P1A_CHILD_SQL_URL"] = scoped_url
+            repo_root = Path(__file__).resolve().parents[3]
+            env["PYTHONPATH"] = os.pathsep.join(
+                x for x in (str(repo_root), env.get("PYTHONPATH", "")) if x
+            )
             process = subprocess.Popen(
                 [sys.executable, str(Path(__file__).resolve()),
                  "--terminal-worker", worker, str(tmp_path)],
-                cwd=str(Path(__file__).resolve().parents[3]),
+                cwd=str(repo_root),
                 env=env, stdout=output, stderr=subprocess.STDOUT,
             )
             workers.append(process)
