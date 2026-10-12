@@ -1,5 +1,6 @@
 """Nonwired AIC facade. No route, worker lease or execution authority."""
 from ..domain.schemas.agent_instance import AgentInstanceDenied
+from ..domain.schemas.identity import Identity
 
 
 class AgentInstanceService:
@@ -10,12 +11,17 @@ class AgentInstanceService:
     def trusted_user_id(identity) -> str:
         # Deliberately conservative: only a server-authenticated identity with
         # an already validated durable user principal may enter this facade.
-        if (identity is None or not getattr(identity, "is_authenticated", False)
-                or getattr(identity, "is_guest", False)
-                or not getattr(identity, "user_id", None)
-                or getattr(identity, "auth_type", None) in ("guest", "admin_key", "api_key")):
-            raise AgentInstanceDenied("durable authenticated user principal required")
-        return str(identity.user_id)
+        # Identity has no is_authenticated flag. AIC P1A accepts only an
+        # already-authenticated JWT principal; API keys require separately
+        # signed unambiguous owner mapping, and admin/guest are not users.
+        if (
+            not isinstance(identity, Identity)
+            or identity.auth_type != "jwt"
+            or not isinstance(identity.user_id, str)
+            or not identity.user_id.strip()
+        ):
+            raise AgentInstanceDenied("trusted JWT durable user principal required")
+        return identity.user_id
 
     async def create(self, identity, definition_id: str, definition_version: str):
         owner = self.trusted_user_id(identity)
