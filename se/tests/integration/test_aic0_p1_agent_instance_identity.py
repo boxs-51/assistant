@@ -771,3 +771,221 @@ os._exit(77)
                 "alice", identity_id, 1
             ) == 2
             await session.commit()
+
+
+
+# ---------------------------------------------------------------------------
+# Full physical Alembic history gate: base→24a→25a→26a→27a→28a→29a→30a→31a.
+# Unlike the scoped trigger tests above, this invokes the real CLI/env.py and
+# upgrades an actual populated database in separate operating-system processes.
+# ---------------------------------------------------------------------------
+
+
+def _aic_run_real_alembic(url, revision):
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[3]
+    env = dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=url)
+    invocation = subprocess.run(
+        [sys.executable, "-m", "alembic", "-c", "alembic.ini", "upgrade", revision],
+        cwd=str(root), env=env, capture_output=True, text=True, timeout=180,
+        check=False,
+    )
+    assert invocation.returncode == 0, (
+        f"Real Alembic upgrade to {revision} failed (exit={invocation.returncode}).\n"
+        f"STDOUT:\n{invocation.stdout[-3000:]}\n"
+        f"STDERR:\n{invocation.stderr[-6000:]}"
+    )
+
+
+@pytest.mark.parametrize("backend", ["sqlite", "postgresql"])
+@pytest.mark.asyncio
+async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
+    tmp_path, request, backend
+):
+    """Actual old-schema rows survive ALL intermediate production migrations.
+
+    PostgreSQL runs against a fresh disposable real database; SQLite against a
+    file with FK-OFF. Both run alembic via fresh child interpreter/processes.
+    """
+    import sqlite3
+    from sqlalchemy.engine import make_url
+
+    db_name = "aic_fullchain_" + uuid4().hex[:16]
+    admin = None
+    if backend == "postgresql":
+        # The opt-in fixture guarantees a real server, not a SQLite-as-PG mock.
+        parent_url = request.getfixturevalue("postgres_url")
+        admin = create_async_engine(parent_url, isolation_level="AUTOCOMMIT")
+        async with admin.connect() as c:
+            version = int((await c.execute(text("SHOW server_version_num"))).scalar_one())
+            assert 170000 <= version < 180000, (
+                f"Full migration requires real PostgreSQL 17, got {version}"
+            )
+            await c.execute(text("CREATE DATABASE " + db_name))
+        url = make_url(parent_url).set(database=db_name).render_as_string(
+            hide_password=False
+        )
+    else:
+        url = "sqlite+aiosqlite:///" + str(tmp_path / (db_name + ".sqlite"))
+
+    engine = create_async_engine(url, pool_pre_ping=True)
+    old_policy = "legacy-policy-" + db_name
+    old_task = "legacy-task-" + db_name
+    old_receipt = "legacy-receipt-" + db_name
+    marker = "permanent-aic-" + db_name
+
+    async def read_scalar(sql, params=None):
+        async with engine.connect() as cx:
+            return (await cx.execute(text(sql), params or {})).scalar_one()
+
+    async def require_revision(revision):
+        assert await read_scalar("SELECT version_num FROM alembic_version") == revision
+
+    try:
+        # Actually execute ALL ancestors, not hand-create 24a tables or stamp.
+        _aic_run_real_alembic(url, "24a_r12_stale_lease_scan_index")
+        await require_revision("24a_r12_stale_lease_scan_index")
+        async with engine.begin() as cx:
+            if backend == "sqlite":
+                await cx.exec_driver_sql("PRAGMA foreign_keys=OFF")
+                assert (await cx.exec_driver_sql("PRAGMA foreign_keys")).scalar_one() == 0
+            await cx.execute(text(
+                "INSERT INTO users(id,email,password_hash,status) "
+                "VALUES ('alice','alice@aic-full.invalid','x','active')"
+            ))
+            await cx.execute(text(
+                "INSERT INTO agent_tasks "
+                "(id,session_id,created_by,assigned_agent_id,status,wait_reasons,input) "
+                "VALUES (:task,'legacy-session','alice','legacy-agent',"
+                "'CREATED','[]','{}')"
+            ), {"task": old_task})
+            await cx.execute(text(
+                "INSERT INTO agent_task_budgets "
+                "(task_id,max_total_executions,max_active_executions,"
+                "max_active_branches,max_parallel_agents,max_total_tool_calls,"
+                "max_total_inference_calls,max_delegation_depth,"
+                "policy_version,policy_fingerprint) "
+                "VALUES (:task,10,3,3,3,10,10,3,'legacy-v1',:fp)"
+            ), {"task": old_task, "fp": "b" * 64})
+            await cx.execute(text(
+                "INSERT INTO agent_task_budget_reservations "
+                "(task_id,kind,reservation_key,payload_fingerprint) "
+                "VALUES (:task,'USAGE','legacy-usage',:fp)"
+            ), {"task": old_task, "fp": "r" * 64})
+
+        _aic_run_real_alembic(url, "25a_ubq1_user_budget_foundation")
+        await require_revision("25a_ubq1_user_budget_foundation")
+        async with engine.begin() as cx:
+            await cx.execute(text(
+                "INSERT INTO user_budget_policies "
+                "(policy_id,owner_user_id,policy_version,policy_fingerprint,"
+                "window_duration_seconds,tool_limits_json) "
+                "VALUES (:policy,'alice','legacy-v1',:fp,3600,:limits)"
+            ), {"policy": old_policy, "fp": "a" * 64, "limits": "{}"})
+            await cx.execute(text(
+                "INSERT INTO user_budget_accounts(owner_user_id,next_window_epoch) "
+                "VALUES ('alice',1)"
+            ))
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM user_budget_policies WHERE owner_user_id='alice'"
+        ) == 1
+
+        _aic_run_real_alembic(url, "26a_ubq2_dual_accounting_bridge")
+        await require_revision("26a_ubq2_dual_accounting_bridge")
+        # 26a MUST backfill historical pre-26a TaskBudget and reservation IDs
+        # to one same durable generation and allocate the next generation.
+        assert await read_scalar(
+            "SELECT incarnation_generation FROM agent_task_budgets "
+            "WHERE task_id=:task", {"task": old_task}
+        ) == 1
+        assert await read_scalar(
+            "SELECT task_budget_incarnation_generation "
+            "FROM agent_task_budget_reservations WHERE task_id=:task",
+            {"task": old_task}
+        ) == 1
+        assert await read_scalar(
+            "SELECT next_generation FROM agent_task_budget_incarnation_allocator "
+            "WHERE allocator_id=1"
+        ) == 2
+
+        async with engine.begin() as cx:
+            await cx.execute(text(
+                "INSERT INTO user_budget_task_bindings "
+                "(task_id,owner_user_id,enrollment_version,source_auth_type,"
+                "resolution_fingerprint) "
+                "VALUES (:task,'alice','ubq2-v1','jwt',:fp)"
+            ), {"task": old_task, "fp": "c" * 64})
+            await cx.execute(text(
+                "INSERT INTO user_budget_dual_accounting_receipts "
+                "(bridge_receipt_id,owner_user_id,task_id,task_budget_kind,"
+                "task_budget_reservation_key,mirror_dimension,"
+                "source_payload_fingerprint,amount_atomic) "
+                "VALUES (:receipt,'alice',:task,'USAGE','legacy-usage',"
+                "'NO_CHARGE',:fp,0)"
+            ), {"receipt": old_receipt, "task": old_task, "fp": "r" * 64})
+
+        # This upgrade traverses ALL intermediate 27a/28a/29a revisions.
+        _aic_run_real_alembic(url, "30a_ctx_f5_user_wide_memory_scope")
+        await require_revision("30a_ctx_f5_user_wide_memory_scope")
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM user_budget_dual_accounting_receipts "
+            "WHERE bridge_receipt_id=:receipt", {"receipt": old_receipt}
+        ) == 1
+
+        _aic_run_real_alembic(url, "31a_aic0_agent_instance_identity")
+        await require_revision("31a_aic0_agent_instance_identity")
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM user_budget_policies WHERE policy_id=:policy",
+            {"policy": old_policy}
+        ) == 1
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM user_budget_task_bindings WHERE task_id=:task",
+            {"task": old_task}
+        ) == 1
+        assert await read_scalar(
+            "SELECT next_generation FROM agent_task_budget_incarnation_allocator "
+            "WHERE allocator_id=1"
+        ) == 2
+
+        # Require raw owner deletion to fail with actual immutable historical
+        # 25a/26a facts and real 31a owner-bound LIVE row (even with FK-OFF).
+        async with engine.begin() as cx:
+            if backend == "sqlite":
+                await cx.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            await cx.execute(text(
+                "INSERT INTO aic_instance_reservations "
+                "(agent_instance_id,state,generation) VALUES (:id,'ACTIVE',1)"
+            ), {"id": marker})
+            await cx.execute(text(
+                "INSERT INTO aic_instance_live "
+                "(agent_instance_id,owner_user_id,definition_id,"
+                "definition_version,lifecycle_state,generation) "
+                "VALUES (:id,'alice','legacy-definition','v1','ACTIVE',1)"
+            ), {"id": marker})
+
+        async with engine.connect() as cx:
+            if backend == "sqlite":
+                await cx.exec_driver_sql("PRAGMA foreign_keys=OFF")
+                assert (await cx.exec_driver_sql("PRAGMA foreign_keys")).scalar_one() == 0
+            with pytest.raises(DBAPIError):
+                await cx.execute(text("DELETE FROM users WHERE id='alice'"))
+            await cx.rollback()
+
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM aic_instance_live "
+            "WHERE agent_instance_id=:id", {"id": marker}
+        ) == 1
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM user_budget_dual_accounting_receipts "
+            "WHERE bridge_receipt_id=:id", {"id": old_receipt}
+        ) == 1
+        # No silent stamp, dropped old budget, reordered generations or
+        # accidental replacement of old policy data is acceptable.
+        await require_revision("31a_aic0_agent_instance_identity")
+    finally:
+        await engine.dispose()
+        if admin is not None:
+            async with admin.connect() as c:
+                await c.execute(text("DROP DATABASE IF EXISTS " + db_name + " WITH (FORCE)"))
+            await admin.dispose()
