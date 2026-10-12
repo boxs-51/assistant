@@ -1,4 +1,3 @@
-from .agent_instance import AgentInstanceLiveRecord, AgentInstanceIdReservationRecord
 from .execution import AgentExecutionRecord
 from .iteration import AgentIterationRecord
 from .tool_call import AgentToolCallRecord
@@ -52,3 +51,16 @@ __all__ = [
     "AgentTranscriptPayloadNodeRecord",
     "AgentTranscriptRepresentationRecord",
 ]
+
+
+# Only materialize the AIC ORM when the dedicated AIC repository imports it.
+# Importing it unconditionally here introduces a users FK into unrelated
+# AE/UBQ Base.metadata.create_all fixtures before their user model graph is
+# registered, breaking the historical R11 isolated test topology.
+# from se.src.infrastructure.storage.models.sql.agent import AgentInstanceLiveRecord
+# still works through this lazy symbol export.
+def __getattr__(name: str):
+    if name in {"AgentInstanceLiveRecord", "AgentInstanceIdReservationRecord"}:
+        from . import agent_instance as _agent_instance
+        return getattr(_agent_instance, name)
+    raise AttributeError(name)
