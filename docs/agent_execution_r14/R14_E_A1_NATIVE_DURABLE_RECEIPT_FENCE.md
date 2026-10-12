@@ -24,6 +24,12 @@ terminal adapter. This proposal does NOT cherry-pick obsolete PR #465 SE code.
   _require_committed_projection — REUSE_COMMITTED blocked.
 - safe_point_reconstruction — both committed transcript sanitation and active
   batch reconstructed result shortcut require the same negative native gate.
+- R8 fork and shared RETRY_FROM_CHECKPOINT — read-only COMMITTED fork result,
+  both model tool-message conversion functions, R8-C checkpoint materialization,
+  and R8-D transactional side-effect and transcript revalidation must deny old
+  native successful COMMITTED records, even when the invocation/checkpoint
+  lineage and output fingerprint are otherwise canonical. A transactionally
+  revalidated ForkPlan is not itself privileged native receipt authority.
 
 Capability IDs presently classified as Agent-native processes are
 terminal.run, terminal.launch and python.run. Non-native tool results and
@@ -61,6 +67,12 @@ Tests:
 - Legacy local/pre-dispatch COMMITTED shortcut: native denied before SQL insert.
 - Runtime and recovery mock store bypasses: native blocked.
 - Non-native success and native failure/unknown: unaffected.
+- Real SQLite R8-C source checkpoint with terminal CapabilityInvocation,
+  old native successful COMMITTED source and forged verified_empty metadata:
+  store fork-read, fork-plan side effects, R8-C transcript, R8-D transactional
+  side effects/transcript and both tool-message projection helpers all DENY
+  for terminal.run/terminal.launch/python.run, with no source-row deletion.
+  The equivalent non-native R8 fork remains read-only and model-consumable.
 - Targeted real Linux and native Windows Python 3.12 runs with 0 skips; full
   Architecture Baseline must remain GREEN.
 
