@@ -119,6 +119,7 @@ class LinuxCgroupTreeAuthority:
         # Parse the kernel mount table: a fabricated tmp_path/cgroup.events
         # must never become security evidence.
         mount_ok = False
+        cgroup_mount_device: int | None = None
         try:
             for line in Path("/proc/self/mountinfo").read_text().splitlines():
                 before, after = line.split(" - ", 1)
@@ -130,6 +131,7 @@ class LinuxCgroupTreeAuthority:
                     # but a fake directory on another filesystem cannot.
                     if self.root.is_relative_to(kernel_mount):
                         mount_ok = True
+                        cgroup_mount_device = int(kernel_mount.stat().st_dev)
                         break
         except (OSError, ValueError, IndexError) as exc:
             raise NativeTreeHold("unreadable kernel cgroup mounts") from exc
@@ -137,6 +139,13 @@ class LinuxCgroupTreeAuthority:
             raise NativeTreeHold("not a verified cgroup-v2 mount")
         try:
             meta = candidate.stat()
+            # A nested bind mount of a fabricated tmpfs into the apparent
+            # cgroup path must never be mistaken for real kernel evidence.
+            if (
+                cgroup_mount_device is None
+                or int(meta.st_dev) != cgroup_mount_device
+            ):
+                raise NativeTreeHold("native tree is not on kernel cgroup2 fs")
             if not candidate.is_dir():
                 raise NativeTreeHold("native tree is not a cgroup directory")
             if not (candidate / "cgroup.events").is_file():
