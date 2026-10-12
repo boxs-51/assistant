@@ -2,12 +2,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 import tempfile
 import asyncio
+import os
 from typing import Dict, Any, Tuple
 import uuid
 from fastapi import FastAPI
 import httpx
 import structlog
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from .infrastructure.event_bus.manager import EventingManager
 
@@ -24,6 +26,9 @@ from .transport.gateway.middleware.factory import create_middleware_stack
 from .infrastructure.storage.core.manager import StorageEngine
 from .infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
 from .infrastructure.storage.repositories.capability_invocations import SqlCapabilityInvocationStore
+from .infrastructure.storage.repositories.capability_publications import (
+    CapabilityPublicationRepository,
+)
 from .infrastructure.mcp.mcp_manager import GatewayMcpManager
 
 # Security & Gateway Infrastructure
@@ -774,6 +779,111 @@ async def bootstrap_storage(config: ConfigSchema) -> Tuple[StorageEngine, Any]:
     return storage_engine, uow_factory
 
 
+async def bootstrap_skill_publication_authority():
+    """Create the isolated PostgreSQL Skill publication authority when configured."""
+
+    dsn = str(os.environ.get("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL") or "").strip()
+    if not dsn:
+        return None, None
+    if not dsn.startswith("postgresql+asyncpg://"):
+        raise RuntimeError(
+            "ASSISTANT_SKILL_PUBLICATION_DATABASE_URL must use postgresql+asyncpg://."
+        )
+
+    engine = create_async_engine(dsn, pool_pre_ping=True)
+    session_factory = async_sessionmaker(engine, expire_on_commit=False)
+    authority = CapabilityPublicationRepository(session_factory)
+    try:
+        await authority.ensure_ready()
+    except BaseException:
+        await engine.dispose()
+        raise
+    logger.info("Skill publication authority initialized")
+    return engine, authority
+
+
+async def _reserve_bootstrap_capability_namespaces(container, catalog) -> None:
+    authority = getattr(container.capability_runtime, "publication_authority", None)
+    if authority is None:
+        return
+    for definition in sorted(
+        catalog.list_definitions(),
+        key=lambda item: item.capability_id,
+    ):
+        await authority.reserve_system_namespace(definition)
+
+
+async def _publish_explicit_trusted_bootstrap_skills(
+    container, discovered_skill_ids
+) -> tuple[str, ...]:
+    """Server-operator attested publication; NEVER an Agent skill.load side effect.
+
+    No configured list means no new public visibility. The only eligible
+    definitions come from verified server manifests discovered at bootstrap,
+    not caller-provided catalog entries or HTTP metadata. The PostgreSQL
+    revision CAS is mandatory and legacy/no-SQL operation cannot opt in.
+    """
+    raw_ids = str(
+        os.environ.get("ASSISTANT_SKILL_PUBLICATION_TRUSTED_IDS") or ""
+    ).strip()
+    if not raw_ids:
+        return ()
+
+    requested = tuple(item.strip() for item in raw_ids.split(","))
+    if (
+        any(not item or item == "*" for item in requested)
+        or len(requested) != len(set(requested))
+    ):
+        raise RuntimeError(
+            "Trusted Skill publisher requires unique explicit skill IDs; "
+            "wildcards and empty entries are prohibited."
+        )
+
+    runtime = container.capability_runtime
+    authority = runtime.publication_authority
+    if authority is None:
+        raise RuntimeError(
+            "Trusted Skill publisher requires configured PostgreSQL authority."
+        )
+    loader = container.support_loader
+    verified = set(discovered_skill_ids)
+    # Validate and materialize the *entire* operator-approved input before
+    # any SQL publish; an unknown ID must never partially publish peers.
+    materialized = []
+    for skill_id in requested:
+        if skill_id not in verified or skill_id not in loader._skill_manifests:
+            raise RuntimeError(
+                f"Trusted Skill publication ID is not a server manifest: {skill_id}"
+            )
+        definition = loader.load_skill(skill_id)
+        metadata = definition.metadata
+        if (
+            definition.capability_id != skill_id
+            or definition.kind.value != "SKILL"
+            or definition.execution_mode.value != "CONTEXT_ONLY"
+            or metadata.get("provenance") != "SERVER_SKILL_MANIFEST"
+            or metadata.get("server_managed") is not True
+            or metadata.get("runtime_owned") is not True
+            or metadata.get("loaded") is not True
+            or not str(metadata.get("instruction") or "").strip()
+        ):
+            raise RuntimeError(
+                f"Trusted Skill publication requires verified materialization: {skill_id}"
+            )
+        materialized.append(definition)
+
+    # Each row was reserved as SYSTEM by bootstrap. The returned revision is
+    # an actual PostgreSQL read-through (not a hard-coded expected_revision).
+    # Repeated startup accepts an identical already-DIRECT digest; mutation
+    # or revoked records remain CAS/tombstone-fenced and abort startup.
+    for definition in materialized:
+        reservation = await authority.reserve_system_namespace(definition)
+        await runtime.publish_system_direct_context(
+            definition, expected_revision=reservation.revision
+        )
+    return requested
+
+
 async def _observe_legacy_waiting_residue(uow_factory: Any) -> None:
     """Emit bounded R13 rollout evidence without mutating durable state."""
 
@@ -873,6 +983,8 @@ async def bootstrap_runtime_kernel(
     eventing_manager: EventingManager,
 
     security_services: Dict[str, Any] = None,
+    skill_publication_authority: Any = None,
+    skill_publication_engine: Any = None,
 ) -> ApplicationContainer:
     """Khởi tạo EventBus, Container, các Runtimes và kích hoạt Boot Sequence cho Kernel."""
     eventing_manager.register_subscribers()
@@ -1015,6 +1127,8 @@ async def bootstrap_runtime_kernel(
         ),
         **(security_services or {}),
     )
+    container.skill_publication_authority = skill_publication_authority
+    container.skill_publication_engine = skill_publication_engine
     eventing_manager.set_dependency_container(container)
     await container.mcp_manager.start_health_checker()
 
@@ -1065,6 +1179,7 @@ async def bootstrap_runtime_kernel(
                 realtime=connection_runtime.realtime,
                 invocation_lifecycle=capability_invocation_lifecycle,
                 tool_quota_service=user_tool_quota_service,
+                publication_authority=skill_publication_authority,
             ),
         ),
         ("provider_runtime", ProviderRuntime(cb_manager)),
@@ -1166,6 +1281,15 @@ async def bootstrap_runtime_kernel(
         sandbox_manager=sandbox_manager,
     )
     builtin_support = register_builtin_support(container)
+    await _reserve_bootstrap_capability_namespaces(container, capability_catalog)
+    published_trusted_skills = await _publish_explicit_trusted_bootstrap_skills(
+        container, builtin_support["skills"]
+    )
+    if published_trusted_skills:
+        logger.info(
+            "Operator-attested trusted Skills published",
+            skill_ids=list(published_trusted_skills),
+        )
     container.multi_agent_coordinator.agent_authorizer = (
         lambda identity, agent_id: (
             capability_catalog.contains_definition(agent_id)
@@ -1338,12 +1462,22 @@ async def lifespan(app: FastAPI):
     security_services = bootstrap_security(config=config, storage_engine=storage_engine, 
                                            uow_factory=uow_factory, cb_manager=cb_manager,
                                            eventing_manager=eventing_manager)
-    
-    container = await bootstrap_runtime_kernel(
-        config=config, storage_engine=storage_engine, uow_factory=uow_factory, 
-        http_client=http_client, cb_manager=cb_manager, security_services=security_services, 
-        eventing_manager=eventing_manager
+    skill_publication_engine, skill_publication_authority = (
+        await bootstrap_skill_publication_authority()
     )
+
+    try:
+        container = await bootstrap_runtime_kernel(
+            config=config, storage_engine=storage_engine, uow_factory=uow_factory,
+            http_client=http_client, cb_manager=cb_manager, security_services=security_services,
+            eventing_manager=eventing_manager,
+            skill_publication_authority=skill_publication_authority,
+            skill_publication_engine=skill_publication_engine,
+        )
+    except BaseException:
+        if skill_publication_engine is not None:
+            await skill_publication_engine.dispose()
+        raise
 
     # AE-R12-H1-A owns only stale RUNNING evacuation.  Its immediate bounded
     # startup sweep completes before traffic is served; periodic work never
@@ -1386,6 +1520,9 @@ async def lifespan(app: FastAPI):
 
         if container.mcp_manager:
             await container.mcp_manager.stop()
+
+        if skill_publication_engine is not None:
+            await skill_publication_engine.dispose()
 
         await http_client.aclose()
         await storage_engine.disconnect()

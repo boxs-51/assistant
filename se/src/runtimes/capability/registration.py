@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from copy import deepcopy
 from typing import Any, Dict, List
 
@@ -93,10 +94,11 @@ class ClientCapabilityRegistrationService:
         self.catalog = catalog
         self.connections = connections
 
-    def register(
+    def _preflight(
         self,
         request: ClientCapabilityRegistration,
-    ) -> List[CapabilityImplementation]:
+    ) -> tuple[Dict[str, CapabilityDefinition], List[CapabilityImplementation]]:
+        """Validate the complete batch without any Catalog or SQL mutation."""
         if not request.client_id.strip() or not request.owner_id.strip():
             raise ClientRegistrationError(
                 "Client registration requires non-empty client_id and owner_id"
@@ -116,31 +118,35 @@ class ClientCapabilityRegistrationService:
                 f"Connection '{request.connection_id}' is not owned by "
                 f"'{request.owner_id}'"
             )
+        registered_client_id = str(snapshot.metadata.get("client_id") or "")
+        if registered_client_id and registered_client_id != request.client_id:
+            raise PermissionError(
+                f"Connection '{request.connection_id}' is not owned by "
+                f"client '{request.client_id}'"
+            )
 
-        # Deep-own the caller payload before any object from it can become
-        # catalog state. CapabilityDefinition is mutable and the catalog stores
-        # definition objects by reference, so retaining request-owned models
-        # would allow out-of-band mutation after a successful registration.
+        # Own caller objects before validation/catalog insertion; definitions
+        # are mutable and stored by reference in the local Catalog.
         owned_request = request.model_copy(deep=True)
-
         implementations = [
             self._build_implementation(owned_request, item)
             for item in owned_request.capabilities
         ]
         self._validate_batch(owned_request, implementations)
-
-        definitions: Dict[str, CapabilityDefinition] = {}
-        for item in owned_request.capabilities:
-            definitions.setdefault(
-                item.definition.capability_id,
-                item.definition,
-            )
-
+        definitions: Dict[str, CapabilityDefinition] = {
+            item.definition.capability_id: item.definition
+            for item in owned_request.capabilities
+        }
         self._validate_existing_definitions(definitions)
         self._validate_existing_implementations(implementations)
+        return definitions, implementations
 
-        # Commit only entries proven absent during preflight. Equivalent
-        # definitions/implementations remain canonical and are reused.
+    def _commit(
+        self,
+        definitions: Dict[str, CapabilityDefinition],
+        implementations: List[CapabilityImplementation],
+    ) -> List[CapabilityImplementation]:
+        """No await points between successful preflight and local commit."""
         for capability_id, definition in definitions.items():
             if not self.catalog.contains_definition(capability_id):
                 self.catalog.register_definition(definition)
@@ -156,7 +162,6 @@ class ClientCapabilityRegistrationService:
                     )
                 )
                 continue
-
             self.catalog.register_implementation(implementation)
             registered.append(
                 self.catalog.transition_implementation(
@@ -164,8 +169,69 @@ class ClientCapabilityRegistrationService:
                     CapabilityImplementationState.ENABLED,
                 )
             )
-
         return registered
+
+    def register(
+        self,
+        request: ClientCapabilityRegistration,
+    ) -> List[CapabilityImplementation]:
+        """Legacy local-only registration; WebSocket uses register_durable."""
+        definitions, implementations = self._preflight(request)
+        return self._commit(definitions, implementations)
+
+    async def register_durable(
+        self,
+        request: ClientCapabilityRegistration,
+        *,
+        user_id: str | None,
+        publication_authority: Any | None,
+    ) -> List[CapabilityImplementation]:
+        """WebSocket ingress: authenticate, preflight, SQL reserve, local bind.
+
+        Never infer an owner from an API key or untrusted payload. Under SQL,
+        reservation for ALL logical IDs is transactional and happens before
+        ANY local Catalog mutation. If durable SQL fails, fail closed.
+        """
+        authenticated_owner = str(user_id or "").strip()
+        if not authenticated_owner or authenticated_owner != request.owner_id:
+            raise PermissionError(
+                "Authenticated user does not own capability registration."
+            )
+        # Caller models are mutable: freeze the request before awaiting SQL.
+        owned_request = request.model_copy(deep=True)
+        definitions, implementations = self._preflight(owned_request)
+        # This repository deliberately retains local-only legacy operation
+        # when no PostgreSQL DSN is configured. Once the operator explicitly
+        # configures durable publication, a missing authority must NEVER
+        # degrade WebSocket registrations into process-local Catalog writes.
+        if (
+            publication_authority is None
+            and str(os.environ.get("ASSISTANT_SKILL_PUBLICATION_DATABASE_URL") or "").strip()
+        ):
+            raise ClientRegistrationError(
+                "Configured durable capability namespace authority is unavailable."
+            )
+        initial_snapshot = self.connections.get(owned_request.connection_id)
+        initial_socket = self.connections.get_socket(owned_request.connection_id)
+        if publication_authority is not None and definitions:
+            await publication_authority.reserve_user_namespaces(
+                tuple(definitions.values()), publisher_id=authenticated_owner
+            )
+            # The socket might have disconnected or been replaced while PG
+            # was running. An old request must never resurrect an ENABLED
+            # Catalog binding on a closed/reused connection.
+            definitions, implementations = self._preflight(owned_request)
+            current = self.connections.get(owned_request.connection_id)
+            if (
+                current.connected_at != initial_snapshot.connected_at
+                or current.session_id != initial_snapshot.session_id
+                or self.connections.get_socket(owned_request.connection_id)
+                is not initial_socket
+            ):
+                raise ClientRegistrationError(
+                    "Connection changed during durable capability reservation."
+                )
+        return self._commit(definitions, implementations)
 
     def unregister_connection(self, connection_id: str) -> int:
         implementations = self.catalog.list_implementations_for_connection(
