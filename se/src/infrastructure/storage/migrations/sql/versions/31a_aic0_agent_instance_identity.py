@@ -23,7 +23,8 @@ SQLITE_TRIGGERS = {
         OR NOT EXISTS(SELECT 1 FROM aic_instance_live WHERE agent_instance_id=OLD.agent_instance_id)
       BEGIN SELECT RAISE(ABORT,'AIC_RESERVATION_IMMUTABLE'); END""",
     "trg_aic_live_insert": """CREATE TRIGGER trg_aic_live_insert BEFORE INSERT ON aic_instance_live
-      WHEN NOT EXISTS(SELECT 1 FROM aic_instance_id_reservations r WHERE r.agent_instance_id=NEW.agent_instance_id AND r.status='LIVE')
+      WHEN NEW.state != 'ACTIVE' OR NEW.generation != 1
+        OR NOT EXISTS(SELECT 1 FROM aic_instance_id_reservations r WHERE r.agent_instance_id=NEW.agent_instance_id AND r.status='LIVE')
         OR NOT EXISTS(SELECT 1 FROM users u WHERE u.id=NEW.owner_user_id AND u.status='active')
       BEGIN SELECT RAISE(ABORT,'AIC_LIVE_OWNER_INVALID'); END""",
     "trg_aic_live_update": """CREATE TRIGGER trg_aic_live_update BEFORE UPDATE ON aic_instance_live
@@ -63,7 +64,8 @@ PG_FUNCTIONS = {
     "aic_guard_live": """CREATE FUNCTION aic_guard_live() RETURNS trigger AS $$
       BEGIN
         IF TG_OP='INSERT' THEN
-          IF NOT EXISTS (SELECT 1 FROM aic_instance_id_reservations WHERE agent_instance_id=NEW.agent_instance_id AND status='LIVE')
+          IF NEW.state <> 'ACTIVE' OR NEW.generation <> 1
+            OR NOT EXISTS (SELECT 1 FROM aic_instance_id_reservations WHERE agent_instance_id=NEW.agent_instance_id AND status='LIVE')
             OR NOT EXISTS(SELECT 1 FROM users WHERE id=NEW.owner_user_id AND status='active')
           THEN RAISE EXCEPTION 'AIC_LIVE_OWNER_INVALID'; END IF;
         ELSE
