@@ -1323,3 +1323,80 @@ async def test_pg17_unsupported_search_path_denied(request, path_value):
                 "DROP DATABASE IF EXISTS " + name + " WITH (FORCE)"
             ))
         await admin.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_pg17_readonly_migrator_cannot_widen_version(request):
+    """No partial history change when the migration role lacks DDL authority."""
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("external PostgreSQL 17 required")
+    from sqlalchemy.engine import make_url
+
+    parent = request.getfixturevalue("postgres_url")
+    admin = create_async_engine(parent, isolation_level="AUTOCOMMIT")
+    suffix = uuid4().hex[:12]
+    name, role = "aic_pgrole_" + suffix, "aic_pgro_" + suffix
+    created_db = created_role = False
+    url = make_url(parent).set(database=name).render_as_string(
+        hide_password=False
+    )
+    engine = create_async_engine(url)
+    try:
+        async with admin.connect() as c:
+            await c.execute(text("CREATE DATABASE " + name))
+            created_db = True
+            await c.execute(text(
+                "CREATE ROLE " + role + " LOGIN PASSWORD 'aic_readonly_1977'"
+            ))
+            created_role = True
+        _aic_run_real_alembic(url, "896c456631dd")
+        async with engine.begin() as c:
+            await c.execute(text(
+                "ALTER TABLE public.alembic_version "
+                "ALTER COLUMN version_num TYPE VARCHAR(32)"
+            ))
+            await c.execute(text("GRANT USAGE ON SCHEMA public TO " + role))
+            await c.execute(text(
+                "GRANT SELECT ON public.alembic_version TO " + role
+            ))
+        async with admin.connect() as c:
+            await c.execute(text(
+                "GRANT CONNECT ON DATABASE " + name + " TO " + role
+            ))
+        limited = make_url(url).set(
+            username=role, password="aic_readonly_1977"
+        ).render_as_string(hide_password=False)
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "alembic.ini",
+             "upgrade", "5b_conversation_temporal_contract"],
+            cwd=str(Path(__file__).resolve().parents[3]),
+            env=dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=limited),
+            capture_output=True, text=True, check=False, timeout=180,
+        )
+        assert result.returncode != 0
+        assert any(x in result.stderr.lower() for x in (
+            "permission denied", "must be owner", "insufficientprivilege"
+        )), result.stderr[-2600:]
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT version_num FROM public.alembic_version"
+            ))).scalar_one() == "896c456631dd"
+            assert (await c.execute(text("""
+                SELECT character_maximum_length
+                  FROM information_schema.columns
+                 WHERE table_schema='public' AND table_name='alembic_version'
+                   AND column_name='version_num'
+            """))).scalar_one() == 32
+        await engine.dispose()
+        _aic_run_real_alembic(url, "5b_conversation_temporal_contract")
+    finally:
+        await engine.dispose()
+        async with admin.connect() as c:
+            if created_db:
+                await c.execute(text(
+                    "DROP DATABASE IF EXISTS " + name + " WITH (FORCE)"
+                ))
+            if created_role:
+                await c.execute(text("DROP ROLE IF EXISTS " + role))
+        await admin.dispose()
