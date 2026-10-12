@@ -1024,6 +1024,8 @@ class TerminalTool:
             )
             if not isinstance(completion, _BrokerRunCompletion):
                 raise ValueError("unrecognized broker completion type")
+            if completion.tree_ref is None or completion.receipt is None:
+                raise ValueError("missing broker tree identity or cleanup receipt")
             # Bool/JSON/result metadata is not proof. This must be a live,
             # broker-authenticated durable and OS-backed read-through.
             verified = await spawn_port.verify_receipt(
