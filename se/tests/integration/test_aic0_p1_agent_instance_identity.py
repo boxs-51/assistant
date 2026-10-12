@@ -9,6 +9,11 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
+from pathlib import Path
+import shutil
+import socket
+import subprocess
+import sys
 from uuid import uuid4
 
 import pytest
@@ -247,12 +252,63 @@ async def test_aic_sqlite_create_status_both_commit_orders(sqlite_aic):
         await s.rollback()
 
 
+@pytest.fixture
+def postgres_url(tmp_path):
+    """Use caller's genuine PG or provision a disposable native server on GitHub Linux."""
+    external = os.getenv("AIC_TEST_POSTGRES_URL")
+    if external:
+        yield external
+        return
+    if os.getenv("GITHUB_ACTIONS") != "true" or sys.platform == "win32":
+        pytest.skip("No AIC_TEST_POSTGRES_URL and no supported native PG test runner")
+    candidates = []
+    if shutil.which("pg_config"):
+        config = subprocess.run(
+            ["pg_config", "--bindir"], capture_output=True, text=True, check=False
+        )
+        if config.returncode == 0:
+            candidates.append(Path(config.stdout.strip()))
+    candidates.extend(sorted(Path("/usr/lib/postgresql").glob("*/bin"), reverse=True))
+    binaries = next(
+        (b for b in candidates if (b / "initdb").is_file() and (b / "pg_ctl").is_file()),
+        None,
+    )
+    if binaries is None:
+        pytest.skip("Native PostgreSQL initdb/pg_ctl unavailable on this runner")
+    data = tmp_path / "nativepg"
+    log = tmp_path / "nativepg.log"
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    init = subprocess.run(
+        [str(binaries / "initdb"), "-D", str(data), "-U", "postgres",
+         "--auth-local=trust", "--auth-host=trust", "--no-sync"],
+        capture_output=True, text=True, timeout=40, check=False,
+    )
+    assert init.returncode == 0, "Native PG initdb failed: " + init.stderr[-2500:]
+    start = subprocess.run(
+        [str(binaries / "pg_ctl"), "-D", str(data), "-l", str(log),
+         "-o", f"-F -h 127.0.0.1 -p {port}", "-w", "start"],
+        capture_output=True, text=True, timeout=40, check=False,
+    )
+    assert start.returncode == 0, (
+        "Native PG startup failed: " + start.stderr[-1000:] + " " +
+        (log.read_text(errors="replace")[-2000:] if log.exists() else "")
+    )
+    try:
+        yield f"postgresql+asyncpg://postgres@127.0.0.1:{port}/postgres"
+    finally:
+        subprocess.run(
+            [str(binaries / "pg_ctl"), "-D", str(data), "-m", "immediate",
+             "-w", "stop"],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+
+
 @pytest.mark.asyncio
-@pytest.mark.skipif(not os.getenv("AIC_TEST_POSTGRES_URL"),
-                    reason="real PostgreSQL requires AIC_TEST_POSTGRES_URL")
-async def test_aic_native_postgres_nonkey_status_update_lock():
+async def test_aic_native_postgres_nonkey_status_update_lock(postgres_url):
     # Real two-session row lock; no fake dialect or SQLite-as-PG substitution.
-    url = os.environ["AIC_TEST_POSTGRES_URL"]
+    url = postgres_url
     schema = "aic426_" + uuid4().hex[:12]
     admin = create_async_engine(url)
     async with admin.begin() as c:
