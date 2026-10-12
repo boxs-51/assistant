@@ -208,11 +208,12 @@ async def test_postgres17_two_os_workers_terminalize_one_task_once(tmp_path):
                     UserBudgetReservationRecord.owner_user_id == "r7j-user",
                 )
             )).scalars().all()
+            # The claim FK is to AgentExecution, not AgentTask.
+            # This isolated database has only the one source execution.
             claims = (await session.execute(
-                select(AgentResumeClaimRecord).where(
-                    AgentResumeClaimRecord.task_id == TASK_ID,
-                )
+                select(AgentResumeClaimRecord)
             )).scalars().all()
+            assert len(claims) == 1
             assert task.status == "COMPLETED"
             assert task.revision == original_revision + 1
             assert budget.state == "CLOSED" and budget.closed_at is not None
