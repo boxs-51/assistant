@@ -289,38 +289,63 @@ class DurableNativeInvocationAuthorityB0:
                        VALUES (?, ?, ?, ?, ?)""",
                     (*scope, time.time()),
                 )
+                # Retire each issued authority even when its independently
+                # maintained attempt already reached a terminal/unknown state.
+                # An UNKNOWN effect must never be rewritten as proven DENIED.
+                # The tombstone and all transitions commit in one writer CAS.
                 rows = db.execute(
-                    """SELECT tool_call_id FROM native_invocation_authority_b0
-                       WHERE owner_id=? AND execution_id=? AND sandbox_id=?
-                         AND lease_generation=? AND state='ISSUED'""",
+                    """SELECT n.tool_call_id, a.state
+                       FROM native_invocation_authority_b0 AS n
+                       LEFT JOIN attempts AS a
+                         ON a.execution_id=n.execution_id
+                        AND a.tool_call_id=n.tool_call_id
+                        AND a.owner_id=n.owner_id
+                        AND a.sandbox_id=n.sandbox_id
+                        AND a.lease_generation=n.lease_generation
+                       WHERE n.owner_id=? AND n.execution_id=?
+                         AND n.sandbox_id=? AND n.lease_generation=?
+                         AND n.state='ISSUED'""",
                     scope,
                 ).fetchall()
-                for (tool_call_id,) in rows:
-                    # A matching unresolved attempt MUST be retired in the
-                    # same transaction as the authority state. If another
-                    # transition occurred this invariant fails closed.
-                    changed = db.execute(
-                        """UPDATE attempts SET state='DENIED'
-                           WHERE owner_id=? AND execution_id=? AND sandbox_id=?
-                             AND lease_generation=? AND tool_call_id=?
-                             AND state='RESERVED'""",
-                        (*scope, tool_call_id),
-                    ).rowcount
-                    if changed != 1:
-                        raise NativeAuthorityDeniedB0(
-                            "native generation attempt state is inconsistent"
+                for tool_call_id, attempt_state in rows:
+                    # A legitimate ledger transition may independently have
+                    # marked a reservation as OUTCOME_UNKNOWN/DISPATCHING.
+                    # Never roll back the tombstone on such a mixed state.
+                    if attempt_state in ("RESERVED", "DISPATCHING"):
+                        new_attempt = (
+                            "DENIED" if attempt_state == "RESERVED"
+                            else "OUTCOME_UNKNOWN"
                         )
-                changed = db.execute(
-                    """UPDATE native_invocation_authority_b0
-                       SET state='PREFLIGHT_DENIED'
-                       WHERE owner_id=? AND execution_id=? AND sandbox_id=?
-                         AND lease_generation=? AND state='ISSUED'""",
-                    scope,
-                ).rowcount
-                if changed != len(rows):
-                    raise NativeAuthorityDeniedB0(
-                        "native generation revocation CAS was not exclusive"
+                        updated = db.execute(
+                            """UPDATE attempts SET state=?
+                               WHERE owner_id=? AND execution_id=?
+                                 AND sandbox_id=? AND lease_generation=?
+                                 AND tool_call_id=? AND state=?""",
+                            (new_attempt, *scope, tool_call_id, attempt_state),
+                        ).rowcount
+                        if updated != 1:
+                            raise NativeAuthorityDeniedB0(
+                                "native generation attempt CAS conflict"
+                            )
+                    # Missing/mismatched ledger rows and UNKNOWN effects are
+                    # fenced as UNKNOWN, never misrepresented as clean denial.
+                    new_authority = (
+                        "PREFLIGHT_DENIED"
+                        if attempt_state in ("RESERVED", "DENIED")
+                        else "OUTCOME_UNKNOWN"
                     )
+                    updated = db.execute(
+                        """UPDATE native_invocation_authority_b0 SET state=?
+                           WHERE owner_id=? AND execution_id=?
+                             AND sandbox_id=? AND lease_generation=?
+                             AND tool_call_id=? AND state='ISSUED'""",
+                        (new_authority, *scope, tool_call_id),
+                    ).rowcount
+                    if updated != 1:
+                        raise NativeAuthorityDeniedB0(
+                            "native generation authority CAS conflict"
+                        )
+                changed = len(rows)
                 db.execute("COMMIT")
                 return changed
             except BaseException:
