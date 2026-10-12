@@ -178,3 +178,28 @@ def test_public_metadata_and_dispatch_have_no_broker_arguments():
         )
         popen.assert_not_called()
     assert result["error"]["code"] == "INVALID_ARGUMENT"
+
+
+def test_missing_tree_or_receipt_never_returns_success():
+    for tree_ref, receipt in [(None, object()), (object(), None)]:
+        completion = terminal_module._BrokerRunCompletion(
+            outcome="EXITED", tree_ref=tree_ref, receipt=receipt,
+            exit_code=0,
+        )
+        port = _SyntheticPort(completion)
+        result = _call(port)
+        assert result["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+        assert [kind for kind, _ in port.calls] == ["run"]
+
+
+def test_valid_public_execute_cannot_inject_private_port():
+    tool = TerminalTool()
+    port = _SyntheticPort()
+    with patch.object(tool, "run", return_value={"ok": True, "data": "DIRECT"}) as run:
+        answer = tool.execute(
+            action="run", command="synthetic-never-executed",
+            spawn_port=port, authority=object(),
+        )
+    assert answer["data"] == "DIRECT"
+    run.assert_called_once()
+    assert port.calls == []
