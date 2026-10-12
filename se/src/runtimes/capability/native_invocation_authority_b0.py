@@ -184,9 +184,11 @@ class DurableNativeInvocationAuthorityB0:
                     raise NativeAuthorityDeniedB0(
                         "foreign, forged, consumed or stale authority"
                     )
-                if time.time() >= authority.deadline_unix:
-                    # Still a pre-spawn denial, permanently burn the token.
-                    pass
+                # Expired or unexpired, this diagnostic stage always burns
+                # the capability before ANY possible OS spawn. Preserve the
+                # expiry reason after the durable transaction, never permit a
+                # future caller to reinterpret an expired token as valid.
+                expired = time.time() >= authority.deadline_unix
                 changed = db.execute(
                     """UPDATE native_invocation_authority_b0
                        SET state='PREFLIGHT_DENIED'
@@ -212,9 +214,72 @@ class DurableNativeInvocationAuthorityB0:
             except BaseException:
                 db.execute("ROLLBACK")
                 raise
+        if expired:
+            raise NativeAuthorityDeniedB0(
+                "expired native authority irrevocably denied before OS spawn"
+            )
         raise NativeAuthorityDeniedB0(
             "native SE B0 not production released: denied before OS spawn"
         )
+
+    def revoke_generation(
+        self, *, owner_id: str, execution_id: str,
+        sandbox_id: str, lease_generation: str,
+    ) -> int:
+        """Server-only NEGATIVE revocation of exact generation, across workers.
+
+        One SQLite BEGIN IMMEDIATE fence serializes generation revocation
+        against the exact ticket preflight CAS and any other issuer. This
+        method NEVER mints rights, launches a process or certifies cleanup.
+        A hostile same-UID caller with direct database access remains an OS
+        authority-isolation blocker; this is not a public endpoint.
+        """
+        scope = (owner_id, execution_id, sandbox_id, lease_generation)
+        if any(
+            not isinstance(v, str) or not v or v != v.strip()
+            for v in scope
+        ):
+            raise NativeAuthorityDeniedB0("invalid generation revocation scope")
+        with closing(self.attempts._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                rows = db.execute(
+                    """SELECT tool_call_id FROM native_invocation_authority_b0
+                       WHERE owner_id=? AND execution_id=? AND sandbox_id=?
+                         AND lease_generation=? AND state='ISSUED'""",
+                    scope,
+                ).fetchall()
+                for (tool_call_id,) in rows:
+                    # A matching unresolved attempt MUST be retired in the
+                    # same transaction as the authority state. If another
+                    # transition occurred this invariant fails closed.
+                    changed = db.execute(
+                        """UPDATE attempts SET state='DENIED'
+                           WHERE owner_id=? AND execution_id=? AND sandbox_id=?
+                             AND lease_generation=? AND tool_call_id=?
+                             AND state='RESERVED'""",
+                        (*scope, tool_call_id),
+                    ).rowcount
+                    if changed != 1:
+                        raise NativeAuthorityDeniedB0(
+                            "native generation attempt state is inconsistent"
+                        )
+                changed = db.execute(
+                    """UPDATE native_invocation_authority_b0
+                       SET state='PREFLIGHT_DENIED'
+                       WHERE owner_id=? AND execution_id=? AND sandbox_id=?
+                         AND lease_generation=? AND state='ISSUED'""",
+                    scope,
+                ).rowcount
+                if changed != len(rows):
+                    raise NativeAuthorityDeniedB0(
+                        "native generation revocation CAS was not exclusive"
+                    )
+                db.execute("COMMIT")
+                return changed
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
 
     def reconcile_after_restart(self) -> int:
         """Conservatively invalidate minted-but-unconsumed credentials."""
