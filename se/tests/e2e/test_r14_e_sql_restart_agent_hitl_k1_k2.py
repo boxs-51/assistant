@@ -54,6 +54,7 @@ from se.src.infrastructure.storage.repositories.capability_invocations import Sq
 from se.src.runtimes.agent.contracts.context import AgentExecutionContext
 from se.src.runtimes.agent.persistence import DurableAgentStore
 from se.src.runtimes.agent.task_budget import TaskBudgetService
+from se.tests.e2e import test_r7_j_real_network_exit_gate as r7j
 
 TASK_ID = "r14e-p1a-task"
 
@@ -86,7 +87,6 @@ def _task_budget_service(sessions):
         ),
         default_policy=TaskBudgetPolicy(version="r14-e-p1a"),
     )
-from se.tests.e2e import test_r7_j_real_network_exit_gate as r7j
 
 
 def _atomic_json(path: Path, payload: dict) -> None:
