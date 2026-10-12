@@ -139,6 +139,34 @@ class KernelOwnedTreeRecoveryTests(unittest.TestCase):
             nested.rmdir()
             cg.rmdir()
 
+    def test_real_hard_crash_after_cgroup_create_before_journal_insert(self) -> None:
+        delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
+        if not delegated:
+            self.skipTest("KERNEL_CGROUP_POSITIVE_NOT_RUN: no delegated root")
+        with tempfile.TemporaryDirectory(prefix="sbx3-untracked-cgroup-") as tmp:
+            journal = Path(tmp) / "state.sqlite"
+            identity = self._identity()
+            expected = Path(delegated) / ("sbx3-" + identity.generation)
+            worker_script = (
+                "import os, pathlib\n"
+                f"pathlib.Path({str(expected)!r}).mkdir(mode=0o700)\n"
+                "os._exit(79)\n"
+            )
+            exited = subprocess.run(
+                [sys.executable, "-c", worker_script], timeout=20,
+                check=False,
+            )
+            self.assertEqual(exited.returncode, 79)
+            restored = LinuxCgroupTreeLedger(Path(delegated), journal)
+            unknown = restored.discover_unregistered_cgroups()
+            self.assertIn(expected, unknown)
+            with self.assertRaises(CgroupTreeMismatch):
+                restored.recover_and_verify_empty(identity)
+            with self.assertRaises(CgroupTreeMismatch):
+                restored.enroll(identity)
+            self.assertTrue(expected.is_dir())
+            expected.rmdir()  # Explicit operator/test cleanup only.
+
     def test_real_crash_between_kernel_empty_and_receipt_commit(self) -> None:
         delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
         if not delegated:
