@@ -52,13 +52,14 @@ async def _tables(engine, *, dialect: str):
         if dialect == "sqlite":
             await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
         await conn.run_sync(User.__table__.create)
-        await conn.run_sync(AgentInstanceReservationRecord.__table__.create)
-        await conn.run_sync(AgentInstanceLiveRecord.__table__.create)
-        guards = MIG._SQLITE_GUARDS if dialect == "sqlite" else (
-            MIG._PG_FUNCTIONS + MIG._PG_TRIGGERS
-        )
-        for sql in guards:
-            await conn.execute(text(sql))
+        if dialect == "postgresql":
+            # Execute the actual Alembic upgrade with PostgreSQL DDL and PL/pgSQL.
+            await conn.run_sync(lambda sync: _run_aic_migration(sync, direction="upgrade"))
+        else:
+            await conn.run_sync(AgentInstanceReservationRecord.__table__.create)
+            await conn.run_sync(AgentInstanceLiveRecord.__table__.create)
+            for sql in MIG._SQLITE_GUARDS:
+                await conn.execute(text(sql))
 
 
 async def _user(engine, uid="alice", status="active"):
@@ -340,6 +341,16 @@ async def test_aic_native_postgres_nonkey_status_update_lock(postgres_url):
             with pytest.raises(AgentInstanceDenied):
                 await AgentInstanceRepository(s).create("alice", "d", "v")
             await s.rollback()
+        # Database-layer owner deletion must also fail when AIC live binding exists.
+        async with sessions() as s:
+            with pytest.raises(DatabaseError):
+                await s.execute(text("DELETE FROM users WHERE id='alice'"))
+            await s.rollback()
+        async with engine.begin() as conn:
+            with pytest.raises(RuntimeError, match="downgrade denied"):
+                await conn.run_sync(
+                    lambda sync: _run_aic_migration(sync, direction="downgrade")
+                )
     finally:
         await engine.dispose()
         async with admin.begin() as c:
