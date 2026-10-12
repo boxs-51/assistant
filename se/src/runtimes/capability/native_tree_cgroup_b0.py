@@ -67,6 +67,20 @@ class VerifiedEmptyWitness:
     production_usable: bool = False
 
 
+@dataclass(frozen=True)
+class EmptyTreeAuditObservation:
+    """Direct kernel/SQL read-through, NEVER a root-delete authorization."""
+
+    owner_id: str
+    execution_id: str
+    sandbox_id: str
+    generation: str
+    cgroup_device: int
+    cgroup_inode: int
+    observed: str = "EMPTY_OBSERVED_DIAGNOSTIC"
+    delete_permitted: bool = False
+
+
 class LinuxCgroupTreeLedger:
     """Durable OS-owned tree registry with an exact-generation kernel witness.
 
@@ -308,8 +322,48 @@ class LinuxCgroupTreeLedger:
         raise CgroupTreeNotEmpty("OS-owned process hierarchy did not become empty")
 
 
+    def audit_committed_empty(
+        self, identity: CgroupTreeIdentity
+    ) -> EmptyTreeAuditObservation:
+        """Revalidate a committed exact-generation kernel witness under SQL lock.
+
+        This read-through refuses forged Python receipts. SQLite BEGIN IMMEDIATE
+        coordinates cooperating journal writers, NOT external cgroup attachment
+        or a non-existent production spawn fence. NEVER use the observation to
+        delete a root or mark an Agent/CRT result complete.
+        """
+        with closing(self._connect()) as db:
+            db.execute("BEGIN IMMEDIATE")
+            try:
+                path, dev, inode, status = self._load(identity)
+                if status != "VERIFIED_EMPTY":
+                    raise CgroupTreeMismatch("no committed OS kernel-empty generation")
+                for _ in range(2):
+                    events = (path / "cgroup.events").read_text(encoding="ascii").splitlines()
+                    procs = (path / "cgroup.procs").read_text(encoding="ascii").strip()
+                    if "populated 0" not in events or procs:
+                        raise CgroupTreeNotEmpty(
+                            "kernel tree repopulated after committed receipt"
+                        )
+                newpath, newdev, newinode, newstate = self._load(identity)
+                if (
+                    newpath != path or newdev != dev or newinode != inode
+                    or newstate != "VERIFIED_EMPTY"
+                ):
+                    raise CgroupTreeMismatch("durable kernel identity changed during audit")
+                db.execute("COMMIT")
+            except BaseException:
+                db.execute("ROLLBACK")
+                raise
+        return EmptyTreeAuditObservation(
+            identity.owner_id, identity.execution_id, identity.sandbox_id,
+            identity.generation, dev, inode,
+        )
+
+
 __all__ = [
     "CgroupTreeIdentity",
+    "EmptyTreeAuditObservation",
     "CgroupTreeMismatch",
     "CgroupTreeNotEmpty",
     "CgroupTreeUnavailable",
