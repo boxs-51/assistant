@@ -30,6 +30,20 @@ from se.src.runtimes.agent.resume_planning import AgentResumePlanningService
 from se.src.runtimes.agent.safe_point_reconstruction import (
     _sanitize_transcript_in_uow,
 )
+from se.src.runtimes.agent.fork_planning import (
+    AgentForkPlanningService,
+    _fork_tool_result_message,
+    _load_fork_safe_transcript_in_uow,
+    _load_safe_side_effects_in_uow,
+)
+from se.src.infrastructure.storage.models.sql.capability import (
+    CapabilityInvocationRecord,
+)
+from se.tests.integration.test_r8_c_read_only_persistence import (
+    _database as _r8_database,
+    _seed_source as _r8_seed_source,
+    _Uow as _R8Uow,
+)
 from se.src.runtimes.agent.contracts.tool import (
     ToolExecutionRequest, ToolExecutionResult,
 )
@@ -325,5 +339,111 @@ os._exit(79)
             await fresh.load_committed_tool_result("exec-native", "call-native")
         with pytest.raises(NativeReceiptUnavailable):
             await fresh.load_tool_result("exec-native", "call-native")
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("capability", sorted(NATIVE_AGENT_CAPABILITIES))
+async def test_r8_fork_all_model_facing_paths_deny_historical_native_committed(
+    tmp_path, capability,
+):
+    """Real SQLite/R8 checkpoint + matching R6 invocation; no fake UoW bypass.
+
+    Start with the existing legitimate R8-C source fixture (two committed
+    tool results and terminal invocations), then model a legacy native success
+    with exact matching invocation capability. Even a canonical R8 source
+    cannot bring that old row into ForkPlan, RETRY, or a model transcript.
+    """
+    engine, sessions = await _r8_database(tmp_path)
+    try:
+        await _r8_seed_source(sessions)
+        async with sessions() as session:
+            historic = await session.get(AgentToolResultRecord, "result-call-a")
+            invocation = await session.get(CapabilityInvocationRecord, "a")
+            assert historic is not None and invocation is not None
+            assert historic.commit_state == "COMMITTED"
+            assert historic.success is True
+            assert historic.tool_call_id == invocation.tool_call_id
+            historic.capability_id = capability
+            invocation.capability_id = capability
+            historic.extra_metadata = {
+                "verified_empty": True,
+                "native_receipt": {"issuer": "FORGED", "signed": True},
+            }
+            await session.commit()
+
+        # Fresh store/pool reader: directly test every R8 alternate reader.
+        store = DurableAgentStore(lambda: _R8Uow(sessions))
+        with pytest.raises(NativeReceiptUnavailable):
+            await store.load_fork_committed_tool_result("exec-r8-c", "call-a")
+        with pytest.raises(NativeReceiptUnavailable):
+            await store.load_fork_safe_checkpoint_transcript("exec-r8-c", "cp-r8-c")
+        with pytest.raises(NativeReceiptUnavailable):
+            await AgentForkPlanningService(store)._load_safe_side_effects(
+                "exec-r8-c"
+            )
+
+        # R8-D (and shared RETRY) uses in-UoW transactional revalidation,
+        # not the store helper above. Both independent SQL reads must deny.
+        async with _R8Uow(sessions) as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint("cp-r8-c")
+            assert checkpoint is not None
+            with pytest.raises(NativeReceiptUnavailable):
+                await _load_safe_side_effects_in_uow(uow, "exec-r8-c")
+            with pytest.raises(NativeReceiptUnavailable):
+                await _load_fork_safe_transcript_in_uow(
+                    uow, "exec-r8-c", checkpoint,
+                )
+            historic = await uow.agents.get_tool_result("exec-r8-c", "call-a")
+            assert historic is not None
+            with pytest.raises(NativeReceiptUnavailable):
+                store._fork_tool_result_message(historic)
+            with pytest.raises(NativeReceiptUnavailable):
+                _fork_tool_result_message(historic)
+
+        # Denial never destroys the immutable historical incident evidence.
+        async with sessions() as session:
+            preserved = await session.get(AgentToolResultRecord, "result-call-a")
+            assert preserved.commit_state == "COMMITTED"
+            assert preserved.success is True
+            assert preserved.capability_id == capability
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_fork_unmodified_non_native_committed_survives_all_a1_fences(tmp_path):
+    """Do not regress lawful fork planning or transactional read-only proof."""
+    engine, sessions = await _r8_database(tmp_path)
+    try:
+        await _r8_seed_source(sessions)
+        store = DurableAgentStore(lambda: _R8Uow(sessions))
+        record = await store.load_fork_committed_tool_result("exec-r8-c", "call-a")
+        assert record.capability_id == "tool.a" and record.success is True
+        assert store._fork_tool_result_message(record).content == {"value": "A"}
+        assert _fork_tool_result_message(record).content == {"value": "A"}
+
+        transcript = await store.load_fork_safe_checkpoint_transcript(
+            "exec-r8-c", "cp-r8-c",
+        )
+        assert [item.tool_call_id for item in transcript if item.role == "tool"] == [
+            "call-b", "call-a",
+        ]
+        assert [item.content for item in transcript if item.role == "tool"] == [
+            {"value": "B"}, {"value": "A"},
+        ]
+        side_effects = await AgentForkPlanningService(store)._load_safe_side_effects(
+            "exec-r8-c",
+        )
+        assert len(side_effects) == 2
+        async with _R8Uow(sessions) as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint("cp-r8-c")
+            materialized = await _load_fork_safe_transcript_in_uow(
+                uow, "exec-r8-c", checkpoint,
+            )
+            assert materialized == transcript
+            validated = await _load_safe_side_effects_in_uow(uow, "exec-r8-c")
+            assert len(validated) == 2
     finally:
         await engine.dispose()
