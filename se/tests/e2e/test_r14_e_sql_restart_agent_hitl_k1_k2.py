@@ -35,6 +35,15 @@ from cl.src.core.realtime_client import GatewayRealtimeClient
 from cl.src.hitl.hitl_manager import HITLManager
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
 from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
+from se.src.application.user_budget import (
+    DualAccountingSettings, UserBudgetDualAccountingService,
+)
+from se.src.infrastructure.storage.models.sql.user_budget import (
+    UserBudgetTaskBindingRecord, UserBudgetReservationRecord,
+    UserBudgetDualAccountingReceiptRecord,
+)
+from se.src.infrastructure.storage.repositories.user_budget import UserBudgetRepository
+from se.src.infrastructure.storage.repositories.user_data.users import UserRepository
 from se.src.infrastructure.storage.models.sql.agent import (
     AgentResumeClaimRecord, AgentTaskRecord, TaskBudgetRecord,
     TaskBudgetReservationRecord,
@@ -48,9 +57,22 @@ from se.src.runtimes.agent.task_budget import TaskBudgetService
 
 TASK_ID = "r14e-p1a-task"
 
+class _R14BudgetUow(r7j._SqliteUow):
+    async def __aenter__(self):
+        await super().__aenter__()
+        self.user_budgets = UserBudgetRepository(self.session)
+        self.users = UserRepository(self.session)
+        return self
+
+
 def _task_budget_service(sessions):
+    factory = lambda: _R14BudgetUow(sessions)
+    dual = UserBudgetDualAccountingService(
+        factory, DualAccountingSettings(enabled=True),
+    )
     return TaskBudgetService(
-        lambda: r7j._SqliteUow(sessions),
+        factory,
+        user_budget_dual_accounting=dual,
         default_limits=TaskBudgetLimits(
             max_total_executions=4,
             max_active_executions=2,
