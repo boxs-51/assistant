@@ -5,19 +5,19 @@
 Stage A introduces a separately migrated PostgreSQL authority for caller-private
 DIRECT-context Skills, server SYSTEM namespace origin, permanent ID collision
 fences, revision CAS, and caller WebSocket capability registration. This feature
-is **opt-in** through \`ASSISTANT_SKILL_PUBLICATION_DATABASE_URL\`; the existing
+is **opt-in** through `ASSISTANT_SKILL_PUBLICATION_DATABASE_URL`; the existing
 non-PG single-process registration behavior remains the legacy mode and is
 **not guaranteed safe for multiworker callers**.
 
 **Intentional compatibility break while PG is configured:** HTTP Gateway
-\`GET /v1/capabilities/?kind=SKILL\` and \`GET /v1/capabilities/{id}\`
+`GET /v1/capabilities/?kind=SKILL` and `GET /v1/capabilities/{id}`
 return **SQL-visible ACTIVE DIRECT_CONTEXT publications only**. The legacy
 Gateway listed permitted server-manifest Skill *metadata* even before their
 instruction was read. Under PG, lazily discovered server Skills have only a
-\`NAMESPACE_RESERVATION\` (\`visibility=NONE\`) and **do not appear** in
+`NAMESPACE_RESERVATION` (`visibility=NONE`) and **do not appear** in
 Gateway GET until a separate trusted server publication. AGENT-eligible
 descriptors continue to be checked by the AGENT authorization policy; an
-Agent's \`skill.load\` is a private read, **not** permission to publish its
+Agent's `skill.load` is a private read, **not** permission to publish its
 instruction to another identity or DIRECT prompts. Existing Gateway consumers
 must not assume legacy metadata-list parity after opting into PostgreSQL.
 
@@ -26,14 +26,14 @@ must not assume legacy metadata-list parity after opting into PostgreSQL.
 An operator who has reviewed and approved a server-owned Skill manifest and
 instruction may explicitly configure a comma-separated allowlist, e.g.:
 
-\`\`\`text
+```text
 ASSISTANT_SKILL_PUBLICATION_DATABASE_URL=postgresql+asyncpg://<database-connection>
 ASSISTANT_SKILL_PUBLICATION_TRUSTED_IDS=approved-skill-a,approved-skill-b
-\`\`\`
+```
 
 Do **not** embed real connection credentials in logs, GitHub issues, PRs, or
 evidence archives. Apply Alembic migrations from
-\`alembic_skill_publications.ini\` before enabling the authority.
+`alembic_skill_publications.ini` before enabling the authority.
 
 This allowlist is an **operator-origin publication decision at boot**, not a
 value accepted from HTTP/WebSocket/Agent inputs. Empty config means *no*
@@ -42,15 +42,15 @@ manifest IDs and missing PG authority fail closed; all IDs and instruction
 bodies are validated before the first public SQL write. On startup, the
 server reserves all builtin SYSTEM namespaces, then materializes only
 the selected validated local manifests and calls
-\`publish_system_direct_context(expected_revision=<current DB revision>)\`.
+`publish_system_direct_context(expected_revision=<current DB revision>)`.
 The repository checks immutable SYSTEM origin, publisher, kind, active
-state and CAS before changing a reservation into \`SERVER_PUBLIC\`.
-The definition retains manifest \`require_auth\`, \`required_scopes\`, and
-\`metadata.required_permissions\`; each reader is re-authorized, and DIRECT
+state and CAS before changing a reservation into `SERVER_PUBLIC`.
+The definition retains manifest `require_auth`, `required_scopes`, and
+`metadata.required_permissions`; each reader is re-authorized, and DIRECT
 still reads the canonical SQL publication instead of Catalog/cache.
 
 The operation is deliberately **not** triggered by browsing the catalog,
-calling AGENT \`skill.load\`, or adding caller-provided metadata. It is
+calling AGENT `skill.load`, or adding caller-provided metadata. It is
 possible to make server Skills visible safely with explicit operator intent
 without expanding trusted authority to arbitrary callers.
 
