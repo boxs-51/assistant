@@ -1,0 +1,69 @@
+name: SBX3 B0 Kernel Cgroup2 Recovery Evidence
+
+on:
+  pull_request:
+    paths:
+      - "se/src/runtimes/capability/native_tree_cgroup_b0.py"
+      - "se/tests/architecture/test_sbx3_cgroup_tree_os_recovery.py"
+      - ".github/workflows/sbx3-b0-cgroup-tree-recovery.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-kernel-cgroup2-hard-crash-positive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Confirm Docker and host cgroup v2
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker version
+          stat -f -c 'host-cgroup-fstype=%T' /sys/fs/cgroup
+          grep -F ' - cgroup2 ' /proc/self/mountinfo
+      - name: Strict OS-owned cgroup v2 crash/reattach/kill/VERIFIED_EMPTY
+        shell: bash
+        run: |
+          set -euo pipefail
+          # A disposable privileged test container provides a real writable
+          # delegated cgroup v2 mount. This does not enable application runtime
+          # privilege escalation; it is exclusively a GitHub Actions evidence job.
+          docker run --rm --privileged --cgroupns=private \
+            -v "$PWD:/src:ro" -w /src \
+            -e PYTHONPATH=/src \
+            -e SBX3_CGROUP_DELEGATED_ROOT=/sys/fs/cgroup \
+            python:3.12-slim \
+            python -m unittest -v \
+              se.tests.architecture.test_sbx3_cgroup_tree_os_recovery
+      - name: Preserve explicit production safety limitation
+        if: always()
+        shell: bash
+        run: |
+          echo "SBX3_LINUX_CGROUP2_KERNEL_WITNESS=DIAGNOSTIC_ONLY"
+          echo "SBX3_ATOMIC_SPAWN_DESTROY=NOT_PROVEN"
+          echo "SBX3_MANAGER_POSITIVE_RELEASE=NOT_WIRED"
+          echo "SBX3_WINDOWS_OS_TREE_BACKEND=NOT_IMPLEMENTED"
+          echo "Do NOT mark unsupported cgroup2 permission as a success."
+
+  windows-kernel-unsupported-fail-closed:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Prove Windows does not mint a forged Linux kernel receipt
+        shell: pwsh
+        run: >-
+          python -m unittest -v
+          se.tests.architecture.test_sbx3_cgroup_tree_os_recovery
+      - name: Explicit Windows status
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Output "SBX3_WINDOWS_CGROUP2_NATIVE_TREE=UNSUPPORTED"
+          Write-Output "SBX3_WINDOWS_APPCONTAINER_RECOVERY=NOT_IMPLEMENTED"
