@@ -78,14 +78,21 @@ class _StoppedSpawnAdmission:
     @staticmethod
     def _require_stopped(pid: int) -> None:
         try:
-            status = (os.path.join("/proc", str(pid), "status"))
+            status = os.path.join("/proc", str(pid), "status")
             with open(status, encoding="ascii") as stream:
-                state = next(
-                    (line.split(":", 1)[1].strip()
-                     for line in stream if line.startswith("State:")), ""
+                fields = dict(
+                    line.split(":", 1)
+                    for line in stream
+                    if line.startswith(("State:", "PPid:"))
                 )
-        except OSError as exc:
-            raise NativeSpawnFenceDenied("kernel process stop state unknown") from exc
+            state = fields.get("State", "").strip()
+            parent = int(fields.get("PPid", "").strip())
+        except (OSError, ValueError) as exc:
+            raise NativeSpawnFenceDenied("kernel process identity or stop state unknown") from exc
+        if parent != os.getpid():
+            raise NativeSpawnFenceDenied(
+                "stopped child is not directly owned by admitting broker worker"
+            )
         if not state or state[0] not in {"T", "t"}:
             raise NativeSpawnFenceDenied("process is not stopped before untrusted exec")
 
