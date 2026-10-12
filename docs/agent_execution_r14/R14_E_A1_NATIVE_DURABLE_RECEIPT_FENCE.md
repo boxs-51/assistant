@@ -22,6 +22,12 @@ terminal adapter. This proposal does NOT cherry-pick obsolete PR #465 SE code.
   _project_continuation_result — no model-facing recovery of forged COMMITTED.
 - AgentResumePlanningService _validate_active_batch_coverage and
   _require_committed_projection — REUSE_COMMITTED blocked.
+- R7-C connection resume historical prefix — DurableAgentStore
+  load_committed_checkpoint_transcript must validate each *old* SQL COMMITTED
+  AgentToolResult with require_native_record before materializing any tool
+  message, even when that tool_call_id is outside the active pending batch.
+  ResumePlan.transcript_snapshot and the model-facing context.resume_transcript
+  are not independent native receipt authority.
 - safe_point_reconstruction — both committed transcript sanitation and active
   batch reconstructed result shortcut require the same negative native gate.
 - R8 fork and shared RETRY_FROM_CHECKPOINT — read-only COMMITTED fork result,
@@ -67,6 +73,13 @@ Tests:
 - Legacy local/pre-dispatch COMMITTED shortcut: native denied before SQL insert.
 - Runtime and recovery mock store bypasses: native blocked.
 - Non-native success and native failure/unknown: unaffected.
+- Real SQLite R7-C WAITING checkpoint with old native COMMITTED
+  historical tool result and a *different* active PENDING/OUTCOME_UNKNOWN
+  tool call: no model-visible old native SUCCESS for all three IDs; preserved
+  SQL row; nonnative historical prefix and native failure/UNKNOWN still work.
+- Actual PostgreSQL17.11 on Linux and Windows with the same historical-prefix
+  case, fresh OS interpreter/SQL connection, exact native denial and artifact
+  containing reader PID plus JUnit (no SQLite substitution).
 - Real SQLite R8-C source checkpoint with terminal CapabilityInvocation,
   old native successful COMMITTED source and forged verified_empty metadata:
   store fork-read, fork-plan side effects, R8-C transcript, R8-D transactional
