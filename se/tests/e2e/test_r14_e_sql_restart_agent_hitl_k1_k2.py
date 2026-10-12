@@ -85,6 +85,9 @@ async def _serve_child(role: str, root: Path, port: int) -> None:
                     email="r14e-pg17-user@example.invalid",
                     password_hash="test-only-not-an-account",
                 ))
+                # Flush FK parent before inserting the session in the same
+                # transaction; PostgreSQL enforces the sessions.user_id FK.
+                await session.flush()
                 session.add(ChatSessionRecord(
                     id=r7j.SESSION_ID, user_id=r7j.USER_ID,
                     organization_id=None, status="active",
