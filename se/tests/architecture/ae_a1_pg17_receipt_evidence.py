@@ -7,6 +7,7 @@ No Agent-native process is launched.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -147,5 +148,17 @@ raise SystemExit(asyncio.run(main()))
         async with _Uow(sessions) as uow:
             preserved = await uow.agents.get_tool_result("exec-a1", "call-a1")
             assert preserved is not None and preserved.commit_state == "COMMITTED"
+        (tmp_path / "ae-a1-pg17-negative-receipt.json").write_text(
+            json.dumps({
+                "server_version_num": version,
+                "database": "ae_a1_receipt",
+                "reader_os_pid": child.pid if hasattr(child, "pid") else None,
+                "native_success_before_commit": "DENIED",
+                "legacy_committed_recovered": "DENIED",
+                "legacy_sql_row_preserved": True,
+                "native_command_activated": False,
+            }, sort_keys=True),
+            encoding="utf-8",
+        )
     finally:
         await engine.dispose()
