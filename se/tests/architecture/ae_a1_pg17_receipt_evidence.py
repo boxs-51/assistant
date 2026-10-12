@@ -140,11 +140,24 @@ raise SystemExit(asyncio.run(main()))
         env["PYTHONPATH"] = os.pathsep.join(
             x for x in (str(repo_root), env.get("PYTHONPATH", "")) if x
         )
-        child = subprocess.run(
+        # Popen exposes the real PID; CompletedProcess from subprocess.run
+        # does not. Preserve OS PID in the artifact as crash/readthrough proof.
+        with subprocess.Popen(
             [sys.executable, "-c", script], env=env, cwd=repo_root,
-            capture_output=True, text=True, timeout=30,
-        )
-        assert child.returncode == 0, child.stderr[-2500:]
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        ) as child:
+            reader_pid = child.pid
+            assert isinstance(reader_pid, int) and reader_pid > 0
+            assert reader_pid != os.getpid(), "Reader must use a new OS process"
+            try:
+                _, child_stderr = child.communicate(timeout=30)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                _, child_stderr = child.communicate()
+                raise AssertionError(
+                    f"AE reader subprocess timed out: {child_stderr[-2500:]}"
+                )
+            assert child.returncode == 0, child_stderr[-2500:]
         async with _Uow(sessions) as uow:
             preserved = await uow.agents.get_tool_result("exec-a1", "call-a1")
             assert preserved is not None and preserved.commit_state == "COMMITTED"
@@ -152,7 +165,7 @@ raise SystemExit(asyncio.run(main()))
             json.dumps({
                 "server_version_num": version,
                 "database": "ae_a1_receipt",
-                "reader_os_pid": child.pid if hasattr(child, "pid") else None,
+                "reader_os_pid": reader_pid,
                 "native_success_before_commit": "DENIED",
                 "legacy_committed_recovered": "DENIED",
                 "legacy_sql_row_preserved": True,
