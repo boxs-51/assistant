@@ -19,7 +19,12 @@ from se.tests.e2e.test_r14_e_sql_restart_agent_hitl_k1_k2 import (
 
 @pytest.mark.e2e
 @pytest.mark.asyncio
-async def test_postgres17_real_s1_kill_and_k2_rediscovery(tmp_path):
+@pytest.mark.parametrize("scenario", [
+    "approve_terminal",
+    "deny_terminal",
+    "effect_before_terminal",
+])
+async def test_postgres17_real_s1_kill_and_k2_rediscovery(tmp_path, scenario):
     url = os.environ.get("R14_E_P1A_POSTGRES_URL", "")
     assert url.startswith("postgresql+asyncpg://"), (
         "Real PostgreSQL 17 DSN is mandatory; no SQLite fallback/skip."
