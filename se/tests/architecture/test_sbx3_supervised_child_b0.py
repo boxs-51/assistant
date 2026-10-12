@@ -103,6 +103,11 @@ class SupervisedNativeKernelTests(unittest.TestCase):
             identity = _identity()
             initial = LinuxCgroupTreeLedger(delegated, journal)
             cgroup = initial.enroll(identity)
+            target_code = (
+                "import pathlib; pathlib.Path("
+                + repr(str(target_sentinel))
+                + ").write_text('should-not-run')"
+            )
             worker = (
                 "import os, pathlib, sys\n"
                 "from se.src.runtimes.capability.native_tree_cgroup_b0 "
@@ -118,7 +123,7 @@ class SupervisedNativeKernelTests(unittest.TestCase):
                 "    os._exit(91)\n"
                 "spawn_supervised_stopped_native_b0(\n"
                 "    NativeTreeLifecycleFence(ledger), identity, sys.executable,\n"
-                f"    ('-I', '-c', {('import pathlib; pathlib.Path(' + repr(str(target_sentinel)) + ').write_text(\"should-not-run\")')!r}),\n"
+                f"    ('-I', '-c', {target_code!r}),\\n"
                 "    _after_stop_for_test=fault_cut,\n"
                 ")\n"
             )
