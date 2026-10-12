@@ -55,11 +55,11 @@ PG_FUNCTIONS = {
           OR NOT EXISTS(SELECT 1 FROM aic_instance_live WHERE agent_instance_id=OLD.agent_instance_id)
         THEN RAISE EXCEPTION 'AIC_RESERVATION_IMMUTABLE'; END IF;
         RETURN NEW; END; $$ LANGUAGE plpgsql""",
-    "aic_guard_live_delete": """CREATE FUNCTION aic_guard_live_delete() RETURNS trigger AS $
+    "aic_guard_live_delete": """CREATE FUNCTION aic_guard_live_delete() RETURNS trigger AS $$
       BEGIN IF NOT EXISTS(SELECT 1 FROM aic_instance_id_reservations
         WHERE agent_instance_id=OLD.agent_instance_id AND status='RETIRED')
         THEN RAISE EXCEPTION 'AIC_LIVE_UNAUTHORIZED_DELETE'; END IF;
-        RETURN OLD; END; $ LANGUAGE plpgsql""",
+        RETURN OLD; END; $$ LANGUAGE plpgsql""",
     "aic_guard_live": """CREATE FUNCTION aic_guard_live() RETURNS trigger AS $$
       BEGIN
         IF TG_OP='INSERT' THEN
