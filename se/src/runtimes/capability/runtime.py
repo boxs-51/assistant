@@ -1446,6 +1446,23 @@ class CapabilityRuntime(BaseRuntime):
                     "for Agent-owned capability invocations."
                 )
 
+        # B0 D2: the Agent adapter is not the only CapabilityRuntime caller.
+        # Reject model-origin process commands before driver resolution/dispatch
+        # until a trusted native broker + receipt is actually wired.
+        if (
+            caller_agent_execution_id is not None
+            and capability_id in {"terminal.run", "terminal.launch", "python.run"}
+        ):
+            raise CapabilityError(
+                code="SBX3_NATIVE_RECEIPT_UNAVAILABLE",
+                message="Agent process execution has no certified native broker.",
+                category="SECURITY",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=capability_id,
+                invocation_id=invocation_id,
+            )
+
         request_metadata = dict(metadata or {})
         metadata_target = request_metadata.pop("target", None)
         try:

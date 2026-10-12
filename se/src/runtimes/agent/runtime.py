@@ -63,6 +63,9 @@ from .wait_policy import (
     ExecutionWaitPolicy,
 )
 from ..capability.sandbox import SandboxManager
+from ..capability.native_tree_recovery_b0 import (
+    require_no_uncertified_agent_success,
+)
 
 
 logger = structlog.get_logger(__name__)
@@ -598,6 +601,9 @@ class AgentRuntime:
                 record = None
         if record is None:
             return None
+        require_no_uncertified_agent_success(
+            str(record.capability_id), record.success is True
+        )
         if getattr(record, "commit_state", "PROVISIONAL") != "COMMITTED":
             return None
         expected_identity = {
@@ -850,6 +856,9 @@ class AgentRuntime:
                 "STALE_RECONCILIATION_SNAPSHOT",
                 "Canonical active-batch slot is no longer COMMITTED.",
             )
+        require_no_uncertified_agent_success(
+            str(record.capability_id), record.success is True
+        )
         source_result_id = getattr(record, "id", None)
         if isinstance(source_result_id, str) and source_result_id:
             self._schedule_f7t_publication_for_committed_result(
@@ -1256,6 +1265,9 @@ class AgentRuntime:
         result: ToolExecutionResult,
         iteration_id: str,
     ) -> None:
+        require_no_uncertified_agent_success(
+            result.capability_id, result.success
+        )
         if self._durable_store is None:
             return
         await self._durable_store.save_tool_result(

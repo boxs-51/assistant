@@ -15,6 +15,9 @@ from ...infrastructure.storage.repositories.capability_invocations import (
 from ...infrastructure.storage.transcript_representation import (
     canonical_transcript_messages,
 )
+from ..capability.native_tree_recovery_b0 import (
+    require_no_uncertified_agent_success,
+)
 from ..capability.contracts.definition import CapabilityIdempotency
 from ..capability.contracts.invocation import (
     CapabilityInvocationState,
@@ -2991,6 +2994,13 @@ class DurableAgentStore:
         Local/server outcomes commit immediately. A linked remote invocation is
         model-consumable only after R6 marks its outcome TERMINAL_COMMITTED.
         """
+        # D2: even if a future direct/recovery caller bypasses Agent adapter,
+        # never persist a successful native command without a trusted broker
+        # receipt. This intentionally does not trust serialized metadata.
+        require_no_uncertified_agent_success(
+            str(values.get("capability_id") or ""),
+            values.get("success") is True,
+        )
         values = _normalize_json_fields(
             values, _TOOL_RESULT_JSON_FIELDS, path="agent_tool_results"
         )
@@ -3068,6 +3078,11 @@ class DurableAgentStore:
     async def load_tool_result(self, execution_id: str, tool_call_id: str):
         async with self.uow_factory() as uow:
             record = await uow.agents.get_tool_result(execution_id, tool_call_id)
+            if record is not None:
+                require_no_uncertified_agent_success(
+                    str(getattr(record, "capability_id", "")),
+                    getattr(record, "success", None) is True,
+                )
             await uow.commit()
             return record
 
@@ -3098,6 +3113,10 @@ class DurableAgentStore:
             if record is None:
                 await uow.commit()
                 return None
+            require_no_uncertified_agent_success(
+                str(getattr(record, "capability_id", "")),
+                getattr(record, "success", None) is True,
+            )
             if getattr(record, "commit_state", "PROVISIONAL") == "COMMITTED":
                 await uow.commit()
                 return record
@@ -3134,6 +3153,10 @@ class DurableAgentStore:
                 self._terminal_projection_from_invocation(values, invocation),
                 _TOOL_RESULT_JSON_FIELDS,
                 path="agent_tool_results",
+            )
+            require_no_uncertified_agent_success(
+                str(values.get("capability_id") or ""),
+                values.get("success") is True,
             )
             if recovery_fence is not None:
                 self._require_recovery_projection_fence_now(

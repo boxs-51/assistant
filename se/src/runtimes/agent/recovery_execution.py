@@ -5,6 +5,9 @@ import json
 from datetime import datetime
 from typing import Any
 
+from ..capability.native_tree_recovery_b0 import (
+    require_no_uncertified_agent_success,
+)
 from ..capability.contracts.definition import CapabilityKind
 from ..capability.contracts.error import (
     CapabilityContinuationDispatchGuardError,
@@ -587,6 +590,9 @@ class AgentRecoveryExecutionService:
             return None
         if str(getattr(record, "commit_state", "PROVISIONAL")) != "COMMITTED":
             return None
+        require_no_uncertified_agent_success(
+            str(record.capability_id), record.success is True
+        )
         return self._tool_result_from_record(
             record,
             iteration=plan.iteration,
@@ -600,6 +606,9 @@ class AgentRecoveryExecutionService:
         action: RecoveryInvocationAction,
         result: ToolExecutionResult,
     ) -> ToolExecutionResult:
+        require_no_uncertified_agent_success(
+            result.capability_id, result.success
+        )
         existing = await self._load_committed_read_only(
             plan,
             action.tool_call_id,

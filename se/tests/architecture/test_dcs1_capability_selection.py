@@ -498,8 +498,8 @@ async def test_agent_runtime_unmarked_empty_snapshot_preserves_legacy_test_compa
                     tool_calls=(
                         {
                             "id": "legacy-call",
-                            "name": "terminal.run",
-                            "arguments": {"command": "echo legacy"},
+                            "name": "file.read",
+                            "arguments": {"path": "legacy-synthetic.txt"},
                         },
                     ),
                 )

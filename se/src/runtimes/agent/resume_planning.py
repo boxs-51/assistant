@@ -5,6 +5,9 @@ import math
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from ..capability.native_tree_recovery_b0 import (
+    require_no_uncertified_agent_success,
+)
 from ..capability.contracts.definition import CapabilityIdempotency
 from ..capability.contracts.error import (
     CapabilityError,
@@ -399,6 +402,13 @@ class AgentResumePlanningService:
                 execution_id,
                 tool_call_id,
             )
+            if committed is not None:
+                # Legacy coverage-only snapshots need not materialize the
+                # result columns. Real durable rows retain full identity.
+                require_no_uncertified_agent_success(
+                    str(getattr(committed, "capability_id", "")),
+                    getattr(committed, "success", None) is True,
+                )
             if committed is None:
                 missing.append(tool_call_id)
         if missing:
@@ -671,6 +681,11 @@ class AgentResumePlanningService:
             execution_id,
             snapshot.tool_call_id,
         )
+        if result is not None:
+            require_no_uncertified_agent_success(
+                str(result.capability_id),
+                result.success is True,
+            )
         if result is None:
             raise ResumePlanRejected(
                 "COMMITTED_TOOL_RESULT_MISSING",

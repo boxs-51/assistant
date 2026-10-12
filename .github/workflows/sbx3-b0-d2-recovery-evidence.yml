@@ -1,0 +1,55 @@
+name: SBX3 B0 D2 Recovery and Fence Evidence
+
+on:
+  pull_request:
+    paths:
+      - "se/src/runtimes/capability/native_tree_recovery_b0.py"
+      - "se/src/runtimes/capability/sandbox.py"
+      - "se/src/runtimes/capability/runtime.py"
+      - "se/src/runtimes/agent/**"
+      - "se/tests/architecture/test_sbx3_d2_recovery_fences.py"
+      - ".github/workflows/sbx3-b0-d2-recovery-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-real-hard-crash-negative:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Run real hard crash, OS tree negative, CRT/AE/root gates
+        run: python -m pytest -q -ra se/tests/architecture/test_sbx3_d2_recovery_fences.py
+      - name: Record native B0 certification limits
+        if: always()
+        run: |
+          echo "SBX3_D2_OS_TREE_REATTACH_POSITIVE=NOT_CERTIFIED"
+          echo "SBX3_D2_AGENT_ACTIVATION=DENY"
+          echo "SBX3_D2_VERIFIED_EMPTY_FROM_FAKE_OS=FORBIDDEN"
+
+  windows-real-hard-crash-negative:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Run real Windows hard crash and fail-closed path
+        run: python -m pytest -q -ra se/tests/architecture/test_sbx3_d2_recovery_fences.py
+      - name: Record native Windows certification limits
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Output "SBX3_D2_WINDOWS_APPCONTAINER=NOT_IMPLEMENTED"
+          Write-Output "SBX3_D2_WINDOWS_OS_TREE_REATTACH=NOT_CERTIFIED"
+          Write-Output "SBX3_D2_AGENT_ACTIVATION=DENY"
