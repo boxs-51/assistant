@@ -136,16 +136,37 @@ def test_downgrade_refuses_nonempty_identity_history(file_database):
 
 @pytest.mark.skipif(not os.getenv("AIC_TEST_POSTGRES_URL"), reason="Real PostgreSQL URL not configured")
 def test_postgresql_real_nonkey_owner_status_conflict():
+    from uuid import uuid4
+    # Real PostgreSQL two independently checked-out physical connections.
+    # A matched, committed users row is MANDATORY; SELECT FOR SHARE on a
+    # missing row would acquire no row-lock and generate a false positive.
     from sqlalchemy import create_engine
     url = os.environ["AIC_TEST_POSTGRES_URL"]
-    engine = create_engine(url, connect_args={"connect_timeout": 3})
+    owner_id = "aic-lock-" + str(uuid4())
+    engine = create_engine(url)
     try:
+        with engine.begin() as seed:
+            seed.execute(text(
+                "INSERT INTO users(id,email,password_hash,status) "
+                "VALUES (:id,:email,'disabled','active')"
+            ), {"id": owner_id, "email": owner_id + "@example.invalid"})
         with engine.connect() as a, engine.connect() as b:
-            a.exec_driver_sql("BEGIN")
-            b.exec_driver_sql("BEGIN")
-            a.exec_driver_sql("SELECT id FROM users WHERE id = :id FOR SHARE", {"id": "aic-pg-test-owner"})
-            b.exec_driver_sql("SET LOCAL lock_timeout='200ms'")
-            with pytest.raises(DBAPIError):
-                b.exec_driver_sql("UPDATE users SET status='inactive' WHERE id=:id", {"id": "aic-pg-test-owner"})
+            tx_a = a.begin()
+            tx_b = b.begin()
+            try:
+                locked = a.execute(text(
+                    "SELECT id FROM users WHERE id=:id FOR SHARE"
+                ), {"id": owner_id}).scalar_one()
+                assert locked == owner_id
+                b.execute(text("SET LOCAL lock_timeout='200ms'"))
+                with pytest.raises(DBAPIError):
+                    b.execute(text(
+                        "UPDATE users SET status='inactive' WHERE id=:id"
+                    ), {"id": owner_id})
+            finally:
+                tx_b.rollback()
+                tx_a.rollback()
+        with engine.begin() as cleanup:
+            cleanup.execute(text("DELETE FROM users WHERE id=:id"), {"id": owner_id})
     finally:
         engine.dispose()
