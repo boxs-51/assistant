@@ -644,7 +644,10 @@ async def run_physical_hard_restart_witness(
             }
         invocation = await invocation_store.get(original_invocation)
         attempts = await invocation_store.list_attempts(original_invocation)
-        assert invocation is not None and invocation.state.value == "COMPLETED"
+        assert invocation is not None
+        assert invocation.state.value == (
+            "FAILED" if scenario == "deny_terminal" else "COMPLETED"
+        )
         # A K2 reconciliation of an already TERMINAL client ledger does NOT
         # create a second execution attempt. K2 owns the resume binding,
         # while the one and only dispatch attempt still belongs to K1.
