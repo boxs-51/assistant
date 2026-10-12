@@ -158,7 +158,7 @@ class SandboxManager:
         if current.state is not SandboxLeaseState.ACTIVE:
             raise SandboxLeaseStateError("native enrollment requires ACTIVE lease")
         self._assert_owned_root(current, current.root.resolve(strict=False))
-        marker = current.root / self._NATIVE_QUARANTINE_MARKER
+        marker = self._native_quarantine_marker(current.sandbox_id)
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         fd = os.open(marker, flags, 0o600)
         try:
@@ -168,7 +168,7 @@ class SandboxManager:
                 os.fsync(file.fileno())
             # Persist the directory entry too on platforms supporting it.
             if os.name == "posix":
-                directory_fd = os.open(current.root, os.O_RDONLY)
+                directory_fd = os.open(marker.parent, os.O_RDONLY)
                 try:
                     os.fsync(directory_fd)
                 finally:
@@ -177,8 +177,14 @@ class SandboxManager:
             # A partial marker is STILL quarantined: never delete it.
             raise
 
+    def _native_quarantine_marker(self, sandbox_id: str) -> Path:
+        # Never store this tombstone inside the child-writable sandbox root.
+        directory = self._base_root / ".sbx3-native-quarantine"
+        directory.mkdir(mode=0o700, exist_ok=True)
+        return directory / sandbox_id
+
     def _require_native_root_empty(self, root: Path) -> None:
-        marker = root / self._NATIVE_QUARANTINE_MARKER
+        marker = self._native_quarantine_marker(root.name)
         if marker.exists() or marker.is_symlink():
             raise NativeTreeUnverifiedError(
                 "native tree quarantined: trusted OS VERIFIED_EMPTY absent"
