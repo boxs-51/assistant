@@ -79,18 +79,29 @@ class _AtomicFakeAuthority:
 
     async def reserve_user_namespaces(self, definitions, *, publisher_id):
         from se.src.infrastructure.storage.repositories.capability_publications import (
-            PublicationConflict,
+            PublicationConflict, _canonical_definition, _digest,
         )
         self.calls += 1
         if self.failure:
             raise self.failure
-        batch = {d.capability_id: d.kind.value for d in definitions}
+        batch = {
+            d.capability_id: (
+                d.kind.value, _digest(_canonical_definition(d))
+            )
+            for d in definitions
+        }
         if any(
-            key in self.owners and self.owners[key] != (publisher_id, kind)
-            for key, kind in batch.items()
+            identifier in self.owners
+            and self.owners[identifier] != (publisher_id, kind, digest)
+            for identifier, (kind, digest) in batch.items()
         ):
-            raise PublicationConflict("A different origin reserved this ID.")
-        self.owners.update({key: (publisher_id, kind) for key, kind in batch.items()})
+            raise PublicationConflict(
+                "A different owner, kind or logical contract reserved this ID."
+            )
+        self.owners.update({
+            identifier: (publisher_id, kind, digest)
+            for identifier, (kind, digest) in batch.items()
+        })
 
 
 @pytest.mark.asyncio
@@ -181,7 +192,24 @@ async def test_ws_durable_preflight_rejects_bad_owner_invalid_batch_and_sql_faul
     )
     assert len(registered) == 1
     assert catalog.contains_definition("ok")
-    assert authority.owners["ok"] == ("alice", "TOOL")
+    assert authority.owners["ok"][:2] == ("alice", "TOOL")
+    assert len(authority.owners["ok"][2]) == 64
+
+    # The same authenticated owner is NOT authorized to replace a different
+    # logical scope contract behind the same reserved capability ID.
+    alternate_catalog, alternate_service = _service(
+        "alice", "client-other", "connection-other"
+    )
+    changed = _request(
+        "alice", "client-other", "connection-other", "ok"
+    )
+    changed.capabilities[0].definition.required_scopes = ["elevated"]
+    with pytest.raises(PublicationConflict):
+        await alternate_service.register_durable(
+            changed, user_id="alice", publication_authority=authority
+        )
+    assert not alternate_catalog.contains_definition("ok")
+
 
 
 
@@ -231,7 +259,7 @@ async def test_ws_disconnect_or_replacement_during_sql_cannot_resurrect_binding(
         assert not catalog.contains_definition("resurrection")
         # SQL reservation is only a non-public tombstone/namespace;
         # no ENABLED local implementation may survive disconnection.
-        assert authority.owners["resurrection"] == ("alice", "TOOL")
+        assert authority.owners["resurrection"][:2] == ("alice", "TOOL")
 
 
 def test_real_websocket_capability_ingress_uses_durable_fence():
@@ -284,7 +312,7 @@ def test_real_websocket_capability_ingress_uses_durable_fence():
             ack = ws.receive_json()
             assert ack["type"] == "capability.registered"
             assert catalog.contains_definition("ws-allowed")
-            assert authority.owners["ws-allowed"] == ("alice", "TOOL")
+            assert authority.owners["ws-allowed"][:2] == ("alice", "TOOL")
 
 
 @pytest.mark.asyncio
