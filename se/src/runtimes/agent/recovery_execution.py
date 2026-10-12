@@ -24,6 +24,7 @@ from .contracts.resume import (
     ResumeInvocationActionKind,
     ResumeTriggerType,
 )
+from .native_receipt_verifier import require_native_receipt, require_native_record
 from .contracts.inference import InferenceMessage
 from .contracts.tool import ToolExecutionResult
 
@@ -587,6 +588,7 @@ class AgentRecoveryExecutionService:
             return None
         if str(getattr(record, "commit_state", "PROVISIONAL")) != "COMMITTED":
             return None
+        require_native_record(record, phase="recovery_COMMITTED_readthrough")
         return self._tool_result_from_record(
             record,
             iteration=plan.iteration,
@@ -600,6 +602,9 @@ class AgentRecoveryExecutionService:
         action: RecoveryInvocationAction,
         result: ToolExecutionResult,
     ) -> ToolExecutionResult:
+        require_native_receipt(
+            result.capability_id, result.success, phase="recovery_before_projection",
+        )
         existing = await self._load_committed_read_only(
             plan,
             action.tool_call_id,
