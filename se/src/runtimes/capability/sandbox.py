@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+import os
 import shutil
+import stat
+from functools import wraps
+from threading import RLock
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from uuid import uuid4
 
@@ -27,6 +31,19 @@ class SandboxPathError(SandboxError):
     pass
 
 
+class NativeTreeUnverifiedError(SandboxError):
+    """A native tree cannot be proven empty; retain its sandbox root."""
+
+
+def _lifecycle_serialized(method):
+    """Serialize manager-local spawn enrollment and destructive transitions."""
+    @wraps(method)
+    def invoke(self, *args, **kwargs):
+        with self._lifecycle_lock:
+            return method(self, *args, **kwargs)
+    return invoke
+
+
 class SandboxManager:
     """Own execution-scoped ephemeral roots without granting host-path authority."""
 
@@ -38,6 +55,32 @@ class SandboxManager:
         if self._base_root in {Path.cwd().resolve(), Path.home().resolve()}:
             raise ValueError("sandbox base_root cannot be ambient cwd or user home")
         self._base_root.mkdir(parents=True, exist_ok=True)
+        self._lifecycle_lock = RLock()
+        # Existing roots have no authenticated in-memory lease on a new
+        # worker. Treat ALL of them as unknown, even if a marker was removed.
+        self._orphan_root_ids = frozenset(
+            entry.name for entry in self._base_root.iterdir()
+            if entry.name.startswith("sbx-")
+        )
+        self._enrolled_native_ids: set[str] = set()
+        # Quarantine is a manager-private sibling of sandbox roots, not a
+        # child-writable path. Once created it must never be auto-repaired
+        # following deletion, symlink or reparse-point replacement.
+        self._quarantine_dir = self._base_root / ".sbx3-native-quarantine"
+        if self._quarantine_dir.is_symlink() or self._is_junction(self._quarantine_dir):
+            raise NativeTreeUnverifiedError("native quarantine path is redirected")
+        # A vanished control directory alongside orphan execution roots is
+        # ambiguous after restart: never recreate it and erase the evidence.
+        if not self._quarantine_dir.exists() and any(
+            entry.name.startswith("sbx-") for entry in self._base_root.iterdir()
+        ):
+            raise NativeTreeUnverifiedError(
+                "quarantine registry missing alongside existing sandbox roots"
+            )
+        self._quarantine_dir.mkdir(mode=0o700, exist_ok=True)
+        control_stat = self._quarantine_dir.stat()
+        self._quarantine_identity = (control_stat.st_dev, control_stat.st_ino)
+        self._require_quarantine_dir()
         self._leases: dict[str, SandboxLease] = {}
         self._profiles: dict[str, SandboxProfile] = {}
         self._execution_leases: dict[str, str] = {}
@@ -46,6 +89,7 @@ class SandboxManager:
     def base_root(self) -> Path:
         return self._base_root
 
+    @_lifecycle_serialized
     def acquire(
         self,
         *,
@@ -76,6 +120,7 @@ class SandboxManager:
         self._leases[sandbox_id] = active
         return active
 
+    @_lifecycle_serialized
     def acquire_for_execution(
         self,
         *,
@@ -137,6 +182,97 @@ class SandboxManager:
             )
         return stored
 
+    # Native B0 is not production-wired. This marker is an irreversible
+    # quarantine tombstone, NOT an OS VERIFIED_EMPTY receipt. A future
+    # authenticated OS broker must own clearing it with a generation fence.
+    _NATIVE_QUARANTINE_MARKER = ".sbx3-native-tree-unverified"
+
+    @_lifecycle_serialized
+    def quarantine_native_tree(self, lease: SandboxLease) -> None:
+        """Durably reject root deletion if any native process might exist.
+
+        Must execute before any experimental native dispatch. Creation is
+        exclusive, and the tombstone survives application/worker restart.
+        The marker carries no positive authority and never enables replay.
+        """
+        current = self.current(lease)
+        if current.state is not SandboxLeaseState.ACTIVE:
+            raise SandboxLeaseStateError("native enrollment requires ACTIVE lease")
+        self._assert_owned_root(current, current.root.resolve(strict=False))
+        marker = self._native_quarantine_marker(current.sandbox_id)
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        fd = os.open(marker, flags, 0o600)
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as file:
+                file.write(current.sandbox_id + "\\n")
+                file.flush()
+                os.fsync(file.fileno())
+            # Persist the directory entry too on platforms supporting it.
+            if os.name == "posix":
+                directory_fd = os.open(marker.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_fd)
+                finally:
+                    os.close(directory_fd)
+        except BaseException:
+            # A partial marker is STILL quarantined: never delete it.
+            raise
+        self._enrolled_native_ids.add(current.sandbox_id)
+
+    @staticmethod
+    def _is_junction(path: Path) -> bool:
+        predicate = getattr(path, "is_junction", None)
+        return bool(callable(predicate) and predicate())
+
+    def _require_quarantine_dir(self) -> None:
+        directory = self._quarantine_dir
+        if (
+            directory.is_symlink()
+            or self._is_junction(directory)
+            or not directory.is_dir()
+            or directory.resolve(strict=False) != directory
+        ):
+            raise NativeTreeUnverifiedError(
+                "trusted quarantine directory is absent or redirected"
+            )
+        control = directory.stat()
+        if (
+            (control.st_dev, control.st_ino) != self._quarantine_identity
+            or (os.name == "posix" and
+                bool(control.st_mode & (stat.S_IWGRP | stat.S_IWOTH)))
+        ):
+            raise NativeTreeUnverifiedError(
+                "quarantine registry identity or permissions changed"
+            )
+
+    def _native_quarantine_marker(self, sandbox_id: str) -> Path:
+        if (
+            not sandbox_id.startswith("sbx-")
+            or len(sandbox_id) != 36
+            or any(letter not in "0123456789abcdef" for letter in sandbox_id[4:])
+        ):
+            raise NativeTreeUnverifiedError("non-canonical sandbox root identity")
+        self._require_quarantine_dir()
+        return self._quarantine_dir / sandbox_id
+
+    def _require_native_root_empty(self, root: Path) -> None:
+        if root.parent != self._base_root or root.is_symlink() or self._is_junction(root):
+            raise NativeTreeUnverifiedError("sandbox root is not a trusted direct child")
+        if root.name in self._enrolled_native_ids or root.name in self._orphan_root_ids:
+            raise NativeTreeUnverifiedError(
+                "native enrollment or orphan root requires OS-owned verification"
+            )
+        marker = self._native_quarantine_marker(root.name)
+        # lstat catches dangling symlinks and denies on all IO/permission errors.
+        try:
+            marker.lstat()
+        except FileNotFoundError:
+            return
+        raise NativeTreeUnverifiedError(
+            "native tree quarantined: trusted OS VERIFIED_EMPTY absent"
+        )
+
+    @_lifecycle_serialized
     def release_execution(
         self,
         execution_id: str,
@@ -189,6 +325,7 @@ class SandboxManager:
             raise SandboxLeaseNotFoundError("sandbox profile is unavailable")
         return profile
 
+    @_lifecycle_serialized
     def quiesce(self, lease: SandboxLease) -> SandboxLease:
         current = self.current(lease)
         if current.state is SandboxLeaseState.QUIESCING:
@@ -203,6 +340,7 @@ class SandboxManager:
         self._leases[current.sandbox_id] = updated
         return updated
 
+    @_lifecycle_serialized
     def begin_cleanup(self, lease: SandboxLease) -> SandboxLease:
         current = self.current(lease)
         if current.state is SandboxLeaseState.CLEANUP:
@@ -215,6 +353,7 @@ class SandboxManager:
         self._leases[current.sandbox_id] = updated
         return updated
 
+    @_lifecycle_serialized
     def destroy(self, lease: SandboxLease) -> SandboxLease:
         current = self.current(lease)
         if current.state is SandboxLeaseState.DESTROYED:
@@ -228,6 +367,7 @@ class SandboxManager:
                 f"cannot destroy sandbox from {current.state.value}"
             )
 
+        self._require_native_root_empty(current.root)
         self._remove_root(current.root)
         destroyed = current.model_copy(
             update={"state": SandboxLeaseState.DESTROYED}
@@ -288,8 +428,11 @@ class SandboxManager:
                 "sandbox root resolves outside manager base"
             ) from exc
 
-    @staticmethod
-    def _remove_root(root: Path) -> None:
+    @_lifecycle_serialized
+    def _remove_root(self, root: Path) -> None:
+        # Every destructive entry point, including acquire rollback and
+        # direct _remove_root callers, must enforce the same quarantine gate.
+        self._require_native_root_empty(root)
         if not root.exists() and not root.is_symlink():
             return
         if root.is_symlink():
@@ -304,6 +447,7 @@ class SandboxManager:
 
 __all__ = [
     "SandboxError",
+    "NativeTreeUnverifiedError",
     "SandboxLeaseNotFoundError",
     "SandboxLeaseStateError",
     "SandboxManager",

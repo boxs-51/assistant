@@ -4,7 +4,9 @@ on:
   pull_request:
     paths:
       - "se/src/runtimes/capability/native_broker_b0.py"
+      - "se/src/runtimes/capability/sandbox.py"
       - "se/tests/architecture/test_sbx3_native_broker_b0.py"
+      - "se/tests/architecture/test_sbx3_native_root_recovery_barrier.py"
       - ".github/workflows/sbx3-b0-native-broker-evidence.yml"
   workflow_dispatch:
 
@@ -44,6 +46,7 @@ jobs:
         run: >-
           python -m pytest -q -ra
           se/tests/architecture/test_sbx3_native_broker_b0.py
+          se/tests/architecture/test_sbx3_native_root_recovery_barrier.py
       - name: Distinguish test output from production certification
         if: always()
         run: |
@@ -66,6 +69,7 @@ jobs:
         run: >-
           python -m pytest -q -ra
           se/tests/architecture/test_sbx3_native_broker_b0.py
+          se/tests/architecture/test_sbx3_native_root_recovery_barrier.py
       - name: Native Windows isolation certification status
         if: always()
         shell: pwsh
