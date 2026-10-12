@@ -273,6 +273,51 @@ class SandboxManager:
         )
 
     @_lifecycle_serialized
+    def inspect_native_cleanup_evidence(self, lease: SandboxLease, *, ledger, identity):
+        """Read-only OS/journal preflight for a quarantined native sandbox.
+
+        Never accepts a caller-provided VerifiedEmptyWitness, never clears the
+        quarantine marker, and NEVER authorizes destroy(). A future dedicated
+        native broker must enforce spawn/cleanup atomicity across processes.
+        """
+        from .native_tree_cgroup_b0 import (
+            CgroupTreeIdentity,
+            CgroupTreeMismatch,
+            LinuxCgroupTreeLedger,
+        )
+
+        current = self.current(lease)
+        if not isinstance(identity, CgroupTreeIdentity):
+            raise CgroupTreeMismatch("invalid native identity object")
+        if not isinstance(ledger, LinuxCgroupTreeLedger):
+            raise CgroupTreeMismatch("native kernel ledger required")
+        if (
+            identity.sandbox_id != current.sandbox_id
+            or identity.execution_id != current.execution_id
+            or identity.owner_id != current.owner_user_id
+        ):
+            raise CgroupTreeMismatch("native owner/execution/sandbox identity mismatch")
+        self._assert_owned_root(current, current.root.resolve(strict=False))
+        self._require_quarantine_dir()
+        marker = self._native_quarantine_marker(current.sandbox_id)
+        try:
+            control = marker.lstat()
+        except FileNotFoundError as exc:
+            raise NativeTreeUnverifiedError(
+                "no durable quarantine marker to bind kernel audit"
+            ) from exc
+        if not stat.S_ISREG(control.st_mode):
+            raise NativeTreeUnverifiedError("quarantine marker is not a regular file")
+        if (
+            current.sandbox_id not in self._enrolled_native_ids
+            and current.sandbox_id not in self._orphan_root_ids
+        ):
+            raise NativeTreeUnverifiedError(
+                "manager has no native enrollment or restart-orphan custody"
+            )
+        return ledger.audit_committed_empty(identity)
+
+    @_lifecycle_serialized
     def release_execution(
         self,
         execution_id: str,
