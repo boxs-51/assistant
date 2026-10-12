@@ -34,12 +34,36 @@ from cl.src.core.client_runtime import ClientRuntime
 from cl.src.core.realtime_client import GatewayRealtimeClient
 from cl.src.hitl.hitl_manager import HITLManager
 from se.src.domain.schemas.agent_execution import AgentExecutionLimits
-from se.src.infrastructure.storage.models.sql.agent import AgentResumeClaimRecord
+from se.src.domain.schemas.task_budget import TaskBudgetLimits, TaskBudgetPolicy
+from se.src.infrastructure.storage.models.sql.agent import (
+    AgentResumeClaimRecord, AgentTaskRecord, TaskBudgetRecord,
+    TaskBudgetReservationRecord,
+)
 from se.src.infrastructure.storage.models.sql.chat_data.session import Session as ChatSessionRecord
 from se.src.infrastructure.storage.models.sql.user_data.user import User
 from se.src.infrastructure.storage.repositories.capability_invocations import SqlCapabilityInvocationStore
 from se.src.runtimes.agent.contracts.context import AgentExecutionContext
 from se.src.runtimes.agent.persistence import DurableAgentStore
+from se.src.runtimes.agent.task_budget import TaskBudgetService
+
+TASK_ID = "r14e-p1a-task"
+
+def _task_budget_service(sessions):
+    return TaskBudgetService(
+        lambda: r7j._SqliteUow(sessions),
+        default_limits=TaskBudgetLimits(
+            max_total_executions=4,
+            max_active_executions=2,
+            max_active_branches=2,
+            max_parallel_agents=2,
+            max_total_tool_calls=8,
+            max_total_inference_calls=8,
+            max_total_tokens=1000,
+            max_total_cost_usd="10",
+            max_delegation_depth=4,
+        ),
+        default_policy=TaskBudgetPolicy(version="r14-e-p1a"),
+    )
 from se.tests.e2e import test_r7_j_real_network_exit_gate as r7j
 
 
@@ -98,6 +122,25 @@ async def _serve_child(role: str, root: Path, port: int) -> None:
             root, db_path=db_path,
             initialize_schema=(role == "s1"), seed_session=(role == "s1"),
         )
+    # Exercise production TaskBudget accounting as part of the SAME SQL
+    # execution/recovery, rather than infer a TaskBudget from a taskless R7J.
+    budget_service = _task_budget_service(state.sessions)
+    state.agent_runtime._task_budget_service = budget_service
+    if role == "s1":
+        await budget_service.create_task_with_budget({
+            "id": TASK_ID,
+            "session_id": r7j.SESSION_ID,
+            "created_by": r7j.USER_ID,
+            "assigned_agent_id": r7j.AGENT_ID,
+            "status": "ASSIGNED",
+            "wait_reasons": [],
+            "input": {"prompt": "r14e-p1a"},
+        })
+        await budget_service.transition_task(
+            TASK_ID,
+            allowed_source_states=("ASSIGNED",),
+            target_state="RUNNING",
+        )
     server, server_task, _ = await _start_fixed_gateway(state.app, port)
     _atomic_json(root / f"{role}-ready.json", {
         "pid": os.getpid(), "port": port, "role": role,
@@ -108,6 +151,7 @@ async def _serve_child(role: str, root: Path, port: int) -> None:
         await _await_file(root / "s1-start.json")
         context = AgentExecutionContext.create(
             execution_id=r7j.EXECUTION_ID,
+            task_id=TASK_ID,
             agent_id=r7j.AGENT_ID,
             session_id=r7j.SESSION_ID,
             correlation_id="r14e-physical-kill",
