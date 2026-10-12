@@ -20,6 +20,16 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Default Alembic PostgreSQL version_num is VARCHAR(32). This historical
+    # revision ID is longer, so without widening *inside this revision*
+    # Alembic fails while stamping 5b before later migrations can run.
+    # Widen only PostgreSQL; SQLite ignores VARCHAR length, and existing
+    # version rows plus branch topology remain unchanged.
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute(sa.text(
+            "ALTER TABLE alembic_version "
+            "ALTER COLUMN version_num TYPE VARCHAR(255)"
+        ))
     op.add_column(
         "sessions",
         sa.Column("next_message_sequence", sa.Integer(), nullable=False, server_default="0"),
