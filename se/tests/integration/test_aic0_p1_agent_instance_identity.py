@@ -261,6 +261,23 @@ def test_live_direct_owner_reassignment_and_invalid_generation_fail(file_databas
             cx.execute("UPDATE aic_instance_id_reservations SET status='BROKEN' WHERE agent_instance_id='a1'")
 
 
+def test_db_genesis_rejects_direct_suspended_or_high_generation_fk_off(file_database):
+    with _connect(file_database) as cx:
+        cx.execute(
+            "INSERT INTO aic_instance_id_reservations VALUES ('forged-genesis','LIVE')"
+        )
+        for state, generation in (("SUSPENDED", 1), ("ACTIVE", 42)):
+            with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_OWNER_INVALID"):
+                cx.execute(
+                    "INSERT INTO aic_instance_live VALUES "
+                    "(?, 'alice', 'definition', 'v1', ?, ?)",
+                    ("forged-genesis", state, generation),
+                )
+        assert cx.execute(
+            "SELECT COUNT(*) FROM aic_instance_live WHERE agent_instance_id='forged-genesis'"
+        ).fetchone()[0] == 0
+
+
 def test_real_identity_contract_does_not_use_nonexistent_auth_flag():
     from se.src.domain.schemas.identity import Identity
     from se.src.application.agent_instance import AgentInstanceService
@@ -318,6 +335,15 @@ async def test_postgresql17_real_native_aic_guards_and_nonkey_status_lock():
         # Execute raw PG trigger DDL from the AIC migration, not a fake model.
         async with engine.begin() as check:
             await check.execute(text(f"SET LOCAL search_path TO {schema}, public"))
+            await check.execute(text(
+                "INSERT INTO aic_instance_id_reservations VALUES ('pg-forged','LIVE')"
+            ))
+            with pytest.raises(DBAPIError):
+                async with check.begin_nested():
+                    await check.execute(text(
+                        "INSERT INTO aic_instance_live VALUES "
+                        "('pg-forged','alice','definition','v1','SUSPENDED',42)"
+                    ))
             await check.execute(text(
                 "INSERT INTO aic_instance_id_reservations VALUES ('pg-i1','LIVE')"
             ))
