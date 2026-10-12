@@ -123,7 +123,7 @@ class SupervisedNativeKernelTests(unittest.TestCase):
                 "    os._exit(91)\n"
                 "spawn_supervised_stopped_native_b0(\n"
                 "    NativeTreeLifecycleFence(ledger), identity, sys.executable,\n"
-                f"    ('-I', '-c', {target_code!r}),\\n"
+                f"    ('-I', '-c', {target_code!r}),\n"
                 "    _after_stop_for_test=fault_cut,\n"
                 ")\n"
             )
