@@ -54,6 +54,22 @@ calling AGENT `skill.load`, or adding caller-provided metadata. It is
 possible to make server Skills visible safely with explicit operator intent
 without expanding trusted authority to arbitrary callers.
 
+## Immutable caller namespace contract digests
+
+An authenticated caller's HTTP or WebSocket `NAMESPACE_RESERVATION` stores
+a SHA-256 digest of the canonical capability definition (including
+`required_scopes`, effect sets, input schemas and other declared fields).
+Even the **same user, same ID and same kind** cannot replay a different
+logical contract from another worker. The digest is normalized using the
+same deterministic `effects` ordering as Skill publication CAS.
+Only an exactly matching active reservation can replay idempotently.
+
+Stage-A staging data written by older implementations may contain legacy
+caller namespace rows with `payload_digest = NULL`. These **must not** be
+silently reinterpreted as equivalent to arbitrary new definitions. Existing
+rows without an attested digest fail the strict replay fence and require
+a separately audited administrative migration or a new capability ID;
+do not delete/rewrite rows or bypass uniqueness from a runtime request.
 ## Deployment, rollback and retention caveats
 
 1. Test the migration in a staging database. Verify the five main jobs:
