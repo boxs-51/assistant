@@ -359,3 +359,142 @@ def test_bad_deadline_or_missing_identity_fails_before_durable_reservation(tmp_p
             deadline_unix=time.time() + 15,
         )
     assert journal.state(_identity()) is None
+
+
+def test_permanent_revoke_before_any_issue_denies_new_ids_across_restart(tmp_path):
+    db = tmp_path / "generation-tombstone.sqlite"
+    first = DurableNativeInvocationAuthorityB0(db)
+    scope = dict(owner_id="owner-revoked", execution_id="exec-revoked",
+                 sandbox_id="sandbox-revoked", lease_generation="g-1")
+    assert first.revoke_generation(**scope) == 0
+    assert first.revoke_generation(**scope) == 0
+    reopened = DurableNativeInvocationAuthorityB0(db)
+    for suffix in ("new-a", "new-b"):
+        with pytest.raises(NativeAuthorityDeniedB0, match="permanently revoked"):
+            reopened.mint_diagnostic(
+                _same_generation(suffix),
+                invocation_id="invocation-" + suffix,
+                deadline_unix=time.time() + 90,
+            )
+        assert reopened.state(_same_generation(suffix)) is None
+    with sqlite3.connect(db) as sql:
+        assert sql.execute(
+            "SELECT COUNT(*) FROM native_generation_revocations_b0"
+        ).fetchone()[0] == 1
+
+
+def test_revoking_one_generation_does_not_revoke_next_generation(tmp_path):
+    journal = DurableNativeInvocationAuthorityB0(tmp_path / "generations.sqlite")
+    assert journal.revoke_generation(
+        owner_id="owner-revoked", execution_id="exec-revoked",
+        sandbox_id="sandbox-revoked", lease_generation="g-1",
+    ) == 0
+    other = replace(_same_generation("fresh"), lease_generation="g-2")
+    token = journal.mint_diagnostic(
+        other, invocation_id="fresh-generation-invocation",
+        deadline_unix=time.time() + 60,
+    )
+    assert journal.state(other) == ("RESERVED", "ISSUED")
+    with pytest.raises(NativeAuthorityDeniedB0, match="denied before OS spawn"):
+        journal.deny_before_spawn(token)
+    assert journal.state(other) == ("DENIED", "PREFLIGHT_DENIED")
+
+
+def test_independent_workers_revoke_vs_fresh_mint_never_leave_issued_token(tmp_path):
+    db = tmp_path / "revoke-race.sqlite"
+    DurableNativeInvocationAuthorityB0(db)
+    go = tmp_path / "start"
+    common = (
+        "import pathlib,sys,time\n"
+        "from se.src.runtimes.capability.native_invocation_authority_b0 "
+        "import DurableNativeInvocationAuthorityB0,NativeAuthorityDeniedB0\n"
+        "from se.src.runtimes.capability.native_broker_b0 import SpawnIdentity\n"
+        f"j=DurableNativeInvocationAuthorityB0({str(db)!r})\n"
+        f"g=pathlib.Path({str(go)!r})\n"
+        "while not g.exists(): time.sleep(.005)\n"
+    )
+    revoke = common + (
+        "j.revoke_generation(owner_id='owner-revoked',"
+        "execution_id='exec-revoked',sandbox_id='sandbox-revoked',"
+        "lease_generation='g-1')\n"
+    )
+    mint = common + (
+        "try:\n"
+        " j.mint_diagnostic(SpawnIdentity('owner-revoked','exec-revoked',"
+        "'race-call','sandbox-revoked','g-1'),"
+        "invocation_id='race-invocation',deadline_unix=time.time()+60)\n"
+        "except NativeAuthorityDeniedB0: sys.exit(0)\n"
+    )
+    processes = [
+        subprocess.Popen([sys.executable, "-c", script], stdout=subprocess.PIPE,
+                         stderr=subprocess.PIPE)
+        for script in (revoke, mint)
+    ]
+    go.touch()
+    outcomes = []
+    for worker in processes:
+        _, stderr = worker.communicate(timeout=30)
+        outcomes.append((worker.returncode, stderr.decode("utf-8", "replace")[-1000:]))
+    assert all(code == 0 for code, _ in outcomes), outcomes
+    restarted = DurableNativeInvocationAuthorityB0(db)
+    # A token minted before revocation is retired within the revocation commit.
+    assert restarted.state(_same_generation("race-call")) in (
+        None, ("DENIED", "PREFLIGHT_DENIED")
+    )
+    with pytest.raises(NativeAuthorityDeniedB0, match="permanently revoked"):
+        restarted.mint_diagnostic(
+            _same_generation("post-race"),
+            invocation_id="after-race", deadline_unix=time.time() + 60,
+        )
+
+
+def test_crash_after_zero_ticket_revoke_fences_fresh_mint_in_new_worker(tmp_path):
+    """A durable tombstone survives os._exit even when there were no tickets."""
+    db = tmp_path / "zero-revoke-hard-exit.sqlite"
+    original = DurableNativeInvocationAuthorityB0(db)
+    script = (
+        "import os\n"
+        "from se.src.runtimes.capability.native_invocation_authority_b0 "
+        "import DurableNativeInvocationAuthorityB0\n"
+        f"j=DurableNativeInvocationAuthorityB0({str(db)!r})\n"
+        "assert j.revoke_generation(owner_id='owner-revoked',"
+        "execution_id='exec-revoked',sandbox_id='sandbox-revoked',"
+        "lease_generation='g-1') == 0\n"
+        "os._exit(93)\n"
+    )
+    exit_worker = subprocess.run(
+        [sys.executable, "-c", script],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=25,
+    )
+    assert exit_worker.returncode == 93, exit_worker.stderr.decode(
+        "utf-8", "replace"
+    )[-900:]
+    assert original.reconcile_after_restart() == 0
+    worker = (
+        "import sys,time\n"
+        "from se.src.runtimes.capability.native_invocation_authority_b0 "
+        "import DurableNativeInvocationAuthorityB0,NativeAuthorityDeniedB0\n"
+        "from se.src.runtimes.capability.native_broker_b0 import SpawnIdentity\n"
+        f"j=DurableNativeInvocationAuthorityB0({str(db)!r})\n"
+        "try:\n"
+        " j.mint_diagnostic(SpawnIdentity('owner-revoked','exec-revoked',"
+        "'never-before-used-call','sandbox-revoked','g-1'),"
+        "invocation_id='never-before-used-invocation',"
+        "deadline_unix=time.time()+90)\n"
+        "except NativeAuthorityDeniedB0: sys.exit(0)\n"
+        "sys.exit(31)\n"
+    )
+    tested = subprocess.run(
+        [sys.executable, "-c", worker],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=False, timeout=25,
+    )
+    assert tested.returncode == 0, tested.stderr.decode(
+        "utf-8", "replace"
+    )[-900:]
+    assert original.state(_same_generation("never-before-used-call")) is None
+    with sqlite3.connect(db) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM native_generation_revocations_b0"
+        ).fetchone()[0] == 1
