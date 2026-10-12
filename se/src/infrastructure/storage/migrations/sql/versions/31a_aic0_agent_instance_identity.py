@@ -114,7 +114,9 @@ _PG_FUNCTIONS = (
     END;
     $$ LANGUAGE plpgsql""",
     """CREATE FUNCTION aic_live_guard() RETURNS trigger AS $$
-    DECLARE owner_active boolean;
+    DECLARE
+      owner_active boolean;
+      reservation_active boolean;
     BEGIN
       IF TG_OP = 'DELETE' THEN
         IF NOT EXISTS (SELECT 1 FROM aic_instance_reservations r
@@ -125,12 +127,17 @@ _PG_FUNCTIONS = (
         RETURN OLD;
       END IF;
       IF TG_OP = 'INSERT' THEN
+        -- A normal UPDATE of reservation.state uses FOR NO KEY UPDATE.
+        -- FK key-share alone does not conflict with that lock. Serialize
+        -- live INSERT with retirement by taking FOR SHARE on THIS row
+        -- before checking ACTIVE, and hold it until caller transaction end.
+        SELECT TRUE INTO reservation_active FROM aic_instance_reservations r
+        WHERE r.agent_instance_id = NEW.agent_instance_id
+          AND r.state = 'ACTIVE' FOR SHARE;
         SELECT TRUE INTO owner_active FROM users
         WHERE id = NEW.owner_user_id AND status = 'active' FOR SHARE;
         IF COALESCE(owner_active, FALSE) = FALSE
-          OR NOT EXISTS (SELECT 1 FROM aic_instance_reservations r
-                         WHERE r.agent_instance_id = NEW.agent_instance_id
-                           AND r.state = 'ACTIVE')
+          OR COALESCE(reservation_active, FALSE) = FALSE
           OR NEW.lifecycle_state <> 'ACTIVE' OR NEW.generation <> 1 THEN
           RAISE EXCEPTION 'AIC_LIVE_OWNER_OR_ID_INVALID';
         END IF;
