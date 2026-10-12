@@ -1,7 +1,7 @@
 """Windows Job Object kernel-owned process-tree containment DIAGNOSTIC (SBX3 B0).
 
 No production native command is wired here. Job creation, suspended process
-creation, Job assignment BEFORE ResumeThread, and kill-on-last-handle-close
+creation, atomic Job assignment DURING CreateProcessW, and kill-on-last-handle-close
 are real Windows kernel operations. An experimental observation that the Job
 reports zero active processes is NOT OS-isolated sandbox-root cleanup consent,
 Windows AppContainer/LPAC, or proof of network NONE.
@@ -27,6 +27,8 @@ _JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000
 _JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9
 _JOB_OBJECT_BASIC_ACCOUNTING_INFORMATION = 1
 _CREATE_SUSPENDED = 0x00000004
+_EXTENDED_STARTUPINFO_PRESENT = 0x00080000
+_PROC_THREAD_ATTRIBUTE_JOB_LIST = 0x0002000D
 _CREATE_NO_WINDOW = 0x08000000
 _INVALID_RESUME = 0xFFFFFFFF
 
@@ -116,6 +118,13 @@ class _StartupInfoW(ctypes.Structure):
     ]
 
 
+class _StartupInfoExW(ctypes.Structure):
+    _fields_ = [
+        ("StartupInfo", _StartupInfoW),
+        ("lpAttributeList", ctypes.c_void_p),
+    ]
+
+
 class _ProcessInfo(ctypes.Structure):
     _fields_ = [
         ("hProcess", wintypes.HANDLE),
@@ -149,8 +158,26 @@ class WindowsJobTreeB0:
             ctypes.POINTER(_StartupInfoW), ctypes.POINTER(_ProcessInfo),
         ]
         k32.CreateProcessW.restype = wintypes.BOOL
-        k32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        k32.AssignProcessToJobObject.restype = wintypes.BOOL
+        # Windows 10+/Server: PROC_THREAD_ATTRIBUTE_JOB_LIST is applied
+        # atomically during CreateProcessW, not afterwards. A worker crash
+        # cannot leave an unassigned suspended child between two syscalls.
+        k32.InitializeProcThreadAttributeList.argtypes = [
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD,
+            ctypes.POINTER(ctypes.c_size_t),
+        ]
+        k32.InitializeProcThreadAttributeList.restype = wintypes.BOOL
+        k32.UpdateProcThreadAttribute.argtypes = [
+            ctypes.c_void_p, wintypes.DWORD, ctypes.c_size_t,
+            ctypes.c_void_p, ctypes.c_size_t,
+            ctypes.c_void_p, ctypes.c_void_p,
+        ]
+        k32.UpdateProcThreadAttribute.restype = wintypes.BOOL
+        k32.DeleteProcThreadAttributeList.argtypes = [ctypes.c_void_p]
+        k32.DeleteProcThreadAttributeList.restype = None
+        k32.IsProcessInJob.argtypes = [
+            wintypes.HANDLE, wintypes.HANDLE, ctypes.POINTER(wintypes.BOOL),
+        ]
+        k32.IsProcessInJob.restype = wintypes.BOOL
         k32.ResumeThread.argtypes = [wintypes.HANDLE]
         k32.ResumeThread.restype = wintypes.DWORD
         k32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
@@ -202,7 +229,7 @@ class WindowsJobTreeB0:
         self, executable: str | Path, args: Sequence[str] = (),
         *, _on_assigned_for_test: Callable[[int], None] | None = None,
     ) -> int:
-        """Create SUSPENDED, assign to kernel Job, then resume primary thread.
+        """Atomically CREATE_SUSPENDED *in* kernel Job, then resume thread.
 
         Never execute before OS-owned membership. On any admission failure
         terminate the suspended process and retain negative result.
@@ -222,36 +249,79 @@ class WindowsJobTreeB0:
             raise WindowsJobB0Unavailable("trusted executable is not a file")
         argv = [str(executable_path), *args]
         mutable_command = ctypes.create_unicode_buffer(subprocess.list2cmdline(argv))
-        startup = _StartupInfoW()
-        startup.cb = ctypes.sizeof(startup)
-        proc = _ProcessInfo()
-        if not self._kernel.CreateProcessW(
-            str(executable_path), mutable_command, None, None, False,
-            _CREATE_SUSPENDED | _CREATE_NO_WINDOW, None, None,
-            ctypes.byref(startup), ctypes.byref(proc),
+        # Reserve the Windows extended startup attribute list with the current
+        # Job handle as an INPUT. Kernel membership happens in CreateProcess
+        # itself, before even the child's suspended primary thread exists.
+        length = ctypes.c_size_t(0)
+        self._kernel.InitializeProcThreadAttributeList(None, 1, 0, ctypes.byref(length))
+        if length.value == 0:
+            raise WindowsJobB0Unavailable(
+                "native Job attribute size query failed: "
+                + str(ctypes.get_last_error())
+            )
+        storage = ctypes.create_string_buffer(length.value)
+        attribute_list = ctypes.cast(storage, ctypes.c_void_p)
+        if not self._kernel.InitializeProcThreadAttributeList(
+            attribute_list, 1, 0, ctypes.byref(length)
         ):
             raise WindowsJobB0Unavailable(
-                "CreateProcessW denied: " + str(ctypes.get_last_error())
+                "native Job attribute allocation failed: "
+                + str(ctypes.get_last_error())
             )
-        admitted = False
         try:
-            if not self._kernel.AssignProcessToJobObject(self._handle, proc.hProcess):
+            job_handle = wintypes.HANDLE(self._handle)
+            if not self._kernel.UpdateProcThreadAttribute(
+                attribute_list, 0, _PROC_THREAD_ATTRIBUTE_JOB_LIST,
+                ctypes.byref(job_handle), ctypes.sizeof(job_handle),
+                None, None,
+            ):
                 raise WindowsJobB0Unavailable(
-                    "kernel Job assignment denied: " + str(ctypes.get_last_error())
+                    "atomic native Job assignment unsupported: "
+                    + str(ctypes.get_last_error())
                 )
-            if _on_assigned_for_test is not None:
-                _on_assigned_for_test(int(proc.dwProcessId))
-            if self._kernel.ResumeThread(proc.hThread) == _INVALID_RESUME:
+            startup = _StartupInfoExW()
+            startup.StartupInfo.cb = ctypes.sizeof(startup)
+            startup.lpAttributeList = attribute_list
+            proc = _ProcessInfo()
+            if not self._kernel.CreateProcessW(
+                str(executable_path), mutable_command, None, None, False,
+                _CREATE_SUSPENDED | _CREATE_NO_WINDOW
+                | _EXTENDED_STARTUPINFO_PRESENT,
+                None, None,
+                ctypes.cast(ctypes.byref(startup), ctypes.POINTER(_StartupInfoW)),
+                ctypes.byref(proc),
+            ):
                 raise WindowsJobB0Unavailable(
-                    "ResumeThread denied: " + str(ctypes.get_last_error())
+                    "atomic Job CreateProcessW denied: "
+                    + str(ctypes.get_last_error())
                 )
-            admitted = True
-            return int(proc.dwProcessId)
+            admitted = False
+            try:
+                in_job = wintypes.BOOL()
+                if not self._kernel.IsProcessInJob(
+                    proc.hProcess, self._handle, ctypes.byref(in_job)
+                ) or not bool(in_job.value):
+                    raise WindowsJobB0Unavailable(
+                        "child not atomically enrolled in kernel Job"
+                    )
+                # A test may hard-exit this broker NOW, before ResumeThread.
+                # KILL_ON_JOB_CLOSE kills this already-assigned suspended
+                # child instead of leaking a process outside the Job.
+                if _on_assigned_for_test is not None:
+                    _on_assigned_for_test(int(proc.dwProcessId))
+                if self._kernel.ResumeThread(proc.hThread) == _INVALID_RESUME:
+                    raise WindowsJobB0Unavailable(
+                        "ResumeThread denied: " + str(ctypes.get_last_error())
+                    )
+                admitted = True
+                return int(proc.dwProcessId)
+            finally:
+                if not admitted:
+                    self._kernel.TerminateProcess(proc.hProcess, 91)
+                self._kernel.CloseHandle(proc.hThread)
+                self._kernel.CloseHandle(proc.hProcess)
         finally:
-            if not admitted:
-                self._kernel.TerminateProcess(proc.hProcess, 91)
-            self._kernel.CloseHandle(proc.hThread)
-            self._kernel.CloseHandle(proc.hProcess)
+            self._kernel.DeleteProcThreadAttributeList(attribute_list)
 
     def active_processes(self) -> int:
         """Read actual kernel Job counters, not /proc, PID lists, or flags."""
