@@ -15,6 +15,7 @@ from ..repositories.chat_data.projects import ProjectRepository
 from ..repositories.chat_data.sessions import SessionRepository
 from ..repositories.chat_data.attachments import AttachmentRepository
 from ..repositories.agent import AgentRepository
+from ..repositories.agent_instance import AgentInstanceRepository
 from ..repositories.capability_invocations import CapabilityInvocationRepository
 from ..repositories.assets import AssetRepository
 from ..repositories.user_budget import UserBudgetRepository
@@ -40,6 +41,7 @@ class AbstractUnitOfWork(ABC):
     attachments: AttachmentRepository
     permissions: PermissionHelper
     agents: AgentRepository
+    agent_instances: AgentInstanceRepository
     capability_invocations: CapabilityInvocationRepository
     assets: AssetRepository
     user_budgets: UserBudgetRepository
@@ -80,6 +82,7 @@ class SqlAlchemyUnitOfWork(AbstractUnitOfWork):
         self.attachments = AttachmentRepository(self.session)
         self.permissions = PermissionHelper(self.session)
         self.agents = AgentRepository(self.session)
+        self.agent_instances = AgentInstanceRepository(self.session)
         self.capability_invocations = CapabilityInvocationRepository(self.session)
         self.assets = AssetRepository(self.session)
         self.user_budgets = UserBudgetRepository(self.session)
