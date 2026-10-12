@@ -62,6 +62,44 @@ def test_no_untrusted_success_without_native_receipt(capability):
     require_no_uncertified_agent_success("file.read", True)
 
 
+def test_real_linux_orphan_survives_worker_crash_but_cannot_be_attested(tmp_path):
+    """Real OS process survives worker crash; missing cgroup ref stays HOLD.
+
+    This is deliberately a negative reattachment test, NOT OS tree cleanup
+    certification. The test owns and kills its harmless sleeping child.
+    """
+    if sys.platform != "linux":
+        return
+    marker = tmp_path / "orphan.pid"
+    script = (
+        "import os, subprocess, sys\n"
+        "from pathlib import Path\n"
+        "p = subprocess.Popen([sys.executable, '-c', "
+        "'import time; time.sleep(6)'], "
+        "start_new_session=True, stdout=subprocess.DEVNULL, "
+        "stderr=subprocess.DEVNULL)\n"
+        "Path(" + repr(str(marker)) + ").write_text(str(p.pid))\n"
+        "os._exit(83)\n"
+    )
+    worker = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False, timeout=15,
+    )
+    assert worker.returncode == 83
+    orphan_pid = int(marker.read_text(encoding="utf-8"))
+    try:
+        os.kill(orphan_pid, 0)  # real live OS process after worker death
+        authority = LinuxCgroupTreeAuthority(tmp_path / "tree.sqlite")
+        with pytest.raises(NativeTreeHold):
+            authority.require_verified_empty(_identity("orphan"))
+    finally:
+        # Kill the entire test-owned detached session, not unrelated processes.
+        try:
+            os.killpg(orphan_pid, 9)
+        except ProcessLookupError:
+            pass
+
+
 def test_cgroup_fake_files_and_foreign_refs_cannot_mint_verified_empty(tmp_path):
     root = tmp_path / "fake-cgroup"
     cg = root / _identity().sandbox_id
