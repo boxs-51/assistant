@@ -119,6 +119,17 @@ class LinuxCgroupTreeLedger:
                     state TEXT NOT NULL CHECK(state IN ('ENROLLED', 'VERIFIED_EMPTY'))
                 )"""
             )
+            db.execute(
+                """CREATE TABLE IF NOT EXISTS native_tree_lifecycle_fences (
+                    sandbox_id TEXT NOT NULL PRIMARY KEY,
+                    owner_id TEXT NOT NULL,
+                    execution_id TEXT NOT NULL,
+                    generation TEXT NOT NULL,
+                    phase TEXT NOT NULL CHECK(
+                        phase IN ('OPEN', 'CLOSING', 'VERIFIED_EMPTY')
+                    )
+                )"""
+            )
 
     @staticmethod
     def _assert_real_cgroup2(path: Path) -> None:
@@ -201,6 +212,18 @@ class LinuxCgroupTreeLedger:
                         pstat.st_ino,
                     ),
                 )
+                # Both native identity and OPEN fence must be committed in
+                # the SAME transaction, before any trusted spawn admission.
+                db.execute(
+                    """INSERT INTO native_tree_lifecycle_fences
+                       VALUES (?, ?, ?, ?, 'OPEN')""",
+                    (
+                        identity.sandbox_id,
+                        identity.owner_id,
+                        identity.execution_id,
+                        identity.generation,
+                    ),
+                )
             except BaseException:
                 db.execute("ROLLBACK")
                 # Keep orphan cgroup for human/kernel forensic recovery.
@@ -274,6 +297,12 @@ class LinuxCgroupTreeLedger:
         path, device, inode, status = self._load(identity)
         if status != "ENROLLED":
             raise CgroupTreeMismatch("generation already finalized; no replay")
+        from .native_tree_fence_b0 import NativeTreeLifecycleFence
+
+        # This COMMITTED phase bars cooperating OS-tree spawns even after a
+        # worker hard-crash. SQLite writer contention fences simultaneous
+        # admission; only after the commit can the kernel kill begin.
+        NativeTreeLifecycleFence(self).begin_cleanup(identity)
         try:
             (path / "cgroup.kill").write_text("1", encoding="ascii")
         except OSError as exc:
@@ -313,6 +342,8 @@ class LinuxCgroupTreeLedger:
                     if changed != 1:
                         db.execute("ROLLBACK")
                         raise CgroupTreeMismatch("generation CAS changed before receipt")
+                    # Both final states share the same durable transaction.
+                    NativeTreeLifecycleFence.finish_cleanup(db, identity)
                     db.execute("COMMIT")
                 return VerifiedEmptyWitness(
                     identity.owner_id, identity.execution_id,
@@ -338,6 +369,11 @@ class LinuxCgroupTreeLedger:
                 path, dev, inode, status = self._load(identity)
                 if status != "VERIFIED_EMPTY":
                     raise CgroupTreeMismatch("no committed OS kernel-empty generation")
+                from .native_tree_fence_b0 import NativeTreeLifecycleFence
+
+                NativeTreeLifecycleFence._assert_fence_row(
+                    db, identity, allowed=("VERIFIED_EMPTY",),
+                )
                 for _ in range(2):
                     events = (path / "cgroup.events").read_text(encoding="ascii").splitlines()
                     procs = (path / "cgroup.procs").read_text(encoding="ascii").strip()

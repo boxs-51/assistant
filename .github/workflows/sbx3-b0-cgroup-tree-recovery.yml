@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - "se/src/runtimes/capability/native_tree_cgroup_b0.py"
+      - "se/src/runtimes/capability/native_tree_fence_b0.py"
       - "se/tests/architecture/test_sbx3_cgroup_tree_os_recovery.py"
       - ".github/workflows/sbx3-b0-cgroup-tree-recovery.yml"
   workflow_dispatch:
