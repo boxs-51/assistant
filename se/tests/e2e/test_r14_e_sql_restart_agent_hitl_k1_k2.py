@@ -519,6 +519,17 @@ async def run_physical_hard_restart_witness(
                         TaskBudgetReservationRecord.task_id == TASK_ID
                     )
                 )).scalars().all()
+                binding = await session.get(UserBudgetTaskBindingRecord, TASK_ID)
+                bridges = (await session.execute(
+                    select(UserBudgetDualAccountingReceiptRecord).where(
+                        UserBudgetDualAccountingReceiptRecord.task_id == TASK_ID
+                    )
+                )).scalars().all()
+                ubq_reservations = (await session.execute(
+                    select(UserBudgetReservationRecord).where(
+                        UserBudgetReservationRecord.owner_user_id == r7j.USER_ID
+                    )
+                )).scalars().all()
             assert task is not None and task.id == TASK_ID
             assert budget is not None and budget.state in {"OPEN", "CLOSED"}
             assert budget.used_executions == 1
@@ -534,6 +545,24 @@ async def run_physical_hard_restart_witness(
                 item.kind == "TOOL_CALL" and item.reservation_key == "call-r7j-1"
                 for item in reservations
             )
+            assert binding is not None and binding.owner_user_id == r7j.USER_ID
+            tool_bridges = [
+                receipt for receipt in bridges
+                if receipt.task_budget_kind == "TOOL_CALL"
+                and receipt.task_budget_reservation_key == "call-r7j-1"
+            ]
+            assert len(tool_bridges) == 1
+            assert tool_bridges[0].mirror_dimension == "TOOL_CALL"
+            assert len({
+                item.bridge_receipt_id for item in bridges
+            }) == len(bridges)
+            matching_ubq = [
+                row for row in ubq_reservations
+                if row.reservation_id == tool_bridges[0].ubq_reservation_id
+            ]
+            assert len(matching_ubq) == 1
+            assert matching_ubq[0].state == "SETTLED"
+            assert matching_ubq[0].settled_amount_atomic == 1
             return {
                 "task_status": task.status,
                 "task_revision": task.revision,
@@ -543,6 +572,9 @@ async def run_physical_hard_restart_witness(
                 "active_executions": budget.active_executions,
                 "used_tool_calls": budget.used_tool_calls,
                 "reservations": sorted(kind_keys),
+                "ubq_enrollment": binding.enrollment_version,
+                "ubq_tool_bridge_count": len(tool_bridges),
+                "ubq_tool_settled": matching_ubq[0].settled_amount_atomic,
             }
 
         async def completed():
