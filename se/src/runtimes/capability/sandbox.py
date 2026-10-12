@@ -120,6 +120,11 @@ class SandboxManager:
                 raise SandboxLeaseStateError(
                     "OS tree cannot be reattached; root stays quarantined"
                 ) from exc
+            existing_profile = self._profiles.get(profile.profile_id)
+            if existing_profile is not None and existing_profile != profile:
+                raise SandboxLeaseStateError(
+                    "native recovery profile semantics mismatch"
+                )
             recovered = lease.model_copy(
                 update={"state": SandboxLeaseState.CLEANUP}
             )
