@@ -169,3 +169,51 @@ def test_concurrent_quarantine_and_destroy_share_manager_lifecycle_lock(tmp_path
             enroll.result(timeout=12)
             assert destroy.result(timeout=12) == "QUARANTINED"
     assert lease.root.exists()
+
+
+def test_deleted_marker_cannot_release_enrolled_root_in_same_worker(tmp_path):
+    manager = SandboxManager((tmp_path / "roots").resolve())
+    lease = _lease(manager)
+    manager.quarantine_native_tree(lease)
+    marker = manager.base_root / ".sbx3-native-quarantine" / lease.sandbox_id
+    marker.unlink()
+    with pytest.raises(NativeTreeUnverifiedError):
+        manager.release_execution("native-e", owner_user_id="native-owner")
+    assert lease.root.exists()
+
+
+def test_restart_quarantines_every_orphan_even_when_marker_was_erased(tmp_path):
+    base = (tmp_path / "roots").resolve()
+    first = SandboxManager(base)
+    lease = _lease(first)
+    first.quarantine_native_tree(lease)
+    (base / ".sbx3-native-quarantine" / lease.sandbox_id).unlink()
+    restarted = SandboxManager(base)
+    assert lease.sandbox_id in restarted._orphan_root_ids
+    with pytest.raises(NativeTreeUnverifiedError):
+        restarted._remove_root(lease.root)
+    assert lease.root.exists()
+
+
+def test_restart_missing_control_dir_with_orphan_is_hard_failure(tmp_path):
+    base = (tmp_path / "roots").resolve()
+    first = SandboxManager(base)
+    lease = _lease(first)
+    first.quarantine_native_tree(lease)
+    shutil.rmtree(base / ".sbx3-native-quarantine")
+    with pytest.raises(NativeTreeUnverifiedError):
+        SandboxManager(base)
+    assert lease.root.exists()
+
+
+def test_recreated_control_directory_cannot_bypass_live_manager(tmp_path):
+    manager = SandboxManager((tmp_path / "roots").resolve())
+    lease = _lease(manager)
+    manager.quarantine_native_tree(lease)
+    control = manager.base_root / ".sbx3-native-quarantine"
+    moved = tmp_path / "old-control"
+    control.rename(moved)
+    control.mkdir(mode=0o700)
+    with pytest.raises(NativeTreeUnverifiedError):
+        manager.destroy(lease)
+    assert lease.root.exists()
