@@ -31,13 +31,23 @@ def assert_exact_cross_pr_source() -> None:
     os.chdir(root)
     # Tests run on the SE child branch, so its parent commit remains exact
     # unless the workflow is explicitly re-anchored and reviewed.
-    base = subprocess.run(
-        ["git", "rev-parse", "HEAD^"], check=True, text=True,
-        capture_output=True,
-    ).stdout.strip()
-    if base != SE_PARENT:
+    ancestral = subprocess.run(
+        ["git", "merge-base", "--is-ancestor", SE_PARENT, "HEAD"],
+        check=False, capture_output=True,
+    )
+    if ancestral.returncode != 0:
+        raise AssertionError("Cross-PR ABI evidence parent mismatch")
+    delta = set(subprocess.run(
+        ["git", "diff", "--name-only", SE_PARENT, "HEAD"],
+        check=True, capture_output=True, text=True,
+    ).stdout.splitlines())
+    expected = {
+        "scripts/sbx3_b0_tools_private_abi_crosspr.py",
+        ".github/workflows/sbx3-b0-tools371-crosspr-abi.yml",
+    }
+    if delta != expected:
         raise AssertionError(
-            f"Cross-PR ABI evidence invalid: SE parent {base} != {SE_PARENT}"
+            f"Unexpected SE PR evidence source scope: {sorted(delta)}"
         )
     subprocess.run(
         ["git", "fetch", "--no-tags", "--depth=1", "origin", TOOLS_HEAD],
