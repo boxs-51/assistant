@@ -6,6 +6,7 @@ from sqlalchemy import BigInteger, CheckConstraint, ForeignKey, Index, String, T
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..base import Base
+from ..user_data.user import User  # noqa: F401 - register users metadata for isolated Agent create_all
 
 
 class AgentInstanceReservationRecord(Base):
