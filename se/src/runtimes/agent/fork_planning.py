@@ -19,6 +19,7 @@ from .contracts.fork import (
     fork_transcript_fingerprint,
 )
 from .contracts.inference import InferenceMessage
+from .native_receipt_verifier import require_native_record
 from .checkpoint_transcript import (
     CheckpointTranscriptMaterializationError,
     checkpoint_representation_error_code,
@@ -470,6 +471,8 @@ class AgentForkPlanningService:
                     f"Invocation {invocation.invocation_id} has no "
                     "already-COMMITTED AgentToolResult.",
                 )
+            # Also validate fake/replaced store adapters at the planner boundary.
+            require_native_record(result, phase="fork_plan_side_effect")
             expected_identity = {
                 "execution_id": execution_id,
                 "invocation_id": invocation.invocation_id,
@@ -609,6 +612,7 @@ class ForkRevalidationSnapshot:
 
 
 def _fork_tool_result_message(record) -> InferenceMessage:
+    require_native_record(record, phase="fork_revalidation_message_to_model")
     return InferenceMessage(
         role="tool",
         name=record.capability_id,
@@ -688,6 +692,7 @@ async def _load_safe_side_effects_in_uow(
                 f"Invocation {invocation.invocation_id} has no "
                 "already-COMMITTED AgentToolResult.",
             )
+        require_native_record(result, phase="fork_revalidation_side_effect")
 
         expected_identity = {
             "execution_id": execution_id,
@@ -821,6 +826,7 @@ async def _load_fork_safe_transcript_in_uow(
                 "COMMITTED tool result has no matching "
                 "CapabilityInvocation authority.",
             )
+        require_native_record(record, phase="fork_revalidation_COMMITTED")
         committed[tool_call_id] = record
         return record
 
