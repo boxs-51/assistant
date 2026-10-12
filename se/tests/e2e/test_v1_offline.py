@@ -47,6 +47,8 @@ from se.src.infrastructure.storage.repositories.capability_publications import (
     PublicationConflict,
     PublicationPermissionDenied,
     PublicationStaleRevision,
+    _canonical_definition,
+    _digest,
 )
 from se.src.runtimes.capability.policy import CapabilityRoutingPolicy
 from se.src.runtimes.workflow.runtime import WorkflowRuntime
@@ -103,31 +105,37 @@ class InMemorySkillPublicationAuthority:
 
     async def reserve_user_namespace(self, definition, *, publisher_id):
         publisher_id = self._publisher(publisher_id)
+        if not publisher_id:
+            raise PublicationPermissionDenied("Authenticated owner required.")
+        digest = _digest(_canonical_definition(definition))
         current = self.records.get(definition.capability_id)
-        if current is not None and (
-            current["publisher_type"] != "USER"
-            or current["publisher_id"] != publisher_id
-        ):
-            raise PublicationConflict("Capability id belongs to another publisher.")
-        if current is None:
-            self.records[definition.capability_id] = {
-                "definition": None,
-                "publisher_type": "USER",
-                "publisher_id": publisher_id,
-                "visibility": "NONE",
-                "state": "ACTIVE",
-                "purpose": "NAMESPACE_RESERVATION",
-                "kind": definition.kind,
-            }
+        if current is not None:
+            if not (
+                current["publisher_type"] == "USER"
+                and current["publisher_id"] == publisher_id
+                and current["state"] == "ACTIVE"
+                and current["purpose"] == "NAMESPACE_RESERVATION"
+                and current["kind"] == definition.kind
+                and current.get("payload_digest") == digest
+            ):
+                raise PublicationConflict(
+                    "Namespace logical definition conflicts with reserved origin."
+                )
+            return current
+        self.records[definition.capability_id] = {
+            "definition": None,
+            "publisher_type": "USER",
+            "publisher_id": publisher_id,
+            "visibility": "NONE",
+            "state": "ACTIVE",
+            "purpose": "NAMESPACE_RESERVATION",
+            "kind": definition.kind,
+            "payload_digest": digest,
+        }
         return self.records[definition.capability_id]
 
     async def reserve_user_namespaces(self, definitions, *, publisher_id):
-        """Test double of atomic PostgreSQL namespace batch admission.
-
-        Validate the complete immutable origin set before mutating any
-        process-local record. Production uses the SQL transaction; this
-        in-memory implementation is only for portable offline Gateway tests.
-        """
+        """Atomic test-double parity with PostgreSQL owner/kind/contract digest."""
         publisher_id = self._publisher(publisher_id)
         if not publisher_id:
             raise PublicationPermissionDenied("Authenticated owner required.")
@@ -135,6 +143,10 @@ class InMemorySkillPublicationAuthority:
         ids = [definition.capability_id for definition in batch]
         if len(ids) != len(set(ids)):
             raise PublicationConflict("Duplicate namespace ID in batch.")
+        digests = {
+            definition.capability_id: _digest(_canonical_definition(definition))
+            for definition in batch
+        }
         for definition in batch:
             current = self.records.get(definition.capability_id)
             if current is not None and not (
@@ -143,9 +155,10 @@ class InMemorySkillPublicationAuthority:
                 and current["state"] == "ACTIVE"
                 and current["purpose"] == "NAMESPACE_RESERVATION"
                 and current["kind"] == definition.kind
+                and current.get("payload_digest") == digests[definition.capability_id]
             ):
                 raise PublicationConflict(
-                    "Namespace was reserved by another origin or purpose."
+                    "Namespace logical contract differs from reserved origin."
                 )
         for definition in batch:
             if definition.capability_id not in self.records:
@@ -157,6 +170,7 @@ class InMemorySkillPublicationAuthority:
                     "state": "ACTIVE",
                     "purpose": "NAMESPACE_RESERVATION",
                     "kind": definition.kind,
+                    "payload_digest": digests[definition.capability_id],
                 }
         return [self.records[identifier] for identifier in ids]
 
