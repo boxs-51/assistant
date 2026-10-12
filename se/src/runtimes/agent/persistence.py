@@ -3206,11 +3206,15 @@ class DurableAgentStore:
             ):
                 await uow.commit()
                 return None
+            # Fork/RETRY checkpoint readers are model-facing just like R7.
+            # A historical native COMMITTED row cannot supply R8 authority.
+            require_native_record(record, phase="fork_COMMITTED_readthrough")
             await uow.commit()
             return record
 
     @staticmethod
     def _fork_tool_result_message(record) -> InferenceMessage:
+        require_native_record(record, phase="fork_message_to_model")
         return InferenceMessage(
             role="tool",
             name=record.capability_id,
@@ -3357,6 +3361,9 @@ class DurableAgentStore:
                         "has no matching CapabilityInvocation authority."
                     )
 
+                # Do not trust persisted COMMITTED success or model transcript
+                # equality as an authenticated OS-owned native receipt.
+                require_native_record(record, phase="fork_checkpoint_COMMITTED")
                 committed[tool_call_id] = record
                 return record
 
