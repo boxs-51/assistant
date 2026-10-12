@@ -11,7 +11,7 @@ Node: `se/tests/e2e/test_r14_e_sql_restart_agent_hitl_k1_k2.py::test_r14_e_decid
 3. Hold `capability.result` only **after the client SQLite ledger has committed TERMINAL**. Disconnect K1, require S1 to durably record `WAITING` and a checkpoint. The K1 terminal frame must not reach S1.
 4. Call actual `kill()` on OS process S1 (SIGKILL / TerminateProcess), prove nonzero termination and record its PID. No graceful `uvicorn.should_exit`, `AgentExecutionSupervisor.shutdown`, or SQL engine dispose is allowed in S1 before this cut.
 5. Launch new OS process S2 with a different PID and fresh Uvicorn, AgentRuntime, capability/connection services, and the **same** server SQLite. Connect K2 with the original installation/principal and original client ledger. K2 must reconcile the committed K1 result without a new approval or target execution.
-6. Read SQL from an independent parent connection. Require Agent `COMPLETED`, matching original invocation identity, one canonical `COMMITTED` tool result, K1/K2 attempt sequence, a `CONSUMED` ResumeClaim, external effect count exactly **one**, approval count exactly **one**, no second approval, and no pending resume tickets.
+6. Read SQL from an independent parent connection. Require Agent `COMPLETED`, matching original invocation identity, one canonical `COMMITTED` tool result, one K1 dispatch attempt with a K2 resume binding, a `CONSUMED` ResumeClaim, external effect count exactly **one**, approval count exactly **one**, no second approval, and no pending resume tickets.
 
 The test is designed to fail, not silently skip or xfail, if a real child cannot launch, S1 does not reach `WAITING`, K2 cannot recover, the result was not committed, an unsafe replay occurs, or the OS kill does not happen.
 
@@ -30,7 +30,7 @@ The database in this first implementation is server **SQLite**, not PostgreSQL. 
 | S1 durable WAITING/checkpoint | Required before kill |
 | Actual S1 OS hard kill / S2 new PID | Executable |
 | Same server durable SQLite across two OS PIDs | Executable |
-| Original K1→K2 principal, invocation, fingerprint | R7-J/R6 invariants; actual DB and attempts assertions |
+| Original K1 invocation, one dispatch attempt, K2 resumed connection and claim binding | Actual SQL/claims/attempts assertions; terminal reconciliation does not mint an extra attempt |
 | No second external NON_IDEMPOTENT effect | Separate SQLite sink assertion |
 | No duplicate HIGH-risk approval | Count and callback assertions |
 | ResumeClaim consumed | Actual SQL assertion |
