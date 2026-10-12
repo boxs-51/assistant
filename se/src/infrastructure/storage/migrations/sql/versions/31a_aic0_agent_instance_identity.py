@@ -20,7 +20,7 @@ SQLITE_TRIGGERS = {
     "trg_aic_reservation_transition": """CREATE TRIGGER trg_aic_reservation_transition BEFORE UPDATE ON aic_instance_id_reservations
       WHEN OLD.agent_instance_id != NEW.agent_instance_id
         OR OLD.status != 'LIVE' OR NEW.status != 'RETIRED'
-        OR EXISTS(SELECT 1 FROM aic_instance_live WHERE agent_instance_id=OLD.agent_instance_id)
+        OR NOT EXISTS(SELECT 1 FROM aic_instance_live WHERE agent_instance_id=OLD.agent_instance_id)
       BEGIN SELECT RAISE(ABORT,'AIC_RESERVATION_IMMUTABLE'); END""",
     "trg_aic_live_insert": """CREATE TRIGGER trg_aic_live_insert BEFORE INSERT ON aic_instance_live
       WHEN NOT EXISTS(SELECT 1 FROM aic_instance_id_reservations r WHERE r.agent_instance_id=NEW.agent_instance_id AND r.status='LIVE')
@@ -33,6 +33,10 @@ SQLITE_TRIGGERS = {
         OR OLD.state != 'ACTIVE'
         OR NOT EXISTS(SELECT 1 FROM users u WHERE u.id=NEW.owner_user_id AND u.status='active')
       BEGIN SELECT RAISE(ABORT,'AIC_LIVE_MUTATION_DENIED'); END""",
+    "trg_aic_live_delete": """CREATE TRIGGER trg_aic_live_delete BEFORE DELETE ON aic_instance_live
+      WHEN NOT EXISTS(SELECT 1 FROM aic_instance_id_reservations r
+        WHERE r.agent_instance_id=OLD.agent_instance_id AND r.status='RETIRED')
+      BEGIN SELECT RAISE(ABORT,'AIC_LIVE_UNAUTHORIZED_DELETE'); END""",
     "trg_aic_live_retired_insert": """CREATE TRIGGER trg_aic_live_retired_insert BEFORE INSERT ON aic_instance_live
       WHEN EXISTS(SELECT 1 FROM aic_instance_id_reservations r
                   WHERE r.agent_instance_id=NEW.agent_instance_id AND r.status='RETIRED')
@@ -48,9 +52,14 @@ PG_FUNCTIONS = {
       BEGIN IF TG_OP='DELETE' THEN RAISE EXCEPTION 'AIC_ID_NONREUSE'; END IF;
         IF OLD.agent_instance_id <> NEW.agent_instance_id OR OLD.status <> 'LIVE'
           OR NEW.status <> 'RETIRED'
-          OR EXISTS(SELECT 1 FROM aic_instance_live WHERE agent_instance_id=OLD.agent_instance_id)
+          OR NOT EXISTS(SELECT 1 FROM aic_instance_live WHERE agent_instance_id=OLD.agent_instance_id)
         THEN RAISE EXCEPTION 'AIC_RESERVATION_IMMUTABLE'; END IF;
         RETURN NEW; END; $$ LANGUAGE plpgsql""",
+    "aic_guard_live_delete": """CREATE FUNCTION aic_guard_live_delete() RETURNS trigger AS $
+      BEGIN IF NOT EXISTS(SELECT 1 FROM aic_instance_id_reservations
+        WHERE agent_instance_id=OLD.agent_instance_id AND status='RETIRED')
+        THEN RAISE EXCEPTION 'AIC_LIVE_UNAUTHORIZED_DELETE'; END IF;
+        RETURN OLD; END; $ LANGUAGE plpgsql""",
     "aic_guard_live": """CREATE FUNCTION aic_guard_live() RETURNS trigger AS $$
       BEGIN
         IF TG_OP='INSERT' THEN
@@ -97,6 +106,8 @@ def upgrade():
             FOR EACH ROW EXECUTE FUNCTION aic_guard_user_delete()"""))
         op.execute(sa.text("""CREATE TRIGGER trg_aic_reservation_guard BEFORE UPDATE OR DELETE
             ON aic_instance_id_reservations FOR EACH ROW EXECUTE FUNCTION aic_guard_reservation()"""))
+        op.execute(sa.text("""CREATE TRIGGER trg_aic_live_delete BEFORE DELETE ON aic_instance_live
+            FOR EACH ROW EXECUTE FUNCTION aic_guard_live_delete()"""))
         op.execute(sa.text("""CREATE TRIGGER trg_aic_live_guard BEFORE INSERT OR UPDATE
             ON aic_instance_live FOR EACH ROW EXECUTE FUNCTION aic_guard_live()"""))
     else:
@@ -116,6 +127,7 @@ def downgrade():
         op.execute(sa.text("DROP TRIGGER IF EXISTS trg_aic_users_live_delete ON users"))
         op.execute(sa.text("DROP TRIGGER IF EXISTS trg_aic_reservation_guard ON aic_instance_id_reservations"))
         op.execute(sa.text("DROP TRIGGER IF EXISTS trg_aic_live_guard ON aic_instance_live"))
+        op.execute(sa.text("DROP TRIGGER IF EXISTS trg_aic_live_delete ON aic_instance_live"))
         for name in PG_FUNCTIONS:
             op.execute(sa.text("DROP FUNCTION IF EXISTS "+name+"()"))
     else:
