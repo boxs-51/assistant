@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import platform
 import shutil
+from contextlib import closing
 import sqlite3
 import stat
 import subprocess
@@ -70,7 +71,7 @@ class DurableAttemptLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.is_symlink():
             raise ValueError("broker database cannot be a symbolic link")
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute(
                 """CREATE TABLE IF NOT EXISTS attempts (
                     execution_id TEXT NOT NULL,
@@ -92,7 +93,7 @@ class DurableAttemptLedger:
         return db
 
     def reserve(self, identity: SpawnIdentity) -> None:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             try:
                 db.execute(
@@ -121,7 +122,7 @@ class DurableAttemptLedger:
         }
         if (old, new) not in permitted:
             raise B0LedgerConflict("unapproved effect journal transition")
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             cursor = db.execute(
                 """UPDATE attempts SET state=?
@@ -144,7 +145,7 @@ class DurableAttemptLedger:
 
     def reconcile_after_restart(self) -> int:
         """Unknown even for RESERVED: dispatch-vs-crash order is unprovable."""
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             db.execute("BEGIN IMMEDIATE")
             changed = db.execute(
                 """UPDATE attempts SET state='OUTCOME_UNKNOWN'
@@ -154,7 +155,7 @@ class DurableAttemptLedger:
             return changed
 
     def state(self, identity: SpawnIdentity) -> str | None:
-        with self._connect() as db:
+        with closing(self._connect()) as db:
             row = db.execute(
                 """SELECT state FROM attempts
                    WHERE execution_id=? AND tool_call_id=? AND owner_id=?
