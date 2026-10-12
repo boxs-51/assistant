@@ -90,14 +90,21 @@ def spawn_supervised_stopped_native_b0(
     if not 0 < stop_timeout_seconds <= 20:
         raise ValueError("invalid bounded trampoline stop timeout")
     target = Path(executable)
+    if not target.is_absolute():
+        raise NativeSpawnFenceDenied("trusted absolute executable required")
+    try:
+        # Platform-managed Python binaries commonly use root-owned symlinks
+        # (e.g. /usr/local/bin/python -> python3.12). Resolve BEFORE the
+        # trusted pre-exec trampoline rather than executing via the link.
+        canonical_target = target.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise NativeSpawnFenceDenied("trusted executable cannot be resolved") from exc
     if (
-        not target.is_absolute()
-        or not target.is_file()
-        or target.is_symlink()
-        or not os.access(target, os.X_OK)
+        not canonical_target.is_file()
+        or not os.access(canonical_target, os.X_OK)
         or any(not isinstance(x, str) or "\x00" in x for x in args)
     ):
-        raise NativeSpawnFenceDenied("trusted absolute executable and argv required")
+        raise NativeSpawnFenceDenied("trusted executable and argv required")
     if _after_stop_for_test is not None and not callable(_after_stop_for_test):
         raise TypeError("invalid diagnostic stop hook")
     child = None
@@ -107,7 +114,7 @@ def spawn_supervised_stopped_native_b0(
             child = subprocess.Popen(
                 [
                     sys.executable, "-I", "-c", _TRUSTED_STOPPED_TRAMPOLINE,
-                    str(os.getpid()), str(target), *args,
+                    str(os.getpid()), str(canonical_target), *args,
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
