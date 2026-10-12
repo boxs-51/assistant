@@ -113,6 +113,47 @@ class WindowsJobKernelB0Tests(unittest.TestCase):
                 self.assertFalse(receipt.production_usable)
                 self.assertFalse(receipt.network_none_certified)
 
+    def test_actual_windows_crash_after_atomic_create_before_resume(self) -> None:
+        """A child already belongs to the Job even if worker never resumes it."""
+        _require_windows(self)
+        with tempfile.TemporaryDirectory(prefix="sbx3-job-atomic-crash-") as tmp:
+            marker = Path(tmp) / "child-should-not-execute"
+            saved_pid = Path(tmp) / "suspended-child-pid"
+            script = (
+                "import pathlib,os,sys\n"
+                "from se.src.runtimes.capability.native_windows_job_b0 "
+                "import WindowsJobTreeB0\n"
+                f"marker={str(marker)!r}\n"
+                f"saved={str(saved_pid)!r}\n"
+                "def crash_before_resume(pid):\n"
+                "    pathlib.Path(saved).write_text(str(pid))\n"
+                "    os._exit(79)\n"
+                "job=WindowsJobTreeB0()\n"
+                "job.spawn_assigned_before_resume("
+                "sys.executable, ('-I', '-c', "
+                "'import pathlib; pathlib.Path(' + repr(marker) + "
+                "').write_text(\"unsafe-exec\")'),"
+                " _on_assigned_for_test=crash_before_resume)\n"
+            )
+            result = subprocess.run(
+                [sys.executable, "-c", script],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=20,
+            )
+            self.assertEqual(
+                result.returncode, 79,
+                result.stderr.decode("utf-8", "replace")[-1200:],
+            )
+            self.assertTrue(saved_pid.exists())
+            pid = int(saved_pid.read_text())
+            self.assertFalse(marker.exists(), "child executed before resume")
+            deadline = time.monotonic() + 10
+            while time.monotonic() < deadline and _windows_pid_active(pid):
+                time.sleep(.05)
+            self.assertFalse(
+                _windows_pid_active(pid),
+                "worker crash leaked suspended process outside OS-owned Job",
+            )
+
     def test_actual_windows_worker_hard_exit_kills_child_and_grandchild(self) -> None:
         _require_windows(self)
         with tempfile.TemporaryDirectory(prefix="sbx3-job-hardcrash-") as tmp:
