@@ -56,6 +56,13 @@ class SandboxManager:
             raise ValueError("sandbox base_root cannot be ambient cwd or user home")
         self._base_root.mkdir(parents=True, exist_ok=True)
         self._lifecycle_lock = RLock()
+        # Existing roots have no authenticated in-memory lease on a new
+        # worker. Treat ALL of them as unknown, even if a marker was removed.
+        self._orphan_root_ids = frozenset(
+            entry.name for entry in self._base_root.iterdir()
+            if entry.name.startswith("sbx-")
+        )
+        self._enrolled_native_ids: set[str] = set()
         # Quarantine is a manager-private sibling of sandbox roots, not a
         # child-writable path. Once created it must never be auto-repaired
         # following deletion, symlink or reparse-point replacement.
@@ -210,6 +217,7 @@ class SandboxManager:
         except BaseException:
             # A partial marker is STILL quarantined: never delete it.
             raise
+        self._enrolled_native_ids.add(current.sandbox_id)
 
     @staticmethod
     def _is_junction(path: Path) -> bool:
@@ -250,6 +258,10 @@ class SandboxManager:
     def _require_native_root_empty(self, root: Path) -> None:
         if root.parent != self._base_root or root.is_symlink() or self._is_junction(root):
             raise NativeTreeUnverifiedError("sandbox root is not a trusted direct child")
+        if root.name in self._enrolled_native_ids or root.name in self._orphan_root_ids:
+            raise NativeTreeUnverifiedError(
+                "native enrollment or orphan root requires OS-owned verification"
+            )
         marker = self._native_quarantine_marker(root.name)
         # lstat catches dangling symlinks and denies on all IO/permission errors.
         try:
