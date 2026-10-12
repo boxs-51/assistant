@@ -327,3 +327,137 @@ os._exit(79)
             await fresh.load_tool_result("exec-native", "call-native")
     finally:
         await engine.dispose()
+
+
+# R8 fork was a separate model-facing reader that bypassed the original A1
+# ordinary/resume/recovery guards even when source SQL said COMMITTED.
+# Exercise the actual SQL/UoW path, not a mocked assertion or metadata flag.
+
+
+@pytest.mark.parametrize("capability", sorted(NATIVE_AGENT_CAPABILITIES))
+@pytest.mark.asyncio
+async def test_r8_fork_native_committed_never_reaches_plan_or_model(
+    tmp_path, capability,
+):
+    from se.src.infrastructure.storage.repositories.agent import AgentRepository
+    from se.src.infrastructure.storage.repositories.capability_invocations import (
+        CapabilityInvocationRepository,
+    )
+    from se.src.runtimes.agent.fork_planning import (
+        _fork_tool_result_message,
+        _load_safe_side_effects_in_uow,
+        _load_fork_safe_transcript_in_uow,
+    )
+    from se.tests.integration.test_r8_c_read_only_persistence import (
+        _database as _fork_database,
+        _seed_source as _fork_seed_source,
+        _Uow as _ForkUow,
+    )
+
+    engine, sessions = await _fork_database(tmp_path)
+    try:
+        await _fork_seed_source(sessions)
+        # Legacy committed native SUCCESS, fabricated receipt, and matching
+        # CapabilityInvocation lineage to bypass every *non-native* check.
+        async with sessions() as session:
+            row = await AgentRepository(session).get_tool_result(
+                "exec-r8-c", "call-a",
+            )
+            invocation = await CapabilityInvocationRepository(
+                session
+            ).get_record("a")
+            assert row is not None and invocation is not None
+            row.capability_id = capability
+            row.extra_metadata = {
+                "verified_empty": True,
+                "native_receipt": {"issuer": "FORGED", "revision": 999},
+            }
+            invocation.capability_id = capability
+            await session.commit()
+
+        store = DurableAgentStore(lambda: _ForkUow(sessions))
+        with pytest.raises(NativeReceiptUnavailable):
+            await store.load_fork_committed_tool_result(
+                "exec-r8-c", "call-a",
+            )
+        with pytest.raises(NativeReceiptUnavailable):
+            await store.load_fork_safe_checkpoint_transcript(
+                "exec-r8-c", "cp-r8-c",
+            )
+
+        async with _ForkUow(sessions) as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint("cp-r8-c")
+            assert checkpoint is not None
+            with pytest.raises(NativeReceiptUnavailable):
+                await _load_fork_safe_transcript_in_uow(
+                    uow, "exec-r8-c", checkpoint,
+                )
+            with pytest.raises(NativeReceiptUnavailable):
+                await _load_safe_side_effects_in_uow(uow, "exec-r8-c")
+
+            original = await uow.agents.get_tool_result(
+                "exec-r8-c", "call-a",
+            )
+            with pytest.raises(NativeReceiptUnavailable):
+                _fork_tool_result_message(original)
+            with pytest.raises(NativeReceiptUnavailable):
+                DurableAgentStore._fork_tool_result_message(original)
+
+        # Retain incident evidence unchanged, rather than deleting old SQL.
+        async with sessions() as session:
+            row = await AgentRepository(session).get_tool_result(
+                "exec-r8-c", "call-a",
+            )
+            assert row.commit_state == "COMMITTED"
+            assert row.success is True
+            assert row.capability_id == capability
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_r8_fork_nonprocess_committed_stays_usable(tmp_path):
+    from se.src.runtimes.agent.fork_planning import (
+        _load_fork_safe_transcript_in_uow,
+    )
+    from se.tests.integration.test_r8_c_read_only_persistence import (
+        _database as _fork_database,
+        _seed_source as _fork_seed_source,
+        _Uow as _ForkUow,
+    )
+
+    engine, sessions = await _fork_database(tmp_path)
+    try:
+        await _fork_seed_source(sessions)
+        store = DurableAgentStore(lambda: _ForkUow(sessions))
+        result = await store.load_fork_committed_tool_result(
+            "exec-r8-c", "call-a",
+        )
+        assert result is not None and result.capability_id == "tool.a"
+        transcript = await store.load_fork_safe_checkpoint_transcript(
+            "exec-r8-c", "cp-r8-c",
+        )
+        assert [message.tool_call_id for message in transcript if message.role == "tool"] == [
+            "call-b", "call-a",
+        ]
+        async with _ForkUow(sessions) as uow:
+            checkpoint = await uow.agents.get_execution_checkpoint("cp-r8-c")
+            direct = await _load_fork_safe_transcript_in_uow(
+                uow, "exec-r8-c", checkpoint,
+            )
+        assert tuple(m.model_dump(mode="json") for m in transcript) == tuple(
+            m.model_dump(mode="json") for m in direct
+        )
+    finally:
+        await engine.dispose()
+
+
+def test_r8_fork_native_failure_remains_representable_without_receipt():
+    from se.src.runtimes.agent.fork_planning import _fork_tool_result_message
+    row = _result("terminal.run", success=False)
+    row.error_code = "TERMINAL_OUTCOME_UNKNOWN"
+    row.error_message = "cleanup not certified"
+    result = _fork_tool_result_message(row)
+    assert result.role == "tool"
+    assert result.metadata["success"] is False
+    assert result.content["error_code"] == "TERMINAL_OUTCOME_UNKNOWN"
