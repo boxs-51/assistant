@@ -693,7 +693,7 @@ def _validate_sandbox_relative_cwd(cwd: Optional[str]) -> Optional[str]:
     if not isinstance(cwd, str) or not cwd or len(cwd) > MAX_CWD_CHARS:
         raise _TerminalToolError("INVALID_ARGUMENT", "invalid sandbox-relative cwd")
     if (
-        "\\x00" in cwd or "\\" in cwd or PurePosixPath(cwd).is_absolute()
+        "\x00" in cwd or "\\" in cwd or PurePosixPath(cwd).is_absolute()
         or PureWindowsPath(cwd).drive
         or ".." in PurePosixPath(cwd).parts
     ):
