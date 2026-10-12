@@ -64,7 +64,7 @@ def require_native_receipt(
     Future authenticated SE readthrough will require a reviewed replacement
     with same-store generation CAS; do not just return True from here.
     """
-    if is_native_agent_capability(capability_id) and success is True:
+    if is_native_agent_capability(capability_id) and success is not False and success is not None:
         raise NativeReceiptUnavailable(phase)
 
 
