@@ -395,5 +395,5 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
             handle.close()
 
 
-if __name__ == "__main__" and len(sys.argv) == 6 and sys.argv[1] == "--r14e-child":
+if __name__ == "__main__" and len(sys.argv) == 5 and sys.argv[1] == "--r14e-child":
     asyncio.run(_serve_child(sys.argv[2], Path(sys.argv[3]), int(sys.argv[4])))
