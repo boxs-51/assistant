@@ -289,13 +289,15 @@ async def run_physical_hard_restart_witness(
     scenario: str = "approve_terminal",
 ):
     """Reproduce real K1-to-K2 hard restart for a selected consent fault cut."""
-    assert scenario in {"approve_terminal", "deny_terminal"}
+    assert scenario in {"approve_terminal", "deny_terminal", "effect_before_terminal"}
     db_path = tmp_path / "server.sqlite3"
     sink_path = tmp_path / "independent_effects.sqlite3"
     ledger_path = tmp_path / "client.sqlite3"
     _sink_init(sink_path)
     terminal_ready = threading.Event()
     release_terminal = threading.Event()
+    effect_ready = threading.Event()
+    release_effect = threading.Event()
     s1 = s2 = k1 = k2 = None
     logs = []
     engine = None
@@ -330,6 +332,11 @@ async def run_physical_hard_restart_witness(
                 count = int(db.execute(
                     "SELECT count(*) FROM effects"
                 ).fetchone()[0])
+            if scenario == "effect_before_terminal":
+                # Side effect durable, client record still RUNNING.
+                effect_ready.set()
+                if not release_effect.wait(60):
+                    raise TimeoutError("External-effect cut not released")
             return {"source": "k1-durable", "value": value, "effect_count": count}
 
         k1 = await _connect_held_k1(
@@ -338,9 +345,14 @@ async def run_physical_hard_restart_witness(
             release_terminal,
         )
         _atomic_json(tmp_path / "s1-start.json", {"begin": True})
-        assert await asyncio.to_thread(terminal_ready.wait, 20.0), (
-            "K1 never reached the after-effect/before-wire cut"
-        )
+        if scenario == "effect_before_terminal":
+            assert await asyncio.to_thread(effect_ready.wait, 20.0), (
+                "K1 did not reach the post-effect/pre-terminal cut"
+            )
+        else:
+            assert await asyncio.to_thread(terminal_ready.wait, 20.0), (
+                "K1 did not commit the terminal result before the wire cut"
+            )
         assert _sink_count(sink_path, "effects") == (
             0 if scenario == "deny_terminal" else 1
         )
@@ -362,15 +374,21 @@ async def run_physical_hard_restart_witness(
             invocation_id=original_invocation,
         )
         assert record is not None
-        assert record.state is ClientInvocationLedgerState.TERMINAL
-        assert record.terminal_type == (
-            "error" if scenario == "deny_terminal" else "result"
-        )
-        if scenario == "deny_terminal":
-            assert record.terminal_payload["code"] == "HITL_DENIED"
+        if scenario == "effect_before_terminal":
+            assert record.state is ClientInvocationLedgerState.RUNNING
+            assert record.terminal_payload is None
+        else:
+            assert record.state is ClientInvocationLedgerState.TERMINAL
+            assert record.terminal_type == (
+                "error" if scenario == "deny_terminal" else "result"
+            )
+            if scenario == "deny_terminal":
+                assert record.terminal_payload["code"] == "HITL_DENIED"
         killed_pid = await _hard_kill(s1)
-        release_terminal.set()
+        # Invalidate generation before allowing the blocked worker to finish.
         k1.dispatcher.shutdown()
+        release_terminal.set()
+        release_effect.set()
         k1 = None
 
         s2_port = r7j._free_port()
@@ -486,6 +504,7 @@ async def run_physical_hard_restart_witness(
         assert k2.pending_resume_tickets == ()
     finally:
         release_terminal.set()
+        release_effect.set()
         if k2 is not None:
             await asyncio.to_thread(k2.stop)
         if k1 is not None:
@@ -515,6 +534,14 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
 @pytest.mark.asyncio
 async def test_r14_e_denied_terminal_reconciles_after_real_s1_kill(tmp_path):
     await run_physical_hard_restart_witness(tmp_path, scenario="deny_terminal")
+
+
+@pytest.mark.e2e
+@pytest.mark.asyncio
+async def test_r14_e_effect_before_terminal_is_unknown_after_s1_kill(tmp_path):
+    await run_physical_hard_restart_witness(
+        tmp_path, scenario="effect_before_terminal",
+    )
 
 
 if __name__ == "__main__" and len(sys.argv) == 5 and sys.argv[1] == "--r14e-child":
