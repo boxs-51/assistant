@@ -478,11 +478,47 @@ async def run_physical_hard_restart_witness(
         store = DurableAgentStore(uow_factory)
         invocation_store = SqlCapabilityInvocationStore(uow_factory)
 
+        async def verify_budget_snapshot():
+            async with sessions() as session:
+                task = await session.get(AgentTaskRecord, TASK_ID)
+                budget = await session.get(TaskBudgetRecord, TASK_ID)
+                reservations = (await session.execute(
+                    select(TaskBudgetReservationRecord).where(
+                        TaskBudgetReservationRecord.task_id == TASK_ID
+                    )
+                )).scalars().all()
+            assert task is not None and task.id == TASK_ID
+            assert budget is not None and budget.state in {"OPEN", "CLOSED"}
+            assert budget.used_executions == 1
+            assert budget.used_tool_calls == 1
+            assert budget.active_executions == 0
+            assert budget.used_executions <= budget.max_total_executions
+            assert budget.used_tool_calls <= budget.max_total_tool_calls
+            kind_keys = [(item.kind, item.reservation_key) for item in reservations]
+            assert len(kind_keys) == len(set(kind_keys))
+            assert sum(item.kind == "NEW_EXECUTION" for item in reservations) == 1
+            assert sum(item.kind == "TOOL_CALL" for item in reservations) == 1
+            assert any(
+                item.kind == "TOOL_CALL" and item.reservation_key == "call-r7j-1"
+                for item in reservations
+            )
+            return {
+                "task_status": task.status,
+                "task_revision": task.revision,
+                "budget_state": budget.state,
+                "budget_revision": budget.revision,
+                "used_executions": budget.used_executions,
+                "active_executions": budget.active_executions,
+                "used_tool_calls": budget.used_tool_calls,
+                "reservations": sorted(kind_keys),
+            }
+
         async def completed():
             row = await store.load_execution(r7j.EXECUTION_ID)
             return row if row is not None and row.state == "COMPLETED" else None
 
         if scenario == "effect_before_terminal":
+            budget_snapshot = await verify_budget_snapshot()
             # Require K2 to reach actual server SQL resume-claim handling.
             async def resumed_unknown():
                 async with sessions() as session:
@@ -514,6 +550,7 @@ async def run_physical_hard_restart_witness(
             assert _sink_count(sink_path, "approvals") == 1
             assert resumed_approvals == []
             _atomic_json(tmp_path / "outcome-unknown.json", {
+                "task_budget": budget_snapshot,
                 "scenario": scenario,
                 "backend": "postgresql" if postgres_url else "sqlite",
                 "s1_pid": killed_pid, "s2_pid": s2.pid,
@@ -527,6 +564,7 @@ async def run_physical_hard_restart_witness(
 
         row = await r7j._wait_async(completed, timeout=35.0)
         assert row.id == r7j.EXECUTION_ID
+        budget_snapshot = await verify_budget_snapshot()
         result = await store.load_committed_tool_result(
             r7j.EXECUTION_ID, "call-r7j-1"
         )
@@ -571,6 +609,7 @@ async def run_physical_hard_restart_witness(
             _atomic_json(tmp_path / "postgres17-result.json", {
                 "backend": "postgresql",
                 "scenario": scenario,
+                "task_budget": budget_snapshot,
                 "version_num": version,
                 "database": database,
                 "s1_pid": killed_pid,
