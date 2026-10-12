@@ -194,6 +194,30 @@ class LinuxCgroupTreeLedger:
             db.execute("COMMIT")
         return path
 
+    def discover_unregistered_cgroups(self) -> tuple[Path, ...]:
+        """Fail-closed orphan discovery after mkdir-before-INSERT hard crash.
+
+        Returns only kernel cgroup directories without a durable record. It
+        NEVER attaches, kills, removes, or certifies these unknown generations.
+        """
+        self._assert_parent()
+        with closing(self._connect()) as db:
+            known = {
+                row[0] for row in db.execute(
+                    "SELECT path FROM native_cgroup_trees"
+                ).fetchall()
+            }
+        unknown = []
+        for child in self.root.iterdir():
+            if not child.name.startswith("sbx3-"):
+                continue
+            if child.is_symlink() or not child.is_dir():
+                raise CgroupTreeMismatch("unknown cgroup entry is not a kernel directory")
+            self._assert_real_cgroup2(child)
+            if str(child) not in known:
+                unknown.append(child)
+        return tuple(sorted(unknown))
+
     def _load(self, identity: CgroupTreeIdentity) -> tuple[Path, int, int, str]:
         self._assert_parent()
         with closing(self._connect()) as db:
