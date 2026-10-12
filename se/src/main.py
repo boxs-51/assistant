@@ -813,6 +813,77 @@ async def _reserve_bootstrap_capability_namespaces(container, catalog) -> None:
         await authority.reserve_system_namespace(definition)
 
 
+async def _publish_explicit_trusted_bootstrap_skills(
+    container, discovered_skill_ids
+) -> tuple[str, ...]:
+    """Server-operator attested publication; NEVER an Agent skill.load side effect.
+
+    No configured list means no new public visibility. The only eligible
+    definitions come from verified server manifests discovered at bootstrap,
+    not caller-provided catalog entries or HTTP metadata. The PostgreSQL
+    revision CAS is mandatory and legacy/no-SQL operation cannot opt in.
+    """
+    raw_ids = str(
+        os.environ.get("ASSISTANT_SKILL_PUBLICATION_TRUSTED_IDS") or ""
+    ).strip()
+    if not raw_ids:
+        return ()
+
+    requested = tuple(item.strip() for item in raw_ids.split(","))
+    if (
+        any(not item or item == "*" for item in requested)
+        or len(requested) != len(set(requested))
+    ):
+        raise RuntimeError(
+            "Trusted Skill publisher requires unique explicit skill IDs; "
+            "wildcards and empty entries are prohibited."
+        )
+
+    runtime = container.capability_runtime
+    authority = runtime.publication_authority
+    if authority is None:
+        raise RuntimeError(
+            "Trusted Skill publisher requires configured PostgreSQL authority."
+        )
+    loader = container.support_loader
+    verified = set(discovered_skill_ids)
+    # Validate and materialize the *entire* operator-approved input before
+    # any SQL publish; an unknown ID must never partially publish peers.
+    materialized = []
+    for skill_id in requested:
+        if skill_id not in verified or skill_id not in loader._skill_manifests:
+            raise RuntimeError(
+                f"Trusted Skill publication ID is not a server manifest: {skill_id}"
+            )
+        definition = loader.load_skill(skill_id)
+        metadata = definition.metadata
+        if (
+            definition.capability_id != skill_id
+            or definition.kind.value != "SKILL"
+            or definition.execution_mode.value != "CONTEXT_ONLY"
+            or metadata.get("provenance") != "SERVER_SKILL_MANIFEST"
+            or metadata.get("server_managed") is not True
+            or metadata.get("runtime_owned") is not True
+            or metadata.get("loaded") is not True
+            or not str(metadata.get("instruction") or "").strip()
+        ):
+            raise RuntimeError(
+                f"Trusted Skill publication requires verified materialization: {skill_id}"
+            )
+        materialized.append(definition)
+
+    # Each row was reserved as SYSTEM by bootstrap. The returned revision is
+    # an actual PostgreSQL read-through (not a hard-coded expected_revision).
+    # Repeated startup accepts an identical already-DIRECT digest; mutation
+    # or revoked records remain CAS/tombstone-fenced and abort startup.
+    for definition in materialized:
+        reservation = await authority.reserve_system_namespace(definition)
+        await runtime.publish_system_direct_context(
+            definition, expected_revision=reservation.revision
+        )
+    return requested
+
+
 async def _observe_legacy_waiting_residue(uow_factory: Any) -> None:
     """Emit bounded R13 rollout evidence without mutating durable state."""
 
@@ -1211,6 +1282,14 @@ async def bootstrap_runtime_kernel(
     )
     builtin_support = register_builtin_support(container)
     await _reserve_bootstrap_capability_namespaces(container, capability_catalog)
+    published_trusted_skills = await _publish_explicit_trusted_bootstrap_skills(
+        container, builtin_support["skills"]
+    )
+    if published_trusted_skills:
+        logger.info(
+            "Operator-attested trusted Skills published",
+            skill_ids=list(published_trusted_skills),
+        )
     container.multi_agent_coordinator.agent_authorizer = (
         lambda identity, agent_id: (
             capability_catalog.contains_definition(agent_id)
