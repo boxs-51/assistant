@@ -272,3 +272,58 @@ os._exit(65)
         capture_output=True, text=True, timeout=20,
     )
     assert child.returncode == 0, child.stderr[-2000:]
+
+
+
+@pytest.mark.asyncio
+async def test_os_hard_crash_then_fresh_ae_sql_reader_must_deny(tmp_path):
+    """Writer dies via os._exit after durable SQL commit, reader restarts."""
+    db_name = "a1-crashed-writer.sqlite"
+    engine, sessions = await _schema(tmp_path, db_name)
+    try:
+        async with _Uow(sessions) as uow:
+            uow.session.add(AgentExecutionRecord(
+                id="exec-native", session_id="session", agent_id="agent",
+                correlation_id="corr", state="RUNNING", revision=1, request={},
+            ))
+            uow.session.add(AgentIterationRecord(
+                id="iter-native", execution_id="exec-native", iteration=1,
+                state="WAITING_TOOL", tool_call_ids=["call-native"],
+            ))
+            await uow.session.flush()
+            uow.session.add(AgentToolResultRecord(
+                id="result-native", execution_id="exec-native",
+                iteration_id="iter-native", tool_call_id="call-native",
+                invocation_id="inv-native", capability_id="terminal.run",
+                success=False, error_code="OUTCOME_UNKNOWN",
+                commit_state="PROVISIONAL",
+            ))
+            await uow.commit()
+
+        # Simulate a preexisting untrusted/native artifact being committed by
+        # another writer. The AE A1 gate never invokes this writer; it must
+        # reject its postmortem content on *every* restart read path.
+        script = """
+import os,sqlite3
+db=sqlite3.connect(os.environ['AE_A1_TEST_DB'])
+db.execute("UPDATE agent_tool_results SET success=1, commit_state='COMMITTED' WHERE id='result-native'")
+db.commit()
+os._exit(79)
+"""
+        root = Path(__file__).resolve().parents[3]
+        env = dict(os.environ)
+        env["AE_A1_TEST_DB"] = str(tmp_path / db_name)
+        process = subprocess.run(
+            [sys.executable, "-c", script], cwd=root, env=env,
+            capture_output=True, text=True, timeout=20,
+        )
+        assert process.returncode == 79, process.stderr[-2000:]
+        await engine.dispose()
+        engine, sessions = await _schema(tmp_path, db_name)
+        fresh = DurableAgentStore(lambda: _Uow(sessions))
+        with pytest.raises(NativeReceiptUnavailable):
+            await fresh.load_committed_tool_result("exec-native", "call-native")
+        with pytest.raises(NativeReceiptUnavailable):
+            await fresh.load_tool_result("exec-native", "call-native")
+    finally:
+        await engine.dispose()
