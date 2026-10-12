@@ -22,6 +22,7 @@ from pathlib import Path
 from se.src.runtimes.capability.native_tree_cgroup_b0 import (
     CgroupTreeIdentity,
     CgroupTreeMismatch,
+    CgroupTreeNotEmpty,
     CgroupTreeUnavailable,
     LinuxCgroupTreeLedger,
 )
@@ -124,6 +125,14 @@ class KernelOwnedTreeRecoveryTests(unittest.TestCase):
             receipt = restored.recover_and_verify_empty(identity, timeout_seconds=15)
             self.assertEqual(receipt.status, "VERIFIED_EMPTY")
             self.assertFalse(receipt.production_usable)
+            audit = restored.audit_committed_empty(identity)
+            self.assertEqual(audit.observed, "EMPTY_OBSERVED_DIAGNOSTIC")
+            self.assertFalse(audit.delete_permitted)
+            self.assertEqual(audit.generation, identity.generation)
+            with self.assertRaises(CgroupTreeMismatch):
+                restored.audit_committed_empty(stale)
+            with self.assertRaises(CgroupTreeMismatch):
+                restored.audit_committed_empty(foreign)
             self.assertEqual(receipt.generation, identity.generation)
             self.assertEqual(receipt.sandbox_id, identity.sandbox_id)
             self.assertEqual(
@@ -138,6 +147,46 @@ class KernelOwnedTreeRecoveryTests(unittest.TestCase):
                 restored.recover_and_verify_empty(identity)
             nested.rmdir()
             cg.rmdir()
+
+    def test_kernel_tree_repopulation_invalidates_committed_empty_audit(self) -> None:
+        delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
+        if not delegated:
+            self.skipTest("KERNEL_CGROUP_POSITIVE_NOT_RUN: no delegated root")
+        with tempfile.TemporaryDirectory(prefix="sbx3-repopulate-") as tmp:
+            journal = Path(tmp) / "state.sqlite"
+            ledger = LinuxCgroupTreeLedger(Path(delegated), journal)
+            identity = self._identity()
+            cgroup = ledger.enroll(identity)
+            receipt = ledger.recover_and_verify_empty(identity)
+            self.assertFalse(receipt.production_usable)
+            self.assertFalse(ledger.audit_committed_empty(identity).delete_permitted)
+            ready = Path(tmp) / "entered"
+            script = (
+                "import os, pathlib, time\n"
+                f"pathlib.Path({str(cgroup)!r}).joinpath('cgroup.procs')"
+                ".write_text(str(os.getpid()), encoding='ascii')\n"
+                f"pathlib.Path({str(ready)!r}).write_text('ok')\n"
+                "time.sleep(60)\n"
+            )
+            child = subprocess.Popen(
+                [sys.executable, "-c", script],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+            )
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    if child.poll() is not None:
+                        self.fail("kernel cgroup reattach fixture failed to start")
+                    time.sleep(.05)
+                self.assertTrue(ready.exists())
+                with self.assertRaises(CgroupTreeNotEmpty):
+                    ledger.audit_committed_empty(identity)
+            finally:
+                (cgroup / "cgroup.kill").write_text("1", encoding="ascii")
+                child.wait(timeout=10)
+            self.assertFalse(ledger.audit_committed_empty(identity).delete_permitted)
+            cgroup.rmdir()
 
     def test_real_hard_crash_after_cgroup_create_before_journal_insert(self) -> None:
         delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
