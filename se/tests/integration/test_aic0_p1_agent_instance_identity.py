@@ -978,22 +978,12 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
         assert await read_scalar("SELECT version_num FROM alembic_version") == revision
 
     try:
-        # Genuine PostgreSQL bootstrap is blocked before 25a by the
-        # historical alembic_version VARCHAR(32) limit at long revision 5b.
-        # Both real PG17 Linux and Windows reproduced the failure on the
-        # untouched fresh DB (evidence #38260235391). The separate scoped
-        # compatibility run BELOW widens ONLY version bookkeeping on this
-        # disposable database; it does NOT certify unprepared production
-        # upgrades or modify any historical Alembic revision.
-        if backend == "postgresql":
-            _aic_run_real_alembic(url, "896c456631dd")
-            await require_revision("896c456631dd")
-            async with engine.begin() as cx:
-                await cx.execute(text(
-                    "ALTER TABLE alembic_version "
-                    "ALTER COLUMN version_num TYPE VARCHAR(255)"
-                ))
-        # Execute the actual 5b...24a ancestors (no Alembic stamp/fake DDL).
+        # Start a pristine database at its default Alembic version table.
+        # This intentionally performs no test-side stamp, ALTER or revision
+        # bypass: historical migration 5b itself must support PG17 before
+        # the full populated 24a→25a→26a→30a→31a upgrade can be certified.
+        # Untouched historical 5b is a known negative control (VARCHAR(32)).
+        # Execute all ancestors with genuine out-of-process Alembic CLI.
         _aic_run_real_alembic(url, "24a_r12_stale_lease_scan_index")
         await require_revision("24a_r12_stale_lease_scan_index")
         async with engine.begin() as cx:
