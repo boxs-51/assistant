@@ -1,6 +1,8 @@
 """Issue #371 private broker adapter: synthetic contract checks only.
 
-None of these tests spawn a child or assert genuine Linux/Windows OS isolation.
+These tests do not spawn untrusted tool commands or certify OS isolation.
+A single TEST-OWNED Python worker hard-exits after persisting a synthetic
+reservation; this is not a native broker or kernel process-tree experiment.
 Real broker authority, process-tree cleanup and AE receipt persistence remain
 the independent #164/#359/#417 integration/security gates.
 """
@@ -203,3 +205,271 @@ def test_valid_public_execute_cannot_inject_private_port():
     assert answer["data"] == "DIRECT"
     run.assert_called_once()
     assert port.calls == []
+
+
+
+# SECURITY NEGATIVE GATES: test-only doubles; no production broker authority.
+# The authentic SE #164 issuer, kernel tree, and root cleanup must be tested
+# separately. A self-asserted bool from this test port is not certification.
+
+
+@pytest.mark.parametrize(
+    "authority_variant",
+    [
+        ("other-owner", "exec-a", 9, "inv-a", "call-a"),
+        ("owner-a", "other-exec", 9, "inv-a", "call-a"),
+        ("owner-a", "exec-a", 8, "inv-a", "call-a"),
+        ("owner-a", "exec-a", 9, "other-inv", "call-a"),
+        ("owner-a", "exec-a", 9, "inv-a", "other-call"),
+    ],
+)
+def test_stale_foreign_generation_invocation_and_tool_call_never_succeed(
+    authority_variant,
+):
+    expected = ("owner-a", "exec-a", 9, "inv-a", "call-a")
+
+    class _ScopeCheckingPort(_SyntheticPort):
+        def __init__(self):
+            super().__init__()
+            self.dispatched = 0
+
+        async def run_preconfined(self, **kwargs):
+            self.calls.append(("attempt", kwargs))
+            if kwargs["authority"] != expected:
+                raise PermissionError("stale or foreign owner/lease/call")
+            self.dispatched += 1
+            return self.completion
+
+    port = _ScopeCheckingPort()
+    with patch.object(terminal_module.subprocess, "Popen") as host:
+        result = _call(port, authority=authority_variant)
+        host.assert_not_called()
+    assert result["ok"] is False
+    assert result["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["replay_safe"] is False
+    assert port.dispatched == 0
+    assert [kind for kind, _ in port.calls] == ["attempt"]
+
+
+def test_consumed_authority_cannot_repeat_an_effectful_attempt():
+    authority = object()
+
+    class _OneUsePort(_SyntheticPort):
+        def __init__(self):
+            super().__init__(verified=False)
+            self.used = set()
+            self.dispatched = 0
+
+        async def run_preconfined(self, **kwargs):
+            token = kwargs["authority"]
+            if token in self.used:
+                raise RuntimeError("consumed authority cannot be replayed")
+            self.used.add(token)
+            self.dispatched += 1
+            return self.completion
+
+    port = _OneUsePort()
+    with patch.object(terminal_module.subprocess, "Popen") as host:
+        first = _call(port, authority=authority)
+        second = _call(port, authority=authority)
+        host.assert_not_called()
+    for result in (first, second):
+        assert result["ok"] is False
+        assert result["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+        assert result["error"]["retryable"] is False
+        assert result["error"]["details"]["replay_safe"] is False
+    assert port.dispatched == 1
+
+
+@pytest.mark.parametrize("verified", [False, None, 1, "VERIFIED_EMPTY", {}])
+@pytest.mark.parametrize("outcome", ["EXITED", "TIMEOUT", "OUTPUT_LIMIT", "IO_ERROR"])
+def test_uncertified_tree_cleanup_overrides_all_broker_outcomes(verified, outcome):
+    completion = terminal_module._BrokerRunCompletion(
+        outcome=outcome,
+        tree_ref=object(),
+        receipt=object(),
+        exit_code=0 if outcome == "EXITED" else None,
+    )
+    port = _SyntheticPort(completion=completion, verified=verified)
+    with patch.object(terminal_module.subprocess, "Popen") as host:
+        result = _call(port)
+        host.assert_not_called()
+    assert result["ok"] is False
+    assert result["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+    assert result["error"]["retryable"] is False
+    assert result["error"]["details"]["replay_safe"] is False
+    assert [name for name, _ in port.calls] == ["run", "verify"]
+
+
+def test_receipt_revoked_after_dispatch_never_publishes_success():
+    class _RevocationPort(_SyntheticPort):
+        def __init__(self):
+            super().__init__()
+            self.active_generation = 4
+            self.dispatched = 0
+
+        async def run_preconfined(self, **kwargs):
+            self.dispatched += 1
+            self.calls.append(("run", kwargs))
+            # Simulates a concurrent lease revoke while the child is exiting.
+            self.active_generation += 1
+            return self.completion
+
+        async def verify_receipt(self, **kwargs):
+            self.calls.append(("verify", kwargs))
+            return self.active_generation == 4
+
+    port = _RevocationPort()
+    with patch.object(terminal_module.subprocess, "Popen") as host:
+        result = _call(port)
+        host.assert_not_called()
+    assert result["ok"] is False
+    assert result["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+    assert port.dispatched == 1
+    assert [kind for kind, _ in port.calls] == ["run", "verify"]
+
+
+@pytest.mark.parametrize("phase", ["collect", "receipt"])
+def test_async_cancellation_propagates_and_requires_broker_quarantine(phase):
+    async def scenario():
+        class _CancellationPort(_SyntheticPort):
+            def __init__(self):
+                super().__init__()
+                self.entered = asyncio.Event()
+                self.quarantined = False
+                self.dispatch_count = 0
+
+            async def run_preconfined(self, **kwargs):
+                if self.quarantined:
+                    raise RuntimeError("quarantined invocation")
+                self.dispatch_count += 1
+                if phase == "collect":
+                    self.entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        # Responsibility of a real trusted SE broker, not a
+                        # cleanup guarantee from TerminalTool/finally.
+                        self.quarantined = True
+                return self.completion
+
+            async def verify_receipt(self, **kwargs):
+                if phase == "receipt":
+                    self.entered.set()
+                    try:
+                        await asyncio.Event().wait()
+                    finally:
+                        self.quarantined = True
+                return False
+
+        port = _CancellationPort()
+        auth = object()
+        task = asyncio.create_task(
+            TerminalTool()._run_broker_owned(
+                command="synthetic-never-executed",
+                spawn_port=port, authority=auth,
+            )
+        )
+        await asyncio.wait_for(port.entered.wait(), timeout=3)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=3)
+        assert task.cancelled()
+        assert port.quarantined
+        assert port.dispatch_count == 1
+        # New adapter call MUST NOT re-dispatch an effectful invocation after
+        # the port has fenced it, even if coroutine state was discarded.
+        again = await TerminalTool()._run_broker_owned(
+            command="synthetic-never-executed",
+            spawn_port=port, authority=auth,
+        )
+        assert not again["ok"]
+        assert again["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+        assert again["error"]["details"]["replay_safe"] is False
+        assert port.dispatch_count == 1
+
+    with patch.object(terminal_module.subprocess, "Popen") as host:
+        asyncio.run(scenario())
+        host.assert_not_called()
+
+
+def test_hard_worker_exit_then_restart_keeps_attempt_nonreplayable(tmp_path):
+    """Real test-owned os._exit; fake durable ledger, NO native command run."""
+    import sqlite3
+    import subprocess
+    import sys
+
+    ledger = tmp_path / "synthetic_attempts.sqlite3"
+    with sqlite3.connect(ledger) as db:
+        db.execute("PRAGMA journal_mode=WAL")
+        db.execute("PRAGMA synchronous=FULL")
+        db.execute(
+            "CREATE TABLE attempts (invocation TEXT PRIMARY KEY, state TEXT NOT NULL)"
+        )
+
+    # Separate Python worker writes and fsync-commits the hypothetical effect
+    # reservation, then dies without a success receipt. No child process is
+    # launched by TerminalTool and no native cleanup is being simulated as real.
+    worker = (
+        "import os, sqlite3, sys\n"
+        "with sqlite3.connect(sys.argv[1]) as db:\n"
+        "    db.execute('PRAGMA synchronous=FULL')\n"
+        "    db.execute(\"INSERT INTO attempts VALUES (?, ?)\", "
+        "('inv-a', 'OUTCOME_UNKNOWN'))\n"
+        "os._exit(73)\n"
+    )
+    child = subprocess.run(
+        [sys.executable, "-c", worker, str(ledger)],
+        check=False, capture_output=True, timeout=15,
+    )
+    assert child.returncode == 73, child.stderr.decode(errors="replace")
+
+    class _RecoveryPort(_SyntheticPort):
+        def __init__(self, db_path):
+            super().__init__()
+            self.db_path = db_path
+            self.dispatched = 0
+
+        async def run_preconfined(self, **kwargs):
+            with sqlite3.connect(self.db_path) as db:
+                row = db.execute(
+                    "SELECT state FROM attempts WHERE invocation=?",
+                    ("inv-a",),
+                ).fetchone()
+            if row is not None:
+                raise RuntimeError("durable reservation: OUTCOME_UNKNOWN")
+            self.dispatched += 1
+            return self.completion
+
+    # A brand-new port instance represents restarted application memory.
+    for _ in range(2):
+        restarted = _RecoveryPort(ledger)
+        with patch.object(terminal_module.subprocess, "Popen") as host:
+            result = _call(restarted)
+            host.assert_not_called()
+        assert result["ok"] is False
+        assert result["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+        assert result["error"]["retryable"] is False
+        assert result["error"]["details"]["replay_safe"] is False
+        assert restarted.dispatched == 0
+    with sqlite3.connect(ledger) as db:
+        assert db.execute(
+            "SELECT COUNT(*) FROM attempts WHERE invocation='inv-a'"
+        ).fetchone() == (1,)
+
+
+def test_receipt_verification_failure_redacts_privileged_broker_state():
+    secret = "/privileged/lease/secret-credential"
+
+    class _SensitiveFailurePort(_SyntheticPort):
+        async def verify_receipt(self, **kwargs):
+            raise PermissionError("forged receipt " + secret)
+
+    port = _SensitiveFailurePort()
+    with patch.object(terminal_module.subprocess, "Popen") as host:
+        result = _call(port)
+        host.assert_not_called()
+    assert result["error"]["code"] == "TERMINAL_OUTCOME_UNKNOWN"
+    assert result["error"]["details"]["replay_safe"] is False
+    assert secret not in repr(result)
