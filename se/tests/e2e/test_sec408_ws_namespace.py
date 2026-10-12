@@ -392,6 +392,96 @@ async def test_real_postgres_ws_atomic_batch_and_concurrent_http_owner_fence():
             ).one()
         assert tuple(row) == (1, "alice")
 
+        # A matching HTTP single-ID reservation is idempotent across engines;
+        # changed scopes by the same owner are NOT the same logical contract.
+        http_same = f"{prefix}-http-same"
+        http_def = _definition(http_same)
+        await authority_a.reserve_user_namespace(http_def, publisher_id="alice")
+        await authority_b.reserve_user_namespace(
+            _definition(http_same), publisher_id="alice"
+        )
+        changed_http = _definition(http_same)
+        changed_http.required_scopes = ["elevated-scope"]
+        with pytest.raises(PublicationConflict):
+            await authority_b.reserve_user_namespace(
+                changed_http, publisher_id="alice"
+            )
+
+        # Same-principal WebSocket replay with a different definition MUST
+        # fail before any local Catalog side effects, not appear idempotent.
+        divergent = f"{prefix}-divergent"
+        changed_catalog, changed_service = _service(
+            "alice", "client-divergent", "connection-divergent"
+        )
+        first_request = _request(
+            "alice", "client-a", "connection-a", divergent
+        )
+        changed_request = _request(
+            "alice", "client-divergent", "connection-divergent", divergent
+        )
+        changed_request.capabilities[0].definition.required_scopes = [
+            "elevated-scope"
+        ]
+        await service_a.register_durable(
+            first_request, user_id="alice", publication_authority=authority_a
+        )
+        with pytest.raises(PublicationConflict):
+            await changed_service.register_durable(
+                changed_request, user_id="alice", publication_authority=authority_b
+            )
+        assert not changed_catalog.contains_definition(divergent)
+        assert catalog_a.contains_definition(divergent)
+
+        # Adversarial concurrent first-writer race, SAME identity and kind
+        # but incompatible scopes/contracts. Exactly one worker may commit.
+        race_id = f"{prefix}-definition-race"
+        competing_catalog, competing_service = _service(
+            "alice", "client-competing", "connection-competing"
+        )
+        base_request = _request(
+            "alice", "client-a", "connection-a", race_id
+        )
+        competing_request = _request(
+            "alice", "client-competing", "connection-competing", race_id
+        )
+        competing_request.capabilities[0].definition.required_scopes = [
+            "deny-unprivileged"
+        ]
+        definition_race = await asyncio.wait_for(
+            asyncio.gather(
+                service_a.register_durable(
+                    base_request,
+                    user_id="alice",
+                    publication_authority=authority_a,
+                ),
+                competing_service.register_durable(
+                    competing_request,
+                    user_id="alice",
+                    publication_authority=authority_b,
+                ),
+                return_exceptions=True,
+            ), timeout=30,
+        )
+        assert sum(isinstance(item, list) for item in definition_race) == 1
+        assert sum(
+            isinstance(item, PublicationConflict) for item in definition_race
+        ) == 1, [type(item).__name__ for item in definition_race]
+        assert (
+            catalog_a.contains_definition(race_id)
+            != competing_catalog.contains_definition(race_id)
+        )
+        async with engine_a.connect() as connection:
+            stored = (
+                await connection.execute(
+                    text(
+                        "SELECT count(*), min(payload_digest) FROM "
+                        "skill_publications.capability_publications "
+                        "WHERE capability_id = :id"
+                    ), {"id": race_id},
+                )
+            ).one()
+        assert stored[0] == 1 and len(stored[1]) == 64
+
         # Simultaneous WS A vs WS B on different engine/session instances.
         shared = f"{prefix}-shared"
         results = await asyncio.wait_for(
