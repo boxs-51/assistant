@@ -433,3 +433,337 @@ async def test_aic_actual_alembic_sqlite_downgrade_rejects_marker(tmp_path):
             ))).scalar_one() == 1
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# AIC-0-P1A durability, real UBQ 25a/26a DDL, and raw-FK-OFF negative gates.
+# The SQLite tests below reopen the real file through independent native
+# sqlite3 connections. They deliberately never mock the AIC SQL migration.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "sqlite_url",
+    ["sqlite+aiosqlite:///:memory:", "sqlite+aiosqlite://"],
+)
+@pytest.mark.asyncio
+async def test_aic_sqlite_shared_memory_connections_fail_closed(sqlite_url):
+    # AsyncSession identity is not evidence of distinct physical SQLite
+    # connections for in-memory databases. Never mint owner authority there.
+    engine = create_async_engine(sqlite_url)
+    try:
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        async with sessions() as session:
+            with pytest.raises(AgentInstanceDenied, match="in-memory"):
+                await AgentInstanceRepository(session).create("alice", "d", "v")
+            assert not session.in_transaction()
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_aic_actual_sqlalchemy_uow_same_session_rollback(sqlite_aic):
+    # Use the real production UoW adapter rather than the minimal _Uow facade
+    # used in other tests; no added session/commit knobs.
+    from se.src.infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+
+    engine, sessions = sqlite_aic
+
+    class _Driver:
+        def get_session(self):
+            return sessions()
+
+    async with SqlAlchemyUnitOfWork(_Driver()) as uow:
+        assert uow.agent_instances.session is uow.session
+        row = await uow.agent_instances.create("alice", "d", "v")
+        provisional = row.agent_instance_id
+        await uow.rollback()
+
+    async with engine.connect() as connection:
+        count = (await connection.execute(text(
+            "SELECT COUNT(*) FROM aic_instance_reservations "
+            "WHERE agent_instance_id=:id"
+        ), {"id": provisional})).scalar_one()
+        assert count == 0
+
+
+def _install_exact_ubq_owner_delete_sqlite_triggers(db):
+    """Install *unmodified* 25a/26a owner-DELETE SQL, not synthetic predicates.
+
+    Only the owner-DELETE guards are installed, using minimal historical
+    table columns referenced by those guards. This is a trigger coexistence
+    check, NOT a claim that every Alembic predecessor has been migrated.
+    """
+    from unittest.mock import patch
+
+    v25 = importlib.import_module(
+        "se.src.infrastructure.storage.migrations.sql.versions."
+        "25a_ubq1_user_budget_foundation"
+    )
+    v26 = importlib.import_module(
+        "se.src.infrastructure.storage.migrations.sql.versions."
+        "26a_ubq2_dual_accounting_bridge"
+    )
+    for table in (
+        "user_budget_policies",
+        "user_budget_accounts",
+        "user_budget_windows",
+        "user_tool_budget_usage",
+        "user_budget_reservations",
+        "user_budget_task_bindings",
+    ):
+        db.execute(f"CREATE TABLE {table} (owner_user_id TEXT NOT NULL)")
+
+    seen = []
+
+    def install_25(sql):
+        if "CREATE TRIGGER trg_ubq_user_history_delete" in sql:
+            db.execute(sql)
+            seen.append("trg_ubq_user_history_delete")
+
+    def install_26(sql):
+        if "CREATE TRIGGER trg_ubq2_user_binding_delete_restrict" in sql:
+            db.execute(sql)
+            seen.append("trg_ubq2_user_binding_delete_restrict")
+
+    with patch.object(v25, "_execute_sqlite_trigger", install_25):
+        v25._create_sqlite_triggers()
+    with patch.object(v26, "_sqlite", install_26):
+        v26._create_sqlite_triggers()
+    assert seen == [
+        "trg_ubq_user_history_delete",
+        "trg_ubq2_user_binding_delete_restrict",
+    ]
+    actual = {
+        name for (name,) in db.execute(
+            "SELECT name FROM sqlite_master WHERE type='trigger'"
+        )
+    }
+    assert set(seen) | {"trg_aic_user_delete"} <= actual
+
+
+@pytest.mark.parametrize("history", ["none", "25a", "26a", "both"])
+@pytest.mark.asyncio
+async def test_aic_exact_ubq_25a_26a_owner_delete_coexistence(sqlite_aic, history):
+    # Independently opened native connections with FK enforcement actually OFF.
+    import sqlite3
+    from contextlib import closing
+
+    engine, sessions = sqlite_aic
+    identity_id = await _create(sessions)
+    with closing(sqlite3.connect(engine.url.database)) as db:
+        db.execute("PRAGMA foreign_keys=OFF")
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+        _install_exact_ubq_owner_delete_sqlite_triggers(db)
+        db.commit()
+        # No UBQ history yet: the AIC guard alone must prevent an orphan.
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_OWNER_DELETE_DENIED"):
+            db.execute("DELETE FROM users WHERE id='alice'")
+        db.rollback()
+        assert db.execute(
+            "SELECT COUNT(*) FROM aic_instance_live "
+            "WHERE agent_instance_id=?", (identity_id,)
+        ).fetchone()[0] == 1
+
+    async with sessions() as session:
+        assert await AgentInstanceRepository(session).retire(
+            "alice", identity_id, 1
+        ) == 2
+        await session.commit()
+
+    with closing(sqlite3.connect(engine.url.database)) as db:
+        db.execute("PRAGMA foreign_keys=OFF")
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+        if history in ("25a", "both"):
+            db.execute(
+                "INSERT INTO user_budget_policies(owner_user_id) VALUES ('alice')"
+            )
+        if history in ("26a", "both"):
+            db.execute(
+                "INSERT INTO user_budget_task_bindings(owner_user_id) VALUES ('alice')"
+            )
+        db.commit()
+        if history == "none":
+            assert db.execute("DELETE FROM users WHERE id='alice'").rowcount == 1
+            db.commit()
+        else:
+            with pytest.raises(sqlite3.IntegrityError, match="UBQ"):
+                db.execute("DELETE FROM users WHERE id='alice'")
+            db.rollback()
+            assert db.execute(
+                "SELECT COUNT(*) FROM users WHERE id='alice'"
+            ).fetchone()[0] == 1
+        assert db.execute(
+            "SELECT state FROM aic_instance_reservations "
+            "WHERE agent_instance_id=?", (identity_id,)
+        ).fetchone() == ("RETIRED",)
+        assert db.execute(
+            "SELECT COUNT(*) FROM aic_instance_live "
+            "WHERE agent_instance_id=?", (identity_id,)
+        ).fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_aic_sqlite_raw_fkoff_id_and_owner_mutation_fences(sqlite_aic):
+    import sqlite3
+    from contextlib import closing
+
+    engine, sessions = sqlite_aic
+    identity_id = await _create(sessions)
+    with closing(sqlite3.connect(engine.url.database)) as db:
+        db.execute("PRAGMA foreign_keys=OFF")
+        assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+        bad_sql = (
+            ("UPDATE aic_instance_reservations SET generation=99 "
+             "WHERE agent_instance_id=?", "AIC_ID_TRANSITION_FORBIDDEN"),
+            ("DELETE FROM aic_instance_reservations "
+             "WHERE agent_instance_id=?", "AIC_ID_REUSE_FORBIDDEN"),
+            ("DELETE FROM aic_instance_live "
+             "WHERE agent_instance_id=?", "AIC_LIVE_DELETE_FORBIDDEN"),
+            ("UPDATE aic_instance_live SET definition_version='forged' "
+             "WHERE agent_instance_id=?", "AIC_LIVE_UPDATE_FORBIDDEN"),
+            ("UPDATE aic_instance_live SET owner_user_id='other' "
+             "WHERE agent_instance_id=?", "AIC_LIVE_UPDATE_FORBIDDEN"),
+            ("UPDATE aic_instance_live SET generation=4 "
+             "WHERE agent_instance_id=?", "AIC_LIVE_UPDATE_FORBIDDEN"),
+        )
+        for statement, error in bad_sql:
+            with pytest.raises(sqlite3.IntegrityError, match=error):
+                db.execute(statement, (identity_id,))
+            db.rollback()
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_OWNER_REKEY_DENIED"):
+            db.execute("UPDATE users SET id='other' WHERE id='alice'")
+        db.rollback()
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_ID_INITIAL_STATE_INVALID"):
+            db.execute(
+                "INSERT INTO aic_instance_reservations "
+                "(agent_instance_id,state,generation) VALUES ('forged','RETIRED',1)"
+            )
+        db.rollback()
+        assert db.execute(
+            "SELECT state,generation FROM aic_instance_reservations "
+            "WHERE agent_instance_id=?", (identity_id,)
+        ).fetchone() == ("ACTIVE", 1)
+
+
+@pytest.mark.parametrize(
+    ("cut", "expected_state", "expected_live"),
+    [
+        ("create_uncommitted", "ACTIVE", 1),
+        ("retire_uncommitted", "ACTIVE", 1),
+        ("retire_committed", "RETIRED", 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_aic_sqlite_real_process_hard_exit_restart_id_durability(
+    sqlite_aic, cut, expected_state, expected_live
+):
+    # Spawn a completely separate Python process. os._exit(77) bypasses
+    # finally/atexit and kills its SQLite connection. A new native connection
+    # verifies real committed vs uncommitted physical file state after restart.
+    import sqlite3
+    from contextlib import closing
+
+    engine, sessions = sqlite_aic
+    identity_id = await _create(sessions)
+    uncommitted_id = "inflight-" + uuid4().hex
+    worker = r"""
+import os, sqlite3, sys
+path, cut, live_id, inflight_id = sys.argv[1:]
+db = sqlite3.connect(path, timeout=5.0)
+db.execute("PRAGMA foreign_keys=OFF")
+assert db.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+db.execute("BEGIN IMMEDIATE")
+if cut == "create_uncommitted":
+    db.execute(
+        "INSERT INTO aic_instance_reservations "
+        "(agent_instance_id,state,generation) VALUES (?, 'ACTIVE', 1)",
+        (inflight_id,),
+    )
+    db.execute(
+        "INSERT INTO aic_instance_live "
+        "(agent_instance_id,owner_user_id,definition_id,definition_version,"
+        "lifecycle_state,generation) VALUES (?, 'alice', 'd', 'v', 'ACTIVE', 1)",
+        (inflight_id,),
+    )
+else:
+    assert db.execute(
+        "UPDATE aic_instance_reservations SET state='RETIRING' "
+        "WHERE agent_instance_id=? AND state='ACTIVE'", (live_id,)
+    ).rowcount == 1
+    assert db.execute(
+        "DELETE FROM aic_instance_live WHERE agent_instance_id=?", (live_id,)
+    ).rowcount == 1
+    assert db.execute(
+        "UPDATE aic_instance_reservations "
+        "SET state='RETIRED', generation=2 "
+        "WHERE agent_instance_id=? AND state='RETIRING'", (live_id,)
+    ).rowcount == 1
+    if cut == "retire_committed":
+        db.commit()
+os._exit(77)
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", worker, engine.url.database, cut,
+         identity_id, uncommitted_id],
+        check=False, capture_output=True, text=True, timeout=20,
+    )
+    assert result.returncode == 77, (
+        f"worker exit={result.returncode}, stderr={result.stderr[-1500:]}"
+    )
+    with closing(sqlite3.connect(engine.url.database)) as restarted:
+        restarted.execute("PRAGMA foreign_keys=OFF")
+        assert restarted.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+        assert restarted.execute(
+            "SELECT state FROM aic_instance_reservations "
+            "WHERE agent_instance_id=?", (identity_id,)
+        ).fetchone() == (expected_state,)
+        assert restarted.execute(
+            "SELECT COUNT(*) FROM aic_instance_live "
+            "WHERE agent_instance_id=?", (identity_id,)
+        ).fetchone()[0] == expected_live
+        assert restarted.execute(
+            "SELECT COUNT(*) FROM aic_instance_reservations "
+            "WHERE agent_instance_id=?", (uncommitted_id,)
+        ).fetchone()[0] == 0
+
+        if cut == "retire_committed":
+            # A fully committed ownerless terminal marker must survive crash,
+            # forbid resurrection, direct deletion and any reuse of the ID.
+            with pytest.raises(sqlite3.IntegrityError, match="AIC_ID_TRANSITION_FORBIDDEN"):
+                restarted.execute(
+                    "UPDATE aic_instance_reservations SET state='ACTIVE' "
+                    "WHERE agent_instance_id=?", (identity_id,)
+                )
+            restarted.rollback()
+            with pytest.raises(sqlite3.IntegrityError, match="AIC_ID_REUSE_FORBIDDEN"):
+                restarted.execute(
+                    "DELETE FROM aic_instance_reservations WHERE agent_instance_id=?",
+                    (identity_id,),
+                )
+            restarted.rollback()
+            with pytest.raises(sqlite3.IntegrityError):
+                restarted.execute(
+                    "INSERT INTO aic_instance_reservations "
+                    "(agent_instance_id,state,generation) VALUES (?, 'ACTIVE', 1)",
+                    (identity_id,),
+                )
+            restarted.rollback()
+            with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_OWNER_OR_ID_INVALID"):
+                restarted.execute(
+                    "INSERT INTO aic_instance_live "
+                    "(agent_instance_id,owner_user_id,definition_id,"
+                    "definition_version,lifecycle_state,generation) "
+                    "VALUES (?, 'alice', 'forged', 'v1', 'ACTIVE', 1)",
+                    (identity_id,),
+                )
+            restarted.rollback()
+
+    if cut == "retire_uncommitted":
+        # After a hard crash *before* COMMIT, the original LIVE binding and
+        # reservation are still intact and can be retired exactly once.
+        async with sessions() as session:
+            assert await AgentInstanceRepository(session).retire(
+                "alice", identity_id, 1
+            ) == 2
+            await session.commit()
