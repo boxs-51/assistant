@@ -373,9 +373,13 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
         invocation = await invocation_store.get(original_invocation)
         attempts = await invocation_store.list_attempts(original_invocation)
         assert invocation is not None and invocation.state.value == "COMPLETED"
-        assert [item.attempt_number for item in attempts] == [1, 2]
+        # A K2 reconciliation of an already TERMINAL client ledger does NOT
+        # create a second execution attempt. K2 owns the resume binding,
+        # while the one and only dispatch attempt still belongs to K1.
+        assert [item.attempt_number for item in attempts] == [1]
         assert attempts[0].connection_id == r7j.K1
-        assert attempts[1].connection_id == k2.connection_id
+        assert row.bound_connection_id == k2.connection_id
+        assert row.bound_client_id == r7j.CLIENT_ID
         async with sessions() as session:
             claims = (await session.execute(
                 select(AgentResumeClaimRecord).where(
@@ -383,6 +387,7 @@ async def test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill(
                 )
             )).scalars().all()
         assert len(claims) == 1 and claims[0].state == "CONSUMED"
+        assert claims[0].connection_id == k2.connection_id
 
         assert _sink_count(sink_path, "effects") == 1
         assert _sink_count(sink_path, "approvals") == 1
