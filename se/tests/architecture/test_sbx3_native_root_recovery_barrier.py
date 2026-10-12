@@ -29,7 +29,7 @@ def _lease(manager: SandboxManager):
 def test_enrolled_native_root_cannot_be_destroyed_or_released(tmp_path):
     manager = SandboxManager((tmp_path / "roots").resolve())
     lease = _lease(manager)
-    marker = lease.root / ".sbx3-native-tree-unverified"
+    marker = manager.base_root / ".sbx3-native-quarantine" / lease.sandbox_id
     manager.quarantine_native_tree(lease)
     assert marker.exists()
     with pytest.raises(FileExistsError):
@@ -61,7 +61,7 @@ def test_real_worker_hard_exit_preserves_quarantine_across_restart(tmp_path):
     child = subprocess.run([sys.executable, "-c", script], timeout=20, check=False)
     assert child.returncode == 77
     root = Path(root_export.read_text())
-    marker = root / ".sbx3-native-tree-unverified"
+    marker = base / ".sbx3-native-quarantine" / root.name
     assert marker.is_file()
     replacement_manager = SandboxManager(base)
     # Recreated manager has empty in-memory lease registry. It must not erase
