@@ -275,41 +275,101 @@ def test_real_identity_contract_does_not_use_nonexistent_auth_flag():
 
 
 @pytest.mark.asyncio
-async def test_postgresql17_real_nonkey_owner_status_lock_conflict():
-    if not os.getenv("AIC_TEST_POSTGRES_URL"):
-        pytest.skip("AIC_TEST_POSTGRES_URL not set; native PostgreSQL 17 required")
+async def test_postgresql17_real_native_aic_guards_and_nonkey_status_lock():
+    """Real PostgreSQL 17 native engine, migrations and two connection locks.
+
+    Creates a uniquely named throwaway schema in the supplied PostgreSQL
+    database. Does not mutate the public application schema.
+    """
+    dsn = os.getenv("AIC_TEST_POSTGRES_URL", "")
+    if not dsn:
+        pytest.skip("real PostgreSQL 17 not configured: AIC_TEST_POSTGRES_URL")
+    assert dsn.startswith("postgresql+asyncpg://"), "native asyncpg URL required"
     from uuid import uuid4
     from sqlalchemy.ext.asyncio import create_async_engine
-    from sqlalchemy import text as sqltext
-    from sqlalchemy.exc import DBAPIError
-    dsn = os.environ["AIC_TEST_POSTGRES_URL"]
-    assert dsn.startswith("postgresql+asyncpg://"), "Real asyncpg driver required"
+    schema = "aic_evidence_" + uuid4().hex
     engine = create_async_engine(dsn, pool_pre_ping=True)
-    owner_id = "aic-lock-" + str(uuid4())
     try:
-        async with engine.connect() as seed:
-            v = (await seed.execute(sqltext("SHOW server_version_num"))).scalar_one()
-            assert 170000 <= int(v) < 180000, f"require PostgreSQL 17, got {v}"
-            await seed.execute(sqltext(
-                "INSERT INTO users(id,email,password_hash,status) "
-                "VALUES (:id,:email,'disabled','active')"
-            ), {"id": owner_id, "email": owner_id + "@example.invalid"})
-            await seed.commit()
+        async with engine.begin() as setup:
+            version = (await setup.execute(text("SHOW server_version_num"))).scalar_one()
+            assert 170000 <= int(version) < 180000, (
+                f"must execute native PostgreSQL 17, observed {version}"
+            )
+            await setup.execute(text(f"CREATE SCHEMA {schema}"))
+            await setup.execute(text(f"SET LOCAL search_path TO {schema}, public"))
+            await setup.execute(text("CREATE TABLE users (id VARCHAR(255) PRIMARY KEY, status VARCHAR(50) NOT NULL)"))
+            await setup.run_sync(_bootstrap)  # actual production vE-1 PG migration DDL
+            await setup.execute(text("INSERT INTO users(id,status) VALUES ('alice','active'), ('bob','active')"))
+        # Use two *distinct physical PG connections* and a registered user.
         async with engine.connect() as a, engine.connect() as b:
-            await a.begin()
-            locked = (await a.execute(sqltext(
-                "SELECT id FROM users WHERE id=:id FOR SHARE"
-            ), {"id": owner_id})).scalar_one()
-            assert locked == owner_id
-            await b.begin()
-            await b.execute(sqltext("SET LOCAL lock_timeout='200ms'"))
+            await a.execute(text(f"SET search_path TO {schema}, public"))
+            await b.execute(text(f"SET search_path TO {schema}, public"))
+            locked = (await a.execute(text(
+                "SELECT id FROM users WHERE id='alice' FOR SHARE"
+            ))).scalar_one()
+            assert locked == "alice"
+            await b.execute(text("SET LOCAL lock_timeout='200ms'"))
             with pytest.raises(DBAPIError):
-                await b.execute(sqltext(
-                    "UPDATE users SET status='inactive' WHERE id=:id"
-                ), {"id": owner_id})
+                await b.execute(text(
+                    "UPDATE users SET status='inactive' WHERE id='alice'"
+                ))
             await b.rollback()
             await a.rollback()
-        async with engine.begin() as cleanup:
-            await cleanup.execute(sqltext("DELETE FROM users WHERE id=:id"), {"id": owner_id})
+        # Execute raw PG trigger DDL from the AIC migration, not a fake model.
+        async with engine.begin() as check:
+            await check.execute(text(f"SET LOCAL search_path TO {schema}, public"))
+            await check.execute(text(
+                "INSERT INTO aic_instance_id_reservations VALUES ('pg-i1','LIVE')"
+            ))
+            await check.execute(text(
+                "INSERT INTO aic_instance_live VALUES "
+                "('pg-i1','alice','definition','v1','ACTIVE',1)"
+            ))
+            with pytest.raises(DBAPIError):
+                async with check.begin_nested():
+                    await check.execute(text("DELETE FROM users WHERE id='alice'"))
+            await check.execute(text(
+                "UPDATE aic_instance_live SET state='SUSPENDED', generation=2 "
+                "WHERE agent_instance_id='pg-i1'"
+            ))
+            with pytest.raises(DBAPIError):
+                async with check.begin_nested():
+                    await check.execute(text("DELETE FROM users WHERE id='alice'"))
+            with pytest.raises(DBAPIError):
+                async with check.begin_nested():
+                    await check.execute(text(
+                        "UPDATE aic_instance_live SET owner_user_id='bob' "
+                        "WHERE agent_instance_id='pg-i1'"
+                    ))
+            await check.execute(text(
+                "UPDATE aic_instance_id_reservations SET status='RETIRED' "
+                "WHERE agent_instance_id='pg-i1'"
+            ))
+            await check.execute(text(
+                "DELETE FROM aic_instance_live WHERE agent_instance_id='pg-i1'"
+            ))
+            assert (await check.execute(text(
+                "SELECT status FROM aic_instance_id_reservations "
+                "WHERE agent_instance_id='pg-i1'"
+            ))).scalar_one() == "RETIRED"
+            with pytest.raises(DBAPIError):
+                async with check.begin_nested():
+                    await check.execute(text(
+                        "DELETE FROM aic_instance_id_reservations "
+                        "WHERE agent_instance_id='pg-i1'"
+                    ))
+            with pytest.raises(DBAPIError):
+                async with check.begin_nested():
+                    await check.execute(text(
+                        "INSERT INTO aic_instance_live VALUES "
+                        "('pg-i1','alice','definition','v1','ACTIVE',1)"
+                    ))
+            assert (await check.execute(text(
+                "DELETE FROM users WHERE id='alice'"
+            ))).rowcount == 1
     finally:
-        await engine.dispose()
+        try:
+            async with engine.begin() as cleanup:
+                await cleanup.execute(text(f"DROP SCHEMA IF EXISTS {schema} CASCADE"))
+        finally:
+            await engine.dispose()
