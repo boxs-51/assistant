@@ -86,12 +86,17 @@ class AgentInstanceRepository:
         if record is None or record.generation != generation:
             raise AgentInstanceConflict("stale/foreign generation")
         if retire:
-            await self.session.delete(record)
-            await self.session.flush()
+            # Retire reservation first, then remove owner-bound LIVE row.
+            # Both writes share the caller's transaction; DB triggers reject
+            # unpaired raw LIVE deletion or retired identity resurrection.
             result = await self.session.execute(
                 update(Reservation).where(Reservation.agent_instance_id == instance_id,
                     Reservation.status == "LIVE").values(status="RETIRED")
             )
+            if result.rowcount != 1:
+                raise AgentInstanceConflict("reservation transition lost")
+            await self.session.delete(record)
+            await self.session.flush()
         else:
             result = await self.session.execute(
                 update(Live).where(Live.agent_instance_id == instance_id,
