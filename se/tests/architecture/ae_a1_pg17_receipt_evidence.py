@@ -220,6 +220,9 @@ async def test_pg17_r7c_historical_committed_prefix_fresh_process(tmp_path):
                     {"role": "tool", "tool_call_id": "pending-call", "content": "ACTIVE"},
                 ], metadata_json={},
             ))
+            # Raw FK identity has no ORM relationship: force parent checkpoint
+            # INSERT before the pending child, on both Linux/Windows PG17.
+            await u.session.flush()
             u.session.add(AgentCheckpointPendingInvocationRecord(
                 checkpoint_id=cid, ordinal=0, invocation_id="pending-inv",
                 invocation_revision=1, tool_call_id="pending-call",
