@@ -496,6 +496,8 @@ async def test_r7c_historical_native_committed_prefix_is_denied_before_resume_mo
                 ],
                 metadata_json={},
             ))
+            # Parent-first FK ordering must also be enforced on PostgreSQL.
+            await uow.session.flush()
             uow.session.add(AgentCheckpointPendingInvocationRecord(
                 checkpoint_id=checkpoint_id, ordinal=0,
                 invocation_id="inv-pending", invocation_revision=1,
