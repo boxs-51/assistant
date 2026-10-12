@@ -84,6 +84,51 @@ class SandboxManager:
                 raise SandboxLeaseStateError("native tree already bound")
             self._native_tree_leases[stored.sandbox_id] = identity
 
+    def reattach_native_after_restart(
+        self,
+        lease: SandboxLease,
+        profile: SandboxProfile,
+        identity: "SpawnIdentity",
+    ) -> SandboxLease:
+        """Restore a trusted native lease ONLY in CLEANUP quarantine.
+
+        The actual lease/profile snapshot must come from authenticated server
+        persistence, never model metadata. A missing/stale kernel tree denies
+        adoption; there is no automatic spawn or SUCCESS on reattachment.
+        """
+        with self._native_root_lock:
+            if self._native_tree_authority is None:
+                raise SandboxLeaseStateError("native OS authority unavailable")
+            expected = self._base_root / lease.sandbox_id
+            if (
+                lease.root != expected
+                or lease.root.is_symlink()
+                or not lease.root.is_dir()
+                or profile.profile_id != lease.profile_id
+                or identity.sandbox_id != lease.sandbox_id
+                or identity.owner_id != lease.owner_user_id
+                or identity.execution_id != lease.execution_id
+                or lease.sandbox_id in self._leases
+                or lease.execution_id in self._execution_leases
+            ):
+                raise SandboxLeaseStateError("unsafe native recovery identity/root")
+            # This method reopens the kernel cgroup and verifies journal
+            # owner/generation/inode. No stale serialized receipt is trusted.
+            try:
+                self._native_tree_authority.require_known_tree(identity)
+            except Exception as exc:
+                raise SandboxLeaseStateError(
+                    "OS tree cannot be reattached; root stays quarantined"
+                ) from exc
+            recovered = lease.model_copy(
+                update={"state": SandboxLeaseState.CLEANUP}
+            )
+            self._profiles.setdefault(profile.profile_id, profile)
+            self._leases[lease.sandbox_id] = recovered
+            self._execution_leases[lease.execution_id] = lease.sandbox_id
+            self._native_tree_leases[lease.sandbox_id] = identity
+            return recovered
+
     @property
     def base_root(self) -> Path:
         return self._base_root
