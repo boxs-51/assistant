@@ -853,6 +853,7 @@ class AgentRuntime:
                 "STALE_RECONCILIATION_SNAPSHOT",
                 "Canonical active-batch slot is no longer COMMITTED.",
             )
+        require_native_record(record, phase="runtime_by_id_COMMITTED")
         source_result_id = getattr(record, "id", None)
         if isinstance(source_result_id, str) and source_result_id:
             self._schedule_f7t_publication_for_committed_result(
