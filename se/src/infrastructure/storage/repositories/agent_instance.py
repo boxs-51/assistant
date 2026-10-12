@@ -34,14 +34,19 @@ class AgentInstanceRepository:
             # connection between nominally distinct AsyncSessions. AIC's
             # cross-connection owner-status ordering is not established there.
             # Refuse these backends BEFORE the first SQL statement.
-            database = self.session.get_bind().url.database
+            url = self.session.get_bind().url
+            database = url.database
             if (
                 not isinstance(database, str)
                 or not database
                 or database == ":memory:"
                 or (
                     database.startswith("file:")
-                    and (":memory:" in database or "mode=memory" in database)
+                    and (
+                        ":memory:" in database
+                        or "mode=memory" in database
+                        or url.query.get("mode") == "memory"
+                    )
                 )
             ):
                 raise AgentInstanceDenied("AIC SQLite in-memory backend unsupported")
