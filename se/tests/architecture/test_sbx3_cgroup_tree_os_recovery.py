@@ -171,7 +171,7 @@ class KernelOwnedTreeRecoveryTests(unittest.TestCase):
             child = subprocess.Popen(
                 [sys.executable, "-c", script],
                 stdout=subprocess.DEVNULL,
-                stderr=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
             )
             try:
                 deadline = time.monotonic() + 10
