@@ -438,6 +438,49 @@ async def run_physical_hard_restart_witness(
             row = await store.load_execution(r7j.EXECUTION_ID)
             return row if row is not None and row.state == "COMPLETED" else None
 
+        if scenario == "effect_before_terminal":
+            # Require K2 to reach actual server SQL resume-claim handling.
+            async def resumed_unknown():
+                async with sessions() as session:
+                    claims = (await session.execute(
+                        select(AgentResumeClaimRecord).where(
+                            AgentResumeClaimRecord.execution_id == r7j.EXECUTION_ID
+                        )
+                    )).scalars().all()
+                return claims if claims else None
+
+            claims = await r7j._wait_async(resumed_unknown, timeout=35.0)
+            await asyncio.sleep(0.5)
+            invocation = await invocation_store.get(original_invocation)
+            attempts = await invocation_store.list_attempts(original_invocation)
+            assert invocation is not None
+            assert invocation.remote_outcome_state.value == "OUTCOME_UNKNOWN"
+            assert invocation.state.value != "COMPLETED"
+            assert [entry.attempt_number for entry in attempts] == [1]
+            assert await store.load_committed_tool_result(
+                r7j.EXECUTION_ID, "call-r7j-1",
+            ) is None
+            ledger = ClientInvocationLedger(ledger_path).get(
+                client_id=r7j.CLIENT_ID, principal_id=r7j.USER_ID,
+                invocation_id=original_invocation,
+            )
+            assert ledger is not None
+            assert ledger.state is ClientInvocationLedgerState.RUNNING
+            assert _sink_count(sink_path, "effects") == 1
+            assert _sink_count(sink_path, "approvals") == 1
+            assert resumed_approvals == []
+            _atomic_json(tmp_path / "outcome-unknown.json", {
+                "scenario": scenario,
+                "backend": "postgresql" if postgres_url else "sqlite",
+                "s1_pid": killed_pid, "s2_pid": s2.pid,
+                "remote_state": invocation.remote_outcome_state.value,
+                "ledger_state": ledger.state.value,
+                "claim_states": [claim.state for claim in claims],
+                "attempts": [entry.attempt_number for entry in attempts],
+                "effects": _sink_count(sink_path, "effects"),
+            })
+            return
+
         row = await r7j._wait_async(completed, timeout=35.0)
         assert row.id == r7j.EXECUTION_ID
         result = await store.load_committed_tool_result(
