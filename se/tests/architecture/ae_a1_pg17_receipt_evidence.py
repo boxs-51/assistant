@@ -203,6 +203,9 @@ async def test_pg17_r7c_historical_committed_prefix_fresh_process(tmp_path):
                 correlation_id="corr-pg-r7", state="WAITING", revision=2,
                 wait_reason="CONNECTION", current_checkpoint_id=cid, request={},
             ))
+            # All FK-bearing rows refer to this execution. ORM values use
+            # raw string IDs, not relationship links: flush parent first.
+            await u.session.flush()
             u.session.add(AgentIterationRecord(
                 id="pg-prefix-old-iter", execution_id=eid, iteration=1,
                 state="COMPLETED", tool_call_ids=["old-call"],
