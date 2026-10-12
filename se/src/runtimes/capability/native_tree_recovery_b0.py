@@ -192,6 +192,12 @@ class LinuxCgroupTreeAuthority:
             raise NativeTreeHold("cgroup inode/generation substituted")
         return ref, str(row[6])
 
+    def require_registered(self, identity: SpawnIdentity) -> None:
+        """Check persisted OS binding even after worker crash; no receipt."""
+        _, state = self._get(identity)
+        if state != "REGISTERED":
+            raise NativeTreeHold("native tree not fresh/registered")
+
     @staticmethod
     def _read_kv(path: Path) -> dict[str, str]:
         try:
