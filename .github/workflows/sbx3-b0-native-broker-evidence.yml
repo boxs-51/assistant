@@ -22,8 +22,22 @@ jobs:
           python-version: "3.12.10"
       - name: Install Python test requirements
         run: python -m pip install -r requirements-test.txt
-      - name: Install host bubblewrap (no runtime sudo escalation)
-        run: sudo apt-get update -qq && sudo apt-get install -y bubblewrap
+      - name: Install bubblewrap with targeted Ubuntu AppArmor userns policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap apparmor-profiles apparmor-utils
+          profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          if [ ! -f "$profile" ]; then
+            echo "SBX3_NATIVE_HOLD: distro-provided restricted bwrap AppArmor profile unavailable" >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$profile" /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          # Never disable system-wide kernel.apparmor_restrict_unprivileged_userns,
+          # and never weaken network NONE via --share-net or runtime sudo.
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
       - name: Run strict REAL namespace positive and durable crash/replay negatives
         env:
           SBX3_REQUIRE_NATIVE_POSITIVE: "1"
