@@ -1,0 +1,42 @@
+name: SBX3 B0 SE164 Tools371 Pinned Cross-PR Private ABI
+
+on:
+  pull_request:
+    paths:
+      - "scripts/sbx3_b0_tools_private_abi_crosspr.py"
+      - ".github/workflows/sbx3-b0-tools371-crosspr-abi.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  se164-tools371-private-abi:
+    name: Pinned private ABI ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Never test an Actions synthetic merge commit: pin EXACT PR head.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install test dependencies without privileged native activation
+        run: python -m pip install -r requirements-test.txt
+      - name: Verify both immutable source blobs and real SE-to-Tools denial
+        run: python scripts/sbx3_b0_tools_private_abi_crosspr.py
+      - name: Explicit production isolation exit status
+        if: always()
+        run: |
+          python -c "print('SBX3_SE164_TOOLS371_PRIVATE_ABI=DIAGNOSTIC_ONLY')"
+          python -c "print('SBX3_NATIVE_COMMAND_ACTIVATION=DENIED')"
+          python -c "print('SBX3_WINDOWS_APPCONTAINER_NETWORK_NONE=UNPROVEN')"
+          python -c "print('SBX3_OS_BROKER_AUTHORITY=NOT_IMPLEMENTED')"
