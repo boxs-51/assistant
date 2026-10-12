@@ -37,7 +37,7 @@ jobs:
       - name: Run real child-process hard kill E-P1A witness
         run: >-
           python -m pytest -q -ra
-          se/tests/e2e/test_r14_e_sql_restart_agent_hitl_k1_k2.py::test_r14_e_decided_high_risk_k1_terminal_recovers_after_real_s1_kill
+          se/tests/e2e/test_r14_e_sql_restart_agent_hitl_k1_k2.py
 
   # Docker service containers run on Linux hosts. PG remains alive while
   # independent S1 is killed, and S2 must reuse the same server database.
