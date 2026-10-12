@@ -814,7 +814,10 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
     db_name = "aic_fullchain_" + uuid4().hex[:16]
     admin = None
     if backend == "postgresql":
-        # The opt-in fixture guarantees a real server, not a SQLite-as-PG mock.
+        # Full-suite Linux may have an unrelated default-version PostgreSQL.
+        # Only explicit external PG17 is valid for this migration evidence.
+        if not os.getenv("AIC_TEST_POSTGRES_URL"):
+            pytest.skip("PG17 historical migration needs explicit AIC_TEST_POSTGRES_URL")
         parent_url = request.getfixturevalue("postgres_url")
         admin = create_async_engine(parent_url, isolation_level="AUTOCOMMIT")
         async with admin.connect() as c:
@@ -881,8 +884,8 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
                 "INSERT INTO user_budget_policies "
                 "(policy_id,owner_user_id,policy_version,policy_fingerprint,"
                 "window_duration_seconds,tool_limits_json) "
-                "VALUES (:policy,'alice','legacy-v1',:fp,3600,:limits)"
-            ), {"policy": old_policy, "fp": "a" * 64, "limits": "{}"})
+                "VALUES (:policy,'alice','legacy-v1',:fp,3600,'{}')"
+            ), {"policy": old_policy, "fp": "a" * 64})
             await cx.execute(text(
                 "INSERT INTO user_budget_accounts(owner_user_id,next_window_epoch) "
                 "VALUES ('alice',1)"
