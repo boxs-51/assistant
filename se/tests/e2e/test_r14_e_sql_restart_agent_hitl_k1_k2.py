@@ -583,17 +583,27 @@ async def run_physical_hard_restart_witness(
 
         if scenario == "effect_before_terminal":
             budget_snapshot = await verify_budget_snapshot()
-            # Require K2 to reach actual server SQL resume-claim handling.
-            async def resumed_unknown():
-                async with sessions() as session:
-                    claims = (await session.execute(
-                        select(AgentResumeClaimRecord).where(
-                            AgentResumeClaimRecord.execution_id == r7j.EXECUTION_ID
-                        )
-                    )).scalars().all()
-                return claims if claims else None
+            # Actual WebSocket K2 must return reconciliation UNKNOWN.
+            # A fail-closed planner MAY defer before creating a ResumeClaim;
+            # requiring a claim here would punish the correct safe path.
+            async def unknown_wire_seen():
+                trace = (tmp_path / "s2.log").read_text(
+                    encoding="utf-8", errors="replace"
+                )
+                return (
+                    '"type": "capability.reconciliation"' in trace
+                    and '"status": "UNKNOWN"' in trace
+                    and original_invocation in trace
+                )
 
-            claims = await r7j._wait_async(resumed_unknown, timeout=35.0)
+            await r7j._wait_async(unknown_wire_seen, timeout=35.0)
+            async with sessions() as session:
+                claims = (await session.execute(
+                    select(AgentResumeClaimRecord).where(
+                        AgentResumeClaimRecord.execution_id == r7j.EXECUTION_ID
+                    )
+                )).scalars().all()
+            assert all(claim.state != "CREATED" for claim in claims)
             await asyncio.sleep(0.5)
             invocation = await invocation_store.get(original_invocation)
             attempts = await invocation_store.list_attempts(original_invocation)
