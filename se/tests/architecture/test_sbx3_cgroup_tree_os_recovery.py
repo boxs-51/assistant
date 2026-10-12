@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 import platform
+import signal
 import sqlite3
 import subprocess
 import sys
@@ -25,6 +26,10 @@ from se.src.runtimes.capability.native_tree_cgroup_b0 import (
     CgroupTreeNotEmpty,
     CgroupTreeUnavailable,
     LinuxCgroupTreeLedger,
+)
+from se.src.runtimes.capability.native_tree_fence_b0 import (
+    NativeSpawnFenceDenied,
+    NativeTreeLifecycleFence,
 )
 
 
@@ -271,6 +276,169 @@ class KernelOwnedTreeRecoveryTests(unittest.TestCase):
             self.assertEqual(witness.generation, identity.generation)
             self.assertFalse(witness.production_usable)
             cg.rmdir()
+
+    def test_real_separate_process_spawn_lock_blocks_cleanup(self) -> None:
+        delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
+        if not delegated:
+            self.skipTest("KERNEL_CGROUP_POSITIVE_NOT_RUN: no delegated root")
+        with tempfile.TemporaryDirectory(prefix="sbx3-crossproc-fence-") as tmp:
+            root = Path(tmp)
+            journal = root / "native.sqlite"
+            identity = self._identity()
+            ledger = LinuxCgroupTreeLedger(Path(delegated), journal)
+            group = ledger.enroll(identity)
+            ready = root / "spawn-lock-held"
+            release = root / "allow-spawn-release"
+            closing = root / "closing-committed"
+            raw_identity = (
+                identity.owner_id, identity.execution_id,
+                identity.sandbox_id, identity.generation,
+            )
+            admission = (
+                "import os, pathlib, time\n"
+                "from se.src.runtimes.capability.native_tree_cgroup_b0 "
+                "import LinuxCgroupTreeLedger, CgroupTreeIdentity\n"
+                "from se.src.runtimes.capability.native_tree_fence_b0 "
+                "import NativeTreeLifecycleFence\n"
+                f"ledger=LinuxCgroupTreeLedger({delegated!r}, {str(journal)!r})\n"
+                f"identity=CgroupTreeIdentity(*{raw_identity!r})\n"
+                "with NativeTreeLifecycleFence(ledger).admit_spawn(identity):\n"
+                f"    pathlib.Path({str(ready)!r}).write_text('OPEN')\n"
+                f"    while not pathlib.Path({str(release)!r}).exists():\n"
+                "        time.sleep(.02)\n"
+            )
+            cleanup = (
+                "import pathlib\n"
+                "from se.src.runtimes.capability.native_tree_cgroup_b0 "
+                "import LinuxCgroupTreeLedger, CgroupTreeIdentity\n"
+                "from se.src.runtimes.capability.native_tree_fence_b0 "
+                "import NativeTreeLifecycleFence\n"
+                f"ledger=LinuxCgroupTreeLedger({delegated!r}, {str(journal)!r})\n"
+                f"identity=CgroupTreeIdentity(*{raw_identity!r})\n"
+                "NativeTreeLifecycleFence(ledger).begin_cleanup(identity)\n"
+                f"pathlib.Path({str(closing)!r}).write_text('CLOSING')\n"
+            )
+            admission_worker = subprocess.Popen([sys.executable, "-c", admission])
+            cleanup_worker = None
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.exists() and time.monotonic() < deadline:
+                    if admission_worker.poll() is not None:
+                        self.fail("spawn window exited before acquiring SQL writer")
+                    time.sleep(.02)
+                self.assertTrue(ready.exists(), "cross-process admission never began")
+                cleanup_worker = subprocess.Popen(
+                    [sys.executable, "-c", cleanup],
+                )
+                time.sleep(.3)
+                self.assertFalse(
+                    closing.exists(),
+                    "cleanup incorrectly passed a live cross-process spawn writer",
+                )
+                self.assertIsNone(cleanup_worker.poll())
+                release.write_text("release")
+                self.assertEqual(admission_worker.wait(timeout=15), 0)
+                self.assertEqual(cleanup_worker.wait(timeout=15), 0)
+                self.assertTrue(closing.exists())
+                with self.assertRaises(NativeSpawnFenceDenied):
+                    with NativeTreeLifecycleFence(ledger).admit_spawn(identity):
+                        self.fail("no spawn admission after durable CLOSING")
+                self.assertFalse(
+                    ledger.recover_and_verify_empty(identity).production_usable
+                )
+            finally:
+                if admission_worker.poll() is None:
+                    admission_worker.kill()
+                    admission_worker.wait(timeout=10)
+                if cleanup_worker is not None and cleanup_worker.poll() is None:
+                    cleanup_worker.kill()
+                    cleanup_worker.wait(timeout=10)
+                release.touch(exist_ok=True)
+            group.rmdir()
+
+    def test_real_preexec_stopped_child_is_enrolled_before_resume(self) -> None:
+        delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
+        if not delegated:
+            self.skipTest("KERNEL_CGROUP_POSITIVE_NOT_RUN: no delegated root")
+        with tempfile.TemporaryDirectory(prefix="sbx3-stopped-child-") as tmp:
+            root = Path(tmp)
+            ledger = LinuxCgroupTreeLedger(
+                Path(delegated), root / "native.sqlite"
+            )
+            identity = self._identity()
+            group = ledger.enroll(identity)
+            marker = root / "ran-after-stop"
+            # Trusted trampoline stops itself BEFORE any side-effect code.
+            trampoline = (
+                "import os, signal, pathlib, time\n"
+                "os.kill(os.getpid(), signal.SIGSTOP)\n"
+                f"pathlib.Path({str(marker)!r}).write_text('started')\n"
+                "time.sleep(90)\n"
+            )
+            child = subprocess.Popen(
+                [sys.executable, "-c", trampoline],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            try:
+                seen_pid, status = os.waitpid(child.pid, os.WUNTRACED)
+                self.assertEqual(seen_pid, child.pid)
+                self.assertTrue(os.WIFSTOPPED(status))
+                self.assertFalse(marker.exists())
+                with NativeTreeLifecycleFence(ledger).admit_spawn(identity) as permit:
+                    permit.admit_stopped_process(child.pid)
+                    self.assertTrue(permit.admitted)
+                    self.assertIn(
+                        str(child.pid),
+                        (group / "cgroup.procs").read_text("ascii").split(),
+                    )
+                deadline = time.monotonic() + 10
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(.02)
+                self.assertTrue(marker.exists())
+                witness = ledger.recover_and_verify_empty(identity)
+                self.assertFalse(witness.production_usable)
+                self.assertFalse(ledger.audit_committed_empty(identity).delete_permitted)
+                with self.assertRaises(NativeSpawnFenceDenied):
+                    with NativeTreeLifecycleFence(ledger).admit_spawn(identity):
+                        self.fail("closed tree cannot be reopened")
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.wait(timeout=10)
+            group.rmdir()
+
+    def test_worker_crash_after_durable_closing_does_not_reopen_spawn(self) -> None:
+        delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
+        if not delegated:
+            self.skipTest("KERNEL_CGROUP_POSITIVE_NOT_RUN: no delegated root")
+        with tempfile.TemporaryDirectory(prefix="sbx3-fence-restart-") as tmp:
+            journal = Path(tmp) / "native.sqlite"
+            ledger = LinuxCgroupTreeLedger(Path(delegated), journal)
+            identity = self._identity()
+            group = ledger.enroll(identity)
+            worker = (
+                "import os\n"
+                "from se.src.runtimes.capability.native_tree_cgroup_b0 "
+                "import LinuxCgroupTreeLedger, CgroupTreeIdentity\n"
+                "from se.src.runtimes.capability.native_tree_fence_b0 "
+                "import NativeTreeLifecycleFence\n"
+                f"ledger=LinuxCgroupTreeLedger({delegated!r}, {str(journal)!r})\n"
+                f"identity=CgroupTreeIdentity(*{(identity.owner_id, identity.execution_id, identity.sandbox_id, identity.generation)!r})\n"
+                "NativeTreeLifecycleFence(ledger).begin_cleanup(identity)\n"
+                "os._exit(87)\n"
+            )
+            crash = subprocess.run(
+                [sys.executable, "-c", worker], timeout=20,
+                check=False,
+            )
+            self.assertEqual(crash.returncode, 87)
+            restarted = LinuxCgroupTreeLedger(Path(delegated), journal)
+            with self.assertRaises(NativeSpawnFenceDenied):
+                with NativeTreeLifecycleFence(restarted).admit_spawn(identity):
+                    self.fail("crashed closing phase must not open")
+            witness = restarted.recover_and_verify_empty(identity)
+            self.assertEqual(witness.generation, identity.generation)
+            group.rmdir()
 
     def test_kernel_enrollment_refuses_generation_path_reuse(self) -> None:
         delegated = os.environ.get("SBX3_CGROUP_DELEGATED_ROOT")
