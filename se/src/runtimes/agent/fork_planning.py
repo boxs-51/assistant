@@ -25,6 +25,7 @@ from .checkpoint_transcript import (
     materialize_checkpoint_transcript_in_uow,
 )
 from .serialization import to_json_safe
+from .native_receipt_verifier import require_native_record
 
 
 class ForkPlanError(RuntimeError):
@@ -609,6 +610,8 @@ class ForkRevalidationSnapshot:
 
 
 def _fork_tool_result_message(record) -> InferenceMessage:
+    # Final R8 model projection boundary; SQL COMMITTED is not OS authority.
+    require_native_record(record, phase="fork_planning_message_to_model")
     return InferenceMessage(
         role="tool",
         name=record.capability_id,
@@ -703,6 +706,9 @@ async def _load_safe_side_effects_in_uow(
                     "CapabilityInvocation authority.",
                 )
 
+        # The R8 side-effect fingerprint is later used as fork authority.
+        # Never allow native SUCCESS to seed it from legacy COMMITTED SQL.
+        require_native_record(result, phase="fork_planning_side_effects")
         if str(invocation.driver_kind or "") == "REMOTE_CLIENT":
             AgentForkPlanningService._validate_remote_projection(
                 invocation,
@@ -821,6 +827,9 @@ async def _load_fork_safe_transcript_in_uow(
                 "COMMITTED tool result has no matching "
                 "CapabilityInvocation authority.",
             )
+        # In-UoW fork revalidation must be fenced independently of the
+        # ordinary DurableAgentStore reader and checkpoint projection.
+        require_native_record(record, phase="fork_planning_COMMITTED_in_uow")
         committed[tool_call_id] = record
         return record
 
