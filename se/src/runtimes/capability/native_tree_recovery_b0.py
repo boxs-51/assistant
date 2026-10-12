@@ -68,7 +68,7 @@ class LinuxCgroupTreeAuthority:
         grace_seconds: float = 2.0,
     ) -> None:
         self.path = Path(journal_path).absolute()
-        self.root = Path(delegated_root).absolute()
+        self.root = Path(delegated_root).resolve(strict=False)
         if not 0 < grace_seconds <= 30:
             raise ValueError("bounded grace required")
         self.grace_seconds = float(grace_seconds)
@@ -105,12 +105,15 @@ class LinuxCgroupTreeAuthority:
     def _assert_real_cgroup2(self, candidate: Path) -> tuple[int, int]:
         if platform.system() != "Linux":
             raise NativeTreeHold("unsupported platform: Windows native HOLD")
-        if candidate.is_symlink() or self.root.is_symlink():
-            raise NativeTreeHold("symlink cgroup ref")
         try:
+            canonical = candidate.resolve(strict=True)
+            # Reject any lexical traversal or symlink indirection; the
+            # stored OS path must be canonical in a trusted delegation.
+            if candidate != canonical:
+                raise NativeTreeHold("noncanonical/symlink cgroup ref")
             candidate.relative_to(self.root)
-        except ValueError as exc:
-            raise NativeTreeHold("cgroup outside delegated root") from exc
+        except (OSError, ValueError) as exc:
+            raise NativeTreeHold("cgroup outside trusted delegation") from exc
         if candidate == self.root:
             raise NativeTreeHold("refusing to own shared/root cgroup")
         # Parse the kernel mount table: a fabricated tmp_path/cgroup.events
@@ -121,13 +124,13 @@ class LinuxCgroupTreeAuthority:
                 before, after = line.split(" - ", 1)
                 attrs = before.split()
                 fs_fields = after.split()
-                if (
-                    len(attrs) > 4
-                    and fs_fields[0] == "cgroup2"
-                    and Path(attrs[4]) == self.root
-                ):
-                    mount_ok = True
-                    break
+                if len(attrs) > 4 and fs_fields[0] == "cgroup2":
+                    kernel_mount = Path(attrs[4])
+                    # Delegated subtrees can be BELOW the cgroup2 mount,
+                    # but a fake directory on another filesystem cannot.
+                    if self.root.is_relative_to(kernel_mount):
+                        mount_ok = True
+                        break
         except (OSError, ValueError, IndexError) as exc:
             raise NativeTreeHold("unreadable kernel cgroup mounts") from exc
         if not mount_ok:
@@ -143,7 +146,10 @@ class LinuxCgroupTreeAuthority:
             raise NativeTreeHold("unavailable cgroup scope") from exc
 
     def register(self, identity: SpawnIdentity, cgroup_path: Path | str) -> NativeTreeRef:
-        path = Path(cgroup_path).absolute()
+        try:
+            path = Path(cgroup_path).resolve(strict=True)
+        except OSError as exc:
+            raise NativeTreeHold("native cgroup not found") from exc
         dev, ino = self._assert_real_cgroup2(path)
         if path.name != identity.sandbox_id:
             raise NativeTreeHold("cgroup name must bind sandbox id")
