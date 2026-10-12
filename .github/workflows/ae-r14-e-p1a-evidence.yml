@@ -81,7 +81,7 @@ jobs:
           python -m pytest -q -ra
           --basetemp=ae-r14-e-pg-evidence/ubuntu
           --junitxml=ae-r14-e-pg-evidence/ubuntu-junit.xml
-          se/tests/e2e/r14_e_postgres17_hard_restart_evidence.py::test_postgres17_real_s1_kill_and_k2_rediscovery
+          se/tests/e2e/r14_e_postgres17_hard_restart_evidence.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -135,7 +135,7 @@ jobs:
           python -m pytest -q -ra
           --basetemp=ae-r14-e-pg-evidence/windows
           --junitxml=ae-r14-e-pg-evidence/windows-junit.xml
-          se/tests/e2e/r14_e_postgres17_hard_restart_evidence.py::test_postgres17_real_s1_kill_and_k2_rediscovery
+          se/tests/e2e/r14_e_postgres17_hard_restart_evidence.py
       - uses: actions/upload-artifact@v4
         if: always()
         with:
