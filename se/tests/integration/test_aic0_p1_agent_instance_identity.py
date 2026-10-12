@@ -1400,3 +1400,108 @@ async def test_pg17_readonly_migrator_cannot_widen_version(request):
             if created_role:
                 await c.execute(text("DROP ROLE IF EXISTS " + role))
         await admin.dispose()
+
+
+
+@pytest.mark.asyncio
+async def test_pg17_hard_kill_after_widen_commit_before_revision(request):
+    """Hard-kill genuine Alembic subprocess after width commit, then recover.
+
+    Independent ACCESS SHARE lock blocks 5b's sessions ALTER (ACCESS
+    EXCLUSIVE), but leaves env.py's alembic_version preflight unobstructed.
+    """
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("external PostgreSQL 17 required")
+    import tempfile
+    import time
+    from sqlalchemy.engine import make_url
+
+    parent = request.getfixturevalue("postgres_url")
+    admin = create_async_engine(parent, isolation_level="AUTOCOMMIT")
+    name = "aic_pgkill_" + uuid4().hex[:13]
+    async with admin.connect() as c:
+        await c.execute(text("CREATE DATABASE " + name))
+    url = make_url(parent).set(database=name).render_as_string(
+        hide_password=False
+    )
+    engine = create_async_engine(url)
+    child = None
+    try:
+        _aic_run_real_alembic(url, "896c456631dd")
+        async with engine.begin() as c:
+            await c.execute(text(
+                "ALTER TABLE public.alembic_version "
+                "ALTER COLUMN version_num TYPE VARCHAR(32)"
+            ))
+        await engine.dispose()
+        with tempfile.TemporaryFile(mode="w+t", encoding="utf-8") as log:
+            async with engine.connect() as blocker:
+                await blocker.execute(text(
+                    "LOCK TABLE public.sessions IN ACCESS SHARE MODE"
+                ))
+                child = subprocess.Popen(
+                    [sys.executable, "-m", "alembic", "-c", "alembic.ini",
+                     "upgrade", "5b_conversation_temporal_contract"],
+                    cwd=str(Path(__file__).resolve().parents[3]),
+                    env=dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=url),
+                    stdout=log, stderr=subprocess.STDOUT,
+                )
+                widened = False
+                deadline = time.monotonic() + 35
+                try:
+                    while time.monotonic() < deadline:
+                        async with engine.connect() as c:
+                            length = (await c.execute(text("""
+                                SELECT character_maximum_length
+                                  FROM information_schema.columns
+                                 WHERE table_schema='public'
+                                   AND table_name='alembic_version'
+                                   AND column_name='version_num'
+                            """))).scalar_one()
+                        if length >= 255:
+                            widened = True
+                            break
+                        if child.poll() is not None:
+                            break
+                        await asyncio.sleep(0.15)
+                    assert widened and child.poll() is None, (
+                        "Alembic must reach committed preflight before fault cut"
+                    )
+                    child.kill()  # SIGKILL on Linux; TerminateProcess on Windows
+                    assert child.wait(timeout=15) != 0
+                finally:
+                    if child.poll() is None:
+                        child.kill()
+                        child.wait(timeout=15)
+                    await blocker.rollback()
+            log.seek(0)
+            captured = log.read()
+            assert widened, captured[-2500:]
+        await engine.dispose()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT version_num FROM public.alembic_version"
+            ))).scalar_one() == "896c456631dd"
+            assert (await c.execute(text("""
+                SELECT character_maximum_length
+                  FROM information_schema.columns
+                 WHERE table_schema='public'
+                   AND table_name='alembic_version'
+                   AND column_name='version_num'
+            """))).scalar_one() >= 255
+        await engine.dispose()
+        _aic_run_real_alembic(url, "5b_conversation_temporal_contract")
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT version_num FROM public.alembic_version"
+            ))).scalar_one() == "5b_conversation_temporal_contract"
+    finally:
+        if child is not None and child.poll() is None:
+            child.kill()
+            child.wait(timeout=15)
+        await engine.dispose()
+        async with admin.connect() as c:
+            await c.execute(text(
+                "DROP DATABASE IF EXISTS " + name + " WITH (FORCE)"
+            ))
+        await admin.dispose()
