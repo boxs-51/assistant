@@ -1245,3 +1245,81 @@ async def test_aic_pg17_alembic_version_preflight_fail_closed(
                 "DROP DATABASE IF EXISTS " + name + " WITH (FORCE)"
             ))
         await admin.dispose()
+
+
+
+@pytest.mark.parametrize("path_value", [
+    "shadow, public", "public, shadow", "pg_temp, public",
+])
+@pytest.mark.asyncio
+async def test_pg17_unsupported_search_path_denied(request, path_value):
+    """Reject relation shadowing rather than changing the migration target."""
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("external PostgreSQL 17 required")
+    from sqlalchemy.engine import make_url
+
+    parent = request.getfixturevalue("postgres_url")
+    admin = create_async_engine(parent, isolation_level="AUTOCOMMIT")
+    name = "aic_pgpath_" + uuid4().hex[:13]
+    async with admin.connect() as c:
+        assert 170000 <= int((await c.execute(text(
+            "SHOW server_version_num"
+        ))).scalar_one()) < 180000
+        await c.execute(text("CREATE DATABASE " + name))
+    url = make_url(parent).set(database=name).render_as_string(
+        hide_password=False
+    )
+    engine = create_async_engine(url)
+    try:
+        if "shadow" in path_value:
+            async with engine.begin() as c:
+                await c.execute(text("CREATE SCHEMA shadow"))
+                await c.execute(text(
+                    "CREATE TABLE shadow.alembic_version "
+                    "(version_num TEXT PRIMARY KEY)"
+                ))
+                await c.execute(text(
+                    "INSERT INTO shadow.alembic_version "
+                    "VALUES ('immutable-shadow')"
+                ))
+        await engine.dispose()
+        async with admin.connect() as c:
+            await c.execute(text(
+                "ALTER DATABASE " + name + " SET search_path TO " + path_value
+            ))
+        proc = subprocess.run(
+            [sys.executable, "-m", "alembic", "-c", "alembic.ini",
+             "upgrade", "896c456631dd"],
+            cwd=str(Path(__file__).resolve().parents[3]),
+            env=dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=url),
+            capture_output=True, text=True, check=False, timeout=180,
+        )
+        assert proc.returncode != 0
+        assert "Unsupported PostgreSQL Alembic schema/search_path" in proc.stderr, (
+            proc.stderr[-2500:]
+        )
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT to_regclass('public.alembic_version') IS NULL"
+            ))).scalar_one()
+            if "shadow" in path_value:
+                assert (await c.execute(text(
+                    "SELECT version_num FROM shadow.alembic_version"
+                ))).scalar_one() == "immutable-shadow"
+        await engine.dispose()
+        async with admin.connect() as c:
+            await c.execute(text(
+                "ALTER DATABASE " + name + " RESET search_path"
+            ))
+        _aic_run_real_alembic(url, "896c456631dd")
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT version_num FROM public.alembic_version"
+            ))).scalar_one() == "896c456631dd"
+    finally:
+        await engine.dispose()
+        async with admin.connect() as c:
+            await c.execute(text(
+                "DROP DATABASE IF EXISTS " + name + " WITH (FORCE)"
+            ))
+        await admin.dispose()
