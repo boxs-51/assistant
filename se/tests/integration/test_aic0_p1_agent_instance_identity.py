@@ -19,6 +19,8 @@ from uuid import uuid4
 import pytest
 import pytest_asyncio
 from sqlalchemy import text
+from alembic.migration import MigrationContext
+from alembic.operations import Operations
 from sqlalchemy.exc import DatabaseError
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
@@ -343,3 +345,71 @@ async def test_aic_native_postgres_nonkey_status_update_lock(postgres_url):
         async with admin.begin() as c:
             await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
         await admin.dispose()
+
+
+def _run_aic_migration(sync_connection, *, direction: str):
+    previous = MIG.op
+    try:
+        MIG.op = Operations(MigrationContext.configure(sync_connection))
+        if direction == "upgrade":
+            MIG.upgrade()
+        else:
+            MIG.downgrade()
+    finally:
+        MIG.op = previous
+
+
+@pytest.mark.asyncio
+async def test_aic_actual_alembic_sqlite_empty_upgrade_downgrade(tmp_path):
+    """Execute actual 31a upgrade/downgrade DDL, not hand-created model tables."""
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///" + str(tmp_path / "aic_migration.sqlite")
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            await conn.run_sync(User.__table__.create)
+            await conn.run_sync(
+                lambda sync: _run_aic_migration(sync, direction="upgrade")
+            )
+            guards = (await conn.execute(text(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='trigger' AND name LIKE 'trg_aic_%'"
+            ))).scalar_one()
+            assert guards == len(MIG._SQLITE_TRIGGER_NAMES)
+            await conn.run_sync(
+                lambda sync: _run_aic_migration(sync, direction="downgrade")
+            )
+            assert (await conn.execute(text(
+                "SELECT COUNT(*) FROM sqlite_master "
+                "WHERE type='table' AND name='aic_instance_live'"
+            ))).scalar_one() == 0
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_aic_actual_alembic_sqlite_downgrade_rejects_marker(tmp_path):
+    engine = create_async_engine(
+        "sqlite+aiosqlite:///" + str(tmp_path / "aic_downgrade.sqlite")
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(User.__table__.create)
+            await conn.run_sync(
+                lambda sync: _run_aic_migration(sync, direction="upgrade")
+            )
+            await conn.execute(text(
+                "INSERT INTO aic_instance_reservations "
+                "(agent_instance_id,state,generation) VALUES ('reserved','ACTIVE',1)"
+            ))
+            with pytest.raises(RuntimeError, match="downgrade denied"):
+                await conn.run_sync(
+                    lambda sync: _run_aic_migration(sync, direction="downgrade")
+                )
+            assert (await conn.execute(text(
+                "SELECT COUNT(*) FROM aic_instance_reservations "
+                "WHERE agent_instance_id='reserved'"
+            ))).scalar_one() == 1
+    finally:
+        await engine.dispose()
