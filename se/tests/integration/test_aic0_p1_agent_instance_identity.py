@@ -444,7 +444,11 @@ async def test_aic_actual_alembic_sqlite_downgrade_rejects_marker(tmp_path):
 
 @pytest.mark.parametrize(
     "sqlite_url",
-    ["sqlite+aiosqlite:///:memory:", "sqlite+aiosqlite://"],
+    [
+        "sqlite+aiosqlite:///:memory:",
+        "sqlite+aiosqlite://",
+        "sqlite+aiosqlite:///file:aic_mem_test?mode=memory&cache=shared&uri=true",
+    ],
 )
 @pytest.mark.asyncio
 async def test_aic_sqlite_shared_memory_connections_fail_closed(sqlite_url):
