@@ -1,0 +1,75 @@
+name: SBX3 B0 Native Broker Diagnostic Evidence
+
+on:
+  pull_request:
+    paths:
+      - "se/src/runtimes/capability/native_broker_b0.py"
+      - "se/tests/architecture/test_sbx3_native_broker_b0.py"
+      - ".github/workflows/sbx3-b0-native-broker-evidence.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  linux-real-namespace-positive:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install Python test requirements
+        run: python -m pip install -r requirements-test.txt
+      - name: Install bubblewrap with targeted Ubuntu AppArmor userns policy
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y bubblewrap apparmor-profiles apparmor-utils
+          profile=/usr/share/apparmor/extra-profiles/bwrap-userns-restrict
+          if [ ! -f "$profile" ]; then
+            echo "SBX3_NATIVE_HOLD: distro-provided restricted bwrap AppArmor profile unavailable" >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$profile" /etc/apparmor.d/bwrap-userns-restrict
+          sudo apparmor_parser -r /etc/apparmor.d/bwrap-userns-restrict
+          # Never disable system-wide kernel.apparmor_restrict_unprivileged_userns,
+          # and never weaken network NONE via --share-net or runtime sudo.
+          sysctl kernel.apparmor_restrict_unprivileged_userns || true
+      - name: Run strict REAL namespace positive and durable crash/replay negatives
+        env:
+          SBX3_REQUIRE_NATIVE_POSITIVE: "1"
+        run: >-
+          python -m pytest -q -ra
+          se/tests/architecture/test_sbx3_native_broker_b0.py
+      - name: Distinguish test output from production certification
+        if: always()
+        run: |
+          echo "SBX3_NATIVE_B0_AGENT_READY=NO"
+          echo "SBX3_VERIFIED_EMPTY_ACROSS_RESTART=NOT_PROVEN"
+          echo "SBX3_WINDOWS_NETWORK_NONE=NOT_IMPLEMENTED"
+          echo "A failed strict Linux namespace probe MUST remain RED."
+
+  windows-native-prespawn-deny:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install Python test requirements
+        run: python -m pip install -r requirements-test.txt
+      - name: Run REAL Windows kernel-host pre-spawn DENY and hard-exit recovery checks
+        run: >-
+          python -m pytest -q -ra
+          se/tests/architecture/test_sbx3_native_broker_b0.py
+      - name: Native Windows isolation certification status
+        if: always()
+        shell: pwsh
+        run: |
+          Write-Output "SBX3_WINDOWS_NATIVE_PRESPAWN_DENY=TESTED"
+          Write-Output "SBX3_WINDOWS_APPCONTAINER_NETWORK_NONE=NOT_IMPLEMENTED"
+          Write-Output "SBX3_NATIVE_B0_AGENT_READY=NO"
