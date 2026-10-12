@@ -844,6 +844,64 @@ os._exit(77)
 
 
 
+@pytest.mark.asyncio
+async def test_aic_raw_committed_intermediate_retiring_remains_fail_closed_after_restart(sqlite_aic):
+    """Privileged raw partial commit must poison availability, never mint reuse.
+
+    The normal repository never commits RETIRING. A privileged actor might;
+    recovery must deny any ACTIVE binding rather than resurrect or auto-retire
+    a marker that may still reference an owner. This is a documented operator
+    repair boundary, not an account-erasure or cleanup authorization.
+    """
+    import sqlite3
+    from contextlib import closing
+
+    engine, sessions = sqlite_aic
+    instance_id = await _create(sessions)
+    with closing(sqlite3.connect(engine.url.database)) as actor:
+        actor.execute("PRAGMA foreign_keys=OFF")
+        actor.execute("BEGIN IMMEDIATE")
+        assert actor.execute(
+            "UPDATE aic_instance_reservations SET state='RETIRING' "
+            "WHERE agent_instance_id=? AND state='ACTIVE'", (instance_id,),
+        ).rowcount == 1
+        actor.commit()
+    # Reopen the database through a distinct physical native SQLite connection.
+    with closing(sqlite3.connect(engine.url.database)) as restarted:
+        restarted.execute("PRAGMA foreign_keys=OFF")
+        assert restarted.execute(
+            "SELECT state FROM aic_instance_reservations "
+            "WHERE agent_instance_id=?", (instance_id,),
+        ).fetchone() == ("RETIRING",)
+        assert restarted.execute(
+            "SELECT COUNT(*) FROM aic_instance_live WHERE agent_instance_id=?",
+            (instance_id,),
+        ).fetchone() == (1,)
+        for statement, message in (
+            ("DELETE FROM users WHERE id='alice'", "AIC_LIVE_OWNER_DELETE_DENIED"),
+            ("UPDATE aic_instance_reservations SET state='ACTIVE' "
+             "WHERE agent_instance_id=?", "AIC_ID_TRANSITION_FORBIDDEN"),
+            ("UPDATE aic_instance_reservations SET state='RETIRED' "
+             "WHERE agent_instance_id=?", "AIC_ID_TRANSITION_FORBIDDEN"),
+            ("DELETE FROM aic_instance_reservations WHERE agent_instance_id=?",
+             "AIC_ID_REUSE_FORBIDDEN"),
+        ):
+            with pytest.raises(sqlite3.IntegrityError, match=message):
+                if "?" in statement:
+                    restarted.execute(statement, (instance_id,))
+                else:
+                    restarted.execute(statement)
+            restarted.rollback()
+    async with sessions() as session:
+        with pytest.raises(AgentInstanceDenied, match="unavailable"):
+            await AgentInstanceRepository(session).resolve("alice", instance_id)
+        await session.rollback()
+    async with sessions() as session:
+        with pytest.raises(AgentInstanceDenied, match="unavailable"):
+            await AgentInstanceRepository(session).retire("alice", instance_id, 1)
+        await session.rollback()
+
+
 # ---------------------------------------------------------------------------
 # Full physical Alembic history gate: base→24a→25a→26a→27a→28a→29a→30a→31a.
 # Unlike the scoped trigger tests above, this invokes the real CLI/env.py and
