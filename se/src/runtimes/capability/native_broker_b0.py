@@ -219,8 +219,16 @@ class NativeBrokerB0Diagnostic:
             "--setenv", "PATH", "/usr/bin",
             "--ro-bind", "/usr", "/usr",
         ]
-        for folder in ("/lib", "/lib64"):
-            if Path(folder).exists() and not Path(folder).is_symlink():
+        # Ubuntu/Debian merged-/usr links must exist INSIDE the empty rootfs;
+        # omitting /lib64 would leave a dynamic loader path unresolved.
+        for folder in ("/lib", "/lib64", "/bin", "/sbin"):
+            path = Path(folder)
+            if path.is_symlink():
+                target = os.readlink(folder)
+                if not (target.startswith("usr/") or target.startswith("/usr/")):
+                    raise ValueError("untrusted system rootfs symlink layout")
+                args.extend(("--symlink", target, folder))
+            elif path.is_dir():
                 args.extend(("--ro-bind", folder, folder))
         args.extend(
             (
@@ -297,7 +305,10 @@ class NativeBrokerB0Diagnostic:
             stderr = completed.stderr[:4096]
         except (OSError, subprocess.TimeoutExpired) as exc:
             rc, stdout, stderr = None, "", type(exc).__name__
-        self.ledger.transition(identity, "DISPATCHING", "OUTCOME_UNKNOWN")
+        finally:
+            # Even unexpected Python exceptions must never leave an
+            # ambiguous live dispatch eligible for replay or SUCCESS.
+            self.ledger.transition(identity, "DISPATCHING", "OUTCOME_UNKNOWN")
         return ProbeObservation(
             disposition="OUTCOME_UNKNOWN_NO_DURABLE_TREE_PROOF",
             returncode=rc,
