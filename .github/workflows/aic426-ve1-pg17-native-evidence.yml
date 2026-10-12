@@ -1,0 +1,160 @@
+name: AIC426 vE-1 Native PostgreSQL 17 and FK-OFF Evidence
+
+on:
+  push:
+    branches:
+      - evidence/aic426-ve1-pg17-linux-windows-20261012
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: aic426-ve1-pg17-native
+  cancel-in-progress: false
+
+jobs:
+  linux-real-postgresql17:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: aic426_evidence
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aic426_evidence"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic426_evidence
+      AIC_SOURCE_PARENT: f8ab733b6fb8329491a0df76e9d768a8bed14ce2
+      AIC_TEST_BLOB: 236c66893f0d6e2a6992c4cb88995ad4283227b2
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: evidence/aic426-ve1-pg17-linux-windows-20261012
+          fetch-depth: 2
+      - name: Verify evidence-only single ADD and frozen parent
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD^)" = "$AIC_SOURCE_PARENT"
+          test "$(git diff --name-status HEAD^ HEAD)" = $'A\t.github/workflows/aic426-ve1-pg17-native-evidence.yml'
+          test "$(git hash-object se/tests/integration/test_aic0_p1_agent_instance_identity.py)" = "$AIC_TEST_BLOB"
+          echo AIC_EXACT_SOURCE_AND_SINGLE_ADD=PASS
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements-runtime.txt
+      - name: Install pinned tests and asyncpg
+        run: |
+          python -m pip install -r requirements-test.txt
+          python -m pip install asyncpg==0.32.0
+      - name: Execute real PostgreSQL 17 and SQLite FK-OFF identity matrix
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aic-evidence-linux
+          python -m pytest -q -ra -o xfail_strict=true --junitxml=aic-evidence-linux/junit.xml se/tests/integration/test_aic0_p1_agent_instance_identity.py
+          python - <<'PY'
+          import xml.etree.ElementTree as ET
+          xml=ET.parse("aic-evidence-linux/junit.xml").getroot()
+          suites=[xml] if xml.tag=="testsuite" else list(xml.iter("testsuite"))
+          assert len(suites)==1
+          result={n:int(suites[0].attrib.get(n,"0")) for n in ("tests","failures","errors","skipped")}
+          assert result["tests"] >= 12 and result["failures"]==result["errors"]==result["skipped"]==0, result
+          assert any(c.get("name")=="test_postgresql17_real_native_aic_guards_and_nonkey_status_lock" for c in xml.iter("testcase"))
+          print("AIC_REAL_PG17_AND_SQLITE_FK_OFF_PASS",result)
+          PY
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aic426-ve1-pg17-linux
+          path: aic-evidence-linux/
+          if-no-files-found: warn
+
+  windows-native-postgresql17:
+    runs-on: windows-2025
+    timeout-minutes: 45
+    env:
+      PGPASSWORD: root
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic426_evidence
+      AIC_SOURCE_PARENT: f8ab733b6fb8329491a0df76e9d768a8bed14ce2
+      AIC_TEST_BLOB: 236c66893f0d6e2a6992c4cb88995ad4283227b2
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: evidence/aic426-ve1-pg17-linux-windows-20261012
+          fetch-depth: 2
+      - name: Verify evidence-only single ADD and frozen parent
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD^).Trim() -ne $env:AIC_SOURCE_PARENT) { throw 'Wrong source parent' }
+          $paths = @(git diff --name-status HEAD^ HEAD)
+          if ($paths.Count -ne 1 -or $paths[0] -ne "A`t.github/workflows/aic426-ve1-pg17-native-evidence.yml") { throw 'Evidence file mismatch' }
+          if ((git hash-object se/tests/integration/test_aic0_p1_agent_instance_identity.py).Trim() -ne $env:AIC_TEST_BLOB) { throw 'Frozen test blob mismatch' }
+          Write-Output 'AIC_EXACT_SOURCE_AND_SINGLE_ADD=PASS'
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements-runtime.txt
+      - name: Start genuine Windows native PostgreSQL 17 service
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $svc = Get-Service -Name 'postgresql-x64-17' -ErrorAction Stop
+          Set-Service -Name $svc.Name -StartupType Manual
+          if ($svc.Status -ne 'Running') { Start-Service -Name $svc.Name }
+          if ((Get-Service -Name $svc.Name).Status -ne 'Running') { throw 'Windows PG17 service not running' }
+          $psql = Join-Path $env:PGBIN 'psql.exe'
+          if (!(Test-Path $psql)) { throw 'Windows native PostgreSQL binary not found' }
+          $version = (& $psql -h 127.0.0.1 -U postgres -d postgres -tAc 'SHOW server_version_num').Trim()
+          if ($LASTEXITCODE -ne 0 -or [int]$version -lt 170000 -or [int]$version -ge 180000) { throw "Wrong native PG17: $version" }
+          & $psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE aic426_evidence'
+          if ($LASTEXITCODE -ne 0) { throw 'Cannot create dedicated PG evidence database' }
+          Write-Output "WINDOWS_NATIVE_POSTGRESQL17_VERSION=$version"
+      - name: Install pinned tests and asyncpg
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-test.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Dependency installation failed' }
+          python -m pip install asyncpg==0.32.0
+          if ($LASTEXITCODE -ne 0) { throw 'asyncpg install failed' }
+      - name: Execute real Windows PostgreSQL 17 and SQLite FK-OFF identity matrix
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path aic-evidence-windows | Out-Null
+          python -m pytest -q -ra -o xfail_strict=true --junitxml=aic-evidence-windows/junit.xml se/tests/integration/test_aic0_p1_agent_instance_identity.py
+          if ($LASTEXITCODE -ne 0) { throw 'AIC native Windows tests RED' }
+          @'
+          import xml.etree.ElementTree as ET
+          root=ET.parse("aic-evidence-windows/junit.xml").getroot()
+          suites=[root] if root.tag=="testsuite" else list(root.iter("testsuite"))
+          assert len(suites)==1
+          result={n:int(suites[0].attrib.get(n,"0")) for n in ("tests","failures","errors","skipped")}
+          assert result["tests"] >= 12 and result["failures"]==result["errors"]==result["skipped"]==0, result
+          assert any(c.get("name")=="test_postgresql17_real_native_aic_guards_and_nonkey_status_lock" for c in root.iter("testcase"))
+          print("AIC_WINDOWS_NATIVE_PG17_AND_SQLITE_FK_OFF_PASS",result)
+          '@ | python -
+          if ($LASTEXITCODE -ne 0) { throw 'Windows JUnit PG17 gate RED' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aic426-ve1-pg17-windows
+          path: aic-evidence-windows/
+          if-no-files-found: warn
