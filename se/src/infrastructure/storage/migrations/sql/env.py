@@ -102,6 +102,24 @@ def _prepare_postgresql_version_table(connection: Connection) -> None:
         return
     from sqlalchemy import text
 
+    # A conservative supported profile until multi-schema migrations receive
+    # independent proof. PostgreSQL can implicitly prioritize pg_temp and
+    # "$user" over public; never let an unqualified ALTER/LOCK select another
+    # physical object than the catalog row we validate.
+    identity = connection.execute(text("""
+        SELECT current_schema(), current_setting('search_path'),
+               pg_catalog.pg_my_temp_schema()
+    """)).one()
+    if (
+        identity[0] != "public"
+        or identity[1] not in ('"$user", public', 'public')
+        or identity[2] != 0
+    ):
+        raise RuntimeError(
+            "Unsupported PostgreSQL Alembic schema/search_path; "
+            "expected unshadowed public"
+        )
+
     connection.exec_driver_sql("SET LOCAL lock_timeout = '10s'")
     connection.exec_driver_sql(
         "CREATE TABLE IF NOT EXISTS alembic_version ("
@@ -109,6 +127,14 @@ def _prepare_postgresql_version_table(connection: Connection) -> None:
         "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
     )
     connection.exec_driver_sql("LOCK TABLE alembic_version IN ACCESS EXCLUSIVE MODE")
+    resolved = connection.execute(text("""
+        SELECT pg_catalog.to_regclass('alembic_version')::oid,
+               pg_catalog.to_regclass('public.alembic_version')::oid
+    """)).one()
+    if resolved[0] is None or resolved[0] != resolved[1]:
+        raise RuntimeError(
+            "Unsafe PostgreSQL Alembic version object resolution; upgrade denied"
+        )
     column = connection.execute(text("""
         SELECT data_type, character_maximum_length, is_nullable
           FROM information_schema.columns
