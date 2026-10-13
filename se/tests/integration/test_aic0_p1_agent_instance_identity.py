@@ -1060,6 +1060,122 @@ asyncio.run(main())
 
 
 @pytest.mark.asyncio
+async def test_aic_pg17_install_triggers_on_durable_tables_despite_prior_temp_shadows(postgres_url):
+    """Pre-install pg_temp shadows may NOT receive the AIC guard triggers.
+
+    The attacker prepares TEMP relations in the migration session BEFORE 31a
+    installs triggers. Assert physical pg_trigger.tgrelid/tgfoid match durable
+    schema table/function OIDs, not search_path-resolved temporary objects.
+    """
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("requires actual disposable PostgreSQL17 server")
+    admin = create_async_engine(postgres_url)
+    schema = "aic426_install_shadow_" + uuid4().hex[:12]
+    async with admin.begin() as c:
+        assert 170000 <= int((await c.execute(text(
+            "SHOW server_version_num"
+        ))).scalar_one()) < 180000
+        await c.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        # TEMP shadows must exist on the exact same physical migration
+        # connection before the real Alembic upgrade. The durable users table
+        # is created first, then the TEMP names deliberately hide it.
+        async with engine.begin() as c:
+            await c.run_sync(User.__table__.create)
+            await c.execute(text(
+                "CREATE TEMP TABLE users (id TEXT, status TEXT)"
+            ))
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_reservations "
+                "(agent_instance_id TEXT, state TEXT, generation BIGINT)"
+            ))
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_live "
+                "(agent_instance_id TEXT, owner_user_id TEXT)"
+            ))
+            # Unqualified lookups really do hit the shadow first.
+            assert (await c.execute(text(
+                "SELECT to_regclass('users') = to_regclass('pg_temp.users')"
+            ))).scalar_one() is True
+            await c.run_sync(
+                lambda sync: _run_aic_migration(sync, direction="upgrade")
+            )
+            objects = (await c.execute(text(
+                "SELECT t.tgname, n.nspname, rel.relname, fn.proname, fns.nspname "
+                "FROM pg_catalog.pg_trigger AS t "
+                "JOIN pg_catalog.pg_class AS rel ON rel.oid=t.tgrelid "
+                "JOIN pg_catalog.pg_namespace AS n ON n.oid=rel.relnamespace "
+                "JOIN pg_catalog.pg_proc AS fn ON fn.oid=t.tgfoid "
+                "JOIN pg_catalog.pg_namespace AS fns ON fns.oid=fn.pronamespace "
+                "WHERE t.tgname IN "
+                "('trg_aic_id_guard','trg_aic_live_guard',"
+                "'trg_aic_user_delete','trg_aic_user_rekey')"
+            ))).all()
+            assert len(objects) == 4, objects
+            assert {obj[0] for obj in objects} == {
+                "trg_aic_id_guard", "trg_aic_live_guard",
+                "trg_aic_user_delete", "trg_aic_user_rekey",
+            }
+            expected_tables = {
+                "trg_aic_id_guard": ("aic_instance_reservations", "aic_id_guard"),
+                "trg_aic_live_guard": ("aic_instance_live", "aic_live_guard"),
+                "trg_aic_user_delete": ("users", "aic_user_guard"),
+                "trg_aic_user_rekey": ("users", "aic_user_guard"),
+            }
+            for trig, table_schema, table_name, fn_name, function_schema in objects:
+                assert (table_name, fn_name) == expected_tables[trig]
+                assert table_schema == schema, (trig, table_schema)
+                assert function_schema == schema, (trig, function_schema)
+        # After committing the installation, a different physical session
+        # must still see the durable table triggers and reject retired ID reuse.
+        await _user(engine)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        original_id = await _create(sessions)
+        async with sessions() as s:
+            assert await AgentInstanceRepository(s).retire(
+                "alice", original_id, 1
+            ) == 2
+            await s.commit()
+        async with engine.connect() as c:
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_reservations "
+                "(agent_instance_id TEXT, state TEXT)"
+            ))
+            await c.execute(text("CREATE TEMP TABLE users (id TEXT, status TEXT)"))
+            await c.execute(text(
+                "INSERT INTO pg_temp.aic_instance_reservations VALUES (:id,'ACTIVE')"
+            ), {"id": original_id})
+            await c.execute(text(
+                "INSERT INTO pg_temp.users VALUES ('alice','active')"
+            ))
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_LIVE_OWNER_OR_ID_INVALID"):
+                await c.execute(text(
+                    "INSERT INTO " + schema + ".aic_instance_live "
+                    "(agent_instance_id,owner_user_id,definition_id,"
+                    "definition_version,lifecycle_state,generation) "
+                    "VALUES (:id,'alice','forged','v1','ACTIVE',1)"
+                ), {"id": original_id})
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT state FROM aic_instance_reservations "
+                "WHERE agent_instance_id=:id"
+            ), {"id": original_id})).scalar_one() == "RETIRED"
+            assert (await c.execute(text(
+                "SELECT COUNT(*) FROM aic_instance_live WHERE agent_instance_id=:id"
+            ), {"id": original_id})).scalar_one() == 0
+    finally:
+        await engine.dispose()
+        async with admin.begin() as c:
+            await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
+
+
+@pytest.mark.asyncio
 async def test_aic_pg17_trigger_rejects_search_path_shadow_resurrection(postgres_url):
     """Retired permanent ID must not be rebound via session search_path.
 
