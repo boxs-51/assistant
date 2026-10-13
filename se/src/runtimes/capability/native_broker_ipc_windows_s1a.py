@@ -153,8 +153,12 @@ class WindowsAuthenticatedPipe:
         self.name = name
         self.service_sid = _valid_sid(service_sid)
         self.client_sid = _valid_sid(authorized_client_sid)
-        if self.service_sid == self.client_sid:
-            raise S1AProtocolError("service and client must be different principals")
+        if not self.service_sid.startswith("S-1-5-80-"):
+            raise S1AProtocolError("broker requires a real SCM service SID")
+        if (not self.client_sid.startswith("S-1-5-21-")
+                or self.client_sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"}
+                or self.service_sid == self.client_sid):
+            raise S1AProtocolError("client must be a distinct unprivileged user SID")
         self.protocol = protocol
 
     def serve(self, stop: threading.Event) -> None:
