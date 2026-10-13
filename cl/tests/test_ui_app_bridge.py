@@ -1,4 +1,6 @@
 import inspect
+import json
+import re
 import threading
 import time
 
@@ -457,3 +459,94 @@ def test_identity_switch_revokes_pending_hitl_before_notifying_webview():
     assert bridge._auth_generation == 2
     assert revocations == [0, 1]
     assert notifications[-1][1] == 2
+
+
+class _BlockingApprovalWindow:
+    def __init__(self):
+        self.shown = threading.Event()
+        self.request = None
+        self.hidden = []
+
+    def evaluate_js(self, source):
+        show = re.search(r"showApprovalBar\((.*)\)$", source)
+        hide = re.search(r"hideApprovalBar\((.*)\)$", source)
+        if show:
+            self.request = json.loads(show.group(1))
+            self.shown.set()
+            return self.request["approval_id"]
+        if hide:
+            self.hidden.append(json.loads(hide.group(1)))
+            return True
+        return True
+
+
+def test_verify_registration_revokes_old_visible_approval():
+    bridge, _, _ = _bridge()
+    bridge.hitl._timeout = 1.0
+    window = _BlockingApprovalWindow()
+    bridge.set_window(window)
+    result = []
+    worker = threading.Thread(target=lambda: result.append(
+        bridge.hitl.show_dialog({"name": "old account"})), daemon=True)
+    # This request represents already-authenticated work that captured
+    # generation zero when it was created.
+    def run_old():
+        bridge._execution_local.auth_generation = 0
+        result.append(bridge.hitl.show_dialog({"name": "old account"}))
+    worker = threading.Thread(target=run_old, daemon=True)
+    worker.start()
+    assert window.shown.wait(1.0)
+    old_id = window.request["approval_id"]
+
+    assert bridge.verify_registration({"otp": "123456"})["success"] is True
+    assert bridge._auth_generation == 1
+    assert bridge.respond_approval(True, old_id) is False
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert result == [False]
+
+
+def test_partial_failed_verification_revokes_approval_even_if_runtime_raises():
+    bridge, _, _ = _bridge()
+    bridge.hitl._timeout = 1.0
+    window = _BlockingApprovalWindow()
+    bridge.set_window(window)
+    result = []
+
+    def run_old():
+        bridge._execution_local.auth_generation = 0
+        result.append(bridge.hitl.show_dialog({"name": "old account"}))
+    worker = threading.Thread(target=run_old, daemon=True)
+    worker.start()
+    assert window.shown.wait(1.0)
+    old_id = window.request["approval_id"]
+
+    def partially_changed(_payload):
+        bridge._client_runtime.owner_id = "partially-changed"
+        raise RuntimeError("auth API failed after runtime changed")
+
+    bridge._client_runtime.verify_registration = partially_changed
+    assert bridge.verify_registration({"otp": "123456"})["success"] is False
+    assert bridge.respond_approval(True, old_id) is False
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert result == [False]
+
+
+def test_direct_tool_approval_cannot_authorize_after_identity_switch():
+    bridge, _, gateway = _bridge()
+    executions = []
+    gateway.execute_capability = lambda *args, **kwargs: executions.append(args)
+    # Mimic the switch after HITL returned approval but before the target.
+    bridge._engine.hitl.request_approval = lambda *args: (
+        bridge._revoke_identity_generation() or True
+    )
+    outcome = bridge.execute_tool("echo", {"text": "old session"})
+    assert outcome["success"] is False
+    assert "old identity" in outcome["error"]
+    assert executions == []
+
+
+def test_production_ui_rejects_callback_without_origin_pin():
+    bridge, _, _ = _bridge()
+    assert bridge.hitl.show_dialog({"name": "unpinned capability"}) is False
