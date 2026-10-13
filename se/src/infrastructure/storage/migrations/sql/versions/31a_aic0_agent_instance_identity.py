@@ -175,11 +175,13 @@ _PG_FUNCTIONS = (
     $$ LANGUAGE plpgsql""",
 )
 
+# Schema is injected only from the dialect-quoted, verified durable target.
+# Trigger target tables AND invoked functions must not resolve via pg_temp.
 _PG_TRIGGERS = (
-    "CREATE TRIGGER trg_aic_id_guard BEFORE INSERT OR UPDATE OR DELETE ON aic_instance_reservations FOR EACH ROW EXECUTE FUNCTION aic_id_guard()",
-    "CREATE TRIGGER trg_aic_live_guard BEFORE INSERT OR UPDATE OR DELETE ON aic_instance_live FOR EACH ROW EXECUTE FUNCTION aic_live_guard()",
-    "CREATE TRIGGER trg_aic_user_delete BEFORE DELETE ON users FOR EACH ROW EXECUTE FUNCTION aic_user_guard()",
-    "CREATE TRIGGER trg_aic_user_rekey BEFORE UPDATE OF id ON users FOR EACH ROW EXECUTE FUNCTION aic_user_guard()",
+    "CREATE TRIGGER trg_aic_id_guard BEFORE INSERT OR UPDATE OR DELETE ON {schema}.aic_instance_reservations FOR EACH ROW EXECUTE FUNCTION {schema}.aic_id_guard()",
+    "CREATE TRIGGER trg_aic_live_guard BEFORE INSERT OR UPDATE OR DELETE ON {schema}.aic_instance_live FOR EACH ROW EXECUTE FUNCTION {schema}.aic_live_guard()",
+    "CREATE TRIGGER trg_aic_user_delete BEFORE DELETE ON {schema}.users FOR EACH ROW EXECUTE FUNCTION {schema}.aic_user_guard()",
+    "CREATE TRIGGER trg_aic_user_rekey BEFORE UPDATE OF id ON {schema}.users FOR EACH ROW EXECUTE FUNCTION {schema}.aic_user_guard()",
 )
 
 
@@ -242,7 +244,7 @@ def upgrade() -> None:
                 f"SET search_path TO pg_catalog, {quoted_schema}, pg_temp"
             ))
         for statement in _PG_TRIGGERS:
-            op.execute(sa.text(statement))
+            op.execute(sa.text(statement.format(schema=quoted_schema)))
 
 
 def downgrade() -> None:
