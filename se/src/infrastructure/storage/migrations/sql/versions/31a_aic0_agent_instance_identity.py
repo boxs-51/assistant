@@ -175,11 +175,13 @@ _PG_FUNCTIONS = (
     $$ LANGUAGE plpgsql""",
 )
 
+# Schema is injected only from the dialect-quoted, verified durable target.
+# Trigger target tables AND invoked functions must not resolve via pg_temp.
 _PG_TRIGGERS = (
-    "CREATE TRIGGER trg_aic_id_guard BEFORE INSERT OR UPDATE OR DELETE ON aic_instance_reservations FOR EACH ROW EXECUTE FUNCTION aic_id_guard()",
-    "CREATE TRIGGER trg_aic_live_guard BEFORE INSERT OR UPDATE OR DELETE ON aic_instance_live FOR EACH ROW EXECUTE FUNCTION aic_live_guard()",
-    "CREATE TRIGGER trg_aic_user_delete BEFORE DELETE ON users FOR EACH ROW EXECUTE FUNCTION aic_user_guard()",
-    "CREATE TRIGGER trg_aic_user_rekey BEFORE UPDATE OF id ON users FOR EACH ROW EXECUTE FUNCTION aic_user_guard()",
+    "CREATE TRIGGER trg_aic_id_guard BEFORE INSERT OR UPDATE OR DELETE ON {schema}.aic_instance_reservations FOR EACH ROW EXECUTE FUNCTION {schema}.aic_id_guard()",
+    "CREATE TRIGGER trg_aic_live_guard BEFORE INSERT OR UPDATE OR DELETE ON {schema}.aic_instance_live FOR EACH ROW EXECUTE FUNCTION {schema}.aic_live_guard()",
+    "CREATE TRIGGER trg_aic_user_delete BEFORE DELETE ON {schema}.users FOR EACH ROW EXECUTE FUNCTION {schema}.aic_user_guard()",
+    "CREATE TRIGGER trg_aic_user_rekey BEFORE UPDATE OF id ON {schema}.users FOR EACH ROW EXECUTE FUNCTION {schema}.aic_user_guard()",
 )
 
 
@@ -222,8 +224,27 @@ def upgrade() -> None:
     else:
         for statement in _PG_FUNCTIONS:
             op.execute(sa.text(statement))
+        # A trigger executes with the caller's SQL search_path unless its
+        # PL/pgSQL function is explicitly pinned. With default pg_temp
+        # precedence, TEMP tables named users / aic_instance_reservations
+        # can otherwise forge ACTIVE owner+marker checks and bind LIVE back
+        # to a permanently RETIRED ID despite the real foreign keys.
+        #
+        # Capture the actual schema in which the migration just created the
+        # AIC tables/functions, and lock the three function-local paths to
+        # trusted pg_catalog, that real schema, and pg_temp LAST.
+        # No runtime session GUC is changed and no cross-schema guesswork.
+        aic_schema = bind.execute(sa.text("SELECT current_schema()")).scalar_one()
+        if not aic_schema or aic_schema.startswith("pg_temp"):
+            raise RuntimeError("AIC PostgreSQL migration requires durable target schema")
+        quoted_schema = bind.dialect.identifier_preparer.quote_identifier(aic_schema)
+        for function in ("aic_id_guard", "aic_live_guard", "aic_user_guard"):
+            op.execute(sa.text(
+                f"ALTER FUNCTION {quoted_schema}.{function}() "
+                f"SET search_path TO pg_catalog, {quoted_schema}, pg_temp"
+            ))
         for statement in _PG_TRIGGERS:
-            op.execute(sa.text(statement))
+            op.execute(sa.text(statement.format(schema=quoted_schema)))
 
 
 def downgrade() -> None:

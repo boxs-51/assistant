@@ -903,6 +903,444 @@ async def test_aic_raw_committed_intermediate_retiring_remains_fail_closed_after
 
 
 # ---------------------------------------------------------------------------
+# PostgreSQL-17 ID durability: a REAL second OS interpreter dies by os._exit,
+# not an in-process exception or mocked AsyncSession. Independent connections
+# prove that committed retirement is permanent and interrupted writes roll back.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("cut", "expected_state", "expected_live"),
+    [
+        ("create_uncommitted", "ACTIVE", 1),
+        ("retire_uncommitted", "ACTIVE", 1),
+        ("retire_committed", "RETIRED", 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_aic_pg17_hard_exit_live_and_permanent_marker(
+    postgres_url, cut, expected_state, expected_live
+):
+    import asyncpg
+
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("Real PG17 OS-kill gate requires explicit disposable PG17 server")
+    admin = create_async_engine(postgres_url)
+    async with admin.begin() as c:
+        version = int((await c.execute(text("SHOW server_version_num"))).scalar_one())
+        assert 170000 <= version < 180000, "Native PostgreSQL 17 required"
+    schema = "aic426_hardexit_" + uuid4().hex[:12]
+    async with admin.begin() as c:
+        await c.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        await _tables(engine, dialect="postgresql")
+        await _user(engine)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        original_id = await _create(sessions)
+        inflight_id = "inflight-" + uuid4().hex
+
+        # The worker is a different operating-system process, connected with
+        # asyncpg directly to the same REAL server. _exit defeats finally,
+        # context-manager rollback and Python atexit cleanup.
+        worker = r"""
+import asyncio, asyncpg, os, sys
+async def main():
+    dsn, schema, cut, original_id, inflight_id = sys.argv[1:]
+    connection = await asyncpg.connect(
+        dsn=dsn, server_settings={"search_path": schema}
+    )
+    transaction = connection.transaction()
+    await transaction.start()
+    if cut == "create_uncommitted":
+        await connection.execute(
+            "INSERT INTO aic_instance_reservations "
+            "(agent_instance_id,state,generation) VALUES ($1,'ACTIVE',1)",
+            inflight_id,
+        )
+        await connection.execute(
+            "INSERT INTO aic_instance_live "
+            "(agent_instance_id,owner_user_id,definition_id,definition_version,"
+            "lifecycle_state,generation) "
+            "VALUES ($1,'alice','d','v','ACTIVE',1)", inflight_id,
+        )
+    else:
+        assert await connection.execute(
+            "UPDATE aic_instance_reservations SET state='RETIRING' "
+            "WHERE agent_instance_id=$1 AND state='ACTIVE'", original_id,
+        ) == "UPDATE 1"
+        assert await connection.execute(
+            "DELETE FROM aic_instance_live WHERE agent_instance_id=$1",
+            original_id,
+        ) == "DELETE 1"
+        assert await connection.execute(
+            "UPDATE aic_instance_reservations "
+            "SET state='RETIRED',generation=2 "
+            "WHERE agent_instance_id=$1 AND state='RETIRING'", original_id,
+        ) == "UPDATE 1"
+        if cut == "retire_committed":
+            await transaction.commit()
+    os._exit(77)
+asyncio.run(main())
+"""
+        dsn = postgres_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        outcome = subprocess.run(
+            [sys.executable, "-c", worker, dsn, schema, cut, original_id, inflight_id],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert outcome.returncode == 77, (
+            f"PG subprocess exit={outcome.returncode} stderr={outcome.stderr[-1200:]}"
+        )
+        # Fresh physical connection after kernel process exit, no inherited
+        # process-local repository/session or cached lifecycle status.
+        restarted = create_async_engine(
+            postgres_url, connect_args={"server_settings": {"search_path": schema}},
+            pool_pre_ping=True,
+        )
+        try:
+            async with restarted.connect() as c:
+                assert (await c.execute(text(
+                    "SELECT state FROM aic_instance_reservations "
+                    "WHERE agent_instance_id=:id"
+                ), {"id": original_id})).scalar_one() == expected_state
+                assert (await c.execute(text(
+                    "SELECT count(*) FROM aic_instance_live "
+                    "WHERE agent_instance_id=:id"
+                ), {"id": original_id})).scalar_one() == expected_live
+                assert (await c.execute(text(
+                    "SELECT count(*) FROM aic_instance_reservations "
+                    "WHERE agent_instance_id=:id"
+                ), {"id": inflight_id})).scalar_one() == 0
+            if cut == "retire_committed":
+                # A terminal marker is still present with no owner data and
+                # can NEVER be removed, reset to ACTIVE, bound or re-inserted.
+                for statement, needle in (
+                    ("DELETE FROM aic_instance_reservations "
+                     "WHERE agent_instance_id=:id", "AIC_ID_REUSE_FORBIDDEN"),
+                    ("UPDATE aic_instance_reservations SET state='ACTIVE' "
+                     "WHERE agent_instance_id=:id", "AIC_ID_TRANSITION_FORBIDDEN"),
+                    ("INSERT INTO aic_instance_live "
+                     "(agent_instance_id,owner_user_id,definition_id,"
+                     "definition_version,lifecycle_state,generation) "
+                     "VALUES (:id,'alice','d','v','ACTIVE',1)",
+                     "AIC_LIVE_OWNER_OR_ID_INVALID"),
+                ):
+                    async with restarted.connect() as c:
+                        with pytest.raises(DBAPIError, match=needle):
+                            await c.execute(text(statement), {"id": original_id})
+                        await c.rollback()
+                async with restarted.connect() as c:
+                    with pytest.raises(DBAPIError):
+                        await c.execute(text(
+                            "INSERT INTO aic_instance_reservations "
+                            "(agent_instance_id,state,generation) "
+                            "VALUES (:id,'ACTIVE',1)"
+                        ), {"id": original_id})
+                    await c.rollback()
+                async with sessions() as s:
+                    with pytest.raises(AgentInstanceDenied, match="unavailable"):
+                        await AgentInstanceRepository(s).resolve("alice", original_id)
+                    await s.rollback()
+            elif cut == "retire_uncommitted":
+                # Crash before COMMIT preserves legitimate LIVE owner, and the
+                # normal caller UoW can retire it exactly once after restart.
+                async with sessions() as s:
+                    assert await AgentInstanceRepository(s).retire(
+                        "alice", original_id, 1
+                    ) == 2
+                    await s.commit()
+        finally:
+            await restarted.dispose()
+    finally:
+        await engine.dispose()
+        async with admin.begin() as c:
+            await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
+
+
+@pytest.mark.asyncio
+async def test_aic_pg17_install_triggers_on_durable_tables_despite_prior_temp_shadows(postgres_url):
+    """Pre-install pg_temp shadows may NOT receive the AIC guard triggers.
+
+    The attacker prepares TEMP relations in the migration session BEFORE 31a
+    installs triggers. Assert physical pg_trigger.tgrelid/tgfoid match durable
+    schema table/function OIDs, not search_path-resolved temporary objects.
+    """
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("requires actual disposable PostgreSQL17 server")
+    admin = create_async_engine(postgres_url)
+    schema = "aic426_install_shadow_" + uuid4().hex[:12]
+    async with admin.begin() as c:
+        assert 170000 <= int((await c.execute(text(
+            "SHOW server_version_num"
+        ))).scalar_one()) < 180000
+        await c.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        # Inject TEMP shadows in the REAL migration connection immediately
+        # BEFORE its first CREATE TRIGGER, but AFTER permanent tables and FKs
+        # have been built. Creating temp tables earlier can break unrelated
+        # FK DDL and would not test the trigger installation vulnerability.
+        from sqlalchemy import event
+
+        async with engine.begin() as c:
+            await c.run_sync(User.__table__.create)
+            injected = {"done": False}
+
+            def shadow_before_trigger(sync_conn, cursor, statement, parameters,
+                                      context, executemany):
+                if injected["done"] or not statement.lstrip().startswith(
+                    "CREATE TRIGGER trg_aic_"
+                ):
+                    return
+                injected["done"] = True
+                for ddl in (
+                    "CREATE TEMP TABLE users (id TEXT, status TEXT)",
+                    "CREATE TEMP TABLE aic_instance_reservations "
+                    "(agent_instance_id TEXT, state TEXT, generation BIGINT)",
+                    "CREATE TEMP TABLE aic_instance_live "
+                    "(agent_instance_id TEXT, owner_user_id TEXT)",
+                ):
+                    sync_conn.exec_driver_sql(ddl)
+                # pg_temp now wins ordinary unqualified relation resolution;
+                # the original unqualified CREATE TRIGGER was vulnerable.
+                assert sync_conn.exec_driver_sql(
+                    "SELECT to_regclass('users') = to_regclass('pg_temp.users')"
+                ).scalar_one() is True
+
+            event.listen(c.sync_connection, "before_cursor_execute",
+                         shadow_before_trigger)
+            try:
+                await c.run_sync(
+                    lambda sync: _run_aic_migration(sync, direction="upgrade")
+                )
+            finally:
+                event.remove(c.sync_connection, "before_cursor_execute",
+                             shadow_before_trigger)
+            assert injected["done"], "real migration never reached CREATE TRIGGER"
+            objects = (await c.execute(text(
+                "SELECT t.tgname, n.nspname, rel.relname, fn.proname, fns.nspname "
+                "FROM pg_catalog.pg_trigger AS t "
+                "JOIN pg_catalog.pg_class AS rel ON rel.oid=t.tgrelid "
+                "JOIN pg_catalog.pg_namespace AS n ON n.oid=rel.relnamespace "
+                "JOIN pg_catalog.pg_proc AS fn ON fn.oid=t.tgfoid "
+                "JOIN pg_catalog.pg_namespace AS fns ON fns.oid=fn.pronamespace "
+                "WHERE t.tgname IN "
+                "('trg_aic_id_guard','trg_aic_live_guard',"
+                "'trg_aic_user_delete','trg_aic_user_rekey')"
+            ))).all()
+            assert len(objects) == 4, objects
+            assert {obj[0] for obj in objects} == {
+                "trg_aic_id_guard", "trg_aic_live_guard",
+                "trg_aic_user_delete", "trg_aic_user_rekey",
+            }
+            expected_tables = {
+                "trg_aic_id_guard": ("aic_instance_reservations", "aic_id_guard"),
+                "trg_aic_live_guard": ("aic_instance_live", "aic_live_guard"),
+                "trg_aic_user_delete": ("users", "aic_user_guard"),
+                "trg_aic_user_rekey": ("users", "aic_user_guard"),
+            }
+            for trig, table_schema, table_name, fn_name, function_schema in objects:
+                assert (table_name, fn_name) == expected_tables[trig]
+                assert table_schema == schema, (trig, table_schema)
+                assert function_schema == schema, (trig, function_schema)
+        # Drop the pool so the post-install checks cannot reuse the migration
+        # connection's TEMP shadow relations under asyncpg connection pooling.
+        await engine.dispose()
+        # A fresh physical session must see genuine tables and reject reuse.
+        await _user(engine)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        original_id = await _create(sessions)
+        async with sessions() as s:
+            assert await AgentInstanceRepository(s).retire(
+                "alice", original_id, 1
+            ) == 2
+            await s.commit()
+        async with engine.connect() as c:
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_reservations "
+                "(agent_instance_id TEXT, state TEXT)"
+            ))
+            await c.execute(text("CREATE TEMP TABLE users (id TEXT, status TEXT)"))
+            await c.execute(text(
+                "INSERT INTO pg_temp.aic_instance_reservations VALUES (:id,'ACTIVE')"
+            ), {"id": original_id})
+            await c.execute(text(
+                "INSERT INTO pg_temp.users VALUES ('alice','active')"
+            ))
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_LIVE_OWNER_OR_ID_INVALID"):
+                await c.execute(text(
+                    "INSERT INTO " + schema + ".aic_instance_live "
+                    "(agent_instance_id,owner_user_id,definition_id,"
+                    "definition_version,lifecycle_state,generation) "
+                    "VALUES (:id,'alice','forged','v1','ACTIVE',1)"
+                ), {"id": original_id})
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT state FROM aic_instance_reservations "
+                "WHERE agent_instance_id=:id"
+            ), {"id": original_id})).scalar_one() == "RETIRED"
+            assert (await c.execute(text(
+                "SELECT COUNT(*) FROM aic_instance_live WHERE agent_instance_id=:id"
+            ), {"id": original_id})).scalar_one() == 0
+    finally:
+        await engine.dispose()
+        async with admin.begin() as c:
+            await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
+
+
+@pytest.mark.asyncio
+async def test_aic_pg17_trigger_rejects_search_path_shadow_resurrection(postgres_url):
+    """Retired permanent ID must not be rebound via session search_path.
+
+    An untrusted DB session can create pg_temp relations under ordinary TEMP
+    privilege. PL/pgSQL trigger SELECTs must read the SAME schema as the
+    trigger's AIC tables rather than caller-shadowed relations. This is an
+    intentional NEGATIVE gate against marker resurrection.
+    """
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("requires disposable real PG17 server")
+    admin = create_async_engine(postgres_url)
+    async with admin.begin() as c:
+        assert 170000 <= int((await c.execute(text(
+            "SHOW server_version_num"
+        ))).scalar_one()) < 180000
+    schema = "aic426_shadow_" + uuid4().hex[:12]
+    async with admin.begin() as c:
+        await c.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        await _tables(engine, dialect="postgresql")
+        # Check all three database guard functions, not just LIVE.
+        # Runtime search_path and implicit pg_temp must not redirect any
+        # owner/marker query away from the newly created AIC schema.
+        async with engine.connect() as c:
+            pins = (await c.execute(text(
+                "SELECT p.proname, array_to_string(p.proconfig, ',') "
+                "FROM pg_catalog.pg_proc AS p "
+                "JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace "
+                "WHERE n.nspname=:schema "
+                "AND p.proname IN ('aic_id_guard','aic_live_guard','aic_user_guard')"
+            ), {"schema": schema})).all()
+        assert len(pins) == 3
+        for _function, config in pins:
+            assert config and config.startswith("search_path="), _function
+            assert config.split("=", 1)[1].replace('"', "").replace(" ", "").split(",") == [
+                "pg_catalog", schema, "pg_temp"
+            ], (_function, config)
+        await _user(engine)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        old_id = await _create(sessions)
+        async with sessions() as s:
+            assert await AgentInstanceRepository(s).retire("alice", old_id, 1) == 2
+            await s.commit()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT state FROM aic_instance_reservations "
+                "WHERE agent_instance_id=:id"
+            ), {"id": old_id})).scalar_one() == "RETIRED"
+            assert (await c.execute(text(
+                "SELECT count(*) FROM aic_instance_live WHERE agent_instance_id=:id"
+            ), {"id": old_id})).scalar_one() == 0
+        async with engine.connect() as c:
+            # Same physical connection, malicious caller creates temp tables
+            # and changes path, but explicitly writes the real AIC live table.
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_reservations "
+                "(agent_instance_id TEXT, state TEXT)"
+            ))
+            await c.execute(text(
+                "CREATE TEMP TABLE users (id TEXT, status TEXT)"
+            ))
+            await c.execute(text(
+                "INSERT INTO pg_temp.aic_instance_reservations "
+                "(agent_instance_id,state) VALUES (:id,'ACTIVE')"
+            ), {"id": old_id})
+            await c.execute(text(
+                "INSERT INTO pg_temp.users(id,status) VALUES ('alice','active')"
+            ))
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_LIVE_OWNER_OR_ID_INVALID"):
+                await c.execute(text(
+                    "INSERT INTO " + schema + ".aic_instance_live "
+                    "(agent_instance_id,owner_user_id,definition_id,"
+                    "definition_version,lifecycle_state,generation) "
+                    "VALUES (:id,'alice','forged','v','ACTIVE',1)"
+                ), {"id": old_id})
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT count(*) FROM aic_instance_live WHERE agent_instance_id=:id"
+            ), {"id": old_id})).scalar_one() == 0
+
+        # Separate adversarial probe for aic_id_guard: pg_temp LIVE rows
+        # cannot forge the real LIVE prerequisite for ACTIVE -> RETIRING.
+        # A deliberately bare reservation mimics an interrupted/illicit raw
+        # SQL write; it must remain ACTIVE instead of trusting a TEMP shadow.
+        bare_id = "bare-" + uuid4().hex
+        async with engine.begin() as c:
+            await c.execute(text(
+                "INSERT INTO aic_instance_reservations "
+                "(agent_instance_id,state,generation) VALUES (:id,'ACTIVE',1)"
+            ), {"id": bare_id})
+        async with engine.connect() as c:
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_live "
+                "(agent_instance_id TEXT, owner_user_id TEXT)"
+            ))
+            await c.execute(text(
+                "INSERT INTO pg_temp.aic_instance_live "
+                "(agent_instance_id,owner_user_id) VALUES (:id,'alice')"
+            ), {"id": bare_id})
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_ID_TRANSITION_FORBIDDEN"):
+                await c.execute(text(
+                    "UPDATE " + schema + ".aic_instance_reservations "
+                    "SET state='RETIRING' WHERE agent_instance_id=:id"
+                ), {"id": bare_id})
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT state FROM aic_instance_reservations "
+                "WHERE agent_instance_id=:id"
+            ), {"id": bare_id})).scalar_one() == "ACTIVE"
+
+        # Third guard: an empty TEMP LIVE table cannot trick aic_user_guard
+        # into permitting rekey of a genuine owner who still has LIVE data.
+        live_id = await _create(sessions)
+        async with engine.connect() as c:
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_live "
+                "(agent_instance_id TEXT, owner_user_id TEXT)"
+            ))
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_LIVE_OWNER_REKEY_DENIED"):
+                await c.execute(text(
+                    "UPDATE " + schema + ".users SET id='forged-user' "
+                    "WHERE id='alice'"
+                ))
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT owner_user_id FROM aic_instance_live "
+                "WHERE agent_instance_id=:id"
+            ), {"id": live_id})).scalar_one() == "alice"
+    finally:
+        await engine.dispose()
+        async with admin.begin() as c:
+            await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
+
+
+# ---------------------------------------------------------------------------
 # Full physical Alembic history gate: base→24a→25a→26a→27a→28a→29a→30a→31a.
 # Unlike the scoped trigger tests above, this invokes the real CLI/env.py and
 # upgrades an actual populated database in separate operating-system processes.
