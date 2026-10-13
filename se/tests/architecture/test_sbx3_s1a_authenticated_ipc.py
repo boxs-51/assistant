@@ -189,13 +189,42 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
             assert proc.returncode == 0, proc.stderr
             r = json.loads(proc.stdout)
             assert r["status"] == "DENY" and r["reason"] == "S1A_NATIVE_EFFECT_NOT_RELEASED"
+        # Foreign UID is intentionally in the socket DAC group, so the
+        # kernel peer-identity mismatch is exercised AFTER connect, not
+        # hidden by a permission error on the socket pathname.
         attacker = _probe_linux_as(foreign, sock=sock, epoch=epoch)
-        # DAC can deny connect outright, or peer-authenticated service may deny it.
-        if attacker.returncode == 0:
-            bad = json.loads(attacker.stdout)
-            assert bad["status"] == "DENY" and bad["peer_authenticated"] is False
-        else:
-            assert attacker.stderr
+        assert attacker.returncode == 0, attacker.stderr
+        bad = json.loads(attacker.stdout)
+        assert bad["status"] == "DENY"
+        assert bad["peer_authenticated"] is False
+        assert bad["reason"] == "FOREIGN_KERNEL_PEER"
+
+        # An unrelated nonmember separately proves the filesystem DAC fence.
+        dac_blocked = _required("SBX3_S1A_TEST_DAC_DENIED_USER")
+        denied_by_dac = _probe_linux_as(dac_blocked, sock=sock, epoch=epoch)
+        assert denied_by_dac.returncode != 0
+        assert denied_by_dac.stderr
+
+        # Replay must be tested on the actual long-lived OS broker, using
+        # *exactly the same wire nonce* twice, rather than two CLI randoms.
+        replay_script = "\n".join((
+            "import json,sys",
+            "from se.src.runtimes.capability.native_broker_ipc_linux_s1a import client_request",
+            "from se.src.runtimes.capability.native_privileged_broker_s1a import new_request",
+            "r=new_request('PING',broker_epoch=sys.argv[2],nonce='e'*32)",
+            "print(json.dumps([client_request(sys.argv[1],r),client_request(sys.argv[1],r)]))",
+        ))
+        replay_proc = subprocess.run(
+            ["sudo", "-n", "-u", client, sys.executable, "-c",
+             replay_script, sock, epoch],
+            cwd=str(Path(__file__).resolve().parents[3]),
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+        assert replay_proc.returncode == 0, replay_proc.stderr
+        replay_once, replay_twice = json.loads(replay_proc.stdout)
+        assert replay_once["status"] == "DENY" and replay_once["peer_authenticated"] is True
+        assert replay_twice["status"] == "DENY" and replay_twice["peer_authenticated"] is False
+        assert replay_twice["reason"] == "replay"
 
 
         # Native slow-client denial-of-service regression: the allowed UID
@@ -318,6 +347,33 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
         for action in ("MINT", "SPAWN", "GET_POSITIVE_RECEIPT", "DELETE_ROOT", "VERIFIED_EMPTY"):
             r = client_request(pipe, new_request(action, broker_epoch=epoch))
             assert r["status"] == "DENY" and r["reason"] == "S1A_NATIVE_EFFECT_NOT_RELEASED"
+
+        # Same authenticated Windows named-pipe request, same epoch and nonce;
+        # the second independent native connection must fail replay admission.
+        replay_request = new_request("PING", broker_epoch=epoch, nonce="e" * 32)
+        first_replay = client_request(pipe, replay_request)
+        second_replay = client_request(pipe, replay_request)
+        assert first_replay["status"] == "DENY" and first_replay["peer_authenticated"] is True
+        assert second_replay["status"] == "DENY" and second_replay["peer_authenticated"] is False
+        assert second_replay["reason"] == "replay"
+
+        # Real unprivileged SID must never read or mutate broker-protected
+        # state, SQLite, or config. These probes run inside the lowpriv account.
+        state_dir = _required("SBX3_S1A_TEST_STATE_DIR")
+        protected_config = _required("SBX3_S1A_TEST_CONFIG")
+        protected_db = _required("SBX3_S1A_TEST_DB")
+        with pytest.raises(PermissionError):
+            os.listdir(state_dir)
+        for protected in (protected_config, protected_db):
+            with pytest.raises(PermissionError):
+                with open(protected, "rb") as handle:
+                    handle.read(1)
+            with pytest.raises(PermissionError):
+                with open(protected, "ab") as handle:
+                    handle.write(b"x")
+        with pytest.raises(PermissionError):
+            with open(os.path.join(state_dir, "unauthorized-create"), "wb") as handle:
+                handle.write(b"x")
 
 
     def test_s1a_windows_native_stale_epoch_and_no_service_fallback() -> None:
