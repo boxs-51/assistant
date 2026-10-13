@@ -1080,29 +1080,47 @@ async def test_aic_pg17_install_triggers_on_durable_tables_despite_prior_temp_sh
         postgres_url, connect_args={"server_settings": {"search_path": schema}},
     )
     try:
-        # TEMP shadows must exist on the exact same physical migration
-        # connection before the real Alembic upgrade. The durable users table
-        # is created first, then the TEMP names deliberately hide it.
+        # Inject TEMP shadows in the REAL migration connection immediately
+        # BEFORE its first CREATE TRIGGER, but AFTER permanent tables and FKs
+        # have been built. Creating temp tables earlier can break unrelated
+        # FK DDL and would not test the trigger installation vulnerability.
+        from sqlalchemy import event
+
         async with engine.begin() as c:
             await c.run_sync(User.__table__.create)
-            await c.execute(text(
-                "CREATE TEMP TABLE users (id TEXT, status TEXT)"
-            ))
-            await c.execute(text(
-                "CREATE TEMP TABLE aic_instance_reservations "
-                "(agent_instance_id TEXT, state TEXT, generation BIGINT)"
-            ))
-            await c.execute(text(
-                "CREATE TEMP TABLE aic_instance_live "
-                "(agent_instance_id TEXT, owner_user_id TEXT)"
-            ))
-            # Unqualified lookups really do hit the shadow first.
-            assert (await c.execute(text(
-                "SELECT to_regclass('users') = to_regclass('pg_temp.users')"
-            ))).scalar_one() is True
-            await c.run_sync(
-                lambda sync: _run_aic_migration(sync, direction="upgrade")
-            )
+            injected = {"done": False}
+
+            def shadow_before_trigger(sync_conn, cursor, statement, parameters,
+                                      context, executemany):
+                if injected["done"] or not statement.lstrip().startswith(
+                    "CREATE TRIGGER trg_aic_"
+                ):
+                    return
+                injected["done"] = True
+                for ddl in (
+                    "CREATE TEMP TABLE users (id TEXT, status TEXT)",
+                    "CREATE TEMP TABLE aic_instance_reservations "
+                    "(agent_instance_id TEXT, state TEXT, generation BIGINT)",
+                    "CREATE TEMP TABLE aic_instance_live "
+                    "(agent_instance_id TEXT, owner_user_id TEXT)",
+                ):
+                    sync_conn.exec_driver_sql(ddl)
+                # pg_temp now wins ordinary unqualified relation resolution;
+                # the original unqualified CREATE TRIGGER was vulnerable.
+                assert sync_conn.exec_driver_sql(
+                    "SELECT to_regclass('users') = to_regclass('pg_temp.users')"
+                ).scalar_one() is True
+
+            event.listen(c.sync_connection, "before_cursor_execute",
+                         shadow_before_trigger)
+            try:
+                await c.run_sync(
+                    lambda sync: _run_aic_migration(sync, direction="upgrade")
+                )
+            finally:
+                event.remove(c.sync_connection, "before_cursor_execute",
+                             shadow_before_trigger)
+            assert injected["done"], "real migration never reached CREATE TRIGGER"
             objects = (await c.execute(text(
                 "SELECT t.tgname, n.nspname, rel.relname, fn.proname, fns.nspname "
                 "FROM pg_catalog.pg_trigger AS t "
