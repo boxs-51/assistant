@@ -12,6 +12,16 @@ from .realtime_client import GatewayRealtimeClient as PersistentGatewayRealtimeC
 logger = structlog.get_logger(__name__)
 
 
+# A connect/read *inactivity* budget for synchronous direct-UI effects.
+# Requests' socket timeouts DO NOT bound total wall-clock duration if a peer
+# continuously sends data; a server-issued effect fence is still required.
+DIRECT_UI_EFFECT_TIMEOUT = (3.05, 30.0)
+
+
+class GatewayEffectOutcomeUnknown(RuntimeError):
+    """The gateway may already have started the effect; never auto-retry."""
+
+
 _LEGACY_WAIT_REASONS = {
     "WAITING_FOR_CONNECTION": "CONNECTION",
     "WAITING_AGENT": "AGENT",
@@ -347,11 +357,26 @@ class GatewayLLMClient:
         return self._request("GET", "/v1/capabilities/", params=params).json()
 
     def execute_capability(self, capability_id: str, payload: Dict[str, Any]) -> Dict[str, Any]:
-        return self._request(
-            "POST",
-            f"/v1/capabilities/{capability_id}/execute",
-            json=payload,
-        ).json()
+        """One-shot direct effect: finite socket inactivity waits, no retries.
+
+        A timeout/connection failure after dispatch is AMBIGUOUS: the server
+        might have committed the effect. Never treat it as safely retryable.
+        """
+        try:
+            return self._request(
+                "POST",
+                f"/v1/capabilities/{capability_id}/execute",
+                json=payload,
+                timeout=DIRECT_UI_EFFECT_TIMEOUT,
+            ).json()
+        except (
+            requests.exceptions.Timeout,
+            requests.exceptions.ConnectionError,
+            requests.exceptions.ChunkedEncodingError,
+        ) as exc:
+            raise GatewayEffectOutcomeUnknown(
+                "Capability result is unknown; do not retry automatically."
+            ) from exc
 
     def get_sessions(self) -> Any:
         return self._request("GET", "/v1/sessions").json()
