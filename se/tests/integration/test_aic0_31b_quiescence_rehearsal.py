@@ -53,26 +53,40 @@ async def _install_roles(admin, database):
     app_role = "aic_application_" + suffix
     migration_password = uuid4().hex + "A"
     app_password = uuid4().hex + "B"
-    async with admin.connect() as cx:
-        await cx.exec_driver_sql(
-            f"CREATE ROLE {migration_role} LOGIN PASSWORD '{migration_password}'"
-        )
-        await cx.exec_driver_sql(
-            f"CREATE ROLE {app_role} LOGIN PASSWORD '{app_password}'"
-        )
-        await cx.exec_driver_sql(f"ALTER DATABASE {database} OWNER TO {migration_role}")
-        # CREATE DB grants CONNECT and TEMPORARY to PUBLIC unless explicitly removed.
-        await cx.exec_driver_sql(
-            f"REVOKE CONNECT, TEMPORARY ON DATABASE {database} FROM PUBLIC"
-        )
-        await cx.exec_driver_sql(
-            f"GRANT CONNECT, TEMPORARY ON DATABASE {database} TO {migration_role}"
-        )
-        await cx.exec_driver_sql(
-            f"GRANT CONNECT ON DATABASE {database} TO {app_role}"
-        )
+    try:
+        async with admin.connect() as cx:
+            await cx.exec_driver_sql(
+                f"CREATE ROLE {migration_role} LOGIN PASSWORD '{migration_password}'"
+            )
+            await cx.exec_driver_sql(
+                f"CREATE ROLE {app_role} LOGIN PASSWORD '{app_password}'"
+            )
+            await cx.exec_driver_sql(
+                f"ALTER DATABASE {database} OWNER TO {migration_role}"
+            )
+            # CREATE DB grants CONNECT/TEMPORARY to PUBLIC by default.
+            await cx.exec_driver_sql(
+                f"REVOKE CONNECT, TEMPORARY ON DATABASE {database} FROM PUBLIC"
+            )
+            await cx.exec_driver_sql(
+                f"GRANT CONNECT, TEMPORARY ON DATABASE {database} "
+                f"TO {migration_role}"
+            )
+            await cx.exec_driver_sql(
+                f"GRANT CONNECT ON DATABASE {database} TO {app_role}"
+            )
+    except Exception:
+        # Setup statements are AUTOCOMMIT, not atomic. Never abandon roles
+        # when a later GRANT/ALTER fails before returning their names.
+        # This function is restricted to a GitHub-hosted disposable PG17 DB.
+        async with admin.connect() as cx:
+            await cx.exec_driver_sql(
+                f"DROP DATABASE IF EXISTS {database} WITH (FORCE)"
+            )
+            await cx.exec_driver_sql(f"DROP ROLE IF EXISTS {app_role}")
+            await cx.exec_driver_sql(f"DROP ROLE IF EXISTS {migration_role}")
+        raise
     return migration_role, migration_password, app_role, app_password
-
 
 async def _drop_roles(admin, migration_role, app_role):
     async with admin.connect() as cx:
@@ -160,8 +174,28 @@ async def test_pg17_ephemeral_login_barrier_drain_and_old31a_forward(
                 "UPDATE public.users SET status=status WHERE id='alice'"
             )
 
-        # True separate-process migration fails safely under an active table
-        # reader/writer (ACCESS EXCLUSIVE NOWAIT), leaving stamped old 31a.
+        # Prove the precise database failure class under this physical lock.
+        # A CLI traceback substring ALONE is not adequate SQLSTATE evidence.
+        control = await asyncpg.connect(
+            dsn=mig_url.replace("postgresql+asyncpg://", "postgresql://")
+        )
+        try:
+            try:
+                await control.execute(
+                    "LOCK TABLE public.users, public.aic_instance_reservations, "
+                    "public.aic_instance_live IN ACCESS EXCLUSIVE MODE NOWAIT"
+                )
+            except asyncpg.PostgresError as exc:
+                assert exc.sqlstate == "55P03", (
+                    "Expected physical PG lock_not_available", exc.sqlstate
+                )
+            else:
+                pytest.fail("Contended physical NOWAIT lock unexpectedly succeeded")
+        finally:
+            await control.close()
+
+        # Separate out-of-process Alembic CLI must also fail while the SAME
+        # physical reader/writer is active; installed 31a remains unchanged.
         failed = _run_actual_cli(mig_url)
         assert failed.returncode != 0, (
             held_lock, failed.stdout[-1200:], failed.stderr[-3000:]
