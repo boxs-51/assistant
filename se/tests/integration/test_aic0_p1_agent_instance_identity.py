@@ -1723,28 +1723,52 @@ async def test_aic_pg17_forward_old31a_guard_and_restart(postgres_url):
                     "WHERE n.nspname=:schema AND p.proname='aic_live_guard'"
                 ), {"schema": schema})).scalar_one() is None, case
 
-        # An ordinary DML writer holding a users ROW EXCLUSIVE table lock
-        # must delay the 31b ALTER/verification transaction until it exits.
-        async with engine.connect() as writer:
-            await writer.execute(text(
-                f"UPDATE {schema}.users SET status=status WHERE id='alice'"
-            ))
-
-            async def upgrade_with_real_competing_writer():
-                async with engine.begin() as migration:
-                    await migration.run_sync(
-                        lambda sync: run_migration(sync, forward)
-                    )
-
-            pending = asyncio.create_task(upgrade_with_real_competing_writer())
-            try:
-                await asyncio.sleep(0.3)
-                assert not pending.done(), (
-                    "31b must wait for existing DML writer before repair"
-                )
-            finally:
+        # A blocked user/reservation/live writer can acquire table locks
+        # in different orders from old 31a triggers. Migration must NEVER
+        # wait while holding prior ACCESS EXCLUSIVE locks (deadlock risk).
+        # NOWAIT refuses all three real contention shapes, then succeeds
+        # only after the writer ends. This is a retry-after-quiescence gate.
+        competing_live_id = await _create(sessions)
+        contested_writers = (
+            ("users",
+             f"UPDATE {schema}.users SET status=status WHERE id='alice'", {}),
+            ("reservation",
+             f"UPDATE {schema}.aic_instance_reservations "
+             "SET state='RETIRING' WHERE agent_instance_id=:i",
+             {"i": competing_live_id}),
+            ("live",
+             f"UPDATE {schema}.aic_instance_live "
+             "SET lifecycle_state='SUSPENDED', generation=2 "
+             "WHERE agent_instance_id=:i",
+             {"i": competing_live_id}),
+        )
+        for contested_table, sql, params in contested_writers:
+            async with engine.connect() as writer:
+                result = await writer.execute(text(sql), params)
+                assert result.rowcount == 1, contested_table
+                async with engine.connect() as migration:
+                    started = asyncio.get_running_loop().time()
+                    with pytest.raises(DBAPIError) as exc_info:
+                        await migration.run_sync(
+                            lambda sync: run_migration(sync, forward)
+                        )
+                    elapsed = asyncio.get_running_loop().time() - started
+                    assert elapsed < 5, (contested_table, elapsed)
+                    assert "lock" in str(exc_info.value).lower()
+                    await migration.rollback()
                 await writer.rollback()
-            await asyncio.wait_for(pending, timeout=20)
+            async with engine.connect() as check:
+                assert (await check.execute(text(
+                    "SELECT p.proconfig FROM pg_catalog.pg_proc p "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace "
+                    "WHERE n.nspname=:schema AND p.proname='aic_live_guard'"
+                ), {"schema": schema})).scalar_one() is None, contested_table
+
+        async with engine.begin() as migration:
+            # No competing DML remains: one clean transactional repair.
+            await migration.run_sync(
+                lambda sync: run_migration(sync, forward)
+            )
 
         async with engine.begin() as conn:
             # 31b was physically committed only AFTER writer lock release.
