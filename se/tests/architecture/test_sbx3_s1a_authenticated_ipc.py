@@ -78,6 +78,22 @@ def test_s1a_portable_protected_registration_remains_non_authorizing(tmp_path: P
         assert db.execute("SELECT COUNT(*) FROM s1a_revocations").fetchone()[0] == 1
 
 
+def test_s1a_portable_replay_memory_budget_fails_closed() -> None:
+    p = DenyOnlyProtocol("a" * 32)
+    for n in range(4096):
+        request = new_request("PING", broker_epoch=p.epoch, nonce=f"{n:032x}")
+        response = p.respond(request, peer_authenticated=True)
+        assert response["status"] == "DENY"
+        assert response["peer_authenticated"] is True
+    assert len(p._seen) == 4096
+    overflow = p.respond(new_request("SPAWN", broker_epoch=p.epoch,
+                                      nonce="f" * 32), peer_authenticated=True)
+    assert overflow["status"] == "DENY"
+    assert overflow["peer_authenticated"] is False
+    assert "replay table" in overflow["reason"]
+    assert len(p._seen) == 4096
+
+
 def _probe_linux_as(user: str, *, sock: str, epoch: str, action: str = "PING",
                     generation: str = "1") -> subprocess.CompletedProcess[str]:
     command = ["sudo", "-n", "-u", user, sys.executable, "-m",
@@ -152,6 +168,33 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
         assert nonexistent.returncode != 0  # No host/HTTP fallback
 
 
+    def test_s1a_linux_native_hard_crash_restart_rejects_old_epoch() -> None:
+        """#417 must hard-kill broker PID then launch real broker UID again."""
+        sock, client, _, broker_uid = _linux_setup()
+        old_epoch = _required("SBX3_S1A_TEST_PREVIOUS_EPOCH")
+        old_pid = int(_required("SBX3_S1A_TEST_PREVIOUS_SERVICE_PID"))
+        current_pid = int(_required("SBX3_S1A_TEST_CURRENT_SERVICE_PID"))
+        assert old_pid > 0 and current_pid > 0 and old_pid != current_pid
+        status = Path(f"/proc/{current_pid}/status").read_text()
+        uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+        assert int(uid_line.split()[1]) == broker_uid
+        cmd = Path(f"/proc/{current_pid}/cmdline").read_bytes()
+        assert b"native_broker_service_s1a" in cmd
+        old = _probe_linux_as(client, sock=sock, epoch=old_epoch)
+        assert old.returncode == 0, old.stderr
+        denied = json.loads(old.stdout)
+        assert denied["status"] == "DENY" and denied["peer_authenticated"] is False
+        fresh_epoch = denied["broker_epoch"]
+        assert fresh_epoch != old_epoch
+        new = _probe_linux_as(client, sock=sock, epoch=fresh_epoch)
+        assert new.returncode == 0, new.stderr
+        transport = json.loads(new.stdout)
+        assert transport["status"] == "DENY"
+        assert transport["peer_authenticated"] is True
+        assert json.loads(_probe_linux_as(
+            client, sock=sock, epoch=fresh_epoch, action="SPAWN").stdout)["status"] == "DENY"
+
+
     def _windows_setup() -> tuple[str, str]:
         assert sys.platform == "win32", "S1-A native Windows evidence requires Windows"
         pipe = _required("SBX3_S1A_TEST_PIPE")
@@ -198,3 +241,54 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
         assert response["peer_authenticated"] is False
         with pytest.raises(S1AProtocolError):
             client_request(pipe + "-missing", new_request(broker_epoch=""))
+
+
+    def test_s1a_windows_native_stalled_peer_read_deadline_recovers() -> None:
+        """No bytes from a real allowed client must not hang SCM listener."""
+        pipe, _ = _windows_setup()
+        from se.src.runtimes.capability.native_broker_ipc_windows_s1a import (
+            _winlibs, client_request, GENERIC_READ, GENERIC_WRITE,
+            FILE_FLAG_OVERLAPPED, OPEN_EXISTING, INVALID, REQUEST_TIMEOUT_S,
+        )
+        import ctypes
+        from ctypes import wintypes as w
+        k, _ = _winlibs()
+        assert k.WaitNamedPipeW(w.LPCWSTR(pipe), 2000)
+        h = k.CreateFileW(w.LPCWSTR(pipe), GENERIC_READ | GENERIC_WRITE,
+                          0, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None)
+        assert h not in (None, INVALID)
+        try:
+            # A client opens the pipe and deliberately never sends its frame.
+            # A bounded ReadFile must cancel, drain, and release the instance.
+            time.sleep(REQUEST_TIMEOUT_S + 0.8)
+        finally:
+            k.CloseHandle(ctypes.c_void_p(h))
+        beginning = time.monotonic()
+        fresh = client_request(pipe, new_request(broker_epoch=""))
+        assert time.monotonic() - beginning < 6
+        assert fresh["status"] == "DENY"
+        assert re.fullmatch("[a-f0-9]{32}", fresh["broker_epoch"])
+
+
+    def test_s1a_windows_native_hard_crash_restart_rejects_old_epoch() -> None:
+        """#417 operator hard-kills SCM PID; fresh SCM service must rotate epoch."""
+        pipe, service = _windows_setup()
+        prior_epoch = _required("SBX3_S1A_TEST_PREVIOUS_EPOCH")
+        prior_pid = int(_required("SBX3_S1A_TEST_PREVIOUS_SERVICE_PID"))
+        sc = subprocess.run(["sc.exe", "queryex", service], capture_output=True,
+                            text=True, check=True)
+        match = re.search(r"PID\s*:\s*([1-9][0-9]*)", sc.stdout)
+        assert match
+        current_pid = int(match.group(1))
+        assert current_pid != prior_pid
+        from se.src.runtimes.capability.native_broker_ipc_windows_s1a import client_request
+        old = client_request(pipe, new_request(broker_epoch=prior_epoch))
+        assert old["status"] == "DENY" and old["peer_authenticated"] is False
+        epoch = old["broker_epoch"]
+        assert epoch != prior_epoch
+        authentic = client_request(pipe, new_request(broker_epoch=epoch))
+        assert authentic["status"] == "DENY" and authentic["peer_authenticated"] is True
+        for action in ("SPAWN", "GET_POSITIVE_RECEIPT", "VERIFIED_EMPTY", "DELETE_ROOT"):
+            denied = client_request(pipe, new_request(action, broker_epoch=epoch))
+            assert denied["status"] == "DENY"
+            assert denied["reason"] == "S1A_NATIVE_EFFECT_NOT_RELEASED"
