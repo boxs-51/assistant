@@ -24,8 +24,14 @@ PIPE_READMODE_BYTE = 0
 PIPE_WAIT = 0
 PIPE_REJECT_REMOTE_CLIENTS = 0x00000008
 FILE_FLAG_OVERLAPPED = 0x40000000
-GENERIC_READ = 0x80000000
-GENERIC_WRITE = 0x40000000
+FILE_READ_DATA = 0x0001
+FILE_WRITE_DATA = 0x0002
+FILE_CREATE_PIPE_INSTANCE = 0x0004
+SYNCHRONIZE = 0x00100000
+READ_CONTROL = 0x00020000
+# Client may read/write data, but MUST NOT create a pipe instance.
+CLIENT_PIPE_RIGHTS = 0x00120183
+CLIENT_OPEN_RIGHTS = FILE_READ_DATA | FILE_WRITE_DATA | SYNCHRONIZE
 OPEN_EXISTING = 3
 TOKEN_QUERY = 0x0008
 ERROR_PIPE_CONNECTED = 535
@@ -254,7 +260,7 @@ def client_request(pipe_name: str, request: dict) -> dict:
     _validate_pipe(pipe_name)
     if not k.WaitNamedPipeW(w.LPCWSTR(pipe_name), 2000):
         raise S1AProtocolError("Windows broker service unavailable")
-    handle = k.CreateFileW(w.LPCWSTR(pipe_name), GENERIC_READ | GENERIC_WRITE,
+    handle = k.CreateFileW(w.LPCWSTR(pipe_name), CLIENT_OPEN_RIGHTS,
                             0, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None)
     if handle in (None, INVALID):
         raise S1AProtocolError("private Windows pipe open failed")
@@ -277,6 +283,8 @@ class WindowsAuthenticatedPipe:
                 or not authorized_client_sid.startswith("S-1-5-21-")
                 or service_sid == authorized_client_sid):
             raise S1AProtocolError("distinct unprivileged client SID required")
+        if CLIENT_PIPE_RIGHTS & FILE_CREATE_PIPE_INSTANCE:
+            raise S1AProtocolError("untrusted client could create pipe instance")
         self.name = name
         self.service_sid = service_sid
         self.client_sid = authorized_client_sid
@@ -286,7 +294,7 @@ class WindowsAuthenticatedPipe:
         k, a = _winlibs()
         sd = ctypes.c_void_p()
         sddl = (f"D:P(A;;GA;;;SY)(A;;GA;;;{self.service_sid})"
-                f"(A;;GRGW;;;{self.client_sid})")
+                f"(A;;0x{CLIENT_PIPE_RIGHTS:08x};;;{self.client_sid})")
         if not a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
                 sddl, 1, ctypes.byref(sd), None):
             raise S1AProtocolError("cannot install explicit named pipe DACL")
