@@ -573,3 +573,32 @@ def test_direct_ui_tool_pins_generation_and_can_execute_after_current_approval()
     assert not worker.is_alive()
     assert outcomes[0]["success"] is True
     assert outcomes[0]["data"]["output"] == {"text": "ok"}
+
+
+def test_direct_ui_tool_denied_while_auth_transition_is_in_flight():
+    bridge, _, gateway = _bridge()
+    entered, resume = threading.Event(), threading.Event()
+    executed = []
+    gateway.execute_capability = lambda *args, **kwargs: executed.append(args)
+
+    def delayed_verification(_payload):
+        entered.set()
+        assert resume.wait(2.0)
+        return {"user": {"id": "new-owner"}}
+
+    bridge._client_runtime.verify_registration = delayed_verification
+    changes = []
+    worker = threading.Thread(
+        target=lambda: changes.append(bridge.verify_registration({"otp": "ok"})),
+        daemon=True,
+    )
+    worker.start()
+    assert entered.wait(1.0)
+    denied = bridge.execute_tool("echo", {"text": "from old UI"})
+    assert denied["success"] is False
+    assert "transition in progress" in denied["error"]
+    assert executed == []
+    resume.set()
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert changes[0]["success"] is True
