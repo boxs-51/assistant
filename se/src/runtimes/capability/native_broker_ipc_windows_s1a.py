@@ -1,6 +1,7 @@
-"""Native Windows local named pipe: explicit DACL, SCM SID, impersonated TokenUser.
+"""Native S1-A local named-pipe transport with time-bounded overlapped Win32 I/O.
 
-No mock Windows identity, no PID/JSON trust, no production spawn or receipt.
+No host Popen, model tools, native effects, or positive receipt authority.
+All connections use kernel impersonation and a restricted service/client SID ACL.
 """
 from __future__ import annotations
 
@@ -9,21 +10,38 @@ import os
 import re
 import struct
 import threading
+import time
 from ctypes import wintypes as w
-from .native_privileged_broker_s1a import MAX_FRAME, DenyOnlyProtocol, S1AProtocolError, decode_frame, encode_frame
+from typing import Callable
+
+from .native_privileged_broker_s1a import (
+    MAX_FRAME, DenyOnlyProtocol, S1AProtocolError, decode_frame, encode_frame,
+)
 
 PIPE_ACCESS_DUPLEX = 0x00000003
-PIPE_TYPE_BYTE = 0x00000000
-PIPE_READMODE_BYTE = 0x00000000
-PIPE_WAIT = 0x00000000
+PIPE_TYPE_BYTE = 0
+PIPE_READMODE_BYTE = 0
+PIPE_WAIT = 0
 PIPE_REJECT_REMOTE_CLIENTS = 0x00000008
+FILE_FLAG_OVERLAPPED = 0x40000000
 GENERIC_READ = 0x80000000
 GENERIC_WRITE = 0x40000000
 OPEN_EXISTING = 3
 TOKEN_QUERY = 0x0008
 ERROR_PIPE_CONNECTED = 535
+ERROR_IO_PENDING = 997
+WAIT_OBJECT_0 = 0
+WAIT_TIMEOUT = 258
 INVALID = ctypes.c_void_p(-1).value
 SID_RE = re.compile(r"S-1-(?:[0-9]+-)*[0-9]+\Z")
+PIPE_PREFIX = "\\\\.\\pipe\\SBX3S1A-"
+
+# Whole connection must complete or fail closed; slow-byte client cannot
+# extend this timeout indefinitely.
+CONNECT_TIMEOUT_S = 0.5
+REQUEST_TIMEOUT_S = 2.0
+CLIENT_TIMEOUT_S = 4.0
+CANCEL_DRAIN_TIMEOUT_MS = 1000
 
 
 class SECURITY_ATTRIBUTES(ctypes.Structure):
@@ -31,170 +49,269 @@ class SECURITY_ATTRIBUTES(ctypes.Structure):
                 ("bInheritHandle", w.BOOL)]
 
 
+class OVERLAPPED(ctypes.Structure):
+    _fields_ = [("Internal", ctypes.c_size_t), ("InternalHigh", ctypes.c_size_t),
+                ("Offset", w.DWORD), ("OffsetHigh", w.DWORD), ("hEvent", w.HANDLE)]
+
+
 def _winlibs():
     if os.name != "nt":
-        raise S1AProtocolError("native Windows only, no emulated pipe")
+        raise S1AProtocolError("native Windows kernel pipe required")
     k = ctypes.WinDLL("kernel32", use_last_error=True)
     a = ctypes.WinDLL("advapi32", use_last_error=True)
-    for fn in ("CreateNamedPipeW", "CreateFileW"):
-        getattr(k, fn).restype = ctypes.c_void_p
-    for fn in ("GetCurrentThread",):
-        getattr(k, fn).restype = ctypes.c_void_p
-    a.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [w.LPCWSTR, w.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(w.DWORD)]
+    k.CreateNamedPipeW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, w.DWORD,
+                                   w.DWORD, w.DWORD, w.DWORD, ctypes.POINTER(SECURITY_ATTRIBUTES)]
+    k.CreateNamedPipeW.restype = ctypes.c_void_p
+    k.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD, ctypes.c_void_p,
+                              w.DWORD, w.DWORD, ctypes.c_void_p]
+    k.CreateFileW.restype = ctypes.c_void_p
+    k.CreateEventW.argtypes = [ctypes.c_void_p, w.BOOL, w.BOOL, w.LPCWSTR]
+    k.CreateEventW.restype = ctypes.c_void_p
+    k.CloseHandle.argtypes = [ctypes.c_void_p]
+    k.CloseHandle.restype = w.BOOL
+    k.WaitForSingleObject.argtypes = [ctypes.c_void_p, w.DWORD]
+    k.WaitForSingleObject.restype = w.DWORD
+    k.WaitNamedPipeW.argtypes = [w.LPCWSTR, w.DWORD]
+    k.WaitNamedPipeW.restype = w.BOOL
+    k.ConnectNamedPipe.argtypes = [ctypes.c_void_p, ctypes.POINTER(OVERLAPPED)]
+    k.ConnectNamedPipe.restype = w.BOOL
+    k.CancelIoEx.argtypes = [ctypes.c_void_p, ctypes.POINTER(OVERLAPPED)]
+    k.CancelIoEx.restype = w.BOOL
+    k.GetOverlappedResult.argtypes = [ctypes.c_void_p, ctypes.POINTER(OVERLAPPED),
+                                      ctypes.POINTER(w.DWORD), w.BOOL]
+    k.GetOverlappedResult.restype = w.BOOL
+    k.ReadFile.argtypes = [ctypes.c_void_p, ctypes.c_void_p, w.DWORD,
+                            ctypes.POINTER(w.DWORD), ctypes.POINTER(OVERLAPPED)]
+    k.ReadFile.restype = w.BOOL
+    k.WriteFile.argtypes = [ctypes.c_void_p, ctypes.c_void_p, w.DWORD,
+                             ctypes.POINTER(w.DWORD), ctypes.POINTER(OVERLAPPED)]
+    k.WriteFile.restype = w.BOOL
+    k.DisconnectNamedPipe.argtypes = [ctypes.c_void_p]
+    k.DisconnectNamedPipe.restype = w.BOOL
+    k.GetCurrentThread.restype = ctypes.c_void_p
+    a.ConvertStringSecurityDescriptorToSecurityDescriptorW.argtypes = [
+        w.LPCWSTR, w.DWORD, ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(w.DWORD)]
     a.ConvertStringSecurityDescriptorToSecurityDescriptorW.restype = w.BOOL
     a.ImpersonateNamedPipeClient.argtypes = [ctypes.c_void_p]
     a.ImpersonateNamedPipeClient.restype = w.BOOL
-    a.OpenThreadToken.argtypes = [ctypes.c_void_p, w.DWORD, w.BOOL, ctypes.POINTER(ctypes.c_void_p)]
+    a.OpenThreadToken.argtypes = [ctypes.c_void_p, w.DWORD, w.BOOL,
+                                  ctypes.POINTER(ctypes.c_void_p)]
     a.OpenThreadToken.restype = w.BOOL
-    a.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p, w.DWORD, ctypes.POINTER(w.DWORD)]
+    a.GetTokenInformation.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_void_p,
+                                      w.DWORD, ctypes.POINTER(w.DWORD)]
     a.GetTokenInformation.restype = w.BOOL
     a.ConvertSidToStringSidW.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_void_p)]
     a.ConvertSidToStringSidW.restype = w.BOOL
+    a.RevertToSelf.argtypes = []
+    a.RevertToSelf.restype = w.BOOL
+    k.LocalFree.argtypes = [ctypes.c_void_p]
+    k.LocalFree.restype = ctypes.c_void_p
     return k, a
 
 
-def _valid_sid(value: str) -> str:
-    if not isinstance(value, str) or not SID_RE.fullmatch(value):
-        raise S1AProtocolError("invalid expected Windows SID")
-    return value
+def _validate_pipe(name: str) -> None:
+    if (not isinstance(name, str) or not name.startswith(PIPE_PREFIX)
+            or len(name) > 180 or len(name) <= len(PIPE_PREFIX)
+            or not re.fullmatch(r"[A-Za-z0-9_-]+", name[len(PIPE_PREFIX):])):
+        raise S1AProtocolError("invalid local private pipe name")
 
 
-def _read_exact(k, h, count: int) -> bytes:
-    data = bytearray()
-    while len(data) < count:
-        size = min(count - len(data), 4096)
-        buf = ctypes.create_string_buffer(size)
-        done = w.DWORD()
-        if not k.ReadFile(ctypes.c_void_p(h), buf, size, ctypes.byref(done), None) or not done.value:
-            raise S1AProtocolError("Windows pipe read failed")
-        data.extend(buf.raw[:done.value])
-    return bytes(data)
+def _overlapped(k, handle: int, begin: Callable[[OVERLAPPED], bool],
+                deadline: float, *, already_connected_ok: bool = False) -> int:
+    """Wait for completion; cancel and DRAIN before buffers/event can be freed.
 
-
-def _receive(k, h) -> dict:
-    header = _read_exact(k, h, 4)
-    n = struct.unpack("!I", header)[0]
-    if not 0 < n <= MAX_FRAME:
-        raise S1AProtocolError("invalid pipe frame length")
-    return decode_frame(header + _read_exact(k, h, n))
-
-
-def _write(k, h, payload: dict) -> None:
-    raw = encode_frame(payload)
-    done = w.DWORD()
-    buf = ctypes.create_string_buffer(raw)
-    if not k.WriteFile(ctypes.c_void_p(h), buf, len(raw), ctypes.byref(done), None) or done.value != len(raw):
-        raise S1AProtocolError("Windows pipe write failed")
-
-
-def _token_sid(a, token, info_class: int) -> str:
-    needed = w.DWORD()
-    a.GetTokenInformation(ctypes.c_void_p(token), info_class, None, 0, ctypes.byref(needed))
-    if needed.value < ctypes.sizeof(ctypes.c_void_p) or needed.value > 65536:
-        raise S1AProtocolError("invalid impersonated token info size")
-    data = ctypes.create_string_buffer(needed.value)
-    if not a.GetTokenInformation(ctypes.c_void_p(token), info_class, data, needed, ctypes.byref(needed)):
-        raise S1AProtocolError("unable to inspect impersonated token")
-    # TOKEN_USER and TOKEN_MANDATORY_LABEL each begin with SID_AND_ATTRIBUTES.
-    sid_addr = ctypes.cast(data, ctypes.POINTER(ctypes.c_void_p))[0]
-    out = ctypes.c_void_p()
-    if not sid_addr or not a.ConvertSidToStringSidW(sid_addr, ctypes.byref(out)):
-        raise S1AProtocolError("unable to stringify kernel token SID")
+    If the kernel cannot drain a cancelled request, terminate the *deny-only*
+    broker process rather than free Python buffers still owned by kernel I/O.
+    No native effects are ever started by this process.
+    """
+    event = k.CreateEventW(None, True, False, None)
+    if not event:
+        raise S1AProtocolError("cannot create kernel event")
+    ov = OVERLAPPED()
+    ov.hEvent = event
     try:
-        return ctypes.wstring_at(out)
+        success = bool(begin(ov))
+        if not success:
+            error = ctypes.get_last_error()
+            if already_connected_ok and error == ERROR_PIPE_CONNECTED:
+                return 0
+            if error != ERROR_IO_PENDING:
+                raise S1AProtocolError("native pipe operation rejected")
+        if not success:
+            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+            result = k.WaitForSingleObject(event, remaining_ms)
+            if result != WAIT_OBJECT_0:
+                k.CancelIoEx(ctypes.c_void_p(handle), ctypes.byref(ov))
+                # Cancellation is asynchronous. Do not release event/OVERLAPPED
+                # storage until the kernel reports completion/cancellation.
+                drained = k.WaitForSingleObject(event, CANCEL_DRAIN_TIMEOUT_MS)
+                if drained != WAIT_OBJECT_0:
+                    os._exit(86)  # safety terminal; no UAF, no native effects
+                raise S1AProtocolError("bounded Windows pipe deadline exceeded")
+        transferred = w.DWORD()
+        if not k.GetOverlappedResult(ctypes.c_void_p(handle), ctypes.byref(ov),
+                                      ctypes.byref(transferred), False):
+            raise S1AProtocolError("native overlapped result unavailable")
+        return transferred.value
     finally:
-        ctypes.WinDLL("kernel32", use_last_error=True).LocalFree(out)
+        k.CloseHandle(ctypes.c_void_p(event))
 
 
-def _peer_authorized(k, a, pipe, expected_client_sid: str) -> bool:
-    if not a.ImpersonateNamedPipeClient(ctypes.c_void_p(pipe)):
+def _read_exact(k, handle: int, size: int, deadline: float) -> bytes:
+    chunks = bytearray()
+    while len(chunks) < size:
+        if time.monotonic() >= deadline:
+            raise S1AProtocolError("bounded read deadline exceeded")
+        request = min(size - len(chunks), 4096)
+        buffer = ctypes.create_string_buffer(request)
+        def begin(ov: OVERLAPPED) -> bool:
+            return bool(k.ReadFile(ctypes.c_void_p(handle), buffer, request,
+                                   None, ctypes.byref(ov)))
+        completed = _overlapped(k, handle, begin, deadline)
+        if not completed or completed > request:
+            raise S1AProtocolError("truncated native pipe data")
+        chunks.extend(buffer.raw[:completed])
+    return bytes(chunks)
+
+
+def _receive(k, handle: int, deadline: float) -> dict:
+    header = _read_exact(k, handle, 4, deadline)
+    length = struct.unpack("!I", header)[0]
+    if not 0 < length <= MAX_FRAME:
+        raise S1AProtocolError("invalid Windows pipe frame size")
+    return decode_frame(header + _read_exact(k, handle, length, deadline))
+
+
+def _write(k, handle: int, payload: dict, deadline: float) -> None:
+    data = encode_frame(payload)
+    buffer = ctypes.create_string_buffer(data)
+    def begin(ov: OVERLAPPED) -> bool:
+        return bool(k.WriteFile(ctypes.c_void_p(handle), buffer, len(data),
+                                None, ctypes.byref(ov)))
+    if _overlapped(k, handle, begin, deadline) != len(data):
+        raise S1AProtocolError("incomplete Windows pipe write")
+
+
+def _token_sid(k, a, token: int, info_class: int) -> str:
+    needed = w.DWORD()
+    a.GetTokenInformation(ctypes.c_void_p(token), info_class, None, 0,
+                          ctypes.byref(needed))
+    if not ctypes.sizeof(ctypes.c_void_p) <= needed.value <= 65536:
+        raise S1AProtocolError("invalid token info length")
+    data = ctypes.create_string_buffer(needed.value)
+    if not a.GetTokenInformation(ctypes.c_void_p(token), info_class, data,
+                                  needed, ctypes.byref(needed)):
+        raise S1AProtocolError("cannot read impersonated token")
+    sid = ctypes.cast(data, ctypes.POINTER(ctypes.c_void_p))[0]
+    string = ctypes.c_void_p()
+    if not sid or not a.ConvertSidToStringSidW(sid, ctypes.byref(string)):
+        raise S1AProtocolError("kernel token has invalid SID")
+    try:
+        return ctypes.wstring_at(string)
+    finally:
+        k.LocalFree(string)
+
+
+def _peer_authorized(k, a, handle: int, expected_client_sid: str) -> bool:
+    if not a.ImpersonateNamedPipeClient(ctypes.c_void_p(handle)):
         return False
     token = ctypes.c_void_p()
     try:
-        if not a.OpenThreadToken(k.GetCurrentThread(), TOKEN_QUERY, True, ctypes.byref(token)):
+        if not a.OpenThreadToken(k.GetCurrentThread(), TOKEN_QUERY, True,
+                                 ctypes.byref(token)):
             return False
-        actual = _token_sid(a, token.value, 1)
-        integrity = _token_sid(a, token.value, 25)
+        actual = _token_sid(k, a, token.value, 1)  # TokenUser
+        integrity = _token_sid(k, a, token.value, 25)  # TokenIntegrityLevel
         try:
             mandatory_rid = int(integrity.rsplit("-", 1)[-1])
         except ValueError:
             return False
-        return actual.casefold() == expected_client_sid.casefold() and mandatory_rid >= 8192
+        return (actual.casefold() == expected_client_sid.casefold()
+                and 8192 <= mandatory_rid < 12288)  # real medium integrity only
     finally:
         if token.value:
             k.CloseHandle(token)
-        # Revert even on malformed token/failed SID lookup.
         if not a.RevertToSelf():
-            raise S1AProtocolError("CRITICAL: Windows impersonation revert failed")
+            # Impersonation state is now UNKNOWN; never serve another request.
+            os._exit(87)
 
 
 def client_request(pipe_name: str, request: dict) -> dict:
     k, _ = _winlibs()
-    if not pipe_name.startswith("\\\\.\\pipe\\SBX3S1A-"):
-        raise S1AProtocolError("pipe outside SBX3 private namespace")
-    # Never use local filesystem/localhost TCP fallback.
-    k.WaitNamedPipeW(w.LPCWSTR(pipe_name), w.DWORD(5000))
-    h = k.CreateFileW(w.LPCWSTR(pipe_name), GENERIC_READ | GENERIC_WRITE, 0, None, OPEN_EXISTING, 0, None)
-    if h in (None, INVALID):
-        raise S1AProtocolError("authorized Windows pipe unavailable")
+    _validate_pipe(pipe_name)
+    if not k.WaitNamedPipeW(w.LPCWSTR(pipe_name), 2000):
+        raise S1AProtocolError("Windows broker service unavailable")
+    handle = k.CreateFileW(w.LPCWSTR(pipe_name), GENERIC_READ | GENERIC_WRITE,
+                            0, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None)
+    if handle in (None, INVALID):
+        raise S1AProtocolError("private Windows pipe open failed")
     try:
-        _write(k, h, request)
-        return _receive(k, h)
+        deadline = time.monotonic() + CLIENT_TIMEOUT_S
+        _write(k, handle, request, deadline)
+        return _receive(k, handle, deadline)
     finally:
-        k.CloseHandle(ctypes.c_void_p(h))
+        k.CloseHandle(ctypes.c_void_p(handle))
 
 
 class WindowsAuthenticatedPipe:
     def __init__(self, name: str, *, service_sid: str,
                  authorized_client_sid: str, protocol: DenyOnlyProtocol) -> None:
         _winlibs()
-        if not name.startswith("\\\\.\\pipe\\SBX3S1A-") or "/" in name:
-            raise S1AProtocolError("invalid local-only pipe namespace")
+        _validate_pipe(name)
+        if not SID_RE.fullmatch(service_sid) or not service_sid.startswith("S-1-5-80-"):
+            raise S1AProtocolError("real Windows SCM service SID required")
+        if (not SID_RE.fullmatch(authorized_client_sid)
+                or not authorized_client_sid.startswith("S-1-5-21-")
+                or service_sid == authorized_client_sid):
+            raise S1AProtocolError("distinct unprivileged client SID required")
         self.name = name
-        self.service_sid = _valid_sid(service_sid)
-        self.client_sid = _valid_sid(authorized_client_sid)
-        if not self.service_sid.startswith("S-1-5-80-"):
-            raise S1AProtocolError("broker requires a real SCM service SID")
-        if (not self.client_sid.startswith("S-1-5-21-")
-                or self.client_sid in {"S-1-5-18", "S-1-5-19", "S-1-5-20"}
-                or self.service_sid == self.client_sid):
-            raise S1AProtocolError("client must be a distinct unprivileged user SID")
+        self.service_sid = service_sid
+        self.client_sid = authorized_client_sid
         self.protocol = protocol
 
     def serve(self, stop: threading.Event) -> None:
         k, a = _winlibs()
         sd = ctypes.c_void_p()
-        # No Everyone, Anonymous or default discretionary access.
-        sddl = f"D:P(A;;GA;;;SY)(A;;GA;;;{self.service_sid})(A;;GRGW;;;{self.client_sid})"
-        if not a.ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, 1, ctypes.byref(sd), None):
-            raise S1AProtocolError("explicit named pipe DACL unavailable")
+        sddl = (f"D:P(A;;GA;;;SY)(A;;GA;;;{self.service_sid})"
+                f"(A;;GRGW;;;{self.client_sid})")
+        if not a.ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl, 1, ctypes.byref(sd), None):
+            raise S1AProtocolError("cannot install explicit named pipe DACL")
         attrs = SECURITY_ATTRIBUTES(ctypes.sizeof(SECURITY_ATTRIBUTES), sd, False)
         try:
             while not stop.is_set():
-                h = k.CreateNamedPipeW(w.LPCWSTR(self.name), PIPE_ACCESS_DUPLEX,
+                handle = k.CreateNamedPipeW(
+                    w.LPCWSTR(self.name), PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
                     PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT | PIPE_REJECT_REMOTE_CLIENTS,
                     1, 8192, 8192, 2000, ctypes.byref(attrs))
-                if h in (None, INVALID):
-                    raise S1AProtocolError("native pipe creation failed")
+                if handle in (None, INVALID):
+                    raise S1AProtocolError("native broker pipe create failed")
                 try:
-                    connected = bool(k.ConnectNamedPipe(ctypes.c_void_p(h), None))
-                    if not connected and ctypes.get_last_error() != ERROR_PIPE_CONNECTED:
-                        if stop.is_set():
-                            break
+                    try:
+                        _overlapped(
+                            k, handle,
+                            lambda ov: bool(k.ConnectNamedPipe(
+                                ctypes.c_void_p(handle), ctypes.byref(ov))),
+                            time.monotonic() + CONNECT_TIMEOUT_S,
+                            already_connected_ok=True)
+                    except S1AProtocolError:
+                        # Connect wait is bounded so SCM STOP is responsive;
+                        # a stalled peer never pins the service indefinitely.
                         continue
                     if stop.is_set():
                         break
+                    deadline = time.monotonic() + REQUEST_TIMEOUT_S
                     try:
-                        request = _receive(k, h)
-                        peer = _peer_authorized(k, a, h, self.client_sid)
+                        request = _receive(k, handle, deadline)
+                        peer = _peer_authorized(k, a, handle, self.client_sid)
                         response = self.protocol.respond(request, peer_authenticated=peer)
                         if not peer:
                             response["reason"] = "FOREIGN_WINDOWS_TOKEN"
-                        _write(k, h, response)
+                        _write(k, handle, response, deadline)
                     except (S1AProtocolError, OSError, ValueError):
                         continue
                 finally:
-                    k.DisconnectNamedPipe(ctypes.c_void_p(h))
-                    k.CloseHandle(ctypes.c_void_p(h))
+                    k.DisconnectNamedPipe(ctypes.c_void_p(handle))
+                    k.CloseHandle(ctypes.c_void_p(handle))
         finally:
             k.LocalFree(sd)
