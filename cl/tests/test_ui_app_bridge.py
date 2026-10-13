@@ -651,7 +651,8 @@ def test_concurrent_logout_stays_fenced_until_effect_exits_unknown():
     logout.start()
     # The old effect holds the authorization lock; logout must NOT mutate
     # runtime principal before the pending result is known/unknown.
-    assert not logout.join(0.05)
+    logout.join(0.05)
+    assert logout.is_alive()
     assert transitions == []
 
     release.set()
