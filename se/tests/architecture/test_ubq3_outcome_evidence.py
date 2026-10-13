@@ -206,6 +206,8 @@ async def test_ubq3_remote_timeout_unknown_does_not_refund() -> None:
         )
 
     assert caught.value.code == "CAPABILITY_TIMEOUT"
+    # Remote timeout after uncertain dispatch must not invite another effect.
+    assert caught.value.retryable is False
     persisted = await runtime.invocation_lifecycle.store.get(
         "inv-ubq3-timeout"
     )
