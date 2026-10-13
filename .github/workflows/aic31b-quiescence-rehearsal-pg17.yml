@@ -36,6 +36,7 @@ jobs:
           --health-timeout 5s
           --health-retries 15
     env:
+      AIC31B_EPHEMERAL_REHEARSAL: "1"
       AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
     steps:
       - uses: actions/checkout@v4
@@ -80,6 +81,7 @@ jobs:
     runs-on: windows-2025
     timeout-minutes: 30
     env:
+      AIC31B_EPHEMERAL_REHEARSAL: "1"
       AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
       PGPASSWORD: root
     steps:
