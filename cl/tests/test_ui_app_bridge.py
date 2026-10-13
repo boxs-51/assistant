@@ -449,11 +449,11 @@ def test_identity_switch_revokes_pending_hitl_before_notifying_webview():
 
     assert bridge.login({"email": "next@example.com"})["success"] is True
     assert bridge._auth_generation == 1
-    assert revocations == [1]
+    assert revocations == [0]  # revoke before auth generation becomes 1
     assert notifications and notifications[-1][1] == 1
 
     bridge._client_runtime.logout = lambda: None
     assert bridge.logout()["success"] is True
     assert bridge._auth_generation == 2
-    assert revocations == [1, 2]
+    assert revocations == [0, 1]
     assert notifications[-1][1] == 2
