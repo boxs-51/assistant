@@ -54,6 +54,30 @@ def test_s1a_portable_bounded_frame_and_zero_effects() -> None:
         decode_frame(b'\0\0\0\r{"x":1,"x":2}')
 
 
+def test_s1a_portable_protected_registration_remains_non_authorizing(tmp_path: Path) -> None:
+    from se.src.runtimes.capability.native_broker_registration_s1a import (
+        ProtectedRegistrationLedger, S1ARegistrationUnavailable,
+    )
+    state = tmp_path / "broker-only"
+    state.mkdir(mode=0o700)
+    os.chmod(state, 0o700)
+    ledger = ProtectedRegistrationLedger(state)
+    first_epoch = ledger.epoch
+    ledger.revoke(owner_id="owner", execution_id="exec", sandbox_id="sandbox", generation="1")
+    ledger.revoke(owner_id="owner", execution_id="exec", sandbox_id="sandbox", generation=1)
+    with pytest.raises(S1AProtocolError):
+        ledger.revoke(owner_id="owner", execution_id="exec", sandbox_id="sandbox", generation="01")
+    assert ledger.authorizes(owner_id="owner", execution_id="exec", generation="2") is False
+    for method in ("mint", "positive_receipt", "verified_empty"):
+        with pytest.raises(S1ARegistrationUnavailable):
+            getattr(ledger, method)()
+    restarted = ProtectedRegistrationLedger(state)
+    assert restarted.epoch != first_epoch
+    assert restarted.authorizes() is False
+    with restarted._db() as db:
+        assert db.execute("SELECT COUNT(*) FROM s1a_revocations").fetchone()[0] == 1
+
+
 def _probe_linux_as(user: str, *, sock: str, epoch: str, action: str = "PING",
                     generation: str = "1") -> subprocess.CompletedProcess[str]:
     command = ["sudo", "-n", "-u", user, sys.executable, "-m",
@@ -141,6 +165,10 @@ def _windows_setup() -> tuple[str, str]:
     assert client_sid.casefold() in whoami.stdout.casefold()
     assert client_sid.casefold() != service_sid.casefold()
     assert "S-1-5-18" not in whoami.stdout  # no LocalSystem test double
+    groups = subprocess.run(["whoami", "/groups"], capture_output=True, text=True, check=True)
+    assert "S-1-16-12288" not in groups.stdout and "S-1-16-16384" not in groups.stdout, (
+        "native Windows client must not be high-integrity/admin CI operator"
+    )
     return pipe, service
 
 
