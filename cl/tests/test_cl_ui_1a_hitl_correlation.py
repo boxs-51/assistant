@@ -241,7 +241,7 @@ class BlockingDisplayAckHarness(ApprovalHarness):
         self.ack_release = threading.Event()
 
     def __call__(self, js_code):
-        show = re.search(r"showApprovalBar\\((.*)\\)$", js_code)
+        show = re.search(r"showApprovalBar\((.*)\)$", js_code)
         if show:
             with self._condition:
                 request = json.loads(show.group(1))
