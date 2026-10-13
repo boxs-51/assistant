@@ -13,7 +13,7 @@ on:
 permissions:
   contents: read
 
-# Test-only child of exact PR467@6edd86a0, 1 test MOD + 1 workflow ADD.
+# Isolated P0 fix/evidence child of PR467@6edd86a0: migration+test MOD, 1 workflow ADD.
 # Full historical PostgreSQL genesis requires separate UNMERGED PR494 (do not
 # conflate its Alembic preflight authority with the original PR467 source).
 # This dedicated gate explicitly excludes only that known blocked PostgreSQL
