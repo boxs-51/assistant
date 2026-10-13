@@ -78,6 +78,19 @@ def test_s1a_portable_protected_registration_remains_non_authorizing(tmp_path: P
         assert db.execute("SELECT COUNT(*) FROM s1a_revocations").fetchone()[0] == 1
 
 
+def test_s1a_portable_windows_pipe_client_cannot_create_instance() -> None:
+    # Pipe creation uses FILE_CREATE_PIPE_INSTANCE (bit 0x4). Windows
+    # generic write includes that bit: client must never get GW/GRGW.
+    from se.src.runtimes.capability.native_broker_ipc_windows_s1a import (
+        CLIENT_PIPE_RIGHTS, CLIENT_OPEN_RIGHTS, FILE_CREATE_PIPE_INSTANCE,
+        FILE_READ_DATA, FILE_WRITE_DATA,
+    )
+    assert CLIENT_PIPE_RIGHTS & FILE_CREATE_PIPE_INSTANCE == 0
+    assert CLIENT_OPEN_RIGHTS & FILE_CREATE_PIPE_INSTANCE == 0
+    assert CLIENT_OPEN_RIGHTS & (FILE_READ_DATA | FILE_WRITE_DATA) == 3
+    assert CLIENT_PIPE_RIGHTS & CLIENT_OPEN_RIGHTS == CLIENT_OPEN_RIGHTS
+
+
 def test_s1a_portable_replay_memory_budget_fails_closed() -> None:
     p = DenyOnlyProtocol("a" * 32)
     for n in range(4096):
@@ -247,14 +260,14 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
         """No bytes from a real allowed client must not hang SCM listener."""
         pipe, _ = _windows_setup()
         from se.src.runtimes.capability.native_broker_ipc_windows_s1a import (
-            _winlibs, client_request, GENERIC_READ, GENERIC_WRITE,
+            _winlibs, client_request, CLIENT_OPEN_RIGHTS,
             FILE_FLAG_OVERLAPPED, OPEN_EXISTING, INVALID, REQUEST_TIMEOUT_S,
         )
         import ctypes
         from ctypes import wintypes as w
         k, _ = _winlibs()
         assert k.WaitNamedPipeW(w.LPCWSTR(pipe), 2000)
-        h = k.CreateFileW(w.LPCWSTR(pipe), GENERIC_READ | GENERIC_WRITE,
+        h = k.CreateFileW(w.LPCWSTR(pipe), CLIENT_OPEN_RIGHTS,
                           0, None, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, None)
         assert h not in (None, INVALID)
         try:
