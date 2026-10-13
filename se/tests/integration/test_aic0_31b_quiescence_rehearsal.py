@@ -133,7 +133,9 @@ async def test_pg17_ephemeral_login_barrier_drain_and_old31a_forward(
 
         # Test profile is deliberately non-privileged; production roles are
         # NOT inventoried/proven by this ephemeral assertion.
-        async with admin.connect() as cx:
+        # ACL checks must resolve objects in the disposable *target* DB,
+        # not the administrative parent database used to provision roles.
+        async with mig_engine.connect() as cx:
             acl = (await cx.execute(text("""
                 SELECT has_database_privilege(:r, :d, 'TEMPORARY'),
                        has_schema_privilege(:r, 'public', 'CREATE'),
