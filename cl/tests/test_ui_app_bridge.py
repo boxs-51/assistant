@@ -438,3 +438,22 @@ def test_submit_prompt_passes_configured_agent_time_budgets(monkeypatch):
     request = bridge._client_runtime.chat_calls[0]
     assert request.agent_limits.timeout_seconds == 600
     assert request.agent_limits.tool_timeout_seconds == 330
+
+
+def test_identity_switch_revokes_pending_hitl_before_notifying_webview():
+    bridge, _, _ = _bridge()
+    notifications = []
+    revocations = []
+    bridge.hitl.invalidate_pending = lambda: revocations.append(bridge._auth_generation)
+    bridge._eval_js = lambda script: notifications.append((script, len(revocations)))
+
+    assert bridge.login({"email": "next@example.com"})["success"] is True
+    assert bridge._auth_generation == 1
+    assert revocations == [1]
+    assert notifications and notifications[-1][1] == 1
+
+    bridge._client_runtime.logout = lambda: None
+    assert bridge.logout()["success"] is True
+    assert bridge._auth_generation == 2
+    assert revocations == [1, 2]
+    assert notifications[-1][1] == 2
