@@ -4,11 +4,13 @@ on:
   push:
     branches:
       - evidence/156-aic467-pg17-id-hardexit-20261013
+      - feature/156-aic31b-forward-pg-20261013
   pull_request:
     paths:
       - ".github/workflows/aic467-pg17-id-hardexit-20261013.yml"
       - "se/tests/integration/test_aic0_p1_agent_instance_identity.py"
       - "se/src/infrastructure/storage/migrations/sql/versions/31a_aic0_agent_instance_identity.py"
+      - "se/src/infrastructure/storage/migrations/sql/versions/31b_aic0_pg_guard_forward.py"
   workflow_dispatch:
 
 permissions:
@@ -42,6 +44,8 @@ jobs:
       AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # pinned historical PR467 31a blob is mandatory
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
@@ -73,7 +77,7 @@ jobs:
             -k "not full_historical_alembic_chain_with_ubq25_26_and_live_owner" \
             se/tests/integration/test_aic0_p1_agent_instance_identity.py \
             se/tests/architecture/test_aic0_p1_identity_production_boundary.py
-          python -c 'from xml.etree import ElementTree as E; r=E.parse("aic467-pg17-evidence/linux-junit.xml").getroot(); suites=[r] if r.tag=="testsuite" else r.findall("testsuite"); print([(x.get("tests"),x.get("failures"),x.get("errors"),x.get("skipped")) for x in suites]); assert all(int(x.get("skipped","0"))==0 and int(x.get("failures","0"))==0 and int(x.get("errors","0"))==0 for x in suites); assert sum("test_aic_pg17_hard_exit_live_and_permanent_marker" in c.get("name","") for s in suites for c in s.findall("testcase"))==3, "three native PG17 OS-kill tests REQUIRED"'
+          python -c 'from xml.etree import ElementTree as E; r=E.parse("aic467-pg17-evidence/linux-junit.xml").getroot(); suites=[r] if r.tag=="testsuite" else r.findall("testsuite"); print([(x.get("tests"),x.get("failures"),x.get("errors"),x.get("skipped")) for x in suites]); assert all(int(x.get("skipped","0"))==0 and int(x.get("failures","0"))==0 and int(x.get("errors","0"))==0 for x in suites); assert sum("test_aic_pg17_hard_exit_live_and_permanent_marker" in c.get("name","") for s in suites for c in s.findall("testcase"))==3, "three native PG17 OS-kill tests REQUIRED"; assert sum("test_aic_pg17_forward_old31a_guard_and_restart" in c.get("name","") for s in suites for c in s.findall("testcase"))==1, "historical 31a -> 31b native PG17 repair gate REQUIRED"'
           python -m pytest -q -ra --junitxml=aic467-pg17-evidence/linux-history-sqlite.xml "se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[sqlite]"
           python -c 'from xml.etree import ElementTree as E; r=E.parse("aic467-pg17-evidence/linux-history-sqlite.xml").getroot(); ss=[r] if r.tag=="testsuite" else r.findall("testsuite"); assert len(ss)==1 and all(int(ss[0].get(k,"0"))==v for k,v in {"tests":1,"failures":0,"errors":0,"skipped":0}.items()), "real SQLite historical gate must be exactly one PASS with zero skips"'
       - uses: actions/upload-artifact@v4
@@ -91,6 +95,8 @@ jobs:
       PGPASSWORD: root
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # pinned historical PR467 31a blob is mandatory
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
@@ -134,7 +140,7 @@ jobs:
           New-Item -ItemType Directory -Force -Path aic467-pg17-evidence | Out-Null
           python -m pytest -q -ra --junitxml=aic467-pg17-evidence/windows-junit.xml -k "not full_historical_alembic_chain_with_ubq25_26_and_live_owner" se/tests/integration/test_aic0_p1_agent_instance_identity.py se/tests/architecture/test_aic0_p1_identity_production_boundary.py
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -c 'from xml.etree import ElementTree as E; r=E.parse("aic467-pg17-evidence/windows-junit.xml").getroot(); suites=[r] if r.tag=="testsuite" else r.findall("testsuite"); print([(x.get("tests"),x.get("failures"),x.get("errors"),x.get("skipped")) for x in suites]); assert all(int(x.get("skipped","0"))==0 and int(x.get("failures","0"))==0 and int(x.get("errors","0"))==0 for x in suites); assert sum("test_aic_pg17_hard_exit_live_and_permanent_marker" in c.get("name","") for s in suites for c in s.findall("testcase"))==3, "three native PG17 OS-kill tests REQUIRED"'
+          python -c 'from xml.etree import ElementTree as E; r=E.parse("aic467-pg17-evidence/windows-junit.xml").getroot(); suites=[r] if r.tag=="testsuite" else r.findall("testsuite"); print([(x.get("tests"),x.get("failures"),x.get("errors"),x.get("skipped")) for x in suites]); assert all(int(x.get("skipped","0"))==0 and int(x.get("failures","0"))==0 and int(x.get("errors","0"))==0 for x in suites); assert sum("test_aic_pg17_hard_exit_live_and_permanent_marker" in c.get("name","") for s in suites for c in s.findall("testcase"))==3, "three native PG17 OS-kill tests REQUIRED"; assert sum("test_aic_pg17_forward_old31a_guard_and_restart" in c.get("name","") for s in suites for c in s.findall("testcase"))==1, "historical 31a -> 31b native PG17 repair gate REQUIRED"'
           if ($LASTEXITCODE -ne 0) { throw "Strict Windows JUnit gate failed before SQLite history" }
           python -m pytest -q -ra --junitxml=aic467-pg17-evidence/windows-history-sqlite.xml "se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[sqlite]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }

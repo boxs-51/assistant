@@ -1567,3 +1567,195 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
             async with admin.connect() as c:
                 await c.execute(text("DROP DATABASE IF EXISTS " + db_name + " WITH (FORCE)"))
             await admin.dispose()
+
+
+# ---------------------------------------------------------------------------
+# 31b forward-security witness on an actually installed old 31a function set.
+# This invokes the pinned old Alembic migration DDL, NOT a fabricated function
+# body, fake DB backend, fake trigger, or a replay of edited 31a source.
+# A second, composed PR494 lane must separately prove real Alembic CLI
+# revision-stamped 31a -> 31b on full 24a/25a/26a/30a ancestry.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_aic_pg17_forward_old31a_guard_and_restart(postgres_url):
+    import hashlib
+    import types
+
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("AIC 31b requires native PostgreSQL 17")
+    forward = importlib.import_module(
+        "se.src.infrastructure.storage.migrations.sql.versions."
+        "31b_aic0_pg_guard_forward"
+    )
+    root = Path(__file__).resolve().parents[3]
+    old_ref = "6edd86a050cb925939c40468e710d286abaaff41"
+    old_path = (
+        "se/src/infrastructure/storage/migrations/sql/versions/"
+        "31a_aic0_agent_instance_identity.py"
+    )
+    pinned = subprocess.run(
+        ["git", "show", old_ref + ":" + old_path],
+        cwd=str(root), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        check=True, timeout=25,
+    ).stdout
+    raw_blob = b"blob " + str(len(pinned)).encode() + b"\0" + pinned
+    assert hashlib.sha1(raw_blob).hexdigest() == (
+        "3cb7528e622a26a62f2d4010986bfdd47df17873"
+    ), "historical 31a exact source blob changed"
+    historical = types.ModuleType("_aic_actual_old_31a")
+    exec(compile(pinned, old_path, "exec"), historical.__dict__)
+    assert historical.revision == "31a_aic0_agent_instance_identity"
+    assert historical.down_revision == "30a_ctx_f5_user_wide_memory_scope"
+
+    def run_migration(sync_connection, module):
+        saved = module.op
+        try:
+            module.op = Operations(MigrationContext.configure(sync_connection))
+            module.upgrade()
+        finally:
+            module.op = saved
+
+    admin = create_async_engine(postgres_url)
+    schema = "aic31b_oldinstalled_" + uuid4().hex[:12]
+    async with admin.begin() as conn:
+        assert 170000 <= int((await conn.execute(text(
+            "SHOW server_version_num"
+        ))).scalar_one()) < 180000
+        await conn.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        async with engine.begin() as conn:
+            await conn.run_sync(User.__table__.create)
+            await conn.run_sync(lambda sync: run_migration(sync, historical))
+            old_config = (await conn.execute(text(
+                "SELECT p.proconfig FROM pg_catalog.pg_proc p "
+                "JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace "
+                "WHERE n.nspname=:schema AND p.proname='aic_live_guard'"
+            ), {"schema": schema})).scalar_one()
+            assert not old_config, "old 31a must be genuinely unpinned"
+
+        await _user(engine)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        retired_id = await _create(sessions)
+        async with sessions() as s:
+            assert await AgentInstanceRepository(s).suspend(
+                "alice", retired_id, 1
+            ) == 2
+            await s.commit()
+        async with sessions() as s:
+            assert await AgentInstanceRepository(s).retire(
+                "alice", retired_id, 2
+            ) == 3
+            await s.commit()
+
+        # Demonstrate the real historical weakness BEFORE the forward repair;
+        # roll back the attack so 31b starts from a coherent durable state.
+        async with engine.connect() as conn:
+            await conn.execute(text(
+                "CREATE TEMP TABLE users (id TEXT, status TEXT)"
+            ))
+            await conn.execute(text(
+                "CREATE TEMP TABLE aic_instance_reservations "
+                "(agent_instance_id TEXT, state TEXT)"
+            ))
+            await conn.execute(text(
+                "INSERT INTO pg_temp.users VALUES ('alice','active')"
+            ))
+            await conn.execute(text(
+                "INSERT INTO pg_temp.aic_instance_reservations "
+                "VALUES (:i, 'ACTIVE')"
+            ), {"i": retired_id})
+            await conn.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            await conn.execute(text(
+                "INSERT INTO " + schema + ".aic_instance_live "
+                "(agent_instance_id,owner_user_id,definition_id,"
+                "definition_version,lifecycle_state,generation) "
+                "VALUES (:i,'alice','forged','v1','ACTIVE',1)"
+            ), {"i": retired_id})
+            assert (await conn.execute(text(
+                "SELECT COUNT(*) FROM " + schema + ".aic_instance_live "
+                "WHERE agent_instance_id=:i"
+            ), {"i": retired_id})).scalar_one() == 1, (
+                "old-31a exploit precondition did not reproduce"
+            )
+            await conn.rollback()
+
+        async with engine.begin() as conn:
+            # Same physical real PostgreSQL schema, now apply only successor.
+            await conn.run_sync(lambda sync: run_migration(sync, forward))
+            for fn in ("aic_id_guard", "aic_live_guard", "aic_user_guard"):
+                config = (await conn.execute(text(
+                    "SELECT p.proconfig FROM pg_catalog.pg_proc p "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace "
+                    "WHERE n.nspname=:schema AND p.proname=:fn"
+                ), {"schema": schema, "fn": fn})).scalar_one()
+                assert config and len(config) == 1, (fn, config)
+                assert config[0].startswith("search_path=pg_catalog,")
+                assert config[0].endswith(", pg_temp")
+            attached = (await conn.execute(text(
+                "SELECT t.tgname, rn.nspname, rel.relname, pn.nspname, p.proname "
+                "FROM pg_catalog.pg_trigger t "
+                "JOIN pg_catalog.pg_class rel ON rel.oid=t.tgrelid "
+                "JOIN pg_catalog.pg_namespace rn ON rn.oid=rel.relnamespace "
+                "JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid "
+                "JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace "
+                "WHERE rn.nspname=:schema AND t.tgname LIKE 'trg_aic_%'"
+            ), {"schema": schema})).all()
+            assert len(attached) == 4, attached
+            assert all(table_ns == schema and fn_ns == schema
+                       for _, table_ns, _, fn_ns, _ in attached)
+
+        # A fresh OS process creates fresh caller-controlled TEMP shadows,
+        # tries real durable LIVE rebinding, then hard-exits without cleanup.
+        worker = r"""
+import asyncio, asyncpg, os, sys
+async def main():
+    dsn, schema, retired_id = sys.argv[1:]
+    c = await asyncpg.connect(dsn=dsn, server_settings={"search_path": schema})
+    await c.execute("CREATE TEMP TABLE users (id TEXT, status TEXT)")
+    await c.execute("CREATE TEMP TABLE aic_instance_reservations (agent_instance_id TEXT, state TEXT)")
+    await c.execute("INSERT INTO pg_temp.users VALUES ('alice','active')")
+    await c.execute("INSERT INTO pg_temp.aic_instance_reservations VALUES ($1,'ACTIVE')", retired_id)
+    await c.execute("SET search_path TO pg_temp, " + schema)
+    try:
+        await c.execute(
+            "INSERT INTO " + schema + ".aic_instance_live "
+            "(agent_instance_id,owner_user_id,definition_id,"
+            "definition_version,lifecycle_state,generation) "
+            "VALUES ($1,'alice','forged','v1','ACTIVE',1)", retired_id)
+    except Exception as exc:
+        if "AIC_LIVE_OWNER_OR_ID_INVALID" not in str(exc):
+            print("WRONG_ERROR:" + str(exc), flush=True)
+            os._exit(19)
+        print("AIC31B_RETIRED_REBIND_DENIED", flush=True)
+        os._exit(77)
+    print("AIC31B_SECURITY_BYPASS", flush=True)
+    os._exit(20)
+asyncio.run(main())
+"""
+        dsn = postgres_url.replace("postgresql+asyncpg://", "postgresql://")
+        result = subprocess.run(
+            [sys.executable, "-c", worker, dsn, schema, retired_id],
+            capture_output=True, text=True, timeout=40,
+        )
+        assert result.returncode == 77, (
+            result.returncode, result.stdout, result.stderr
+        )
+        assert "AIC31B_RETIRED_REBIND_DENIED" in result.stdout
+        async with engine.connect() as conn:
+            assert (await conn.execute(text(
+                "SELECT state FROM " + schema + ".aic_instance_reservations "
+                "WHERE agent_instance_id=:i"
+            ), {"i": retired_id})).scalar_one() == "RETIRED"
+            assert (await conn.execute(text(
+                "SELECT COUNT(*) FROM " + schema + ".aic_instance_live "
+                "WHERE agent_instance_id=:i"
+            ), {"i": retired_id})).scalar_one() == 0
+    finally:
+        await engine.dispose()
+        async with admin.begin() as conn:
+            await conn.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
