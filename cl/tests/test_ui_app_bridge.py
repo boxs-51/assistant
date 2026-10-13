@@ -5,6 +5,7 @@ import threading
 import time
 
 from cl.src.ui.bridge import UIBridge
+from cl.src.core.gateway_client import GatewayEffectOutcomeUnknown
 
 
 class _Hitl:
@@ -602,3 +603,66 @@ def test_direct_ui_tool_denied_while_auth_transition_is_in_flight():
     worker.join(1.0)
     assert not worker.is_alive()
     assert changes[0]["success"] is True
+
+
+def test_direct_tool_gateway_unknown_is_not_success_or_retryable():
+    bridge, _, gateway = _bridge()
+    attempts = []
+
+    def ambiguous(*args, **kwargs):
+        attempts.append((args, kwargs))
+        raise GatewayEffectOutcomeUnknown("gateway timed out")
+
+    gateway.execute_capability = ambiguous
+    result = bridge.execute_tool("echo", {"text": "one-shot"})
+    assert result["success"] is False
+    assert result["status"] == "OUTCOME_UNKNOWN"
+    assert result["retryable"] is False
+    assert "may have occurred" in result["error"]
+    assert len(attempts) == 1
+
+
+def test_concurrent_logout_stays_fenced_until_effect_exits_unknown():
+    bridge, _, gateway = _bridge()
+    entered = threading.Event()
+    release = threading.Event()
+    outcomes = []
+    transitions = []
+    attempts = []
+
+    def blocked_effect(*args):
+        attempts.append(args)
+        entered.set()
+        assert release.wait(2.0)
+        raise GatewayEffectOutcomeUnknown("read timeout")
+
+    gateway.execute_capability = blocked_effect
+    tool = threading.Thread(
+        target=lambda: outcomes.append(bridge.execute_tool("echo", {"x": 1})),
+        daemon=True,
+    )
+    tool.start()
+    assert entered.wait(1.0)
+
+    bridge._client_runtime.logout = lambda: transitions.append("runtime-logout")
+    logout = threading.Thread(
+        target=lambda: transitions.append(bridge.logout()), daemon=True,
+    )
+    logout.start()
+    # The old effect holds the authorization lock; logout must NOT mutate
+    # runtime principal before the pending result is known/unknown.
+    logout.join(0.05)
+    assert logout.is_alive()
+    assert transitions == []
+
+    release.set()
+    tool.join(2.0)
+    logout.join(2.0)
+    assert not tool.is_alive()
+    assert not logout.is_alive()
+    assert len(attempts) == 1
+    assert outcomes[0]["status"] == "OUTCOME_UNKNOWN"
+    assert outcomes[0]["retryable"] is False
+    assert transitions[0] == "runtime-logout"
+    assert transitions[1]["success"] is True
+    assert bridge._auth_generation == 1
