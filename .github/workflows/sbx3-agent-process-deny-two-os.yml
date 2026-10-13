@@ -1,0 +1,56 @@
+name: SBX3 Agent Process DENY Linux-Windows Contract
+
+on:
+  pull_request:
+    paths:
+      - "se/src/runtimes/agent/adapters/tool.py"
+      - "se/tests/architecture/test_sbx3_agent_process_fail_closed.py"
+      - ".github/workflows/sbx3-agent-process-deny-two-os.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  agent-process-deny:
+    name: agent-process-deny (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Create evidence directory
+        run: python -c "from pathlib import Path; Path('evidence/sbx3-agent-deny').mkdir(parents=True, exist_ok=True)"
+      - name: Agent native process routing and continuation hard DENY
+        run: >-
+          python -m pytest -q -ra
+          --junitxml=evidence/sbx3-agent-deny/junit.xml
+          se/tests/architecture/test_sbx3_agent_process_fail_closed.py
+      - name: Strict JUnit all ten cases
+        run: >-
+          python -c "import xml.etree.ElementTree as ET;
+          root=ET.parse('evidence/sbx3-agent-deny/junit.xml').getroot();
+          suites=[root] if root.tag=='testsuite' else list(root.findall('testsuite'));
+          assert len(suites)==1 and
+          int(suites[0].attrib.get('tests','0'))==10 and
+          all(int(suites[0].attrib.get(k,'0'))==0 for k in ('failures','errors','skipped'));
+          print('SBX3_AGENT_PROCESS_DENY=10_PASS_0_SKIP; PORTABLE_ROUTING_NOT_NATIVE_OS_CONFINEMENT')"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: sbx3-agent-deny-${{ matrix.os }}
+          path: evidence/sbx3-agent-deny
+          if-no-files-found: error
