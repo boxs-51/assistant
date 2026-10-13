@@ -63,7 +63,7 @@ File `se/tests/architecture/test_sbx3_s1a_authenticated_ipc.py` contains:
 
 ### Bounded Windows I/O and crash/restart negative admission
 
-All service `ConnectNamedPipe`, `ReadFile`, `WriteFile` and client read/write use Win32 **FILE_FLAG_OVERLAPPED**, bounded deadlines, kernel event waits, `CancelIoEx` and confirmation that the kernel completed/cancelled the operation before Python frees its OVERLAPPED event or buffer. If cancellation cannot drain within 1000 ms, the deny-only broker terminates (exit 86) rather than risk a use-after-free; no native effect is enabled. Whole server request deadline: **2 seconds** including slow-byte attacks. Connect bounded to 0.5 seconds per listener instance; client I/O deadline 4 seconds, WaitNamedPipe 2 seconds. SCM STOP signals a thread event and never runs blocking pipe I/O in its control callback.
+All service `ConnectNamedPipe`, `ReadFile`, `WriteFile` and client read/write use Win32 **FILE_FLAG_OVERLAPPED**, bounded deadlines, kernel event waits, `CancelIoEx` and confirmation that the kernel completed/cancelled the operation before Python frees its OVERLAPPED event or buffer. If cancellation cannot drain within 1000 ms, the deny-only broker terminates (exit 86) rather than risk a use-after-free; no native effect is enabled. Whole server request deadline: **2 seconds** including slow-byte attacks. Connect is a stable 30-second overlapped pending listener (not a rapid instance teardown loop), with SCM STOP polled at most every 100 ms; on STOP or deadline the outstanding connect is cancelled and drained. Client I/O deadline is 4 seconds, WaitNamedPipe 2 seconds. SCM STOP never runs blocking pipe I/O in its control callback.
 
 New **real native Windows required selectors**:
 
