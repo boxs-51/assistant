@@ -31,7 +31,7 @@ from se.tests.integration.test_aic0_31b_quiescence_rehearsal import (
 async def _pg_admin_count(admin, database, term):
     async with admin.connect() as connection:
         return (await connection.execute(text("""
-            SELECT COUNT(*) FROM pg_catalog.pg_stat_activity
+            SELECT max(pid) FROM pg_catalog.pg_stat_activity
              WHERE datname=:db AND state='active'
                AND query LIKE :query
         """), {"db": database, "query": term})).scalar_one()
@@ -150,6 +150,7 @@ async def test_pg17_interrupted_31b_cli_fail_closed(cut, tmp_path):
             assert active == 0
 
         env = dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=url)
+        backend_pid = None
         if cut == "before_commit":
             ini = _fault_cut_config(tmp_path)
             proc = subprocess.Popen(
@@ -164,6 +165,10 @@ async def test_pg17_interrupted_31b_cli_fail_closed(cut, tmp_path):
                     admin, database, "%AIC31B_PRECOMMIT_FAULT_CUT%"
                 ),
             )
+            backend_pid = await _pg_admin_count(
+                admin, database, "%AIC31B_PRECOMMIT_FAULT_CUT%"
+            )
+            assert backend_pid, "PostgreSQL crash-cut backend was not observed"
         else:
             # The real, UNMODIFIED Alembic CLI completes and commits before
             # the process-wrapper readiness marker is written.
@@ -190,6 +195,16 @@ async def test_pg17_interrupted_31b_cli_fail_closed(cut, tmp_path):
         stdout, stderr = proc.communicate(timeout=20)
         assert proc.returncode != 0, (stdout[-1000:], stderr[-2500:])
         proc = None
+        if backend_pid is not None:
+            # An OS-killed client can leave pg_sleep executing for its full
+            # duration before the server discovers the disconnected socket.
+            # Terminate exactly the observed, disposable test backend to
+            # model the server-side cancellation cut and avoid stale locks.
+            # This requires the already-verified ephemeral hosted PG profile.
+            async with admin.connect() as cx:
+                await cx.execute(text(
+                    "SELECT pg_catalog.pg_terminate_backend(:pid)"
+                ), {"pid": backend_pid})
 
         # New physical connection after OS kill: distinguish rollback from
         # already-committed upgrade, with no ambiguous revision stamp.
