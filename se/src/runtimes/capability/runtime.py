@@ -2307,7 +2307,11 @@ class CapabilityRuntime(BaseRuntime):
                         RemoteOutcomeState.OUTCOME_UNKNOWN,
                     }
                 )
-                if remote_timeout_uncertain:
+                if (
+                    remote_timeout_uncertain
+                    and invocation.remote_outcome_state
+                    is not RemoteOutcomeState.OUTCOME_UNKNOWN
+                ):
                     await self.invocation_lifecycle.update_remote_outcome(
                         invocation,
                         RemoteOutcomeState.OUTCOME_UNKNOWN,
