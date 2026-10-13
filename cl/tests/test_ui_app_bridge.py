@@ -553,6 +553,12 @@ def test_production_ui_rejects_callback_without_origin_pin():
 def test_direct_ui_tool_pins_generation_and_can_execute_after_current_approval():
     bridge, _, _ = _bridge()
     bridge.hitl._timeout = 1.0
+    bridge._engine.hitl.request_approval = (
+        lambda name, args, risk, reason: bridge._engine.hitl.callback({
+            "name": name, "args": args,
+            "risk_level": risk, "reason": reason,
+        })
+    )
     window = _BlockingApprovalWindow()
     bridge.set_window(window)
     outcomes = []
