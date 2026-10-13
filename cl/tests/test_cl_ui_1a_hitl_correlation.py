@@ -231,3 +231,41 @@ def test_queued_prompt_from_prior_auth_generation_cannot_appear_after_switch():
     assert manager.respond(True, new_id) is True
     fresh_thread.join(1.0)
     assert fresh_result == [True]
+
+
+class BlockingDisplayAckHarness(ApprovalHarness):
+    """Reproduce an identity switch while WebView's show ACK is pending."""
+
+    def __init__(self):
+        super().__init__()
+        self.ack_release = threading.Event()
+
+    def __call__(self, js_code):
+        show = re.search(r"showApprovalBar\\((.*)\\)$", js_code)
+        if show:
+            with self._condition:
+                request = json.loads(show.group(1))
+                self.shown.append(request)
+                self._condition.notify_all()
+            if not self.ack_release.wait(2.0):
+                raise AssertionError("timed out waiting to release display ACK")
+            return request["approval_id"]
+        return super().__call__(js_code)
+
+
+def test_identity_change_during_delayed_display_ack_hides_old_bar():
+    harness = BlockingDisplayAckHarness()
+    manager = HitlManager(harness, SimpleNamespace(), timeout=1.0)
+    thread, result = _start_dialog(manager)
+    request = harness.wait_for_show_count(1)
+    old_id = request["approval_id"]
+
+    manager.invalidate_pending()
+    assert manager.respond(True, old_id) is False
+    harness.ack_release.set()
+    thread.join(1.0)
+
+    assert not thread.is_alive()
+    assert result == [False]
+    assert harness.hidden == [old_id]
+    assert manager._pending_approvals == {}
