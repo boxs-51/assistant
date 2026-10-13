@@ -1059,6 +1059,81 @@ asyncio.run(main())
         await admin.dispose()
 
 
+@pytest.mark.asyncio
+async def test_aic_pg17_trigger_rejects_search_path_shadow_resurrection(postgres_url):
+    """Retired permanent ID must not be rebound via session search_path.
+
+    An untrusted DB session can create pg_temp relations under ordinary TEMP
+    privilege. PL/pgSQL trigger SELECTs must read the SAME schema as the
+    trigger's AIC tables rather than caller-shadowed relations. This is an
+    intentional NEGATIVE gate against marker resurrection.
+    """
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("requires disposable real PG17 server")
+    admin = create_async_engine(postgres_url)
+    async with admin.begin() as c:
+        assert 170000 <= int((await c.execute(text(
+            "SHOW server_version_num"
+        ))).scalar_one()) < 180000
+    schema = "aic426_shadow_" + uuid4().hex[:12]
+    async with admin.begin() as c:
+        await c.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        await _tables(engine, dialect="postgresql")
+        await _user(engine)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        old_id = await _create(sessions)
+        async with sessions() as s:
+            assert await AgentInstanceRepository(s).retire("alice", old_id, 1) == 2
+            await s.commit()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT state FROM aic_instance_reservations "
+                "WHERE agent_instance_id=:id"
+            ), {"id": old_id})).scalar_one() == "RETIRED"
+            assert (await c.execute(text(
+                "SELECT count(*) FROM aic_instance_live WHERE agent_instance_id=:id"
+            ), {"id": old_id})).scalar_one() == 0
+        async with engine.connect() as c:
+            # Same physical connection, malicious caller creates temp tables
+            # and changes path, but explicitly writes the real AIC live table.
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_reservations "
+                "(agent_instance_id TEXT, state TEXT)"
+            ))
+            await c.execute(text(
+                "CREATE TEMP TABLE users (id TEXT, status TEXT)"
+            ))
+            await c.execute(text(
+                "INSERT INTO pg_temp.aic_instance_reservations "
+                "(agent_instance_id,state) VALUES (:id,'ACTIVE')"
+            ), {"id": old_id})
+            await c.execute(text(
+                "INSERT INTO pg_temp.users(id,status) VALUES ('alice','active')"
+            ))
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_LIVE_OWNER_OR_ID_INVALID"):
+                await c.execute(text(
+                    "INSERT INTO " + schema + ".aic_instance_live "
+                    "(agent_instance_id,owner_user_id,definition_id,"
+                    "definition_version,lifecycle_state,generation) "
+                    "VALUES (:id,'alice','forged','v','ACTIVE',1)"
+                ), {"id": old_id})
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT count(*) FROM aic_instance_live WHERE agent_instance_id=:id"
+            ), {"id": old_id})).scalar_one() == 0
+    finally:
+        await engine.dispose()
+        async with admin.begin() as c:
+            await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
+
+
 # ---------------------------------------------------------------------------
 # Full physical Alembic history gate: base→24a→25a→26a→27a→28a→29a→30a→31a.
 # Unlike the scoped trigger tests above, this invokes the real CLI/env.py and
