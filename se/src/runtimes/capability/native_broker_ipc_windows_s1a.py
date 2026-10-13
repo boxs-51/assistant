@@ -166,6 +166,11 @@ def _overlapped(k, handle: int, begin: Callable[[OVERLAPPED], bool],
                 drained = k.WaitForSingleObject(event, CANCEL_DRAIN_TIMEOUT_MS)
                 if drained != WAIT_OBJECT_0:
                     os._exit(86)  # safety terminal; no UAF, no native effects
+                transferred_after_cancel = w.DWORD()
+                # ERROR_OPERATION_ABORTED and successful completion races are
+                # both terminal; the storage is freed only after kernel signal.
+                k.GetOverlappedResult(ctypes.c_void_p(handle), ctypes.byref(ov),
+                                      ctypes.byref(transferred_after_cancel), False)
                 raise S1AProtocolError("bounded/cancelled Windows pipe request")
         transferred = w.DWORD()
         if not k.GetOverlappedResult(ctypes.c_void_p(handle), ctypes.byref(ov),
