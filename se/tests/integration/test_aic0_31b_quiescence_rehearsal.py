@@ -33,6 +33,7 @@ def _require_ephemeral_github_runner():
     url = make_url(dsn)
     assert (
         os.getenv("GITHUB_ACTIONS") == "true"
+        and os.getenv("RUNNER_ENVIRONMENT") == "github-hosted"
         and url.host == "127.0.0.1"
         and (url.port or 5432) == 5432
         and url.database == "aic_p1a"
