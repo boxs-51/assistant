@@ -1083,6 +1083,23 @@ async def test_aic_pg17_trigger_rejects_search_path_shadow_resurrection(postgres
     )
     try:
         await _tables(engine, dialect="postgresql")
+        # Check all three database guard functions, not just LIVE.
+        # Runtime search_path and implicit pg_temp must not redirect any
+        # owner/marker query away from the newly created AIC schema.
+        async with engine.connect() as c:
+            pins = (await c.execute(text(
+                "SELECT p.proname, array_to_string(p.proconfig, ',') "
+                "FROM pg_catalog.pg_proc AS p "
+                "JOIN pg_catalog.pg_namespace AS n ON n.oid=p.pronamespace "
+                "WHERE n.nspname=:schema "
+                "AND p.proname IN ('aic_id_guard','aic_live_guard','aic_user_guard')"
+            ), {"schema": schema})).all()
+        assert len(pins) == 3
+        for _function, config in pins:
+            assert config and config.startswith("search_path="), _function
+            assert config.split("=", 1)[1].replace('"', "").replace(" ", "").split(",") == [
+                "pg_catalog", schema, "pg_temp"
+            ], (_function, config)
         await _user(engine)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         old_id = await _create(sessions)
