@@ -486,8 +486,6 @@ def test_verify_registration_revokes_old_visible_approval():
     window = _BlockingApprovalWindow()
     bridge.set_window(window)
     result = []
-    worker = threading.Thread(target=lambda: result.append(
-        bridge.hitl.show_dialog({"name": "old account"})), daemon=True)
     # This request represents already-authenticated work that captured
     # generation zero when it was created.
     def run_old():
