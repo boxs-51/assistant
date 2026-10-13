@@ -903,6 +903,163 @@ async def test_aic_raw_committed_intermediate_retiring_remains_fail_closed_after
 
 
 # ---------------------------------------------------------------------------
+# PostgreSQL-17 ID durability: a REAL second OS interpreter dies by os._exit,
+# not an in-process exception or mocked AsyncSession. Independent connections
+# prove that committed retirement is permanent and interrupted writes roll back.
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize(
+    ("cut", "expected_state", "expected_live"),
+    [
+        ("create_uncommitted", "ACTIVE", 1),
+        ("retire_uncommitted", "ACTIVE", 1),
+        ("retire_committed", "RETIRED", 0),
+    ],
+)
+@pytest.mark.asyncio
+async def test_aic_pg17_hard_exit_live_and_permanent_marker(
+    postgres_url, cut, expected_state, expected_live
+):
+    import asyncpg
+
+    if not os.getenv("AIC_TEST_POSTGRES_URL"):
+        pytest.skip("Real PG17 OS-kill gate requires explicit disposable PG17 server")
+    admin = create_async_engine(postgres_url)
+    async with admin.begin() as c:
+        version = int((await c.execute(text("SHOW server_version_num"))).scalar_one())
+        assert 170000 <= version < 180000, "Native PostgreSQL 17 required"
+    schema = "aic426_hardexit_" + uuid4().hex[:12]
+    async with admin.begin() as c:
+        await c.execute(text("CREATE SCHEMA " + schema))
+    engine = create_async_engine(
+        postgres_url, connect_args={"server_settings": {"search_path": schema}},
+    )
+    try:
+        await _tables(engine, dialect="postgresql")
+        await _user(engine)
+        sessions = async_sessionmaker(engine, expire_on_commit=False)
+        original_id = await _create(sessions)
+        inflight_id = "inflight-" + uuid4().hex
+
+        # The worker is a different operating-system process, connected with
+        # asyncpg directly to the same REAL server. _exit defeats finally,
+        # context-manager rollback and Python atexit cleanup.
+        worker = r"""
+import asyncio, asyncpg, os, sys
+async def main():
+    dsn, schema, cut, original_id, inflight_id = sys.argv[1:]
+    connection = await asyncpg.connect(
+        dsn=dsn, server_settings={"search_path": schema}
+    )
+    transaction = connection.transaction()
+    await transaction.start()
+    if cut == "create_uncommitted":
+        await connection.execute(
+            "INSERT INTO aic_instance_reservations "
+            "(agent_instance_id,state,generation) VALUES ($1,'ACTIVE',1)",
+            inflight_id,
+        )
+        await connection.execute(
+            "INSERT INTO aic_instance_live "
+            "(agent_instance_id,owner_user_id,definition_id,definition_version,"
+            "lifecycle_state,generation) "
+            "VALUES ($1,'alice','d','v','ACTIVE',1)", inflight_id,
+        )
+    else:
+        assert await connection.execute(
+            "UPDATE aic_instance_reservations SET state='RETIRING' "
+            "WHERE agent_instance_id=$1 AND state='ACTIVE'", original_id,
+        ) == "UPDATE 1"
+        assert await connection.execute(
+            "DELETE FROM aic_instance_live WHERE agent_instance_id=$1",
+            original_id,
+        ) == "DELETE 1"
+        assert await connection.execute(
+            "UPDATE aic_instance_reservations "
+            "SET state='RETIRED',generation=2 "
+            "WHERE agent_instance_id=$1 AND state='RETIRING'", original_id,
+        ) == "UPDATE 1"
+        if cut == "retire_committed":
+            await transaction.commit()
+    os._exit(77)
+asyncio.run(main())
+"""
+        dsn = postgres_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        outcome = subprocess.run(
+            [sys.executable, "-c", worker, dsn, schema, cut, original_id, inflight_id],
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert outcome.returncode == 77, (
+            f"PG subprocess exit={outcome.returncode} stderr={outcome.stderr[-1200:]}"
+        )
+        # Fresh physical connection after kernel process exit, no inherited
+        # process-local repository/session or cached lifecycle status.
+        restarted = create_async_engine(
+            postgres_url, connect_args={"server_settings": {"search_path": schema}},
+            pool_pre_ping=True,
+        )
+        try:
+            async with restarted.connect() as c:
+                assert (await c.execute(text(
+                    "SELECT state FROM aic_instance_reservations "
+                    "WHERE agent_instance_id=:id"
+                ), {"id": original_id})).scalar_one() == expected_state
+                assert (await c.execute(text(
+                    "SELECT count(*) FROM aic_instance_live "
+                    "WHERE agent_instance_id=:id"
+                ), {"id": original_id})).scalar_one() == expected_live
+                assert (await c.execute(text(
+                    "SELECT count(*) FROM aic_instance_reservations "
+                    "WHERE agent_instance_id=:id"
+                ), {"id": inflight_id})).scalar_one() == 0
+            if cut == "retire_committed":
+                # A terminal marker is still present with no owner data and
+                # can NEVER be removed, reset to ACTIVE, bound or re-inserted.
+                for statement, needle in (
+                    ("DELETE FROM aic_instance_reservations "
+                     "WHERE agent_instance_id=:id", "AIC_ID_REUSE_FORBIDDEN"),
+                    ("UPDATE aic_instance_reservations SET state='ACTIVE' "
+                     "WHERE agent_instance_id=:id", "AIC_ID_TRANSITION_FORBIDDEN"),
+                    ("INSERT INTO aic_instance_live "
+                     "(agent_instance_id,owner_user_id,definition_id,"
+                     "definition_version,lifecycle_state,generation) "
+                     "VALUES (:id,'alice','d','v','ACTIVE',1)",
+                     "AIC_LIVE_OWNER_OR_ID_INVALID"),
+                ):
+                    async with restarted.connect() as c:
+                        with pytest.raises(DBAPIError, match=needle):
+                            await c.execute(text(statement), {"id": original_id})
+                        await c.rollback()
+                async with restarted.connect() as c:
+                    with pytest.raises(DBAPIError):
+                        await c.execute(text(
+                            "INSERT INTO aic_instance_reservations "
+                            "(agent_instance_id,state,generation) "
+                            "VALUES (:id,'ACTIVE',1)"
+                        ), {"id": original_id})
+                    await c.rollback()
+                async with sessions() as s:
+                    with pytest.raises(AgentInstanceDenied, match="unavailable"):
+                        await AgentInstanceRepository(s).resolve("alice", original_id)
+                    await s.rollback()
+            elif cut == "retire_uncommitted":
+                # Crash before COMMIT preserves legitimate LIVE owner, and the
+                # normal caller UoW can retire it exactly once after restart.
+                async with sessions() as s:
+                    assert await AgentInstanceRepository(s).retire(
+                        "alice", original_id, 1
+                    ) == 2
+                    await s.commit()
+        finally:
+            await restarted.dispose()
+    finally:
+        await engine.dispose()
+        async with admin.begin() as c:
+            await c.execute(text("DROP SCHEMA " + schema + " CASCADE"))
+        await admin.dispose()
+
+
+# ---------------------------------------------------------------------------
 # Full physical Alembic history gate: base→24a→25a→26a→27a→28a→29a→30a→31a.
 # Unlike the scoped trigger tests above, this invokes the real CLI/env.py and
 # upgrades an actual populated database in separate operating-system processes.
