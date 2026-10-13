@@ -179,3 +179,55 @@ def test_caller_supplied_approval_id_is_not_trusted():
     assert manager.respond(True, request["approval_id"]) is True
     thread.join(1.0)
     assert result == [True]
+
+
+def test_identity_change_denies_visible_approval_and_rejects_late_response():
+    harness = ApprovalHarness()
+    manager = HitlManager(harness, SimpleNamespace(), timeout=1.0)
+    thread, result = _start_dialog(manager)
+    old_id = harness.wait_for_show_count(1)["approval_id"]
+
+    manager.invalidate_pending()
+    assert manager.respond(True, old_id) is False
+    thread.join(1.0)
+
+    assert not thread.is_alive()
+    assert result == [False]
+    assert harness.hidden == [old_id]
+
+    new_thread, new_result = _start_dialog(manager)
+    new_id = harness.wait_for_show_count(2)["approval_id"]
+    assert new_id != old_id
+    assert manager.respond(True, old_id) is False
+    assert manager.respond(True, new_id) is True
+    new_thread.join(1.0)
+    assert new_result == [True]
+
+
+def test_queued_prompt_from_prior_auth_generation_cannot_appear_after_switch():
+    harness = ApprovalHarness()
+    local = SimpleNamespace(auth_generation=0)
+    manager = HitlManager(harness, local, timeout=1.0)
+
+    first_thread, first_result = _start_dialog(manager, {"name": "first"})
+    first_id = harness.wait_for_show_count(1)["approval_id"]
+    queued_thread, queued_result = _start_dialog(manager, {"name": "old-queued"})
+    time.sleep(0.05)
+    assert len(harness.shown) == 1
+
+    manager.invalidate_pending()
+    first_thread.join(1.0)
+    queued_thread.join(1.0)
+    assert not first_thread.is_alive()
+    assert not queued_thread.is_alive()
+    assert first_result == [False]
+    assert queued_result == [False]
+    assert len(harness.shown) == 1
+    assert manager.respond(True, first_id) is False
+
+    local.auth_generation = 1
+    fresh_thread, fresh_result = _start_dialog(manager, {"name": "new"})
+    new_id = harness.wait_for_show_count(2)["approval_id"]
+    assert manager.respond(True, new_id) is True
+    fresh_thread.join(1.0)
+    assert fresh_result == [True]
