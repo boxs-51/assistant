@@ -1683,9 +1683,71 @@ async def test_aic_pg17_forward_old31a_guard_and_restart(postgres_url):
             )
             await conn.rollback()
 
+        # Three physical DDL tamper negatives on a genuine old-31a database:
+        # wrong UPDATE OF column, a false WHEN, and extra trigger arguments.
+        # Every attempt must be refused before any 31b guard/body is committed.
+        malformed = {
+            "wrong_id_column": (
+                f"BEFORE UPDATE OF status ON {schema}.users "
+                f"FOR EACH ROW EXECUTE FUNCTION {schema}.aic_user_guard()"
+            ),
+            "conditional_false": (
+                f"BEFORE UPDATE OF id ON {schema}.users "
+                f"FOR EACH ROW WHEN (FALSE) "
+                f"EXECUTE FUNCTION {schema}.aic_user_guard()"
+            ),
+            "unexpected_arguments": (
+                f"BEFORE UPDATE OF id ON {schema}.users "
+                f"FOR EACH ROW EXECUTE FUNCTION "
+                f"{schema}.aic_user_guard('unexpected')"
+            ),
+        }
+        for case, definition in malformed.items():
+            async with engine.connect() as conn:
+                await conn.execute(text(
+                    f"DROP TRIGGER trg_aic_user_rekey ON {schema}.users"
+                ))
+                await conn.execute(text(
+                    "CREATE TRIGGER trg_aic_user_rekey " + definition
+                ))
+                with pytest.raises(RuntimeError, match="invalid physical guard trigger"):
+                    await conn.run_sync(
+                        lambda sync: run_migration(sync, forward)
+                    )
+                # Revert the attempted attacker-owned DDL and any 31b work.
+                await conn.rollback()
+            async with engine.connect() as conn:
+                assert (await conn.execute(text(
+                    "SELECT p.proconfig FROM pg_catalog.pg_proc p "
+                    "JOIN pg_catalog.pg_namespace n ON n.oid=p.pronamespace "
+                    "WHERE n.nspname=:schema AND p.proname='aic_live_guard'"
+                ), {"schema": schema})).scalar_one() is None, case
+
+        # An ordinary DML writer holding a users ROW EXCLUSIVE table lock
+        # must delay the 31b ALTER/verification transaction until it exits.
+        async with engine.connect() as writer:
+            await writer.execute(text(
+                f"UPDATE {schema}.users SET status=status WHERE id='alice'"
+            ))
+
+            async def upgrade_with_real_competing_writer():
+                async with engine.begin() as migration:
+                    await migration.run_sync(
+                        lambda sync: run_migration(sync, forward)
+                    )
+
+            pending = asyncio.create_task(upgrade_with_real_competing_writer())
+            try:
+                await asyncio.sleep(0.3)
+                assert not pending.done(), (
+                    "31b must wait for existing DML writer before repair"
+                )
+            finally:
+                await writer.rollback()
+            await asyncio.wait_for(pending, timeout=20)
+
         async with engine.begin() as conn:
-            # Same physical real PostgreSQL schema, now apply only successor.
-            await conn.run_sync(lambda sync: run_migration(sync, forward))
+            # 31b was physically committed only AFTER writer lock release.
             for fn in ("aic_id_guard", "aic_live_guard", "aic_user_guard"):
                 config = (await conn.execute(text(
                     "SELECT p.proconfig FROM pg_catalog.pg_proc p "
