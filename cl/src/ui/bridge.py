@@ -76,6 +76,7 @@ class UIBridge:
         # Serializes authenticated principal replacement with direct UI
         # effect handoff, never with the human approval wait itself.
         self._auth_transition_lock = threading.RLock()
+        self._auth_transition_in_progress = False
         self._activity = []
         self._auth_generation = 0
         self._chat_preferences = {
@@ -291,6 +292,11 @@ class UIBridge:
         if not isinstance(tool_arguments, dict):
             return {"success": False, "error": "Tool arguments phải là object."}
         with self._state_lock:
+            if self._auth_transition_in_progress:
+                return {
+                    "success": False,
+                    "error": "Authentication transition in progress.",
+                }
             # An already-pinned invocation cannot be silently rebound.
             prior_generation = getattr(self._execution_local, "auth_generation", None)
             origin_generation = (
@@ -402,16 +408,22 @@ class UIBridge:
 
     def _identity_action(self, action, payload: dict, authenticated: bool):
         with self._auth_transition_lock:
-            # Even an auth API exception may occur after runtime state changed.
-            # Conservatively revoke old authority before issuing the request.
-            self._revoke_identity_generation()
-            result = self._auth_action(action, payload)
-            effective_auth = (
-                authenticated if result.get("success") else
-                bool(getattr(self._client_runtime, "owner_id", None))
-            )
-            self._publish_identity_changed(effective_auth)
-            return result
+            with self._state_lock:
+                self._auth_transition_in_progress = True
+            try:
+                # Even an auth API exception may occur after runtime changed.
+                # Revoke before issuing it; deny UI tools during transition.
+                self._revoke_identity_generation()
+                result = self._auth_action(action, payload)
+                effective_auth = (
+                    authenticated if result.get("success") else
+                    bool(getattr(self._client_runtime, "owner_id", None))
+                )
+                self._publish_identity_changed(effective_auth)
+                return result
+            finally:
+                with self._state_lock:
+                    self._auth_transition_in_progress = False
 
     def _notify_identity_changed(self, authenticated: bool):
         # Compatibility helper for callers not performing a runtime transition.
