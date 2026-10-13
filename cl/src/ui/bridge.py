@@ -382,6 +382,7 @@ class UIBridge:
         with self._state_lock:
             self._auth_generation += 1
             generation = self._auth_generation
+            self.hitl.invalidate_pending()
             self.sessions = SessionManager()
         payload = {
             "generation": generation,
@@ -660,6 +661,9 @@ class UIBridge:
 
                 execution_started = True
                 self._execution_local.execution_id = execution_id
+                # Bind a prompt to the authenticated generation that started
+                # this work, not whichever account happens to own the UI later.
+                self._execution_local.auth_generation = auth_generation
                 self._emit_conversation_execution_state(
                     cid,
                     execution_id,
@@ -739,6 +743,8 @@ class UIBridge:
             except Exception as e:
                 _scoped_render(role="system", text=f"❌ Lỗi: {str(e)}")
             finally:
+                if hasattr(self._execution_local, "auth_generation"):
+                    del self._execution_local.auth_generation
                 if execution_started:
                     _scoped_render(role="assistant", btype="stream_end")
                     self._emit_conversation_execution_state(
