@@ -92,18 +92,16 @@ def test_s1a_portable_windows_pipe_client_cannot_create_instance() -> None:
     # The Win32 response ACK is transport framing only, never a positive
     # receipt, execution success, or authority bit. Its verification is strict.
     from se.src.runtimes.capability import native_broker_ipc_windows_s1a as ipc
-    assert ipc.TRANSPORT_FRAME_CONSUMED_ACK == b"\\x06".replace(b"\\\\x06", b"\\x06")
-    class FakePipe:
-        pass
-    import pytest
     from unittest.mock import patch
-    with patch.object(ipc, "_read_exact", return_value=ipc.TRANSPORT_FRAME_CONSUMED_ACK) as read:
-        ipc._await_response_consumption(FakePipe(), 12, 42.0)
-        read.assert_called_once_with(read.call_args.args[0], 12, 1, 42.0)
-    for forged in (b"", b"\\x00", b"\\x05", b"\\x06\\x06"):
+    assert ipc.TRANSPORT_FRAME_CONSUMED_ACK == bytes([6])
+    fake_kernel = object()
+    with patch.object(ipc, "_read_exact", return_value=bytes([6])) as read:
+        ipc._await_response_consumption(fake_kernel, 12, 42.0)
+        read.assert_called_once_with(fake_kernel, 12, 1, 42.0)
+    for forged in (b"", bytes([0]), bytes([5]), bytes([6, 6])):
         with patch.object(ipc, "_read_exact", return_value=forged):
             with pytest.raises(S1AProtocolError):
-                ipc._await_response_consumption(FakePipe(), 12, 42.0)
+                ipc._await_response_consumption(fake_kernel, 12, 42.0)
 
 
 def test_s1a_portable_replay_memory_budget_fails_closed() -> None:
