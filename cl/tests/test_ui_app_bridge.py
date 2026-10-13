@@ -548,3 +548,22 @@ def test_direct_tool_approval_cannot_authorize_after_identity_switch():
 def test_production_ui_rejects_callback_without_origin_pin():
     bridge, _, _ = _bridge()
     assert bridge.hitl.show_dialog({"name": "unpinned capability"}) is False
+
+
+def test_direct_ui_tool_pins_generation_and_can_execute_after_current_approval():
+    bridge, _, _ = _bridge()
+    bridge.hitl._timeout = 1.0
+    window = _BlockingApprovalWindow()
+    bridge.set_window(window)
+    outcomes = []
+    worker = threading.Thread(
+        target=lambda: outcomes.append(bridge.execute_tool("echo", {"text": "ok"})),
+        daemon=True,
+    )
+    worker.start()
+    assert window.shown.wait(1.0)
+    assert bridge.respond_approval(True, window.request["approval_id"]) is True
+    worker.join(1.0)
+    assert not worker.is_alive()
+    assert outcomes[0]["success"] is True
+    assert outcomes[0]["data"]["output"] == {"text": "ok"}
