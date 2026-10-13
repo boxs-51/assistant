@@ -225,6 +225,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    # Reverting this migration on a populated (or merely previously stamped)
-    # database would restore vulnerable guard semantics. Never silently allow.
-    raise RuntimeError("AIC 31b security downgrade denied")
+    bind = op.get_bind()
+    if bind.dialect.name == "sqlite":
+        # The SQLite upgrade is inert: it creates no guard functions or tables.
+        # Historical SQLite down-migrations must remain reversible.
+        return
+    if bind.dialect.name == "postgresql":
+        # Restoring vulnerable PostgreSQL guards is never an authorized rollback.
+        raise RuntimeError("AIC 31b PostgreSQL security downgrade denied")
+    raise RuntimeError("AIC 31b: unsupported SQL dialect")
