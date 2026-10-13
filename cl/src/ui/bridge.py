@@ -380,9 +380,12 @@ class UIBridge:
 
     def _notify_identity_changed(self, authenticated: bool):
         with self._state_lock:
+            # Revoke old pending consent BEFORE publishing the new auth
+            # generation. Otherwise old approval responses have a short
+            # acceptance window after the identity counter advances.
+            self.hitl.invalidate_pending()
             self._auth_generation += 1
             generation = self._auth_generation
-            self.hitl.invalidate_pending()
             self.sessions = SessionManager()
         payload = {
             "generation": generation,
