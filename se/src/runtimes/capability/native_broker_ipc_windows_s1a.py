@@ -38,7 +38,7 @@ PIPE_PREFIX = "\\\\.\\pipe\\SBX3S1A-"
 
 # Whole connection must complete or fail closed; slow-byte client cannot
 # extend this timeout indefinitely.
-CONNECT_TIMEOUT_S = 0.5
+CONNECT_TIMEOUT_S = 30.0
 REQUEST_TIMEOUT_S = 2.0
 CLIENT_TIMEOUT_S = 4.0
 CANCEL_DRAIN_TIMEOUT_MS = 1000
@@ -117,7 +117,8 @@ def _validate_pipe(name: str) -> None:
 
 
 def _overlapped(k, handle: int, begin: Callable[[OVERLAPPED], bool],
-                deadline: float, *, already_connected_ok: bool = False) -> int:
+                deadline: float, *, already_connected_ok: bool = False,
+                stop: threading.Event | None = None) -> int:
     """Wait for completion; cancel and DRAIN before buffers/event can be freed.
 
     If the kernel cannot drain a cancelled request, terminate the *deny-only*
@@ -138,16 +139,28 @@ def _overlapped(k, handle: int, begin: Callable[[OVERLAPPED], bool],
             if error != ERROR_IO_PENDING:
                 raise S1AProtocolError("native pipe operation rejected")
         if not success:
-            remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
-            result = k.WaitForSingleObject(event, remaining_ms)
-            if result != WAIT_OBJECT_0:
+            completed = False
+            while True:
+                remaining_ms = max(0, int((deadline - time.monotonic()) * 1000))
+                if (stop is not None and stop.is_set()) or not remaining_ms:
+                    break
+                # A pending listener stays stable while SCM STOP is observed
+                # within one polling slice; no 500ms pipe-instance churn.
+                wait_ms = min(100, remaining_ms) if stop is not None else remaining_ms
+                result = k.WaitForSingleObject(event, wait_ms)
+                if result == WAIT_OBJECT_0:
+                    completed = True
+                    break
+                if result != WAIT_TIMEOUT:
+                    break
+            if not completed:
                 k.CancelIoEx(ctypes.c_void_p(handle), ctypes.byref(ov))
                 # Cancellation is asynchronous. Do not release event/OVERLAPPED
                 # storage until the kernel reports completion/cancellation.
                 drained = k.WaitForSingleObject(event, CANCEL_DRAIN_TIMEOUT_MS)
                 if drained != WAIT_OBJECT_0:
                     os._exit(86)  # safety terminal; no UAF, no native effects
-                raise S1AProtocolError("bounded Windows pipe deadline exceeded")
+                raise S1AProtocolError("bounded/cancelled Windows pipe request")
         transferred = w.DWORD()
         if not k.GetOverlappedResult(ctypes.c_void_p(handle), ctypes.byref(ov),
                                       ctypes.byref(transferred), False):
@@ -293,7 +306,7 @@ class WindowsAuthenticatedPipe:
                             lambda ov: bool(k.ConnectNamedPipe(
                                 ctypes.c_void_p(handle), ctypes.byref(ov))),
                             time.monotonic() + CONNECT_TIMEOUT_S,
-                            already_connected_ok=True)
+                            already_connected_ok=True, stop=stop)
                     except S1AProtocolError:
                         # Connect wait is bounded so SCM STOP is responsive;
                         # a stalled peer never pins the service indefinitely.
