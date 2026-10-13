@@ -111,7 +111,7 @@ def test_s1a_portable_linux_absolute_deadline_rejects_partial_frame() -> None:
 
     reader, writer = socket.socketpair()
     try:
-        writer.sendall(b"\\x00\\x00\\x00\\x80{")
+        writer.sendall(bytes([0, 0, 0, 128, 123]))
         start = time.monotonic()
         with pytest.raises(S1AProtocolError, match="deadline"):
             _receive(reader, deadline=start + 0.15)
@@ -202,16 +202,16 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
         # trickles a claimed 128-byte frame every 750 ms. A per-recv timeout
         # would keep the *single-threaded* broker occupied indefinitely.
         import select
-        slow_script = (
-            "import socket,sys,time,struct\\n"
-            "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\\n"
-            "s.connect(sys.argv[1])\\n"
-            "s.sendall(struct.pack('!I',128)+b'{')\\n"
-            "print('SLOW_CLIENT_CONNECTED',flush=True)\\n"
-            "for _ in range(12):\\n"
-            "    time.sleep(0.75)\\n"
-            "    s.sendall(b'x')\\n"
-        )
+        slow_script = "\n".join((
+            "import socket,sys,time,struct",
+            "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)",
+            "s.connect(sys.argv[1])",
+            "s.sendall(struct.pack('!I',128)+b'{')",
+            "print('SLOW_CLIENT_CONNECTED',flush=True)",
+            "for _ in range(12):",
+            "    time.sleep(0.75)",
+            "    s.sendall(b'x')",
+        ))
         slow = subprocess.Popen(
             ["sudo", "-n", "-u", client, sys.executable, "-c", slow_script, sock],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
