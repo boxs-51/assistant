@@ -1144,6 +1144,59 @@ async def test_aic_pg17_trigger_rejects_search_path_shadow_resurrection(postgres
             assert (await c.execute(text(
                 "SELECT count(*) FROM aic_instance_live WHERE agent_instance_id=:id"
             ), {"id": old_id})).scalar_one() == 0
+
+        # Separate adversarial probe for aic_id_guard: pg_temp LIVE rows
+        # cannot forge the real LIVE prerequisite for ACTIVE -> RETIRING.
+        # A deliberately bare reservation mimics an interrupted/illicit raw
+        # SQL write; it must remain ACTIVE instead of trusting a TEMP shadow.
+        bare_id = "bare-" + uuid4().hex
+        async with engine.begin() as c:
+            await c.execute(text(
+                "INSERT INTO aic_instance_reservations "
+                "(agent_instance_id,state,generation) VALUES (:id,'ACTIVE',1)"
+            ), {"id": bare_id})
+        async with engine.connect() as c:
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_live "
+                "(agent_instance_id TEXT, owner_user_id TEXT)"
+            ))
+            await c.execute(text(
+                "INSERT INTO pg_temp.aic_instance_live "
+                "(agent_instance_id,owner_user_id) VALUES (:id,'alice')"
+            ), {"id": bare_id})
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_ID_TRANSITION_FORBIDDEN"):
+                await c.execute(text(
+                    "UPDATE " + schema + ".aic_instance_reservations "
+                    "SET state='RETIRING' WHERE agent_instance_id=:id"
+                ), {"id": bare_id})
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT state FROM aic_instance_reservations "
+                "WHERE agent_instance_id=:id"
+            ), {"id": bare_id})).scalar_one() == "ACTIVE"
+
+        # Third guard: an empty TEMP LIVE table cannot trick aic_user_guard
+        # into permitting rekey of a genuine owner who still has LIVE data.
+        live_id = await _create(sessions)
+        async with engine.connect() as c:
+            await c.execute(text(
+                "CREATE TEMP TABLE aic_instance_live "
+                "(agent_instance_id TEXT, owner_user_id TEXT)"
+            ))
+            await c.execute(text("SET LOCAL search_path TO pg_temp, " + schema))
+            with pytest.raises(DBAPIError, match="AIC_LIVE_OWNER_REKEY_DENIED"):
+                await c.execute(text(
+                    "UPDATE " + schema + ".users SET id='forged-user' "
+                    "WHERE id='alice'"
+                ))
+            await c.rollback()
+        async with engine.connect() as c:
+            assert (await c.execute(text(
+                "SELECT owner_user_id FROM aic_instance_live "
+                "WHERE agent_instance_id=:id"
+            ), {"id": live_id})).scalar_one() == "alice"
     finally:
         await engine.dispose()
         async with admin.begin() as c:
