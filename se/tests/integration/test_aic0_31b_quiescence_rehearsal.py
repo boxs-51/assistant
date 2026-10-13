@@ -181,10 +181,11 @@ async def test_pg17_ephemeral_login_barrier_drain_and_old31a_forward(
         )
         try:
             try:
-                await control.execute(
-                    "LOCK TABLE public.users, public.aic_instance_reservations, "
-                    "public.aic_instance_live IN ACCESS EXCLUSIVE MODE NOWAIT"
-                )
+                async with control.transaction():
+                    await control.execute(
+                        "LOCK TABLE public.users, public.aic_instance_reservations, "
+                        "public.aic_instance_live IN ACCESS EXCLUSIVE MODE NOWAIT"
+                    )
             except asyncpg.PostgresError as exc:
                 assert exc.sqlstate == "55P03", (
                     "Expected physical PG lock_not_available", exc.sqlstate
