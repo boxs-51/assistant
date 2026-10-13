@@ -48,6 +48,10 @@ CONNECT_TIMEOUT_S = 30.0
 REQUEST_TIMEOUT_S = 2.0
 CLIENT_TIMEOUT_S = 4.0
 CANCEL_DRAIN_TIMEOUT_MS = 1000
+# The server MUST wait for an ACK written only after the client decoded its
+# full DENY frame. WriteFile completion alone does not mean client consumption.
+# This byte never denotes execution authorization, receipt, or a success status.
+TRANSPORT_FRAME_CONSUMED_ACK = b"\x06"
 
 
 class SECURITY_ATTRIBUTES(ctypes.Structure):
@@ -216,6 +220,28 @@ def _write(k, handle: int, payload: dict, deadline: float) -> None:
         raise S1AProtocolError("incomplete Windows pipe write")
 
 
+def _acknowledge_complete_response(k, handle: int, deadline: float) -> None:
+    """One-byte transport ACK only AFTER decode_frame has validated DENY."""
+    ack = ctypes.create_string_buffer(TRANSPORT_FRAME_CONSUMED_ACK)
+    def begin(ov: OVERLAPPED) -> bool:
+        return bool(k.WriteFile(ctypes.c_void_p(handle), ack,
+                                len(TRANSPORT_FRAME_CONSUMED_ACK), None,
+                                ctypes.byref(ov)))
+    if _overlapped(k, handle, begin, deadline) != len(TRANSPORT_FRAME_CONSUMED_ACK):
+        raise S1AProtocolError("incomplete transport-consumption ACK")
+
+
+def _await_response_consumption(k, handle: int, deadline: float) -> None:
+    """Do not disconnect while unread response payload remains in pipe.
+
+    Fail closed on missing/malformed ACK; deadline/cancellation is bounded by
+    REQUEST_TIMEOUT_S. No FlushFileBuffers, no blocking wait for hostile peers.
+    """
+    ack = _read_exact(k, handle, len(TRANSPORT_FRAME_CONSUMED_ACK), deadline)
+    if ack != TRANSPORT_FRAME_CONSUMED_ACK:
+        raise S1AProtocolError("invalid response-consumption ACK")
+
+
 def _token_sid(k, a, token: int, info_class: int) -> str:
     needed = w.DWORD()
     a.GetTokenInformation(ctypes.c_void_p(token), info_class, None, 0,
@@ -272,7 +298,12 @@ def client_request(pipe_name: str, request: dict) -> dict:
     try:
         deadline = time.monotonic() + CLIENT_TIMEOUT_S
         _write(k, handle, request, deadline)
-        return _receive(k, handle, deadline)
+        response = _receive(k, handle, deadline)
+        if response.get("status") != "DENY":
+            raise S1AProtocolError("S1-A accepts DENY-only broker frames")
+        # The server keeps its pipe instance alive until this ACK arrives.
+        _acknowledge_complete_response(k, handle, deadline)
+        return response
     finally:
         k.CloseHandle(ctypes.c_void_p(handle))
 
@@ -334,6 +365,11 @@ class WindowsAuthenticatedPipe:
                         if not peer:
                             response["reason"] = "FOREIGN_WINDOWS_TOKEN"
                         _write(k, handle, response, deadline)
+                        # Overlapped write only queued bytes. A client may have
+                        # read the header but not the body; immediately calling
+                        # DisconnectNamedPipe truncates the frame (Win32 233).
+                        # An ACK after full client decode is the bounded fence.
+                        _await_response_consumption(k, handle, deadline)
                     except (S1AProtocolError, OSError, ValueError):
                         continue
                 finally:
