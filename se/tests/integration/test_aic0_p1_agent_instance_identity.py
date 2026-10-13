@@ -1561,6 +1561,22 @@ async def test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner(
         # No silent stamp, dropped old budget, reordered generations or
         # accidental replacement of old policy data is acceptable.
         await require_revision("31a_aic0_agent_instance_identity")
+        # Evidence-only #494+#496+#500 composed descendant: advance the real
+        # populated 25a/26a historical DB through actual 31b as well.
+        _aic_run_real_alembic(url, "31b_aic0_pg_guard_forward")
+        await require_revision("31b_aic0_pg_guard_forward")
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM user_budget_dual_accounting_receipts "
+            "WHERE bridge_receipt_id=:id", {"id": old_receipt}
+        ) == 1
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM user_budget_policies WHERE policy_id=:id",
+            {"id": old_policy}
+        ) == 1
+        assert await read_scalar(
+            "SELECT COUNT(*) FROM aic_instance_live WHERE agent_instance_id=:id",
+            {"id": marker}
+        ) == 1
     finally:
         await engine.dispose()
         if admin is not None:
