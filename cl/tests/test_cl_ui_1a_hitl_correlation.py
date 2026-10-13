@@ -269,3 +269,62 @@ def test_identity_change_during_delayed_display_ack_hides_old_bar():
     assert result == [False]
     assert harness.hidden == [old_id]
     assert manager._pending_approvals == {}
+
+
+class BlockingHideHarness(ApprovalHarness):
+    def __init__(self):
+        super().__init__()
+        self.hide_entered = threading.Event()
+        self.hide_release = threading.Event()
+
+    def __call__(self, js_code):
+        if "window.hideApprovalBar" in js_code:
+            self.hide_entered.set()
+            assert self.hide_release.wait(2.0)
+        return super().__call__(js_code)
+
+
+def test_identity_revoke_while_hide_is_blocked_cannot_return_cached_approval():
+    harness = BlockingHideHarness()
+    manager = HitlManager(harness, SimpleNamespace(auth_generation=0), timeout=1.0,
+                          require_origin_pin=True)
+    thread, result = _start_dialog(manager)
+    old_id = harness.wait_for_show_count(1)["approval_id"]
+    assert manager.respond(True, old_id) is True
+    assert harness.hide_entered.wait(1.0)
+
+    # The decision was removed from pending, but its effect authority must
+    # still disappear while the WebView hide callback is blocked.
+    manager.invalidate_pending()
+    harness.hide_release.set()
+    thread.join(1.0)
+    assert not thread.is_alive()
+    assert result == [False]
+    assert harness.hidden == [old_id]
+
+
+def test_strict_production_hitl_requires_captured_origin_generation():
+    harness = ApprovalHarness()
+    execution_local = SimpleNamespace()
+    manager = HitlManager(harness, execution_local, timeout=1.0,
+                          require_origin_pin=True)
+    assert manager.show_dialog({"name": "untrusted-dispatcher"}) is False
+    assert harness.shown == []
+
+    # A correctly pinned generation remains usable with a fresh token.
+    execution_local.auth_generation = 0
+    thread, result = _start_dialog(manager)
+    approval_id = harness.wait_for_show_count(1)["approval_id"]
+    assert manager.respond(True, approval_id) is True
+    thread.join(1.0)
+    assert result == [True]
+
+
+def test_old_pinned_invocation_cannot_adopt_new_generation():
+    harness = ApprovalHarness()
+    execution_local = SimpleNamespace(auth_generation=0)
+    manager = HitlManager(harness, execution_local, timeout=1.0,
+                          require_origin_pin=True)
+    manager.invalidate_pending()
+    assert manager.show_dialog({"name": "stale"}) is False
+    assert harness.shown == []
