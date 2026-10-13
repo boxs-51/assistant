@@ -7,13 +7,16 @@ logger = logging.getLogger(__name__)
 
 
 class HitlManager:
-    def __init__(self, eval_js_cb, execution_local, timeout=300.0):
+    def __init__(self, eval_js_cb, execution_local, timeout=300.0, *, require_origin_pin=False):
         self._eval_js = eval_js_cb
         self._execution_local = execution_local
         self._approval_lock = threading.RLock()
         self._approval_ui_lock = threading.Lock()
         self._pending_approvals = {}
         self._auth_generation = 0
+        # Production UIBridge opts in; callbacks with no trusted invocation
+        # generation cannot claim the current principal's approval authority.
+        self._require_origin_pin = require_origin_pin
         self._timeout = timeout
 
     @staticmethod
@@ -63,6 +66,12 @@ class HitlManager:
         execution_id = getattr(self._execution_local, "execution_id", None)
         execution_generation = getattr(self._execution_local, "auth_generation", None)
         with self._approval_lock:
+            if self._require_origin_pin and (
+                not isinstance(execution_generation, int)
+                or isinstance(execution_generation, bool)
+            ):
+                logger.warning("HITL missing trusted invocation generation; denying")
+                return False
             request_generation = (
                 self._auth_generation
                 if execution_generation is None else execution_generation
@@ -138,4 +147,9 @@ class HitlManager:
                     approval_id,
                 )
 
-            return bool(response)
+            # The WebView hide callback can block while auth changes after
+            # the response was consumed. Refuse a cached approval on return.
+            with self._approval_lock:
+                if request_generation != self._auth_generation:
+                    return False
+                return bool(response)
