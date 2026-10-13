@@ -9,6 +9,7 @@ from .workspace import WorkspaceManager
 from .session import SessionManager
 from .hitl import HitlManager
 from .encoder import FileEncoder
+from ..core.gateway_client import GatewayEffectOutcomeUnknown
 from ..schemas.message import GatewayMessage
 from ..schemas.request import GatewayChatRequest, RequestConfig
 from ..schemas.agent_execution import AgentExecutionLimits
@@ -327,6 +328,21 @@ class UIBridge:
                 )
             self._record_activity("tool.execute", "success", tool_name)
             return {"success": True, "data": result}
+        except GatewayEffectOutcomeUnknown:
+            # Network ambiguity is never an explicit server-side DENY.
+            # No automatic retries; definitive dedupe needs #359 authority.
+            self._record_activity(
+                "tool.execute", "outcome_unknown", tool_name,
+            )
+            return {
+                "success": False,
+                "status": "OUTCOME_UNKNOWN",
+                "retryable": False,
+                "error": (
+                    "The gateway response was lost or timed out; the effect "
+                    "may have occurred. Do not retry automatically."
+                ),
+            }
         except Exception as error:
             self._record_activity("tool.execute", "error", str(error))
             return {"success": False, "error": str(error)}
