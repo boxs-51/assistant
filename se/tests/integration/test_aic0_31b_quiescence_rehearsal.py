@@ -24,6 +24,23 @@ from se.tests.integration.test_aic0_31b_composed_alembic import (
 )
 
 
+def _require_ephemeral_github_runner():
+    # Fail BEFORE creating any database or role. A localhost DSN alone does not
+    # prove ephemerality (e.g. someone might port-forward a production DB).
+    if os.getenv("AIC31B_EPHEMERAL_REHEARSAL") != "1":
+        pytest.skip("Ephemeral AIC31b PG17 rehearsal requires explicit CI opt-in")
+    dsn = os.getenv("AIC_TEST_POSTGRES_URL", "")
+    url = make_url(dsn)
+    assert (
+        os.getenv("GITHUB_ACTIONS") == "true"
+        and url.host == "127.0.0.1"
+        and (url.port or 5432) == 5432
+        and url.database == "aic_p1a"
+        and url.username == "postgres"
+        and url.drivername == "postgresql+asyncpg"
+    ), "Refusing role/database mutation outside isolated hosted PG17 test profile"
+
+
 def _role_url(url, name, password):
     return make_url(url).set(username=name, password=password).render_as_string(
         hide_password=False
@@ -81,6 +98,7 @@ async def test_pg17_ephemeral_login_barrier_drain_and_old31a_forward(
     """Real old CLI + active table lock => 31b abort => LOGIN fence/drain =>
     distinct successful CLI, post-upgrade guard validation, then release.
     """
+    _require_ephemeral_github_runner()
     admin, initial_engine, database, admin_url = await _new_database()
     migration_role = app_role = None
     mig_engine = None
