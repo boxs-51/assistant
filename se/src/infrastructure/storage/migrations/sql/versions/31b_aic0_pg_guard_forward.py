@@ -165,7 +165,13 @@ def _check_physical_attachments(bind, schema: str) -> None:
                 or enabled != "O" or internal
                 or (name == "trg_aic_user_rekey" and not attrs.strip())
                 or (name != "trg_aic_user_rekey" and bool(attrs.strip()))):
-            raise RuntimeError("AIC 31b: invalid physical guard trigger " + name)
+            raise RuntimeError(
+                "AIC 31b: invalid physical guard trigger "
+                f"{name}: table={table!r}, function={function!r}, "
+                f"function_schema={fn_schema!r}, type={event_mask!r}, "
+                f"enabled={enabled!r}, internal={internal!r}, "
+                f"update_columns={attrs!r}"
+            )
 
     corrupted = bind.execute(sa.text("""
         SELECT EXISTS (
