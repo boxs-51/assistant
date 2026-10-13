@@ -104,6 +104,9 @@ class DenyOnlyProtocol:
                 raise S1AProtocolError("invalid nonce")
             if nonce in self._seen:
                 raise S1AProtocolError("replay")
+            if len(self._seen) >= 4096:
+                # A hostile but OS-authorized client must not grow memory forever.
+                raise S1AProtocolError("bounded replay table exhausted")
             if (type(request["deadline_unix"]) not in (int, float)
                     or not time.time() < request["deadline_unix"] <= time.time() + 30):
                 raise S1AProtocolError("stale deadline")
