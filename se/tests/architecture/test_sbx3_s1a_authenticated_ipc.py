@@ -89,6 +89,21 @@ def test_s1a_portable_windows_pipe_client_cannot_create_instance() -> None:
     assert CLIENT_OPEN_RIGHTS & FILE_CREATE_PIPE_INSTANCE == 0
     assert CLIENT_OPEN_RIGHTS & (FILE_READ_DATA | FILE_WRITE_DATA) == 3
     assert CLIENT_PIPE_RIGHTS & CLIENT_OPEN_RIGHTS == CLIENT_OPEN_RIGHTS
+    # The Win32 response ACK is transport framing only, never a positive
+    # receipt, execution success, or authority bit. Its verification is strict.
+    from se.src.runtimes.capability import native_broker_ipc_windows_s1a as ipc
+    assert ipc.TRANSPORT_FRAME_CONSUMED_ACK == b"\\x06".replace(b"\\\\x06", b"\\x06")
+    class FakePipe:
+        pass
+    import pytest
+    from unittest.mock import patch
+    with patch.object(ipc, "_read_exact", return_value=ipc.TRANSPORT_FRAME_CONSUMED_ACK) as read:
+        ipc._await_response_consumption(FakePipe(), 12, 42.0)
+        read.assert_called_once_with(read.call_args.args[0], 12, 1, 42.0)
+    for forged in (b"", b"\\x00", b"\\x05", b"\\x06\\x06"):
+        with patch.object(ipc, "_read_exact", return_value=forged):
+            with pytest.raises(S1AProtocolError):
+                ipc._await_response_consumption(FakePipe(), 12, 42.0)
 
 
 def test_s1a_portable_replay_memory_budget_fails_closed() -> None:
@@ -241,6 +256,14 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
         result = client_request(pipe, new_request(broker_epoch=epoch))
         assert result["status"] == "DENY"
         assert result["peer_authenticated"] is True  # from impersonated kernel token
+        # Win32 regression for ERROR_PIPE_NOT_CONNECTED (233): WriteFile
+        # completion does not imply response-body consumption. Each DENY frame
+        # must be fully decoded before the server disconnects.
+        for _ in range(12):
+            complete = client_request(pipe, new_request(broker_epoch=epoch))
+            assert complete["status"] == "DENY"
+            assert complete["peer_authenticated"] is True
+            assert complete["reason"] == "TRANSPORT_ONLY_NO_EFFECT_AUTHORITY"
         for action in ("MINT", "SPAWN", "GET_POSITIVE_RECEIPT", "DELETE_ROOT", "VERIFIED_EMPTY"):
             r = client_request(pipe, new_request(action, broker_epoch=epoch))
             assert r["status"] == "DENY" and r["reason"] == "S1A_NATIVE_EFFECT_NOT_RELEASED"
