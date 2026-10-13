@@ -1129,8 +1129,10 @@ async def test_aic_pg17_install_triggers_on_durable_tables_despite_prior_temp_sh
                 assert (table_name, fn_name) == expected_tables[trig]
                 assert table_schema == schema, (trig, table_schema)
                 assert function_schema == schema, (trig, function_schema)
-        # After committing the installation, a different physical session
-        # must still see the durable table triggers and reject retired ID reuse.
+        # Drop the pool so the post-install checks cannot reuse the migration
+        # connection's TEMP shadow relations under asyncpg connection pooling.
+        await engine.dispose()
+        # A fresh physical session must see genuine tables and reject reuse.
         await _user(engine)
         sessions = async_sessionmaker(engine, expire_on_commit=False)
         original_id = await _create(sessions)
