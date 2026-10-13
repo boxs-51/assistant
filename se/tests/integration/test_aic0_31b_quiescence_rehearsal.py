@@ -30,7 +30,13 @@ def _require_ephemeral_github_runner():
     if os.getenv("AIC31B_EPHEMERAL_REHEARSAL") != "1":
         pytest.skip("Ephemeral AIC31b PG17 rehearsal requires explicit CI opt-in")
     dsn = os.getenv("AIC_TEST_POSTGRES_URL", "")
+    # asyncpg interprets URI query arguments such as ?host=remote AFTER the
+    # authority; checking only url.host is therefore insufficient. The CI
+    # fixture URL is intentionally exact, with no query/driver overrides.
+    expected = "postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a"
+    assert dsn == expected, "Refusing non-fixture PostgreSQL role/database target"
     url = make_url(dsn)
+    assert not url.query, "PostgreSQL URI query overrides are forbidden"
     assert (
         os.getenv("GITHUB_ACTIONS") == "true"
         and os.getenv("RUNNER_ENVIRONMENT") == "github-hosted"
