@@ -67,7 +67,13 @@ def _fault_cut_config(tmp_path):
     unchanged. Validate byte-exact trusted production 31b before instrumenting.
     """
     source_file = ROOT / SCRIPT_PATH / "versions" / (REV31B + ".py")
-    old = source_file.read_bytes()
+    # GitHub stores LF bytes; Windows checkout can convert only newline bytes
+    # to CRLF. Hash the canonical LF representation, refusing any other edit.
+    # The copied test-only revision is also written with LF for deterministic
+    # injection of the exact pre-commit fault cut on both native platforms.
+    raw = source_file.read_bytes()
+    old = raw.replace(b"\r\n", b"\n")
+    assert b"\r" not in old, "Unexpected non-CRLF line ending in 31b source"
     blob = hashlib.sha1(b"blob " + str(len(old)).encode() + b"\0" + old).hexdigest()
     assert blob == "71ee2332d360ae7cdb851fc802aa43db384cb46c", (
         "31b production migration changed; fault-cut re-review required"
