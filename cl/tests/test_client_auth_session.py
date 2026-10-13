@@ -1,12 +1,15 @@
 import json
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import threading
 import uuid
 
+import pytest
 import requests
 
 from cl.src.core.auth_session import AuthSessionStore
 from cl.src.core.client_runtime import ClientRuntime
-from cl.src.core.gateway_client import GatewayLLMClient
+from cl.src.core.gateway_client import GatewayLLMClient, GatewayEffectOutcomeUnknown, DIRECT_UI_EFFECT_TIMEOUT
 
 
 class _Response:
@@ -196,3 +199,96 @@ def test_start_refreshes_and_restores_saved_user_session(request):
     assert runtime.owner_id == "user-1"
     assert runtime.principal_type == "user"
     assert store.load()["access_token"] == "fresh-access"
+
+
+def test_direct_effect_propagates_explicit_finite_socket_timeout(monkeypatch):
+    captured = []
+
+    def request(method, url, **kwargs):
+        captured.append((method, url, kwargs))
+        return _Response({"output": {"ok": True}})
+
+    monkeypatch.setattr(requests, "request", request)
+    client = GatewayLLMClient("http://gateway")
+    result = client.execute_capability("echo", {"arguments": {"text": "hello"}})
+
+    assert result == {"output": {"ok": True}}
+    assert len(captured) == 1
+    assert captured[0][0] == "POST"
+    assert captured[0][1].endswith("/v1/capabilities/echo/execute")
+    assert captured[0][2]["timeout"] == DIRECT_UI_EFFECT_TIMEOUT
+    assert all(isinstance(limit, float) and limit > 0
+               for limit in captured[0][2]["timeout"])
+
+
+@pytest.mark.parametrize("error", [
+    requests.exceptions.ConnectTimeout("connect stalled"),
+    requests.exceptions.ReadTimeout("read stalled"),
+    requests.exceptions.ConnectionError("peer disconnected"),
+    requests.exceptions.ChunkedEncodingError("partial chunk"),
+    requests.exceptions.ContentDecodingError("corrupt body"),
+])
+def test_direct_effect_transport_failure_is_unknown_and_not_auto_retried(
+    monkeypatch, error,
+):
+    attempts = []
+
+    def failing_request(*args, **kwargs):
+        attempts.append((args, kwargs))
+        raise error
+
+    monkeypatch.setattr(requests, "request", failing_request)
+    client = GatewayLLMClient("http://gateway")
+    with pytest.raises(GatewayEffectOutcomeUnknown, match="do not retry"):
+        client.execute_capability("effect", {"arguments": {}})
+    assert len(attempts) == 1
+
+
+def test_direct_effect_malformed_success_body_is_unknown(monkeypatch):
+    class BadBody(_Response):
+        def json(self):
+            raise requests.exceptions.JSONDecodeError("invalid body", "not json", 0)
+
+    monkeypatch.setattr(requests, "request", lambda *a, **k: BadBody({}))
+    with pytest.raises(GatewayEffectOutcomeUnknown):
+        GatewayLLMClient("http://gateway").execute_capability("effect", {})
+
+
+def test_native_loopback_silent_gateway_times_out_without_retry(monkeypatch):
+    entered = threading.Event()
+    release = threading.Event()
+    calls = []
+
+    class SilentGateway(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length", "0"))
+            self.rfile.read(length)
+            calls.append(self.path)
+            entered.set()
+            release.wait(3.0)
+            # Never provide an HTTP response while the client is waiting.
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), SilentGateway)
+    server.daemon_threads = True
+    host = threading.Thread(target=server.serve_forever, daemon=True)
+    host.start()
+    try:
+        monkeypatch.setattr(
+            "cl.src.core.gateway_client.DIRECT_UI_EFFECT_TIMEOUT",
+            (1.0, 0.35),
+        )
+        client = GatewayLLMClient(f"http://127.0.0.1:{server.server_port}")
+        with pytest.raises(GatewayEffectOutcomeUnknown):
+            client.execute_capability("opaque-effect", {"arguments": {"x": 1}})
+        assert entered.is_set()
+        assert calls == ["/v1/capabilities/opaque-effect/execute"]
+    finally:
+        release.set()
+        server.shutdown()
+        server.server_close()
+        host.join(2.0)
