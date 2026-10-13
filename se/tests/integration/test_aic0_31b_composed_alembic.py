@@ -51,7 +51,7 @@ def _alembic(url, revision, *, config=ROOT / "alembic.ini"):
 def _old31a_script_config(tmp_path):
     """Use authentic old 31a migration for Alembic CLI, not only DDL replay."""
     old = subprocess.run(
-        ["git", "show", f"{ORIGINAL_HEAD}:{SCRIPT_PATH.as_posix()}/{REV31A}.py"],
+        ["git", "show", f"{ORIGINAL_HEAD}:{SCRIPT_PATH.as_posix()}/versions/{REV31A}.py"],
         cwd=ROOT, capture_output=True, check=True, timeout=30,
     ).stdout
     blob_hash = hashlib.sha1(
