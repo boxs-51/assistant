@@ -142,7 +142,13 @@ def _check_physical_attachments(bind, schema: str) -> None:
     triggers = bind.execute(sa.text("""
         SELECT t.tgname, relation.relname, proc.proname,
                proc_ns.nspname, t.tgtype, t.tgenabled::text, t.tgisinternal,
-               t.tgattr::text
+               t.tgattr::text, t.tgqual IS NULL, t.tgnargs,
+               pg_catalog.octet_length(t.tgargs), t.tgdeferrable,
+               t.tginitdeferred, t.tgconstraint,
+               (SELECT a.attnum::text FROM pg_catalog.pg_attribute a
+                 WHERE a.attrelid = t.tgrelid
+                   AND a.attname = 'id'
+                   AND a.attnum > 0 AND NOT a.attisdropped)
           FROM pg_catalog.pg_trigger t
           JOIN pg_catalog.pg_class relation ON relation.oid = t.tgrelid
           JOIN pg_catalog.pg_namespace relation_ns
@@ -158,19 +164,25 @@ def _check_physical_attachments(bind, schema: str) -> None:
     """), {"schema": schema}).all()
     if len(triggers) != 4 or {row[0] for row in triggers} != set(_EXPECTED_TRIGGERS):
         raise RuntimeError("AIC 31b: durable guard triggers absent/duplicated")
-    for name, table, function, fn_schema, event_mask, enabled, internal, attrs in triggers:
+    for (name, table, function, fn_schema, event_mask, enabled, internal,
+         attrs, no_predicate, nargs, args_length, deferrable, initially_deferred,
+         constraint_oid, id_attnum) in triggers:
         expected_table, expected_function, expected_mask = _EXPECTED_TRIGGERS[name]
+        expected_attrs = id_attnum if name == "trg_aic_user_rekey" else ""
         if (table != expected_table or function != expected_function
                 or fn_schema != schema or event_mask != expected_mask
                 or enabled != "O" or internal
-                or (name == "trg_aic_user_rekey" and not attrs.strip())
-                or (name != "trg_aic_user_rekey" and bool(attrs.strip()))):
+                or not no_predicate or nargs != 0 or args_length != 0
+                or deferrable or initially_deferred or constraint_oid != 0
+                or (name == "trg_aic_user_rekey" and not id_attnum)
+                or attrs.strip() != expected_attrs):
             raise RuntimeError(
                 "AIC 31b: invalid physical guard trigger "
                 f"{name}: table={table!r}, function={function!r}, "
                 f"function_schema={fn_schema!r}, type={event_mask!r}, "
                 f"enabled={enabled!r}, internal={internal!r}, "
-                f"update_columns={attrs!r}"
+                f"update_columns={attrs!r}, actual_id_attnum={id_attnum!r}, "
+                f"no_predicate={no_predicate!r}, arguments={nargs!r}"
             )
 
     corrupted = bind.execute(sa.text("""
@@ -198,9 +210,19 @@ def upgrade() -> None:
         raise RuntimeError("AIC 31b requires a verified durable target schema")
     quoted_schema = bind.dialect.identifier_preparer.quote_identifier(schema)
 
-    # PostgreSQL transactional DDL: a failed check/replacement cannot stamp 31b.
-    # In production the migration role and public-only search_path are fenced by
-    # the independently reviewed #494 Alembic online preflight.
+    # The #494 advisory lock only fences cooperating migrations, not DML.
+    # Bounded transactional DML exclusion starts BEFORE the first catalog
+    # read and stays in place through replacement, checks and version stamp.
+    # NOWAIT aborts without holding earlier exclusive locks while waiting
+    # for later tables (which could deadlock live-table-trigger writers).
+    # Use deterministic physical names: caller pg_temp cannot redirect locks.
+    # PostgreSQL's transactional DDL/LOCK preserves the original 31a on errors.
+    bind.exec_driver_sql("SET LOCAL lock_timeout = '10s'")
+    bind.exec_driver_sql(
+        f"LOCK TABLE {quoted_schema}.users, "
+        f"{quoted_schema}.aic_instance_reservations, "
+        f"{quoted_schema}.aic_instance_live IN ACCESS EXCLUSIVE MODE NOWAIT"
+    )
     _check_physical_attachments(bind, schema)
     for statement in _TRUSTED_PG_FUNCTIONS:
         op.execute(sa.text(statement.format(schema=quoted_schema)))
