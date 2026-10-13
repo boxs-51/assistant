@@ -71,10 +71,6 @@ class HitlManager:
             request["execution_id"] = execution_id
 
         with self._approval_ui_lock:
-            with self._approval_lock:
-                # Also refuse old work queued behind another visible prompt.
-                if request_generation != self._auth_generation:
-                    return False
             event = threading.Event()
             pending = {
                 "event": event,
@@ -83,8 +79,11 @@ class HitlManager:
                 "execution_id": execution_id,
                 "auth_generation": request_generation,
             }
-
             with self._approval_lock:
+                # Registration and generation check must be atomic: an
+                # identity switch may occur while this UI surface is queued.
+                if request_generation != self._auth_generation:
+                    return False
                 self._pending_approvals[approval_id] = pending
 
             displayed_id = self._eval_js(
@@ -97,6 +96,19 @@ class HitlManager:
             if displayed_id != approval_id or invalidated:
                 with self._approval_lock:
                     self._pending_approvals.pop(approval_id, None)
+                # An identity switch can race a delayed WebView show ACK.
+                # If our token was actually displayed, hide exactly that
+                # token rather than leaving a stale approval on the new UI.
+                if invalidated and displayed_id == approval_id:
+                    hidden = self._eval_js(
+                        "window.hideApprovalBar && window.hideApprovalBar("
+                        + json.dumps(approval_id)
+                        + ")"
+                    )
+                    if hidden is not True:
+                        logger.warning(
+                            "HITL stale approval hide failed: %s", approval_id
+                        )
                 logger.warning(
                     "HITL approval UI display acknowledgement mismatch; "
                     "failing closed: expected=%s actual=%r",
