@@ -211,15 +211,17 @@ def upgrade() -> None:
     quoted_schema = bind.dialect.identifier_preparer.quote_identifier(schema)
 
     # The #494 advisory lock only fences cooperating migrations, not DML.
-    # Bounded transactional DML exclusion must start BEFORE the first catalog
-    # read, and be held through replacement, checks and Alembic version stamp.
+    # Bounded transactional DML exclusion starts BEFORE the first catalog
+    # read and stays in place through replacement, checks and version stamp.
+    # NOWAIT aborts without holding earlier exclusive locks while waiting
+    # for later tables (which could deadlock live-table-trigger writers).
     # Use deterministic physical names: caller pg_temp cannot redirect locks.
     # PostgreSQL's transactional DDL/LOCK preserves the original 31a on errors.
     bind.exec_driver_sql("SET LOCAL lock_timeout = '10s'")
     bind.exec_driver_sql(
         f"LOCK TABLE {quoted_schema}.users, "
         f"{quoted_schema}.aic_instance_reservations, "
-        f"{quoted_schema}.aic_instance_live IN ACCESS EXCLUSIVE MODE"
+        f"{quoted_schema}.aic_instance_live IN ACCESS EXCLUSIVE MODE NOWAIT"
     )
     _check_physical_attachments(bind, schema)
     for statement in _TRUSTED_PG_FUNCTIONS:
