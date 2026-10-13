@@ -104,6 +104,23 @@ def test_s1a_portable_windows_pipe_client_cannot_create_instance() -> None:
                 ipc._await_response_consumption(fake_kernel, 12, 42.0)
 
 
+def test_s1a_portable_linux_absolute_deadline_rejects_partial_frame() -> None:
+    # Portable socket pair proves an incomplete frame cannot reset its
+    # total deadline for each recv (the Linux server is single-threaded).
+    from se.src.runtimes.capability.native_broker_ipc_linux_s1a import _receive
+
+    reader, writer = socket.socketpair()
+    try:
+        writer.sendall(b"\\x00\\x00\\x00\\x80{")
+        start = time.monotonic()
+        with pytest.raises(S1AProtocolError, match="deadline"):
+            _receive(reader, deadline=start + 0.15)
+        assert time.monotonic() - start < 2.0
+    finally:
+        reader.close()
+        writer.close()
+
+
 def test_s1a_portable_replay_memory_budget_fails_closed() -> None:
     p = DenyOnlyProtocol("a" * 32)
     for n in range(4096):
@@ -179,6 +196,42 @@ if os.environ.get("SBX3_S1A_NATIVE_REQUIRED") == "1":
             assert bad["status"] == "DENY" and bad["peer_authenticated"] is False
         else:
             assert attacker.stderr
+
+
+        # Native slow-client denial-of-service regression: the allowed UID
+        # trickles a claimed 128-byte frame every 750 ms. A per-recv timeout
+        # would keep the *single-threaded* broker occupied indefinitely.
+        import select
+        slow_script = (
+            "import socket,sys,time,struct\\n"
+            "s=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)\\n"
+            "s.connect(sys.argv[1])\\n"
+            "s.sendall(struct.pack('!I',128)+b'{')\\n"
+            "print('SLOW_CLIENT_CONNECTED',flush=True)\\n"
+            "for _ in range(12):\\n"
+            "    time.sleep(0.75)\\n"
+            "    s.sendall(b'x')\\n"
+        )
+        slow = subprocess.Popen(
+            ["sudo", "-n", "-u", client, sys.executable, "-c", slow_script, sock],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True,
+        )
+        try:
+            assert slow.stdout is not None
+            readable, _, _ = select.select([slow.stdout], [], [], 5.0)
+            assert readable, "real allowed-UID slow client did not connect"
+            assert slow.stdout.readline().strip() == "SLOW_CLIENT_CONNECTED"
+            time.sleep(3.4)
+            recovered_at = time.monotonic()
+            recovered = _probe_linux_as(client, sock=sock, epoch=epoch)
+            assert recovered.returncode == 0, recovered.stderr
+            assert time.monotonic() - recovered_at < 3.0
+            assert json.loads(recovered.stdout)["status"] == "DENY"
+        finally:
+            if slow.poll() is None:
+                slow.kill()
+            slow.communicate(timeout=5)
 
 
     def test_s1a_linux_native_alias_replay_stale_and_missing_socket_deny() -> None:
