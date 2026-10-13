@@ -97,13 +97,8 @@ def _windows_scm(config: dict) -> int:
                 set_status(SERVICE_STOP_PENDING)
             except Exception:
                 state["failure"] = True
-            # Wake blocking ConnectNamedPipe; server immediately observes STOP.
-            try:
-                from .native_broker_ipc_windows_s1a import client_request
-                client_request(config["windows_pipe"],
-                               {"version": -1})  # invalid message, no effect
-            except Exception:
-                pass
+            # Server ConnectNamedPipe/ReadFile now have bounded overlapped
+            # deadlines. Never block the SCM control callback on client IPC.
         return 0
 
     @MAIN
