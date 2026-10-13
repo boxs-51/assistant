@@ -91,21 +91,119 @@ def do_run_migrations(connection: Connection) -> None:
         context.run_migrations()
 
 
-async def run_async_migrations() -> None:
-    """In this scenario we need to create an Engine
-    and associate a connection with the context.
+# Cooperative session lock survives preflight COMMIT and the Alembic migration.
+# A legacy migrator that ignores this lock remains an external deployment risk.
+_PG_ALEMBIC_LOCK = "1977, 156426"
 
-    """
+
+def _prepare_postgresql_version_table(connection: Connection) -> None:
+    """Idempotently widen only Alembic bookkeeping, never stamp or delete."""
+    if connection.dialect.name != "postgresql":
+        return
+    from sqlalchemy import text
+
+    # A conservative supported profile until multi-schema migrations receive
+    # independent proof. PostgreSQL can implicitly prioritize pg_temp and
+    # "$user" over public; never let an unqualified ALTER/LOCK select another
+    # physical object than the catalog row we validate.
+    identity = connection.execute(text("""
+        SELECT current_schema(), current_setting('search_path'),
+               pg_catalog.pg_my_temp_schema()
+    """)).one()
+    if (
+        identity[0] != "public"
+        or identity[1] not in ('"$user", public', 'public')
+        or identity[2] != 0
+    ):
+        raise RuntimeError(
+            "Unsupported PostgreSQL Alembic schema/search_path; "
+            "expected unshadowed public"
+        )
+
+    connection.exec_driver_sql("SET LOCAL lock_timeout = '10s'")
+    connection.exec_driver_sql(
+        "CREATE TABLE IF NOT EXISTS alembic_version ("
+        "version_num VARCHAR(255) NOT NULL, "
+        "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+    )
+    connection.exec_driver_sql("LOCK TABLE alembic_version IN ACCESS EXCLUSIVE MODE")
+    resolved = connection.execute(text("""
+        SELECT pg_catalog.to_regclass('alembic_version')::oid,
+               pg_catalog.to_regclass('public.alembic_version')::oid
+    """)).one()
+    if resolved[0] is None or resolved[0] != resolved[1]:
+        raise RuntimeError(
+            "Unsafe PostgreSQL Alembic version object resolution; upgrade denied"
+        )
+    column = connection.execute(text("""
+        SELECT data_type, character_maximum_length, is_nullable
+          FROM information_schema.columns
+         WHERE table_schema = current_schema()
+           AND table_name = 'alembic_version' AND column_name = 'version_num'
+    """)).one_or_none()
+    pk = connection.execute(text("""
+        SELECT COUNT(*)
+          FROM pg_catalog.pg_constraint AS con
+          JOIN pg_catalog.pg_class AS rel ON rel.oid = con.conrelid
+          JOIN pg_catalog.pg_namespace AS ns ON ns.oid = rel.relnamespace
+         WHERE ns.nspname = current_schema()
+           AND rel.relname = 'alembic_version'
+           AND rel.relkind IN ('r', 'p')
+           AND con.contype = 'p'
+           AND pg_catalog.pg_get_constraintdef(con.oid)
+               = 'PRIMARY KEY (version_num)'
+    """)).scalar_one()
+    if (
+        column is None
+        or column.data_type != "character varying"
+        or column.is_nullable != "NO"
+        or column.character_maximum_length is None
+        or pk != 1
+    ):
+        raise RuntimeError(
+            "Unsafe PostgreSQL Alembic version table shape; upgrade denied"
+        )
+    if column.character_maximum_length < 255:
+        connection.exec_driver_sql(
+            "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)"
+        )
+
+
+async def run_async_migrations() -> None:
+    """Run online migrations with PostgreSQL version-width preflight."""
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+    try:
+        async with connectable.connect() as connection:
+            if connection.dialect.name != "postgresql":
+                await connection.run_sync(do_run_migrations)
+                return
 
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
+            acquired = (await connection.exec_driver_sql(
+                "SELECT pg_try_advisory_lock(" + _PG_ALEMBIC_LOCK + ")"
+            )).scalar_one()
+            await connection.commit()
+            if not acquired:
+                raise RuntimeError("Concurrent PostgreSQL Alembic migration denied")
+            try:
+                # Separate preflight transaction, preserving Alembic's native
+                # context.begin_transaction semantics for every revision.
+                await connection.run_sync(_prepare_postgresql_version_table)
+                await connection.commit()
+                await connection.run_sync(do_run_migrations)
+            finally:
+                await connection.rollback()
+                unlocked = (await connection.exec_driver_sql(
+                    "SELECT pg_advisory_unlock(" + _PG_ALEMBIC_LOCK + ")"
+                )).scalar_one()
+                await connection.commit()
+                if not unlocked:
+                    raise RuntimeError("PostgreSQL Alembic migration lock lost")
+    finally:
+        await connectable.dispose()
 
 
 def run_migrations_online() -> None:
