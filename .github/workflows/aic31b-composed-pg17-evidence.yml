@@ -1,0 +1,162 @@
+name: AIC31b Composed Historical PostgreSQL17 Linux Windows
+
+on:
+  push:
+    branches:
+      - evidence/156-aic31b-pg17-composed-20261013
+  pull_request:
+    paths:
+      - ".github/workflows/aic31b-composed-pg17-evidence.yml"
+      - "se/src/infrastructure/storage/migrations/sql/env.py"
+      - "se/src/infrastructure/storage/migrations/sql/versions/31b_aic0_pg_guard_forward.py"
+      - "se/tests/integration/test_aic0_31b_composed_pg17.py"
+      - "se/tests/integration/test_aic0_p1_agent_instance_identity.py"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  composed-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: aic_p1a
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d aic_p1a"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install actual PostgreSQL test dependencies
+        run: |
+          python -m pip install -r requirements-test.txt
+          python -m pip install asyncpg==0.32.0
+      - name: Pin old PR494 code and real historical old-31a migration
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin refs/pull/494/head
+          test "$(git rev-parse FETCH_HEAD)" = "f7efcd63c479626d43733ad836fc092db84a8506"
+          git worktree add --detach "$RUNNER_TEMP/aic31b-old-pr494" f7efcd63c479626d43733ad836fc092db84a8506
+          echo "AIC31B_OLD494_WORKTREE=$RUNNER_TEMP/aic31b-old-pr494" >> "$GITHUB_ENV"
+      - name: Require real server_version_num 17.x
+        shell: bash
+        run: |
+          python -c 'import asyncio,asyncpg,os
+          from sqlalchemy.engine.url import make_url
+          async def check():
+              u=make_url(os.environ["AIC_TEST_POSTGRES_URL"])
+              c=await asyncpg.connect(host=u.host,port=u.port or 5432,user=u.username,password=u.password,database=u.database)
+              try:
+                  v=int(await c.fetchval("SHOW server_version_num"))
+                  assert 170000 <= v < 180000, "real PG17 required"
+                  print("PG17_COMPOSED_NATIVE_VERSION",v,flush=True)
+              finally:
+                  await c.close()
+          asyncio.run(check())'
+      - name: Strict actual old31a stamped CLI -> 31b + populated UBQ25/26
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p aic31b-pg17-evidence
+          python -m pytest -q -ra --junitxml=aic31b-pg17-evidence/linux.xml \
+            se/tests/integration/test_aic0_31b_composed_pg17.py \
+            'se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[postgresql]'
+          python -c 'from xml.etree import ElementTree as E
+          root=E.parse("aic31b-pg17-evidence/linux.xml").getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          cases=[c.get("name","") for s in suites for c in s.findall("testcase")]
+          assert sum(int(s.get("tests","0")) for s in suites)==3,cases
+          assert all(int(s.get("failures","0"))==0 and int(s.get("errors","0"))==0 and int(s.get("skipped","0"))==0 for s in suites),cases
+          assert any("actual_stamped_old31a" in c for c in cases)
+          assert any("pristine_to_31b" in c for c in cases)
+          assert any("full_historical_alembic_chain" in c for c in cases)'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aic31b-composed-linux
+          path: aic31b-pg17-evidence/
+          if-no-files-found: warn
+
+  composed-windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    env:
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
+      PGPASSWORD: root
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Boot native Windows PostgreSQL 17
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $service = Get-Service -Name "postgresql-x64-17" -ErrorAction Stop
+          Set-Service -Name $service.Name -StartupType Manual
+          if ($service.Status -ne "Running") { Start-Service -Name $service.Name }
+          $psql = Join-Path $env:PGBIN "psql.exe"
+          if (!(Test-Path $psql)) { throw "native PG17 binary missing" }
+          $v = & $psql -h 127.0.0.1 -U postgres -d postgres -tAc "SHOW server_version_num"
+          if ($LASTEXITCODE -ne 0 -or [int]($v.Trim()) -lt 170000 -or [int]($v.Trim()) -ge 180000) { throw "real PG17 required: $v" }
+          & $psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE aic_p1a"
+          if ($LASTEXITCODE -ne 0) { throw "cannot create native Windows PG17 database" }
+      - name: Install actual PostgreSQL test dependencies
+        shell: pwsh
+        run: |
+          python -m pip install -r requirements-test.txt
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install asyncpg==0.32.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Pin old PR494 code and real historical old-31a migration
+        shell: pwsh
+        run: |
+          git fetch --no-tags origin refs/pull/494/head
+          if ($LASTEXITCODE -ne 0) { throw "cannot fetch pinned PR494" }
+          $actual = (git rev-parse FETCH_HEAD).Trim()
+          if ($actual -ne "f7efcd63c479626d43733ad836fc092db84a8506") { throw "PR494 source drift: $actual" }
+          $old = Join-Path $env:RUNNER_TEMP "aic31b-old-pr494"
+          git worktree add --detach $old $actual
+          if ($LASTEXITCODE -ne 0) { throw "old PR494 worktree unavailable" }
+          "AIC31B_OLD494_WORKTREE=$old" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Strict native Windows old31a stamped CLI -> 31b + UBQ25/26
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path aic31b-pg17-evidence | Out-Null
+          python -m pytest -q -ra --junitxml=aic31b-pg17-evidence/windows.xml se/tests/integration/test_aic0_31b_composed_pg17.py "se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[postgresql]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -c 'from xml.etree import ElementTree as E
+          root=E.parse("aic31b-pg17-evidence/windows.xml").getroot()
+          suites=[root] if root.tag=="testsuite" else root.findall("testsuite")
+          cases=[c.get("name","") for s in suites for c in s.findall("testcase")]
+          assert sum(int(s.get("tests","0")) for s in suites)==3,cases
+          assert all(int(s.get("failures","0"))==0 and int(s.get("errors","0"))==0 and int(s.get("skipped","0"))==0 for s in suites),cases
+          assert any("actual_stamped_old31a" in c for c in cases)
+          assert any("pristine_to_31b" in c for c in cases)
+          assert any("full_historical_alembic_chain" in c for c in cases)'
+          if ($LASTEXITCODE -ne 0) { throw "native Windows strict composed PG17 matrix failed" }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: aic31b-composed-windows
+          path: aic31b-pg17-evidence/
+          if-no-files-found: warn
