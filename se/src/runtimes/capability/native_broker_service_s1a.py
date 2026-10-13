@@ -85,7 +85,8 @@ def _windows_scm(config: dict) -> int:
     state = {"status_handle": None, "failure": False}
 
     def set_status(current: int, *, accept: int = 0, error: int = 0) -> None:
-        status = SERVICE_STATUS(SERVICE_WIN32_OWN_PROCESS, current, accept, error, 0, 0, 2000)
+        status = SERVICE_STATUS(SERVICE_WIN32_OWN_PROCESS, current, accept, error, 0, 0,
+                                5000 if current == SERVICE_STOP_PENDING else 2000)
         if not adv.SetServiceStatus(state["status_handle"], ctypes.byref(status)):
             raise S1AProtocolError("SCM status publication failed")
 
