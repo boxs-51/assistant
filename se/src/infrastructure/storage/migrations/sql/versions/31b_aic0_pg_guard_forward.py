@@ -141,7 +141,7 @@ def _check_physical_attachments(bind, schema: str) -> None:
 
     triggers = bind.execute(sa.text("""
         SELECT t.tgname, relation.relname, proc.proname,
-               proc_ns.nspname, t.tgtype, t.tgenabled, t.tgisinternal,
+               proc_ns.nspname, t.tgtype, t.tgenabled::text, t.tgisinternal,
                t.tgattr::text
           FROM pg_catalog.pg_trigger t
           JOIN pg_catalog.pg_class relation ON relation.oid = t.tgrelid
