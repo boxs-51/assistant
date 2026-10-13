@@ -373,6 +373,8 @@ class GatewayLLMClient:
             requests.exceptions.Timeout,
             requests.exceptions.ConnectionError,
             requests.exceptions.ChunkedEncodingError,
+            requests.exceptions.ContentDecodingError,
+            requests.exceptions.JSONDecodeError,
         ) as exc:
             raise GatewayEffectOutcomeUnknown(
                 "Capability result is unknown; do not retry automatically."
