@@ -101,13 +101,62 @@ async def _drop_roles(admin, migration_role, app_role):
         await cx.exec_driver_sql(f"DROP ROLE IF EXISTS {migration_role}")
 
 
+# Use Alembic's *actual CommandLine parser/dispatcher* in its own process.
+# Only the test child adds a machine-readable SQLSTATE error witness; neither
+# env.py nor any production migration is modified to emit synthetic evidence.
+_CLI_SQLSTATE_CHILD = r"""
+import json
+import sys
+import traceback
+from alembic.config import CommandLine
+
+try:
+    CommandLine(prog="alembic").main(argv=sys.argv[1:])
+except BaseException as exc:
+    seen = set()
+    pending = [exc]
+    sqlstate = None
+    while pending:
+        item = pending.pop()
+        if id(item) in seen:
+            continue
+        seen.add(id(item))
+        code = getattr(item, "sqlstate", None) or getattr(item, "pgcode", None)
+        if isinstance(code, str) and len(code) == 5:
+            sqlstate = code
+            break
+        for key in ("orig", "__cause__", "__context__"):
+            child = getattr(item, key, None)
+            if child is not None:
+                pending.append(child)
+    print("AIC31B_CLI_SQLSTATE=" + json.dumps({"sqlstate": sqlstate}),
+          file=sys.stderr, flush=True)
+    traceback.print_exc()
+    sys.exit(96)
+"""
+
+
 def _run_actual_cli(url):
     env = dict(os.environ, ASSISTANT_ALEMBIC_DATABASE_URL=url)
     return subprocess.run(
-        [sys.executable, "-m", "alembic", "-c", "alembic.ini",
+        [sys.executable, "-c", _CLI_SQLSTATE_CHILD, "-c", "alembic.ini",
          "upgrade", REV31B],
         cwd=ROOT, env=env, capture_output=True, text=True, timeout=180,
         check=False,
+    )
+
+
+def _require_exact_cli_lock_sqlstate(result):
+    # The *failing Alembic CLI subprocess*, not a control probe or a traceback
+    # substring, must emit exactly one structured SQLSTATE 55P03 witness.
+    import json
+    assert result.returncode != 0, "Expected Alembic CLI failure"
+    marker = "AIC31B_CLI_SQLSTATE="
+    witnesses = [line[len(marker):] for line in result.stderr.splitlines()
+                 if line.startswith(marker)]
+    assert len(witnesses) == 1, "Missing/ambiguous CLI SQLSTATE witness"
+    assert json.loads(witnesses[0]) == {"sqlstate": "55P03"}, (
+        "Alembic CLI did not fail with PostgreSQL lock_not_available", witnesses
     )
 
 
@@ -208,12 +257,16 @@ async def test_pg17_ephemeral_login_barrier_drain_and_old31a_forward(
         assert failed.returncode != 0, (
             held_lock, failed.stdout[-1200:], failed.stderr[-3000:]
         )
-        details = (failed.stdout + failed.stderr).lower()
-        assert any(
-            token in details
-            for token in ("could not obtain lock", "locknotavailable",
-                          "55p03")
-        ), ("migration failed for non-lock reason", held_lock, details[-4000:])
+        # A non-lock CLI error must NOT pass merely by mentioning a lock in
+        # its traceback. Keep the negative-oracle regression in both schedules.
+        bogus = subprocess.CompletedProcess(
+            args=["alembic"], returncode=1, stdout="",
+            stderr="could not obtain lock; locknotavailable; 55P03; "
+                   "AIC31B_CLI_SQLSTATE={\\"sqlstate\\": \\"42P01\\"}",
+        )
+        with pytest.raises(AssertionError):
+            _require_exact_cli_lock_sqlstate(bogus)
+        _require_exact_cli_lock_sqlstate(failed)
         assert await _revision(mig_engine) == REV31A
 
         # PostgreSQL itself rejects NEW app-role logins while existing app
