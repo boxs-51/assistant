@@ -33,11 +33,12 @@ class _QuotaProbe:
         self.reserve_calls = []
         self.settle_calls = []
         self.release_calls = []
+        self.admissions = {}
 
     async def reserve_tool_call(self, **kwargs):
         self.reserve_calls.append(dict(kwargs))
         invocation_id = str(kwargs["invocation_id"])
-        return ToolQuotaAdmission(
+        admission = ToolQuotaAdmission(
             owner_user_id=str(kwargs["identity"].user_id),
             invocation_id=invocation_id,
             capability_id=str(kwargs["capability_id"]),
@@ -47,9 +48,11 @@ class _QuotaProbe:
             window_epoch=1,
             reservation_state="RESERVED",
         )
+        self.admissions[invocation_id] = admission
+        return admission
 
     async def find_tool_call_authority(self, **kwargs):
-        return None
+        return self.admissions.get(str(kwargs["invocation_id"]))
 
     async def settle_tool_call(self, admission):
         self.settle_calls.append(admission)
@@ -265,8 +268,10 @@ async def test_ubq3_remote_terminal_error_untrusted_retry_hint_is_clamped(
     assert persisted.error is not None
     assert persisted.error["retryable"] is False
     assert realtime.calls == 1
-    assert len(quota.reserve_calls) == 2
-    assert len(quota.settle_calls) >= 1
+    # Same-ID terminal read-through finds the original durable quota
+    # authority; no fresh charge and no second remote dispatch.
+    assert len(quota.reserve_calls) == 1
+    assert len(quota.settle_calls) == 2
     assert quota.release_calls == []
 
 
