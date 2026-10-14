@@ -22,7 +22,7 @@ Do not assume STOP of one Compose gateway, role NOLOGIN alone, REVOKE CONNECT, a
 | O4 Enforced admission + drain | External deploy/DB admission controller rejects new work AND connections for every identified principal; physical sessions and long-lived transactions drained; no autostart/race re-entry | HOLD |
 | O5 Immutable target | Approved artifact includes exact reviewed PR494 preflight, PR496 secure 31a, PR504 repaired 31b; unique graph 30a→31a→31b, no sibling 32a and no hidden Alembic stamps or manual ALTER | HOLD |
 | O6 Quiescent single execution | A single privileged Alembic CLI upgrades only to 31b under the same global exclusion; no automatic retry, no downgrade | HOLD |
-| O7 Verification before reopen | Independent connection sees 31b revision, physical four trigger bindings, three pinned function configs, RETIRED marker nonreuse/known-corruption refusal, privilege audit and no unknown session; signed reviewer evidence | HOLD |
+| O7 Verification before reopen | Independent connection sees 31b revision, physical four trigger bindings/shape including OIDs and users.id attnum, three exact pinned function configs, RETIRED marker nonreuse/known-corruption refusal, privilege audit and no unknown session; signed reviewer evidence | HOLD |
 | O8 Crash, timeout, 55P03 | On any ambiguity, maintain isolation and block application/native Agent; inspect actual commit/stamp/guards on new connection and retry only by explicit operator decision after new quiescence | HOLD |
 | O9 Data lifecycle handoff | #426/#141/#74/#15 Task/account erasure/retention disposition separate from AIC DB repair; #381 TBO P0-S 32a not auto-reserved | HOLD |
 
@@ -107,14 +107,70 @@ SELECT pid, usename, application_name, client_addr, state,
  WHERE datname = current_database() AND pid <> pg_catalog.pg_backend_pid()
  ORDER BY xact_start NULLS LAST, backend_start;
 
-SELECT r.rolname,
-       has_database_privilege(r.rolname, current_database(), 'CONNECT') AS can_connect,
-       has_database_privilege(r.rolname, current_database(), 'TEMPORARY') AS can_temp,
-       has_schema_privilege(r.rolname, 'public', 'CREATE') AS can_create_public,
-       has_table_privilege(r.rolname, 'public.users', 'TRIGGER') AS can_trigger_users,
-       has_table_privilege(r.rolname, 'public.users', 'TRUNCATE') AS can_truncate_users
-  FROM pg_catalog.pg_roles r
- WHERE r.rolcanlogin ORDER BY r.rolname;
+-- O3: run this effective-access matrix ONLY when all three physical AIC
+-- relations exist (at installed 31a/31b). For 30a, record NOT APPLICABLE;
+-- do NOT substitute NULL or skip a 31a+ object that should exist.
+-- Each row names the original LOGIN, the role it can SET to, and the
+-- physical target. Direct login privileges and SET ROLE paths are distinct.
+-- Cross-check CREATEROLE/ADMIN OPTION mutation rights and SUPERUSER manually:
+-- a static privilege matrix cannot enumerate future grants or owner DDL.
+WITH target AS (
+    SELECT c.oid AS table_oid, n.nspname, c.relname, c.relowner,
+           c.relkind
+      FROM pg_catalog.pg_class c
+      JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relname IN (
+           'users', 'aic_instance_reservations', 'aic_instance_live'
+       ) AND c.relkind IN ('r', 'p')
+), effective AS (
+    SELECT login.oid AS login_oid, login.rolname AS login_name,
+           login.rolsuper AS login_superuser,
+           login.rolcreaterole AS login_can_manage_roles,
+           acting.oid AS acting_oid, acting.rolname AS acting_name,
+           acting.rolsuper AS acting_superuser,
+           (login.oid = acting.oid) AS is_direct_login,
+           (login.oid <> acting.oid
+             AND pg_catalog.pg_has_role(login.oid, acting.oid, 'SET'))
+             AS set_role_reachable
+      FROM pg_catalog.pg_roles login
+      CROSS JOIN pg_catalog.pg_roles acting
+     WHERE login.rolcanlogin
+       AND (login.oid = acting.oid
+         OR pg_catalog.pg_has_role(login.oid, acting.oid, 'SET'))
+)
+SELECT e.login_name, e.acting_name, e.is_direct_login,
+       e.set_role_reachable, e.login_superuser,
+       e.login_can_manage_roles, e.acting_superuser,
+       t.nspname, t.relname, t.table_oid,
+       t.relowner::pg_catalog.regrole AS table_owner,
+       (t.relowner = e.acting_oid) AS acting_owns_table,
+       pg_catalog.has_table_privilege(e.acting_oid, t.table_oid,
+                                      'TRIGGER') AS can_trigger,
+       pg_catalog.has_table_privilege(e.acting_oid, t.table_oid,
+                                      'TRUNCATE') AS can_truncate,
+       pg_catalog.has_table_privilege(e.acting_oid, t.table_oid,
+                                      'DELETE') AS can_delete,
+       pg_catalog.has_table_privilege(e.acting_oid, t.table_oid,
+                                      'UPDATE') AS can_update,
+       pg_catalog.has_database_privilege(e.acting_oid,
+                  current_database(), 'CONNECT') AS can_connect,
+       pg_catalog.has_database_privilege(e.acting_oid,
+                  current_database(), 'TEMPORARY') AS can_temp,
+       pg_catalog.has_schema_privilege(e.acting_oid, 'public',
+                  'CREATE') AS can_create_public
+  FROM effective e CROSS JOIN target t
+ ORDER BY e.login_name, e.acting_name, t.relname;
+
+-- Mandatory O3 completeness check at installed 31a+: exactly three
+-- physical relations. If this returns fewer than three, STOP.
+SELECT count(*) AS observed_aic_relations
+  FROM pg_catalog.pg_class c
+  JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+ WHERE n.nspname = 'public'
+   AND c.relname IN (
+     'users','aic_instance_reservations','aic_instance_live')
+   AND c.relkind IN ('r', 'p');
 
 SELECT a.pid, a.usename, a.application_name, a.state,
        l.locktype, l.mode, l.granted, l.relation::pg_catalog.regclass AS relation
@@ -140,20 +196,73 @@ SELECT p.proname, n.nspname AS function_schema, p.prosecdef, p.proconfig,
        ('aic_id_guard','aic_live_guard','aic_user_guard')
  ORDER BY p.proname;
 
-SELECT t.tgname, n.nspname AS relation_schema, c.relname AS relation_name,
-       t.tgtype, t.tgenabled, t.tgattr::text, t.tgqual IS NULL AS no_when,
-       t.tgnargs, octet_length(t.tgargs) AS args_bytes,
-       pn.nspname AS function_schema, p.proname AS function_name
+-- O7: physical 31a/31b attachment oracle; execute only after all three
+-- AIC tables exist. t.oid/tgrelid/tgfoid are physical IDs, not names
+-- resolved through the observing connection's search_path.
+-- The "shape_ok" test intentionally matches PR504._check_physical_attachments.
+WITH expected(tgname, relname, proname, event_mask) AS (
+    VALUES
+      ('trg_aic_id_guard',    'aic_instance_reservations','aic_id_guard',31),
+      ('trg_aic_live_guard',  'aic_instance_live',        'aic_live_guard',31),
+      ('trg_aic_user_delete','users',                    'aic_user_guard',11),
+      ('trg_aic_user_rekey', 'users',                    'aic_user_guard',19)
+), observed AS (
+    SELECT t.oid AS trigger_oid, t.tgname, t.tgrelid,
+           t.tgfoid, c.relname AS relation_name, c.relkind,
+           n.nspname AS relation_schema, p.oid AS function_oid,
+           p.proname AS function_name, pn.nspname AS function_schema,
+           t.tgtype, t.tgenabled, t.tgisinternal, t.tgattr::text AS tgattr,
+           t.tgqual IS NULL AS no_when, t.tgnargs,
+           pg_catalog.octet_length(t.tgargs) AS args_bytes,
+           t.tgconstraint, t.tgdeferrable, t.tginitdeferred,
+           (SELECT a.attnum::text
+              FROM pg_catalog.pg_attribute a
+             WHERE a.attrelid=t.tgrelid AND a.attname='id'
+               AND a.attnum>0 AND NOT a.attisdropped) AS id_attnum
+      FROM pg_catalog.pg_trigger t
+      JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid
+      JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
+      JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
+      JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
+     WHERE n.nspname='public'
+       AND t.tgname IN
+         ('trg_aic_id_guard','trg_aic_live_guard',
+          'trg_aic_user_delete','trg_aic_user_rekey')
+)
+SELECT o.*, e.event_mask AS expected_event_mask,
+       (
+         o.relation_schema='public' AND o.function_schema='public'
+         AND o.relation_name=e.relname AND o.function_name=e.proname
+         AND o.relkind IN ('r','p') AND o.tgtype=e.event_mask
+         AND o.tgenabled='O' AND NOT o.tgisinternal AND o.no_when
+         AND o.tgnargs=0 AND o.args_bytes=0 AND o.tgconstraint=0
+         AND NOT o.tgdeferrable AND NOT o.tginitdeferred
+         AND CASE WHEN o.tgname='trg_aic_user_rekey'
+             THEN o.id_attnum IS NOT NULL AND
+                  btrim(o.tgattr)=o.id_attnum
+             ELSE btrim(o.tgattr)='' END
+       ) AS shape_ok
+  FROM observed o JOIN expected e ON e.tgname=o.tgname
+ ORDER BY o.tgname, o.trigger_oid;
+
+-- Strict O7 acceptance: EXACTLY four observed physical trigger rows,
+-- one distinct expected name each, and ALL shape_ok=true. Also verify no
+-- matching guard trigger name is attached to an unexpected other schema,
+-- by running this unfiltered duplicate/rogue-name inventory:
+SELECT t.oid AS trigger_oid, t.tgname, t.tgrelid,
+       t.tgfoid, n.nspname AS schema_name, c.relname
   FROM pg_catalog.pg_trigger t
   JOIN pg_catalog.pg_class c ON c.oid=t.tgrelid
   JOIN pg_catalog.pg_namespace n ON n.oid=c.relnamespace
-  JOIN pg_catalog.pg_proc p ON p.oid=t.tgfoid
-  JOIN pg_catalog.pg_namespace pn ON pn.oid=p.pronamespace
- WHERE n.nspname='public' AND t.tgname IN
+ WHERE t.tgname IN
        ('trg_aic_id_guard','trg_aic_live_guard',
         'trg_aic_user_delete','trg_aic_user_rekey')
- ORDER BY t.tgname;
+ ORDER BY t.tgname, n.nspname, c.relname;
 ~~~
+
+**O3 three-table privilege acceptance (P2-RUNBOOK-ROLE-ACL-01):** For an installed 31a/31b database, the completeness count MUST be 3 and every login/effective-role/table combination MUST be inspected. An ordinary application/worker/reader/legacy identity that can directly, by inherited grants, or after `SET ROLE` exercise TRUNCATE or ownership/DDL on the reservation or live table can erase permanent RETIRED evidence (including via TRUNCATE ... CASCADE); STOP, not PASS. Reconcile the graph with CREATEROLE/ADMIN OPTION, superusers, owners, schema CREATE, default/PUBLIC grants, role administration and *actual* DSNs/poolers. A NOLOGIN owner is not isolated if an app LOGIN can reach it. The SQL only inventories current authority; it does NOT enforce an admission barrier and cannot prove the role topology complete without operator evidence. At 30a mark the AIC-specific matrix NOT APPLICABLE, do not attempt the three-table or regclass query, and repeat at 31a/31b before O7.
+
+**O7 physical acceptance (P2-RUNBOOK-PHYSICAL-READTHROUGH-02):** Four rows with four distinct names, all `shape_ok=true`, expected real-schema `tgrelid`/`tgfoid` relation-function pairs and event masks 31/31/11/19 are mandatory. Capture actual OIDs, the `users.id` physical `attnum` for rekey, and negative/rogue object inventory. Reject missing, duplicate, disabled, deferred, altered-WHEN, argument-bearing, or wrong-target triggers. Separately require exactly three zero-argument, non-SECURITY-DEFINER PL/pgSQL trigger-returning functions and `proconfig` equal to the trusted one-entry `search_path=pg_catalog, public, pg_temp` array on a physically verified public-schema target. Do not treat an OID snapshot alone as the post-commit assertion; re-query on a fresh connection. Execute these read-only queries on an approved actual PostgreSQL17 staging clone and retain redacted outputs before any operator claim of O7 PASS. At 30a this is NOT APPLICABLE; a 31a-installed DB with missing objects is STOP.
 
 **Preflight interpretation:** a database currently stamped 30a does not yet have 31a AIC tables. Do not run their regclass or trigger queries prematurely; mark these as NOT APPLICABLE until a target schema is actually present. For already-stamped 31a, check all three relations exist and require intact physical attachments; corrupt or disabled triggers or unexpected RETIRED→LIVE data is STOP, not an opportunity to silently repair data. Role privilege and ownership queries must be reviewed **together**: a NOLOGIN owner can be reached by `SET ROLE`; a superuser can bypass ordinary ACLs; ownership permits DDL independently of GRANTs. Also, `CREATEROLE` with membership `ADMIN OPTION` may permit an actor to grant itself a new `SET`/`INHERIT` path even when its CURRENT `pg_has_role(...,'SET')` is false. Review both current authority and the ability to change memberships; block grants/role administration as part of admission freeze. Default/PUBLIC grants and external principals require environment-specific reconciliation. A missing or ambiguous membership edge, inherited/SET/ADMIN option, CREATEROLE mutation path, owner/ACL or external login is O3=HOLD, not PASS.
 
@@ -208,6 +317,6 @@ The **GitHub PR494 HEAD and PR506 file blobs were independently re-fetched and m
 
 ## 5. Evidence artifact to submit for independent review
 
-Redacted operator identity and change ticket; exact approved source/tree SHA; physical cluster/database identity (no credentials); current Alembic revision and unique graph; signed completeness of all service/role inventories; how the admission barrier denies each enumerated actor including supervisors and legacy migrators; actual before/after session/transaction/lock snapshots; direct/transitive role membership incl. ADMIN/SET/INHERIT, actual database/schema/table/function ownership and ACL/PUBLIC/default grants, explicit superuser bypass assessment; first CLI exit/SQLSTATE; exact post-commit trigger/proc/catalog snapshots; interruption/lock-negative rehearsal on an equivalent staging deployment topology Linux/native Windows; rollback/quarantine and reopening decision logs; signed independent operational/security review.
+Redacted operator identity and change ticket; exact approved source/tree SHA; physical cluster/database identity (no credentials); current Alembic revision and unique graph; signed completeness of all service/role inventories; how the admission barrier denies each enumerated actor including supervisors and legacy migrators; actual before/after session/transaction/lock snapshots; direct/transitive role membership incl. ADMIN/SET/INHERIT, effective LOGIN-to-SET-role privileges against all three physical AIC tables (including TRUNCATE, DDL/owner, and CASCADE), actual database/schema/table/function ownership and ACL/PUBLIC/default grants, explicit superuser bypass assessment; first CLI exit/SQLSTATE; exact post-commit trigger/proc/catalog snapshots; interruption/lock-negative rehearsal on an equivalent staging deployment topology Linux/native Windows; rollback/quarantine and reopening decision logs; signed independent operational/security review.
 
 **Gate remains:** ENFORCED_QUIESCENCE_SELECTED_CONDITIONALLY / NOT IMPLEMENTED IN PRODUCTION. This is an evidence-and-design aid, not executable code, not a deployment, not a production PASS, not erasure approval, not merge or native execution permission.
