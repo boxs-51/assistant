@@ -231,11 +231,13 @@ def test_redis_driver_propagates_atomic_del_receipt():
     async def check():
         driver = RedisDriver(DriverConfig())
         fake_client = type("_RedisDelClient", (), {})()
-        fake_client.delete = AsyncMock(side_effect=[1, 0])
+        fake_client.delete = AsyncMock(side_effect=[1, 0, True])
         driver._client = fake_client
         assert await driver.delete("cached-key") == 1
         assert await driver.delete("cached-key") == 0
-        assert fake_client.delete.await_count == 2
+        with pytest.raises(RuntimeError, match="unconfirmed deletion count"):
+            await driver.delete("cached-key")
+        assert fake_client.delete.await_count == 3
 
     asyncio.run(check())
 
