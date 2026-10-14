@@ -40,12 +40,18 @@ class SessionRepository(BaseRepository):
             logger.warning("Redis is not available. Cannot fetch token.", error=str(e))
             return None  # Trả về None tạm thời
 
-    async def delete_token(self, token_hash: str):
-        """Xóa một refresh token khỏi cache."""
+    async def delete_token(self, token_hash: str) -> int:
+        """Return the atomic cache deletion count; never invent a revoke ACK."""
         key = f"{self.prefix}{token_hash}"
         try:
-            await self.cache_driver.delete(key)
-            logger.debug("Refresh token deleted from cache", key=key)
+            deleted = await self.cache_driver.delete(key)
+            # Reject void, boolean and unexpected counts from nonconforming
+            # drivers rather than treating a no-op as successful revocation.
+            if type(deleted) is not int or deleted not in (0, 1):
+                raise RuntimeError("Refresh token cache deletion was not confirmed")
+            if deleted:
+                logger.debug("Refresh token deleted from cache", key=key)
+            return deleted
         except (RedisError, RuntimeError) as e:
-            logger.warning("Redis is not available. Cannot delete token.", error=str(e))
-            raise  # P0A: propagate failed revocation; caller must not ACK HTTP 204.
+            logger.warning("Refresh token cache deletion failed", error=str(e))
+            raise  # P0A: backend failures must propagate, never HTTP 204.
