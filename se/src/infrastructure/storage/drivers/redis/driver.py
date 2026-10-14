@@ -158,7 +158,11 @@ class RedisDriver(CacheDriver):
         try:
             # Redis DEL is atomic and returns the number of removed keys.
             # Do not discard this receipt: a no-op must not ACK revocation.
-            return int(await client.delete(key))
+            deleted = await client.delete(key)
+            # Never coerce True, None, a float or a string to an affected count.
+            if type(deleted) is not int:
+                raise RuntimeError("Redis DEL returned an unconfirmed deletion count")
+            return deleted
 
         except RedisError:
             self._connected = False
