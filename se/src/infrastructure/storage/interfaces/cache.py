@@ -52,6 +52,10 @@ class CacheDriver(ABC):
         pass
 
     @abstractmethod
-    async def delete(self, key: str) -> None:
-        """Xóa một key khỏi cache."""
+    async def delete(self, key: str) -> int:
+        """Atomically delete one key; return 1 if removed, 0 if absent.
+
+        A backend failure must raise, never return 0 or None. Callers that
+        require confirmed one-use consumption must inspect the result.
+        """
         pass
