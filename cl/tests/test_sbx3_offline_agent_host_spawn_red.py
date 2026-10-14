@@ -103,8 +103,9 @@ def test_offline_agent_approved_terminal_never_spawns_host(
         f"reached host subprocess.Popen {count} time(s)"
     )
     assert not marker.exists(), "RED P0: model-originated host command executed"
-    assert responses[0].is_error is True, "Model-originated process was not denied"
-    assert "AGENT_TOOL_POLICY_DENIED" in str(responses[0].content)
+    assert responses[0].role == "tool", "Denied call must return a tool message"
+    assert isinstance(responses[0].content, str)
+    assert responses[0].content.startswith("AGENT_TOOL_POLICY_DENIED:")
 
 
 def test_offline_agent_mixed_parallel_batch_denies_all_process_spawns(
@@ -140,6 +141,8 @@ def test_offline_agent_mixed_parallel_batch_denies_all_process_spawns(
     assert count == 0, "RED P0: parallel legacy Agent tool batch spawned host process"
     assert not any(marker.exists() for marker in markers)
     assert all(
-        item.is_error and "AGENT_TOOL_POLICY_DENIED" in str(item.content)
+        item.role == "tool"
+        and isinstance(item.content, str)
+        and item.content.startswith("AGENT_TOOL_POLICY_DENIED:")
         for item in results
     )
