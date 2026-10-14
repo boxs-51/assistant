@@ -10,6 +10,7 @@ on:
       - "se/src/infrastructure/storage/drivers/inmemory/driver.py"
       - "se/src/transport/gateway/authentication/services/token_service.py"
       - "se/src/transport/gateway/api/v1/auth_router.py"
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -35,7 +36,7 @@ jobs:
             requirements-runtime.txt
       - name: Install test dependencies
         run: python -m pip install -r requirements-test.txt
-      - name: RED-first: real auth chain and redis-py socket failures (EXPECTED TO FAIL)
+      - name: "RED-first: real auth chain and redis-py socket failures (EXPECTED TO FAIL)"
         run: >-
           python -m pytest -q -ra
           se/tests/integration/test_ae359_logout_cache_redfirst.py
