@@ -1,0 +1,85 @@
+name: AIC381 D0 Real etcd RED-First (Evidence Only)
+on:
+  pull_request:
+    paths:
+      - "se/tests/integration/aic31b_d0_real_etcd_red_first.py"
+      - ".github/workflows/aic381-d0-real-etcd-red-first.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  d0-real-etcd:
+    name: D0 R01-R18 ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2022]
+    steps:
+      - name: Checkout exact unmerged evidence tree
+        uses: actions/checkout@v4
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install isolated test PKI dependency
+        run: python -m pip install "cryptography==46.0.5"
+      - name: Download official etcd v3.7.2 for actual OS, verify SHA256SUMS
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $version = "v3.7.2"
+          $asset = if ($IsWindows) { "etcd-$version-windows-amd64.zip" } else { "etcd-$version-linux-amd64.tar.gz" }
+          $prefix = "https://github.com/etcd-io/etcd/releases/download/$version"
+          $dst = Join-Path $env:RUNNER_TEMP $asset
+          $checksums = Join-Path $env:RUNNER_TEMP "SHA256SUMS"
+          Invoke-WebRequest -Uri "$prefix/$asset" -OutFile $dst -MaximumRedirection 10
+          Invoke-WebRequest -Uri "$prefix/SHA256SUMS" -OutFile $checksums -MaximumRedirection 10
+          $line = @(Get-Content $checksums | Where-Object { $_.Trim().EndsWith($asset) })
+          if ($line.Count -ne 1) { throw "Pinned SHA256SUMS asset row missing/ambiguous" }
+          $expected = ($line[0].Trim() -split '\s+')[0].ToLowerInvariant()
+          $actual = (Get-FileHash -Algorithm SHA256 $dst).Hash.ToLowerInvariant()
+          if ($expected -notmatch '^[a-f0-9]{64}$' -or $expected -ne $actual) { throw "Official etcd SHA256 mismatch" }
+          Write-Host "Verified official $asset SHA256=$actual"
+          $target = Join-Path $env:RUNNER_TEMP "aic381-etcd"
+          New-Item -ItemType Directory -Path $target -Force | Out-Null
+          if ($IsWindows) {
+            Expand-Archive -Path $dst -DestinationPath $target -Force
+          } else {
+            tar -xzf $dst -C $target --strip-components=1
+            if ($LASTEXITCODE -ne 0) { throw "tar extraction failed" }
+          }
+          $suffix = if ($IsWindows) { "etcd.exe" } else { "etcd" }
+          $found = Get-ChildItem -Path $target -Recurse -File | Where-Object { $_.Name -eq $suffix } | Select-Object -First 1
+          if (-not $found) { throw "No native etcd binary in archive" }
+          $bin = $found.Directory.FullName
+          Add-Content -Path $env:GITHUB_ENV -Value "ETCD_BIN_DIR=$bin"
+          & (Join-Path $bin $suffix) --version
+          if ($LASTEXITCODE -ne 0) { throw "Native etcd executable failed" }
+          Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value "Verified official etcd $version $asset SHA256=$actual"
+      - name: Real etcd R01-R18 strict expected-RED experiment
+        id: redfirst
+        env:
+          PYTHONPATH: ${{ github.workspace }}
+          PYTHONUNBUFFERED: "1"
+        run: python se/tests/integration/aic31b_d0_real_etcd_red_first.py
+        continue-on-error: true
+      - name: Upload unmodified per-OS raw witness even on RED
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: aic381-d0-real-etcd-${{ matrix.os }}-${{ github.run_id }}
+          path: d0_evidence/
+          if-no-files-found: warn
+          retention-days: 14
+      - name: Enforce RED-first non-certification
+        if: always()
+        shell: pwsh
+        run: |
+          if ("${{ steps.redfirst.outcome }}" -ne "success") {
+            Write-Host "RED-first contract did NOT pass: exact R01-R18 statuses in artifacts."
+            exit 1
+          }
