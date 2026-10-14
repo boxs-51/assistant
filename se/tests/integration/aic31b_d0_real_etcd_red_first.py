@@ -71,6 +71,7 @@ def free_port():
         return sock.getsockname()[1]
 
 def make_pki(directory):
+    directory.mkdir(parents=True, exist_ok=True)
     now = datetime.datetime.now(datetime.timezone.utc)
     cakey = rsa.generate_private_key(public_exponent=65537, key_size=2048)
     caname = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "AIC31B disposable CA")])
