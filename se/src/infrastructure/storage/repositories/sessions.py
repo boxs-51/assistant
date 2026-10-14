@@ -48,3 +48,4 @@ class SessionRepository(BaseRepository):
             logger.debug("Refresh token deleted from cache", key=key)
         except (RedisError, RuntimeError) as e:
             logger.warning("Redis is not available. Cannot delete token.", error=str(e))
+            raise  # P0A: propagate failed revocation; caller must not ACK HTTP 204.
