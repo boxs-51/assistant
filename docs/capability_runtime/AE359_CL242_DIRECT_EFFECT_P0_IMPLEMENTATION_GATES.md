@@ -47,6 +47,23 @@ live JWT, API key, guest, human proof or binding signatures themselves.
 No production code imports the module. Do not wire these methods directly to
 client JSON or use its bootstrap_disposable_only() in production.
 
+
+### Additional P0 discovered while tracing the real logout endpoint
+
+At main `se/src/transport/gateway/api/v1/auth_router.py`, the /logout
+handler catches **all Exceptions** from auth_facade.logout and still returns
+204 NO_CONTENT. Thus even refresh-token deletion failure gets a success ACK.
+`LOGOUT_ACK_SEMANTICS=FAIL_P0`. Production must return a non-success / strict
+UNKNOWN on failed registry/revoke/drain transaction, and distinguish a confirmed
+server revoke ACK from a separately witnessed PHYSICAL_NO_POST_ACK_START ACK.
+It must not return 204 after a failed revoke or missing authoritative session.
+
+Further exact source observation: refresh_access_token calls create_user_tokens,
+which also persists a newly minted refresh hash although refresh endpoint
+returns only an access token. Confirm token-family/session lineage and orphan
+refresh-hash behavior with the authentication owner; do not assume a stable
+family relation from existing JWT jti.
+
 ## Production target: immutable identity, no caller authority
 
 Require a trusted server auth service to derive (never receive as a model/JS
