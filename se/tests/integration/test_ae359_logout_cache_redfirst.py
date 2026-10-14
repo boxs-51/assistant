@@ -149,3 +149,110 @@ def test_successful_existing_token_deletion_retains_scoped_204():
         response = _logout(client)
     assert response.status_code == 204
     assert asyncio.run(driver.get(_key())) is None
+
+
+# P0B positive and adversarial contract checks. The original five RED-first
+# witness tests above are unchanged from frozen PR535.
+def test_missing_refresh_hash_returns_401_with_no_revocation_ack():
+    driver = InMemoryDriver(DriverConfig())
+    asyncio.run(driver.connect())
+    with _client_with_real_service_chain(driver) as client:
+        response = _logout(client)
+    assert response.status_code == 401
+    assert REFRESH not in response.text
+
+
+def test_backend_void_noop_delete_returns_503_not_204():
+    driver = _NoOpDeleteCache()
+    asyncio.run(driver.connect())
+    asyncio.run(driver.set(_key(), USER_ID, expire=3600))
+    with _client_with_real_service_chain(driver) as client:
+        response = _logout(client)
+    assert response.status_code == 503
+    assert asyncio.run(driver.get(_key())) == USER_ID
+    assert REFRESH not in response.text
+
+
+@pytest.mark.parametrize("unconfirmed", [None, True, False, -1, 2])
+def test_nonconforming_backend_delete_receipt_fails_closed(unconfirmed):
+    class _MalformedReceiptCache(InMemoryDriver):
+        async def delete(self, key):
+            return unconfirmed
+
+    driver = _MalformedReceiptCache(DriverConfig())
+    asyncio.run(driver.connect())
+    asyncio.run(driver.set(_key(), USER_ID, expire=3600))
+    with _client_with_real_service_chain(driver) as client:
+        response = _logout(client)
+    assert response.status_code == 503
+    assert asyncio.run(driver.get(_key())) == USER_ID
+
+
+def test_inmemory_atomic_delete_count_missing_expired_and_existing():
+    import time
+
+    async def check():
+        driver = InMemoryDriver(DriverConfig())
+        await driver.connect()
+        assert await driver.delete("missing") == 0
+        await driver.set("live", "user", expire=3600)
+        assert await driver.delete("live") == 1
+        assert await driver.delete("live") == 0
+        await driver.set("expired", "user", expire=3600)
+        # Simulate an expired TTL without slowing or relying on wall time.
+        driver._expires["expired"] = time.monotonic() - 1
+        assert await driver.delete("expired") == 0
+        assert await driver.get("expired") is None
+
+    asyncio.run(check())
+
+
+def test_inmemory_two_concurrent_deletes_exactly_one_receipt():
+    async def check():
+        driver = InMemoryDriver(DriverConfig())
+        await driver.connect()
+        await driver.set(_key(), USER_ID, expire=3600)
+        repo = SessionRepository(driver)
+        receipts = await asyncio.gather(
+            repo.delete_token(hashlib.sha256(REFRESH.encode()).hexdigest()),
+            repo.delete_token(hashlib.sha256(REFRESH.encode()).hexdigest()),
+        )
+        assert sorted(receipts) == [0, 1]
+        assert await driver.get(_key()) is None
+
+    asyncio.run(check())
+
+
+def test_redis_driver_propagates_atomic_del_receipt():
+    # RedisDriver contract unit check; actual redis-py socket failure is
+    # independently covered by the unchanged RED-first test above.
+    from unittest.mock import AsyncMock
+
+    async def check():
+        driver = RedisDriver(DriverConfig())
+        fake_client = type("_RedisDelClient", (), {})()
+        fake_client.delete = AsyncMock(side_effect=[1, 0])
+        driver._client = fake_client
+        assert await driver.delete("cached-key") == 1
+        assert await driver.delete("cached-key") == 0
+        assert fake_client.delete.await_count == 2
+
+    asyncio.run(check())
+
+
+def test_otp_cache_consumer_remains_compatible_with_delete_receipt():
+    # CacheDriver.delete now reports an int; OTPStorageService ignores the
+    # successful receipt, preserving the existing OTP consume call signature.
+    from se.src.transport.gateway.authentication.services.otp_service import (
+        OTPStorageService,
+    )
+
+    async def check():
+        driver = InMemoryDriver(DriverConfig())
+        await driver.connect()
+        await driver.set("pending_reg:contract", "opaque-otp", expire=60)
+        otp = OTPStorageService(driver, uow_factory=lambda: None)
+        assert await otp._consume_cache_value("pending_reg:contract") == "opaque-otp"
+        assert await otp._consume_cache_value("pending_reg:contract") is None
+
+    asyncio.run(check())
