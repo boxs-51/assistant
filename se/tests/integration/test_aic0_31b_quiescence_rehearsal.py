@@ -261,8 +261,8 @@ async def test_pg17_ephemeral_login_barrier_drain_and_old31a_forward(
         # its traceback. Keep the negative-oracle regression in both schedules.
         bogus = subprocess.CompletedProcess(
             args=["alembic"], returncode=1, stdout="",
-            stderr="could not obtain lock; locknotavailable; 55P03; "
-                   "AIC31B_CLI_SQLSTATE={\\"sqlstate\\": \\"42P01\\"}",
+            stderr='could not obtain lock; locknotavailable; 55P03; '
+                   'AIC31B_CLI_SQLSTATE={"sqlstate": "42P01"}',
         )
         with pytest.raises(AssertionError):
             _require_exact_cli_lock_sqlstate(bogus)
