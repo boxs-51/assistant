@@ -22,6 +22,7 @@ from se.src.runtimes.capability.drivers.remote_client_driver import (
 )
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.connection.multiplexer import RemoteConnectionLost
+from se.src.runtimes.connection.realtime import RemoteCapabilityError
 from se.src.runtimes.connection.registry import ConnectionStateError
 
 
@@ -220,6 +221,52 @@ async def test_ubq3_remote_timeout_unknown_does_not_refund() -> None:
     assert realtime.calls == 1
     assert len(quota.reserve_calls) == 1
     assert quota.settle_calls == []
+    assert quota.release_calls == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "idempotency",
+    [CapabilityIdempotency.UNKNOWN, CapabilityIdempotency.NON_IDEMPOTENT],
+)
+async def test_ubq3_remote_terminal_error_untrusted_retry_hint_is_clamped(
+    idempotency: CapabilityIdempotency,
+) -> None:
+    # Remote capability.error carries a client-origin retryable=True advisory.
+    # A terminal-committed nonreplayable invocation must never turn that hint
+    # into authority for a fresh server-side effect.
+    runtime, realtime, quota = _runtime(
+        lambda envelope: RemoteCapabilityError(
+            "client claims transient failure",
+            code="CLIENT_TRANSIENT",
+            details={"source": "client"},
+            retryable=True,
+        ),
+        idempotency=idempotency,
+    )
+    invocation_id = f"inv-ubq3-remote-error-{idempotency.value}"
+
+    for _ in range(2):
+        with pytest.raises(CapabilityError) as caught:
+            await runtime.execute_capability(
+                "tool.ubq3.remote",
+                {"value": "x"},
+                _identity(),
+                invocation_id=invocation_id,
+                connection_id="conn-ubq3-remote",
+            )
+        assert caught.value.code == "CLIENT_TRANSIENT"
+        assert caught.value.retryable is False
+
+    persisted = await runtime.invocation_lifecycle.store.get(invocation_id)
+    assert persisted is not None
+    assert persisted.state is CapabilityInvocationState.FAILED
+    assert persisted.remote_outcome_state is RemoteOutcomeState.TERMINAL_COMMITTED
+    assert persisted.error is not None
+    assert persisted.error["retryable"] is False
+    assert realtime.calls == 1
+    assert len(quota.reserve_calls) == 2
+    assert len(quota.settle_calls) >= 1
     assert quota.release_calls == []
 
 
