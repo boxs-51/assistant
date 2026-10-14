@@ -125,6 +125,7 @@ class Cluster:
         self.proc = None
         self.logfile = None
         self.data = root / "first"
+        self.client_cert_auth = False  # Phase A: REST epoch/restore negative test; no RBAC claim.
     def start(self, data=None):
         self.stop()
         self.data = data or self.data
@@ -140,7 +141,7 @@ class Cluster:
                 "--cert-file=" + str(self.certdir / "server.pem"),
                 "--key-file=" + str(self.certdir / "server.key"),
                 "--trusted-ca-file=" + str(self.certdir / "ca.pem"),
-                "--client-cert-auth=true"]
+                "--client-cert-auth=" + ("true" if self.client_cert_auth else "false")]
         self.proc = subprocess.Popen(args, stdout=self.logfile, stderr=subprocess.STDOUT)
         last = None
         for _ in range(45):
@@ -326,7 +327,10 @@ def main():
                 return "HOLD", "real etcd OS hard kill/restart preserves local receipt; independent W/quorum partition unimplemented"
             attempt("R18", r18)
 
-            # Activate actual RBAC: authenticate native gRPC CN separately from HTTPS REST gateway.
+            # Activate actual RBAC: new server process with TLS client CN enforcement.
+            c.client_cert_auth = True
+            c.stop()
+            c.start(c.data)
             def auth_setup():
                 c.cli("role", "add", "root")
                 c.cli("user", "add", "root:DisposableOnly-Pw14")
