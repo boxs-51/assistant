@@ -107,6 +107,39 @@ def make_pki(directory):
             serialization.NoEncryption()))
     return directory
 
+class NativeGrpcStore:
+    """Exact Store read/CAS against native etcdctl gRPC with real server TXN."""
+    def __init__(self, cluster):
+        self.c = cluster
+
+    def read(self, target):
+        assert target == TARGET
+        output = self.c.cli("get", KEY, "--write-out=json").stdout
+        data = json.loads(output)
+        kvs = data.get("kvs", [])
+        if not kvs:
+            return None, 0
+        if len(kvs) != 1:
+            raise RuntimeError("native etcd returned duplicate/malformed range")
+        kv = kvs[0]
+        item = Record.decode(base64.b64decode(kv["value"], validate=True))
+        return item, int(kv["mod_revision"])
+
+    def cas(self, target, revision, record):
+        assert target == TARGET
+        record.validate()
+        cmp = ('version(' + json.dumps(KEY) + ') = "0"' if revision == 0 else
+               'mod(' + json.dumps(KEY) + ') = "' + str(revision) + '"')
+        # Exact etcdctl txn protocol: compares, blank, success list, blank, failure list.
+        txn = (cmp + "\n\nput " + json.dumps(KEY) + " " +
+               json.dumps(record.encode().decode("utf-8")) + "\n\n")
+        result = self.c.cli("txn", input=txn)
+        if "SUCCESS" in result.stdout:
+            return True
+        if "FAILURE" in result.stdout:
+            return False
+        raise RuntimeError("no real native server CAS outcome: " + result.stdout[:180])
+
 class Cluster:
     def __init__(self, root):
         self.root = root
@@ -177,7 +210,7 @@ class Cluster:
             self.logfile.close()
             self.logfile = None
         self.proc = None
-    def cli(self, *argv, identity="operator", root=False, check=True):
+    def cli(self, *argv, identity="operator", root=False, check=True, input=None):
         cmd = [str(self.ctl), "--endpoints=" + self.endpoint,
                "--cacert=" + str(self.certdir / "ca.pem"),
                "--cert=" + str(self.certdir / (identity + ".pem")),
@@ -186,7 +219,7 @@ class Cluster:
         if root:
             cmd += ["--user=root:DisposableOnly-Pw14"]
         cmd += [str(v) for v in argv]
-        run = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        run = subprocess.run(cmd, input=input, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                              text=True, timeout=15)
         if check and run.returncode != 0:
             raise RuntimeError("etcdctl command failed [" + str(argv[0]) +
@@ -194,9 +227,10 @@ class Cluster:
                                " stderr=" + run.stderr[:240])
         return run
     def store(self):
-        return EtcdV3Store(endpoint=self.endpoint, ca=str(self.certdir / "ca.pem"),
-                cert=str(self.certdir / "operator.pem"),
-                key=str(self.certdir / "operator.key"))
+        # This adapter exercises the unmodified PR519 DenyOnlyBarrier algorithm
+        # against REAL etcd through native gRPC etcdctl. It is NOT the production
+        # EtcdV3Store REST gateway, which independently fails (R06).
+        return NativeGrpcStore(self)
     def barrier(self, actor="operator", operator="operator"):
         return DenyOnlyBarrier(
              store=self.store(), target_sha256=TARGET,
@@ -293,18 +327,24 @@ def main():
 
             def r15():
                 c.cli("del", KEY)
-                snippet = ("import os; from ops.aic31b.barrier import DenyOnlyBarrier,EtcdV3Store,certificate_sha256; "
-                  "from pathlib import Path; c=Path(" + repr(str(c.certdir)) + "); "
-                  "f=lambda n: certificate_sha256(str(c/(n+'.pem'))); "
-                  "s=EtcdV3Store(endpoint=" + repr(c.endpoint) +
-                  ",ca=str(c/'ca.pem'),cert=str(c/'operator.pem'),key=str(c/'operator.key')); "
-                  "b=DenyOnlyBarrier(store=s,target_sha256=" + repr(TARGET) +
-                  ",actor_cert_sha256=f('operator'),operator_cert_sha256=f('operator'),reviewer_cert_sha256=f('reviewer')); "
-                  "b.seal(expected_epoch=0,ticket='R15WRITE'); os._exit(73)")
-                died = subprocess.run([sys.executable, "-c", snippet], timeout=20)
+                operator = certificate_sha256(str(c.certdir / "operator.pem"))
+                intended = Record(TARGET, 1, "SEAL_REQUESTED", "R15WRITE", operator)
+                txn = ('version(' + json.dumps(KEY) + ') = "0"\n\nput ' +
+                       json.dumps(KEY) + ' ' + json.dumps(intended.encode().decode()) +
+                       '\n\n')
+                binary = str(c.ctl)
+                flags = ['--endpoints=' + c.endpoint,
+                         '--cacert=' + str(c.certdir / 'ca.pem'),
+                         '--cert=' + str(c.certdir / 'operator.pem'),
+                         '--key=' + str(c.certdir / 'operator.key')]
+                payload = ('import os,subprocess; cmd=' + repr([binary] + flags + ['txn']) +
+                           '; txn=' + repr(txn) +
+                           '; r=subprocess.run(cmd,input=txn,text=True,capture_output=True,timeout=12)' +
+                           '; os._exit(73 if r.returncode==0 and "SUCCESS" in r.stdout else 74)')
+                died = subprocess.run([sys.executable, "-c", payload], timeout=20)
                 read = c.store().read(TARGET)[0]
                 assert died.returncode == 73 and read and read.ticket == "R15WRITE"
-                return "HOLD", "real child os._exit(73) after etcd CAS; receipt survived, but no external W/ACK recovery"
+                return "HOLD", "real child os._exit(73) after native etcd CAS; receipt survived; no external W recovery"
             attempt("R15", r15)
 
             def r16():
