@@ -39,7 +39,7 @@ SELECT current_database() AS db, current_user AS observer,
        pg_catalog.pg_postmaster_start_time() AS started_at;
 
 SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolreplication,
-       rolcanlogin, rolbypassrls
+       rolinherit, rolcanlogin, rolbypassrls
   FROM pg_catalog.pg_roles ORDER BY rolname;
 
 -- Membership grants alone do not describe the full ability to SET ROLE:
@@ -55,6 +55,7 @@ SELECT member.rolname AS member_role, parent.rolname AS granted_role,
 
 SELECT login.rolname AS login_role, target.rolname AS reachable_role,
        pg_catalog.pg_has_role(login.oid, target.oid, 'MEMBER') AS member,
+       pg_catalog.pg_has_role(login.oid, target.oid, 'MEMBER WITH ADMIN OPTION') AS can_admin_membership,
        pg_catalog.pg_has_role(login.oid, target.oid, 'USAGE') AS inherits_authority,
        pg_catalog.pg_has_role(login.oid, target.oid, 'SET') AS can_set_role
   FROM pg_catalog.pg_roles login
@@ -154,7 +155,7 @@ SELECT t.tgname, n.nspname AS relation_schema, c.relname AS relation_name,
  ORDER BY t.tgname;
 ~~~
 
-**Preflight interpretation:** a database currently stamped 30a does not yet have 31a AIC tables. Do not run their regclass or trigger queries prematurely; mark these as NOT APPLICABLE until a target schema is actually present. For already-stamped 31a, check all three relations exist and require intact physical attachments; corrupt or disabled triggers or unexpected RETIRED→LIVE data is STOP, not an opportunity to silently repair data. Role privilege and ownership queries must be reviewed **together**: a NOLOGIN owner can be reached by `SET ROLE`; a superuser can bypass ordinary ACLs; ownership permits DDL independently of GRANTs; default/PUBLIC grants and external principals require environment-specific reconciliation. A missing or ambiguous membership edge, inheritance/SET option, owner/ACL or external login is O3=HOLD, not PASS.
+**Preflight interpretation:** a database currently stamped 30a does not yet have 31a AIC tables. Do not run their regclass or trigger queries prematurely; mark these as NOT APPLICABLE until a target schema is actually present. For already-stamped 31a, check all three relations exist and require intact physical attachments; corrupt or disabled triggers or unexpected RETIRED→LIVE data is STOP, not an opportunity to silently repair data. Role privilege and ownership queries must be reviewed **together**: a NOLOGIN owner can be reached by `SET ROLE`; a superuser can bypass ordinary ACLs; ownership permits DDL independently of GRANTs. Also, `CREATEROLE` with membership `ADMIN OPTION` may permit an actor to grant itself a new `SET`/`INHERIT` path even when its CURRENT `pg_has_role(...,'SET')` is false. Review both current authority and the ability to change memberships; block grants/role administration as part of admission freeze. Default/PUBLIC grants and external principals require environment-specific reconciliation. A missing or ambiguous membership edge, inherited/SET/ADMIN option, CREATEROLE mutation path, owner/ACL or external login is O3=HOLD, not PASS.
 
 ## 2A. Immutable PR494 source-provenance and composition verification
 
