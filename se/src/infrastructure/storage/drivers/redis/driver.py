@@ -152,11 +152,13 @@ class RedisDriver(CacheDriver):
             self._connected = False
             raise
 
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: str) -> int:
         client = self._require_client()
 
         try:
-            await client.delete(key)
+            # Redis DEL is atomic and returns the number of removed keys.
+            # Do not discard this receipt: a no-op must not ACK revocation.
+            return int(await client.delete(key))
 
         except RedisError:
             self._connected = False
