@@ -132,7 +132,7 @@ class NativeGrpcStore:
                'mod(' + json.dumps(KEY) + ') = "' + str(revision) + '"')
         # Exact etcdctl txn protocol: compares, blank, success list, blank, failure list.
         txn = (cmp + "\n\nput " + json.dumps(KEY) + " " +
-               json.dumps(record.encode().decode("utf-8")) + "\n\n")
+               json.dumps(record.encode().decode("utf-8")) + "\n\n\n")
         result = self.c.cli("txn", input=txn)
         if "SUCCESS" in result.stdout:
             return True
@@ -301,16 +301,22 @@ def main():
                 assert mod == 0
                 synchronizer = threading.Barrier(2)
                 replies = []
+                worker_errors = []
                 def worker(ticket):
-                    synchronizer.wait(timeout=8)
-                    rec = Record(TARGET, 1, "SEAL_REQUESTED", ticket,
-                                 certificate_sha256(str(c.certdir / "operator.pem")))
-                    replies.append(s.cas(TARGET, 0, rec))
+                    try:
+                        synchronizer.wait(timeout=8)
+                        rec = Record(TARGET, 1, "SEAL_REQUESTED", ticket,
+                                     certificate_sha256(str(c.certdir / "operator.pem")))
+                        replies.append(s.cas(TARGET, 0, rec))
+                    except Exception as exc:
+                        worker_errors.append(type(exc).__name__ + ": " + str(exc))
                 a = threading.Thread(target=worker, args=(label + "A",))
                 b = threading.Thread(target=worker, args=(label + "B",))
                 a.start(); b.start(); a.join(timeout=15); b.join(timeout=15)
                 if a.is_alive() or b.is_alive():
                     raise RuntimeError("race worker did not terminate")
+                if worker_errors:
+                    raise RuntimeError("real CAS worker transport failed: " + "; ".join(worker_errors))
                 return replies.count(True), replies.count(False)
             attempt("R04", lambda: ("PASS" if do_race("R04") == (1,1) else "RED", "real server transaction single winner"))
             record("R05", "HOLD", "PR519 has no external rollback-resistant witness W; cannot test W failure as successful denial")
@@ -331,7 +337,7 @@ def main():
                 intended = Record(TARGET, 1, "SEAL_REQUESTED", "R15WRITE", operator)
                 txn = ('version(' + json.dumps(KEY) + ') = "0"\n\nput ' +
                        json.dumps(KEY) + ' ' + json.dumps(intended.encode().decode()) +
-                       '\n\n')
+                       '\n\n\n')
                 binary = str(c.ctl)
                 flags = ['--endpoints=' + c.endpoint,
                          '--cacert=' + str(c.certdir / 'ca.pem'),
