@@ -259,13 +259,17 @@ async def test_pg17_ephemeral_login_barrier_drain_and_old31a_forward(
         )
         # A non-lock CLI error must NOT pass merely by mentioning a lock in
         # its traceback. Keep the negative-oracle regression in both schedules.
-        bogus = subprocess.CompletedProcess(
-            args=["alembic"], returncode=1, stdout="",
-            stderr='could not obtain lock; locknotavailable; 55P03; '
-                   'AIC31B_CLI_SQLSTATE={"sqlstate": "42P01"}',
-        )
-        with pytest.raises(AssertionError):
-            _require_exact_cli_lock_sqlstate(bogus)
+        for adversarial_error in (
+            "could not obtain lock; locknotavailable; 55P03",
+            'could not obtain lock; 55P03\n'
+            'AIC31B_CLI_SQLSTATE={"sqlstate": "42P01"}\n',
+        ):
+            bogus = subprocess.CompletedProcess(
+                args=["alembic"], returncode=1, stdout="",
+                stderr=adversarial_error,
+            )
+            with pytest.raises(AssertionError):
+                _require_exact_cli_lock_sqlstate(bogus)
         _require_exact_cli_lock_sqlstate(failed)
         assert await _revision(mig_engine) == REV31A
 
