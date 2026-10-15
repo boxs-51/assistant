@@ -26,8 +26,9 @@ class SessionRepository(BaseRepository):
             await self.cache_driver.set(key, user_id, expire=expires_in_seconds)
             logger.debug("Refresh token saved to cache", key=key, user_id=user_id)
         except (RedisError, RuntimeError) as e:
-            # Bắt lỗi khi không có Redis, ghi log và cho qua để không làm sập luồng login
-            logger.warning("Redis is not available. Skipping token storage.", error=str(e))
+            # Fail closed: never return an issued refresh credential without a stored session.
+            logger.warning("Refresh token storage failed; abort token issuance.", error=str(e))
+            raise
 
     async def get_user_id_by_token(self, token_hash: str) -> Optional[str]:
         """
