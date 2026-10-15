@@ -449,6 +449,136 @@ def _run_aic_migration(sync_connection, *, direction: str):
         MIG.op = previous
 
 
+@pytest.mark.parametrize("foreign_keys", [False, True], ids=["fk_off", "fk_on"])
+@pytest.mark.parametrize(
+    "recursive_triggers", [False, True], ids=["recursive_off", "recursive_on"]
+)
+@pytest.mark.parametrize(
+    "replace_statement", ["INSERT OR REPLACE", "REPLACE"], ids=["insert_or_replace", "replace"]
+)
+@pytest.mark.asyncio
+async def test_aic_actual_alembic_sqlite_retired_marker_cannot_be_replaced(
+    tmp_path, foreign_keys, recursive_triggers, replace_statement
+):
+    """RED-first: actual Alembic 31a DDL rejects REPLACE after lawful retirement.
+
+    Use separate native SQLite file connections after the Alembic upgrade; no
+    model-only setup, faked triggers, PRAGMA recursive_triggers assumption, or
+    weakening of any existing strict assertion.
+    """
+    import sqlite3
+
+    file_path = tmp_path / (
+        f"aic_retired_{int(foreign_keys)}_{int(recursive_triggers)}_"
+        f"{replace_statement.replace(' ', '_')}.sqlite"
+    )
+    engine = create_async_engine("sqlite+aiosqlite:///" + str(file_path))
+    try:
+        async with engine.begin() as connection:
+            await connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            await connection.run_sync(User.__table__.create)
+            await connection.run_sync(
+                lambda sync: _run_aic_migration(sync, direction="upgrade")
+            )
+    finally:
+        await engine.dispose()
+
+    with sqlite3.connect(str(file_path)) as seed:
+        seed.execute("PRAGMA foreign_keys=ON")
+        seed.execute(
+            "INSERT INTO users(id,email,password_hash,status) "
+            "VALUES ('alice','alice@aic.invalid','x','active')"
+        )
+        seed.execute(
+            "INSERT INTO users(id,email,password_hash,status) "
+            "VALUES ('bob','bob@aic.invalid','x','active')"
+        )
+        seed.execute(
+            "INSERT INTO aic_instance_reservations"
+            "(agent_instance_id,state,generation) VALUES ('retired-id','ACTIVE',1)"
+        )
+        seed.execute(
+            "INSERT INTO aic_instance_live"
+            "(agent_instance_id,owner_user_id,definition_id,definition_version,"
+            "lifecycle_state,generation) "
+            "VALUES ('retired-id','alice','original','v1','ACTIVE',1)"
+        )
+        seed.execute(
+            "UPDATE aic_instance_reservations SET state='RETIRING' "
+            "WHERE agent_instance_id='retired-id'"
+        )
+        seed.execute(
+            "DELETE FROM aic_instance_live WHERE agent_instance_id='retired-id'"
+        )
+        seed.execute(
+            "UPDATE aic_instance_reservations SET state='RETIRED',generation=2 "
+            "WHERE agent_instance_id='retired-id'"
+        )
+        seed.commit()
+
+    with sqlite3.connect(str(file_path)) as writer:
+        writer.execute(f"PRAGMA foreign_keys={'ON' if foreign_keys else 'OFF'}")
+        writer.execute(
+            f"PRAGMA recursive_triggers={'ON' if recursive_triggers else 'OFF'}"
+        )
+        assert writer.execute("PRAGMA foreign_keys").fetchone()[0] == int(foreign_keys)
+        assert writer.execute("PRAGMA recursive_triggers").fetchone()[0] == int(
+            recursive_triggers
+        )
+        guards = writer.execute(
+            "SELECT COUNT(*) FROM sqlite_master "
+            "WHERE type='trigger' AND name LIKE 'trg_aic_%'"
+        ).fetchone()[0]
+        assert guards == len(MIG._SQLITE_TRIGGER_NAMES) == 8
+
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_ID_REUSE_FORBIDDEN"):
+            writer.execute(
+                f"{replace_statement} INTO aic_instance_reservations "
+                "(agent_instance_id,state,generation) VALUES "
+                "('retired-id','ACTIVE',1)"
+            )
+        writer.rollback()
+
+        # No previously-retired opaque key may be rebound to a new owner.
+        with pytest.raises(sqlite3.IntegrityError, match="AIC_LIVE_OWNER_OR_ID_INVALID"):
+            writer.execute(
+                "INSERT INTO aic_instance_live"
+                "(agent_instance_id,owner_user_id,definition_id,definition_version,"
+                "lifecycle_state,generation) "
+                "VALUES ('retired-id','bob','forged','v2','ACTIVE',1)"
+            )
+        writer.rollback()
+        # Positive controls: normal fresh reservation and user no-op are valid.
+        writer.execute(
+            "INSERT INTO aic_instance_reservations"
+            "(agent_instance_id,state,generation) VALUES ('fresh-id','ACTIVE',1)"
+        )
+        writer.execute(
+            "INSERT INTO users(id,email,password_hash,status) "
+            "VALUES ('alice','alice@aic.invalid','x','active') "
+            "ON CONFLICT DO NOTHING"
+        )
+        writer.commit()
+
+    # Fresh physical connection reads the committed identity and owner proof.
+    with sqlite3.connect(str(file_path)) as verify:
+        assert verify.execute(
+            "SELECT state,generation FROM aic_instance_reservations "
+            "WHERE agent_instance_id='retired-id'"
+        ).fetchone() == ("RETIRED", 2)
+        assert verify.execute(
+            "SELECT COUNT(*) FROM aic_instance_live "
+            "WHERE agent_instance_id='retired-id'"
+        ).fetchone()[0] == 0
+        assert verify.execute(
+            "SELECT state,generation FROM aic_instance_reservations "
+            "WHERE agent_instance_id='fresh-id'"
+        ).fetchone() == ("ACTIVE", 1)
+        assert verify.execute(
+            "SELECT COUNT(*) FROM users WHERE id IN ('alice','bob')"
+        ).fetchone()[0] == 2
+
+
 @pytest.mark.asyncio
 async def test_aic_actual_alembic_sqlite_empty_upgrade_downgrade(tmp_path):
     """Execute actual 31a upgrade/downgrade DDL, not hand-created model tables."""
