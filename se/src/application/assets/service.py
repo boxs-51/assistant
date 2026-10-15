@@ -144,6 +144,7 @@ class AssetService:
                     asset_id,
                     blob_id,
                     object_key,
+                    owner_user_id=owner_user_id,
                 )
             )
             raise
@@ -152,6 +153,7 @@ class AssetService:
                 asset_id,
                 blob_id,
                 object_key,
+                owner_user_id=owner_user_id,
             )
             raise
         except Exception as exc:
@@ -159,6 +161,7 @@ class AssetService:
                 asset_id,
                 blob_id,
                 object_key,
+                owner_user_id=owner_user_id,
             )
             raise AssetStorageError(
                 f"Failed to persist object for asset {asset_id}"
@@ -171,6 +174,15 @@ class AssetService:
                 if file_record is None or blob_record is None:
                     raise AssetFinalizeError(
                         "Asset/blob disappeared before finalize"
+                    )
+                # The first STAGING commit is the immutable custody origin.
+                # Never publish READY under a relinked owner or blob.
+                if (
+                    file_record.owner_user_id != owner_user_id
+                    or file_record.blob_id != blob_id
+                ):
+                    raise AssetFinalizeError(
+                        "Asset owner/blob custody changed before finalize"
                     )
                 if file_record.state != "STAGING" or file_record.revision != 0:
                     raise AssetStateError(
@@ -192,6 +204,8 @@ class AssetService:
                     asset_id,
                     expected_revision=0,
                     expected_state="STAGING",
+                    expected_owner_user_id=owner_user_id,
+                    expected_blob_id=blob_id,
                     values={"state": "READY"},
                 )
                 if winner is None:
@@ -206,6 +220,7 @@ class AssetService:
                     asset_id,
                     blob_id,
                     object_key,
+                    owner_user_id=owner_user_id,
                 )
             )
             raise
@@ -214,6 +229,7 @@ class AssetService:
                 asset_id,
                 blob_id,
                 object_key,
+                owner_user_id=owner_user_id,
             )
             raise AssetFinalizeError(
                 f"Object stored but SQL finalize failed for asset {asset_id}"
@@ -350,6 +366,7 @@ class AssetService:
         asset_id: str,
         blob_id: str,
         object_key: str,
+        owner_user_id: Optional[str] = None,
     ) -> bool:
         """Abort only while this ingest still owns STAGING@0 authority.
 
@@ -363,6 +380,11 @@ class AssetService:
                 if (
                     file_record is None
                     or blob_record is None
+                    or file_record.blob_id != blob_id
+                    or (
+                        owner_user_id is not None
+                        and file_record.owner_user_id != owner_user_id
+                    )
                     or file_record.state != "STAGING"
                     or file_record.revision != 0
                     or blob_record.state != "STAGING"
@@ -373,6 +395,8 @@ class AssetService:
                     asset_id,
                     expected_revision=0,
                     expected_state="STAGING",
+                    expected_owner_user_id=owner_user_id,
+                    expected_blob_id=blob_id,
                     values={"state": "ERROR"},
                 )
                 if winner is None:
