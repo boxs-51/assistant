@@ -448,7 +448,25 @@ class AssetRepository:
                 == expected_live_claim_token
             )
 
+        # Domain identity and canonical source fingerprint are immutable,
+        # regardless of which application caller provides the update mapping.
+        # Reject before issuing any SQL, including same-value rewrites.
         next_values = dict(values)
+        immutable = frozenset({
+            "id",
+            "file_id",
+            "provider_name",
+            "provider_namespace",
+            "source_blob_id",
+            "source_sha256",
+            "revision",
+        })
+        forbidden = immutable.intersection(next_values)
+        if forbidden:
+            raise ValueError(
+                "Immutable ProviderBinding fields cannot be updated: "
+                + ", ".join(sorted(forbidden))
+            )
         next_values["revision"] = expected_revision + 1
         result = await self.session.execute(
             update(FileProviderBindingRecord)
@@ -514,16 +532,38 @@ class AssetRepository:
         expected_revision: int,
         expected_state: str,
         values: Mapping[str, Any],
+        expected_owner_user_id: Optional[str] = None,
+        expected_blob_id: Optional[str] = None,
     ) -> Optional[FileAssetRecord]:
+        # Application-level defense in depth. Physical/raw SQL protection
+        # remains with the separately gated CAS owner-fence migration.
         next_values = dict(values)
+        immutable = frozenset({
+            "id", "owner_user_id", "blob_id", "revision",
+        })
+        forbidden = immutable.intersection(next_values)
+        if forbidden:
+            raise ValueError(
+                "Immutable FileAsset fields cannot be updated: "
+                + ", ".join(sorted(forbidden))
+            )
         next_values["revision"] = expected_revision + 1
+        predicates = [
+            FileAssetRecord.id == file_id,
+            FileAssetRecord.revision == expected_revision,
+            FileAssetRecord.state == expected_state,
+        ]
+        # Keep owner/blob custody in the UPDATE predicate, not just in a
+        # preceding ORM read; a rekey/relink must lose the optimistic CAS.
+        if expected_owner_user_id is not None:
+            predicates.append(
+                FileAssetRecord.owner_user_id == expected_owner_user_id
+            )
+        if expected_blob_id is not None:
+            predicates.append(FileAssetRecord.blob_id == expected_blob_id)
         result = await self.session.execute(
             update(FileAssetRecord)
-            .where(
-                FileAssetRecord.id == file_id,
-                FileAssetRecord.revision == expected_revision,
-                FileAssetRecord.state == expected_state,
-            )
+            .where(*predicates)
             .values(**next_values)
             .returning(FileAssetRecord)
         )
