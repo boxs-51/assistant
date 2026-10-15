@@ -6,6 +6,8 @@ on:
       - "se/tests/integration/test_ae359_refresh_logout_race_redfirst.py"
       - "se/tests/integration/test_auth_refresh_save_token_failclosed_redfirst.py"
       - "se/tests/integration/test_auth_otp_atomic_consume_redfirst.py"
+      - "se/src/transport/gateway/authentication/jwt.py"
+      - "se/src/infrastructure/storage/repositories/sessions.py"
       - ".github/workflows/ae359-security-t1-redfirst.yml"
   workflow_dispatch:
 
