@@ -71,7 +71,14 @@ def _sbx3_uncertified_process_export(tool_info: Any) -> bool:
         origin_module.rsplit(".", 1)[-1] in _SBX3_AGENT_PROCESS_PHYSICAL
     ):
         return True
-    return False
+    # A model-origin Python export can call Popen through an arbitrary wrapper
+    # even when its self-declared Metadata V2 effects are READ-only. Neither a
+    # display name, source path nor function.__module__ is trusted proof that
+    # the function is process-free. Until an authenticated, broker-owned
+    # positive provenance/one-use authority is available, deny *all* resolved
+    # legacy Agent-local callable dispatch by default. This deliberately
+    # sacrifices unsupported Agent tool availability, not trusted DIRECT.
+    return True
 
 
 
