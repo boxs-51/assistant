@@ -52,7 +52,7 @@ class TokenService:
     ) -> TokenSchema:
         """Persist the refresh authority before exposing either credential."""
         access_token = await self._create_access_only(user_id, email)
-        v2 = self.session_repo.refresh_store is not None
+        v2 = getattr(self.session_repo, "refresh_store", None) is not None
         refresh_token = self.jwt.create_refresh_token(
             {"sub": user_id, **({"sv": 2} if v2 else {})}
         )
