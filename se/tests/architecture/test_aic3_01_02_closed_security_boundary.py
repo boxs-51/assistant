@@ -92,8 +92,8 @@ def test_a3_closed_adapters_expose_no_available_authority() -> None:
     assert verifier.is_available is False
     assert issubclass(OriginalIncarnationUnavailable, PermissionError)
     assert issubclass(WkIssuerVerificationUnavailable, PermissionError)
-    assert not vars(ledger)
-    assert not vars(verifier)
+    assert not hasattr(ledger, "__dict__")
+    assert not hasattr(verifier, "__dict__")
 
 
 @pytest.mark.asyncio
