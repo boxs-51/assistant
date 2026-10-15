@@ -295,10 +295,21 @@ class CanonicalAssetHydrationService:
         # Remote success is known. Never invoke the provider again in this
         # invocation, even if the canonical fingerprint or persistence fence
         # changed while the remote call was in flight.
-        latest = await self._read_canonical_snapshot(
-            owner_user_id=owner_user_id,
-            asset_id=asset_id,
-        )
+        try:
+            latest = await self._read_canonical_snapshot(
+                owner_user_id=owner_user_id,
+                asset_id=asset_id,
+            )
+        except AssetHydrationPreflightError:
+            # Remote success is already known. A lost canonical owner
+            # must not be misclassified as a pre-provider safe failure,
+            # nor should it authorize a second upload.
+            return HydrationResult(
+                status=HydrationStatus.HYDRATION_PERSISTENCE_CONFLICT,
+                binding_id=claim_id,
+                provider_file_id=outcome.provider_file_id,
+                provider_uri=outcome.provider_uri,
+            )
         if (
             latest.blob_id != claim_blob_id
             or latest.sha256 != claim_sha256
