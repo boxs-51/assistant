@@ -324,8 +324,8 @@ async def _u4a_one_victim_probe(engine, *, foreign_keys, recursive, name, sql):
             witness["db_error_type"] = type(exc.orig).__name__
             witness["db_error"] = str(exc.orig)[:200]
             assert (
-                "UBQ_" in str(exc.orig)
-                or "FOREIGN KEY constraint failed" in str(exc.orig)
+                str(exc.orig).startswith(("UBQ_", "UBQ2_"))
+                or str(exc.orig) == "FOREIGN KEY constraint failed"
             ), ("UBQ_U4A_UNEXPECTED_DENIAL_SIGNATURE", name, str(exc.orig))
         finally:
             await conn.rollback()
