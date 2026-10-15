@@ -49,14 +49,24 @@ _SQLITE_GUARDS = (
     )
     BEGIN SELECT RAISE(ABORT, 'AIC_ID_TRANSITION_FORBIDDEN'); END""",
     """CREATE TRIGGER trg_aic_live_insert BEFORE INSERT ON aic_instance_live
-    WHEN NOT (
-      EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.owner_user_id AND u.status = 'active')
-      AND EXISTS (SELECT 1 FROM aic_instance_reservations r
-                  WHERE r.agent_instance_id = NEW.agent_instance_id
-                    AND r.state = 'ACTIVE')
-      AND NEW.lifecycle_state = 'ACTIVE' AND NEW.generation = 1
-    )
-    BEGIN SELECT RAISE(ABORT, 'AIC_LIVE_OWNER_OR_ID_INVALID'); END""",
+    BEGIN
+      SELECT RAISE(ABORT, 'AIC_LIVE_OWNER_OR_ID_INVALID')
+      WHERE NOT (
+        EXISTS (SELECT 1 FROM users u WHERE u.id = NEW.owner_user_id AND u.status = 'active')
+        AND EXISTS (SELECT 1 FROM aic_instance_reservations r
+                    WHERE r.agent_instance_id = NEW.agent_instance_id
+                      AND r.state = 'ACTIVE')
+        AND NEW.lifecycle_state = 'ACTIVE' AND NEW.generation = 1
+      );
+      -- Under recursive_triggers=OFF, SQLite REPLACE deletes the existing
+      -- LIVE row without firing its DELETE guard. Refuse the conflicting
+      -- identity here, BEFORE SQLite resolves the unique key conflict.
+      SELECT RAISE(ABORT, 'AIC_LIVE_OWNER_REPLACE_DENIED')
+      WHERE EXISTS (
+        SELECT 1 FROM aic_instance_live l
+        WHERE l.agent_instance_id = NEW.agent_instance_id
+      );
+    END""",
     """CREATE TRIGGER trg_aic_live_update BEFORE UPDATE ON aic_instance_live
     WHEN NOT (
       NEW.agent_instance_id = OLD.agent_instance_id
