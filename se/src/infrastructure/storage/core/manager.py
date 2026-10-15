@@ -511,6 +511,12 @@ class StorageEngine:
         # -----------------------------------------------------
 
         cache_driver = None
+        # Auth-enabled deployments must never silently downgrade a configured
+        # Redis refresh authority to per-process InMemory after Redis fails.
+        # This does not change generic rate-limiter cache fallback behavior.
+        redis_registered = self.drivers.get_entry("redis") is not None
+        if redis_registered and self.config.auth.enable and not self.drivers.is_available("redis"):
+            raise RuntimeError("Configured Redis authentication authority is unavailable")
         if self.drivers.is_available("redis"):
             cache_driver = self.get_driver("redis")
         elif self.drivers.is_available("in-memory"):
