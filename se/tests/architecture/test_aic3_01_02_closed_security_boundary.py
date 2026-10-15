@@ -97,19 +97,19 @@ def test_a3_closed_adapters_expose_no_available_authority() -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owner", ["alice", "", "replayed-id", _NoTouch()])
+@pytest.mark.parametrize("owner", ["alice", "", "replayed-id", "__untrusted_object__"])
 @pytest.mark.parametrize("epoch", [-1, 0, 42])
 async def test_a3_01_original_lookup_never_authenticates_claimed_owner(
     owner: object, epoch: int
 ) -> None:
     ledger = ClosedAccountIncarnationLedger()
     with pytest.raises(OriginalIncarnationUnavailable, match="A3-01 CLOSED"):
-        await ledger.read_original(**_ledger_args(owner=owner, epoch=epoch))
+        await ledger.read_original(**_ledger_args(owner=_NoTouch() if owner == "__untrusted_object__" else owner, epoch=epoch))
     assert ledger.is_available is False
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("owner", ["alice", "", "stale-guest", _NoTouch()])
+@pytest.mark.parametrize("owner", ["alice", "", "stale-guest", "__untrusted_object__"])
 @pytest.mark.parametrize("epoch", [-1, 0, 42])
 async def test_a3_01_new_or_replayed_enrollment_never_mints_wk(
     owner: object, epoch: int
@@ -117,7 +117,7 @@ async def test_a3_01_new_or_replayed_enrollment_never_mints_wk(
     ledger = ClosedAccountIncarnationLedger()
     with pytest.raises(OriginalIncarnationUnavailable, match="A3-01 CLOSED"):
         await ledger.enroll_at_creation(
-            **_ledger_args(owner=owner, epoch=epoch),
+            **_ledger_args(owner=_NoTouch() if owner == "__untrusted_object__" else owner, epoch=epoch),
             creation_event=_NoTouch(),
         )
     assert ledger.is_available is False
@@ -125,7 +125,7 @@ async def test_a3_01_new_or_replayed_enrollment_never_mints_wk(
 
 @pytest.mark.parametrize(
     "envelope",
-    [b"", b'{"verified":true,"issuer":"trusted"}', b"signed-looking-wk-receipt", _NoTouch()],
+    [b"", b'{"verified":true,"issuer":"trusted"}', b"signed-looking-wk-receipt", "__untrusted_envelope__"],
 )
 @pytest.mark.parametrize("epoch", [-1, 0, 42])
 def test_a3_02_forged_or_replayed_envelope_always_denied(
@@ -133,7 +133,12 @@ def test_a3_02_forged_or_replayed_envelope_always_denied(
 ) -> None:
     verifier = ClosedWkIssuerVerifier()
     with pytest.raises(WkIssuerVerificationUnavailable, match="A3-02 CLOSED"):
-        verifier.verify_enrollment(**_issuer_args(envelope=envelope, epoch=epoch))
+        verifier.verify_enrollment(
+            **_issuer_args(
+                envelope=_NoTouch() if envelope == "__untrusted_envelope__" else envelope,
+                epoch=epoch,
+            )
+        )
     assert verifier.is_available is False
 
 
