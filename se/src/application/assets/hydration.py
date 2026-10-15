@@ -312,6 +312,9 @@ class CanonicalAssetHydrationService:
 
         return await self._finalize_success(
             asset_id=asset_id,
+            owner_user_id=owner_user_id,
+            claim_blob_id=claim_blob_id,
+            claim_sha256=claim_sha256,
             provider_name=provider_name,
             provider_namespace=provider_namespace,
             claim_id=claim_id,
@@ -593,6 +596,9 @@ class CanonicalAssetHydrationService:
         provider_name: str,
         provider_namespace: str,
         claim_id: str,
+        owner_user_id: Optional[str] = None,
+        claim_blob_id: Optional[str] = None,
+        claim_sha256: Optional[str] = None,
     ):
         live = await uow.assets.get_live_provider_binding(
             asset_id,
@@ -601,6 +607,29 @@ class CanonicalAssetHydrationService:
         )
         if live is None or live.id != claim_id:
             return None
+
+        # For a known remote success, re-prove the original authenticated
+        # owner and canonical blob INSIDE the finalize UoW. The earlier
+        # pre-provider read is not sufficient across an external upload.
+        # This is app-level protection, not a physical FK-OFF SQL fence.
+        if owner_user_id is not None:
+            if not claim_blob_id or not claim_sha256:
+                return None
+            try:
+                file_record, blob = await uow.assets.get_owned_ready_file(
+                    file_id=asset_id,
+                    owner_user_id=owner_user_id,
+                )
+            except (KeyError, PermissionError, ValueError):
+                return None
+            if (
+                file_record.blob_id != claim_blob_id
+                or blob.id != claim_blob_id
+                or blob.sha256 != claim_sha256
+                or live.source_blob_id != claim_blob_id
+                or live.source_sha256 != claim_sha256
+            ):
+                return None
         return live
 
     async def _finalize_safe_failure(
@@ -746,6 +775,9 @@ class CanonicalAssetHydrationService:
         self,
         *,
         asset_id: str,
+        owner_user_id: str,
+        claim_blob_id: str,
+        claim_sha256: str,
         provider_name: str,
         provider_namespace: str,
         claim_id: str,
@@ -760,6 +792,9 @@ class CanonicalAssetHydrationService:
                 provider_name=provider_name,
                 provider_namespace=provider_namespace,
                 claim_id=claim_id,
+                owner_user_id=owner_user_id,
+                claim_blob_id=claim_blob_id,
+                claim_sha256=claim_sha256,
             )
             if live is None:
                 return HydrationResult(
