@@ -110,7 +110,9 @@ async def _collect(processes):
             assert process.returncode == 0, (
                 "Real Redis subprocess failed: " + stderr.decode(errors="replace")[-1500:]
             )
-            results.append(json.loads(stdout.decode().strip().splitlines()[-1]))
+            receipts = [line for line in stdout.decode().splitlines() if line.startswith('{"pid": ')]
+            assert len(receipts) == 1, "Worker must emit exactly one structured Redis receipt"
+            results.append(json.loads(receipts[0]))
         assert len({result["pid"] for result in results}) == len(results)
         assert len({result["client_id"] for result in results}) == len(results)
         assert all(result["pid"] != os.getpid() for result in results)
