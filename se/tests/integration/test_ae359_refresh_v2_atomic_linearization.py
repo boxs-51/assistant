@@ -166,3 +166,20 @@ def test_legacy_refresh_never_issues_an_unreturned_refresh_credential():
         assert len(backend._data) == 1
         await backend.disconnect()
     asyncio.run(run())
+
+
+def test_legacy_refresh_backend_uncertainty_is_not_silently_invalidated():
+    class _DisconnectedRead(InMemoryDriver):
+        async def get(self, key):
+            raise RuntimeError("backend unavailable")
+
+    async def run():
+        cache = _DisconnectedRead(DriverConfig())
+        await cache.connect()
+        repo = SessionRepository(cache)
+        with pytest.raises(RuntimeError, match="backend unavailable"):
+            await repo.get_user_id_by_token("opaque-hash")
+        with pytest.raises(RuntimeError, match="backend unavailable"):
+            await repo.assert_legacy_active("u", "opaque-hash")
+        await cache.disconnect()
+    asyncio.run(run())
