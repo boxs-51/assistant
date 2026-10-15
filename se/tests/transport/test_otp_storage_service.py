@@ -9,11 +9,9 @@ class _Cache:
     def __init__(self, values=None):
         self.values = dict(values or {})
 
-    async def get(self, key):
-        return self.values.get(key)
-
-    async def delete(self, key):
-        self.values.pop(key, None)
+    async def consume_one_time(self, key):
+        """Atomically return and remove a value in this single-loop test fake."""
+        return self.values.pop(key, None)
 
 
 class _PendingRegistrations:
