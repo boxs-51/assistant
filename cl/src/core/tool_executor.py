@@ -34,50 +34,18 @@ def _sbx3_agent_process_name(value: Any) -> bool:
 
 
 def _sbx3_uncertified_process_export(tool_info: Any) -> bool:
-    """Deny known process implementations even if their logical ID was renamed.
+    """Fail closed before inspecting any untrusted dynamic plugin object.
 
-    This is a routing barrier, not native OS confinement or certification that
-    arbitrary third-party tools cannot hide a process effect.
+    Until a separately certified broker can attest native confinement and
+    one-use authority, there is NO positively authenticated Agent-local host
+    Python callable. A metadata name, declared effect, path or module string
+    is not proof of process-freedom; inspecting such Python objects may itself
+    run arbitrary code via __eq__ or __getattribute__ before HITL.
+
+    This deliberately disables uncertified legacy model-origin tool execution;
+    the separately authorized trusted DIRECT entry point is not routed through
+    this AgentEngine-owned executor.
     """
-    if not isinstance(tool_info, dict):
-        return True
-    metadata = tool_info.get("metadata")
-    if not isinstance(metadata, dict):
-        return True
-    if _sbx3_agent_process_name(metadata.get("name")):
-        return True
-    if metadata.get("physical_tool") in _SBX3_AGENT_PROCESS_PHYSICAL:
-        return True
-    effects = metadata.get("effects", ())
-    if effects == "EXECUTE" or (
-        isinstance(effects, (list, tuple, set, frozenset))
-        and "EXECUTE" in effects
-    ):
-        return True
-    # Invalid Metadata V2 effects cannot silently fall back to host execution.
-    if metadata.get("manifest_version") == "2.0" and not isinstance(
-        effects, (list, tuple, set, frozenset)
-    ):
-        return True
-    source_file = tool_info.get("file_path")
-    if isinstance(source_file, str) and (
-        source_file.replace("\\", "/").rsplit("/", 1)[-1]
-        in {"terminal_tool.py", "python_tool.py"}
-    ):
-        return True
-    handler = tool_info.get("func")
-    origin_module = getattr(handler, "__module__", "")
-    if isinstance(origin_module, str) and (
-        origin_module.rsplit(".", 1)[-1] in _SBX3_AGENT_PROCESS_PHYSICAL
-    ):
-        return True
-    # A model-origin Python export can call Popen through an arbitrary wrapper
-    # even when its self-declared Metadata V2 effects are READ-only. Neither a
-    # display name, source path nor function.__module__ is trusted proof that
-    # the function is process-free. Until an authenticated, broker-owned
-    # positive provenance/one-use authority is available, deny *all* resolved
-    # legacy Agent-local callable dispatch by default. This deliberately
-    # sacrifices unsupported Agent tool availability, not trusted DIRECT.
     return True
 
 
