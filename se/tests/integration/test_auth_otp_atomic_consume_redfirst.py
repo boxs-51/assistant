@@ -126,3 +126,39 @@ def test_positive_control_sequential_consume_returns_payload_only_once():
         await driver.disconnect()
 
     asyncio.run(exercise())
+
+
+def test_atomic_otp_consume_must_never_call_separate_get():
+    class NoLegacyGet(InMemoryDriver):
+        async def get(self, key):
+            raise AssertionError("Unsafe separate GET on OTP consume path")
+
+    async def exercise():
+        driver = NoLegacyGet(DriverConfig())
+        await driver.connect()
+        try:
+            key = "pending_reg:no-legacy-get"
+            await driver.set(key, "single-use-payload", expire=120)
+            service = OTPStorageService(driver, uow_factory=lambda: None)
+            assert await service._consume_cache_value(key) == "single-use-payload"
+            assert await service._consume_cache_value(key) is None
+        finally:
+            await driver.disconnect()
+
+    asyncio.run(exercise())
+
+
+def test_atomic_otp_pop_respects_ttl_and_does_not_resurrect_expired_value():
+    async def exercise():
+        driver = InMemoryDriver(DriverConfig())
+        await driver.connect()
+        try:
+            key = "pending_reg:expired"
+            await driver.set(key, "stale-payload", expire=0)
+            service = OTPStorageService(driver, uow_factory=lambda: None)
+            assert await service._consume_cache_value(key) is None
+            assert await driver.consume_one_time(key) is None
+        finally:
+            await driver.disconnect()
+
+    asyncio.run(exercise())
