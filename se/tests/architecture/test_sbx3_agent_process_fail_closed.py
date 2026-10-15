@@ -217,7 +217,8 @@ def _r7_alias_context():
         iteration=0,
         connection_id="sbx3-claimed-client",
         ensure_active=lambda: None,
-        cancellation_event=None,
+        cancellation_event=asyncio.Event(),
+        remaining_seconds=20,
         limits=SimpleNamespace(max_parallel_tools=1),
     )
 
