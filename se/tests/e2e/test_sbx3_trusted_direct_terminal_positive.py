@@ -34,26 +34,34 @@ from se.tests.e2e import test_v1_offline as _offline
 
 
 class _IsolatedBearerAuthenticator(AuthenticatorInterface):
-    def __init__(self, token: str):
+    def __init__(self, token: str, untrusted_token: str):
         self._token = token
+        self._untrusted_token = untrusted_token
 
     def can_handle(self, token: str) -> bool:
         return token.startswith("sbx3_direct_t1_")
 
     async def authenticate(self, token: str) -> Identity:
-        if token != self._token:
-            raise InvalidCredentialsError("Invalid isolated DIRECT-T1 credential")
-        return Identity(auth_type="api_key", user_id="sbx3-trusted-owner", permissions=[])
+        if token == self._token:
+            return Identity(auth_type="api_key", user_id="sbx3-trusted-owner", permissions=["admin:write"])
+        if token == self._untrusted_token:
+            return Identity(auth_type="api_key", user_id="sbx3-untrusted-principal", permissions=[])
+        raise InvalidCredentialsError("Invalid isolated DIRECT-T1 credential")
 
 
 @dataclass(repr=False)
 class _Harness:
     app: object
     token: str
+    untrusted_token: str
 
     @property
     def headers(self) -> dict[str, str]:
         return {"Authorization": f"Bearer {self.token}"}
+
+    @property
+    def untrusted_headers(self) -> dict[str, str]:
+        return {"Authorization": f"Bearer {self.untrusted_token}"}
 
 
 @pytest.fixture
@@ -70,7 +78,9 @@ def trusted_direct_gateway():
         container.config.auth.enable = True
         container.config.auth.allow_guest = False
         token = "sbx3_direct_t1_" + secrets.token_urlsafe(24)
-        container.auth_manager = AuthenticationManager([_IsolatedBearerAuthenticator(token)])
+        untrusted_token = "sbx3_direct_t1_" + secrets.token_urlsafe(24)
+        assert token != untrusted_token
+        container.auth_manager = AuthenticationManager([_IsolatedBearerAuthenticator(token, untrusted_token)])
         app.add_middleware(AuthenticationMiddleware, public_paths=[])
         # Register canonical physical Metadata V2 tools, not a fake capability.
         root = Path(__file__).resolve().parents[3]
@@ -80,7 +90,7 @@ def trusted_direct_gateway():
             root / "tools" / "v1",
         )
         assert registration.get("terminal.run") == "registered", registration
-        yield _Harness(app=app, token=token)
+        yield _Harness(app=app, token=token, untrusted_token=untrusted_token)
     finally:
         next(scaffold, None)
 
@@ -131,6 +141,33 @@ async def test_trusted_direct_authenticated_capability_http_reaches_real_popen(
         assert output["data"]["exit_code"] == 0
         assert popen.call_count == 1, "Trusted capability did not reach real Popen"
         assert marker.read_text(encoding="utf-8") == "DIRECT_OK"
+
+
+@pytest.mark.asyncio
+async def test_authenticated_unprivileged_principal_cannot_execute_terminal(
+    trusted_direct_gateway, tmp_path,
+):
+    """RED-first: a valid identity is not by itself terminal EXECUTE authority."""
+    marker = tmp_path / "must-not-be-created-by-unprivileged-caller.txt"
+    command = _harmless_command(marker)
+    original_popen = subprocess.Popen
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=trusted_direct_gateway.app),
+        base_url="http://testserver",
+    ) as client:
+        with patch("tools.v1.terminal_tool.subprocess.Popen", wraps=original_popen) as popen:
+            denied = await client.post(
+                "/v1/capabilities/terminal.run/execute",
+                headers=trusted_direct_gateway.untrusted_headers,
+                json={"arguments": {"command": command, "cwd": str(tmp_path), "timeout": 8}},
+            )
+    assert denied.status_code in {401, 403}, (
+        "A valid but unprivileged principal was allowed to execute a host command",
+        denied.status_code,
+        denied.text[:300],
+    )
+    assert popen.call_count == 0, "Unprivileged principal reached real host Popen"
+    assert not marker.exists(), "Unprivileged principal created host process marker"
 
 
 @pytest.mark.asyncio
