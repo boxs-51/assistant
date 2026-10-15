@@ -1,9 +1,16 @@
-"""Auth OTP T1 RED-first: atomic single-use consumption of cached OTP data.
+"""Child-only AE359 OTP T1 semantic oracles for atomic value-returning consume.
 
-Concurrent real InMemoryDriver reads and an adversarial count=0 delete.
-No production source or cross-track cache API modification.
+The original GET-barrier and DEL=0 RED witnesses remain frozen in PR545.
+This file is a successor test-only revision: no production GET is ever
+required to satisfy an oracle and no cache driver/source is modified.
+Correct consumers must atomically pop the stored value, or fail closed on
+an ambiguous/unconfirmed backend receipt. The current GET->DELETE source
+must remain physically RED against these tests.
 """
+
 import asyncio
+
+import pytest
 
 from se.src.infrastructure.config.schemas import DriverConfig
 from se.src.infrastructure.storage.drivers.inmemory.driver import InMemoryDriver
@@ -12,59 +19,98 @@ from se.src.transport.gateway.authentication.services.otp_service import OTPStor
 
 def test_two_concurrent_otp_consumers_cannot_both_receive_same_data():
     async def exercise():
-        two_readers_ready = asyncio.Event()
+        key = "pending_reg:race"
+        payload = '{"purpose":"registration","otp":"123456","user_data":{"id":"u"}}'
 
-        class BarrierReadCache(InMemoryDriver):
-            def __init__(self):
-                super().__init__(DriverConfig())
-                self.readers = 0
-
-            async def get(self, key):
-                value = await super().get(key)
-                if key == "pending_reg:race":
-                    self.readers += 1
-                    if self.readers == 2:
-                        two_readers_ready.set()
-                    await asyncio.wait_for(two_readers_ready.wait(), timeout=4)
+        class YieldingLegacyReadCache(InMemoryDriver):
+            async def get(self, requested_key):
+                value = await super().get(requested_key)
+                if requested_key == key and value is not None:
+                    # Expose a reachable stale-GET race in the OLD implementation.
+                    # The correct atomic-pop implementation never calls get().
+                    # There is no GET barrier, reader-count condition or
+                    # requirement to perform an unsafe read.
+                    await asyncio.sleep(0)
                 return value
 
-        driver = BarrierReadCache()
+        driver = YieldingLegacyReadCache(DriverConfig())
         await driver.connect()
-        payload = '{"purpose":"registration","otp":"123456","user_data":{"id":"u"}}'
-        await driver.set("pending_reg:race", payload, expire=120)
-        service = OTPStorageService(driver, uow_factory=lambda: None)
-        consumed = await asyncio.gather(
-            service._consume_cache_value("pending_reg:race"),
-            service._consume_cache_value("pending_reg:race"),
-        )
-        assert driver.readers == 2, "Concurrency interleaving was not exercised"
-        assert await driver.get("unrelated") is None
-        assert sum(item == payload for item in consumed) == 1, (
-            "RED-FIRST: two readers fetched the same OTP before one DEL "
-            "completed; consuming the same OTP twice is not allowed"
-        )
-        await driver.disconnect()
+        try:
+            await driver.set(key, payload, expire=120)
+            service = OTPStorageService(driver, uow_factory=lambda: None)
+            start = asyncio.Event()
+
+            async def consume_when_released():
+                await start.wait()
+                return await service._consume_cache_value(key)
+
+            tasks = [asyncio.create_task(consume_when_released()) for _ in range(2)]
+            start.set()
+            consumed = await asyncio.gather(*tasks)
+
+            assert sum(value == payload for value in consumed) == 1, (
+                "RED-FIRST: two consumers must never receive one OTP payload"
+            )
+            assert sum(value is None for value in consumed) == 1, (
+                "Atomic consumption must confirm a single winner and one miss"
+            )
+            assert await driver.get(key) is None, "Consumed OTP must be absent"
+        finally:
+            await driver.disconnect()
 
     asyncio.run(exercise())
 
 
-def test_zero_affected_delete_count_must_never_return_cached_otp():
-    class ZeroCountCache(InMemoryDriver):
-        async def delete(self, key):
-            return 0  # Explicitly no physical deletion.
+def test_unconfirmed_atomic_pop_receipt_must_fail_closed_without_deletion():
+    class UnconfirmedPopCache(InMemoryDriver):
+        async def consume_one_time(self, key):
+            # A boolean is not an OTP payload nor an atomic pop confirmation.
+            # The backend deliberately retains the original OTP.
+            return True
 
     async def exercise():
-        driver = ZeroCountCache(DriverConfig())
+        key = "pending_reg:unconfirmed"
+        payload = '{"purpose":"registration","otp":"123456","user_data":{"id":"u"}}'
+        driver = UnconfirmedPopCache(DriverConfig())
         await driver.connect()
-        await driver.set("pending_reg:zero", "opaque-payload", expire=120)
-        otp = OTPStorageService(driver, uow_factory=lambda: None)
-        consumed = await otp._consume_cache_value("pending_reg:zero")
-        assert await driver.get("pending_reg:zero") == "opaque-payload"
-        assert consumed is None, (
-            "RED-FIRST: OTP cache consumer returned data despite atomic "
-            "delete count 0; no one-use consumption was confirmed"
-        )
-        await driver.disconnect()
+        try:
+            await driver.set(key, payload, expire=120)
+            service = OTPStorageService(driver, uow_factory=lambda: None)
+            with pytest.raises(RuntimeError, match="(?i)(unconfirmed|invalid|receipt|atomic|consume)"):
+                await service._consume_cache_value(key)
+            assert await driver.get(key) == payload, (
+                "Unconfirmed atomic pop must not be treated as a consumed OTP"
+            )
+        finally:
+            await driver.disconnect()
+
+    asyncio.run(exercise())
+
+
+def test_uncertain_atomic_pop_must_not_fallback_to_database():
+    class UncertainPopCache(InMemoryDriver):
+        async def consume_one_time(self, key):
+            # Simulates an ambiguous/failed backend receipt, not proven MISSING.
+            raise RuntimeError("atomic pop ambiguous")
+
+    def forbidden_db_fallback():
+        pytest.fail("UNCERTAIN atomic pop cannot fall back to a stale DB OTP")
+
+    async def exercise():
+        key = "pending_reg:ambiguous@example.invalid"
+        payload = '{"purpose":"registration","otp":"123456","user_data":{"id":"u"}}'
+        driver = UncertainPopCache(DriverConfig())
+        await driver.connect()
+        try:
+            await driver.set(key, payload, expire=120)
+            service = OTPStorageService(driver, uow_factory=forbidden_db_fallback)
+            with pytest.raises(RuntimeError, match="atomic pop ambiguous"):
+                await service.verify_and_get_data("ambiguous@example.invalid", "123456")
+            assert await driver.get(key) == payload, (
+                "The simulated pre-consume failure left its OTP untouched"
+            )
+        finally:
+            await driver.disconnect()
 
     asyncio.run(exercise())
 
