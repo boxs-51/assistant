@@ -166,6 +166,13 @@ async def refresh_token(
         return new_token
     except InvalidCredentialsError as e:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=e.detail)
+    except Exception as exc:
+        # Redis/refresh-store uncertainty is never proof of bad credentials.
+        logger.error("Refresh authorization could not be confirmed", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Refresh authorization unavailable. Retry later.",
+        ) from exc
 
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
