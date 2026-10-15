@@ -277,7 +277,10 @@ class ToolExecutor:
 
         # 2. Check tool existence
         tool_info = self.registry.get_tool(tool_name)
-        if not tool_info:
+        # Only a missing entry or an empty *exact built-in dict* is absent.
+        # Evaluating truthiness on an untrusted Mapping/dict subclass can call
+        # its __bool__ or __len__ and spawn a host process before SBX3 DENY.
+        if tool_info is None or (type(tool_info) is dict and not tool_info):
             err_text = f"❌ Tool '{tool_name}' không tồn tại trong Registry."
             logger.error(
                 "Tool missing from Registry",
