@@ -40,8 +40,10 @@ class SessionRepository(BaseRepository):
         try:
             return await self.cache_driver.get(key)
         except (RedisError, RuntimeError) as e:
-            logger.warning("Redis is not available. Cannot fetch token.", error=str(e))
-            return None  # Trả về None tạm thời
+            # Backend uncertainty is a 503-class failure, not evidence that
+            # the client's refresh credential is invalid or revoked.
+            logger.warning("Refresh session lookup backend unavailable.", error=str(e))
+            raise
 
     async def delete_token(self, token_hash: str) -> int:
         """Return the atomic cache deletion count; never invent a revoke ACK."""
