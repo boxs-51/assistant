@@ -59,3 +59,14 @@ class CacheDriver(ABC):
         require confirmed one-use consumption must inspect the result.
         """
         pass
+
+    @abstractmethod
+    async def consume_one_time(self, key: str) -> Optional[Any]:
+        """Atomically remove and return the live value for one key.
+
+        A confirmed miss returns None; a consumed value is returned from the
+        same indivisible operation that removed it. An unavailable backend or
+        ambiguous receipt MUST raise, not return None. This is distinct from
+        delete(key)->int used by refresh-token revocation.
+        """
+        pass
