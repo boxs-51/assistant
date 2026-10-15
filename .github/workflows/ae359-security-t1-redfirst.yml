@@ -9,6 +9,7 @@ on:
       - "se/tests/integration/test_ae359_refresh_v2_atomic_linearization.py"
       - "se/src/transport/gateway/authentication/jwt.py"
       - "se/src/infrastructure/storage/repositories/sessions.py"
+      - "se/tests/integration/test_ae359_refresh_v2_redis_real.py"
       - ".github/workflows/ae359-security-t1-redfirst.yml"
   workflow_dispatch:
 
@@ -51,3 +52,45 @@ jobs:
           name: ae359-security-t1-red-${{ matrix.os }}
           path: ae359-security-t1-redfirst.xml
           if-no-files-found: warn
+
+  redis-r2-real-linux:
+    name: AE359 Redis R2 real two-process / ubuntu-24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+    env:
+      AE359_REDIS_REAL_CI: "1"
+      AE359_REDIS_REAL_URL: redis://127.0.0.1:6379/15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Run strict isolated real Redis V2 physical T1
+        run: >-
+          python -m pytest -q -ra
+          se/tests/integration/test_ae359_refresh_v2_redis_real.py
+          --junitxml=ae359-r2-real-redis.xml
+      - name: Preserve real Redis V2 JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ae359-r2-real-redis-ubuntu-24.04
+          path: ae359-r2-real-redis.xml
+          if-no-files-found: error
