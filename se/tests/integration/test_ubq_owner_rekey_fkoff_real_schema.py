@@ -20,7 +20,7 @@ from uuid import uuid4
 
 import pytest
 from sqlalchemy import text
-from sqlalchemy.exc import DBAPIError
+from sqlalchemy.exc import DBAPIError, IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -208,6 +208,130 @@ os._exit(76)
     return child.stdout.strip()
 
 
+
+async def _seed_ubq_only_real_schema(conn, full_history: bool) -> None:
+    """Identical real UBQ fixture for original T1 and additive U4A oracles."""
+    await conn.execute(text(
+        "INSERT INTO users(id,email,password_hash,status) VALUES "
+        "('alice','alice@ubq.invalid','original-alice','active'),"
+        "('bob','bob@ubq.invalid','original-bob','active')"
+    ))
+    await conn.execute(text(
+        "INSERT INTO user_budget_policies "
+        "(policy_id,owner_user_id,policy_version,policy_fingerprint,"
+        "window_duration_seconds,tool_limits_json) "
+        "VALUES ('policy1','alice','v1',:fp,3600,'{}')"
+    ), {"fp": "a" * 64})
+    await conn.execute(text(
+        "INSERT INTO user_budget_accounts"
+        "(owner_user_id,next_window_epoch) VALUES ('alice',2)"
+    ))
+    if full_history:
+        await conn.execute(text(
+            "INSERT INTO user_budget_windows "
+            "(owner_user_id,epoch,governing_policy_id,"
+            "governing_policy_version,governing_policy_fingerprint,"
+            "started_at,expires_at) VALUES "
+            "('alice',1,'policy1','v1',:fp,"
+            "'2026-01-01 00:00:00','2026-01-01 01:00:00')"
+        ), {"fp": "a" * 64})
+        await conn.execute(text(
+            "INSERT INTO user_tool_budget_usage "
+            "(owner_user_id,window_epoch,capability_id) "
+            "VALUES ('alice',1,'tool.demo')"
+        ))
+        await conn.execute(text(
+            "INSERT INTO user_budget_reservations "
+            "(reservation_id,owner_user_id,window_epoch,"
+            "idempotency_key,resource_kind,reserved_amount_atomic,"
+            "attribution_json,payload_fingerprint) VALUES "
+            "('reservation1','alice',1,'key1','INFERENCE_CALL',"
+            "1,'{}',:fp)"
+        ), {"fp": "b" * 64})
+        await conn.execute(text(
+            "INSERT INTO agent_tasks "
+            "(id,session_id,created_by,assigned_agent_id,status,"
+            "wait_reasons,input) VALUES "
+            "('task1','session','alice','agent','CREATED','[]','{}')"
+        ))
+        await conn.execute(text(
+            "INSERT INTO user_budget_task_bindings "
+            "(task_id,owner_user_id,enrollment_version,"
+            "source_auth_type,resolution_fingerprint) VALUES "
+            "('task1','alice','v1','JWT',:fp)"
+        ), {"fp": "c" * 64})
+
+
+async def _u4a_retained_snapshot(engine):
+    """Independent, complete source-row readthrough; includes quota/reservation."""
+    tables = (
+        "users",
+        "user_budget_policies",
+        "user_budget_accounts",
+        "user_budget_windows",
+        "user_tool_budget_usage",
+        "user_budget_reservations",
+        "user_budget_task_bindings",
+        "user_budget_dual_accounting_receipts",
+        "agent_tasks",
+    )
+    async with engine.connect() as conn:
+        return {
+            table: tuple(
+                tuple(row) for row in (
+                    await conn.exec_driver_sql(
+                        f"SELECT * FROM {table} ORDER BY 1"
+                    )
+                ).all()
+            )
+            for table in tables
+        }
+
+
+async def _u4a_one_victim_probe(engine, *, foreign_keys, recursive, name, sql):
+    """Run one raw user-identity DML and observe before always rolling back."""
+    async with engine.connect() as conn:
+        await _pragmas(conn, foreign_keys, recursive)
+        witness = {"case": name, "denied": False}
+        try:
+            result = await conn.execute(text(sql))
+            witness["affected_rows"] = result.rowcount
+            witness["users_in_transaction"] = [
+                tuple(row) for row in (
+                    await conn.execute(text(
+                        "SELECT id,email,password_hash FROM users ORDER BY id"
+                    ))
+                ).all()
+            ]
+            for table in (
+                "user_budget_policies",
+                "user_budget_accounts",
+                "user_budget_windows",
+                "user_tool_budget_usage",
+                "user_budget_reservations",
+                "user_budget_task_bindings",
+            ):
+                witness[table + "_orphans"] = (
+                    await conn.execute(text(
+                        f"SELECT COUNT(*) FROM {table} x "
+                        "LEFT JOIN users u ON x.owner_user_id=u.id "
+                        "WHERE u.id IS NULL"
+                    ))
+                ).scalar_one()
+        except IntegrityError as exc:
+            # A syntax, setup or connection error must never count as DENY.
+            witness["denied"] = True
+            witness["db_error_type"] = type(exc.orig).__name__
+            witness["db_error"] = str(exc.orig)[:200]
+            assert (
+                "UBQ_" in str(exc.orig)
+                or "FOREIGN KEY constraint failed" in str(exc.orig)
+            ), ("UBQ_U4A_UNEXPECTED_DENIAL_SIGNATURE", name, str(exc.orig))
+        finally:
+            await conn.rollback()
+    return witness
+
+
 @pytest.mark.parametrize(("foreign_keys", "recursive"), MODES)
 @pytest.mark.parametrize(
     "full_history", (False, True),
@@ -238,55 +362,7 @@ async def test_ubq_only_user_owner_delete_rekey_fkoff_real_schema(
                 "trg_ubq2_user_binding_delete_restrict",
             }.issubset(sqlite_triggers), sqlite_triggers
 
-            await conn.execute(text(
-                "INSERT INTO users(id,email,password_hash,status) VALUES "
-                "('alice','alice@ubq.invalid','original-alice','active'),"
-                "('bob','bob@ubq.invalid','original-bob','active')"
-            ))
-            await conn.execute(text(
-                "INSERT INTO user_budget_policies "
-                "(policy_id,owner_user_id,policy_version,policy_fingerprint,"
-                "window_duration_seconds,tool_limits_json) "
-                "VALUES ('policy1','alice','v1',:fp,3600,'{}')"
-            ), {"fp": "a" * 64})
-            await conn.execute(text(
-                "INSERT INTO user_budget_accounts"
-                "(owner_user_id,next_window_epoch) VALUES ('alice',2)"
-            ))
-            if full_history:
-                await conn.execute(text(
-                    "INSERT INTO user_budget_windows "
-                    "(owner_user_id,epoch,governing_policy_id,"
-                    "governing_policy_version,governing_policy_fingerprint,"
-                    "started_at,expires_at) VALUES "
-                    "('alice',1,'policy1','v1',:fp,"
-                    "'2026-01-01 00:00:00','2026-01-01 01:00:00')"
-                ), {"fp": "a" * 64})
-                await conn.execute(text(
-                    "INSERT INTO user_tool_budget_usage "
-                    "(owner_user_id,window_epoch,capability_id) "
-                    "VALUES ('alice',1,'tool.demo')"
-                ))
-                await conn.execute(text(
-                    "INSERT INTO user_budget_reservations "
-                    "(reservation_id,owner_user_id,window_epoch,"
-                    "idempotency_key,resource_kind,reserved_amount_atomic,"
-                    "attribution_json,payload_fingerprint) VALUES "
-                    "('reservation1','alice',1,'key1','INFERENCE_CALL',"
-                    "1,'{}',:fp)"
-                ), {"fp": "b" * 64})
-                await conn.execute(text(
-                    "INSERT INTO agent_tasks "
-                    "(id,session_id,created_by,assigned_agent_id,status,"
-                    "wait_reasons,input) VALUES "
-                    "('task1','session','alice','agent','CREATED','[]','{}')"
-                ))
-                await conn.execute(text(
-                    "INSERT INTO user_budget_task_bindings "
-                    "(task_id,owner_user_id,enrollment_version,"
-                    "source_auth_type,resolution_fingerprint) VALUES "
-                    "('task1','alice','v1','JWT',:fp)"
-                ), {"fp": "c" * 64})
+            await _seed_ubq_only_real_schema(conn, full_history)
 
         await _assert_unchanged(engine, full_history=full_history)
         await _assert_do_nothing(engine, foreign_keys, recursive)
@@ -338,3 +414,107 @@ async def test_ubq_only_user_owner_delete_rekey_fkoff_real_schema(
         )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.parametrize(("foreign_keys", "recursive"), MODES)
+@pytest.mark.parametrize(
+    "full_history", (False, True),
+    ids=("U4A-policy-account-only", "U4A-reservation-task-binding"),
+)
+@pytest.mark.asyncio
+async def test_ubq_u4a_one_victim_replace_rekey_real_schema(
+    tmp_path, foreign_keys, recursive, full_history
+):
+    """Strict CAS/CTX-free one-protected-user REPLACE/REKEY regression.
+
+    Global K-ID/K-EMAIL two-victim and authenticated W/K registrar remain
+    #426 S5/S6-only; this test makes no shared authority claim.
+    """
+    db_path = tmp_path / ("ubq_u4a_" + uuid4().hex[:14] + ".db")
+    url = "sqlite+aiosqlite:///" + str(db_path)
+    _upgrade_real_schema(url)
+    engine = create_async_engine(url, pool_pre_ping=True)
+    observations = []
+    try:
+        assert await _scalar(
+            engine, "SELECT version_num FROM alembic_version"
+        ) == ALEMBIC_HEAD
+        async with engine.begin() as conn:
+            await _pragmas(conn, foreign_keys, recursive)
+            existing_triggers = {
+                row[0] for row in (await conn.execute(text(
+                    "SELECT name FROM sqlite_master WHERE type='trigger'"
+                ))).all()
+            }
+            assert {
+                "trg_ubq_user_history_delete",
+                "trg_ubq2_user_binding_delete_restrict",
+            }.issubset(existing_triggers)
+            await _seed_ubq_only_real_schema(conn, full_history)
+
+        await _assert_unchanged(engine, full_history=full_history)
+        original = await _u4a_retained_snapshot(engine)
+        await _assert_do_nothing(engine, foreign_keys, recursive)
+        assert await _u4a_retained_snapshot(engine) == original
+
+        # Every statement targets Alice as the ONLY existing protected
+        # victim; no ID-A + email-B two-victim collision belongs here.
+        one_victim_sql = (
+            (
+                "same-id-insert-or-replace",
+                "INSERT OR REPLACE INTO users(id,email,password_hash,status) "
+                "VALUES ('alice','alice-replaced@ubq.invalid','poison','active')",
+            ),
+            (
+                "same-id-replace",
+                "REPLACE INTO users(id,email,password_hash,status) "
+                "VALUES ('alice','alice@ubq.invalid','poison','active')",
+            ),
+            (
+                "email-only-insert-or-replace",
+                "INSERT OR REPLACE INTO users(id,email,password_hash,status) "
+                "VALUES ('foreign-id','alice@ubq.invalid','poison','active')",
+            ),
+            (
+                "owner-id-update-or-replace",
+                "UPDATE OR REPLACE users SET id='alice-moved' "
+                "WHERE id='alice'",
+            ),
+        )
+        for name, statement in one_victim_sql:
+            observation = await _u4a_one_victim_probe(
+                engine, foreign_keys=foreign_keys, recursive=recursive,
+                name=name, sql=statement,
+            )
+            observations.append(observation)
+            # Verify the *entire* durable source/owner snapshot after
+            # explicit rollback: policy identity, quota, reservation,
+            # task binding, immutable source fingerprint and owner.
+            assert await _u4a_retained_snapshot(engine) == original, (
+                "UBQ_U4A_DURABLE_SOURCE_OR_OWNER_DRIFT", name, observation
+            )
+            await _assert_unchanged(engine, full_history=full_history)
+    finally:
+        await engine.dispose()
+
+    # Independent native sqlite3 reopen, not the SQLAlchemy writer handle.
+    with sqlite3.connect(db_path) as reopened:
+        assert reopened.execute(
+            "SELECT id,email,password_hash FROM users ORDER BY id"
+        ).fetchall() == [
+            ("alice", "alice@ubq.invalid", "original-alice"),
+            ("bob", "bob@ubq.invalid", "original-bob"),
+        ], "UBQ_U4A_REOPEN_ORIGINAL_USER_IDENTITY_DRIFT"
+
+    print("UBQ_U4A_ONE_VICTIM_REAL_SCHEMA_WITNESSES", {
+        "foreign_keys": foreign_keys,
+        "recursive_triggers": recursive,
+        "full_history": full_history,
+        "cases": observations,
+    })
+    violations = [case for case in observations if not case["denied"]]
+    assert not violations, (
+        "UBQ_U4A_P0_ONE_VICTIM_REPLACE_OR_REKEY_ACCEPTED; "
+        "all protected identity DML must be physically denied: "
+        + repr((foreign_keys, recursive, full_history, violations))
+    )
