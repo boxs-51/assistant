@@ -134,9 +134,23 @@ class OTPStorageService:
         return raw_data
 
     async def _consume_database_value(self, email: str) -> Optional[str]:
+        """Disclose an OTP payload only after the winning DELETE commits.
+
+        MISSING/EXPIRED return None; any repository or COMMIT exception
+        propagates as UNCERTAIN/ERROR, never as MISSING or a retry. The
+        repository may return a provisional payload from DELETE RETURNING,
+        but the service must not authenticate against it before COMMIT.
+        """
         async with self.uow_factory() as uow:
             pending_record = await uow.pending_registrations.get_and_delete(email)
-            raw_data = pending_record.payload if pending_record else None
-            # get_and_delete only flushes; commit makes consumption durable.
+            provisional_payload = (
+                pending_record.payload if pending_record is not None else None
+            )
+            if provisional_payload is not None and type(provisional_payload) is not str:
+                raise RuntimeError("DB OTP consume returned an invalid payload receipt")
+
+            # Even the no-row/expired result is committed (the latter may
+            # have deleted an expired row). Never catch ambiguous failures.
             await uow.commit()
-            return raw_data
+            return provisional_payload
+
