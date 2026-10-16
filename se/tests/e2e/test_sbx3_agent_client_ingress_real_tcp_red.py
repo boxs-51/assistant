@@ -7,6 +7,8 @@ driver, client dispatcher and MCP process are real. No source remediation.
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import io
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -106,15 +108,17 @@ def _real_mcp_tools(marker):
         startup_timeout_seconds=10.0,
         shutdown_timeout_seconds=10.0,
     )
-    tools = manager.load_mcp_servers({
-        "ingress": {
-            "enabled": True,
-            "command": sys.executable,
-            "args": ["-E", str(FIXTURE)],
-            "base_risk": "LOW",
-            "env": {"SBX3_INGRESS_MARKER": str(marker)},
-        }
-    })
+    # stdout glyph is not encodable by Windows cp1252; capture only fixture status.
+    with contextlib.redirect_stdout(io.StringIO()):
+        tools = manager.load_mcp_servers({
+            "ingress": {
+                "enabled": True,
+                "command": sys.executable,
+                "args": ["-E", str(FIXTURE)],
+                "base_risk": "LOW",
+                "env": {"SBX3_INGRESS_MARKER": str(marker)},
+            }
+        })
     assert all(k in tools for k in (BAD, ECHO, REPLAY)), (
         "HARNESS_ERROR: real stdio MCP list_tools missing process/echo exports"
     )
@@ -272,6 +276,19 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
             return receipts, hitl
 
         result, message = await agent_once("sbx3-ing-agent-01")
+        # Read physical witness FIRST, otherwise a policy assertion masks the
+        # observed host child-process side effect in failing RED-first logs.
+        print(
+            "SBX3_AGENT_INGRESS_WITNESS",
+            "capability=" + capability_id,
+            "marker=" + str(marker.exists()),
+            "hitl_calls=" + str(len(hitl.calls)),
+            "tool_metadata=" + repr(dict(message.metadata)),
+            flush=True,
+        )
+        assert not marker.exists(), (
+            "PHYSICAL_RED: real TCP Agent triggered additional MCP child process"
+        )
         assert message.metadata["success"] is False, (
             "POLICY_RED: Agent-origin renamed process capability was accepted"
         )
