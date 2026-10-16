@@ -1,0 +1,263 @@
+name: SEC408 Skill Publication PostgreSQL Physical Evidence
+
+on:
+  push:
+    branches:
+      - audit/sec408-pg-physical-evidence-20261017
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sec408-skillpub-pg16-physical-evidence
+  cancel-in-progress: false
+
+jobs:
+  postgresql-physical-isolated:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: evidence
+          POSTGRES_PASSWORD: local_ephemeral_pg16_evidence
+          POSTGRES_DB: skill_publication_evidence
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U evidence -d skill_publication_evidence"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 6
+    env:
+      ASSISTANT_SECURITY_PG_E2E: "1"
+      ASSISTANT_SKILL_PUBLICATION_DATABASE_URL: "postgresql+asyncpg://evidence:local_ephemeral_pg16_evidence@127.0.0.1:5432/skill_publication_evidence"
+      PGHOST: "127.0.0.1"
+      PGPORT: "5432"
+      PGUSER: "evidence"
+      PGPASSWORD: "local_ephemeral_pg16_evidence"
+      PGDATABASE: "skill_publication_evidence"
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Assert exact PR source tree and nonproduction scope
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "AUDIT_EVIDENCE_COMMIT=$(git rev-parse HEAD)"
+          echo "SOURCE_BASE=8f847ee754f034660c44ef55772b5606ed607e2a"
+          git cat-file -e '8f847ee754f034660c44ef55772b5606ed607e2a^{commit}'
+          changed="$(git diff --name-only 8f847ee754f034660c44ef55772b5606ed607e2a HEAD)"
+          printf 'SCOPE_DIFF=%s\n' "$changed"
+          test "$changed" = ".github/workflows/sec408-skillpub-pg16-physical-evidence.yml"
+          test "$ASSISTANT_SECURITY_PG_E2E" = "1"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install baseline dependencies
+        shell: bash
+        run: python -m pip install -r requirements-test.txt
+      - name: Physical PostgreSQL SQL probe and pre-migration evidence
+        shell: python
+        run: |
+          import asyncio
+          import json
+          from pathlib import Path
+          import asyncpg
+          import os
+
+          async def main():
+              db = await asyncpg.connect(
+                  host="127.0.0.1",
+                  port=5432,
+                  user=os.environ["PGUSER"],
+                  password=os.environ["PGPASSWORD"],
+                  database=os.environ["PGDATABASE"],
+              )
+              try:
+                  row = await db.fetchrow(
+                      "SELECT current_database() AS db, "
+                      "current_setting('server_version') AS server_version, "
+                      "pg_is_in_recovery() AS is_replica, "
+                      "to_regclass('skill_publications.capability_publications')::text AS table_before"
+                  )
+                  proof = dict(row)
+                  assert not proof["is_replica"], "Physical PostgreSQL primary required"
+                  assert proof["table_before"] is None, "Expected virgin isolated database"
+                  Path("evidence/sec408-pg16").mkdir(parents=True, exist_ok=True)
+                  Path("evidence/sec408-pg16/sql-before.json").write_text(
+                      json.dumps(proof, indent=2), encoding="utf-8"
+                  )
+                  print("PHYSICAL_PG_PRE_MIGRATION", json.dumps(proof))
+              finally:
+                  await db.close()
+          asyncio.run(main())
+      - name: Apply original skill-publications Alembic migration to physical PostgreSQL
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m alembic -c alembic_skill_publications.ini upgrade head 2>&1 |
+            tee evidence/sec408-pg16/alembic-upgrade.log
+      - name: Capture migration head and physical SQL schema
+        shell: python
+        run: |
+          import asyncio
+          import json
+          from pathlib import Path
+          import asyncpg
+          import os
+
+          async def main():
+              db = await asyncpg.connect(
+                  host="127.0.0.1", port=5432, user=os.environ["PGUSER"],
+                  password=os.environ["PGPASSWORD"], database=os.environ["PGDATABASE"],
+              )
+              try:
+                  schema_head = await db.fetchval(
+                      "SELECT version_num FROM "
+                      "skill_publications.alembic_version_skill_publications"
+                  )
+                  table = await db.fetchval(
+                      "SELECT to_regclass('skill_publications.capability_publications')::text"
+                  )
+                  columns = await db.fetch(
+                      "SELECT column_name, data_type FROM information_schema.columns "
+                      "WHERE table_schema = 'skill_publications' AND table_name = 'capability_publications' "
+                      "ORDER BY ordinal_position"
+                  )
+                  indexes = await db.fetch(
+                      "SELECT indexname FROM pg_indexes "
+                      "WHERE schemaname = 'skill_publications' ORDER BY indexname"
+                  )
+                  assert schema_head == "skillpub_0001", f"Unexpected migration head {schema_head!r}"
+                  assert table == "skill_publications.capability_publications"
+                  assert columns and indexes, "Physical schema is incomplete"
+                  proof = {
+                      "schema_head": schema_head, "table": table,
+                      "columns": [dict(row) for row in columns],
+                      "index_names": [row["indexname"] for row in indexes],
+                  }
+                  Path("evidence/sec408-pg16/sql-migrated.json").write_text(
+                      json.dumps(proof, indent=2), encoding="utf-8"
+                  )
+                  print("PHYSICAL_PG_MIGRATED", json.dumps(proof))
+              finally:
+                  await db.close()
+          asyncio.run(main())
+      - name: Run exactly ten real PostgreSQL E2E cases and preserve original oracles
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m pytest -q -ra --junitxml=evidence/sec408-pg16/pytest.xml \
+            se/tests/e2e/test_sec408_explicit_trusted_publisher.py::test_real_postgres_operator_trusted_publication_and_race_fence \
+            se/tests/e2e/test_sec408_ws_namespace.py::test_real_postgres_ws_atomic_batch_and_concurrent_http_owner_fence \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_skill_publication_migration_head_and_table_exist \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_two_worker_owner_read_collision_restart_and_revoke \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_same_origin_concurrent_publish_is_idempotent \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_system_namespace_blocks_caller_and_materializes_public_skill \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_post_start_wrong_schema_head_blocks_provider_before_send \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_post_start_missing_version_table_blocks_provider_before_send \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_post_start_postgres_transport_loss_blocks_provider_before_send \
+            se/tests/integration/test_skill_publication_cross_worker.py::test_real_postgres_reservation_survives_local_catalog_bind_failure \
+            2>&1 | tee evidence/sec408-pg16/pytest-raw.log
+      - name: Record PostgreSQL final SQL head and row counts after adversarial tests
+        if: always()
+        shell: python
+        run: |
+          import asyncio
+          import json
+          import os
+          from pathlib import Path
+          import asyncpg
+          output = Path("evidence/sec408-pg16")
+          output.mkdir(parents=True, exist_ok=True)
+
+          async def main():
+              db = await asyncpg.connect(
+                  host="127.0.0.1", port=5432, user=os.environ["PGUSER"],
+                  password=os.environ["PGPASSWORD"], database=os.environ["PGDATABASE"]
+              )
+              try:
+                  head = await db.fetchval(
+                      "SELECT version_num FROM skill_publications.alembic_version_skill_publications"
+                  )
+                  count = await db.fetchval(
+                      "SELECT count(*) FROM skill_publications.capability_publications"
+                  )
+                  proof = {"schema_head_after_tests": head, "row_count_after_tests": count}
+                  output.joinpath("sql-after.json").write_text(
+                      json.dumps(proof, indent=2), encoding="utf-8"
+                  )
+                  assert head == "skillpub_0001", "Adversarial test did not restore exact migration head"
+                  print("PHYSICAL_PG_POST_TEST", json.dumps(proof))
+              finally:
+                  await db.close()
+          asyncio.run(main())
+      - name: Enforce exact 10-case zero-skip JUnit contract
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          import json
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          p = Path("evidence/sec408-pg16/pytest.xml")
+          assert p.exists(), "HARNESS_ERROR: physical PostgreSQL JUnit missing"
+          root = ET.parse(p).getroot()
+          cases = list(root.iter("testcase"))
+          original = {
+              "test_real_postgres_operator_trusted_publication_and_race_fence",
+              "test_real_postgres_ws_atomic_batch_and_concurrent_http_owner_fence",
+              "test_skill_publication_migration_head_and_table_exist",
+              "test_two_worker_owner_read_collision_restart_and_revoke",
+              "test_same_origin_concurrent_publish_is_idempotent",
+              "test_system_namespace_blocks_caller_and_materializes_public_skill",
+              "test_post_start_wrong_schema_head_blocks_provider_before_send",
+              "test_post_start_missing_version_table_blocks_provider_before_send",
+              "test_post_start_postgres_transport_loss_blocks_provider_before_send",
+              "test_real_postgres_reservation_survives_local_catalog_bind_failure",
+          }
+          seen = Counter(c.get("name", "") for c in cases)
+          counts = {
+              "testcases": len(cases),
+              "failures": sum(c.find("failure") is not None for c in cases),
+              "errors": sum(c.find("error") is not None for c in cases),
+              "skipped": sum(c.find("skipped") is not None for c in cases),
+          }
+          proof = {"counts": counts, "identities": sorted(seen)}
+          Path("evidence/sec408-pg16/oracle-inventory.json").write_text(
+              json.dumps(proof, indent=2), encoding="utf-8"
+          )
+          print("PHYSICAL_PG_JUNIT", json.dumps(proof))
+          assert seen == Counter(original), "HARNESS_ERROR: physical PG case missing, duplicate or unrelated"
+          assert counts == {"testcases": 10, "failures": 0, "errors": 0, "skipped": 0}, (
+              "SEMANTIC_RED: physical PostgreSQL tests must all execute and pass"
+          )
+      - name: Save PostgreSQL 16 service-container logs
+        if: always()
+        shell: bash
+        run: |
+          mkdir -p evidence/sec408-pg16
+          set +e
+          cid="$(docker ps --filter 'ancestor=postgres:16' --format '{{.ID}}' | head -n 1)"
+          if [[ -n "$cid" ]]; then
+            docker logs --timestamps "$cid" > evidence/sec408-pg16/postgres-server.log 2>&1
+          else
+            echo "Postgres service container not visible" > evidence/sec408-pg16/postgres-server.log
+          fi
+      - name: Upload raw JUnit, migration, PostgreSQL SQL and server evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sec408-skillpub-pg16-physical-evidence-linux
+          path: evidence/sec408-pg16/
+          if-no-files-found: error
