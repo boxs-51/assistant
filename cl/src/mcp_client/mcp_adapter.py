@@ -251,6 +251,13 @@ class MCPClientAdapter:
         self._mapped_tools = {}
 
     def _create_execution_handler(self, original_tool_name: str):
+        # Pin the stdio session and adapter lifecycle that produced this
+        # registry entry. A new process/session cannot reuse the old wrapper.
+        # This is handler identity, NOT an effect-safety certification.
+        bound_client = self.client
+        bound_session = self.session
+        bound_lifecycle = self._lifecycle_task
+
         def handler(
             *,
             invocation_id=None,
@@ -260,8 +267,21 @@ class MCPClientAdapter:
             **kwargs,
         ) -> str:
             # Correlation values are CL runtime metadata, not MCP tool
-            # arguments.  Keep only the model-supplied tool arguments.
+            # arguments. Keep only model-supplied tool arguments.
             del invocation_id, connection_id, session_id
+            if (
+                bound_client is None
+                or bound_session is None
+                or bound_lifecycle is None
+                or self.client is not bound_client
+                or self.session is not bound_session
+                or self._lifecycle_task is not bound_lifecycle
+                or self._startup_phase != "READY"
+            ):
+                raise RuntimeError(
+                    "MCP_PHYSICAL_HANDLER_BINDING_CHANGED: "
+                    "adapter process/session generation is no longer pinned"
+                )
             return self._manager.invoke(
                 self,
                 original_tool_name,
