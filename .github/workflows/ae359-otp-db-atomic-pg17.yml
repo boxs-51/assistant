@@ -1,0 +1,115 @@
+name: AE359 OTP PG17 T1 Physical RED-first
+
+on:
+  pull_request:
+    paths:
+      - se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py
+      - .github/workflows/ae359-otp-db-atomic-pg17.yml
+      - se/src/infrastructure/storage/repositories/user_data/pending_registrations.py
+      - se/src/transport/gateway/authentication/services/otp_service.py
+      - se/src/infrastructure/storage/core/unit_of_work.py
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  pg17-security-t1:
+    name: PG17 ${{ matrix.slice }} / Linux
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        slice: [semantic, mutation]
+    services:
+      postgres:
+        # Exact digest must be approved/pinned before release evidence acceptance.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ae359_otp_t1
+          POSTGRES_USER: ae359_test
+          POSTGRES_PASSWORD: ae359_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ae359_test -d ae359_otp_t1"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AE359_PG17_STRICT: "1"
+      AE359_PG17_TEST_DATABASE_URL: postgresql+asyncpg://ae359_test:ae359_test_only@127.0.0.1:5432/ae359_otp_t1
+      PYTHONDONTWRITEBYTECODE: "1"
+      AE359_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Attest exact checked-out HEAD and disposable PG17
+        shell: bash
+        run: |
+          set -euo pipefail
+          printf 'HEAD_SHA=%s\n' "$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "$AE359_EXPECTED_SHA"
+          python - <<'PY'
+          import os
+          from sqlalchemy.engine import make_url
+          u = make_url(os.environ['AE359_PG17_TEST_DATABASE_URL'])
+          assert u.host == '127.0.0.1' and u.database == 'ae359_otp_t1'
+          assert u.drivername == 'postgresql+asyncpg'
+          print('DISPOSABLE_PG17_DSN_GUARD=PASS')
+          PY
+      - name: Run real PostgreSQL 17 oracle slice (strict)
+        shell: bash
+        env:
+          SLICE: ${{ matrix.slice }}
+        run: |
+          set -euo pipefail
+          if [ "$SLICE" = "mutation" ]; then
+            FILTER="test_m0"
+          else
+            FILTER="not test_m0"
+          fi
+          # Preserve pytest's failing status while still auditing the full
+          # JUnit receipt on a RED-first witness run.
+          set +e
+          python -m pytest -q -ra \
+            se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py \
+            -k "$FILTER" --junitxml=ae359-pg17-t1.xml
+          pytest_rc=$?
+          set -e
+          python - <<'PY'
+          import os, xml.etree.ElementTree as ET
+          root = ET.parse('ae359-pg17-t1.xml').getroot()
+          suites = [root] if root.tag == 'testsuite' else list(root.iter('testsuite'))
+          if root.tag == 'testsuites':
+              suites = [s for s in root if s.tag == 'testsuite']
+          n = sum(int(x.attrib.get('tests', 0)) for x in suites)
+          skip = sum(int(x.attrib.get('skipped', 0)) for x in suites)
+          expected = 6 if os.environ['SLICE'] == 'mutation' else 14
+          assert n == expected and skip == 0, f'Incomplete PG17 T1 receipt: {n}/{expected} tests, {skip} skips'
+          errors = sum(int(x.attrib.get('errors', 0)) for x in suites)
+          failures = sum(int(x.attrib.get('failures', 0)) for x in suites)
+          print(f'AE359_T1_{os.environ["SLICE"].upper()}_RECEIPTS={n} SKIP=0 FAIL={failures} ERROR={errors}')
+          PY
+          exit "$pytest_rc"
+      - name: Save raw T1 JUnit
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ae359-pg17-${{ matrix.slice }}-linux-raw
+          path: ae359-pg17-t1.xml
+          if-no-files-found: warn
+          retention-days: 7
