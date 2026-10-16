@@ -70,11 +70,15 @@ class LocalCapabilityExecutor:
         # Keep the pre-effect durable CAS and the physical callable inside
         # the same local lease. A local revoke ACK waits until this lease
         # closes; remote issuer revocation still requires a separate channel.
-        with self.effect_start_gate.effect_lease():
+        with self.effect_start_gate.effect_lease() as admit_effect_start:
             if cancellation_event.is_set():
                 raise LocalExecutionCancelled()
             if before_target_call is not None:
                 before_target_call()
+            # This is the local effect-start linearization point. A revoke
+            # that won after lease acquisition but before this point denies
+            # the physical handler; a revoke after it drains this active lease.
+            admit_effect_start()
             result = self._call(target, arguments, envelope, cancellation_event)
             if inspect.isawaitable(result):
                 result = asyncio.run(result)
