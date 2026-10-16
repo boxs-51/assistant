@@ -75,6 +75,10 @@ class LocalCapabilityExecutor:
                 raise LocalExecutionCancelled()
             if before_target_call is not None:
                 before_target_call()
+            # Re-check cancellation after the durable admission callback and
+            # before consuming the local effect-start permit.
+            if cancellation_event.is_set():
+                raise LocalExecutionCancelled()
             # This is the local effect-start linearization point. A revoke
             # that won after lease acquisition but before this point denies
             # the physical handler; a revoke after it drains this active lease.
