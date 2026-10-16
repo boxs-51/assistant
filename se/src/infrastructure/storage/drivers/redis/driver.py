@@ -168,6 +168,27 @@ class RedisDriver(CacheDriver):
             self._connected = False
             raise
 
+    async def consume_one_time(self, key: str) -> Optional[Any]:
+        """Atomic Redis GETDEL; no separate stale GET or unsafe fallback.
+
+        Requires Redis >= 6.2. Unsupported commands, timeouts and uncertain
+        replies propagate as errors, never as a confirmed cache miss.
+        """
+        client = self._require_client()
+
+        try:
+            value = await client.getdel(key)
+            # connect() uses decode_responses=True. A boolean, integer or
+            # other malformed reply is not proof of one-use consumption.
+            if value is not None and type(value) is not str:
+                raise RuntimeError("Redis GETDEL returned an unconfirmed atomic receipt")
+            self._connected = True
+            return value
+
+        except RedisError:
+            self._connected = False
+            raise
+
     async def execute_script(
         self,
         script: str,

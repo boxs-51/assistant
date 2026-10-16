@@ -175,5 +175,24 @@ class InMemoryDriver(CacheDriver):
             self._delete_unlocked(key)
             return 1
 
+    async def consume_one_time(self, key: str) -> Optional[Any]:
+        """TTL-aware atomic read-and-remove, within this process only.
+
+        InMemory is never a shared one-use authority across OS processes.
+        Check connection, expiry and removal while holding the same lock.
+        """
+        async with self._lock:
+            self._require_connected()
+            if key not in self._data:
+                self._expires.pop(key, None)
+                return None
+            if self._is_expired(key, time.monotonic()):
+                self._delete_unlocked(key)
+                return None
+
+            value = self._data[key]
+            self._delete_unlocked(key)
+            return value
+
     async def exists(self, key: str) -> bool:
         return key in self._data
