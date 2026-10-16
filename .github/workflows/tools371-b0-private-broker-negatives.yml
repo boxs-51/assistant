@@ -1,0 +1,46 @@
+name: Tools371 B0 Private Broker Negative Evidence
+
+on:
+  pull_request:
+    paths:
+      - "tools/v1/terminal_tool.py"
+      - "tools/v1/test/test_t12_b0_private_broker_adapter.py"
+      - ".github/workflows/tools371-b0-private-broker-negatives.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  negative-contract-linux:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Run Tools B0 synthetic negative contract tests
+        run: python -m pytest -q -ra tools/v1/test/test_t12_b0_private_broker_adapter.py
+      - name: Evidence classification — no OS certification
+        if: always()
+        run: echo "TOOLS371_B0_SYNTHETIC_ONLY; NATIVE_OS_ISOLATION=NOT_CERTIFIED; NO_AGENT_ACTIVATION"
+
+  negative-contract-windows:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Install test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Run Tools B0 synthetic negative contract tests
+        run: python -m pytest -q -ra tools/v1/test/test_t12_b0_private_broker_adapter.py
+      - name: Evidence classification — no OS certification
+        if: always()
+        shell: pwsh
+        run: Write-Output 'TOOLS371_B0_SYNTHETIC_ONLY; NATIVE_OS_ISOLATION=NOT_CERTIFIED; NO_AGENT_ACTIVATION'
