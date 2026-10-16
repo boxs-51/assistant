@@ -14,6 +14,9 @@ from ..drivers.chroma.driver import ChromaVectorDriver
 from ..drivers.object_local.driver import LocalObjectStorageDriver
 
 from ..repositories.sessions import SessionRepository
+from ..repositories.refresh_sessions_redis import RedisRefreshSessionStore
+from ..repositories.refresh_sessions_inmemory import InMemoryRefreshSessionStore
+from ..interfaces.refresh_sessions import RefreshSessionStore
 from ..services.embedding_service import EmbeddingService
 from ..services.memory_promotion_admission import (
     DurableMemoryPromotionAdmission,
@@ -105,6 +108,7 @@ class StorageEngine:
         self._started = False
         self._service_generation = 0
         self._active_service_generation = None
+        self._refresh_store: RefreshSessionStore | None = None
 
     async def connect(self) -> None:
         """
@@ -178,6 +182,7 @@ class StorageEngine:
         except Exception:
             self._started = False
             self._revoke_service_generation()
+            await self._close_refresh_store()
 
             logger.error(
                 "Storage Engine failed to start",
@@ -208,6 +213,7 @@ class StorageEngine:
             # Revoke before any defensive teardown so a retained service from
             # a partially completed start cannot acquire a fresh SQL session.
             self._revoke_service_generation()
+            await self._close_refresh_store()
 
             # Vẫn gọi disconnect để đảm bảo cleanup
             # trong trường hợp startup partially completed.
@@ -225,6 +231,7 @@ class StorageEngine:
         self._revoke_service_generation()
 
         try:
+            await self._close_refresh_store()
             await self.drivers.disconnect_all()
 
         finally:
@@ -374,6 +381,12 @@ class StorageEngine:
     def _revoke_service_generation(self) -> None:
         self._active_service_generation = None
 
+    async def _close_refresh_store(self) -> None:
+        store = self._refresh_store
+        self._refresh_store = None
+        if store is not None:
+            await store.close()
+
     def _is_service_generation_active(self, generation: int) -> bool:
         return (
             self._started
@@ -498,16 +511,35 @@ class StorageEngine:
         # -----------------------------------------------------
 
         cache_driver = None
+        # Auth-enabled deployments must never silently downgrade a configured
+        # Redis refresh authority to per-process InMemory after Redis fails.
+        # This does not change generic rate-limiter cache fallback behavior.
+        redis_registered = self.drivers.get_entry("redis") is not None
+        if redis_registered and self.config.auth.enable and not self.drivers.is_available("redis"):
+            raise RuntimeError("Configured Redis authentication authority is unavailable")
         if self.drivers.is_available("redis"):
             cache_driver = self.get_driver("redis")
         elif self.drivers.is_available("in-memory"):
             cache_driver = self.get_cache_driver("in-memory")
 
         if cache_driver is not None:
+            generation = self._active_service_generation
+            is_active = lambda: self._is_service_generation_active(generation)
+            if isinstance(cache_driver, RedisDriver):
+                refresh_store: RefreshSessionStore = RedisRefreshSessionStore(
+                    cache_driver, is_generation_active=is_active,
+                )
+            elif isinstance(cache_driver, InMemoryDriver):
+                refresh_store = InMemoryRefreshSessionStore(
+                    is_generation_active=is_active,
+                )
+            else:
+                raise RuntimeError("Unsupported refresh-session authority driver")
+            self._refresh_store = refresh_store
             self.repositories.register(
                 "sessions",
                 SessionRepository(
-                    cache_driver=cache_driver
+                    cache_driver=cache_driver, refresh_store=refresh_store,
                 ),
             )
 
