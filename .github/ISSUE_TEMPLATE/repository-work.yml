@@ -1,53 +1,13 @@
 name: "Repository work / roadmap issue"
-description: "Open implementation, architecture, migration, audit, roadmap, or governance work under canonical policy #85."
+description: "Open implementation, architecture, migration, audit or roadmap work."
 title: "[ACTIVE] "
 body:
   - type: markdown
     attributes:
       value: |
-        ## Repository governance
-
-        All repository work opened with this form is governed by the canonical
-        **Repository Stacked Development & Integration Wave Policy — Issue #85**.
-
-        - Future / unclaimed stages: `FOLLOW-LATEST`.
-        - At production CLAIM: record the effective #85 policy version.
-        - Local overrides may be stricter, never broader.
-        - Stable development baselines avoid re-anchor on unrelated NON_MATERIAL main drift.
-        - Active issues may autonomously communicate, negotiate dependencies, and build/revise merge plans or Integration Waves through READY under Policy v2.5.\n        - Merge authorization remains separate from stage/development progression and may be granted per PR or by one explicit READY Integration Wave command.
-
-  - type: checkboxes
-    id: policy_ack
-    attributes:
-      label: "Canonical policy acknowledgement"
-      options:
-        - label: "I have read and will follow canonical stacked-development policy #85."
-          required: true
-        - label: "I understand that this issue does not gain runtime/schema/lifecycle/destructive authority merely by referencing #85."
-          required: true
-        - label: "I understand that production merge authorization remains a separate gate and may be granted by one explicit Integration Wave command for a frozen READY manifest."
-          required: true
-
-  - type: dropdown
-    id: reference_mode
-    attributes:
-      label: "Policy reference mode"
-      description: "New/unclaimed work normally uses FOLLOW-LATEST. CLAIM-PINNED is for an already claimed production candidate whose effective policy version is being recorded."
-      options:
-        - "FOLLOW-LATEST"
-        - "CLAIM-PINNED"
-    validations:
-      required: true
-
-  - type: input
-    id: policy_version
-    attributes:
-      label: "Effective #85 policy version"
-      description: "Use the current #85 version. At production CLAIM this becomes the recorded candidate policy version."
-      placeholder: "v2.5"
-      value: "v2.5"
-    validations:
-      required: true
+        Describe the technical objective, owned scope, dependencies and acceptance criteria.
+        The former Policy #85 and its modules have been retired by the Owner.
+        Historical policy references do not define current repository instructions.
 
   - type: dropdown
     id: work_class
@@ -107,59 +67,6 @@ body:
     validations:
       required: true
 
-  - type: dropdown
-    id: stack_role
-    attributes:
-      label: "Initial stacked-development role"
-      options:
-        - "Root / no production parent"
-        - "Depth 1 production candidate"
-        - "Proposed depth 2 child — PRE-CLAIM only"
-        - "Released depth 2 child"
-        - "Non-production / governance / audit"
-    validations:
-      required: true
-
-  - type: textarea
-    id: stack_checkpoint
-    attributes:
-      label: "Stack checkpoint"
-      description: "Required for any production parent/child. Use N/A for non-production work."
-      value: |
-        STACK_POLICY_ISSUE    = #85
-        STACK_POLICY_VERSION  = v2.5
-        STACK_MODE            = <ROOT | STACKED_DEVELOPMENT | N/A>
-        INTEGRATION_MODE      = <SINGLE_LANE | PARALLEL_LANES | N/A>
-        DEVELOPMENT_BASE      = <sha | N/A>
-        WAVE_ID               = <not-assigned | IW-... | N/A>
-        STACK_DEPTH           = <0 | 1 | 2 | N/A>
-        CANONICAL_MAIN_FORK   = <sha | N/A>
-        STACK_PARENT_PR       = <number | none | N/A>
-        STACK_PARENT_HEAD     = <exact sha | none | N/A>
-        CHILD_CLAIM           = <released scope | PRE-CLAIM | N/A>
-        CLOSED_AUTHORITIES    = <summary>
-        MERGE_ORDER           = <parent first | N/A>
-        DRIFT_CLASS           = <NON_MATERIAL | MATERIAL | N/A>
-        INTEGRATION_STATUS    = <NOT_CANONICAL | WAVE_CANDIDATE | HOLD | N/A>
-    validations:
-      required: true
-
-  - type: textarea
-    id: merge_planning
-    attributes:
-      label: "Autonomous merge-planning context"
-      description: "Record known merge peers, provisional ordering, blockers, or why this issue should stay outside the current wave. Policy #85 v2.5 allows this plan to evolve autonomously before authorization."
-      value: |
-        MERGE_CANDIDATE       = <PR | not-yet>
-        PEER_CANDIDATES       = <PR refs | NONE>
-        PROPOSED_ORDER        = <order | unresolved>
-        ORDER_RATIONALE       = <short reason>
-        BLOCKERS              = <NONE | refs>
-        NEXT_WAVE_IF_EXCLUDED = <yes/no/N/A>
-        AUTHORIZATION_MODE    = <wave command | local auto-merge exception | manual PR confirmation | unknown>
-    validations:
-      required: true
-
   - type: textarea
     id: gates
     attributes:
@@ -171,31 +78,6 @@ body:
     validations:
       required: true
 
-  - type: checkboxes
-    id: progression_ack
-    attributes:
-      label: "Stage / integration discipline"
-      options:
-        - label: "I will not treat an unmerged stacked candidate as LANDED or canonical authority."
-          required: true
-        - label: "A depth-2 child will not merge before its production parent."
-          required: true
-        - label: "After parent or sibling landing, I will classify drift first; unrelated NON_MATERIAL main movement alone does not force re-anchor."
-          required: true
-        - label: "If drift is MATERIAL, I will refresh/re-anchor and rerun the affected CI/audit evidence before integration."
-          required: true
-        - label: "If this candidate is enrolled in an Integration Wave, it will not merge outside that frozen wave manifest."
-          required: true
-        - label: "I will stop on a blocking P0/P1, unopened authority, semantic parent change, migration conflict, ownership conflict, or applicable stack-depth limit."
-          required: true
-
-  - type: textarea
-    id: local_override
-    attributes:
-      label: "Local stricter override to #85"
-      description: "Optional. Use NONE if this issue does not narrow the repository default. Local rules may be stricter but may not silently broaden authority."
-      value: "NONE"
-
   - type: textarea
     id: first_action
     attributes:
@@ -205,3 +87,4 @@ body:
         Example: PRE-CLAIM only; production branch remains closed pending independent release.
     validations:
       required: true
+
