@@ -363,3 +363,21 @@ def test_uncertified_agent_mcp_continuation_fails_before_runtime():
     assert exc.value.code == "AGENT_TOOL_POLICY_DENIED"
     assert exc.value.retryable is False
     runtime.continue_invocation.assert_not_awaited()
+
+
+def test_runtime_boundary_denies_agent_origin_mcp_before_resolution():
+    from se.src.runtimes.capability.runtime import CapabilityRuntime
+
+    runtime = CapabilityRuntime.__new__(CapabilityRuntime)
+    identity = SimpleNamespace(user_id="sbx3-user")
+    with pytest.raises(PermissionError, match="AGENT_TOOL_POLICY_DENIED"):
+        asyncio.run(
+            runtime.execute_capability(
+                capability_id="mcp__ingress__innocent_preview",
+                arguments={"value": "MUST_NOT_EXECUTE"},
+                identity=identity,
+                execution_id="root-agent-execution",
+                caller_agent_execution_id="root-agent-execution",
+                metadata={"chat_execution_mode": "DIRECT"},
+            )
+        )
