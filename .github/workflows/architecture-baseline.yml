@@ -69,3 +69,5 @@ jobs:
           se/tests/integration/test_sbx2_sandbox_file_glob_execution.py
           tools/v1/test/test_terminal_tool.py
           tools/v1/test/test_t12_a_sbx3_terminal_python_contract.py
+          se/tests/e2e/test_sbx3_trusted_direct_terminal_positive.py
+          se/tests/e2e/test_sbx3_direct_capability_real_jwt_auth.py
