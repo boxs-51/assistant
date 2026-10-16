@@ -39,15 +39,80 @@ jobs:
           python -m pytest -q -ra
           --junitxml=evidence/sbx3-agent-deny/junit.xml
           se/tests/architecture/test_sbx3_agent_process_fail_closed.py
-      - name: Strict JUnit original ten and twelve alias cases
-        run: >-
-          python -c "import xml.etree.ElementTree as ET;
-          root=ET.parse('evidence/sbx3-agent-deny/junit.xml').getroot();
-          suites=[root] if root.tag=='testsuite' else list(root.findall('testsuite'));
-          assert len(suites)==1 and
-          int(suites[0].attrib.get('tests','0'))==22 and
-          all(int(suites[0].attrib.get(k,'0'))==0 for k in ('failures','errors','skipped'));
-          print('SBX3_AGENT_PROCESS_DENY=22_PASS_0_SKIP; PORTABLE_ROUTING_NOT_NATIVE_OS_CONFINEMENT')"
+      - name: Strict JUnit original 22 plus 8 MCP security oracles
+        if: always()
+        shell: python
+        run: |
+          from collections import Counter
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+
+          path = Path("evidence/sbx3-agent-deny/junit.xml")
+          assert path.exists(), "HARNESS_ERROR: missing Agent-deny JUnit"
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+          assert len(suites) == 1, "HARNESS_ERROR: expected one Agent-deny test suite"
+          suite = suites[0]
+          cases = list(suite.findall("testcase"))
+
+          # Preserve the complete original 10 process-command/continuation
+          # controls plus the 12 R7/R12 alias-denial parametrizations.
+          original = {
+              "test_uncertified_agent_command_never_dispatches": 6,
+              "test_uncertified_agent_continuation_rejects_before_runtime": 3,
+              "test_nonprocess_capability_still_uses_normal_agent_policy": 1,
+              "test_process_alias_execution_fails_before_runtime_dispatch": 3,
+              "test_process_alias_r7_continuation_rejected_before_runtime": 3,
+              "test_process_alias_never_eligible_for_server_continuation": 3,
+              "test_process_alias_r12_coordinator_prepared_continuation_never_dispatches": 3,
+          }
+          # New TA-R3 P0 MCP guards are additive, never substitutes.
+          mcp = {
+              "test_uncertified_agent_mcp_tool_fails_before_runtime_dispatch": 3,
+              "test_uncertified_agent_mcp_continuation_fails_before_runtime": 1,
+              "test_runtime_boundary_denies_agent_origin_mcp_before_resolution": 1,
+              "test_event_bus_cannot_claim_trusted_origin_for_mcp_execution": 1,
+              "test_durable_continuation_cannot_bypass_mcp_origin_deny": 1,
+              "test_direct_read_only_profile_requires_local_mcp_effect_certification": 1,
+          }
+          assert sum(original.values()) == 22 and sum(mcp.values()) == 8
+          expected = Counter({**original, **mcp})
+          observed = Counter(case.get("name", "").split("[", 1)[0] for case in cases)
+          full_ids = [(case.get("classname"), case.get("name")) for case in cases]
+          assert observed == expected, (
+              "HARNESS_ERROR: original 22 or additive 8 MCP oracle cases missing/duplicated",
+              observed, expected,
+          )
+          assert len(full_ids) == len(set(full_ids)) == 30, (
+              "HARNESS_ERROR: duplicate JUnit case identities",
+              full_ids,
+          )
+          assert all(
+              "test_sbx3_agent_process_fail_closed" in (case.get("classname") or "")
+              for case in cases
+          ), "HARNESS_ERROR: unrelated JUnit cases in Agent-deny evidence"
+          assert int(suite.attrib.get("tests", "-1")) == 30, (
+              "HARNESS_ERROR: JUnit reported test count is not 30"
+          )
+          counts = {
+              name: int(suite.attrib.get(name, "-1"))
+              for name in ("failures", "errors", "skipped")
+          }
+          assert all(count == 0 for count in counts.values()), (
+              "SEMANTIC_RED: never accept failed, errored, skipped or xfailed controls",
+              counts,
+          )
+          assert not any(
+              case.find("failure") is not None
+              or case.find("error") is not None
+              or case.find("skipped") is not None
+              for case in cases
+          ), "SEMANTIC_RED: case-level JUnit result is not PASS"
+          print(
+              "SBX3_AGENT_PROCESS_DENY=30_PASS_0_FAIL_0_ERROR_0_SKIP;"
+              " ORIGINAL_22_AND_ADDITIVE_MCP_8;"
+              " PORTABLE_ROUTING_NOT_NATIVE_OS_CONFINEMENT"
+          )
       - uses: actions/upload-artifact@v4
         if: always()
         with:
