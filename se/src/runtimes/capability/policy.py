@@ -39,6 +39,16 @@ class CapabilityAccessPolicy:
             return False
         if profile is CapabilityAccessProfile.AGENT_POLICY:
             return True
+        if (
+            profile is CapabilityAccessProfile.DIRECT_READ_ONLY
+            and type(definition.capability_id) is str
+            and definition.capability_id.lower().startswith("mcp__")
+            and definition.metadata.get("trusted_direct_read_only") is not True
+        ):
+            # A read-only-looking MCP description is not a physical effect
+            # certification. Only an explicit local client allowlist may
+            # expose that handler through trusted DIRECT visibility.
+            return False
         if definition.kind is CapabilityKind.AGENT:
             return False
         if definition.execution_mode in {
