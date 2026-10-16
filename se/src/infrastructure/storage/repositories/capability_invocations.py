@@ -677,6 +677,68 @@ class SqlCapabilityInvocationStore:
             await uow.commit()
             return True
 
+    async def claim_remote_send(
+        self, invocation_id: str, attempt_id: str, attempt_number: int
+    ) -> bool:
+        """Durably claim the first send of one running remote attempt.
+
+        Lock the shared invocation-id serialization key, then the attempt.
+        SQLite's writer lock and PostgreSQL's advisory lock make the read and
+        JSON metadata update indivisible with respect to cooperating writers.
+        The marker survives later attempt lifecycle writes.
+        """
+        async with self._uow_factory() as uow:
+            repository = getattr(uow, "capability_invocations", None)
+            if repository is None:
+                repository = CapabilityInvocationRepository(uow.session)
+            invocation = await repository.lock_invocation_gc_serialization_fence(
+                invocation_id
+            )
+            if (
+                invocation is None
+                or invocation.state != CapabilityInvocationState.RUNNING.value
+                or int(invocation.attempt) != attempt_number
+            ):
+                await uow.rollback()
+                return False
+            attempt = (
+                await uow.session.execute(
+                    select(CapabilityInvocationAttemptRecord)
+                    .where(
+                        CapabilityInvocationAttemptRecord.attempt_id == attempt_id,
+                        CapabilityInvocationAttemptRecord.invocation_id == invocation_id,
+                        CapabilityInvocationAttemptRecord.attempt_number == attempt_number,
+                        CapabilityInvocationAttemptRecord.state
+                        == CapabilityInvocationState.RUNNING.value,
+                    )
+                    .with_for_update()
+                )
+            ).scalar_one_or_none()
+            if attempt is None:
+                await uow.rollback()
+                return False
+            existing_metadata = dict(attempt.metadata_json or {})
+            if existing_metadata.get("ta_r3_send_claimed"):
+                await uow.rollback()
+                return False
+            result = await uow.session.execute(
+                update(CapabilityInvocationAttemptRecord)
+                .where(
+                    CapabilityInvocationAttemptRecord.attempt_id == attempt_id,
+                    CapabilityInvocationAttemptRecord.state
+                    == CapabilityInvocationState.RUNNING.value,
+                )
+                .values(metadata_json={
+                    **existing_metadata,
+                    "ta_r3_send_claimed": True,
+                })
+            )
+            if result.rowcount != 1:
+                await uow.rollback()
+                return False
+            await uow.commit()
+            return True
+
     async def list_attempts(
         self, invocation_id: str
     ) -> list[CapabilityInvocationAttempt]:
@@ -713,6 +775,20 @@ class SqlCapabilityInvocationStore:
         values["metadata_json"] = jsonable_encoder(values.pop("metadata"))
         values["error"] = jsonable_encoder(values["error"])
         async with self._uow_factory() as uow:
+            repository = getattr(uow, "capability_invocations", None)
+            if repository is None:
+                repository = CapabilityInvocationRepository(uow.session)
+            await repository.lock_invocation_gc_serialization_fence(
+                attempt.invocation_id
+            )
+            stored = await uow.session.get(
+                CapabilityInvocationAttemptRecord, attempt.attempt_id
+            )
+            if stored is None or stored.invocation_id != attempt.invocation_id:
+                await uow.rollback()
+                raise KeyError(attempt.attempt_id)
+            if (stored.metadata_json or {}).get("ta_r3_send_claimed"):
+                values["metadata_json"]["ta_r3_send_claimed"] = True
             await uow.session.execute(
                 update(CapabilityInvocationAttemptRecord)
                 .where(CapabilityInvocationAttemptRecord.attempt_id == attempt.attempt_id)

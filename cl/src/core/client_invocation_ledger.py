@@ -221,34 +221,37 @@ class ClientInvocationLedger:
                 principal_id,
                 invocation_id,
             )
-            if existing.state is ClientInvocationLedgerState.TERMINAL:
+            # Only one worker may consume the first physical-effect permit.
+            # Authorized idempotent recovery is handled separately and does
+            # not turn a second mark_running() into a new first-start permit.
+            if existing.state is not ClientInvocationLedgerState.PREPARED:
                 raise ClientInvocationLedgerConflict(
-                    "Terminal invocation cannot return to RUNNING."
+                    "First effect admission already consumed."
                 )
-            if existing.state is ClientInvocationLedgerState.PREPARED:
-                connection.execute(
-                    """
-                    UPDATE client_invocations
-                    SET state = ?, updated_at = ?
-                    WHERE client_id = ?
-                      AND principal_id = ?
-                      AND invocation_id = ?
-                      AND state = ?
-                    """,
-                    (
-                        ClientInvocationLedgerState.RUNNING.value,
-                        time.time(),
-                        client_id,
-                        principal_id,
-                        invocation_id,
-                        ClientInvocationLedgerState.PREPARED.value,
-                    ),
+            result = connection.execute(
+                """
+                UPDATE client_invocations
+                SET state = ?, updated_at = ?
+                WHERE client_id = ?
+                  AND principal_id = ?
+                  AND invocation_id = ?
+                  AND state = ?
+                """,
+                (
+                    ClientInvocationLedgerState.RUNNING.value,
+                    time.time(),
+                    client_id,
+                    principal_id,
+                    invocation_id,
+                    ClientInvocationLedgerState.PREPARED.value,
+                ),
+            )
+            if result.rowcount != 1:
+                raise ClientInvocationLedgerConflict(
+                    "Concurrent first effect admission rejected."
                 )
             return self._require_record(
-                connection,
-                client_id,
-                principal_id,
-                invocation_id,
+                connection, client_id, principal_id, invocation_id
             )
 
     def commit_terminal(
