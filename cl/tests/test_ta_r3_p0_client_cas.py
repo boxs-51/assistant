@@ -84,7 +84,6 @@ def test_terminal_record_cannot_reenter_first_effect(tmp_path):
 
 
 def test_running_mcp_replay_is_blocked_even_if_registry_claims_deduplicated(tmp_path):
-    import time
     from types import SimpleNamespace
 
     from cl.src.core.capability_dispatcher import CapabilityDispatcher
