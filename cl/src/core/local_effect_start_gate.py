@@ -10,11 +10,11 @@ from __future__ import annotations
 from contextlib import contextmanager
 from threading import Condition, RLock
 from time import monotonic
-from typing import Iterator
+from typing import Callable, Iterator
 
 
 class EffectStartRevoked(PermissionError):
-    """A local effect lease cannot be issued after revocation."""
+    """A local effect lease or start admission is denied after revocation."""
 
 
 class LocalEffectStartGate:
@@ -25,13 +25,33 @@ class LocalEffectStartGate:
         self._epoch = 0
 
     @contextmanager
-    def effect_lease(self) -> Iterator[None]:
+    def effect_lease(self) -> Iterator[Callable[[], None]]:
+        """Reserve a drain-tracked lease and yield its atomic start LP.
+
+        A lease acquired before revoke is not yet permission to start an
+        effect. The caller must invoke the yielded function immediately before
+        the physical handler. If revoke linearizes first, start is denied.
+        If start linearizes first, revoke waits for the lease to drain.
+        """
         with self._condition:
             if self._revoked:
                 raise EffectStartRevoked("Effect-start authority is revoked.")
             self._active += 1
+        started = False
+
+        def admit_effect_start() -> None:
+            nonlocal started
+            with self._condition:
+                if self._revoked:
+                    raise EffectStartRevoked(
+                        "Effect-start authority was revoked before handler start."
+                    )
+                if started:
+                    raise RuntimeError("Effect-start lease was already consumed.")
+                started = True
+
         try:
-            yield
+            yield admit_effect_start
         finally:
             with self._condition:
                 self._active -= 1
