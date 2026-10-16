@@ -8,6 +8,7 @@ RED-first J03 must remain physically RED until separately authorized T2.
 from __future__ import annotations
 
 import secrets
+import hashlib
 import shlex
 import os
 import subprocess
@@ -32,6 +33,8 @@ from se.src.infrastructure.storage.models.sql.user_data.member import (
     Member, member_role_association,
 )
 from se.src.infrastructure.storage.models.sql.user_data.organization import Organization
+from se.src.infrastructure.storage.models.sql.user_data.application import Application
+from se.src.infrastructure.storage.models.sql.user_data.api_key import APIKey
 from se.src.infrastructure.storage.models.sql.user_data.permission import (
     Permission, Role, role_permission_association,
 )
@@ -50,6 +53,7 @@ from se.src.transport.gateway.api.v1 import capability_router
 from se.src.transport.gateway.authentication.authenticators.jwt_authenticator import (
     JWTAuthenticator,
 )
+from se.src.transport.gateway.authentication.services.api_key_service import APIKeyService
 from se.src.transport.gateway.authentication.dependency import get_current_identity
 from se.src.transport.gateway.authentication.manager import AuthenticationManager
 from se.src.transport.gateway.authentication.middleware import AuthenticationMiddleware
@@ -526,3 +530,130 @@ async def test_j10_jwt_write_only_cannot_run_terminal(
     assert witness == {
         "http_status": 403, "popen_count": 0, "marker_created": False,
     }, witness
+
+
+@pytest.mark.asyncio
+async def test_j11_cross_organization_same_name_role_must_not_inherit_terminal(
+    real_jwt_gateway, tmp_path,
+):
+    """Signed JWT + actual persisted membership: role B name=admin cannot
+    borrow the terminal grant from role A with the same name."""
+    gateway = real_jwt_gateway
+    victim = "direct-collision-owner-b"
+    org_b = "direct-collision-org-b"
+    role_b = "direct-collision-admin-b"
+    async with gateway.uow_factory() as uow:
+        await uow.session.execute(User.__table__.insert(), {
+            "id": victim, "email": "collision-b@example.invalid",
+            "password_hash": "disabled-test-password", "status": "active",
+        })
+        await uow.session.execute(Organization.__table__.insert(), {
+            "id": org_b, "owner_id": victim, "name": "Untrusted org B",
+            "plan": "free", "status": "active",
+        })
+        # This role is created AFTER org A's role already has terminal grant.
+        await uow.session.execute(Role.__table__.insert(), {
+            "id": role_b, "name": "admin", "organization_id": org_b,
+        })
+        await uow.session.execute(Member.__table__.insert(), {
+            "organization_id": org_b, "user_id": victim,
+        })
+        await uow.session.execute(member_role_association.insert(), {
+            "member_organization_id": org_b, "member_user_id": victim,
+            "role_id": role_b,
+        })
+        await uow.commit()
+
+    token_b = gateway.token_service.jwt.create_access_token({
+        "sub": victim, "roles": ["admin"],
+        "org_id": org_b, "scopes": ["profile"],
+    })
+    # Role names are *identical*; only durable role IDs/memberships differ.
+    identity_b = await gateway.jwt_authenticator.authenticate(token_b)
+    assert identity_b.organization_id == org_b
+    assert identity_b.roles == ["admin"]
+    assert "terminal:execute" not in identity_b.permissions
+
+    # Even a valid signed JWT with forged org A claim must not gain A's grant.
+    forged_org = gateway.token_service.jwt.create_access_token({
+        "sub": victim, "roles": ["admin"],
+        "org_id": "direct-jwt-org", "scopes": ["profile"],
+    })
+    asserted_a = await gateway.jwt_authenticator.authenticate(forged_org)
+    assert "terminal:execute" not in asserted_a.permissions
+
+    marker = tmp_path / "cross-organization-terminal-must-not-exist"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app),
+        base_url="http://testserver",
+    ) as client:
+        with patch(
+            "tools.v1.terminal_tool.subprocess.Popen",
+            side_effect=OSError("cross-organization execution intercepted"),
+        ) as popen:
+            response = await client.post(
+                "/v1/capabilities/terminal.run/execute",
+                headers={"Authorization": f"Bearer {token_b}"},
+                json={"arguments": {"command": _harmless_command(marker),
+                                    "cwd": str(tmp_path), "timeout": 8}},
+            )
+        assert response.status_code == 403, response.text
+        assert popen.call_count == 0 and not marker.exists()
+    original_a = await gateway.jwt_authenticator.authenticate(gateway.tokens["admin"])
+    assert "terminal:execute" in original_a.permissions
+
+
+@pytest.mark.asyncio
+async def test_j12_admin_and_standard_api_keys_never_union_same_name_role_grants(
+    real_jwt_gateway,
+):
+    """An ak_/sk_ token for org B must not acquire org A's terminal grant."""
+    gateway = real_jwt_gateway
+    victim = "direct-api-tenant-b"
+    org_b = "direct-api-org-b"
+    async with gateway.uow_factory() as uow:
+        await uow.session.execute(User.__table__.insert(), {
+            "id": victim, "email": "api-owner-b@example.invalid",
+            "password_hash": "disabled-test-password", "status": "active",
+        })
+        await uow.session.execute(Organization.__table__.insert(), {
+            "id": org_b, "owner_id": victim, "name": "API org B",
+            "plan": "free", "status": "active",
+        })
+        await uow.session.execute(Role.__table__.insert(), {
+            "id": "direct-api-role-b", "name": "admin",
+            "organization_id": org_b,
+        })
+        await uow.session.execute(Member.__table__.insert(), {
+            "organization_id": org_b, "user_id": victim,
+        })
+        await uow.session.execute(member_role_association.insert(), {
+            "member_organization_id": org_b, "member_user_id": victim,
+            "role_id": "direct-api-role-b",
+        })
+        await uow.session.execute(Application.__table__.insert(), [
+            {"id": "direct-api-app-b", "organization_id": org_b, "name": "B"},
+            {"id": "direct-api-app-a", "organization_id": "direct-jwt-org", "name": "A"},
+        ])
+        for prefix, app in (
+            ("ak_crossb", "direct-api-app-b"),
+            ("sk_crossb", "direct-api-app-b"),
+            ("ak_crossa", "direct-api-app-a"),
+        ):
+            await uow.session.execute(APIKey.__table__.insert(), {
+                "id": prefix, "application_id": app, "prefix": prefix,
+                "hashed_key": hashlib.sha256(b"proof-body").hexdigest(),
+                "status": "active",
+            })
+        await uow.commit()
+
+    key_service = APIKeyService(gateway.uow_factory)
+    admin_b = await key_service.verify_key("ak_crossb_proof-body")
+    assert admin_b.organization_id == org_b
+    assert "terminal:execute" not in admin_b.permissions
+    standard_b = await key_service.verify_key("sk_crossb_proof-body")
+    assert standard_b.organization_id == org_b
+    assert "terminal:execute" not in standard_b.permissions
+    admin_a = await key_service.verify_key("ak_crossa_proof-body")
+    assert admin_a.organization_id == "direct-jwt-org"
+    assert "terminal:execute" in admin_a.permissions
