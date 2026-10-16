@@ -1555,6 +1555,15 @@ class CapabilityRuntime(BaseRuntime):
             raise PermissionError(
                 f"Capability '{capability_id}' is not authorized."
             )
+        if (
+            type(capability_id) is str
+            and capability_id.lower().startswith("mcp__")
+            and driver.definition.metadata.get("trusted_direct_read_only") is not True
+        ):
+            raise PermissionError(
+                "MCP_EFFECT_CLASS_UNCERTIFIED: MCP physical effects require "
+                "an explicit local DIRECT read-only certification."
+            )
 
         effective_execution_connection_id = (
             connection_id or metadata_connection_id

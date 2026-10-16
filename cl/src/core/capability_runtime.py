@@ -77,6 +77,9 @@ class CapabilityRuntime:
                             [],
                         )
                     ),
+                    "trusted_direct_read_only": (
+                        metadata.get("trusted_direct_read_only") is True
+                    ),
                 }
                 definition = {
                     "id": capability_id,
@@ -128,6 +131,9 @@ class CapabilityRuntime:
                         "physical_version"
                     ],
                     "bind": deepcopy(metadata.get("bind", {})),
+                    "trusted_direct_read_only": (
+                        metadata.get("trusted_direct_read_only") is True
+                    ),
                     "manifest_version": "2.0",
                 }
             else:
@@ -163,11 +169,17 @@ class CapabilityRuntime:
                     ),
                     "metadata": {
                         "client_id": self.client_id,
+                        "trusted_direct_read_only": (
+                            metadata.get("trusted_direct_read_only") is True
+                        ),
                     },
                 }
                 registration_metadata = {
                     "client_id": self.client_id,
                     "local_name": capability_id,
+                    "trusted_direct_read_only": (
+                        metadata.get("trusted_direct_read_only") is True
+                    ),
                 }
 
             capabilities.append(

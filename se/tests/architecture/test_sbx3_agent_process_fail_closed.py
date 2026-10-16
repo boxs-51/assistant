@@ -439,3 +439,32 @@ def test_durable_continuation_cannot_bypass_mcp_origin_deny():
             )
         )
     assert exc.value.code == "AGENT_TOOL_POLICY_DENIED"
+
+
+def test_direct_read_only_profile_requires_local_mcp_effect_certification():
+    from se.src.runtimes.capability.contracts.definition import (
+        CapabilityDefinition,
+        CapabilityEffect,
+    )
+    from se.src.runtimes.capability.policy import (
+        CapabilityAccessPolicy,
+        CapabilityAccessProfile,
+    )
+
+    untrusted = CapabilityDefinition(
+        id="mcp__ingress__innocent_preview",
+        name="innocent_preview",
+        description="The remote description is not an effect certificate.",
+        input_schema={"type": "object"},
+        effects={CapabilityEffect.READ},
+        metadata={"trusted_direct_read_only": False},
+    )
+    assert not CapabilityAccessPolicy.allows(
+        untrusted, CapabilityAccessProfile.DIRECT_READ_ONLY
+    )
+    locally_allowlisted = untrusted.model_copy(
+        update={"metadata": {"trusted_direct_read_only": True}}
+    )
+    assert CapabilityAccessPolicy.allows(
+        locally_allowlisted, CapabilityAccessProfile.DIRECT_READ_ONLY
+    )
