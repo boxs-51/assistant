@@ -80,8 +80,22 @@ class MCPClientAdapter:
 
     def _map_tools(self, tools: Any) -> Dict[str, Dict[str, Any]]:
         mapped_tools: Dict[str, Dict[str, Any]] = {}
+        configured_direct_reads = self.config.get(
+            "trusted_direct_read_only_tools", ()
+        )
+        if not isinstance(
+            configured_direct_reads, (list, tuple, set, frozenset)
+        ):
+            configured_direct_reads = ()
         for tool in tools:
             namespaced_name = f"mcp__{self.server_name}__{tool.name}"
+            # Only local client configuration may certify a tool for trusted
+            # DIRECT read-only visibility. MCP names/descriptions/effect claims
+            # returned by the remote server are never treated as certification.
+            trusted_direct_read_only = (
+                type(getattr(tool, "name", None)) is str
+                and tool.name in configured_direct_reads
+            )
             mapped_tools[namespaced_name] = {
                 "metadata": {
                     "name": namespaced_name,
@@ -91,6 +105,7 @@ class MCPClientAdapter:
                     ),
                     "base_risk": self.config.get("base_risk", "MEDIUM"),
                     "parameters": self._tool_input_schema(tool),
+                    "trusted_direct_read_only": trusted_direct_read_only,
                 },
                 "func": self._create_execution_handler(tool.name),
                 "is_mcp": True,
