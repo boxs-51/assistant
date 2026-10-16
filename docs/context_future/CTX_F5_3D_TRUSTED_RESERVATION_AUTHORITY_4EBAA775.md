@@ -1,3 +1,7 @@
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:START -->
+> **HISTORICAL / NON-NORMATIVE (Human Owner withdrawal, 2026-10-16):** Repository-specific Policy #85 (all versions), its M1–M7 modules and Developer Harness #551 are **RETIRED**. References below calling them active, canonical, currently operative, or governing CLAIM, review, stack depth, Integration Wave, source admission or merge are dated historical statements, **not instructions currently in force**. This notice does not change this document's technical contracts, P0/P1/HOLD, security requirements, test expectations, recorded Owner decisions, audit evidence, or real GitHub protections; it grants no approval, technical PASS, merge or deployment permission.
+<!-- POLICY85_HISTORICAL_GOVERNANCE_20261016:END -->
+
 # CTX-F5-3D — Trusted Promotion-Reservation Authority Contract
 
 Primary authority: Issue #15.  
