@@ -42,8 +42,17 @@ class JWTAuthenticator(AuthenticatorInterface):
                 return base_identity.model_copy(
                     update={"permissions": ["read:public"]}
                 )
-            permissions = await uow.permissions.get_permissions_for_role_names(
-                base_identity.roles
+            permissions, resolved_org = (
+                await uow.permissions.get_permissions_for_member_role_ids(
+                    user_id=base_identity.user_id,
+                    organization_id=base_identity.organization_id,
+                )
             )
 
-        return base_identity.model_copy(update={"permissions": list(permissions)})
+        # Token role labels, email-derived admin labels and org assertions
+        # are never authority to inherit permissions from same-name DB roles.
+        # When no org claim exists, only one actual membership may resolve it.
+        return base_identity.model_copy(update={
+            "permissions": sorted(permissions),
+            "organization_id": resolved_org or base_identity.organization_id,
+        })
