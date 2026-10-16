@@ -142,7 +142,7 @@ class RedisDriver(CacheDriver):
         # network write, including timeout or lost ACK, do NOT label it as
         # non-dispatched: the backend may already hold a live OTP.
         if self._client is None:
-            raise CacheWriteNotDispatched("Redis SET not dispatched: client is not initialized")
+            raise CacheWriteNotDispatched("RedisDriver is not connected; SET was not dispatched before client initialization")
         client = self._require_client()
 
         try:
