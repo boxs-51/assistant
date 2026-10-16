@@ -1551,6 +1551,10 @@ class CapabilityRuntime(BaseRuntime):
             raise ValueError(
                 f"Capability '{capability_id}' not found or unavailable."
             )
+        if not self.authorization.is_allowed(identity, driver):
+            raise PermissionError(
+                f"Capability '{capability_id}' is not authorized."
+            )
         if (
             type(capability_id) is str
             and capability_id.lower().startswith("mcp__")
@@ -1559,10 +1563,6 @@ class CapabilityRuntime(BaseRuntime):
             raise PermissionError(
                 "MCP_EFFECT_CLASS_UNCERTIFIED: MCP physical effects require "
                 "an explicit local DIRECT read-only certification."
-            )
-        if not self.authorization.is_allowed(identity, driver):
-            raise PermissionError(
-                f"Capability '{capability_id}' is not authorized."
             )
 
         effective_execution_connection_id = (
