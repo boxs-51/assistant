@@ -6,6 +6,8 @@ No test here simulates hostile Python subclasses arriving over JSON.
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import json
 import os
 import sys
@@ -49,7 +51,10 @@ def _registry(tmp_path: Path, *, names=("ingress",)):
     registry.config_loader.load_constitution = lambda: "SBX3 fixture only"
     registry.local_tool_mgr.load_tools = lambda _: {}
     registry.skill_mgr.load_skills = lambda: {}
-    registry.load_all()
+    # MCPManager prints a Unicode status glyph; prevent cp1252 console
+    # errors on hosted Windows without changing production MCP behavior.
+    with contextlib.redirect_stdout(io.StringIO()):
+        registry.load_all()
     for n in names:
         assert "mcp__" + n + "__innocent_preview" in registry.tools, (
             "HARNESS_ERROR: real MCP list_tools registration missing"
