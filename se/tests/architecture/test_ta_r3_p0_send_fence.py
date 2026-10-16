@@ -80,3 +80,44 @@ def test_send_claim_rejects_terminal_attempt_and_invocation():
         store.items[invocation.invocation_id].state = CapabilityInvocationState.COMPLETED
         assert not await store.claim_remote_send(invocation.invocation_id, attempt.attempt_id, 1)
     asyncio.run(run())
+
+
+async def _sql_store(path):
+    from se.src.infrastructure.config.schemas import DriverConfig
+    from se.src.infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+    from se.src.infrastructure.storage.drivers.sqlite.driver import SQLiteDriver
+    from se.src.infrastructure.storage.models.sql.base import Base
+    from se.src.infrastructure.storage.repositories.capability_invocations import (
+        SqlCapabilityInvocationStore,
+    )
+
+    driver = SQLiteDriver(DriverConfig(
+        enabled=True, required=True, options={"path": str(path)}
+    ))
+    async with driver._engine.begin() as connection:
+        await connection.run_sync(Base.metadata.create_all)
+    return SqlCapabilityInvocationStore(lambda: SqlAlchemyUnitOfWork(driver)), driver
+
+
+def test_sql_send_claim_is_one_winner_and_survives_attempt_update(tmp_path):
+    async def run():
+        store, driver = await _sql_store(tmp_path / "ta-r3-claim.db")
+        _, invocation, attempt = _store()
+        try:
+            await store.create(invocation)
+            await store.save_attempt(attempt)
+            first, second = await asyncio.gather(
+                store.claim_remote_send(invocation.invocation_id, attempt.attempt_id, 1),
+                store.claim_remote_send(invocation.invocation_id, attempt.attempt_id, 1),
+            )
+            assert (first, second) in ((True, False), (False, True))
+            await store.update_attempt(attempt)
+            records = await store.list_attempts(invocation.invocation_id)
+            assert len(records) == 1
+            assert records[0].metadata["ta_r3_send_claimed"] is True
+            assert not await store.claim_remote_send(
+                invocation.invocation_id, attempt.attempt_id, 1
+            )
+        finally:
+            await driver.disconnect()
+    asyncio.run(run())
