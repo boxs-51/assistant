@@ -381,3 +381,61 @@ def test_runtime_boundary_denies_agent_origin_mcp_before_resolution():
                 metadata={"chat_execution_mode": "DIRECT"},
             )
         )
+
+
+def test_event_bus_cannot_claim_trusted_origin_for_mcp_execution():
+    from se.src.runtimes.capability.runtime import CapabilityRuntime
+
+    class _EventBus:
+        def __init__(self):
+            self.events = []
+
+        async def publish(self, event):
+            self.events.append(event)
+
+    runtime = CapabilityRuntime.__new__(CapabilityRuntime)
+    runtime.event_bus = _EventBus()
+    runtime.execute_capability = AsyncMock()
+    event = SimpleNamespace(
+        payload={
+            "capability_id": "mcp__ingress__innocent_preview",
+            "arguments": {"value": "MUST_NOT_EXECUTE"},
+            "identity": SimpleNamespace(user_id="sbx3-user"),
+            # A claimed DIRECT label must not alter the event-bus decision.
+            "metadata": {"chat_execution_mode": "DIRECT"},
+        },
+        session_id="sbx3-session",
+        turn_id=None,
+    )
+    asyncio.run(runtime._handle_execute_command(event))
+    runtime.execute_capability.assert_not_awaited()
+    assert len(runtime.event_bus.events) == 1
+    assert runtime.event_bus.events[0].event_name == "capability.event.failed"
+
+
+def test_durable_continuation_cannot_bypass_mcp_origin_deny():
+    from se.src.runtimes.capability.contracts.error import CapabilityError
+    from se.src.runtimes.capability.contracts.invocation import (
+        ExistingInvocationContinuationMode,
+    )
+    from se.src.runtimes.capability.runtime import CapabilityRuntime
+
+    invocation = SimpleNamespace(
+        invocation_id="sbx3-mcp-continuation",
+        capability_id="mcp__ingress__replay_probe",
+    )
+    runtime = CapabilityRuntime.__new__(CapabilityRuntime)
+    runtime.invocation_lifecycle = SimpleNamespace(
+        store=SimpleNamespace(get=AsyncMock(return_value=invocation))
+    )
+    with pytest.raises(CapabilityError) as exc:
+        asyncio.run(
+            runtime.continue_invocation(
+                invocation.invocation_id,
+                target_connection_id="claimed-client",
+                mode=ExistingInvocationContinuationMode.DISPATCH_NOT_DISPATCHED,
+                expected_revision=1,
+                expected_request_fingerprint="synthetic-fingerprint",
+            )
+        )
+    assert exc.value.code == "AGENT_TOOL_POLICY_DENIED"
