@@ -308,3 +308,134 @@ def test_process_alias_r12_coordinator_prepared_continuation_never_dispatches(
     assert prepared == [action.invocation_id]
     assert not guard_calls, "Alias reached R12 final-send guard after missed early deny"
     runtime.continue_invocation.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "capability_id",
+    [
+        "mcp__ingress__innocent_preview",
+        "MCP__ingress__replay_probe",
+        "mcp__another_server__renamed_alias",
+    ],
+)
+def test_uncertified_agent_mcp_tool_fails_before_runtime_dispatch(capability_id):
+    runtime = SimpleNamespace(execute_capability=AsyncMock())
+    adapter = CapabilityToolExecutionAdapter(
+        runtime,
+        tool_policy=object(),
+        execution_policy=object(),
+    )
+    context = SimpleNamespace(
+        execution_id="sbx3-mcp-execution",
+        connection_id="remote-mcp-client",
+    )
+    request = ToolExecutionRequest(
+        execution_id=context.execution_id,
+        iteration=0,
+        invocation_id="sbx3-mcp-invocation",
+        tool_call_id="sbx3-mcp-call",
+        capability_id=capability_id,
+        connection_id=context.connection_id,
+        arguments={"value": "MUST_NOT_EXECUTE"},
+    )
+    result = asyncio.run(adapter.execute(context, request))
+    assert result.success is False
+    assert result.error_code == "AGENT_TOOL_POLICY_DENIED"
+    assert result.retryable is False
+    assert result.metadata["sbx3_mcp_effects"] == "NOT_CERTIFIED"
+    runtime.execute_capability.assert_not_awaited()
+
+
+def test_uncertified_agent_mcp_continuation_fails_before_runtime():
+    from se.src.runtimes.agent.contracts.resume import ResumeInvocationActionKind
+
+    runtime = SimpleNamespace(continue_invocation=AsyncMock(), catalog=None)
+    adapter = CapabilityToolExecutionAdapter(
+        runtime, tool_policy=object(), execution_policy=object()
+    )
+    context = SimpleNamespace(connection_id="claimed-client")
+    action = SimpleNamespace(
+        action=ResumeInvocationActionKind.DISPATCH_NOT_DISPATCHED,
+        capability_id="mcp__ingress__replay_probe",
+    )
+    with pytest.raises(CapabilityContinuationDispatchGuardError) as exc:
+        asyncio.run(adapter.continue_invocation(context, action))
+    assert exc.value.code == "AGENT_TOOL_POLICY_DENIED"
+    assert exc.value.retryable is False
+    runtime.continue_invocation.assert_not_awaited()
+
+
+def test_runtime_boundary_denies_agent_origin_mcp_before_resolution():
+    from se.src.runtimes.capability.runtime import CapabilityRuntime
+
+    runtime = CapabilityRuntime.__new__(CapabilityRuntime)
+    identity = SimpleNamespace(user_id="sbx3-user")
+    with pytest.raises(PermissionError, match="AGENT_TOOL_POLICY_DENIED"):
+        asyncio.run(
+            runtime.execute_capability(
+                capability_id="mcp__ingress__innocent_preview",
+                arguments={"value": "MUST_NOT_EXECUTE"},
+                identity=identity,
+                execution_id="root-agent-execution",
+                caller_agent_execution_id="root-agent-execution",
+                metadata={"chat_execution_mode": "DIRECT"},
+            )
+        )
+
+
+def test_event_bus_cannot_claim_trusted_origin_for_mcp_execution():
+    from se.src.runtimes.capability.runtime import CapabilityRuntime
+
+    class _EventBus:
+        def __init__(self):
+            self.events = []
+
+        async def publish(self, event):
+            self.events.append(event)
+
+    runtime = CapabilityRuntime.__new__(CapabilityRuntime)
+    runtime.event_bus = _EventBus()
+    runtime.execute_capability = AsyncMock()
+    event = SimpleNamespace(
+        payload={
+            "capability_id": "mcp__ingress__innocent_preview",
+            "arguments": {"value": "MUST_NOT_EXECUTE"},
+            "identity": SimpleNamespace(user_id="sbx3-user"),
+            # A claimed DIRECT label must not alter the event-bus decision.
+            "metadata": {"chat_execution_mode": "DIRECT"},
+        },
+        session_id="sbx3-session",
+        turn_id=None,
+    )
+    asyncio.run(runtime._handle_execute_command(event))
+    runtime.execute_capability.assert_not_awaited()
+    assert len(runtime.event_bus.events) == 1
+    assert runtime.event_bus.events[0].event_name == "capability.event.failed"
+
+
+def test_durable_continuation_cannot_bypass_mcp_origin_deny():
+    from se.src.runtimes.capability.contracts.error import CapabilityError
+    from se.src.runtimes.capability.contracts.invocation import (
+        ExistingInvocationContinuationMode,
+    )
+    from se.src.runtimes.capability.runtime import CapabilityRuntime
+
+    invocation = SimpleNamespace(
+        invocation_id="sbx3-mcp-continuation",
+        capability_id="mcp__ingress__replay_probe",
+    )
+    runtime = CapabilityRuntime.__new__(CapabilityRuntime)
+    runtime.invocation_lifecycle = SimpleNamespace(
+        store=SimpleNamespace(get=AsyncMock(return_value=invocation))
+    )
+    with pytest.raises(CapabilityError) as exc:
+        asyncio.run(
+            runtime.continue_invocation(
+                invocation.invocation_id,
+                target_connection_id="claimed-client",
+                mode=ExistingInvocationContinuationMode.DISPATCH_NOT_DISPATCHED,
+                expected_revision=1,
+                expected_request_fingerprint="synthetic-fingerprint",
+            )
+        )
+    assert exc.value.code == "AGENT_TOOL_POLICY_DENIED"

@@ -204,6 +204,17 @@ class CapabilityRuntime(BaseRuntime):
         identity = event.payload.get("identity")
 
         try:
+            # Event-bus commands carry caller-controlled dictionaries and
+            # cannot establish trusted DIRECT or Agent origin. Never route an
+            # MCP physical handler through this unauthenticated origin seam.
+            if (
+                type(capability_id) is str
+                and capability_id.lower().startswith("mcp__")
+            ):
+                raise PermissionError(
+                    "UNTRUSTED_EVENT_ORIGIN: MCP execution is denied on the "
+                    "event-bus command path."
+                )
             result = await self.execute_capability(
                 capability_id=capability_id,
                 arguments=arguments,
@@ -570,6 +581,26 @@ class CapabilityRuntime(BaseRuntime):
                 invocation_id=invocation_id,
             )
 
+        # This API is the durable Agent/R7 continuation path. It has
+        # no independently signed origin/handler proof yet, so MCP replay
+        # must remain denied even if a caller bypasses the Agent adapter.
+        if (
+            type(invocation.capability_id) is str
+            and invocation.capability_id.lower().startswith("mcp__")
+        ):
+            raise CapabilityError(
+                code="AGENT_TOOL_POLICY_DENIED",
+                message=(
+                    "MCP continuation is denied until physical handler "
+                    "effects and origin provenance are certified."
+                ),
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
+            )
+
         self._validate_existing_continuation(
             invocation,
             mode=mode,
@@ -707,6 +738,7 @@ class CapabilityRuntime(BaseRuntime):
         self._bind_remote_dispatch_started(
             driver,
             invocation,
+            attempt_id=attempt.attempt_id,
             continuation_dispatch_guard=continuation_dispatch_guard,
             selected_implementation_id=implementation.implementation_id,
             target_connection_id=target_connection_id,
@@ -1446,6 +1478,20 @@ class CapabilityRuntime(BaseRuntime):
                     "for Agent-owned capability invocations."
                 )
 
+        # Deny-only Agent taint at the canonical runtime boundary. This also
+        # covers nested workflow calls that bypass the top-level Agent adapter.
+        # The caller-provided scalar cannot grant privilege; it can only cause
+        # this conservative denial. DirectChat uses a separate entrypoint.
+        if (
+            caller_agent_execution_id is not None
+            and type(capability_id) is str
+            and capability_id.lower().startswith("mcp__")
+        ):
+            raise PermissionError(
+                "AGENT_TOOL_POLICY_DENIED: Agent-origin MCP execution is "
+                "blocked until physical handler effects are certified."
+            )
+
         request_metadata = dict(metadata or {})
         metadata_target = request_metadata.pop("target", None)
         try:
@@ -1787,7 +1833,6 @@ class CapabilityRuntime(BaseRuntime):
         if not tool_quota_enabled:
             await self.invocation_lifecycle.create(candidate)
             invocation = candidate
-            self._bind_remote_dispatch_started(driver, invocation)
             invocation.attempt = 1
             attempt = await self.invocation_lifecycle.start_attempt(
                 invocation,
@@ -1804,6 +1849,9 @@ class CapabilityRuntime(BaseRuntime):
                 invocation,
                 CapabilityInvocationState.RUNNING,
                 attempt_id=attempt.attempt_id,
+            )
+            self._bind_remote_dispatch_started(
+                driver, invocation, attempt_id=attempt.attempt_id
             )
             return await self._run_invocation_attempt(
                 invocation=invocation,
@@ -1961,7 +2009,9 @@ class CapabilityRuntime(BaseRuntime):
             )
 
         context.attempt = invocation.attempt
-        self._bind_remote_dispatch_started(driver, invocation)
+        self._bind_remote_dispatch_started(
+            driver, invocation, attempt_id=attempt.attempt_id
+        )
 
         try:
             result = await self._run_invocation_attempt(
@@ -2115,7 +2165,6 @@ class CapabilityRuntime(BaseRuntime):
             context.connection_id = selected_implementation.connection_id
             invocation.attempt += 1
             context.attempt = invocation.attempt
-            self._bind_remote_dispatch_started(driver, invocation)
             attempt = await self.invocation_lifecycle.start_attempt(
                 invocation,
                 implementation_id=effective_implementation_id,
@@ -2131,6 +2180,9 @@ class CapabilityRuntime(BaseRuntime):
                 invocation,
                 CapabilityInvocationState.RUNNING,
                 attempt_id=attempt.attempt_id,
+            )
+            self._bind_remote_dispatch_started(
+                driver, invocation, attempt_id=attempt.attempt_id
             )
             return True
 
@@ -2499,6 +2551,7 @@ class CapabilityRuntime(BaseRuntime):
         driver: BaseCapabilityDriver,
         invocation: CapabilityInvocation,
         *,
+        attempt_id: str,
         continuation_dispatch_guard: ContinuationDispatchGuard | None = None,
         selected_implementation_id: str | None = None,
         target_connection_id: str | None = None,
@@ -2508,6 +2561,24 @@ class CapabilityRuntime(BaseRuntime):
             return
 
         async def mark_started(_envelope) -> None:
+            # The per-attempt send CAS is persisted first. The R12 final
+            # lease/target guard MUST remain the last await before the
+            # transport boundary, preserving its security ordering oracle.
+            claim = getattr(
+                self.invocation_lifecycle.store, "claim_remote_send", None
+            )
+            if not callable(claim):
+                raise RuntimeError(
+                    "Remote first-send requires a durable attempt claim store"
+                )
+            if not await claim(
+                invocation.invocation_id, attempt_id, invocation.attempt
+            ):
+                raise RuntimeError(
+                    "REMOTE_DISPATCH_ALREADY_CLAIMED: "
+                    f"{invocation.invocation_id}/{attempt_id}"
+                )
+            # The committed claim is conservative MAY_HAVE_SENT evidence.
             if (
                 invocation.remote_outcome_state
                 is RemoteOutcomeState.NOT_DISPATCHED

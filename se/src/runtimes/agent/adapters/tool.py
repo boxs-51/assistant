@@ -86,6 +86,15 @@ def _sbx3_uncertified_agent_process_id(capability_id: object) -> bool:
     )
 
 
+def _sbx3_uncertified_agent_mcp_id(capability_id: object) -> bool:
+    """Deny all MCP-exported Agent tools until physical effects are certified.
+
+    An innocuous MCP display name is not proof that its handler is harmless.
+    Trusted DIRECT follows its separately authorized policy path.
+    """
+    return type(capability_id) is str and capability_id.lower().startswith("mcp__")
+
+
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
     """Canonical Agent tool gateway over CapabilityRuntime."""
 
@@ -125,6 +134,19 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 ),
                 retryable=False,
                 metadata={"sbx3_native_isolation": "NOT_CERTIFIED"},
+                pre_dispatch=True,
+            )
+
+        if _sbx3_uncertified_agent_mcp_id(request.capability_id):
+            return self._failure(
+                request,
+                code=AGENT_TOOL_POLICY_DENIED,
+                message=(
+                    "Agent-origin MCP execution is denied until the physical "
+                    "handler and its effects are independently certified."
+                ),
+                retryable=False,
+                metadata={"sbx3_mcp_effects": "NOT_CERTIFIED"},
                 pre_dispatch=True,
             )
 
@@ -354,6 +376,12 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             raise CapabilityContinuationDispatchGuardError(
                 AGENT_TOOL_POLICY_DENIED,
                 "Agent process continuation requires verified native SBX-3 isolation.",
+                retryable=False,
+            )
+        if _sbx3_uncertified_agent_mcp_id(action.capability_id):
+            raise CapabilityContinuationDispatchGuardError(
+                AGENT_TOOL_POLICY_DENIED,
+                "Agent-origin MCP continuation requires certified physical handler effects.",
                 retryable=False,
             )
         if context.connection_id is None:
