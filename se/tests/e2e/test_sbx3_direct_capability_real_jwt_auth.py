@@ -53,6 +53,9 @@ from se.src.transport.gateway.api.v1 import capability_router
 from se.src.transport.gateway.authentication.authenticators.jwt_authenticator import (
     JWTAuthenticator,
 )
+from se.src.transport.gateway.authentication.authenticators.api_key_authenticator import (
+    APIKeyAuthenticator,
+)
 from se.src.transport.gateway.authentication.services.api_key_service import APIKeyService
 from se.src.transport.gateway.authentication.dependency import get_current_identity
 from se.src.transport.gateway.authentication.manager import AuthenticationManager
@@ -605,7 +608,7 @@ async def test_j11_cross_organization_same_name_role_must_not_inherit_terminal(
 
 @pytest.mark.asyncio
 async def test_j12_admin_and_standard_api_keys_never_union_same_name_role_grants(
-    real_jwt_gateway,
+    real_jwt_gateway, tmp_path,
 ):
     """An ak_/sk_ token for org B must not acquire org A's terminal grant."""
     gateway = real_jwt_gateway
@@ -657,6 +660,55 @@ async def test_j12_admin_and_standard_api_keys_never_union_same_name_role_grants
     admin_a = await key_service.verify_key("ak_crossa_proof-body")
     assert admin_a.organization_id == "direct-jwt-org"
     assert "terminal:execute" in admin_a.permissions
+
+    # Exercise the real AuthenticationMiddleware / APIKeyAuthenticator / server
+    # capability route, not only APIKeyService's permission DTO.
+    gateway.app.state.container.auth_manager = AuthenticationManager([
+        gateway.jwt_authenticator, APIKeyAuthenticator(key_service),
+    ])
+    marker = tmp_path / "j12-api-key-cross-tenant-must-not-run"
+    command = _harmless_command(marker)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver",
+    ) as client:
+        for credential in ("ak_crossb_proof-body", "sk_crossb_proof-body"):
+            for capability_id in ("terminal.run", "terminal.launch"):
+                with patch(
+                    "tools.v1.terminal_tool.subprocess.Popen",
+                    side_effect=OSError("J12 intercepted cross-tenant Popen"),
+                ) as popen:
+                    response = await client.post(
+                        f"/v1/capabilities/{capability_id}/execute",
+                        headers={"Authorization": f"Bearer {credential}"},
+                        json={"arguments": {
+                            "command": command, "cwd": str(tmp_path), "timeout": 8,
+                        }},
+                    )
+                assert response.status_code == 403, (
+                    credential, capability_id, response.text,
+                )
+                assert popen.call_count == 0, (credential, capability_id)
+                assert not marker.exists(), (credential, capability_id)
+
+        # The independently approved org A admin role ID remains an actual
+        # positive physical Popen witness. Never trade it for mocked success.
+        positive_marker = tmp_path / "j12-api-key-authorized-org-a"
+        original_popen = subprocess.Popen
+        with patch(
+            "tools.v1.terminal_tool.subprocess.Popen", wraps=original_popen,
+        ) as popen:
+            response = await client.post(
+                "/v1/capabilities/terminal.run/execute",
+                headers={"Authorization": "Bearer ak_crossa_proof-body"},
+                json={"arguments": {
+                    "command": _harmless_command(positive_marker),
+                    "cwd": str(tmp_path), "timeout": 8,
+                }},
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["success"] is True
+        assert popen.call_count == 1
+        assert positive_marker.read_text(encoding="utf-8") == "DIRECT_JWT_OK"
 
 
 @pytest.mark.asyncio
