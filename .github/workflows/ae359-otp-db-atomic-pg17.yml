@@ -1,13 +1,8 @@
 name: AE359 OTP PG17 T1 Physical RED-first
 
+# Unfiltered PR trigger: these security jobs must not disappear due to path filters.
 on:
   pull_request:
-    paths:
-      - se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py
-      - .github/workflows/ae359-otp-db-atomic-pg17.yml
-      - se/src/infrastructure/storage/repositories/user_data/pending_registrations.py
-      - se/src/transport/gateway/authentication/services/otp_service.py
-      - se/src/infrastructure/storage/core/unit_of_work.py
   workflow_dispatch:
 
 permissions:

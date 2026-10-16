@@ -1,16 +1,8 @@
 name: AE359 Post-Execution ACK-Loss Physical RED-First
 
+# Unfiltered PR trigger: these security jobs must not disappear due to path filters.
 on:
   pull_request:
-    paths:
-      - "se/tests/integration/fixtures/ae359_redis_resp_ack_cut.py"
-      - "se/tests/integration/fixtures/ae359_pgwire_ack_cut.py"
-      - "se/tests/integration/test_ae359_post_ack_loss_physical.py"
-      - ".github/workflows/ae359-post-ack-loss-physical.yml"
-      - "se/src/transport/gateway/authentication/services/otp_service.py"
-      - "se/src/infrastructure/storage/repositories/refresh_sessions_redis.py"
-      - "se/src/infrastructure/storage/repositories/user_data/pending_registrations.py"
-      - "se/src/infrastructure/storage/models/sql/user_data/pending_registration.py"
   workflow_dispatch:
 
 permissions:

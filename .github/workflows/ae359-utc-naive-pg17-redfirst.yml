@@ -1,13 +1,8 @@
 name: AE359 UTC-Naive PG17 T1 RED-First
 
+# Unfiltered PR trigger: these security jobs must not disappear due to path filters.
 on:
   pull_request:
-    paths:
-      - "se/tests/integration/test_ae359_utc_naive_pg17_redfirst.py"
-      - ".github/workflows/ae359-utc-naive-pg17-redfirst.yml"
-      - "se/src/infrastructure/storage/models/sql/user_data/pending_registration.py"
-      - "se/src/infrastructure/storage/repositories/user_data/pending_registrations.py"
-      - "se/src/transport/gateway/authentication/services/otp_service.py"
   workflow_dispatch:
 
 permissions:
