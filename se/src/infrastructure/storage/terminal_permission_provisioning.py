@@ -32,9 +32,9 @@ def provision_terminal_execute(
 ) -> dict[str, str]:
     """Preflight or atomically grant to exactly one existing persisted role.
 
-    JWT/API-key permission loading currently resolves roles *by name*, not by
-    organization-scoped role ID. Refuse duplicate names to avoid cross-role
-    privilege bleed until that broader identity contract is remediated.
+    JWT/API-key permission loading is now bound to exact durable membership
+    role IDs and organization scope. Same-name roles are safe and may receive
+    different grants. The operator must still approve this exact role ID.
     """
     if not isinstance(role_id, str) or not role_id.strip() or role_id != role_id.strip():
         raise TerminalGrantError("A nonblank exact role ID is required")
@@ -48,16 +48,6 @@ def provision_terminal_execute(
     if row is None:
         raise TerminalGrantError("Requested role ID does not exist")
     name = row["name"]
-    name_count = connection.execute(
-        sa.text("SELECT COUNT(*) FROM roles WHERE name = :name"),
-        {"name": name},
-    ).scalar_one()
-    if name_count != 1:
-        raise TerminalGrantError(
-            "Role name is ambiguous across database roles; "
-            "grant prohibited until role-name identity lookup is disambiguated"
-        )
-
     permission_rows = connection.execute(
         sa.text("SELECT id FROM permissions WHERE name = :permission"),
         {"permission": PERMISSION},
