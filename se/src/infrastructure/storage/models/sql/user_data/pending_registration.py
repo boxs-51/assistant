@@ -8,5 +8,10 @@ class PendingRegistration(Base):
 
     email = Column(String(255), primary_key=True, index=True)
     payload = Column(Text, nullable=False)  # Lưu trữ JSON chứa mật khẩu mã hóa & tên user
-    expires_at = Column(DateTime, nullable=False)
-    created_at = Column(DateTime, default=lambda: datetime.now(timezone.utc), nullable=False)
+    # Both PostgreSQL columns store UTC instants as timezone-naive timestamps.
+    expires_at = Column(DateTime(timezone=False), nullable=False)
+    created_at = Column(
+        DateTime(timezone=False),
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None),
+        nullable=False,
+    )

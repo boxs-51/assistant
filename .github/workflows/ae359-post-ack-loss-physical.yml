@@ -1,0 +1,109 @@
+name: AE359 Post-Execution ACK-Loss Physical RED-First
+
+# Unfiltered PR trigger: these security jobs must not disappear due to path filters.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  physical-ack-loss-linux:
+    name: Physical Redis RESP and PG17 PGwire ACK-loss / ubuntu-24.04
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    services:
+      redis:
+        image: redis:7.4-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 15
+      postgres:
+        # Release-grade provenance HOLD until a verified digest is pinned.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ae359_otp_t1
+          POSTGRES_USER: ae359_test
+          # Ephemeral localhost CI only. No password exists to leak in docker create logs.
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ae359_test -d ae359_otp_t1"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AE359_POSTACK_STRICT: "1"
+      AE359_POSTACK_PG_URL: postgresql+asyncpg://ae359_test@127.0.0.1:5432/ae359_otp_t1
+      AE359_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - name: Checkout exact candidate HEAD
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Mask disposable Redis URI before exporting it to later steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compose rather than print the URI in the workflow command listing.
+          uri="redis$(printf '%s' '://')127.0.0.1:6379/15"
+          echo "::add-mask::$uri"
+          printf 'AE359_POSTACK_REDIS_URL=%s\n' "$uri" >> "$GITHUB_ENV"
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Attest isolated physical backends and exact HEAD
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$AE359_EXPECTED_SHA"
+          printf 'AE359_EXACT_HEAD=%s\n' "$(git rev-parse HEAD)"
+          python - <<'PY'
+          import os
+          import redis
+          from sqlalchemy.engine import make_url
+          ru = redis.Redis.from_url(os.environ["AE359_POSTACK_REDIS_URL"])
+          kw = ru.connection_pool.connection_kwargs
+          pg = make_url(os.environ["AE359_POSTACK_PG_URL"])
+          assert kw.get("host") == "127.0.0.1" and kw.get("db") == 15
+          assert kw.get("password") is None
+          assert (pg.drivername, pg.host, pg.database) == (
+              "postgresql+asyncpg", "127.0.0.1", "ae359_otp_t1"
+          ) and pg.password is None
+          assert os.environ.get("AE359_POSTACK_STRICT") == "1"
+          print("AE359_DISPOSABLE_TWO_BACKENDS_GUARD=PASS")
+          PY
+          python -m compileall -q \
+            se/tests/integration/fixtures/ae359_redis_resp_ack_cut.py \
+            se/tests/integration/fixtures/ae359_pgwire_ack_cut.py \
+            se/tests/integration/test_ae359_post_ack_loss_physical.py
+      - name: Run physical RED-first (retain pytest semantic exit code)
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -q -ra --tb=short \
+            se/tests/integration/test_ae359_post_ack_loss_physical.py \
+            --junitxml=ae359-postack-physical.xml
+      - name: Preserve independent raw JUnit receipt
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ae359-postack-physical-linux-raw
+          path: ae359-postack-physical.xml
+          if-no-files-found: warn
+          retention-days: 7

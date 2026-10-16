@@ -5,7 +5,7 @@ from redis.exceptions import RedisError, NoScriptError
 from typing import Any, Optional, Dict
 
 from ....config.schemas import DriverConfig
-from ...interfaces.cache import CacheDriver
+from ...interfaces.cache import CacheDriver, CacheWriteNotDispatched
 
 logger = structlog.get_logger(__name__)
 
@@ -26,7 +26,8 @@ class RedisDriver(CacheDriver):
         Không retry vô hạn tại đây.
         """
 
-        logger.info("Connecting to Redis...", url=self.url)
+        # A connection URL may contain passwords; never include it in logs.
+        logger.info("Connecting to Redis...")
 
         if self._client is not None:
             await self.disconnect()
@@ -43,17 +44,15 @@ class RedisDriver(CacheDriver):
             try:
                 await client.aclose()
             except Exception:
-                logger.debug(
-                    "Failed to close Redis client after connection failure",
-                    exc_info=True,
-                )
+                # Cleanup exceptions may also contain the configured URL.
+                logger.debug("Failed to close Redis client after connection failure")
 
             self._client = None
             self._connected = False
 
             logger.error(
                 "Failed to connect to Redis",
-                error=str(e),
+                error_type=type(e).__name__,
             )
 
             raise
@@ -139,24 +138,60 @@ class RedisDriver(CacheDriver):
         value: Any,
         expire: Optional[int] = None,
     ) -> None:
+        # This state is known before command submission. For any attempted
+        # network write, including timeout or lost ACK, do NOT label it as
+        # non-dispatched: the backend may already hold a live OTP.
+        if self._client is None:
+            raise CacheWriteNotDispatched("RedisDriver is not connected; SET was not dispatched before client initialization")
         client = self._require_client()
 
         try:
-            await client.set(
+            receipt = await client.set(
                 key,
                 value,
                 ex=expire,
             )
+            if receipt is not True:
+                # A missing/false/invalid SET reply is never a confirmed OTP.
+                # This is still post-dispatch uncertainty, not SQL fallback.
+                raise RuntimeError("Redis SET returned an unconfirmed write receipt")
 
         except RedisError:
             self._connected = False
             raise
 
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: str) -> int:
         client = self._require_client()
 
         try:
-            await client.delete(key)
+            # Redis DEL is atomic and returns the number of removed keys.
+            # Do not discard this receipt: a no-op must not ACK revocation.
+            deleted = await client.delete(key)
+            # Never coerce True, None, a float or a string to an affected count.
+            if type(deleted) is not int:
+                raise RuntimeError("Redis DEL returned an unconfirmed deletion count")
+            return deleted
+
+        except RedisError:
+            self._connected = False
+            raise
+
+    async def consume_one_time(self, key: str) -> Optional[Any]:
+        """Atomic Redis GETDEL; no separate stale GET or unsafe fallback.
+
+        Requires Redis >= 6.2. Unsupported commands, timeouts and uncertain
+        replies propagate as errors, never as a confirmed cache miss.
+        """
+        client = self._require_client()
+
+        try:
+            value = await client.getdel(key)
+            # connect() uses decode_responses=True. A boolean, integer or
+            # other malformed reply is not proof of one-use consumption.
+            if value is not None and type(value) is not str:
+                raise RuntimeError("Redis GETDEL returned an unconfirmed atomic receipt")
+            self._connected = True
+            return value
 
         except RedisError:
             self._connected = False

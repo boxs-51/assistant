@@ -52,6 +52,32 @@ class CacheDriver(ABC):
         pass
 
     @abstractmethod
-    async def delete(self, key: str) -> None:
-        """Xóa một key khỏi cache."""
+    async def delete(self, key: str) -> int:
+        """Atomically delete one key; return 1 if removed, 0 if absent.
+
+        A backend failure must raise, never return 0 or None. Callers that
+        require confirmed one-use consumption must inspect the result.
+        """
         pass
+
+    @abstractmethod
+    async def consume_one_time(self, key: str) -> Optional[Any]:
+        """Atomically remove and return the live value for one key.
+
+        A confirmed miss returns None; a consumed value is returned from the
+        same indivisible operation that removed it. An unavailable backend or
+        ambiguous receipt MUST raise, not return None. This is distinct from
+        delete(key)->int used by refresh-token revocation.
+        """
+        pass
+
+
+class CacheWriteNotDispatched(RuntimeError):
+    """Authoritative pre-dispatch failure for a cache write.
+
+    Raise only when the implementation can prove the write command was NOT
+    submitted to a backend. Connection/timeouts after attempted dispatch,
+    lost ACKs and uncertain receipts must propagate as ordinary errors.
+    This signal may permit fallback to an alternate OTP authority; lying
+    about pre-dispatch status creates a cross-store one-use bypass.
+    """
