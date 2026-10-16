@@ -61,6 +61,14 @@ _SBX2_SANDBOX_CAPABILITY_IDS = frozenset(
 )
 
 
+# SBX-3 B0 has no certified native process/FS/network-NONE backend yet.
+# Agent command calls must fail before reaching the legacy host process driver.
+# This guard does not alter separately authorized trusted DIRECT TerminalTool.
+_SBX3_UNCERTIFIED_AGENT_PROCESS_IDS = frozenset(
+    {"terminal.run", "terminal.launch", "python.run"}
+)
+
+
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
     """Canonical Agent tool gateway over CapabilityRuntime."""
 
@@ -88,6 +96,19 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         if request.connection_id != context.connection_id:
             raise ValueError(
                 "Tool request connection_id does not match execution context."
+            )
+
+        if request.capability_id in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS:
+            return self._failure(
+                request,
+                code=AGENT_TOOL_POLICY_DENIED,
+                message=(
+                    "Agent process execution is denied until native SBX-3 "
+                    "OS confinement and cleanup are verified."
+                ),
+                retryable=False,
+                metadata={"sbx3_native_isolation": "NOT_CERTIFIED"},
+                pre_dispatch=True,
             )
 
         if request.capability_id == "agent.budget.configure":
@@ -310,6 +331,14 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             raise ValueError(
                 "REUSE_COMMITTED must be loaded from durable AgentToolResult."
             )
+        # R7 continuation bypasses execute(), so independently deny native
+        # process commands rather than falling back to a host/client driver.
+        if action.capability_id in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS:
+            raise CapabilityContinuationDispatchGuardError(
+                AGENT_TOOL_POLICY_DENIED,
+                "Agent process continuation requires verified native SBX-3 isolation.",
+                retryable=False,
+            )
         if context.connection_id is None:
             raise ValueError(
                 "R7 continuation requires a claimed target connection."
@@ -440,6 +469,8 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
 
     def can_continue_server_side(self, capability_id: str) -> bool:
         """Return whether a new routing decision can avoid the lost client."""
+        if capability_id in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS:
+            return False
         catalog = getattr(self._capability_runtime, "catalog", None)
         if catalog is None:
             return False
