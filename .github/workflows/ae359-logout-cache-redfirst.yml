@@ -1,16 +1,8 @@
 name: AE359 Logout Cache RED-First (Evidence Only)
 
+# Unfiltered PR trigger: these security jobs must not disappear due to path filters.
 on:
   pull_request:
-    paths:
-      - "se/tests/integration/test_ae359_logout_cache_redfirst.py"
-      - ".github/workflows/ae359-logout-cache-redfirst.yml"
-      - "se/src/infrastructure/storage/interfaces/cache.py"
-      - "se/src/infrastructure/storage/repositories/sessions.py"
-      - "se/src/infrastructure/storage/drivers/redis/driver.py"
-      - "se/src/infrastructure/storage/drivers/inmemory/driver.py"
-      - "se/src/transport/gateway/authentication/services/token_service.py"
-      - "se/src/transport/gateway/api/v1/auth_router.py"
   workflow_dispatch:
 
 permissions:

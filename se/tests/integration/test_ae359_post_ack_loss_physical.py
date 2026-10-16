@@ -148,10 +148,14 @@ def test_r_ack_01_x_ack_09_real_redis_set_ack_lost_db_dual_authority_red_first()
                 assert await direct.exists(redis_key) == 1, "Real SET did not execute"
                 proxy.release_drop.set()
                 status, detail = await _finish(task)
-                assert status == "SUCCESS", f"Expected actual DB fallback: {detail}"
+                assert status == "ERROR", (
+                    f"UNCERTAIN Redis SET must fail closed, got {status}: {detail}"
+                )
                 await writer.disconnect()
 
-            assert await _row_count(engine, email) == 1, "No real DB fallback occurred"
+            assert await _row_count(engine, email) == 0, (
+                "SEMANTIC_RED: uncertain Redis SET created a second SQL OTP authority"
+            )
             reader = await _redis_driver(ru)
             try:
                 verifier = OTPStorageService(reader, _factory(engine))
@@ -160,6 +164,56 @@ def test_r_ack_01_x_ack_09_real_redis_set_ack_lost_db_dual_authority_red_first()
                 assert first == {"value": "synthetic-only"}
                 # RED-FIRST: fails if the same challenge was accepted again.
                 assert second is None, "SEMANTIC_RED: one OTP authenticated twice"
+            finally:
+                await reader.disconnect()
+        finally:
+            await direct.delete(redis_key)
+            async with engine.begin() as conn:
+                await conn.execute(PendingRegistration.__table__.delete().where(
+                    PendingRegistration.email == email
+                ))
+            await direct.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
+
+def test_r_ack_02_real_password_reset_set_ack_loss_must_not_duplicate():
+    """A real password-reset SET followed by lost ACK never issues DB OTP."""
+    async def run():
+        ru, _ = _targets()
+        engine = await _pg_engines()
+        email = "ae359-reset-" + uuid4().hex + "@example.invalid"
+        redis_key = "pending_password_reset:" + email
+        direct = redis.Redis.from_url(ru, decode_responses=True)
+        try:
+            assert await direct.ping()
+            async with RespAckCutProxy() as proxy:
+                writer = await _redis_driver(f"redis://127.0.0.1:{proxy.port}/15")
+                service = OTPStorageService(writer, _factory(engine))
+                proxy.arm_once()
+                task = asyncio.create_task(service.save_pending_password_reset(
+                    email, {"value": "synthetic-reset-only"}, "123456"
+                ))
+                await proxy.wait_captured()
+                assert proxy.client_ack_bytes == 0
+                assert await direct.exists(redis_key) == 1, "Physical reset SET missing"
+                proxy.release_drop.set()
+                status, detail = await _finish(task)
+                assert status == "ERROR", (
+                    f"Password-reset UNCERTAIN SET must fail closed: {status} {detail}"
+                )
+                await writer.disconnect()
+            assert await _row_count(engine, email) == 0, (
+                "SEMANTIC_RED: password-reset cache uncertainty duplicated into SQL"
+            )
+            reader = await _redis_driver(ru)
+            try:
+                verifier = OTPStorageService(reader, _factory(engine))
+                first = await verifier.verify_password_reset(email, "123456")
+                second = await verifier.verify_password_reset(email, "123456")
+                assert first == {"value": "synthetic-reset-only"}
+                assert second is None, "SEMANTIC_RED: password-reset OTP reused"
             finally:
                 await reader.disconnect()
         finally:
@@ -307,4 +361,65 @@ def test_ctrl_10_real_redis_and_postgres_confirmed_ack_controls():
             await direct.delete("pending_reg:" + email, "otp_cooldown:" + email)
             await direct.aclose()
             await engine.dispose()
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ["registration", "password_reset"])
+def test_r_ack_05_06_real_cooldown_set_ack_loss_keeps_single_otp_authority(purpose):
+    """Backend executes cooldown SET; lost ACK must not create SQL OTP."""
+    async def run():
+        ru, _ = _targets()
+        engine = await _pg_engines()
+        email = "ae359-cooldown-" + uuid4().hex + "@example.invalid"
+        reset = purpose == "password_reset"
+        otp_key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown_key = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        direct = redis.Redis.from_url(ru, decode_responses=True)
+        try:
+            assert await direct.ping()
+            async with RespAckCutProxy() as proxy:
+                writer = await _redis_driver(f"redis://127.0.0.1:{proxy.port}/15")
+
+                class _ArmOnlyOnCooldown:
+                    async def set(self, key, value, expire):
+                        if key == cooldown_key:
+                            proxy.arm_once()
+                        return await writer.set(key, value, expire)
+
+                service = OTPStorageService(_ArmOnlyOnCooldown(), _factory(engine))
+                save = (service.save_pending_password_reset if reset
+                        else service.save_pending_registration)
+                task = asyncio.create_task(save(email, {"value": "cooldown-control"}, "123456"))
+                await proxy.wait_captured()
+                assert proxy.client_ack_bytes == 0
+                assert await direct.exists(otp_key) == 1, "Physical OTP SET missing"
+                assert await direct.exists(cooldown_key) == 1, "Physical cooldown SET missing"
+                proxy.release_drop.set()
+                status, detail = await _finish(task)
+                assert status == "ERROR", (
+                    f"Cooldown lost ACK must fail closed: {status} {detail}"
+                )
+                await writer.disconnect()
+
+            assert await _row_count(engine, email) == 0, (
+                "SEMANTIC_RED: cooldown ACK loss created a duplicate SQL OTP"
+            )
+            reader = await _redis_driver(ru)
+            try:
+                verifier = OTPStorageService(reader, _factory(engine))
+                verify = (verifier.verify_password_reset if reset
+                          else verifier.verify_and_get_data)
+                assert await verify(email, "123456") == {"value": "cooldown-control"}
+                assert await verify(email, "123456") is None
+            finally:
+                await reader.disconnect()
+        finally:
+            await direct.delete(otp_key, cooldown_key)
+            async with engine.begin() as conn:
+                await conn.execute(PendingRegistration.__table__.delete().where(
+                    PendingRegistration.email == email
+                ))
+            await direct.aclose()
+            await engine.dispose()
+
     asyncio.run(run())

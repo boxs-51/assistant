@@ -1,16 +1,8 @@
 name: AE359 Post-Execution ACK-Loss Physical RED-First
 
+# Unfiltered PR trigger: these security jobs must not disappear due to path filters.
 on:
   pull_request:
-    paths:
-      - "se/tests/integration/fixtures/ae359_redis_resp_ack_cut.py"
-      - "se/tests/integration/fixtures/ae359_pgwire_ack_cut.py"
-      - "se/tests/integration/test_ae359_post_ack_loss_physical.py"
-      - ".github/workflows/ae359-post-ack-loss-physical.yml"
-      - "se/src/transport/gateway/authentication/services/otp_service.py"
-      - "se/src/infrastructure/storage/repositories/refresh_sessions_redis.py"
-      - "se/src/infrastructure/storage/repositories/user_data/pending_registrations.py"
-      - "se/src/infrastructure/storage/models/sql/user_data/pending_registration.py"
   workflow_dispatch:
 
 permissions:
@@ -37,7 +29,8 @@ jobs:
         env:
           POSTGRES_DB: ae359_otp_t1
           POSTGRES_USER: ae359_test
-          POSTGRES_PASSWORD: ae359_test_only
+          # Ephemeral localhost CI only. No password exists to leak in docker create logs.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -47,8 +40,7 @@ jobs:
           --health-retries 15
     env:
       AE359_POSTACK_STRICT: "1"
-      AE359_POSTACK_REDIS_URL: redis://127.0.0.1:6379/15
-      AE359_POSTACK_PG_URL: postgresql+asyncpg://ae359_test:ae359_test_only@127.0.0.1:5432/ae359_otp_t1
+      AE359_POSTACK_PG_URL: postgresql+asyncpg://ae359_test@127.0.0.1:5432/ae359_otp_t1
       AE359_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -57,6 +49,14 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Mask disposable Redis URI before exporting it to later steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compose rather than print the URI in the workflow command listing.
+          uri="redis$(printf '%s' '://')127.0.0.1:6379/15"
+          echo "::add-mask::$uri"
+          printf 'AE359_POSTACK_REDIS_URL=%s\n' "$uri" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
@@ -84,7 +84,7 @@ jobs:
           assert kw.get("password") is None
           assert (pg.drivername, pg.host, pg.database) == (
               "postgresql+asyncpg", "127.0.0.1", "ae359_otp_t1"
-          )
+          ) and pg.password is None
           assert os.environ.get("AE359_POSTACK_STRICT") == "1"
           print("AE359_DISPOSABLE_TWO_BACKENDS_GUARD=PASS")
           PY

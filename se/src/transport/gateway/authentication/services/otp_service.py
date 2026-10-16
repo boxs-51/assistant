@@ -5,7 +5,7 @@ from typing import Callable, Optional
 import structlog
 
 from .....infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
-from .....infrastructure.storage.interfaces.cache import CacheDriver
+from .....infrastructure.storage.interfaces.cache import CacheDriver, CacheWriteNotDispatched
 
 logger = structlog.get_logger(__name__)
 
@@ -24,13 +24,31 @@ class OTPStorageService:
             "purpose": "registration",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
-        try:
-            if self.cache_driver:
+        if self.cache_driver is not None:
+            try:
                 await self.cache_driver.set(f"pending_reg:{email}", payload_str, self.otp_ttl)
-                await self.cache_driver.set(f"otp_cooldown:{email}", "active", self.cooldown_ttl)
+            except CacheWriteNotDispatched:
+                # An attested pre-dispatch failure cannot have made this OTP
+                # live in the cache. Only this state permits SQL fallback.
+                logger.warning("OTP cache write not dispatched; using database fallback")
+            except Exception as exc:
+                # Redis may have committed SET before its ACK was lost.
+                # Never create a second live authority for this challenge.
+                logger.error("OTP cache write unconfirmed; database fallback denied",
+                             error_type=type(exc).__name__)
+                raise
+            else:
+                # The challenge is already live in Redis. Failure of the
+                # cooldown write cannot justify duplicating it in SQL.
+                try:
+                    await self.cache_driver.set(
+                        f"otp_cooldown:{email}", "active", self.cooldown_ttl
+                    )
+                except Exception as exc:
+                    logger.error("OTP cooldown cache write unconfirmed",
+                                 error_type=type(exc).__name__)
+                    raise
                 return
-        except Exception as exc:
-            logger.error("Redis error during OTP save, falling back to database", error=str(exc))
 
         async with self.uow_factory() as uow:
             await uow.pending_registrations.create_or_update(
@@ -44,7 +62,7 @@ class OTPStorageService:
                 ttl = await self.cache_driver.get_ttl(f"otp_cooldown:{email}")
                 return max(0, ttl) if ttl else 0
         except Exception as exc:
-            logger.error("Redis error during cooldown check, falling back to database", error=str(exc))
+            logger.error("Redis error during cooldown check; database cooldown lookup", error_type=type(exc).__name__)
 
         async with self.uow_factory() as uow:
             return await uow.pending_registrations.get_remaining_cooldown(email, self.cooldown_ttl)
@@ -56,16 +74,30 @@ class OTPStorageService:
             "purpose": "password_reset",
             "created_at": datetime.now(timezone.utc).isoformat(),
         })
-        try:
-            if self.cache_driver:
-                await self.cache_driver.set(f"pending_password_reset:{email}", payload_str, self.otp_ttl)
-                await self.cache_driver.set(f"password_reset_cooldown:{email}", "active", self.cooldown_ttl)
+        if self.cache_driver is not None:
+            try:
+                await self.cache_driver.set(
+                    f"pending_password_reset:{email}", payload_str, self.otp_ttl
+                )
+            except CacheWriteNotDispatched:
+                logger.warning(
+                    "Password-reset OTP cache write not dispatched; using database fallback"
+                )
+            except Exception as exc:
+                logger.error("Password-reset OTP cache write unconfirmed; "
+                             "database fallback denied",
+                             error_type=type(exc).__name__)
+                raise
+            else:
+                try:
+                    await self.cache_driver.set(
+                        f"password_reset_cooldown:{email}", "active", self.cooldown_ttl
+                    )
+                except Exception as exc:
+                    logger.error("Password-reset OTP cooldown cache write unconfirmed",
+                                 error_type=type(exc).__name__)
+                    raise
                 return
-        except Exception as exc:
-            logger.error(
-                "Redis error during password-reset OTP save, falling back to database",
-                error=str(exc),
-            )
 
         async with self.uow_factory() as uow:
             await uow.pending_registrations.create_or_update(
@@ -81,7 +113,7 @@ class OTPStorageService:
         except Exception as exc:
             logger.error(
                 "Redis error during password-reset cooldown check, falling back to database",
-                error=str(exc),
+                error_type=type(exc).__name__,
             )
 
         async with self.uow_factory() as uow:
@@ -124,10 +156,12 @@ class OTPStorageService:
             raise RuntimeError("OTP cache does not support atomic consume_one_time")
         try:
             raw_data = await consumer(key)
-        except Exception:
+        except Exception as exc:
             # A command may already have consumed the key before its reply
             # was lost. Never convert UNCERTAIN to MISSING or retry in SQL.
-            logger.error("OTP atomic cache consumption unconfirmed", exc_info=True)
+            # Redis exception text/tracebacks may contain connection secrets.
+            logger.error("OTP atomic cache consumption unconfirmed",
+                         error_type=type(exc).__name__)
             raise
         if raw_data is not None and type(raw_data) is not str:
             raise RuntimeError("OTP cache returned an unconfirmed atomic consume receipt")

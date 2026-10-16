@@ -70,3 +70,14 @@ class CacheDriver(ABC):
         delete(key)->int used by refresh-token revocation.
         """
         pass
+
+
+class CacheWriteNotDispatched(RuntimeError):
+    """Authoritative pre-dispatch failure for a cache write.
+
+    Raise only when the implementation can prove the write command was NOT
+    submitted to a backend. Connection/timeouts after attempted dispatch,
+    lost ACKs and uncertain receipts must propagate as ordinary errors.
+    This signal may permit fallback to an alternate OTP authority; lying
+    about pre-dispatch status creates a cross-store one-use bypass.
+    """

@@ -22,6 +22,7 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from se.src.infrastructure.storage.core.unit_of_work import SqlAlchemyUnitOfWork
+from se.src.infrastructure.storage.interfaces.cache import CacheWriteNotDispatched
 from se.src.infrastructure.storage.models.sql.user_data.pending_registration import (
     PendingRegistration,
 )
@@ -56,7 +57,7 @@ class _CacheUnavailableBeforeDispatch:
 
     async def set(self, key, value, expire):
         self.attempted_keys.append(key)
-        raise ConnectionError("test-only: Redis unavailable BEFORE command dispatch")
+        raise CacheWriteNotDispatched("test-only: Redis unavailable BEFORE command dispatch")
 
 
 def _uow_factory(engine):
