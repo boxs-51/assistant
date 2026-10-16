@@ -1,6 +1,2 @@
-blank_issues_enabled: false
-
-contact_links:
-  - name: "Repository stacked-development policy (#85)"
-    url: "https://github.com/boxs-51/assistant/issues/85"
-    about: "Read the canonical stacked-development and integration policy before opening repository work."
+# Former Policy #85 contact link removed following Owner withdrawal (2026-10-16).
+blank_issues_enabled: true
