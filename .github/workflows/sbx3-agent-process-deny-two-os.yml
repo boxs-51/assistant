@@ -39,15 +39,15 @@ jobs:
           python -m pytest -q -ra
           --junitxml=evidence/sbx3-agent-deny/junit.xml
           se/tests/architecture/test_sbx3_agent_process_fail_closed.py
-      - name: Strict JUnit all ten cases
+      - name: Strict JUnit original ten and twelve alias cases
         run: >-
           python -c "import xml.etree.ElementTree as ET;
           root=ET.parse('evidence/sbx3-agent-deny/junit.xml').getroot();
           suites=[root] if root.tag=='testsuite' else list(root.findall('testsuite'));
           assert len(suites)==1 and
-          int(suites[0].attrib.get('tests','0'))==10 and
+          int(suites[0].attrib.get('tests','0'))==22 and
           all(int(suites[0].attrib.get(k,'0'))==0 for k in ('failures','errors','skipped'));
-          print('SBX3_AGENT_PROCESS_DENY=10_PASS_0_SKIP; PORTABLE_ROUTING_NOT_NATIVE_OS_CONFINEMENT')"
+          print('SBX3_AGENT_PROCESS_DENY=22_PASS_0_SKIP; PORTABLE_ROUTING_NOT_NATIVE_OS_CONFINEMENT')"
       - uses: actions/upload-artifact@v4
         if: always()
         with:

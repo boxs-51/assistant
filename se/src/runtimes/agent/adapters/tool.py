@@ -69,6 +69,23 @@ _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS = frozenset(
 )
 
 
+def _sbx3_uncertified_agent_process_id(capability_id: object) -> bool:
+    """Fail closed on canonical and namespace-exported Agent process IDs.
+
+    Inspect exact built-in strings only, not untrusted subclass metadata hooks.
+    Native process isolation is not yet certified for Agent dispatch.
+    """
+    if type(capability_id) is not str:
+        return True
+
+    return any(
+        capability_id == canonical
+        or capability_id.endswith(f".{canonical}")
+        or capability_id.endswith(f"__{canonical}")
+        for canonical in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS
+    )
+
+
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
     """Canonical Agent tool gateway over CapabilityRuntime."""
 
@@ -98,7 +115,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
                 "Tool request connection_id does not match execution context."
             )
 
-        if request.capability_id in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS:
+        if _sbx3_uncertified_agent_process_id(request.capability_id):
             return self._failure(
                 request,
                 code=AGENT_TOOL_POLICY_DENIED,
@@ -333,7 +350,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             )
         # R7 continuation bypasses execute(), so independently deny native
         # process commands rather than falling back to a host/client driver.
-        if action.capability_id in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS:
+        if _sbx3_uncertified_agent_process_id(action.capability_id):
             raise CapabilityContinuationDispatchGuardError(
                 AGENT_TOOL_POLICY_DENIED,
                 "Agent process continuation requires verified native SBX-3 isolation.",
@@ -469,7 +486,7 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
 
     def can_continue_server_side(self, capability_id: str) -> bool:
         """Return whether a new routing decision can avoid the lost client."""
-        if capability_id in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS:
+        if _sbx3_uncertified_agent_process_id(capability_id):
             return False
         catalog = getattr(self._capability_runtime, "catalog", None)
         if catalog is None:

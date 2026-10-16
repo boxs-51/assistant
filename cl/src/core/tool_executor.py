@@ -12,6 +12,44 @@ from ..schemas.tool import GatewayToolCall, GatewayToolResult
 logger = structlog.get_logger(__name__)
 
 
+# SBX-3 B0: this executor is constructed by AgentEngine for model-origin tool
+# calls. It is NOT the separately authorized trusted DIRECT tool entry point.
+# Until an OS-confined native process backend exists, reject process-capable
+# exports before HITL or invocation. Metadata is a negative signal, never proof
+# that an otherwise unknown dynamic plugin is safe to execute on the host.
+_SBX3_AGENT_PROCESS_IDS = frozenset(
+    {"terminal.run", "terminal.launch", "python.run"}
+)
+_SBX3_AGENT_PROCESS_PHYSICAL = frozenset(
+    {"terminal_tool", "python_tool"}
+)
+
+
+def _sbx3_agent_process_name(value: Any) -> bool:
+    """Match canonical IDs and legacy MCP __suffix aliases, not substrings."""
+    return isinstance(value, str) and any(
+        value == name or value.endswith("__" + name)
+        for name in _SBX3_AGENT_PROCESS_IDS
+    )
+
+
+def _sbx3_uncertified_process_export(tool_info: Any) -> bool:
+    """Fail closed before inspecting any untrusted dynamic plugin object.
+
+    Until a separately certified broker can attest native confinement and
+    one-use authority, there is NO positively authenticated Agent-local host
+    Python callable. A metadata name, declared effect, path or module string
+    is not proof of process-freedom; inspecting such Python objects may itself
+    run arbitrary code via __eq__ or __getattribute__ before HITL.
+
+    This deliberately disables uncertified legacy model-origin tool execution;
+    the separately authorized trusted DIRECT entry point is not routed through
+    this AgentEngine-owned executor.
+    """
+    return True
+
+
+
 class ExecutionCancelled(Exception):
     """Raised when an agent execution is cancelled or its deadline expires."""
 
@@ -197,6 +235,21 @@ class ToolExecutor:
                 is_error=True,
             )
 
+        # This Agent-owned gateway must not ask HITL, parse model arguments, or
+        # reach a driver for uncertified process IDs (including suffix aliases).
+        if _sbx3_agent_process_name(tool_name):
+            logger.warning(
+                "SBX3 denied model-origin process tool before dispatch",
+                tool_name=tool_name,
+                execution_id=execution_context.execution_id,
+            )
+            return self._create_tool_message(
+                tool_call_id,
+                tool_name,
+                "AGENT_TOOL_POLICY_DENIED: SBX3 native process isolation not certified",
+                is_error=True,
+            )
+
         # 1. Parse JSON arguments
         try:
             tool_args = (
@@ -224,7 +277,10 @@ class ToolExecutor:
 
         # 2. Check tool existence
         tool_info = self.registry.get_tool(tool_name)
-        if not tool_info:
+        # Only a missing entry or an empty *exact built-in dict* is absent.
+        # Evaluating truthiness on an untrusted Mapping/dict subclass can call
+        # its __bool__ or __len__ and spawn a host process before SBX3 DENY.
+        if tool_info is None or (type(tool_info) is dict and not tool_info):
             err_text = f"❌ Tool '{tool_name}' không tồn tại trong Registry."
             logger.error(
                 "Tool missing from Registry",
@@ -244,6 +300,22 @@ class ToolExecutor:
                 tool_call_id,
                 tool_name,
                 f"❌ {str(ex)}",
+                is_error=True,
+            )
+
+        # A different logical name may resolve through DynamicRegistry to the
+        # same physical host-process implementation. Check the resolved export
+        # before HITL; a positive HITL decision is not sandbox authorization.
+        if _sbx3_uncertified_process_export(tool_info):
+            logger.warning(
+                "SBX3 denied resolved model-origin process export",
+                tool_name=tool_name,
+                execution_id=execution_context.execution_id,
+            )
+            return self._create_tool_message(
+                tool_call_id,
+                tool_name,
+                "AGENT_TOOL_POLICY_DENIED: SBX3 native process isolation not certified",
                 is_error=True,
             )
 
