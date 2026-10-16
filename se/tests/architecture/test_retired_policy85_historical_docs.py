@@ -24,7 +24,14 @@ def test_historical_policy85_markdown_references_are_explicitly_disclaimed() -> 
                 assert "ARCHIVED" in text and "not in effect" in text
                 continue
             matched.append(path)
-            assert text.startswith(NOTICE_START + "\n"), str(path.relative_to(ROOT))
+            if path.name == "R14_E_FINAL_PRODUCTION_EXIT_EVIDENCE_9D9A6F20.md":
+                # Preserve the historic R14-E first-line title oracle.
+                assert text.startswith(
+                    "# AE-R14-E-G0 — GAP LEDGER / FINAL EXIT HOLD / NOT CERTIFIED\n\n"
+                    + NOTICE_START + "\n"
+                ), str(path.relative_to(ROOT))
+            else:
+                assert text.startswith(NOTICE_START + "\n"), str(path.relative_to(ROOT))
             assert NOTICE_END in text, str(path.relative_to(ROOT))
             top = text.split(NOTICE_END, 1)[0]
             assert "RETIRED" in top and "NON-NORMATIVE" in top
