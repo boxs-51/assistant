@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi import HTTPException
 
 from se.src.agent.registry import AgentRegistry
 from se.src.application.policy.authorization import AuthorizationService
@@ -174,7 +175,35 @@ async def test_real_projection_exposes_only_logical_ids_and_public_provenance():
     assert not PHYSICAL_ROOTS.intersection(privileged_model_ids)
 
     listed = await list_capabilities(None, _guest(), container)
-    assert [item.capability_id for item in listed] == sorted(ALL_LOGICAL_IDS)
+    assert [item.capability_id for item in listed] == sorted(
+        set(ALL_LOGICAL_IDS) - TERMINAL_IDS
+    )
+
+    privileged_identity = Identity(
+        auth_type="jwt", permissions=["terminal:execute"]
+    )
+    privileged_listed = await list_capabilities(
+        None, privileged_identity, container
+    )
+    assert [item.capability_id for item in privileged_listed] == sorted(
+        ALL_LOGICAL_IDS
+    )
+
+    # Discovery and single-item lookup must apply the same authorization
+    # floor, while preserving positive metadata for an explicitly granted
+    # terminal principal.
+    for terminal_id in TERMINAL_IDS:
+        with pytest.raises(HTTPException) as denied:
+            await get_capability(terminal_id, _guest(), container)
+        assert denied.value.status_code == 404
+        privileged_item = next(
+            item for item in privileged_listed
+            if item.capability_id == terminal_id
+        )
+        assert privileged_item == await get_capability(
+            terminal_id, privileged_identity, container
+        )
+        assert "physical_tool" not in privileged_item.definition["metadata"]
 
     for item in listed:
         capability_id = item.capability_id
