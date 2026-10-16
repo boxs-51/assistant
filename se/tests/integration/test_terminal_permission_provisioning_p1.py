@@ -6,6 +6,7 @@ JWT no-Popen/positive tests remain unchanged in their original file.
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 import sys
 from pathlib import Path
@@ -206,9 +207,9 @@ async def test_p1_real_persisted_jwt_role_stays_denied_until_opt_in(
 ):
     db = tmp_path / "p1-jwt.sqlite3"
     config = _config(db, monkeypatch)
-    command.upgrade(config, PREVIOUS)
+    await asyncio.to_thread(command.upgrade, config, PREVIOUS)
     _seed_legacy_rows(db)
-    command.upgrade(config, REVISION)
+    await asyncio.to_thread(command.upgrade, config, REVISION)
     driver = SQLiteDriver(
         DriverConfig(enabled=True, required=True, options={"path": str(db)})
     )
