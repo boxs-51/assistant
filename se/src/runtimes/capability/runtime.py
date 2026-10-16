@@ -707,6 +707,7 @@ class CapabilityRuntime(BaseRuntime):
         self._bind_remote_dispatch_started(
             driver,
             invocation,
+            attempt_id=attempt.attempt_id,
             continuation_dispatch_guard=continuation_dispatch_guard,
             selected_implementation_id=implementation.implementation_id,
             target_connection_id=target_connection_id,
@@ -1787,7 +1788,6 @@ class CapabilityRuntime(BaseRuntime):
         if not tool_quota_enabled:
             await self.invocation_lifecycle.create(candidate)
             invocation = candidate
-            self._bind_remote_dispatch_started(driver, invocation)
             invocation.attempt = 1
             attempt = await self.invocation_lifecycle.start_attempt(
                 invocation,
@@ -1804,6 +1804,9 @@ class CapabilityRuntime(BaseRuntime):
                 invocation,
                 CapabilityInvocationState.RUNNING,
                 attempt_id=attempt.attempt_id,
+            )
+            self._bind_remote_dispatch_started(
+                driver, invocation, attempt_id=attempt.attempt_id
             )
             return await self._run_invocation_attempt(
                 invocation=invocation,
@@ -1961,7 +1964,9 @@ class CapabilityRuntime(BaseRuntime):
             )
 
         context.attempt = invocation.attempt
-        self._bind_remote_dispatch_started(driver, invocation)
+        self._bind_remote_dispatch_started(
+            driver, invocation, attempt_id=attempt.attempt_id
+        )
 
         try:
             result = await self._run_invocation_attempt(
@@ -2115,7 +2120,6 @@ class CapabilityRuntime(BaseRuntime):
             context.connection_id = selected_implementation.connection_id
             invocation.attempt += 1
             context.attempt = invocation.attempt
-            self._bind_remote_dispatch_started(driver, invocation)
             attempt = await self.invocation_lifecycle.start_attempt(
                 invocation,
                 implementation_id=effective_implementation_id,
@@ -2131,6 +2135,9 @@ class CapabilityRuntime(BaseRuntime):
                 invocation,
                 CapabilityInvocationState.RUNNING,
                 attempt_id=attempt.attempt_id,
+            )
+            self._bind_remote_dispatch_started(
+                driver, invocation, attempt_id=attempt.attempt_id
             )
             return True
 
@@ -2499,6 +2506,7 @@ class CapabilityRuntime(BaseRuntime):
         driver: BaseCapabilityDriver,
         invocation: CapabilityInvocation,
         *,
+        attempt_id: str,
         continuation_dispatch_guard: ContinuationDispatchGuard | None = None,
         selected_implementation_id: str | None = None,
         target_connection_id: str | None = None,
@@ -2508,14 +2516,8 @@ class CapabilityRuntime(BaseRuntime):
             return
 
         async def mark_started(_envelope) -> None:
-            if (
-                invocation.remote_outcome_state
-                is RemoteOutcomeState.NOT_DISPATCHED
-            ):
-                await self.invocation_lifecycle.update_remote_outcome(
-                    invocation,
-                    RemoteOutcomeState.IN_FLIGHT,
-                )
+            # R12's live lease/target guard remains mandatory immediately
+            # before the first-send CAS. A rejected guard never consumes it.
             if continuation_dispatch_guard is not None:
                 if not selected_implementation_id:
                     raise CapabilityContinuationDispatchGuardError(
@@ -2527,6 +2529,32 @@ class CapabilityRuntime(BaseRuntime):
                     selected_implementation_id,
                     target_connection_id,
                     origin_connection_id,
+                )
+
+            claim = getattr(
+                self.invocation_lifecycle.store, "claim_remote_send", None
+            )
+            if not callable(claim):
+                raise RuntimeError(
+                    "Remote first-send requires a durable attempt claim store"
+                )
+            if not await claim(
+                invocation.invocation_id, attempt_id, invocation.attempt
+            ):
+                raise RuntimeError(
+                    "REMOTE_DISPATCH_ALREADY_CLAIMED: "
+                    f"{invocation.invocation_id}/{attempt_id}"
+                )
+            # A committed claim is conservative MAY_HAVE_SENT evidence.
+            # Preserve existing R6 outcome transition and connection-failure
+            # classification; never re-grant first-send for this attempt.
+            if (
+                invocation.remote_outcome_state
+                is RemoteOutcomeState.NOT_DISPATCHED
+            ):
+                await self.invocation_lifecycle.update_remote_outcome(
+                    invocation,
+                    RemoteOutcomeState.IN_FLIGHT,
                 )
 
         driver.set_dispatch_started_handler(mark_started)
