@@ -26,7 +26,8 @@ class RedisDriver(CacheDriver):
         Không retry vô hạn tại đây.
         """
 
-        logger.info("Connecting to Redis...", url=self.url)
+        # A connection URL may contain passwords; never include it in logs.
+        logger.info("Connecting to Redis...")
 
         if self._client is not None:
             await self.disconnect()
@@ -43,17 +44,15 @@ class RedisDriver(CacheDriver):
             try:
                 await client.aclose()
             except Exception:
-                logger.debug(
-                    "Failed to close Redis client after connection failure",
-                    exc_info=True,
-                )
+                # Cleanup exceptions may also contain the configured URL.
+                logger.debug("Failed to close Redis client after connection failure")
 
             self._client = None
             self._connected = False
 
             logger.error(
                 "Failed to connect to Redis",
-                error=str(e),
+                error_type=type(e).__name__,
             )
 
             raise
