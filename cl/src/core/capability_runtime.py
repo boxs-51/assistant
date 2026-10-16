@@ -77,9 +77,6 @@ class CapabilityRuntime:
                             [],
                         )
                     ),
-                    "trusted_direct_read_only": (
-                        metadata.get("trusted_direct_read_only") is True
-                    ),
                 }
                 definition = {
                     "id": capability_id,
@@ -131,9 +128,6 @@ class CapabilityRuntime:
                         "physical_version"
                     ],
                     "bind": deepcopy(metadata.get("bind", {})),
-                    "trusted_direct_read_only": (
-                        metadata.get("trusted_direct_read_only") is True
-                    ),
                     "manifest_version": "2.0",
                 }
             else:
@@ -169,18 +163,23 @@ class CapabilityRuntime:
                     ),
                     "metadata": {
                         "client_id": self.client_id,
-                        "trusted_direct_read_only": (
-                            metadata.get("trusted_direct_read_only") is True
-                        ),
                     },
                 }
                 registration_metadata = {
                     "client_id": self.client_id,
                     "local_name": capability_id,
-                    "trusted_direct_read_only": (
-                        metadata.get("trusted_direct_read_only") is True
-                    ),
                 }
+
+            # MCP effect certification belongs only to canonical MCP exports.
+            # Preserve exact v1/v2 metadata compatibility for unrelated local
+            # tools; omission is never interpreted as MCP authorization.
+            if (
+                isinstance(capability_id, str)
+                and capability_id.lower().startswith("mcp__")
+            ):
+                certified = metadata.get("trusted_direct_read_only") is True
+                definition["metadata"]["trusted_direct_read_only"] = certified
+                registration_metadata["trusted_direct_read_only"] = certified
 
             capabilities.append(
                 {

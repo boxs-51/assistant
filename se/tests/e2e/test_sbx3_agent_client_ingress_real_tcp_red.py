@@ -15,7 +15,7 @@ from types import SimpleNamespace
 
 from cl.src.core.capability_dispatcher import CapabilityDispatcher
 from cl.src.core.capability_runtime import CapabilityRuntime as ClientCapabilityRuntime
-from cl.src.core.realtime_client import GatewayRealtimeClient
+from cl.src.core.realtime_client import GatewayRealtimeClient, RealtimeHandshakeError
 from cl.src.hitl.hitl_manager import HITLManager
 from cl.src.mcp_client.mcp_adapter import MCPManager
 
@@ -136,14 +136,15 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
     dispatcher = CapabilityDispatcher(registry, None, hitl=hitl)
     current = None
     client_capabilities = None
+    active_connection_id = base.CONNECTION_ID
     receipts = {"tcp_registered": [], "tool_results": [], "inference": []}
 
-    def new_client():
+    def new_client(connection_id, *, session_id=base.SESSION_ID):
         realtime = GatewayRealtimeClient(
             f"http://127.0.0.1:{port}",
             {"Authorization": "Bearer sbx3-loopback-test-only"},
-            connection_id=base.CONNECTION_ID,
-            session_id=base.SESSION_ID,
+            connection_id=connection_id,
+            session_id=session_id,
             client_id=base.CLIENT_ID,
             heartbeat_interval=60.0,
             on_message=lambda env: client_capabilities.handle_message(env),
@@ -156,7 +157,7 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
         return realtime, runtime
 
     try:
-        current, client_capabilities = new_client()
+        current, client_capabilities = new_client(active_connection_id)
         async def register():
             registered = await asyncio.to_thread(current.connect, wait_timeout=5.0)
             assert registered["type"] == "connection.registered", (
@@ -164,13 +165,13 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
             )
             received = await asyncio.to_thread(client_capabilities.register, timeout=5.0)
             assert received["type"] == "capability.registered"
-            impl_id = f"{base.CONNECTION_ID}:{capability_id}"
+            impl_id = f"{active_connection_id}:{capability_id}"
             await base._wait_until_async(
                 lambda: catalog.get_implementation(impl_id) is not None,
                 timeout=5.0,
             )
             implementation = catalog.get_implementation(impl_id)
-            assert implementation.connection_id == base.CONNECTION_ID
+            assert implementation.connection_id == active_connection_id
             receipts["tcp_registered"].append(impl_id)
 
         await register()
@@ -224,7 +225,7 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
                 correlation_id=execution_id + "-corr",
                 identity=identity,
                 limits=AgentExecutionLimits(max_iterations=3),
-                connection_id=base.CONNECTION_ID,
+                connection_id=active_connection_id,
                 agent=agent,
                 metadata={"constitution": "Report results; no native sandbox."},
             )
@@ -247,7 +248,7 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
                 "execution_id": execution_id,
                 "capability_id": capability_id,
                 "tool_call_id": "ing-model-tool-01",
-                "connection_id": base.CONNECTION_ID,
+                "connection_id": active_connection_id,
                 "transport": "REAL_TCP_WEBSOCKET",
                 "model": "DETERMINISTIC",
             })
@@ -331,7 +332,42 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
             # snapshot; a synthetic invocation replay is not allowed to
             # substitute for the real socket. Reissue same model tool-call ID.
             await asyncio.to_thread(current.close)
-            current, client_capabilities = new_client()
+            # A retired connection ID is not reusable. Assert that the server
+            # rejects replay of the original physical registration before
+            # attempting a legitimate new transport identity.
+            # Reuse must fail even when a different session is claimed.
+            # This does not weaken the server's connection-generation fence.
+            for attempted_session in (
+                base.SESSION_ID,
+                f"{base.SESSION_ID}-cross-session",
+            ):
+                stale, _ = new_client(
+                    base.CONNECTION_ID, session_id=attempted_session
+                )
+                try:
+                    try:
+                        await asyncio.to_thread(stale.connect, wait_timeout=5.0)
+                    except RealtimeHandshakeError as exc:
+                        assert "Connection ID cannot be reused" in str(exc), (
+                            "POLICY_RED: stale connection rejected for the wrong reason",
+                            attempted_session, str(exc),
+                        )
+                        assert base.CONNECTION_ID in str(exc)
+                    else:
+                        raise AssertionError(
+                            "POLICY_RED: retired connection_id reused by "
+                            + attempted_session
+                        )
+                finally:
+                    await asyncio.to_thread(stale.close)
+                assert not marker.exists(), (
+                    "PHYSICAL_RED: stale/cross-session replay spawned a child"
+                )
+
+            # Reconnect as a *new* physical connection while deliberately
+            # reusing the same model tool-call ID in the Agent denial test.
+            active_connection_id = f"{base.CONNECTION_ID}-reconnect-01"
+            current, client_capabilities = new_client(active_connection_id)
             await register()
             result2, message2 = await agent_once("sbx3-ing-agent-01")
             assert message2.metadata["success"] is False
@@ -380,7 +416,7 @@ def test_ing_t1_04_trusted_direct_compatibility_real_tcp_positive(tmp_path):
         manager.shutdown()
 
 
-def test_ing_t1_08_direct_mode_cannot_promote_uncertified_mcp_process(tmp_path):
+def test_ing_t1_09_direct_mode_cannot_promote_uncertified_mcp_process(tmp_path):
     marker = tmp_path / "direct-uncertified-process.marker"
     manager, registry = _real_mcp_tools(marker)
     try:
