@@ -61,6 +61,40 @@ _SBX2_SANDBOX_CAPABILITY_IDS = frozenset(
 )
 
 
+# SBX-3 B0 has no certified native process/FS/network-NONE backend yet.
+# Agent command calls must fail before reaching the legacy host process driver.
+# This guard does not alter separately authorized trusted DIRECT TerminalTool.
+_SBX3_UNCERTIFIED_AGENT_PROCESS_IDS = frozenset(
+    {"terminal.run", "terminal.launch", "python.run"}
+)
+
+
+def _sbx3_uncertified_agent_process_id(capability_id: object) -> bool:
+    """Fail closed on canonical and namespace-exported Agent process IDs.
+
+    Inspect exact built-in strings only, not untrusted subclass metadata hooks.
+    Native process isolation is not yet certified for Agent dispatch.
+    """
+    if type(capability_id) is not str:
+        return True
+
+    return any(
+        capability_id == canonical
+        or capability_id.endswith(f".{canonical}")
+        or capability_id.endswith(f"__{canonical}")
+        for canonical in _SBX3_UNCERTIFIED_AGENT_PROCESS_IDS
+    )
+
+
+def _sbx3_uncertified_agent_mcp_id(capability_id: object) -> bool:
+    """Deny all MCP-exported Agent tools until physical effects are certified.
+
+    An innocuous MCP display name is not proof that its handler is harmless.
+    Trusted DIRECT follows its separately authorized policy path.
+    """
+    return type(capability_id) is str and capability_id.lower().startswith("mcp__")
+
+
 class CapabilityToolExecutionAdapter(ToolExecutionPort):
     """Canonical Agent tool gateway over CapabilityRuntime."""
 
@@ -88,6 +122,32 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
         if request.connection_id != context.connection_id:
             raise ValueError(
                 "Tool request connection_id does not match execution context."
+            )
+
+        if _sbx3_uncertified_agent_process_id(request.capability_id):
+            return self._failure(
+                request,
+                code=AGENT_TOOL_POLICY_DENIED,
+                message=(
+                    "Agent process execution is denied until native SBX-3 "
+                    "OS confinement and cleanup are verified."
+                ),
+                retryable=False,
+                metadata={"sbx3_native_isolation": "NOT_CERTIFIED"},
+                pre_dispatch=True,
+            )
+
+        if _sbx3_uncertified_agent_mcp_id(request.capability_id):
+            return self._failure(
+                request,
+                code=AGENT_TOOL_POLICY_DENIED,
+                message=(
+                    "Agent-origin MCP execution is denied until the physical "
+                    "handler and its effects are independently certified."
+                ),
+                retryable=False,
+                metadata={"sbx3_mcp_effects": "NOT_CERTIFIED"},
+                pre_dispatch=True,
             )
 
         if request.capability_id == "agent.budget.configure":
@@ -310,6 +370,20 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
             raise ValueError(
                 "REUSE_COMMITTED must be loaded from durable AgentToolResult."
             )
+        # R7 continuation bypasses execute(), so independently deny native
+        # process commands rather than falling back to a host/client driver.
+        if _sbx3_uncertified_agent_process_id(action.capability_id):
+            raise CapabilityContinuationDispatchGuardError(
+                AGENT_TOOL_POLICY_DENIED,
+                "Agent process continuation requires verified native SBX-3 isolation.",
+                retryable=False,
+            )
+        if _sbx3_uncertified_agent_mcp_id(action.capability_id):
+            raise CapabilityContinuationDispatchGuardError(
+                AGENT_TOOL_POLICY_DENIED,
+                "Agent-origin MCP continuation requires certified physical handler effects.",
+                retryable=False,
+            )
         if context.connection_id is None:
             raise ValueError(
                 "R7 continuation requires a claimed target connection."
@@ -440,6 +514,8 @@ class CapabilityToolExecutionAdapter(ToolExecutionPort):
 
     def can_continue_server_side(self, capability_id: str) -> bool:
         """Return whether a new routing decision can avoid the lost client."""
+        if _sbx3_uncertified_agent_process_id(capability_id):
+            return False
         catalog = getattr(self._capability_runtime, "catalog", None)
         if catalog is None:
             return False
