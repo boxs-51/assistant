@@ -222,6 +222,7 @@ async def test_p1_real_persisted_jwt_role_stays_denied_until_opt_in(
     jwt = JWTAuthenticator(token_source, factory)
     cap = CapabilityDefinition(
         id="terminal.run", name="terminal.run",
+        description="Terminal execution permission provisioning regression",
         input_schema={"type": "object"},
     )
     try:
