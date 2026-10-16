@@ -25,24 +25,24 @@ class RespAckCutProxy:
     @staticmethod
     async def _reply(reader):
         kind = await reader.readexactly(1)
-        if kind in (b"+", b"-", b":"):
+        if kind in (b"+", b"-", b":", b"_", b"#", b",", b"("):
             return kind + await reader.readuntil(b"\r\n")
-        if kind == b"$":
+        if kind in (b"$", b"!", b"="):
             line = await reader.readuntil(b"\r\n")
             length = int(line[:-2])
             if length < -1 or length > 8 * 1024 * 1024:
                 raise ValueError("Unexpected Redis bulk length")
             return kind + line + (await reader.readexactly(length + 2) if length >= 0 else b"")
-        if kind == b"*":
+        if kind in (b"*", b"~", b">", b"%", b"|"):
             line = await reader.readuntil(b"\r\n")
             count = int(line[:-2])
             if count < -1 or count > 4096:
                 raise ValueError("Unexpected Redis array length")
             items = b""
-            for _ in range(max(0, count)):
+            for _ in range(max(0, count) * (2 if kind in (b"%", b"|") else 1)):
                 items += await RespAckCutProxy._reply(reader)
             return kind + line + items
-        raise ValueError("Unexpected RESP type, refusing fault attribution")
+        raise ValueError(f"Unexpected RESP type {kind!r}, refusing fault attribution")
 
     async def _serve(self, client_reader, client_writer):
         upstream_reader, upstream_writer = await asyncio.open_connection(
