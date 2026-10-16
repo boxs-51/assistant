@@ -12,6 +12,9 @@ jobs:
     name: sbx3-model-ingress (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 35
+    env:
+      PYTHONIOENCODING: utf-8
+      PYTHONUTF8: "1"
     strategy:
       fail-fast: false
       matrix:
