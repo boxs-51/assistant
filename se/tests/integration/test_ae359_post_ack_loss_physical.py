@@ -148,10 +148,14 @@ def test_r_ack_01_x_ack_09_real_redis_set_ack_lost_db_dual_authority_red_first()
                 assert await direct.exists(redis_key) == 1, "Real SET did not execute"
                 proxy.release_drop.set()
                 status, detail = await _finish(task)
-                assert status == "SUCCESS", f"Expected actual DB fallback: {detail}"
+                assert status == "ERROR", (
+                    f"UNCERTAIN Redis SET must fail closed, got {status}: {detail}"
+                )
                 await writer.disconnect()
 
-            assert await _row_count(engine, email) == 1, "No real DB fallback occurred"
+            assert await _row_count(engine, email) == 0, (
+                "SEMANTIC_RED: uncertain Redis SET created a second SQL OTP authority"
+            )
             reader = await _redis_driver(ru)
             try:
                 verifier = OTPStorageService(reader, _factory(engine))
