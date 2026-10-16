@@ -16,15 +16,16 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Check out exact parent PR source
         shell: bash
         run: |
           set -euo pipefail
           echo "EVIDENCE_COMMIT=$(git rev-parse HEAD)"
-          echo "PR_SOURCE_TREE_PARENT=$(git rev-parse HEAD^)"
-          test "$(git rev-parse HEAD^)" = "8f847ee754f034660c44ef55772b5606ed607e2a"
-          git diff --name-only HEAD^ HEAD
-          test "$(git diff --name-only HEAD^ HEAD)" = ".github/workflows/sbx3-pytest-skip-evidence-20261017.yml"
+          echo "PR_SOURCE_BASE=8f847ee754f034660c44ef55772b5606ed607e2a"
+          git cat-file -e "8f847ee754f034660c44ef55772b5606ed607e2a^{commit}"
+          git diff --name-only 8f847ee754f034660c44ef55772b5606ed607e2a HEAD
+          test "$(git diff --name-only 8f847ee754f034660c44ef55772b5606ed607e2a HEAD)" = ".github/workflows/sbx3-pytest-skip-evidence-20261017.yml"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
