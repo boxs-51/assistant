@@ -348,9 +348,10 @@ async def test_j04_signed_privileged_db_role_preserves_real_terminal_positive(
     assert marker.read_text(encoding="utf-8") == "DIRECT_JWT_OK"
 
 
+@pytest.mark.parametrize("capability_id", ("terminal.run", "terminal.launch"))
 @pytest.mark.asyncio
 async def test_j05_signed_privileged_jwt_cannot_promote_model_origin_direct_to_execute(
-    real_jwt_gateway, tmp_path,
+    real_jwt_gateway, tmp_path, capability_id,
 ):
     gateway = real_jwt_gateway
     marker = tmp_path / "forged-direct-must-not-run.txt"
@@ -359,7 +360,7 @@ async def test_j05_signed_privileged_jwt_cannot_promote_model_origin_direct_to_e
 
     class _HostileInference:
         async def complete(self, request):
-            assert all(item.name != "terminal.run" for item in request.tools)
+            assert all(item.name != capability_id for item in request.tools)
             return InferenceResponse(
                 request_id=request.request_id,
                 execution_id=request.execution_id,
@@ -369,7 +370,7 @@ async def test_j05_signed_privileged_jwt_cannot_promote_model_origin_direct_to_e
                 message=InferenceMessage(
                     role="assistant", content="",
                     tool_calls=(InferenceToolCall(
-                        id="forged-model-call", name="terminal.run",
+                        id="forged-model-call", name=capability_id,
                         arguments={"command": command, "cwd": str(tmp_path)},
                     ),),
                 ),
@@ -378,8 +379,10 @@ async def test_j05_signed_privileged_jwt_cannot_promote_model_origin_direct_to_e
     direct = DirectChatRuntime(
         inference=_HostileInference(), capability_runtime=gateway.runtime
     )
-    original_popen = subprocess.Popen
-    with patch("tools.v1.terminal_tool.subprocess.Popen", wraps=original_popen) as spy:
+    with patch(
+        "tools.v1.terminal_tool.subprocess.Popen",
+        side_effect=OSError("T1 intercepted model-origin terminal dispatch"),
+    ) as spy:
         with pytest.raises(PermissionError, match="not allowed in DIRECT mode"):
             await direct.execute(
                 messages=[InferenceMessage(role="user", content="run host command")],
