@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+import secrets
 from typing import Optional, Dict, Any
 from jose import JWTError, jwt
 
@@ -27,7 +28,9 @@ class JwtHelper:
         """Tạo một refresh token mới."""
         to_encode = data.copy()
         expire = datetime.now(timezone.utc) + timedelta(days=self.REFRESH_TOKEN_EXPIRE_DAYS)
-        to_encode.update({"exp": expire, "type": "refresh"})
+        # Per-issuance identity is mandatory even for identical users and seconds.
+        # 24 random bytes provide 192 bits; do not derive identity from exp/sub.
+        to_encode.update({"exp": expire, "type": "refresh", "jti": secrets.token_urlsafe(24)})
         encoded_jwt = jwt.encode(to_encode, self.SECRET_KEY, algorithm=self.ALGORITHM)
         return encoded_jwt
 

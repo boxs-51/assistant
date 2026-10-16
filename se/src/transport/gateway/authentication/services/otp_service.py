@@ -90,9 +90,9 @@ class OTPStorageService:
     async def verify_and_get_data(self, email: str, input_otp: str) -> Optional[dict]:
         """Consume and validate a one-time registration challenge."""
         raw_data = await self._consume_cache_value(f"pending_reg:{email}")
-        if not raw_data:
+        if raw_data is None:
             raw_data = await self._consume_database_value(email)
-        if not raw_data:
+        if raw_data is None:
             return None
 
         data = json.loads(raw_data)
@@ -103,9 +103,9 @@ class OTPStorageService:
     async def verify_password_reset(self, email: str, input_otp: str) -> Optional[dict]:
         """Consume and validate a one-time password-reset challenge."""
         raw_data = await self._consume_cache_value(f"pending_password_reset:{email}")
-        if not raw_data:
+        if raw_data is None:
             raw_data = await self._consume_database_value(email)
-        if not raw_data:
+        if raw_data is None:
             return None
 
         data = json.loads(raw_data)
@@ -114,22 +114,43 @@ class OTPStorageService:
         return data.get("user_data")
 
     async def _consume_cache_value(self, key: str) -> Optional[str]:
-        if not self.cache_driver:
-            return None
-        try:
-            raw_data = await self.cache_driver.get(key)
-            if raw_data:
-                await self.cache_driver.delete(key)
-            return raw_data
-        except Exception as exc:
-            # Fail closed if deletion fails; otherwise a one-time OTP could be reused.
-            logger.error("Redis error while consuming OTP", key=key, error=str(exc))
+        if self.cache_driver is None:
             return None
 
+        # No GET->DELETE compatibility fallback. Lack of an atomic pop
+        # capability is an error, not proof that the key is absent.
+        consumer = getattr(self.cache_driver, "consume_one_time", None)
+        if not callable(consumer):
+            raise RuntimeError("OTP cache does not support atomic consume_one_time")
+        try:
+            raw_data = await consumer(key)
+        except Exception:
+            # A command may already have consumed the key before its reply
+            # was lost. Never convert UNCERTAIN to MISSING or retry in SQL.
+            logger.error("OTP atomic cache consumption unconfirmed", exc_info=True)
+            raise
+        if raw_data is not None and type(raw_data) is not str:
+            raise RuntimeError("OTP cache returned an unconfirmed atomic consume receipt")
+        return raw_data
+
     async def _consume_database_value(self, email: str) -> Optional[str]:
+        """Disclose an OTP payload only after the winning DELETE commits.
+
+        MISSING/EXPIRED return None; any repository or COMMIT exception
+        propagates as UNCERTAIN/ERROR, never as MISSING or a retry. The
+        repository may return a provisional payload from DELETE RETURNING,
+        but the service must not authenticate against it before COMMIT.
+        """
         async with self.uow_factory() as uow:
             pending_record = await uow.pending_registrations.get_and_delete(email)
-            raw_data = pending_record.payload if pending_record else None
-            # get_and_delete only flushes; commit makes consumption durable.
+            provisional_payload = (
+                pending_record.payload if pending_record is not None else None
+            )
+            if provisional_payload is not None and type(provisional_payload) is not str:
+                raise RuntimeError("DB OTP consume returned an invalid payload receipt")
+
+            # Even the no-row/expired result is committed (the latter may
+            # have deleted an expired row). Never catch ambiguous failures.
             await uow.commit()
-            return raw_data
+            return provisional_payload
+
