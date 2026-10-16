@@ -23,7 +23,8 @@ def test_revoke_ack_waits_for_active_effect_lease():
     release = threading.Event()
 
     def effect():
-        with gate.effect_lease():
+        with gate.effect_lease() as admit_effect_start:
+            admit_effect_start()
             started.set()
             assert release.wait(5)
 
@@ -105,3 +106,34 @@ def test_local_executor_does_not_start_effect_after_gate_revoke():
             threading.Event(),
         )
     assert calls == []
+
+
+def test_revoke_wins_between_lease_acquisition_and_start_linearization():
+    gate = LocalEffectStartGate()
+    leased = threading.Event()
+    allow_start = threading.Event()
+    denied = threading.Event()
+    effects = []
+
+    def worker():
+        with gate.effect_lease() as admit_effect_start:
+            leased.set()
+            assert allow_start.wait(5)
+            try:
+                admit_effect_start()
+            except EffectStartRevoked:
+                denied.set()
+                return
+            effects.append("started")
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        running = pool.submit(worker)
+        assert leased.wait(5)
+        with pytest.raises(TimeoutError, match="no revoke ACK"):
+            gate.revoke_and_drain(timeout_seconds=0.01)
+        allow_start.set()
+        running.result(timeout=5)
+
+    assert denied.is_set()
+    assert effects == []
+    assert gate.revoke_and_drain(timeout_seconds=0.1) == 1
