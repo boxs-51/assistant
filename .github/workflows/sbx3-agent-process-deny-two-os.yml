@@ -105,7 +105,7 @@ jobs:
               for kind in ("failure", "error", "skipped")
           }
           assert int(suites[0].get("tests", "-1")) == len(cases) == 30
-          assert all(int(suites[0].get(kind+"s" if kind == "failure" else kind, "-1")) == 0 for kind in ("failure", "error", "skipped")), (
+          assert all(int(suites[0].get({"failure": "failures", "error": "errors", "skipped": "skipped"}[kind], "-1")) == 0 for kind in ("failure", "error", "skipped")), (
               "SEMANTIC_RED: suite recorded failure/error/skip"
           )
           assert all(v == 0 for v in counters.values()), (
