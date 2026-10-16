@@ -2516,21 +2516,9 @@ class CapabilityRuntime(BaseRuntime):
             return
 
         async def mark_started(_envelope) -> None:
-            # R12's live lease/target guard remains mandatory immediately
-            # before the first-send CAS. A rejected guard never consumes it.
-            if continuation_dispatch_guard is not None:
-                if not selected_implementation_id:
-                    raise CapabilityContinuationDispatchGuardError(
-                        "RECOVERY_CONTINUATION_AFFINITY_CHANGED",
-                        "Continuation implementation identity is unavailable.",
-                    )
-                await continuation_dispatch_guard(
-                    invocation,
-                    selected_implementation_id,
-                    target_connection_id,
-                    origin_connection_id,
-                )
-
+            # The per-attempt send CAS is persisted first. The R12 final
+            # lease/target guard MUST remain the last await before the
+            # transport boundary, preserving its security ordering oracle.
             claim = getattr(
                 self.invocation_lifecycle.store, "claim_remote_send", None
             )
@@ -2545,9 +2533,7 @@ class CapabilityRuntime(BaseRuntime):
                     "REMOTE_DISPATCH_ALREADY_CLAIMED: "
                     f"{invocation.invocation_id}/{attempt_id}"
                 )
-            # A committed claim is conservative MAY_HAVE_SENT evidence.
-            # Preserve existing R6 outcome transition and connection-failure
-            # classification; never re-grant first-send for this attempt.
+            # The committed claim is conservative MAY_HAVE_SENT evidence.
             if (
                 invocation.remote_outcome_state
                 is RemoteOutcomeState.NOT_DISPATCHED
@@ -2555,6 +2541,18 @@ class CapabilityRuntime(BaseRuntime):
                 await self.invocation_lifecycle.update_remote_outcome(
                     invocation,
                     RemoteOutcomeState.IN_FLIGHT,
+                )
+            if continuation_dispatch_guard is not None:
+                if not selected_implementation_id:
+                    raise CapabilityContinuationDispatchGuardError(
+                        "RECOVERY_CONTINUATION_AFFINITY_CHANGED",
+                        "Continuation implementation identity is unavailable.",
+                    )
+                await continuation_dispatch_guard(
+                    invocation,
+                    selected_implementation_id,
+                    target_connection_id,
+                    origin_connection_id,
                 )
 
         driver.set_dispatch_started_handler(mark_started)
