@@ -272,7 +272,9 @@ class CapabilityDispatcher:
                     self._emit(invocation_id, outcome)
                     return
                 if durable.state is ClientInvocationLedgerState.RUNNING:
-                    if not self._durable_running_replay_safe(idempotency):
+                    if not self._durable_running_replay_safe(
+                        idempotency, capability_id=capability_id
+                    ):
                         self._capacity.release()
                         return
                     replay_existing_running = True
