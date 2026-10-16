@@ -423,3 +423,66 @@ def test_r_ack_05_06_real_cooldown_set_ack_loss_keeps_single_otp_authority(purpo
             await engine.dispose()
 
     asyncio.run(run())
+
+
+def test_r_ack_07_lost_ack_then_fresh_uninitialized_cache_must_not_issue_sql_otp():
+    """RED-first: pre-dispatch on a retry is NOT proof of no earlier live OTP.
+
+    This is evidence for the explicitly HOLD cross-instance authority design;
+    it must not be 'fixed' by weakening the two valid OTP assertion.
+    """
+    async def run():
+        ru, _ = _targets()
+        engine = await _pg_engines()
+        email = "ae359-retry-" + uuid4().hex + "@example.invalid"
+        key = "pending_reg:" + email
+        direct = redis.Redis.from_url(ru, decode_responses=True)
+        try:
+            assert await direct.ping()
+            async with RespAckCutProxy() as proxy:
+                writer = await _redis_driver(f"redis://127.0.0.1:{proxy.port}/15")
+                service = OTPStorageService(writer, _factory(engine))
+                proxy.arm_once()
+                task = asyncio.create_task(service.save_pending_registration(
+                    email, {"value": "first-redis"}, "111111"
+                ))
+                await proxy.wait_captured()
+                assert proxy.client_ack_bytes == 0
+                assert await direct.exists(key) == 1, "Backend must hold first OTP"
+                proxy.release_drop.set()
+                status, detail = await _finish(task)
+                assert status == "ERROR", f"Initial uncertain SET must fail closed: {detail}"
+                await writer.disconnect()
+
+            # A new instance lacking an initialized Redis client has an
+            # authoritative pre-dispatch receipt only for its *own* retry.
+            # It has no proof that an earlier instance did not commit SET.
+            cold = RedisDriver(DriverConfig(options={"url": ru}))
+            assert cold._client is None
+            retry = OTPStorageService(cold, _factory(engine))
+            await retry.save_pending_registration(
+                email, {"value": "second-sql"}, "222222"
+            )
+
+            reader = await _redis_driver(ru)
+            try:
+                verifier = OTPStorageService(reader, _factory(engine))
+                first = await verifier.verify_and_get_data(email, "111111")
+                assert first == {"value": "first-redis"}, "Redis positive control"
+                second = await verifier.verify_and_get_data(email, "222222")
+                assert second is None, (
+                    "SEMANTIC_RED: lost-ACK Redis OTP plus fresh-instance "
+                    "pre-dispatch SQL fallback authenticated a second OTP"
+                )
+            finally:
+                await reader.disconnect()
+        finally:
+            await direct.delete(key, "otp_cooldown:" + email)
+            async with engine.begin() as conn:
+                await conn.execute(PendingRegistration.__table__.delete().where(
+                    PendingRegistration.email == email
+                ))
+            await direct.aclose()
+            await engine.dispose()
+
+    asyncio.run(run())
