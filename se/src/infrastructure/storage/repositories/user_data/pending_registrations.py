@@ -23,7 +23,10 @@ class PendingRegistrationRepository(BaseRepository):
         Lưu thông tin đăng ký tạm thời vào Database.
         Nếu đã tồn tại, sẽ cập nhật thay vì tạo mới (UPSERT).
         """
-        expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_in_seconds)
+        # PostgreSQL columns are TIMESTAMP WITHOUT TIME ZONE containing UTC.
+        # Bind one UTC-naive instant for both persisted timestamp fields.
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        expires_at = utc_now + timedelta(seconds=expires_in_seconds)
 
         # Tìm và xóa bản ghi cũ nếu có
         existing = await self.session.get(PendingRegistration, email)
@@ -36,7 +39,7 @@ class PendingRegistrationRepository(BaseRepository):
             email=email,
             payload=payload,
             expires_at=expires_at,
-            created_at=datetime.now(timezone.utc)
+            created_at=utc_now
         )
         self.session.add(new_pending)
         await self.session.flush()
@@ -56,7 +59,13 @@ class PendingRegistrationRepository(BaseRepository):
             return 0
             
         # Cooldown tính dựa trên: thời gian tạo + thời gian cooldown cấu hình
-        elapsed_time = (datetime.now(timezone.utc) - pending.created_at.replace(tzinfo=timezone.utc)).total_seconds()
+        created_at = pending.created_at
+        if created_at.tzinfo is None:
+            # The persisted UTC-naive timestamp represents a UTC instant.
+            created_at = created_at.replace(tzinfo=timezone.utc)
+        else:
+            created_at = created_at.astimezone(timezone.utc)
+        elapsed_time = (datetime.now(timezone.utc) - created_at).total_seconds()
         remaining = cooldown_ttl - int(elapsed_time)
         return max(0, remaining)
 
@@ -129,6 +138,7 @@ class PendingRegistrationRepository(BaseRepository):
 
     async def cleanup_expired(self):
         """Xóa tất cả các bản ghi đã hết hạn."""
-        stmt = delete(PendingRegistration).where(PendingRegistration.expires_at < datetime.now(timezone.utc))
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        stmt = delete(PendingRegistration).where(PendingRegistration.expires_at < utc_now)
         await self.session.execute(stmt)
         await self.session.flush()

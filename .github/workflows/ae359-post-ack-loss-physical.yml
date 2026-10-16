@@ -9,6 +9,8 @@ on:
       - ".github/workflows/ae359-post-ack-loss-physical.yml"
       - "se/src/transport/gateway/authentication/services/otp_service.py"
       - "se/src/infrastructure/storage/repositories/refresh_sessions_redis.py"
+      - "se/src/infrastructure/storage/repositories/user_data/pending_registrations.py"
+      - "se/src/infrastructure/storage/models/sql/user_data/pending_registration.py"
   workflow_dispatch:
 
 permissions:
