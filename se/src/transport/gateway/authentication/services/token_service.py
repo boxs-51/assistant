@@ -113,7 +113,11 @@ class TokenService:
     async def logout(self, refresh_token: str):
         """Thu hồi một refresh token bằng cách xóa nó khỏi session store."""
         token_hash = hashlib.sha256(refresh_token.encode()).hexdigest()
-        await self.session_repo.delete_token(token_hash)
+        deleted = await self.session_repo.delete_token(token_hash)
+        if deleted != 1:
+            # Do not ACK a missing or previously revoked refresh-token hash.
+            # This does not revoke already-issued stateless access JWTs.
+            raise InvalidCredentialsError("Refresh token not found or already revoked")
         logger.info("User logged out, refresh token revoked.", token_hash_prefix=token_hash[:8])
 
     def verify_access_token(self, token: str) -> Identity:

@@ -160,11 +160,20 @@ class InMemoryDriver(CacheDriver):
                     time.monotonic() + expire
                 )
 
-    async def delete(self, key: str) -> None:
+    async def delete(self, key: str) -> int:
         self._require_connected()
 
         async with self._lock:
+            # Count only a live entry, matching Redis DEL/TTL semantics.
+            # Check and remove in one critical section (no TOCTOU).
+            if key not in self._data:
+                self._expires.pop(key, None)
+                return 0
+            if self._is_expired(key, time.monotonic()):
+                self._delete_unlocked(key)
+                return 0
             self._delete_unlocked(key)
+            return 1
 
     async def exists(self, key: str) -> bool:
         return key in self._data
