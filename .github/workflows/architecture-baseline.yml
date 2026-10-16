@@ -13,6 +13,27 @@ jobs:
   linux-full-suite:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    services:
+      postgres:
+        # Disposable PostgreSQL 17 for strict AE359 integration oracles.
+        # Release admission still requires an immutable image digest.
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: ae359_otp_t1
+          POSTGRES_USER: ae359_test
+          POSTGRES_PASSWORD: ae359_test_only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ae359_test -d ae359_otp_t1"
+          --health-interval 3s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AE359_TZ_PG17_STRICT: "1"
+      AE359_TZ_PG17_URL: postgresql+asyncpg://ae359_test:ae359_test_only@127.0.0.1:5432/ae359_otp_t1
+      AE359_PG17_STRICT: "1"
+      AE359_PG17_TEST_DATABASE_URL: postgresql+asyncpg://ae359_test:ae359_test_only@127.0.0.1:5432/ae359_otp_t1
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
