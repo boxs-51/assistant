@@ -15,6 +15,7 @@ import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import httpx
@@ -43,7 +44,7 @@ class _IsolatedBearerAuthenticator(AuthenticatorInterface):
 
     async def authenticate(self, token: str) -> Identity:
         if token == self._token:
-            return Identity(auth_type="api_key", user_id="sbx3-trusted-owner", permissions=["admin:write"])
+            return Identity(auth_type="api_key", user_id="sbx3-trusted-owner", permissions=["admin:write", "terminal:execute"])
         if token == self._untrusted_token:
             return Identity(auth_type="api_key", user_id="sbx3-untrusted-principal", permissions=[])
         raise InvalidCredentialsError("Invalid isolated DIRECT-T1 credential")
@@ -161,13 +162,14 @@ async def test_authenticated_unprivileged_principal_cannot_execute_terminal(
                 headers=trusted_direct_gateway.untrusted_headers,
                 json={"arguments": {"command": command, "cwd": str(tmp_path), "timeout": 8}},
             )
-    assert denied.status_code in {401, 403}, (
-        "A valid but unprivileged principal was allowed to execute a host command",
-        denied.status_code,
-        denied.text[:300],
-    )
-    assert popen.call_count == 0, "Unprivileged principal reached real host Popen"
-    assert not marker.exists(), "Unprivileged principal created host process marker"
+    witness = {
+        "http_status": denied.status_code,
+        "popen_count": popen.call_count,
+        "marker_created": marker.exists(),
+    }
+    assert witness == {
+        "http_status": 403, "popen_count": 0, "marker_created": False,
+    }, witness
 
 
 @pytest.mark.asyncio
@@ -232,3 +234,98 @@ async def test_model_origin_direct_chat_cannot_promote_terminal_into_trusted_exe
         assert not marker.exists(), "Model-origin DIRECT launched a subprocess"
     finally:
         provider.chat.chat = original_chat
+
+@pytest.mark.asyncio
+async def test_launch_missing_or_invalid_bearer_cannot_reach_popen(
+    trusted_direct_gateway, tmp_path,
+):
+    marker = tmp_path / "launch-no-auth-must-not-exist.txt"
+    command = _harmless_command(marker)
+    observations = []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=trusted_direct_gateway.app),
+        base_url="http://testserver",
+    ) as client:
+        for headers in ({}, {"Authorization": "Bearer sbx3_direct_t1_invalid"}):
+            with patch(
+                "tools.v1.terminal_tool.subprocess.Popen",
+                side_effect=OSError("unexpected host launch"),
+            ) as popen:
+                response = await client.post(
+                    "/v1/capabilities/terminal.launch/execute",
+                    headers=headers,
+                    json={"arguments": {"command": command, "cwd": str(tmp_path)}},
+                )
+            observations.append({
+                "http_status": response.status_code,
+                "popen_count": popen.call_count,
+                "marker_created": marker.exists(),
+            })
+    expected = {"http_status": 401, "popen_count": 0, "marker_created": False}
+    assert observations == [expected, expected], observations
+
+
+@pytest.mark.asyncio
+async def test_authenticated_unprivileged_principal_cannot_launch_terminal(
+    trusted_direct_gateway, tmp_path,
+):
+    """RED-first: authenticated unprivileged caller never reaches launch Popen."""
+    marker = tmp_path / "launch-unprivileged-must-not-exist.txt"
+    command = _harmless_command(marker)
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=trusted_direct_gateway.app),
+        base_url="http://testserver",
+    ) as client:
+        with patch(
+            "tools.v1.terminal_tool.subprocess.Popen",
+            side_effect=OSError("T1 intercepted unauthorized launch"),
+        ) as popen:
+            response = await client.post(
+                "/v1/capabilities/terminal.launch/execute",
+                headers=trusted_direct_gateway.untrusted_headers,
+                json={"arguments": {"command": command, "cwd": str(tmp_path)}},
+            )
+    witness = {
+        "http_status": response.status_code,
+        "popen_count": popen.call_count,
+        "marker_created": marker.exists(),
+    }
+    assert witness == {
+        "http_status": 403, "popen_count": 0, "marker_created": False,
+    }, witness
+
+
+@pytest.mark.asyncio
+async def test_trusted_principal_with_explicit_execute_grant_launches_stub(
+    trusted_direct_gateway, tmp_path,
+):
+    """Positive dispatch control: fake PID, no physical detached process."""
+    marker = tmp_path / "launch-positive-must-still-not-exist.txt"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=trusted_direct_gateway.app),
+        base_url="http://testserver",
+    ) as client:
+        with patch(
+            "tools.v1.terminal_tool.subprocess.Popen",
+            return_value=SimpleNamespace(pid=424242),
+        ) as popen:
+            response = await client.post(
+                "/v1/capabilities/terminal.launch/execute",
+                headers=trusted_direct_gateway.headers,
+                json={"arguments": {
+                    "command": _harmless_command(marker), "cwd": str(tmp_path),
+                }},
+            )
+    witness = {
+        "http_status": response.status_code,
+        "popen_count": popen.call_count,
+        "marker_created": marker.exists(),
+    }
+    assert witness == {
+        "http_status": 200, "popen_count": 1, "marker_created": False,
+    }, witness
+    body = response.json()
+    assert body["capability_id"] == "terminal.launch"
+    assert body["success"] is True and body["output"]["ok"] is True
+    assert body["output"]["data"]["pid"] == 424242
+    assert body["output"]["data"]["started"] is True
