@@ -75,6 +75,19 @@ def _seed_legacy_rows(database: Path) -> None:
             "INSERT INTO role_permissions (role_id,permission_id) VALUES (?,?)",
             ("p1-admin-role", "p1-write-permission"),
         )
+        db.execute(
+            "INSERT INTO organizations (id,owner_id,name) VALUES (?,?,?)",
+            ("p1-existing-org", "p1-admin", "Existing organization"),
+        )
+        db.execute(
+            "INSERT INTO members (organization_id,user_id) VALUES (?,?)",
+            ("p1-existing-org", "p1-admin"),
+        )
+        db.execute(
+            "INSERT INTO member_roles "
+            "(member_organization_id,member_user_id,role_id) VALUES (?,?,?)",
+            ("p1-existing-org", "p1-admin", "p1-admin-role"),
+        )
 
 
 def _terminal_count(database: Path) -> tuple[int, int]:
@@ -216,7 +229,8 @@ async def test_p1_real_persisted_jwt_role_stays_denied_until_opt_in(
     factory = lambda: SqlAlchemyUnitOfWork(driver)
     token_source = SimpleNamespace(
         verify_access_token=lambda _token: Identity(
-            auth_type="jwt", user_id="p1-admin", roles=["admin"]
+            auth_type="jwt", user_id="p1-admin",
+            organization_id="p1-existing-org", roles=["admin"]
         )
     )
     jwt = JWTAuthenticator(token_source, factory)
@@ -249,8 +263,14 @@ async def test_p1_real_persisted_jwt_role_stays_denied_until_opt_in(
             is AuthorizationDecision.ALLOW
         )
         async with factory() as uow:
-            assert await uow.permissions.get_permissions_for_role_names(
-                ["member"]
-            ) == set()
+            member_rights, resolved_org = (
+                await uow.permissions.get_permissions_for_member_role_ids(
+                    user_id="p1-admin",
+                    organization_id="p1-existing-org",
+                    allowed_role_names={"member"},
+                )
+            )
+            assert member_rights == set()
+            assert resolved_org == "p1-existing-org"
     finally:
         await driver.disconnect()
