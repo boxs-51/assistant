@@ -657,3 +657,104 @@ async def test_j12_admin_and_standard_api_keys_never_union_same_name_role_grants
     admin_a = await key_service.verify_key("ak_crossa_proof-body")
     assert admin_a.organization_id == "direct-jwt-org"
     assert "terminal:execute" in admin_a.permissions
+
+
+@pytest.mark.asyncio
+async def test_j13_signed_forged_role_id_and_permission_claims_never_authorize_terminal(
+    real_jwt_gateway, tmp_path,
+):
+    """Token-controlled role IDs, display labels and permission claims are not SQL grants."""
+    gateway = real_jwt_gateway
+    forged = gateway.token_service.jwt.create_access_token({
+        "sub": _MEMBER_ID,
+        "org_id": "direct-jwt-org",
+        "roles": ["admin"],
+        "role_id": "direct-role-admin",
+        "role_ids": ["direct-role-admin"],
+        "permissions": ["terminal:execute"],
+        "scopes": ["profile"],
+    })
+    identity = await gateway.jwt_authenticator.authenticate(forged)
+    assert identity.user_id == _MEMBER_ID
+    assert identity.organization_id == "direct-jwt-org"
+    assert identity.roles == ["admin"]  # Untrusted display claim remains non-authoritative.
+    assert set(identity.permissions) == {"read:public"}
+
+    marker = tmp_path / "j13-forged-role-id-must-not-exist"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver"
+    ) as client:
+        for capability_id in ("terminal.run", "terminal.launch"):
+            with patch(
+                "tools.v1.terminal_tool.subprocess.Popen",
+                side_effect=OSError("J13 intercepted an unauthorized process"),
+            ) as popen:
+                response = await client.post(
+                    f"/v1/capabilities/{capability_id}/execute",
+                    headers={"Authorization": f"Bearer {forged}"},
+                    json={"arguments": {
+                        "command": _harmless_command(marker),
+                        "cwd": str(tmp_path), "timeout": 8,
+                    }},
+                )
+            assert response.status_code == 403, (capability_id, response.text)
+            assert popen.call_count == 0, capability_id
+            assert not marker.exists(), capability_id
+
+
+@pytest.mark.parametrize("revocation", ("role_permission", "membership_role"))
+@pytest.mark.asyncio
+async def test_j14_existing_signed_jwt_loses_terminal_after_persisted_revocation(
+    real_jwt_gateway, tmp_path, revocation,
+):
+    """A previously authorized, still-signed JWT must not cache revoked SQL grants."""
+    gateway = real_jwt_gateway
+    token = gateway.tokens["admin"]
+    before = await gateway.jwt_authenticator.authenticate(token)
+    assert before.organization_id == "direct-jwt-org"
+    assert "terminal:execute" in before.permissions
+
+    async with gateway.uow_factory() as uow:
+        if revocation == "role_permission":
+            statement = role_permission_association.delete().where(
+                role_permission_association.c.role_id == "direct-role-admin",
+                role_permission_association.c.permission_id == "direct-perm-terminal",
+            )
+        else:
+            statement = member_role_association.delete().where(
+                member_role_association.c.member_organization_id == "direct-jwt-org",
+                member_role_association.c.member_user_id == _ADMIN_ID,
+                member_role_association.c.role_id == "direct-role-admin",
+            )
+        await uow.session.execute(statement)
+        await uow.commit()
+
+    after = await gateway.jwt_authenticator.authenticate(token)
+    assert after.user_id == _ADMIN_ID
+    assert after.organization_id == "direct-jwt-org"
+    assert "terminal:execute" not in after.permissions
+    if revocation == "role_permission":
+        assert set(after.permissions) == {"admin:write"}
+    else:
+        assert after.permissions == []
+
+    marker = tmp_path / f"j14-{revocation}-must-not-exist"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver"
+    ) as client:
+        for capability_id in ("terminal.run", "terminal.launch"):
+            with patch(
+                "tools.v1.terminal_tool.subprocess.Popen",
+                side_effect=OSError("J14 intercepted an unauthorized process"),
+            ) as popen:
+                response = await client.post(
+                    f"/v1/capabilities/{capability_id}/execute",
+                    headers={"Authorization": f"Bearer {token}"},
+                    json={"arguments": {
+                        "command": _harmless_command(marker),
+                        "cwd": str(tmp_path), "timeout": 8,
+                    }},
+                )
+            assert response.status_code == 403, (revocation, capability_id, response.text)
+            assert popen.call_count == 0, (revocation, capability_id)
+            assert not marker.exists(), (revocation, capability_id)
