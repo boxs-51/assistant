@@ -23,6 +23,11 @@ class AuthorizationService:
         required_permissions = set(
             getattr(definition, "metadata", {}).get("required_permissions", [])
         )
+        # Terminal capabilities execute host commands. Metadata V2 currently
+        # declares no permissions, so enforce this server-side security floor
+        # before the permissive no-requirements shortcut.
+        if definition.capability_id in {"terminal.run", "terminal.launch"}:
+            required_permissions.add("terminal:execute")
         if not definition.require_auth and not required_scopes and not required_permissions:
             return AuthorizationDecision.ALLOW
         if identity is None:
