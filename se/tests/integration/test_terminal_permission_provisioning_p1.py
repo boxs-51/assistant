@@ -149,7 +149,7 @@ def test_p1_real_upgrade_replay_and_downgrade_does_not_revoke_grants(
         engine.dispose()
 
 
-def test_p1_explicit_grant_rejects_missing_and_ambiguous_roles(
+def test_p1_explicit_grant_uses_exact_role_id_with_duplicate_names(
     tmp_path, monkeypatch,
 ):
     db = tmp_path / "p1-reject.sqlite3"
@@ -170,9 +170,21 @@ def test_p1_explicit_grant_rejects_missing_and_ambiguous_roles(
                 sa.text("INSERT INTO roles (id,name) VALUES (:id,:name)"),
                 {"id": "p1-role-2", "name": "admin"},
             )
-            with pytest.raises(TerminalGrantError, match="ambiguous"):
-                provision_terminal_execute(conn, role_id="p1-role-1", apply=True)
-        assert _terminal_count(db) == (1, 0)
+            assert provision_terminal_execute(
+                conn, role_id="p1-role-1", apply=True
+            )["status"] == "GRANTED"
+            assert provision_terminal_execute(
+                conn, role_id="p1-role-2", apply=False
+            )["status"] == "PENDING_EXPLICIT_APPROVAL"
+            grants = conn.execute(
+                sa.text(
+                    "SELECT role_id FROM role_permissions "
+                    "WHERE permission_id = :permission_id"
+                ),
+                {"permission_id": "direct-terminal-execute-v1"},
+            ).scalars().all()
+            assert grants == ["p1-role-1"]
+        assert _terminal_count(db) == (1, 1)
     finally:
         engine.dispose()
 
