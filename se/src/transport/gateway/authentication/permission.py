@@ -63,11 +63,26 @@ class PermissionHelper:
         )
         if organization_id is not None:
             stmt = stmt.where(Member.organization_id == organization_id)
+        # Resolve tenant membership *before* joining roles. A principal may
+        # belong to an additional tenant that has not assigned any roles yet;
+        # such a token without an explicit org must still fail closed.
+        membership_stmt = select(Member.organization_id).where(
+            Member.user_id == user_id
+        )
+        membership_orgs = {
+            row[0] for row in (
+                await self.session.execute(membership_stmt)
+            ).all()
+        }
+        if organization_id is not None:
+            if organization_id not in membership_orgs:
+                return set(), None
+            resolved_org = organization_id
+        else:
+            if len(membership_orgs) != 1:
+                return set(), None
+            resolved_org = next(iter(membership_orgs))
         rows = (await self.session.execute(stmt)).all()
-        organizations = {org_id for org_id, _role in rows}
-        if len(organizations) != 1:
-            return set(), None
-        resolved_org = next(iter(organizations))
         permissions: Set[str] = set()
         for _org_id, role in rows:
             # Never accept a role from another tenant even if the join table
