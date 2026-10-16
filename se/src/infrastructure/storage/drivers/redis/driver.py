@@ -5,7 +5,7 @@ from redis.exceptions import RedisError, NoScriptError
 from typing import Any, Optional, Dict
 
 from ....config.schemas import DriverConfig
-from ...interfaces.cache import CacheDriver
+from ...interfaces.cache import CacheDriver, CacheWriteNotDispatched
 
 logger = structlog.get_logger(__name__)
 
@@ -138,6 +138,11 @@ class RedisDriver(CacheDriver):
         value: Any,
         expire: Optional[int] = None,
     ) -> None:
+        # This state is known before command submission. For any attempted
+        # network write, including timeout or lost ACK, do NOT label it as
+        # non-dispatched: the backend may already hold a live OTP.
+        if self._client is None:
+            raise CacheWriteNotDispatched("Redis SET not dispatched: client is not initialized")
         client = self._require_client()
 
         try:
