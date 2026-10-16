@@ -99,11 +99,14 @@ async def _seed_otp(engine, email, otp="123456"):
         "purpose": "registration", "otp": otp,
         "user_data": {"value": "synthetic-only"},
     })
+    # The existing SQL model stores UTC-naive TIMESTAMP WITHOUT TIME ZONE.
+    # This test fixture must seed the same physical representation as PG17 T1.
+    utc_naive_now = datetime.now(timezone.utc).replace(tzinfo=None)
     async with engine.begin() as conn:
         await conn.execute(PendingRegistration.__table__.insert().values(
             email=email, payload=payload,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=5),
-            created_at=datetime.now(timezone.utc),
+            expires_at=utc_naive_now + timedelta(minutes=5),
+            created_at=utc_naive_now,
         ))
     return payload
 
