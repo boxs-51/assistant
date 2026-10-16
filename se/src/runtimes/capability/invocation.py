@@ -154,6 +154,9 @@ class CapabilityInvocationStore(Protocol):
     async def list_attempts(
         self, invocation_id: str
     ) -> list[CapabilityInvocationAttempt]: ...
+    async def claim_remote_send(
+        self, invocation_id: str, attempt_id: str, attempt_number: int
+    ) -> bool: ...
     async def begin_initial_attempt(
         self,
         invocation: CapabilityInvocation,
