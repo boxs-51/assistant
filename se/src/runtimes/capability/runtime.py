@@ -204,6 +204,17 @@ class CapabilityRuntime(BaseRuntime):
         identity = event.payload.get("identity")
 
         try:
+            # Event-bus commands carry caller-controlled dictionaries and
+            # cannot establish trusted DIRECT or Agent origin. Never route an
+            # MCP physical handler through this unauthenticated origin seam.
+            if (
+                type(capability_id) is str
+                and capability_id.lower().startswith("mcp__")
+            ):
+                raise PermissionError(
+                    "UNTRUSTED_EVENT_ORIGIN: MCP execution is denied on the "
+                    "event-bus command path."
+                )
             result = await self.execute_capability(
                 capability_id=capability_id,
                 arguments=arguments,
@@ -568,6 +579,26 @@ class CapabilityRuntime(BaseRuntime):
                 retryable=False,
                 safe_for_client=True,
                 invocation_id=invocation_id,
+            )
+
+        # This API is the durable Agent/R7 continuation path. It has
+        # no independently signed origin/handler proof yet, so MCP replay
+        # must remain denied even if a caller bypasses the Agent adapter.
+        if (
+            type(invocation.capability_id) is str
+            and invocation.capability_id.lower().startswith("mcp__")
+        ):
+            raise CapabilityError(
+                code="AGENT_TOOL_POLICY_DENIED",
+                message=(
+                    "MCP continuation is denied until physical handler "
+                    "effects and origin provenance are certified."
+                ),
+                category="CONTINUATION",
+                retryable=False,
+                safe_for_client=True,
+                capability_id=invocation.capability_id,
+                invocation_id=invocation.invocation_id,
             )
 
         self._validate_existing_continuation(
