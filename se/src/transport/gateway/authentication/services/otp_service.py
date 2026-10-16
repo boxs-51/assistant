@@ -62,7 +62,7 @@ class OTPStorageService:
                 ttl = await self.cache_driver.get_ttl(f"otp_cooldown:{email}")
                 return max(0, ttl) if ttl else 0
         except Exception as exc:
-            logger.error("Redis error during cooldown check, falling back to database", error=str(exc))
+            logger.error("Redis error during cooldown check; database cooldown lookup", error_type=type(exc).__name__)
 
         async with self.uow_factory() as uow:
             return await uow.pending_registrations.get_remaining_cooldown(email, self.cooldown_ttl)
@@ -113,7 +113,7 @@ class OTPStorageService:
         except Exception as exc:
             logger.error(
                 "Redis error during password-reset cooldown check, falling back to database",
-                error=str(exc),
+                error_type=type(exc).__name__,
             )
 
         async with self.uow_factory() as uow:
@@ -156,10 +156,12 @@ class OTPStorageService:
             raise RuntimeError("OTP cache does not support atomic consume_one_time")
         try:
             raw_data = await consumer(key)
-        except Exception:
+        except Exception as exc:
             # A command may already have consumed the key before its reply
             # was lost. Never convert UNCERTAIN to MISSING or retry in SQL.
-            logger.error("OTP atomic cache consumption unconfirmed", exc_info=True)
+            # Redis exception text/tracebacks may contain connection secrets.
+            logger.error("OTP atomic cache consumption unconfirmed",
+                         error_type=type(exc).__name__)
             raise
         if raw_data is not None and type(raw_data) is not str:
             raise RuntimeError("OTP cache returned an unconfirmed atomic consume receipt")

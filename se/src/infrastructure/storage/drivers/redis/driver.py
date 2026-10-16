@@ -146,11 +146,15 @@ class RedisDriver(CacheDriver):
         client = self._require_client()
 
         try:
-            await client.set(
+            receipt = await client.set(
                 key,
                 value,
                 ex=expire,
             )
+            if receipt is not True:
+                # A missing/false/invalid SET reply is never a confirmed OTP.
+                # This is still post-dispatch uncertainty, not SQL fallback.
+                raise RuntimeError("Redis SET returned an unconfirmed write receipt")
 
         except RedisError:
             self._connected = False

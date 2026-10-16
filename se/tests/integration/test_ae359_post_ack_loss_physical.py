@@ -362,3 +362,64 @@ def test_ctrl_10_real_redis_and_postgres_confirmed_ack_controls():
             await direct.aclose()
             await engine.dispose()
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("purpose", ["registration", "password_reset"])
+def test_r_ack_05_06_real_cooldown_set_ack_loss_keeps_single_otp_authority(purpose):
+    """Backend executes cooldown SET; lost ACK must not create SQL OTP."""
+    async def run():
+        ru, _ = _targets()
+        engine = await _pg_engines()
+        email = "ae359-cooldown-" + uuid4().hex + "@example.invalid"
+        reset = purpose == "password_reset"
+        otp_key = ("pending_password_reset:" if reset else "pending_reg:") + email
+        cooldown_key = ("password_reset_cooldown:" if reset else "otp_cooldown:") + email
+        direct = redis.Redis.from_url(ru, decode_responses=True)
+        try:
+            assert await direct.ping()
+            async with RespAckCutProxy() as proxy:
+                writer = await _redis_driver(f"redis://127.0.0.1:{proxy.port}/15")
+
+                class _ArmOnlyOnCooldown:
+                    async def set(self, key, value, expire):
+                        if key == cooldown_key:
+                            proxy.arm_once()
+                        return await writer.set(key, value, expire)
+
+                service = OTPStorageService(_ArmOnlyOnCooldown(), _factory(engine))
+                save = (service.save_pending_password_reset if reset
+                        else service.save_pending_registration)
+                task = asyncio.create_task(save(email, {"value": "cooldown-control"}, "123456"))
+                await proxy.wait_captured()
+                assert proxy.client_ack_bytes == 0
+                assert await direct.exists(otp_key) == 1, "Physical OTP SET missing"
+                assert await direct.exists(cooldown_key) == 1, "Physical cooldown SET missing"
+                proxy.release_drop.set()
+                status, detail = await _finish(task)
+                assert status == "ERROR", (
+                    f"Cooldown lost ACK must fail closed: {status} {detail}"
+                )
+                await writer.disconnect()
+
+            assert await _row_count(engine, email) == 0, (
+                "SEMANTIC_RED: cooldown ACK loss created a duplicate SQL OTP"
+            )
+            reader = await _redis_driver(ru)
+            try:
+                verifier = OTPStorageService(reader, _factory(engine))
+                verify = (verifier.verify_password_reset if reset
+                          else verifier.verify_and_get_data)
+                assert await verify(email, "123456") == {"value": "cooldown-control"}
+                assert await verify(email, "123456") is None
+            finally:
+                await reader.disconnect()
+        finally:
+            await direct.delete(otp_key, cooldown_key)
+            async with engine.begin() as conn:
+                await conn.execute(PendingRegistration.__table__.delete().where(
+                    PendingRegistration.email == email
+                ))
+            await direct.aclose()
+            await engine.dispose()
+
+    asyncio.run(run())
