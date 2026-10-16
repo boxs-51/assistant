@@ -60,10 +60,12 @@ jobs:
               "test_ing_t1_06_json_wire_cannot_materialize_hostile_python_registry_objects",
               "test_ing_t1_07_agent_origin_disconnect_reconnect_duplicate_negative",
               "test_ing_t1_08_stdio_bootstrap_allowed_but_model_dispatch_no_extra_child",
+              "test_ing_t1_09_direct_mode_cannot_promote_uncertified_mcp_process",
           }
           print("SBX3_INGRESS_ORACLES", sorted(ids), "expected", sorted(required))
+          assert len(required) == 9 and len(tests) == 9, "HARNESS_ERROR: 8 original + 1 DIRECT regression expected"
           assert ids == required and len(tests) == len(required), (
-              "HARNESS_ERROR: mandatory 8 oracle functions missing or duplicated"
+              "HARNESS_ERROR: mandatory 8 original + 1 DIRECT oracle missing or duplicated"
           )
           failures = sum(
               bool(case.find("failure") is not None)
@@ -81,7 +83,7 @@ jobs:
           assert failures == errors == skipped == 0, (
               "RED_FIRST_OR_HARNESS_ERROR: never rewrite FAIL/SKIP/XFAIL into GREEN"
           )
-          print("SBX3_INGRESS=8_PASS_0_FAIL_0_ERROR_0_SKIP; MODEL_SIMULATION_REAL_STDIO_REAL_TCP")
+          print("SBX3_INGRESS=9_PASS_0_FAIL_0_ERROR_0_SKIP; ORIGINAL_8_AND_DIRECT_1; MODEL_SIMULATION_REAL_STDIO_REAL_TCP")
       - name: Upload raw MCP/TCP RED-first evidence
         if: always()
         uses: actions/upload-artifact@v4

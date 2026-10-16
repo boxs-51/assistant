@@ -587,6 +587,44 @@ def test_v1_registration_payload_remains_compatible(tmp_path):
     }
 
 
+
+@pytest.mark.parametrize("manifest_version", ["1.0", "2.0"])
+@pytest.mark.parametrize("local_certification", [None, False, "true", True])
+def test_mcp_direct_certification_wire_requires_local_boolean_true(
+    manifest_version, local_certification
+):
+    """Absence/string/False are DENY; the explicit operator True is preserved."""
+    metadata = {
+        "name": "mcp__safe__safe_echo",
+        "version": "1.0",
+        "effects": ["READ"],
+    }
+    if manifest_version == "2.0":
+        metadata.update({
+            "manifest_version": "2.0",
+            "physical_tool": "safe-mcp-provider",
+            "physical_version": "1.0",
+        })
+    if local_certification is not None:
+        metadata["trusted_direct_read_only"] = local_certification
+
+    runtime, _, _ = _client_capability_runtime({
+        "mcp__safe__safe_echo": {"metadata": metadata}
+    })
+    registered = runtime.build_registration()["capabilities"][0]
+    for attributes in (
+        registered["definition"]["metadata"],
+        registered["metadata"],
+    ):
+        assert (
+            "trusted_direct_read_only" in attributes
+        ) is (local_certification is True), (
+            "SECURITY_RED: non-boolean or unconfigured MCP certification "
+            "must not enter the registration wire"
+        )
+        if local_certification is True:
+            assert attributes["trusted_direct_read_only"] is True
+
 def test_v2_register_preserves_snapshot_send_and_ack_flow(tmp_path):
     _write_v2_package(
         tmp_path,
