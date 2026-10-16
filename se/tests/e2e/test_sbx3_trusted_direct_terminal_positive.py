@@ -172,9 +172,10 @@ async def test_authenticated_unprivileged_principal_cannot_execute_terminal(
     }, witness
 
 
+@pytest.mark.parametrize("capability_id", ("terminal.run", "terminal.launch"))
 @pytest.mark.asyncio
 async def test_model_origin_direct_chat_cannot_promote_terminal_into_trusted_execute(
-    trusted_direct_gateway, tmp_path,
+    trusted_direct_gateway, tmp_path, capability_id,
 ):
     marker = tmp_path / "must-not-exist.txt"
     command = _harmless_command(marker)
@@ -199,7 +200,7 @@ async def test_model_origin_direct_chat_cannot_promote_terminal_into_trusted_exe
                             GatewayToolCall(
                                 id="sbx3-forged-model-tool",
                                 function=FunctionCall(
-                                    name="terminal.run",
+                                    name=capability_id,
                                     arguments=json.dumps({
                                         "command": command, "cwd": str(tmp_path)
                                     }),
@@ -215,22 +216,27 @@ async def test_model_origin_direct_chat_cannot_promote_terminal_into_trusted_exe
 
     provider.chat.chat = hostile_provider
     try:
-        async with httpx.AsyncClient(
-            transport=httpx.ASGITransport(app=app), base_url="http://testserver"
-        ) as client:
-            denied = await client.post(
-                "/v1/chat/completions",
-                headers=trusted_direct_gateway.headers,
-                json={
-                    "model": "mock-chat",
-                    "agent_enabled": False,
-                    "messages": [{"role": "user", "content": "Run a command"}],
-                    "metadata": {"routing": {"prefer_provider": "mock"}},
-                },
-            )
+        with patch(
+            "tools.v1.terminal_tool.subprocess.Popen",
+            side_effect=OSError("T1 intercepted model-origin terminal launch"),
+        ) as popen:
+            async with httpx.AsyncClient(
+                transport=httpx.ASGITransport(app=app), base_url="http://testserver"
+            ) as client:
+                denied = await client.post(
+                    "/v1/chat/completions",
+                    headers=trusted_direct_gateway.headers,
+                    json={
+                        "model": "mock-chat",
+                        "agent_enabled": False,
+                        "messages": [{"role": "user", "content": "Run a command"}],
+                        "metadata": {"routing": {"prefer_provider": "mock"}},
+                    },
+                )
         assert observed_tools, "Provider was never invoked"
-        assert all("terminal.run" not in str(tools) for tools in observed_tools)
+        assert all(capability_id not in str(tools) for tools in observed_tools)
         assert denied.status_code != 200, denied.text
+        assert popen.call_count == 0, "Model-origin DIRECT reached terminal Popen"
         assert not marker.exists(), "Model-origin DIRECT launched a subprocess"
     finally:
         provider.chat.chat = original_chat
