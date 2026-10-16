@@ -82,9 +82,14 @@ jobs:
           else
             FILTER="not test_m0"
           fi
+          # Preserve pytest's failing status while still auditing the full
+          # JUnit receipt on a RED-first witness run.
+          set +e
           python -m pytest -q -ra \
             se/tests/integration/test_auth_otp_db_atomic_consume_pg17_redfirst.py \
             -k "$FILTER" --junitxml=ae359-pg17-t1.xml
+          pytest_rc=$?
+          set -e
           python - <<'PY'
           import os, xml.etree.ElementTree as ET
           root = ET.parse('ae359-pg17-t1.xml').getroot()
@@ -93,10 +98,13 @@ jobs:
               suites = [s for s in root if s.tag == 'testsuite']
           n = sum(int(x.attrib.get('tests', 0)) for x in suites)
           skip = sum(int(x.attrib.get('skipped', 0)) for x in suites)
-          threshold = 6 if os.environ['SLICE'] == 'mutation' else 10
-          assert n >= threshold and skip == 0, f'Incomplete PG17 T1 receipt: {n} tests, {skip} skips'
-          print(f'AE359_T1_{os.environ["SLICE"].upper()}_RECEIPTS={n} SKIP=0')
+          expected = 6 if os.environ['SLICE'] == 'mutation' else 14
+          assert n == expected and skip == 0, f'Incomplete PG17 T1 receipt: {n}/{expected} tests, {skip} skips'
+          errors = sum(int(x.attrib.get('errors', 0)) for x in suites)
+          failures = sum(int(x.attrib.get('failures', 0)) for x in suites)
+          print(f'AE359_T1_{os.environ["SLICE"].upper()}_RECEIPTS={n} SKIP=0 FAIL={failures} ERROR={errors}')
           PY
+          exit "$pytest_rc"
       - name: Save raw T1 JUnit
         if: always()
         uses: actions/upload-artifact@v4
