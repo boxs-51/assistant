@@ -58,6 +58,7 @@ from se.src.transport.gateway.authentication.services.token_service import Token
 
 _MEMBER_ID = "direct-jwt-member"
 _ADMIN_ID = "direct-jwt-admin"
+_WRITE_ONLY_ID = "direct-jwt-write-only"
 
 
 class _NoopRefreshStore:
@@ -96,6 +97,8 @@ async def _seed_roles(driver: SQLiteDriver) -> None:
              "password_hash": "offline-test-no-password-login", "status": "active"},
             {"id": _ADMIN_ID, "email": "direct-admin@example.invalid",
              "password_hash": "offline-test-no-password-login", "status": "active"},
+            {"id": _WRITE_ONLY_ID, "email": "direct-write-only@example.invalid",
+             "password_hash": "offline-test-no-password-login", "status": "active"},
         ])
         await conn.execute(Organization.__table__.insert(), {
             "id": "direct-jwt-org", "owner_id": _ADMIN_ID,
@@ -104,24 +107,31 @@ async def _seed_roles(driver: SQLiteDriver) -> None:
         await conn.execute(Role.__table__.insert(), [
             {"id": "direct-role-member", "name": "member", "organization_id": None},
             {"id": "direct-role-admin", "name": "admin", "organization_id": None},
+            {"id": "direct-role-write-only", "name": "direct-write-only", "organization_id": None},
         ])
         await conn.execute(Permission.__table__.insert(), [
             {"id": "direct-perm-read", "name": "read:public"},
             {"id": "direct-perm-write", "name": "admin:write"},
+            {"id": "direct-perm-terminal", "name": "terminal:execute"},
         ])
         await conn.execute(Member.__table__.insert(), [
             {"organization_id": "direct-jwt-org", "user_id": _MEMBER_ID},
             {"organization_id": "direct-jwt-org", "user_id": _ADMIN_ID},
+            {"organization_id": "direct-jwt-org", "user_id": _WRITE_ONLY_ID},
         ])
         await conn.execute(member_role_association.insert(), [
             {"member_organization_id": "direct-jwt-org", "member_user_id": _MEMBER_ID,
              "role_id": "direct-role-member"},
             {"member_organization_id": "direct-jwt-org", "member_user_id": _ADMIN_ID,
              "role_id": "direct-role-admin"},
+            {"member_organization_id": "direct-jwt-org", "member_user_id": _WRITE_ONLY_ID,
+             "role_id": "direct-role-write-only"},
         ])
         await conn.execute(role_permission_association.insert(), [
             {"role_id": "direct-role-member", "permission_id": "direct-perm-read"},
             {"role_id": "direct-role-admin", "permission_id": "direct-perm-write"},
+            {"role_id": "direct-role-admin", "permission_id": "direct-perm-terminal"},
+            {"role_id": "direct-role-write-only", "permission_id": "direct-perm-write"},
         ])
 
 
@@ -153,6 +163,9 @@ async def real_jwt_gateway(tmp_path):
     )).access_token
     admin_jwt = (await token_service.create_user_tokens(
         _ADMIN_ID, "direct-admin@example.invalid"
+    )).access_token
+    write_only_jwt = (await token_service.create_user_tokens(
+        _WRITE_ONLY_ID, "direct-write-only@example.invalid"
     )).access_token
 
     runtime = CapabilityRuntime(
@@ -190,7 +203,7 @@ async def real_jwt_gateway(tmp_path):
     try:
         yield _Gateway(
             app=app, token_service=token_service, jwt_authenticator=jwt_auth,
-            uow_factory=uow_factory, tokens={"member": member_jwt, "admin": admin_jwt},
+            uow_factory=uow_factory, tokens={"member": member_jwt, "admin": admin_jwt, "write_only": write_only_jwt},
             runtime=runtime,
         )
     finally:
@@ -203,20 +216,24 @@ async def test_j01_j06_signed_jwt_roles_and_permissions_are_persisted(real_jwt_g
     async with gateway.uow_factory() as uow:
         assert await uow.users.get_user_roles(_MEMBER_ID) == ["member"]
         assert await uow.users.get_user_roles(_ADMIN_ID) == ["admin"]
+        assert await uow.users.get_user_roles(_WRITE_ONLY_ID) == ["direct-write-only"]
         assert await uow.permissions.get_permissions_for_role_names(["member"]) == {"read:public"}
-        assert await uow.permissions.get_permissions_for_role_names(["admin"]) == {"admin:write"}
+        assert await uow.permissions.get_permissions_for_role_names(["admin"]) == {"admin:write", "terminal:execute"}
+        assert await uow.permissions.get_permissions_for_role_names(["direct-write-only"]) == {"admin:write"}
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver"
     ) as client:
         for principal, user_id, roles, permissions in [
             ("member", _MEMBER_ID, ["member"], ["read:public"]),
-            ("admin", _ADMIN_ID, ["admin"], ["admin:write"]),
+            ("admin", _ADMIN_ID, ["admin"], ["admin:write", "terminal:execute"]),
+            ("write_only", _WRITE_ONLY_ID, ["direct-write-only"], ["admin:write"]),
         ]:
             identity = await gateway.jwt_authenticator.authenticate(gateway.tokens[principal])
             assert identity.auth_type == "jwt"
             assert identity.user_id == user_id
             assert identity.roles == roles
-            assert identity.permissions == permissions
+            assert set(identity.permissions) == set(permissions)
+            assert len(identity.permissions) == len(permissions)
             response = await client.get(
                 "/__direct_jwt_test_identity", headers=gateway.headers(principal)
             )
@@ -224,6 +241,7 @@ async def test_j01_j06_signed_jwt_roles_and_permissions_are_persisted(real_jwt_g
             body = response.json()
             assert body["user_id"] == user_id and body["auth_type"] == "jwt"
             assert body["roles"] == roles and set(body["permissions"]) == set(permissions)
+            assert len(body["permissions"]) == len(permissions)
 
 
 @pytest.mark.asyncio
@@ -307,6 +325,8 @@ async def test_j04_signed_privileged_db_role_preserves_real_terminal_positive(
     real_jwt_gateway, tmp_path,
 ):
     gateway = real_jwt_gateway
+    privileged = await gateway.jwt_authenticator.authenticate(gateway.tokens["admin"])
+    assert set(privileged.permissions) == {"admin:write", "terminal:execute"}
     marker = tmp_path / "signed-admin-positive.txt"
     command = _harmless_command(marker)
     original_popen = subprocess.Popen
@@ -366,3 +386,140 @@ async def test_j05_signed_privileged_jwt_cannot_promote_model_origin_direct_to_e
                 identity=privileged, session_id="direct-jwt-session", model="mock-chat",
             )
     assert spy.call_count == 0 and not marker.exists()
+
+@pytest.mark.asyncio
+async def test_j07_jwt_launch_missing_and_invalid_bearer_never_reach_popen(
+    real_jwt_gateway, tmp_path,
+):
+    """Authentication failures must stop terminal.launch before physical dispatch."""
+    gateway = real_jwt_gateway
+    marker = tmp_path / "j07-launch-must-not-exist.txt"
+    command = _harmless_command(marker)
+    witnesses = []
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver"
+    ) as client:
+        for headers in ({}, {"Authorization": "Bearer invalid-signed-jwt"}):
+            with patch(
+                "tools.v1.terminal_tool.subprocess.Popen",
+                side_effect=OSError("unexpected host launch"),
+            ) as popen:
+                response = await client.post(
+                    "/v1/capabilities/terminal.launch/execute",
+                    headers=headers,
+                    json={"arguments": {"command": command, "cwd": str(tmp_path)}},
+                )
+            witnesses.append({
+                "http_status": response.status_code,
+                "popen_count": popen.call_count,
+                "marker_created": marker.exists(),
+            })
+    assert witnesses == [
+        {"http_status": 401, "popen_count": 0, "marker_created": False},
+        {"http_status": 401, "popen_count": 0, "marker_created": False},
+    ], witnesses
+
+
+@pytest.mark.asyncio
+async def test_j08_jwt_member_and_write_only_principal_cannot_launch(
+    real_jwt_gateway, tmp_path,
+):
+    """RED-first: neither read:public nor admin:write alone grants detached EXECUTE."""
+    gateway = real_jwt_gateway
+    witnesses = {}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver"
+    ) as client:
+        for principal in ("member", "write_only"):
+            marker = tmp_path / f"j08-{principal}-launch-must-not-exist.txt"
+            command = _harmless_command(marker)
+            actual = await gateway.jwt_authenticator.authenticate(gateway.tokens[principal])
+            assert "terminal:execute" not in actual.permissions
+            with patch(
+                "tools.v1.terminal_tool.subprocess.Popen",
+                side_effect=OSError("T1 intercepted unauthorized launch"),
+            ) as popen:
+                response = await client.post(
+                    "/v1/capabilities/terminal.launch/execute",
+                    headers=gateway.headers(principal),
+                    json={"arguments": {"command": command, "cwd": str(tmp_path)}},
+                )
+            witnesses[principal] = {
+                "http_status": response.status_code,
+                "popen_count": popen.call_count,
+                "marker_created": marker.exists(),
+            }
+    expected = {"http_status": 403, "popen_count": 0, "marker_created": False}
+    assert witnesses == {"member": expected, "write_only": expected}, witnesses
+
+
+@pytest.mark.asyncio
+async def test_j09_jwt_admin_terminal_execute_launch_dispatch_stub(
+    real_jwt_gateway, tmp_path,
+):
+    """Privileged launch reaches one dispatch; do not create a detached OS child."""
+    gateway = real_jwt_gateway
+    identity = await gateway.jwt_authenticator.authenticate(gateway.tokens["admin"])
+    assert "terminal:execute" in identity.permissions
+    marker = tmp_path / "j09-no-real-detached-child.txt"
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver"
+    ) as client:
+        with patch(
+            "tools.v1.terminal_tool.subprocess.Popen",
+            return_value=SimpleNamespace(pid=424242),
+        ) as popen:
+            response = await client.post(
+                "/v1/capabilities/terminal.launch/execute",
+                headers=gateway.headers("admin"),
+                json={"arguments": {
+                    "command": _harmless_command(marker), "cwd": str(tmp_path),
+                }},
+            )
+    witness = {
+        "http_status": response.status_code,
+        "popen_count": popen.call_count,
+        "marker_created": marker.exists(),
+    }
+    assert witness == {
+        "http_status": 200, "popen_count": 1, "marker_created": False,
+    }, witness
+    body = response.json()
+    assert body["capability_id"] == "terminal.launch"
+    assert body["success"] is True and body["output"]["ok"] is True
+    assert body["output"]["data"]["pid"] == 424242
+    assert body["output"]["data"]["started"] is True
+
+
+@pytest.mark.asyncio
+async def test_j10_jwt_write_only_cannot_run_terminal(
+    real_jwt_gateway, tmp_path,
+):
+    """RED-first: admin:write must never be an implicit terminal:execute alias."""
+    gateway = real_jwt_gateway
+    marker = tmp_path / "j10-write-only-run-must-not-exist.txt"
+    identity = await gateway.jwt_authenticator.authenticate(gateway.tokens["write_only"])
+    assert set(identity.permissions) == {"admin:write"}
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=gateway.app), base_url="http://testserver"
+    ) as client:
+        with patch(
+            "tools.v1.terminal_tool.subprocess.Popen",
+            side_effect=OSError("T1 intercepted unauthorized run"),
+        ) as popen:
+            response = await client.post(
+                "/v1/capabilities/terminal.run/execute",
+                headers=gateway.headers("write_only"),
+                json={"arguments": {
+                    "command": _harmless_command(marker),
+                    "cwd": str(tmp_path), "timeout": 8,
+                }},
+            )
+    witness = {
+        "http_status": response.status_code,
+        "popen_count": popen.call_count,
+        "marker_created": marker.exists(),
+    }
+    assert witness == {
+        "http_status": 403, "popen_count": 0, "marker_created": False,
+    }, witness
