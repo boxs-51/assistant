@@ -116,6 +116,9 @@ def _real_mcp_tools(marker):
                 "command": sys.executable,
                 "args": ["-E", str(FIXTURE)],
                 "base_risk": "LOW",
+                # Local operator allowlist: only the benign fixture echo is
+                # certified for trusted DIRECT read-only visibility.
+                "trusted_direct_read_only_tools": ["safe_echo"],
                 "env": {"SBX3_INGRESS_MARKER": str(marker)},
             }
         })
@@ -252,7 +255,27 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
 
         if mode == "direct":
             # Separate, positive trusted DIRECT capability-runtime control.
-            # This is NOT claimed to be a full DirectChatRuntime/LLM proof.
+            # MCP is eligible only when locally allowlisted for read-only use.
+            if capability_id != ECHO:
+                try:
+                    await server_runtime.execute_capability(
+                        capability_id=capability_id,
+                        arguments={"value": "direct-deny"},
+                        identity=identity,
+                        session_id=base.SESSION_ID,
+                        connection_id=base.CONNECTION_ID,
+                        execution_id="sbx3-direct-untrusted-mcp",
+                        metadata={"chat_execution_mode": "DIRECT"},
+                    )
+                except PermissionError as exc:
+                    assert "MCP_EFFECT_CLASS_UNCERTIFIED" in str(exc)
+                    assert not marker.exists()
+                    assert hitl.calls == []
+                    return receipts, hitl
+                raise AssertionError(
+                    "POLICY_RED: untrusted MCP handler bypassed DIRECT effect certification"
+                )
+
             result = await server_runtime.execute_capability(
                 capability_id=capability_id,
                 arguments={"value": "direct-ok"},
@@ -263,7 +286,7 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
                 metadata={"chat_execution_mode": "DIRECT"},
             )
             assert result.success is True, (
-                "COMPAT_RED: allowed direct client tool did not execute: "
+                "COMPAT_RED: locally allowlisted DIRECT client tool did not execute: "
                 + repr(result)
             )
             assert "safe:" in str(result.output), (
@@ -352,6 +375,20 @@ def test_ing_t1_04_trusted_direct_compatibility_real_tcp_positive(tmp_path):
         )
         assert receipts["tcp_registered"]
         assert len(hitl.calls) == 1
+        assert not marker.exists()
+    finally:
+        manager.shutdown()
+
+
+def test_ing_t1_08_direct_mode_cannot_promote_uncertified_mcp_process(tmp_path):
+    marker = tmp_path / "direct-uncertified-process.marker"
+    manager, registry = _real_mcp_tools(marker)
+    try:
+        receipts, hitl = asyncio.run(
+            _exercise_true_tcp(registry, BAD, marker, mode="direct")
+        )
+        assert receipts["tcp_registered"]
+        assert hitl.calls == []
         assert not marker.exists()
     finally:
         manager.shutdown()
