@@ -7,6 +7,7 @@ from pathlib import Path
 from se.src.agent.registry import AgentRegistry
 from se.src.application.policy.authorization import AuthorizationService
 from se.src.domain.schemas.agent import AgentDefinition
+from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.agent.adapters.policy import RegistryAgentToolPolicy
 from se.src.runtimes.agent.capabilities import RegistryAgentCapabilityResolver
 from se.src.runtimes.capability.contracts.definition import CapabilityDefinition
@@ -104,18 +105,38 @@ def test_command_reviewer_projection_hides_physical_roots():
             tool_policy=policy,
         )
 
-        resolved = await resolver.resolve(
-            agent_id=agent.name,
-            identity=None,
-        )
+        # Unauthenticated, guest and write-only principals must not project
+        # executable terminal tools into an Agent's available tool context.
+        for identity in (
+            None,
+            Identity(auth_type="guest"),
+            Identity(auth_type="jwt", permissions=["admin:write"]),
+        ):
+            resolved = await resolver.resolve(
+                agent_id=agent.name,
+                identity=identity,
+            )
+            visible_ids = tuple(item.capability_id for item in resolved)
+            assert visible_ids == COMMAND_REVIEWER_CAPABILITIES[2:]
+            assert not {"terminal.run", "terminal.launch"}.intersection(visible_ids)
+            assert not {
+                "terminal_tool",
+                "file_tool",
+                "find_by_glob",
+            }.intersection(visible_ids)
 
-        assert tuple(item.capability_id for item in resolved) == (
-            COMMAND_REVIEWER_CAPABILITIES
+        # An explicitly terminal-authorized principal retains both canonical
+        # logical IDs; physical implementation roots remain undiscoverable.
+        privileged = await resolver.resolve(
+            agent_id=agent.name,
+            identity=Identity(auth_type="jwt", permissions=["terminal:execute"]),
         )
+        privileged_ids = tuple(item.capability_id for item in privileged)
+        assert privileged_ids == COMMAND_REVIEWER_CAPABILITIES
         assert not {
             "terminal_tool",
             "file_tool",
             "find_by_glob",
-        }.intersection(item.capability_id for item in resolved)
+        }.intersection(privileged_ids)
 
     asyncio.run(scenario())
