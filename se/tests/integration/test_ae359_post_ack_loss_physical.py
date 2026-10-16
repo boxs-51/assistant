@@ -177,6 +177,56 @@ def test_r_ack_01_x_ack_09_real_redis_set_ack_lost_db_dual_authority_red_first()
     asyncio.run(run())
 
 
+
+def test_r_ack_02_real_password_reset_set_ack_loss_must_not_duplicate():
+    """A real password-reset SET followed by lost ACK never issues DB OTP."""
+    async def run():
+        ru, _ = _targets()
+        engine = await _pg_engines()
+        email = "ae359-reset-" + uuid4().hex + "@example.invalid"
+        redis_key = "pending_password_reset:" + email
+        direct = redis.Redis.from_url(ru, decode_responses=True)
+        try:
+            assert await direct.ping()
+            async with RespAckCutProxy() as proxy:
+                writer = await _redis_driver(f"redis://127.0.0.1:{proxy.port}/15")
+                service = OTPStorageService(writer, _factory(engine))
+                proxy.arm_once()
+                task = asyncio.create_task(service.save_pending_password_reset(
+                    email, {"value": "synthetic-reset-only"}, "123456"
+                ))
+                await proxy.wait_captured()
+                assert proxy.client_ack_bytes == 0
+                assert await direct.exists(redis_key) == 1, "Physical reset SET missing"
+                proxy.release_drop.set()
+                status, detail = await _finish(task)
+                assert status == "ERROR", (
+                    f"Password-reset UNCERTAIN SET must fail closed: {status} {detail}"
+                )
+                await writer.disconnect()
+            assert await _row_count(engine, email) == 0, (
+                "SEMANTIC_RED: password-reset cache uncertainty duplicated into SQL"
+            )
+            reader = await _redis_driver(ru)
+            try:
+                verifier = OTPStorageService(reader, _factory(engine))
+                first = await verifier.verify_password_reset(email, "123456")
+                second = await verifier.verify_password_reset(email, "123456")
+                assert first == {"value": "synthetic-reset-only"}
+                assert second is None, "SEMANTIC_RED: password-reset OTP reused"
+            finally:
+                await reader.disconnect()
+        finally:
+            await direct.delete(redis_key)
+            async with engine.begin() as conn:
+                await conn.execute(PendingRegistration.__table__.delete().where(
+                    PendingRegistration.email == email
+                ))
+            await direct.aclose()
+            await engine.dispose()
+    asyncio.run(run())
+
+
 def test_r_ack_03_real_getdel_ack_lost_never_falls_back_to_db():
     async def run():
         ru, _ = _targets()
