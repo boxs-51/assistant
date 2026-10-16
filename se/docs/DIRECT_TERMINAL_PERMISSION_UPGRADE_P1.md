@@ -26,11 +26,13 @@ permission and test-role assignment and therefore did not cover upgrades.
    `terminal:execute` idempotently while **granting it to no role**.
 2. Identify an existing role ID intentionally trusted to execute host shell
    commands. Review its role name, current memberships and
-   `role_permissions` in the target DB. **All principals whose JWT/API-key
-   resolves to that role name will gain execution access** once explicitly
-   granted: current `PermissionHelper` resolves by role name. If multiple
-   role rows share that name, the helper **refuses** to grant; resolve identity
-   ambiguity separately, rather than permitting cross-organization leakage.
+   `role_permissions` in the target DB. **Only principals with an actual persisted
+   membership referencing that exact role ID, within the matched
+   organization, receive its explicitly assigned permission. Two roles
+   with the same display name have independent grants; role names and
+   token role-label claims are not authority. A JWT without an org claim
+   is accepted for a single actual membership organization only; for
+   multiple memberships it receives no role permission until scoped.
 3. Read-only preflight (no grant):
    ```bash
    python -m se.src.infrastructure.storage.terminal_permission_provisioning \
@@ -79,3 +81,28 @@ collisions, R7/R12 nested Agent-origin, remote Client dispatch or OS-native
 sandbox isolation. Preserve all earlier technical HOLDs for those workstreams.
 PR #559 remains an audit-only branch; PR #562 remains unmerged until an
 explicit new final-HEAD Owner merge decision.
+
+
+## Identity binding proof for P1 follow-up
+
+The effective permission reader
+`PermissionHelper.get_permissions_for_member_role_ids()` joins
+`members` to `member_roles.role_id` and `roles.id`, then reads
+`role_permissions` from those persisted IDs, constrained to the
+principal's actual membership organization. Both JWT and admin/API key
+paths use the persisted user or organization owner and organization
+rather than a globally named role.
+
+For admin API keys, the linked `application.organization` and
+`organization.owner_id` must have a real `admin` membership in that
+organization; otherwise no terminal permission is granted.
+Standard API keys require an explicit `member` membership of the
+same owner and never implicitly inherit admin terminal privileges.
+Application-level per-user API-key delegation is not supported by
+this change and remains fail-closed.
+
+Same-name roles created after a grant cannot inherit that permission
+without the same exact persisted role ID actually being bound in a
+matching membership. No schema-wide unique-name constraint is needed
+or imposed. This is validated by signed-JWT/HTTP physical no-Popen
+and persisted API-key cross-tenant regressions.
