@@ -1,0 +1,88 @@
+name: SBX3 Model Origin MCP Ingress Real TCP Linux Windows
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  sbx3-ingress:
+    name: sbx3-model-ingress (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-2025]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+          cache: pip
+          cache-dependency-path: |
+            requirements-test.txt
+            requirements.txt
+            requirements-runtime.txt
+      - name: Install pinned test dependencies
+        run: python -m pip install -r requirements-test.txt
+      - name: Make SBX3 evidence directory
+        run: python -c "from pathlib import Path; Path('evidence/sbx3-model-ingress').mkdir(parents=True, exist_ok=True)"
+      - name: Real stdio MCP, real TCP WS ingress, RED-first security oracles
+        run: >-
+          python -m pytest -vv -ra -s
+          --junitxml=evidence/sbx3-model-ingress/junit.xml
+          cl/tests/test_sbx3_model_origin_mcp_ingress_red.py
+          se/tests/e2e/test_sbx3_agent_client_ingress_real_tcp_red.py
+      - name: Strict oracle identity and JUnit acceptance
+        if: always()
+        shell: python
+        run: |
+          from pathlib import Path
+          import xml.etree.ElementTree as ET
+          path = Path("evidence/sbx3-model-ingress/junit.xml")
+          assert path.exists(), "HARNESS_ERROR: missing pytest JUnit"
+          root = ET.parse(path).getroot()
+          suites = [root] if root.tag == "testsuite" else root.findall("testsuite")
+          tests = [case for suite in suites for case in suite.findall("testcase")]
+          ids = {case.get("name", "") for case in tests}
+          required = {
+              "test_ing_t1_01_real_stdio_model_unary_and_stream_pre_hitl",
+              "test_ing_t1_02_model_action_fallback_parser_reachability",
+              "test_ing_t1_03_model_origin_real_tcp_to_renamed_mcp_process_denied",
+              "test_ing_t1_04_trusted_direct_compatibility_real_tcp_positive",
+              "test_ing_t1_05_multi_stdio_namespace_suffix_collision_fails_closed",
+              "test_ing_t1_06_json_wire_cannot_materialize_hostile_python_registry_objects",
+              "test_ing_t1_07_agent_origin_disconnect_reconnect_duplicate_negative",
+              "test_ing_t1_08_stdio_bootstrap_allowed_but_model_dispatch_no_extra_child",
+          }
+          print("SBX3_INGRESS_ORACLES", sorted(ids), "expected", sorted(required))
+          assert ids == required and len(tests) == len(required), (
+              "HARNESS_ERROR: mandatory 8 oracle functions missing or duplicated"
+          )
+          failures = sum(
+              bool(case.find("failure") is not None)
+              for case in tests
+          )
+          errors = sum(
+              bool(case.find("error") is not None)
+              for case in tests
+          )
+          skipped = sum(
+              bool(case.find("skipped") is not None)
+              for case in tests
+          )
+          print(f"SBX3_INGRESS_COUNTS tests={len(tests)} failures={failures} errors={errors} skipped={skipped}")
+          assert failures == errors == skipped == 0, (
+              "RED_FIRST_OR_HARNESS_ERROR: never rewrite FAIL/SKIP/XFAIL into GREEN"
+          )
+          print("SBX3_INGRESS=8_PASS_0_FAIL_0_ERROR_0_SKIP; MODEL_SIMULATION_REAL_STDIO_REAL_TCP")
+      - name: Upload raw MCP/TCP RED-first evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sbx3-model-ingress-${{ matrix.os }}
+          path: evidence/sbx3-model-ingress/
+          if-no-files-found: warn
