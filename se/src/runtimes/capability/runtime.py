@@ -1447,6 +1447,20 @@ class CapabilityRuntime(BaseRuntime):
                     "for Agent-owned capability invocations."
                 )
 
+        # Deny-only Agent taint at the canonical runtime boundary. This also
+        # covers nested workflow calls that bypass the top-level Agent adapter.
+        # The caller-provided scalar cannot grant privilege; it can only cause
+        # this conservative denial. DirectChat uses a separate entrypoint.
+        if (
+            caller_agent_execution_id is not None
+            and type(capability_id) is str
+            and capability_id.lower().startswith("mcp__")
+        ):
+            raise PermissionError(
+                "AGENT_TOOL_POLICY_DENIED: Agent-origin MCP execution is "
+                "blocked until physical handler effects are certified."
+            )
+
         request_metadata = dict(metadata or {})
         metadata_target = request_metadata.pop("target", None)
         try:
