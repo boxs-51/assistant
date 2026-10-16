@@ -66,6 +66,7 @@ WEB_IDS = (
 )
 
 SERVER_EXECUTABLE_IDS = (*NON_WEB_IDS, *WEB_IDS)
+TERMINAL_IDS = {"terminal.run", "terminal.launch"}
 CLIENT_ONLY_LOGICAL_IDS = ("desktop.screenshot",)
 ALL_LOGICAL_IDS = (*SERVER_EXECUTABLE_IDS, *CLIENT_ONLY_LOGICAL_IDS)
 
@@ -151,15 +152,26 @@ async def test_real_projection_exposes_only_logical_ids_and_public_provenance():
         definition.capability_id
         for definition in await runtime.get_available_capabilities(_guest())
     }
+    privileged_model_ids = {
+        definition.capability_id
+        for definition in await runtime.get_available_capabilities(
+            Identity(auth_type="jwt", permissions=["terminal:execute"])
+        )
+    }
 
     assert registry_ids == set(SERVER_EXECUTABLE_IDS)
     assert catalog_ids == set(ALL_LOGICAL_IDS)
-    assert model_ids == set(SERVER_EXECUTABLE_IDS)
+    # Registration and public metadata are stable; authorization controls
+    # which capabilities may be projected into the caller's Agent context.
+    assert model_ids == set(SERVER_EXECUTABLE_IDS) - TERMINAL_IDS
+    assert not TERMINAL_IDS.intersection(model_ids)
+    assert privileged_model_ids == set(SERVER_EXECUTABLE_IDS)
     assert runtime.registry.get_driver("desktop.screenshot") is None
     assert catalog.contains_definition("desktop.screenshot")
     assert not PHYSICAL_ROOTS.intersection(registry_ids)
     assert not PHYSICAL_ROOTS.intersection(catalog_ids)
     assert not PHYSICAL_ROOTS.intersection(model_ids)
+    assert not PHYSICAL_ROOTS.intersection(privileged_model_ids)
 
     listed = await list_capabilities(None, _guest(), container)
     assert [item.capability_id for item in listed] == sorted(ALL_LOGICAL_IDS)
@@ -333,7 +345,43 @@ async def test_coordinator_context_has_direct_tools_and_skill_descriptions():
     )
     assembled = await assembler.assemble(context=context, prior_messages=[])
 
-    assert [tool.name for tool in assembled.tools] == agent.tools
+    guest_tools = [tool.name for tool in assembled.tools]
+    assert guest_tools == agent.tools[2:]
+    assert not TERMINAL_IDS.intersection(guest_tools)
+
+    # The synthetic write-only principal cannot acquire terminal powers.
+    write_only_context = AgentExecutionContext.create(
+        execution_id="coordinator-write-only",
+        agent_id=agent.name,
+        session_id="session-write-only",
+        correlation_id="correlation-write-only",
+        identity=Identity(auth_type="jwt", permissions=["admin:write"]),
+        limits=AgentExecutionLimits(),
+        agent=agent,
+    )
+    write_only = await assembler.assemble(
+        context=write_only_context, prior_messages=[]
+    )
+    assert [tool.name for tool in write_only.tools] == guest_tools
+
+    # A principal carrying the explicit terminal grant retains the original
+    # logical tool projection without exposing physical tool roots.
+    privileged_context = AgentExecutionContext.create(
+        execution_id="coordinator-terminal-privileged",
+        agent_id=agent.name,
+        session_id="session-terminal-privileged",
+        correlation_id="correlation-terminal-privileged",
+        identity=Identity(auth_type="jwt", permissions=["terminal:execute"]),
+        limits=AgentExecutionLimits(),
+        agent=agent,
+    )
+    privileged = await assembler.assemble(
+        context=privileged_context, prior_messages=[]
+    )
+    assert [tool.name for tool in privileged.tools] == agent.tools
+    assert not PHYSICAL_ROOTS.intersection(
+        tool.name for tool in privileged.tools
+    )
     assert assembled.skills == ()
     assert "[AVAILABLE SKILLS]" in assembled.system_prompt.content
     assert "skill-command-safety: Review shell" in assembled.system_prompt.content
