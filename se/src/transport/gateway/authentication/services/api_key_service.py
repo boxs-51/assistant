@@ -122,9 +122,9 @@ class APIKeyService:
             raise InvalidCredentialsError("Key format is not recognized.")
 
     async def _verify_admin_api_key(self, token: str) -> Identity:
-        """Xác thực Admin API Key (ak_[hex]_[body])"""
+        """An admin key has no effective permission without a bound DB role ID."""
         try:
-            parts = token.split('_', 2)
+            parts = token.split("_", 2)
             prefix = f"{parts[0]}_{parts[1]}"
             key_body = parts[2]
         except (ValueError, IndexError):
@@ -134,30 +134,42 @@ class APIKeyService:
             stored_key_record = await uow.api_keys.get_by_prefix(prefix)
             if not stored_key_record or stored_key_record.status != "active":
                 raise InvalidCredentialsError("Invalid or revoked Admin key")
-
             incoming_key_hash = hashlib.sha256(key_body.encode()).hexdigest()
             if not secrets.compare_digest(incoming_key_hash, stored_key_record.hashed_key):
                 raise InvalidCredentialsError("Invalid Admin key")
-
-        # Admin Key được gán thẳng quyền admin hệ thống
-        roles = ["admin"]
-        permissions = await uow.permissions.get_permissions_for_role_names(roles) # Lấy helper từ uow
+            organization = stored_key_record.application.organization
+            if organization is None:
+                raise AuthenticationError("Admin key has no owning organization")
+            # The linked organization and its owner are persisted, trusted
+            # context. A globally shared display name 'admin' is not a grant.
+            permissions, resolved_org = (
+                await uow.permissions.get_permissions_for_member_role_ids(
+                    user_id=organization.owner_id,
+                    organization_id=organization.id,
+                    allowed_role_names={"admin"},
+                )
+            )
+            if resolved_org != organization.id:
+                permissions = set()
+            organization_id = organization.id
+            app_id = stored_key_record.application_id
+            key_id = stored_key_record.id
 
         return Identity(
             auth_type="admin_key",
-            api_key_id=stored_key_record.id,
-            organization_id="admin_org", # ID đặc biệt cho admin
-            application_id=stored_key_record.application_id,
+            api_key_id=key_id,
+            organization_id=organization_id,
+            application_id=app_id,
             plan="enterprise",
-            roles=roles,
-            permissions=list(permissions),
-            scopes={"*"} # Admin key có toàn bộ quyền
+            roles=["admin"],
+            permissions=sorted(permissions),
+            scopes={"*"},
         )
 
     async def _verify_standard_api_key(self, token: str) -> Identity:
-        """Xác thực User API Key thông thường (sk_[hex]_[body])"""
+        """Standard app credentials never aggregate same-name tenant roles."""
         try:
-            parts = token.split('_', 2)
+            parts = token.split("_", 2)
             prefix = f"{parts[0]}_{parts[1]}"
             key_body = parts[2]
         except (ValueError, IndexError):
@@ -167,27 +179,37 @@ class APIKeyService:
             stored_key_record = await uow.api_keys.get_by_prefix(prefix)
             if not stored_key_record or stored_key_record.status != "active":
                 raise InvalidCredentialsError("Invalid or revoked API key")
-
             incoming_key_hash = hashlib.sha256(key_body.encode()).hexdigest()
             if not secrets.compare_digest(incoming_key_hash, stored_key_record.hashed_key):
                 raise InvalidCredentialsError("Invalid API key")
-
             organization = stored_key_record.application.organization
             if not organization:
-                 raise AuthenticationError(f"Data integrity error: API key {stored_key_record.id} has no associated organization.")
+                raise AuthenticationError("API key has no owning organization")
 
-        # Key người dùng thông thường có vai trò 'member'
-        roles = ["member"] # Trong tương lai, vai trò có thể được lưu cùng API key
-        scopes = {"model:read", "chat:create"} # Gán scope mặc định cho API key người dùng
-        permissions = await uow.permissions.get_permissions_for_role_names(roles) # Lấy helper từ uow
+            # The API key lacks a persisted user-role assignment. Use only an
+            # explicit 'member' binding of the organization's persisted owner;
+            # do NOT inherit an admin grant or any globally named member role.
+            permissions, resolved_org = (
+                await uow.permissions.get_permissions_for_member_role_ids(
+                    user_id=organization.owner_id,
+                    organization_id=organization.id,
+                    allowed_role_names={"member"},
+                )
+            )
+            if resolved_org != organization.id:
+                permissions = set()
+            organization_id = organization.id
+            application_id = stored_key_record.application_id
+            key_id = stored_key_record.id
+            plan = organization.plan
 
         return Identity(
             auth_type="api_key",
-            api_key_id=stored_key_record.id,
-            organization_id=organization.id,
-            application_id=stored_key_record.application_id,
-            plan=organization.plan,
-            roles=roles,
-            permissions=list(permissions),
-            scopes=scopes
+            api_key_id=key_id,
+            organization_id=organization_id,
+            application_id=application_id,
+            plan=plan,
+            roles=["member"],
+            permissions=sorted(permissions),
+            scopes={"model:read", "chat:create"},
         )
