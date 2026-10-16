@@ -139,12 +139,12 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
     active_connection_id = base.CONNECTION_ID
     receipts = {"tcp_registered": [], "tool_results": [], "inference": []}
 
-    def new_client(connection_id):
+    def new_client(connection_id, *, session_id=base.SESSION_ID):
         realtime = GatewayRealtimeClient(
             f"http://127.0.0.1:{port}",
             {"Authorization": "Bearer sbx3-loopback-test-only"},
             connection_id=connection_id,
-            session_id=base.SESSION_ID,
+            session_id=session_id,
             client_id=base.CLIENT_ID,
             heartbeat_interval=60.0,
             on_message=lambda env: client_capabilities.handle_message(env),
@@ -335,25 +335,34 @@ async def _exercise_true_tcp(registry, capability_id, marker, *, mode, reconnect
             # A retired connection ID is not reusable. Assert that the server
             # rejects replay of the original physical registration before
             # attempting a legitimate new transport identity.
-            stale, _ = new_client(base.CONNECTION_ID)
-            try:
+            # Reuse must fail even when a different session is claimed.
+            # This does not weaken the server's connection-generation fence.
+            for attempted_session in (
+                base.SESSION_ID,
+                f"{base.SESSION_ID}-cross-session",
+            ):
+                stale, _ = new_client(
+                    base.CONNECTION_ID, session_id=attempted_session
+                )
                 try:
-                    await asyncio.to_thread(stale.connect, wait_timeout=5.0)
-                except RealtimeHandshakeError as exc:
-                    assert "Connection ID cannot be reused" in str(exc), (
-                        "POLICY_RED: stale connection rejected for the wrong reason",
-                        str(exc),
-                    )
-                    assert base.CONNECTION_ID in str(exc)
-                else:
-                    raise AssertionError(
-                        "POLICY_RED: retired connection_id was accepted on reconnect"
-                    )
-            finally:
-                await asyncio.to_thread(stale.close)
-            assert not marker.exists(), (
-                "PHYSICAL_RED: stale connection replay spawned a child"
-            )
+                    try:
+                        await asyncio.to_thread(stale.connect, wait_timeout=5.0)
+                    except RealtimeHandshakeError as exc:
+                        assert "Connection ID cannot be reused" in str(exc), (
+                            "POLICY_RED: stale connection rejected for the wrong reason",
+                            attempted_session, str(exc),
+                        )
+                        assert base.CONNECTION_ID in str(exc)
+                    else:
+                        raise AssertionError(
+                            "POLICY_RED: retired connection_id reused by "
+                            + attempted_session
+                        )
+                finally:
+                    await asyncio.to_thread(stale.close)
+                assert not marker.exists(), (
+                    "PHYSICAL_RED: stale/cross-session replay spawned a child"
+                )
 
             # Reconnect as a *new* physical connection while deliberately
             # reusing the same model tool-call ID in the Agent denial test.
