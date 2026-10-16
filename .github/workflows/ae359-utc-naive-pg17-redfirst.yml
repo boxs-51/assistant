@@ -20,7 +20,8 @@ jobs:
         env:
           POSTGRES_DB: ae359_otp_t1
           POSTGRES_USER: ae359_test
-          POSTGRES_PASSWORD: ae359_test_only
+          # Ephemeral localhost CI only. No password exists to leak in docker create logs.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -30,7 +31,7 @@ jobs:
           --health-retries 15
     env:
       AE359_TZ_PG17_STRICT: "1"
-      AE359_TZ_PG17_URL: postgresql+asyncpg://ae359_test:ae359_test_only@127.0.0.1:5432/ae359_otp_t1
+      AE359_TZ_PG17_URL: postgresql+asyncpg://ae359_test@127.0.0.1:5432/ae359_otp_t1
       AE359_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -61,7 +62,7 @@ jobs:
           u = make_url(os.environ['AE359_TZ_PG17_URL'])
           assert (u.drivername, u.host, u.database) == (
               'postgresql+asyncpg', '127.0.0.1', 'ae359_otp_t1'
-          )
+          ) and u.password is None
           assert os.environ['AE359_TZ_PG17_STRICT'] == '1'
           print('AE359_TZ_DISPOSABLE_PG17_GUARD=PASS')
           PY

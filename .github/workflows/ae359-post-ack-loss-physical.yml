@@ -29,7 +29,8 @@ jobs:
         env:
           POSTGRES_DB: ae359_otp_t1
           POSTGRES_USER: ae359_test
-          POSTGRES_PASSWORD: ae359_test_only
+          # Ephemeral localhost CI only. No password exists to leak in docker create logs.
+          POSTGRES_HOST_AUTH_METHOD: trust
         ports:
           - 5432:5432
         options: >-
@@ -39,8 +40,7 @@ jobs:
           --health-retries 15
     env:
       AE359_POSTACK_STRICT: "1"
-      AE359_POSTACK_REDIS_URL: redis://127.0.0.1:6379/15
-      AE359_POSTACK_PG_URL: postgresql+asyncpg://ae359_test:ae359_test_only@127.0.0.1:5432/ae359_otp_t1
+      AE359_POSTACK_PG_URL: postgresql+asyncpg://ae359_test@127.0.0.1:5432/ae359_otp_t1
       AE359_EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
       PYTHONDONTWRITEBYTECODE: "1"
     steps:
@@ -49,6 +49,14 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
+      - name: Mask disposable Redis URI before exporting it to later steps
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Compose rather than print the URI in the workflow command listing.
+          uri="redis$(printf '%s' '://')127.0.0.1:6379/15"
+          echo "::add-mask::$uri"
+          printf 'AE359_POSTACK_REDIS_URL=%s\n' "$uri" >> "$GITHUB_ENV"
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
@@ -76,7 +84,7 @@ jobs:
           assert kw.get("password") is None
           assert (pg.drivername, pg.host, pg.database) == (
               "postgresql+asyncpg", "127.0.0.1", "ae359_otp_t1"
-          )
+          ) and pg.password is None
           assert os.environ.get("AE359_POSTACK_STRICT") == "1"
           print("AE359_DISPOSABLE_TWO_BACKENDS_GUARD=PASS")
           PY
