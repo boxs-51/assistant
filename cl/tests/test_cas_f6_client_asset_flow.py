@@ -420,6 +420,10 @@ def test_file_queue_executes_multifile_failure_retry_and_explicit_continue(tmp_p
     )
 
     harness = r"""
+import { writeSync } from "node:fs";
+// Synchronous bounded stage markers: no timers or extra handles.
+const d0Mark = (stage) => writeSync(2, "[CAS-F6-D0] " + stage + "\n");
+d0Mark("harness-start");
 const assert = (condition, message) => {
   if (!condition) throw new Error(message);
 };
@@ -467,7 +471,9 @@ class FakeElement {
       ...event,
     };
     for (const callback of this.listeners[type] || []) {
+      d0Mark("listener:" + this.id + ":" + type + ":before");
       await callback(payload);
+      d0Mark("listener:" + this.id + ":" + type + ":after");
     }
   }
 
@@ -568,8 +574,10 @@ globalThis.window = {
   },
 };
 
+d0Mark("imports:before");
 const inputFrame = await import("./components/inputFrame.js");
 const fileManager = await import("./components/inputFrame/fileManager.js");
+d0Mark("imports:after");
 
 const submissions = [];
 inputFrame.initInputFrame(async (text, files) => {
@@ -580,7 +588,9 @@ const attachButton = elements.get("btn-attach");
 const sendButton = elements.get("btn-send");
 const textInput = elements.get("user-input");
 
+d0Mark("attach-first:before");
 await attachButton.trigger("click");
+d0Mark("attach-first:after");
 assert(
   prepareCalls.length === 1
     && JSON.stringify(prepareCalls[0]) === JSON.stringify(selectedPaths),
@@ -619,7 +629,9 @@ assert(
 
 window.confirm = () => false;
 textInput.value = "cancelled partial send";
+d0Mark("partial-cancel:before");
 await sendButton.trigger("click");
+d0Mark("partial-cancel:after");
 
 assert(
   submissions.length === 0,
@@ -631,7 +643,9 @@ assert(
   "Cancel must preserve the failed item for retry",
 );
 
+d0Mark("retry:before");
 fileManager.retryFile(selectedPaths[1], inputFrame.updateSendButtonState);
+d0Mark("retry:after");
 assert(
   prepareCalls.length === 2
     && JSON.stringify(prepareCalls[1]) ===
@@ -665,7 +679,9 @@ assert(
 );
 
 textInput.value = "retry succeeded";
+d0Mark("retry-send:before");
 await sendButton.trigger("click");
+d0Mark("retry-send:after");
 assert(
   submissions.length === 1 && submissions[0].files.length === 2,
   "after retry success, submit must carry both canonical READY payloads",
@@ -674,7 +690,9 @@ assert(
 submissions.length = 0;
 fileManager.clearAllFiles();
 selectedPaths = ["C:/tmp/ready-c.txt", "C:/tmp/fail-d.txt"];
+d0Mark("attach-second:before");
 await attachButton.trigger("click");
+d0Mark("attach-second:after");
 
 const readyC = {
   asset_id: "asset-c",
@@ -703,7 +721,9 @@ window.confirm = () => {
   return true;
 };
 textInput.value = "explicit partial continue";
+d0Mark("explicit-partial:before");
 await sendButton.trigger("click");
+d0Mark("explicit-partial:after");
 
 assert(confirmCalls === 1, "partial continue must require explicit confirmation");
 assert(submissions.length === 1, "confirmed partial continue must submit once");
@@ -726,19 +746,38 @@ console.log(JSON.stringify({
   prepareCalls,
   legacyEncodeCalls,
 }));
+d0Mark("json-emitted");
 """
 
     harness_path = harness_root / "cas_f6_state_machine.mjs"
     harness_path.write_text(harness, encoding="utf-8")
 
-    completed = subprocess.run(
-        [node, str(harness_path)],
-        cwd=harness_root,
-        capture_output=True,
-        text=True,
-        timeout=20,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(
+            [node, str(harness_path)],
+            cwd=harness_root,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
+        # A Windows pipe reader awaiting EOF can also time out.
+        # Keep the original 20-second deadline and exception propagation.
+        def _bounded_tail(stream):
+            if stream is None:
+                return "<none>"
+            if isinstance(stream, bytes):
+                stream = stream[-2048:].decode("utf-8", errors="replace")
+            return stream[-2048:]
+
+        exc.add_note(
+            "CAS-F6-D0 Node 20s TimeoutExpired preserved; "
+            "partial output alone does not establish process/pipe cause. "
+            f"stdout_tail={_bounded_tail(exc.stdout)!r}; "
+            f"stderr_tail={_bounded_tail(exc.stderr)!r}"
+        )
+        raise
 
     assert completed.returncode == 0, (
         "CAS-F6 executable UI state-machine harness failed.\n"
