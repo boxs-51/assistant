@@ -22,6 +22,7 @@ from ..capability.contracts.invocation import (
     RemoteOutcomeState,
     TERMINAL_INVOCATION_STATES,
 )
+from .native_receipt_verifier import require_native_receipt, require_native_record
 from .contracts.clock import ExecutionClock
 from .contracts.context import AgentExecutionContext
 from .contracts.aggregate import (
@@ -3037,6 +3038,18 @@ class DurableAgentStore:
                 else:
                     values["commit_state"] = "PROVISIONAL"
 
+            # AE A1: no native SUCCESS may cross a COMMITTED write boundary.
+            # Includes compatibility/no-invocation and R6 local paths; Tool
+            # metadata, COMMITTED state and fake verified-empty grant no trust.
+            if values["commit_state"] == "COMMITTED":
+                require_native_receipt(
+                    values.get("capability_id"),
+                    values.get("success"),
+                    phase="before_COMMITTED",
+                )
+            if existing is not None and getattr(existing, "commit_state", None) == "COMMITTED":
+                require_native_record(existing, phase="existing_COMMITTED_write")
+
             if existing is None:
                 if recovery_fence is not None:
                     self._require_recovery_projection_fence_now(
@@ -3068,6 +3081,8 @@ class DurableAgentStore:
     async def load_tool_result(self, execution_id: str, tool_call_id: str):
         async with self.uow_factory() as uow:
             record = await uow.agents.get_tool_result(execution_id, tool_call_id)
+            if record is not None and getattr(record, "commit_state", None) == "COMMITTED":
+                require_native_record(record, phase="load_tool_result")
             await uow.commit()
             return record
 
@@ -3099,6 +3114,7 @@ class DurableAgentStore:
                 await uow.commit()
                 return None
             if getattr(record, "commit_state", "PROVISIONAL") == "COMMITTED":
+                require_native_record(record, phase="COMMITTED_readthrough")
                 await uow.commit()
                 return record
 
@@ -3134,6 +3150,10 @@ class DurableAgentStore:
                 self._terminal_projection_from_invocation(values, invocation),
                 _TOOL_RESULT_JSON_FIELDS,
                 path="agent_tool_results",
+            )
+            require_native_receipt(
+                values.get("capability_id"), values.get("success"),
+                phase="COMMITTED_readthrough_promotion",
             )
             if recovery_fence is not None:
                 self._require_recovery_projection_fence_now(
@@ -3186,11 +3206,15 @@ class DurableAgentStore:
             ):
                 await uow.commit()
                 return None
+            # Fork/RETRY checkpoint readers are model-facing just like R7.
+            # A historical native COMMITTED row cannot supply R8 authority.
+            require_native_record(record, phase="fork_COMMITTED_readthrough")
             await uow.commit()
             return record
 
     @staticmethod
     def _fork_tool_result_message(record) -> InferenceMessage:
+        require_native_record(record, phase="fork_message_to_model")
         return InferenceMessage(
             role="tool",
             name=record.capability_id,
@@ -3337,6 +3361,9 @@ class DurableAgentStore:
                         "has no matching CapabilityInvocation authority."
                     )
 
+                # Do not trust persisted COMMITTED success or model transcript
+                # equality as an authenticated OS-owned native receipt.
+                require_native_record(record, phase="fork_checkpoint_COMMITTED")
                 committed[tool_call_id] = record
                 return record
 
@@ -5939,6 +5966,11 @@ class DurableAgentStore:
                     != "COMMITTED"
                 ):
                     continue
+                # R7-C safe-prefix messages are model-facing on connection
+                # resume. A historical native SQL COMMITTED/SUCCESS is not an
+                # authenticated privileged OS receipt, even when the active
+                # batch is independently reconciled.
+                require_native_record(durable, phase="R7_prefix_COMMITTED")
                 result.append(
                     {
                         "role": "tool",
