@@ -179,3 +179,152 @@ def test_caller_supplied_approval_id_is_not_trusted():
     assert manager.respond(True, request["approval_id"]) is True
     thread.join(1.0)
     assert result == [True]
+
+
+def test_identity_change_denies_visible_approval_and_rejects_late_response():
+    harness = ApprovalHarness()
+    manager = HitlManager(harness, SimpleNamespace(), timeout=1.0)
+    thread, result = _start_dialog(manager)
+    old_id = harness.wait_for_show_count(1)["approval_id"]
+
+    manager.invalidate_pending()
+    assert manager.respond(True, old_id) is False
+    thread.join(1.0)
+
+    assert not thread.is_alive()
+    assert result == [False]
+    assert harness.hidden == [old_id]
+
+    new_thread, new_result = _start_dialog(manager)
+    new_id = harness.wait_for_show_count(2)["approval_id"]
+    assert new_id != old_id
+    assert manager.respond(True, old_id) is False
+    assert manager.respond(True, new_id) is True
+    new_thread.join(1.0)
+    assert new_result == [True]
+
+
+def test_queued_prompt_from_prior_auth_generation_cannot_appear_after_switch():
+    harness = ApprovalHarness()
+    local = SimpleNamespace(auth_generation=0)
+    manager = HitlManager(harness, local, timeout=1.0)
+
+    first_thread, first_result = _start_dialog(manager, {"name": "first"})
+    first_id = harness.wait_for_show_count(1)["approval_id"]
+    queued_thread, queued_result = _start_dialog(manager, {"name": "old-queued"})
+    time.sleep(0.05)
+    assert len(harness.shown) == 1
+
+    manager.invalidate_pending()
+    first_thread.join(1.0)
+    queued_thread.join(1.0)
+    assert not first_thread.is_alive()
+    assert not queued_thread.is_alive()
+    assert first_result == [False]
+    assert queued_result == [False]
+    assert len(harness.shown) == 1
+    assert manager.respond(True, first_id) is False
+
+    local.auth_generation = 1
+    fresh_thread, fresh_result = _start_dialog(manager, {"name": "new"})
+    new_id = harness.wait_for_show_count(2)["approval_id"]
+    assert manager.respond(True, new_id) is True
+    fresh_thread.join(1.0)
+    assert fresh_result == [True]
+
+
+class BlockingDisplayAckHarness(ApprovalHarness):
+    """Reproduce an identity switch while WebView's show ACK is pending."""
+
+    def __init__(self):
+        super().__init__()
+        self.ack_release = threading.Event()
+
+    def __call__(self, js_code):
+        show = re.search(r"showApprovalBar\((.*)\)$", js_code)
+        if show:
+            with self._condition:
+                request = json.loads(show.group(1))
+                self.shown.append(request)
+                self._condition.notify_all()
+            if not self.ack_release.wait(2.0):
+                raise AssertionError("timed out waiting to release display ACK")
+            return request["approval_id"]
+        return super().__call__(js_code)
+
+
+def test_identity_change_during_delayed_display_ack_hides_old_bar():
+    harness = BlockingDisplayAckHarness()
+    manager = HitlManager(harness, SimpleNamespace(), timeout=1.0)
+    thread, result = _start_dialog(manager)
+    request = harness.wait_for_show_count(1)
+    old_id = request["approval_id"]
+
+    manager.invalidate_pending()
+    assert manager.respond(True, old_id) is False
+    harness.ack_release.set()
+    thread.join(1.0)
+
+    assert not thread.is_alive()
+    assert result == [False]
+    assert harness.hidden == [old_id]
+    assert manager._pending_approvals == {}
+
+
+class BlockingHideHarness(ApprovalHarness):
+    def __init__(self):
+        super().__init__()
+        self.hide_entered = threading.Event()
+        self.hide_release = threading.Event()
+
+    def __call__(self, js_code):
+        if "window.hideApprovalBar" in js_code:
+            self.hide_entered.set()
+            assert self.hide_release.wait(2.0)
+        return super().__call__(js_code)
+
+
+def test_identity_revoke_while_hide_is_blocked_cannot_return_cached_approval():
+    harness = BlockingHideHarness()
+    manager = HitlManager(harness, SimpleNamespace(auth_generation=0), timeout=1.0,
+                          require_origin_pin=True)
+    thread, result = _start_dialog(manager)
+    old_id = harness.wait_for_show_count(1)["approval_id"]
+    assert manager.respond(True, old_id) is True
+    assert harness.hide_entered.wait(1.0)
+
+    # The decision was removed from pending, but its effect authority must
+    # still disappear while the WebView hide callback is blocked.
+    manager.invalidate_pending()
+    harness.hide_release.set()
+    thread.join(1.0)
+    assert not thread.is_alive()
+    assert result == [False]
+    assert harness.hidden == [old_id]
+
+
+def test_strict_production_hitl_requires_captured_origin_generation():
+    harness = ApprovalHarness()
+    execution_local = SimpleNamespace()
+    manager = HitlManager(harness, execution_local, timeout=1.0,
+                          require_origin_pin=True)
+    assert manager.show_dialog({"name": "untrusted-dispatcher"}) is False
+    assert harness.shown == []
+
+    # A correctly pinned generation remains usable with a fresh token.
+    execution_local.auth_generation = 0
+    thread, result = _start_dialog(manager)
+    approval_id = harness.wait_for_show_count(1)["approval_id"]
+    assert manager.respond(True, approval_id) is True
+    thread.join(1.0)
+    assert result == [True]
+
+
+def test_old_pinned_invocation_cannot_adopt_new_generation():
+    harness = ApprovalHarness()
+    execution_local = SimpleNamespace(auth_generation=0)
+    manager = HitlManager(harness, execution_local, timeout=1.0,
+                          require_origin_pin=True)
+    manager.invalidate_pending()
+    assert manager.show_dialog({"name": "stale"}) is False
+    assert harness.shown == []
