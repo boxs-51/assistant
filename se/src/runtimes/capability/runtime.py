@@ -2295,13 +2295,22 @@ class CapabilityRuntime(BaseRuntime):
                 )
                 raise normalized from exc
             except asyncio.TimeoutError as exc:
-                if (
+                # A remote timeout cannot prove that the client did not run
+                # the effect. Preserve the durable UNKNOWN transition and
+                # never advertise a fresh invocation as safe to retry.
+                remote_timeout_uncertain = (
                     isinstance(driver, RemoteClientDriver)
                     and invocation.remote_outcome_state
                     in {
                         RemoteOutcomeState.NOT_DISPATCHED,
                         RemoteOutcomeState.IN_FLIGHT,
+                        RemoteOutcomeState.OUTCOME_UNKNOWN,
                     }
+                )
+                if (
+                    remote_timeout_uncertain
+                    and invocation.remote_outcome_state
+                    is not RemoteOutcomeState.OUTCOME_UNKNOWN
                 ):
                     await self.invocation_lifecycle.update_remote_outcome(
                         invocation,
@@ -2339,7 +2348,7 @@ class CapabilityRuntime(BaseRuntime):
                     code=timeout_code,
                     message=f"Capability '{capability_id}' timed out.",
                     category="TIMEOUT",
-                    retryable=True,
+                    retryable=not remote_timeout_uncertain,
                     safe_for_client=True,
                     cause_type=type(exc).__name__,
                     capability_id=capability_id,
