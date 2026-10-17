@@ -181,9 +181,20 @@ async def logout(
     try:
         await auth_facade.logout(refresh_data.refresh_token)
         return Response(status_code=status.HTTP_204_NO_CONTENT)
-    except Exception as e:
-        logger.error("Error during logout", error=str(e), exc_info=True)
-        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    except InvalidCredentialsError as exc:
+        logger.warning("Logout credential invalid; no revoke ACK", error=str(exc))
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Refresh token could not be authenticated for revocation.",
+        ) from exc
+    except Exception as exc:
+        # A 204 response here falsely acknowledged a revoke that may have failed.
+        # This is *not* a session-generation/dispatch-fence success guarantee.
+        logger.error("Logout revocation not confirmed", error=str(exc), exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Logout revocation could not be confirmed. Retry status check.",
+        ) from exc
 
 
 @router.get("/oauth/login/{provider}")
