@@ -548,3 +548,67 @@ def test_f5a_migration_upgrades_and_downgrades_real_sqlite_schema():
         assert "live_claim_token" not in columns
 
     engine.dispose()
+
+
+# CAS #74 / CAS-3: RED-first repository-level ProviderBinding immutability.
+# This does not substitute for the raw SQL FK-OFF tests in PR533.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("immutable_field", "replacement"),
+    (
+        ("id", "binding-relinked"),
+        ("file_id", "asset-relinked"),
+        ("provider_name", "other-provider"),
+        ("provider_namespace", "other-namespace"),
+        ("source_blob_id", "blob-relinked"),
+        ("source_sha256", "b" * 64),
+    ),
+)
+async def test_f5a_binding_cas_rejects_identity_relink_before_sql(
+    immutable_field, replacement
+):
+    engine, sessions = await _database()
+    try:
+        async with sessions() as session:
+            assets = AssetRepository(session)
+            await _ready_asset(assets)
+            claim, created = await assets.try_create_processing_provider_binding(
+                file_id="asset-f5a",
+                owner_user_id="u-f5a",
+                provider_name="gemini",
+                provider_namespace="gemini-project-a",
+            )
+            assert created
+            claim_id = claim.id
+            await session.commit()
+
+        async with sessions() as session:
+            assets = AssetRepository(session)
+            with pytest.raises(ValueError):
+                await assets.compare_and_set_provider_binding(
+                    claim_id,
+                    expected_revision=0,
+                    expected_state="PROCESSING",
+                    expected_live_claim_token="LIVE",
+                    values={
+                        immutable_field: replacement,
+                        "state": "UNKNOWN",
+                    },
+                )
+            await session.rollback()
+
+        async with sessions() as session:
+            binding = await session.get(FileProviderBindingRecord, claim_id)
+            assert binding is not None
+            assert binding.file_id == "asset-f5a"
+            assert binding.provider_name == "gemini"
+            assert binding.provider_namespace == "gemini-project-a"
+            assert binding.source_blob_id == "blob-f5a"
+            assert binding.source_sha256 == "a" * 64
+            assert binding.state == "PROCESSING"
+            assert binding.live_claim_token == "LIVE"
+            assert binding.revision == 0
+    finally:
+        await engine.dispose()
