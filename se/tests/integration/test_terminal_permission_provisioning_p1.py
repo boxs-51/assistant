@@ -109,7 +109,13 @@ def test_p1_real_upgrade_replay_and_downgrade_does_not_revoke_grants(
     database = tmp_path / "p1-upgrade.sqlite3"
     config = _config(database, monkeypatch)
     script = ScriptDirectory.from_config(config)
-    assert script.get_heads() == [REVISION]
+    # Alpha combines the independent AIC 31b and terminal P1 branches.
+    # Require exactly the two independently audited tips; a third/unexpected
+    # migration head is not silently accepted.
+    assert set(script.get_heads()) == {
+        REVISION,
+        "31b_aic0_pg_guard_forward",
+    }
     assert script.get_revision(REVISION).down_revision == PREVIOUS
     command.upgrade(config, PREVIOUS)
     _seed_legacy_rows(database)

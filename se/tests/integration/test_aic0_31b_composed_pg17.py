@@ -152,7 +152,8 @@ async def test_aic31b_real_pg17_composed_cli_revision_and_retired_guard(
 
         # Real CLI on the composed tree. Old branch is unchanged and the
         # second process obtains a fresh physical connection.
-        _alembic(root, url, "head")
+        # Integrated alpha has multiple Alembic heads; this proof targets AIC31b only.
+        _alembic(root, url, REV31B)
         assert await read_one("SELECT version_num FROM alembic_version") == REV31B
         assert await read_one("""
             SELECT character_maximum_length

@@ -3,18 +3,20 @@ name: AIC467 Real PostgreSQL 17 Linux Windows Evidence
 on:
   push:
     branches:
-      - evidence/156-aic467-fkoff-id-final-pg17-20261012
+      - alpha
   pull_request:
     paths:
       - ".github/workflows/aic467-pg17-linux-windows-evidence.yml"
       - "se/tests/integration/test_aic0_p1_agent_instance_identity.py"
+      - "se/src/infrastructure/storage/migrations/sql/versions/5b_conversation_temporal_contract.py"
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Exact-parent diagnostic: evidence branch is precisely one workflow ADD
-# on top of canonical draft PR #467. Do not merge this evidence child.
+# Alpha-only experimental PostgreSQL 17 historical 5b witness.
+# Preserve a pinned pristine negative control and post-fix real PG17 matrix.
+# No production migration, deployment, or security-HOLD release.
 jobs:
   postgresql17-linux:
     runs-on: ubuntu-24.04
@@ -37,6 +39,8 @@ jobs:
       AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/aic_p1a
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # old pinned 31a commit must remain available for physical regression
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
@@ -59,6 +63,40 @@ jobs:
               finally:
                   await c.close()
           asyncio.run(check())'
+      - name: Negative control — pinned original env + 5b MUST fail on pristine PG17
+        shell: bash
+        run: |
+          set -euo pipefail
+          git fetch --no-tags origin 858004fae17732f3b388383c28146c12b36ecdb9
+          python -c '
+          import pathlib, subprocess, sys
+          paths = [
+              pathlib.Path("se/src/infrastructure/storage/migrations/sql/env.py"),
+              pathlib.Path("se/src/infrastructure/storage/migrations/sql/versions/5b_conversation_temporal_contract.py"),
+          ]
+          modern = {p: p.read_bytes() for p in paths}
+          try:
+              for p in paths:
+                  pristine = subprocess.check_output(["git", "show", "FETCH_HEAD:" + p.as_posix()])
+                  assert pristine != modern[p], "baseline must differ for both env and 5b"
+                  p.write_bytes(pristine)
+              assert subprocess.check_output(["git", "hash-object", str(paths[0])], text=True).strip() == "0c8b4d0323dbeaec06c82be16ed5e15121aea77e"
+              assert subprocess.check_output(["git", "hash-object", str(paths[1])], text=True).strip() == "20be86d8e3852027e411a0b16e0a8015993b4998"
+              command = [
+                  sys.executable, "-m", "pytest", "-q",
+                  "se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[postgresql]",
+              ]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
+              output = result.stdout + "\n" + result.stderr
+              print(output[-4000:])
+              assert result.returncode != 0, "negative control unexpectedly PASSED with original 5b"
+              assert "StringDataRightTruncationError" in output and "alembic_version" in output, "negative failed for unrelated reason"
+              print("AIC_PG17_PRISTINE_5B_NEGATIVE_CONTROL_PASS", flush=True)
+          finally:
+              for p in paths:
+                  p.write_bytes(modern[p])
+                  assert p.read_bytes() == modern[p]
+          '
       - name: Run AIC integration and architecture matrix, strict no skips
         shell: bash
         run: |
@@ -83,6 +121,8 @@ jobs:
       PGPASSWORD: root
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # old pinned 31a commit must remain available for physical regression
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12.10"
@@ -120,6 +160,42 @@ jobs:
               finally:
                   await c.close()
           asyncio.run(check())'
+      - name: Negative control — pinned original env + 5b MUST fail on pristine PG17
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          git fetch --no-tags origin 858004fae17732f3b388383c28146c12b36ecdb9
+          if ($LASTEXITCODE -ne 0) { throw "Cannot fetch pinned pre-preflight env and 5b baseline" }
+          python -c '
+          import pathlib, subprocess, sys
+          paths = [
+              pathlib.Path("se/src/infrastructure/storage/migrations/sql/env.py"),
+              pathlib.Path("se/src/infrastructure/storage/migrations/sql/versions/5b_conversation_temporal_contract.py"),
+          ]
+          modern = {p: p.read_bytes() for p in paths}
+          try:
+              for p in paths:
+                  pristine = subprocess.check_output(["git", "show", "FETCH_HEAD:" + p.as_posix()])
+                  assert pristine != modern[p], "baseline must differ for both env and 5b"
+                  p.write_bytes(pristine)
+              assert subprocess.check_output(["git", "hash-object", str(paths[0])], text=True).strip() == "0c8b4d0323dbeaec06c82be16ed5e15121aea77e"
+              assert subprocess.check_output(["git", "hash-object", str(paths[1])], text=True).strip() == "20be86d8e3852027e411a0b16e0a8015993b4998"
+              command = [
+                  sys.executable, "-m", "pytest", "-q",
+                  "se/tests/integration/test_aic0_p1_agent_instance_identity.py::test_aic_full_historical_alembic_chain_with_ubq25_26_and_live_owner[postgresql]",
+              ]
+              result = subprocess.run(command, capture_output=True, text=True, timeout=180, check=False)
+              output = result.stdout + "\n" + result.stderr
+              print(output[-4000:])
+              assert result.returncode != 0, "negative control unexpectedly PASSED with original 5b"
+              assert "StringDataRightTruncationError" in output and "alembic_version" in output, "negative failed for unrelated reason"
+              print("AIC_PG17_PRISTINE_5B_NEGATIVE_CONTROL_PASS", flush=True)
+          finally:
+              for p in paths:
+                  p.write_bytes(modern[p])
+                  assert p.read_bytes() == modern[p]
+          '
+          if ($LASTEXITCODE -ne 0) { throw "Negative 5b control failed" }
       - name: Run Windows AIC integration and architecture matrix, strict no skips
         shell: pwsh
         run: |
