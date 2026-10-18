@@ -132,3 +132,30 @@ At this pinned tree: **85 matching path blobs**, **40 divergent path blobs**, **
 **Status terms are deliberately separate:** `EXECUTABLE_EQUIVALENCE` / `STRICT_SUPERSET` are static scoped custody findings, **not actual GitHub MERGED events**, not proof of platform runtime correctness, and not grounds to close existing issue/PR records or remove security HOLD. Same/overlapping code remains in alpha; upstream historical trigger names were not copied because they are not relevant to alpha behavior.
 
 **Scope summary:** 13 staging PRs remain OPEN/DRAFT in GitHub. #639/#640 are new DRAFT non-production code/test remediation PRs; neither has merged into alpha. No content/issue status changes to main, #613, #636, #629/#630/#632/#634, or original sources.
+
+
+## Contract C2 — physical RED-first reproduction and bounded security fix
+
+### CR-SBX3-REG-MCP-01 — original #609/#583
+
+- **[DRAFT #641](https://github.com/boxs-51/assistant/pull/641)** test-only @ `0c4bb9b609316995720522e9c20d3c9ac97afd5c`: test blob **exactly matches original #609 source** `ce1688b4c73db33e95dff7524d0d176cc5ba75bc`. Two unchanged test functions parametrize 8 MCP marker forms plus 2 non-MCP V1/V2 shapes.
+- Actual **Windows client** baseline [job 117686062553](https://github.com/boxs-51/assistant/actions/runs/39131034571/job/117686062553): `8 FAILED, 340 PASSED` (6 MCP None/False/string KeyError on missing explicit false, 2 non-MCP cases leaked `trusted_direct_read_only=True`). This is attributable `BASELINE_RED`, not unrelated infra. No skip or assertion modification.
+- **[DRAFT #643](https://github.com/boxs-51/assistant/pull/643)** fixes a single client registration source file on top of #641. Resulting blob SHA **exact original #609 source** `46a78b820deab354bcd6e72530846bc05bab0aee`: local exact True for MCP only; explicit False for other MCP values, omit certification for all unrelated non-MCP V1/V2. No physical native authorization activated. **POSTFIX test checks are still pending**; review must distinguish this fix from unrelated RED tests. Original #609 remains open and diverges in other source paths.
+
+### CR-AIC31B-MULTIHEAD-01 — alpha composition
+
+- Actual physical PG17 composed baseline at #640 [Linux job 117684933490](https://github.com/boxs-51/assistant/actions/runs/39130648710/job/117684933490) fails both `actual_stamped_old31a` and `pristine_to_31b` because `alembic upgrade head` has multiple heads in the aggregated alpha DAG; old PR494 checkout `head` remains valid and is not touched.
+- **[DRAFT #642](https://github.com/boxs-51/assistant/pull/642)** changes **only** the alpha worktree CLI target from ambiguous `head` to the test's already asserted immutable `REV31B="31b_aic0_pg_guard_forward"`. Strict retired identity/security oracles unchanged. Exact-head composed-linux subsequent check **PASS**. Composed-windows evidence / independent review pending at initial observation.
+- Original AIC/PG17 physical tests from #640 on Linux and Windows: pinned 5b NEGATIVE_CONTROL_PASS followed by **58 PASS / 0 skipped on each OS** ([Linux job 117684933602](https://github.com/boxs-51/assistant/actions/runs/39130648708/job/117684933602), [Windows job 117684933304](https://github.com/boxs-51/assistant/actions/runs/39130648708/job/117684933304)). The other real PG17 pair also returned **56 passed, 2 deselected** plus a strict historical SQLite test. Global suite remains RED due unrelated security/integration branches.
+
+### CR-AE359-RACK07 — unrelated preserved hard failure
+
+- On #639 exact-head physical [job 117684371176](https://github.com/boxs-51/assistant/actions/runs/39130455104/job/117684371176), test `test_r_ack_07_lost_ack_then_fresh_uninitialized_cache_must_not_issue_sql_otp` reports **SEMANTIC_RED: fresh-instance pre-dispatch fallback issues a second SQL OTP following uncertain Redis ACK** (`1 failed, 8 passed`). This is genuine P0 / cross-instance durability gap, not a configuration or harmless test skip.
+- Never weaken/xfail this oracle, claim release-readiness, or merge the broad alpha tree to main until separately remediated and physical proofs succeed. It does not authorize abandonment of independent safe AIC and SBX3 child work.
+
+### CR-AE359-P0A-SUPERSET — original #637/#537
+
+- `auth_router.py` and `test_ae359_logout_cache_redfirst.py` original source files are **exact line subsequences** of alpha; alpha test adds seven P0B/atomic-delete/concurrency/Redis receipt witnesses. Alpha `SessionRepository.delete_token` returns **verified int 0/1**, rejects null/boolean/no-op, and propagates Redis errors, strictly more protective than the historical #537 void delete and P0A-only exception propagation. Old full-file replacement would regress P0B.
+- Historical #637 adds a PR path filter to the old cache RED workflow but does not warrant reverting safer current behavior. Classify **PARTIAL_STATIC_SUPERSET**, keep old PR open with original issue unchanged, no overwrite.
+
+**Next gates:** after CI, run exact-head PR #643 Windows client tests; require post-fix `348 passed / 0 unexpected skipped` and preserve #641 RED provenance. Complete PR #642 Windows composed test. Keep #639/#640/#641/#642/#643 DRAFT pending independent review; alpha/main unchanged by C2 work.
