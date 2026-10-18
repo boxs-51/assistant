@@ -1,7 +1,7 @@
 """D2 fail-closed tests. NO fabricated VERIFIED_EMPTY/OS positive proof.
 
-All fake tree receipts in this file are for MANAGER CONTROL FLOW ONLY, not
-kernel/native certification. Test process crash uses os._exit in a real child.
+No fabricated user receipt or mock OS readback authorizes native cleanup.
+Test process crash uses os._exit in a real child; marker and root are physical.
 Linux cgroup-v2 native-positive proof still requires host delegation and a
 trusted pre-exec launcher; Windows native pre-spawn remains denied.
 """
@@ -13,6 +13,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from uuid import uuid4
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -21,7 +22,10 @@ import pytest
 from se.src.domain.schemas.identity import Identity
 from se.src.runtimes.capability.runtime import CapabilityRuntime
 from se.src.runtimes.capability.sandbox import (
+    SandboxError,
+    SandboxLeaseNotFoundError,
     SandboxLeaseStateError,
+    NativeTreeUnverifiedError,
     SandboxManager,
 )
 from se.src.runtimes.capability.contracts.sandbox import (
@@ -29,6 +33,10 @@ from se.src.runtimes.capability.contracts.sandbox import (
     SandboxProfile,
 )
 from se.src.runtimes.capability.native_broker_b0 import SpawnIdentity
+from se.src.runtimes.capability.native_tree_cgroup_b0 import (
+    CgroupTreeIdentity, CgroupTreeMismatch, LinuxCgroupTreeLedger,
+    VerifiedEmptyWitness,
+)
 from se.src.runtimes.capability.native_tree_recovery_b0 import (
     LinuxCgroupTreeAuthority,
     NativeTreeHold,
@@ -140,153 +148,178 @@ def test_real_crash_recovery_cannot_fabricate_tree_receipt(tmp_path):
         recovered.require_verified_empty(_identity())
 
 
-class _TestTreeGate:
-    """Only verifies manager call ordering; never an OS security witness."""
-    def __init__(self):
-        self.allowed = False
-        self.reads = 0
-        self.expected = None
-
-    def require_registered(self, identity):
-        assert identity == self.expected
-
-    def require_known_tree(self, identity):
-        assert identity == self.expected
-
-    def require_verified_empty(self, identity):
-        self.reads += 1
-        assert identity == self.expected
-        if not self.allowed:
-            raise NativeTreeHold("unknown real OS state")
+# D2 CONTRACT 2026-10-19: SandboxManager has a durable quarantine registry
+# and OS custody mutex; its read-only kernel audit is NOT a cleanup permit.
+# This replaces obsolete mock native_tree_authority / bind_native_tree /
+# reattach_native_after_restart tests. Preserve the same negative invariants:
+# no root deletion on UNKNOWN, no foreign owner adoption, no crash-to-EMPTY.
 
 
 def test_manager_native_root_quarantined_until_authority_readback(tmp_path):
-    gate = _TestTreeGate()
-    manager = SandboxManager(
-        (tmp_path / "owned-roots").resolve(), native_tree_authority=gate
-    )
-    identity = _identity()
+    """Current contract: even a positive-looking observation cannot delete a root."""
+    manager = SandboxManager((tmp_path / "owned-roots").resolve())
     lease = manager.acquire_for_execution(
-        execution_id=identity.execution_id,
-        owner_user_id=identity.owner_id,
+        execution_id="exec-d2", owner_user_id="owner-d2",
         profile=SandboxProfile(profile_id="native-b0-d2"),
     )
-    identity = SpawnIdentity(
-        owner_id=identity.owner_id,
-        execution_id=identity.execution_id,
-        tool_call_id=identity.tool_call_id,
-        sandbox_id=lease.sandbox_id,
-        lease_generation=identity.lease_generation,
-    )
-    gate.expected = identity
-    manager.bind_native_tree(lease, identity)
-    marker = manager.resolve_path(lease, "proof.txt")
-    marker.write_text("root must remain", encoding="utf-8")
+    token = manager.resolve_path(lease, "proof.txt")
+    token.write_text("root must remain", encoding="utf-8")
+    marker = manager.base_root / ".sbx3-native-quarantine" / lease.sandbox_id
+    manager.quarantine_native_tree(lease)
+    assert marker.is_file(), "native enrollment must be durable before cleanup"
 
-    with pytest.raises(SandboxLeaseStateError, match="VERIFIED_EMPTY"):
+    with pytest.raises(NativeTreeUnverifiedError):
         manager.destroy(lease)
-    assert gate.reads == 1
-    assert marker.read_text(encoding="utf-8") == "root must remain"
     assert manager.current(lease).state is SandboxLeaseState.CLEANUP
     with pytest.raises(SandboxLeaseStateError):
         manager.resolve_path(lease, "no-new-write")
-    with pytest.raises(SandboxLeaseStateError, match="VERIFIED_EMPTY"):
-        manager.release_execution(identity.execution_id, owner_user_id=identity.owner_id)
-
-    # CONTROL-FLOW mock only; production proof always comes from a kernel
-    # LinuxCgroupTreeAuthority, never from this illustrative gate.
-    gate.allowed = True
-    destroyed = manager.destroy(lease)
-    assert destroyed.state is SandboxLeaseState.DESTROYED
-    assert not lease.root.exists()
+    with pytest.raises(NativeTreeUnverifiedError):
+        manager.release_execution(lease.execution_id, owner_user_id=lease.owner_user_id)
+    # No private filesystem delete escape hatch after quarantine.
+    with pytest.raises(NativeTreeUnverifiedError):
+        manager._remove_root(lease.root)
+    assert token.read_text(encoding="utf-8") == "root must remain"
+    assert marker.is_file()
 
 
 def test_restart_reattach_quarantines_native_root_until_os_proof(tmp_path):
-    """Manager restart flow; gate is mocked, NOT a native OS PASS."""
+    """A real worker hard exit leaves an orphan root, not an empty attestation."""
     base = (tmp_path / "shared-roots").resolve()
-    gate = _TestTreeGate()
-    profile = SandboxProfile(profile_id="native-recover")
-    original = SandboxManager(base, native_tree_authority=gate)
-    lease = original.acquire_for_execution(
-        execution_id="exec-d2",
-        owner_user_id="owner-d2",
-        profile=profile,
+    root_export = tmp_path / "orphan-root.txt"
+    script = (
+        "import os, pathlib\\n"
+        "from se.src.runtimes.capability.sandbox import SandboxManager\\n"
+        "from se.src.runtimes.capability.contracts.sandbox import SandboxProfile\\n"
+        f"m=SandboxManager(pathlib.Path({str(base)!r}))\\n"
+        "lease=m.acquire_for_execution(execution_id='exec-d2',"
+        "owner_user_id='owner-d2',"
+        "profile=SandboxProfile(profile_id='native-recover'))\\n"
+        "m.resolve_path(lease,'survivor.txt').write_text('preserve across restart')\\n"
+        "m.quarantine_native_tree(lease)\\n"
+        f"pathlib.Path({str(root_export)!r}).write_text(str(lease.root))\\n"
+        "os._exit(73)\\n"
     )
-    identity = SpawnIdentity(
-        owner_id=lease.owner_user_id,
-        execution_id=lease.execution_id,
-        tool_call_id="call-d2",
-        sandbox_id=lease.sandbox_id,
-        lease_generation="gen-1",
+    worker = subprocess.run(
+        [sys.executable, "-c", script], check=False, timeout=20,
+        cwd=str(Path.cwd()),
     )
-    gate.expected = identity
-    original.bind_native_tree(lease, identity)
-    token = original.resolve_path(lease, "survivor.txt")
-    token.write_text("preserve across restart", encoding="utf-8")
-
-    # New worker has no old in-memory lease map, but the filesystem remains.
-    recovered_manager = SandboxManager(base, native_tree_authority=gate)
-    recovered = recovered_manager.reattach_native_after_restart(
-        lease, profile, identity
-    )
-    assert recovered.state is SandboxLeaseState.CLEANUP
+    assert worker.returncode == 73, "hard-crash fixture did not execute"
+    root = Path(root_export.read_text(encoding="utf-8"))
+    token = root / "survivor.txt"
+    marker = base / ".sbx3-native-quarantine" / root.name
     assert token.read_text(encoding="utf-8") == "preserve across restart"
-    with pytest.raises(SandboxLeaseStateError):
-        recovered_manager.resolve_path(recovered, "no-new-effects")
-    with pytest.raises(SandboxLeaseStateError, match="VERIFIED_EMPTY"):
-        recovered_manager.destroy(recovered)
-    assert token.exists()
+    assert marker.is_file()
 
-    gate.allowed = True  # control-flow stub, NOT authenticated OS proof
-    assert recovered_manager.destroy(recovered).state is SandboxLeaseState.DESTROYED
-    assert not token.exists()
+    restarted = SandboxManager(base)
+    assert root.name in restarted._orphan_root_ids
+    with pytest.raises(SandboxLeaseNotFoundError):
+        restarted.current_for_execution("exec-d2")
+    with pytest.raises(NativeTreeUnverifiedError):
+        restarted._require_native_root_empty(root)
+    with pytest.raises(NativeTreeUnverifiedError):
+        restarted._remove_root(root)
+    assert marker.is_file(), "restart must never clear the native tombstone"
+    assert token.read_text(encoding="utf-8") == "preserve across restart"
 
 
 def test_restart_with_missing_os_scope_never_adopts_or_deletes_root(tmp_path):
+    """Erased marker or forged user receipt cannot make UNKNOWN into EMPTY."""
     base = (tmp_path / "shared-roots").resolve()
     original = SandboxManager(base)
-    profile = SandboxProfile(profile_id="native-recover")
     lease = original.acquire_for_execution(
-        execution_id="exec-d2",
-        owner_user_id="owner-d2",
-        profile=profile,
+        execution_id="exec-d2", owner_user_id="owner-d2",
+        profile=SandboxProfile(profile_id="native-recover"),
     )
     token = original.resolve_path(lease, "survivor.txt")
     token.write_text("protected", encoding="utf-8")
-    authority = LinuxCgroupTreeAuthority(tmp_path / "tree.sqlite")
-    restarted = SandboxManager(base, native_tree_authority=authority)
-    identity = SpawnIdentity(
-        owner_id=lease.owner_user_id,
-        execution_id=lease.execution_id,
-        tool_call_id="call-d2",
-        sandbox_id=lease.sandbox_id,
-        lease_generation="gen-1",
+    original.quarantine_native_tree(lease)
+    marker = base / ".sbx3-native-quarantine" / lease.sandbox_id
+
+    # A caller-supplied shape that says VERIFIED_EMPTY is diagnostic input,
+    # never a replacement for the kernel/journal read-through.
+    synthetic = VerifiedEmptyWitness(
+        owner_id=lease.owner_user_id, execution_id=lease.execution_id,
+        sandbox_id=lease.sandbox_id, generation=uuid4().hex,
+        cgroup_device=1, cgroup_inode=1,
     )
-    with pytest.raises(SandboxLeaseStateError, match="cannot be reattached"):
-        restarted.reattach_native_after_restart(lease, profile, identity)
+    identity = CgroupTreeIdentity(
+        owner_id=lease.owner_user_id, execution_id=lease.execution_id,
+        sandbox_id=lease.sandbox_id, generation=uuid4().hex,
+    )
+    assert synthetic.status == "VERIFIED_EMPTY"
+    assert synthetic.production_usable is False
+    with pytest.raises(CgroupTreeMismatch, match="native kernel ledger required"):
+        original.inspect_native_cleanup_evidence(
+            lease, ledger=synthetic, identity=identity,
+        )
+    with pytest.raises(NativeTreeUnverifiedError):
+        original.destroy(lease)
     assert token.read_text(encoding="utf-8") == "protected"
+
+    # Even deliberate marker removal must not release the old live manager,
+    # or enable a fresh manager to delete an orphan root.
+    marker.unlink()
+    with pytest.raises(NativeTreeUnverifiedError):
+        original._remove_root(lease.root)
+    restarted = SandboxManager(base)
+    assert lease.sandbox_id in restarted._orphan_root_ids
+    with pytest.raises(NativeTreeUnverifiedError):
+        restarted._remove_root(lease.root)
+    assert token.read_text(encoding="utf-8") == "protected"
+    assert lease.root.is_dir()
 
 
 def test_manager_rejects_foreign_native_binding_before_spawn(tmp_path):
-    gate = _TestTreeGate()
-    manager = SandboxManager(
-        (tmp_path / "owned-roots").resolve(), native_tree_authority=gate
-    )
-    lease = manager.acquire(
-        execution_id="exec-d2",
-        owner_user_id="owner-d2",
+    """Foreign owner, execution or sandbox identity never reaches OS audit."""
+    manager = SandboxManager((tmp_path / "owned-roots").resolve())
+    lease = manager.acquire_for_execution(
+        execution_id="exec-d2", owner_user_id="owner-d2",
         profile=SandboxProfile(profile_id="native-b0-d2"),
     )
-    foreign = SpawnIdentity(
-        owner_id="other-owner",
-        execution_id="exec-d2",
-        tool_call_id="call-d2",
-        sandbox_id=lease.sandbox_id,
-        lease_generation="gen-1",
-    )
-    with pytest.raises(SandboxLeaseStateError, match="identity mismatch"):
-        manager.bind_native_tree(lease, foreign)
-    assert manager.destroy(lease).state is SandboxLeaseState.DESTROYED
+    token = manager.resolve_path(lease, "owner-proof.txt")
+    token.write_text("preserve", encoding="utf-8")
+    manager.quarantine_native_tree(lease)
+    marker = manager.base_root / ".sbx3-native-quarantine" / lease.sandbox_id
+
+    # A typed (but deliberately uninitialized) ledger makes the *identity*
+    # preflight reachable without faking OS VERIFIED_EMPTY or touching cgroup.
+    # The guard MUST reject every foreign identity BEFORE calling the ledger.
+    ledger = object.__new__(LinuxCgroupTreeLedger)
+    def forbidden_audit(_identity):
+        raise AssertionError("FOREIGN_IDENTITY_REACHED_NATIVE_OS_AUDIT")
+    ledger.audit_committed_empty = forbidden_audit
+
+    for name, changes in (
+        ("foreign-owner", {"owner_id": "other-owner"}),
+        ("foreign-execution", {"execution_id": "other-exec"}),
+        ("foreign-root", {"sandbox_id": "sbx-" + "0" * 32}),
+    ):
+        data = {
+            "owner_id": lease.owner_user_id,
+            "execution_id": lease.execution_id,
+            "sandbox_id": lease.sandbox_id,
+            "generation": uuid4().hex,
+        }
+        data.update(changes)
+        with pytest.raises(CgroupTreeMismatch, match="identity mismatch"):
+            manager.inspect_native_cleanup_evidence(
+                lease, ledger=ledger, identity=CgroupTreeIdentity(**data),
+            )
+
+    # Agent-created altered lease objects and wrong-owner acquisition cannot
+    # take over an existing sandbox, even if the sandbox ID is known.
+    foreign_lease = lease.model_copy(update={"owner_user_id": "other-owner"})
+    with pytest.raises(SandboxLeaseNotFoundError):
+        manager.current(foreign_lease)
+    with pytest.raises(SandboxError):
+        manager.acquire_for_execution(
+            execution_id="exec-d2", owner_user_id="other-owner",
+            profile=SandboxProfile(profile_id="native-b0-d2"),
+        )
+    with pytest.raises(NativeTreeUnverifiedError):
+        manager.destroy(lease)
+    assert marker.is_file()
+    assert token.read_text(encoding="utf-8") == "preserve"
 
 
 def test_agent_origin_crt_bypass_denied_before_any_runtime_driver():
