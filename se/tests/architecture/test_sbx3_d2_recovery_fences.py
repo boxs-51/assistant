@@ -187,17 +187,17 @@ def test_restart_reattach_quarantines_native_root_until_os_proof(tmp_path):
     base = (tmp_path / "shared-roots").resolve()
     root_export = tmp_path / "orphan-root.txt"
     script = (
-        "import os, pathlib\\n"
-        "from se.src.runtimes.capability.sandbox import SandboxManager\\n"
-        "from se.src.runtimes.capability.contracts.sandbox import SandboxProfile\\n"
-        f"m=SandboxManager(pathlib.Path({str(base)!r}))\\n"
+        "import os, pathlib\n"
+        "from se.src.runtimes.capability.sandbox import SandboxManager\n"
+        "from se.src.runtimes.capability.contracts.sandbox import SandboxProfile\n"
+        f"m=SandboxManager(pathlib.Path({str(base)!r}))\n"
         "lease=m.acquire_for_execution(execution_id='exec-d2',"
         "owner_user_id='owner-d2',"
-        "profile=SandboxProfile(profile_id='native-recover'))\\n"
-        "m.resolve_path(lease,'survivor.txt').write_text('preserve across restart')\\n"
-        "m.quarantine_native_tree(lease)\\n"
-        f"pathlib.Path({str(root_export)!r}).write_text(str(lease.root))\\n"
-        "os._exit(73)\\n"
+        "profile=SandboxProfile(profile_id='native-recover'))\n"
+        "m.resolve_path(lease,'survivor.txt').write_text('preserve across restart')\n"
+        "m.quarantine_native_tree(lease)\n"
+        f"pathlib.Path({str(root_export)!r}).write_text(str(lease.root))\n"
+        "os._exit(73)\n"
     )
     worker = subprocess.run(
         [sys.executable, "-c", script], check=False, timeout=20,
