@@ -89,3 +89,19 @@ This is an **experimental development assembly**, not a release candidate, valid
 6. Verify fresh exact-tree Linux/Windows CI and independently review semantic security boundaries before any future main-target proposal.
 
 **This file records integration custody, not a claim of functional correctness.**
+
+
+## Owner continuation checkpoint — 2026-10-18 (after initial ledger)
+
+This section is **additional evidence**, not a retroactive change to the 26-merge/14-queue original snapshot.
+
+- Original baseline `main@858004fae17732f3b388383c28146c12b36ecdb9` was verified unchanged at integration start.
+- `alpha` at original ledger commit: `dbc58f22e9c4c36176a5355838c19187c6f3996a`.
+- [Alpha PR #604](https://github.com/boxs-51/assistant/pull/604) (original #542) subsequently **MERGED** as `1c9715ffd0796472c8fe7acdbaba4191fb7fe993`: exactly three application-layer CAS RED-first test files, no runtime source modifications. Tests may intentionally fail; this does not waive CAS integrity/security HOLD.
+- [Alpha PR #638](https://github.com/boxs-51/assistant/pull/638) subsequently **MERGED** as `aed7a90bd10d25887c0b9e5234d107dbccfd91d1`, adding **six previously absent** Windows Job B0 / D2 recovery source, tests and two-OS evidence files from the separate #623/#627 development branches; comparison against the integration parent verified exactly six ADDED paths, zero overwritten paths. This is only a **partial** recovery of original #487/#465: both conflicting stacked PRs remain DRAFT and unmerged; no live runtime/authority path was modified by #638. No new Native/Agent permissions are authorized.
+- The integration **now contains 28 completed alpha-only merge PRs**, counting the original 26, #604 and #638. **13 original alpha-stage conflict PRs remain open/DRAFT:** #609, #612, #613, #614, #623, #627, #629, #630, #632, #633, #634, #636, #637. They must not be described as fully integrated, reviewed, tested, or resolved.
+- At exact #604 parent tree, Git blob comparison showed source-PR path identity with alpha for much of the blocked work: #609 16/22 identical, #612 33/37 identical, #613 4/6, #614 19/25, #629 2/3, #630 2/3, #636 1/3, #637 1/5. The remaining path differences are **semantic conflicts**, not evidence of missing branch history. Do not overwrite current alpha files with old full-file snapshots or adopt an `ours` merge that silently hides the conflicting source code.
+- Other open original PRs and all original issues remain unchanged by these new actions. Source PRs may continue to report intentionally RED CI. No source branch was force-pushed, deleted, or retargeted.
+- The user requested a new development successor branch from the final alpha HEAD; that new branch must be pinned to the final ledger commit, not the pre-ledger SHA. See live GitHub branch refs for exact identity.
+- This is **not a release-readiness certification**: no exact-tree comprehensive alpha Linux/Windows/Redis/PG17 proof has been published for the final merged tree, no independent security approval is claimed. Alpha contains intentionally RED evidence and unresolved conflicts.
+- **SECURITY_HOLD=PRESERVED; NO_DEPLOY=YES; NO_MAIN_MERGE=YES; NO_ISSUE_STATUS_CHANGE=YES.**
