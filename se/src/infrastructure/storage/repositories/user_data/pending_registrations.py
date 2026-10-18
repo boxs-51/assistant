@@ -1,6 +1,10 @@
 import structlog
+import hashlib
+import json
 from typing import Optional
 from sqlalchemy import select, delete, func
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy.orm import Session
@@ -9,6 +13,11 @@ from ...interfaces.database import DatabaseDriver
 from ...models.sql.user_data.pending_registration import PendingRegistration
 
 logger = structlog.get_logger(__name__)
+
+class OTPIssuanceConflict(RuntimeError):
+    """A durable email/purpose issuance fence already exists or cannot be proven."""
+
+
 
 class PendingRegistrationRepository(BaseRepository):
     """
@@ -45,6 +54,62 @@ class PendingRegistrationRepository(BaseRepository):
         await self.session.flush()
         logger.info("Saved pending registration to session", email=email)
         return new_pending
+
+    async def reserve_otp_issuance(
+        self, email: str, purpose: str, expires_in_seconds: int
+    ) -> None:
+        """Reserve a durable single issuance slot BEFORE any Redis write.
+
+        A separate hashed key keeps this witness independent of the actual SQL
+        fallback payload keyed by email. PostgreSQL/SQLite primary-key INSERT
+        ... ON CONFLICT DO NOTHING is the linearization point. A conflicting
+        live reservation fails closed across workers/processes. The caller
+        MUST commit this reservation successfully before attempting Redis.
+        TTL includes a conservative post-dispatch uncertainty margin; until
+        crash/retry generation fencing is externally proven this method does
+        not certify cross-region failover or production availability.
+        """
+        if purpose not in ("registration", "password_reset"):
+            raise ValueError("unsupported OTP issuance purpose")
+        if not isinstance(email, str) or not email or expires_in_seconds <= 0:
+            raise ValueError("invalid OTP issuance identity or TTL")
+        dialect = self.session.get_bind().dialect.name
+        if dialect not in ("postgresql", "sqlite"):
+            raise OTPIssuanceConflict("unsupported durable issuance backend")
+        digest = hashlib.sha256(
+            (purpose + "\\x00" + email.strip().casefold()).encode("utf-8")
+        ).hexdigest()
+        fence_key = "otp-issuance-v1-" + digest
+        utc_now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Never release the fence concurrently with an unconfirmed Redis
+        # command. The longer retention is deliberate fail-closed behavior;
+        # no SQL duplicate is admitted while a Redis OTP might still exist.
+        deadline = utc_now + timedelta(seconds=max(expires_in_seconds * 4, 1200))
+        # Expired fences can be retired; a future generation must still prove
+        # Redis expiry/failover safety before this is a production certificate.
+        await self.session.execute(
+            delete(PendingRegistration).where(
+                PendingRegistration.email == fence_key,
+                PendingRegistration.expires_at <= utc_now,
+            ).execution_options(synchronize_session=False)
+        )
+        record = dict(
+            email=fence_key,
+            payload=json.dumps({"kind": "otp-issuance-fence-v1", "purpose": purpose}),
+            expires_at=deadline,
+            created_at=utc_now,
+        )
+        statement = (
+            pg_insert(PendingRegistration) if dialect == "postgresql"
+            else sqlite_insert(PendingRegistration)
+        ).values(**record).on_conflict_do_nothing(
+            index_elements=[PendingRegistration.email]
+        )
+        result = await self.session.execute(statement)
+        if result.rowcount != 1:
+            raise OTPIssuanceConflict(
+                "OTP issuance already reserved: cross-instance replay denied"
+            )
 
     async def get_by_email(self, email: str) -> Optional[PendingRegistration]:
         """Lấy một bản ghi đăng ký tạm bằng email."""
