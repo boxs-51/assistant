@@ -1,0 +1,88 @@
+name: CrossOwner AIC CAS UBQ Lifecycle Real Schema PG17 SQLite
+on:
+  push:
+    branches:
+      - evidence/426-381-15-74-141-lifecycle-real-schema-20261014
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  real-schema-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    services:
+      postgres:
+        image: postgres:17.11
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: root
+          POSTGRES_DB: lifecycle_root
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d lifecycle_root"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 15
+    env:
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/lifecycle_root
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - run: |
+          python -m pip install -r requirements-test.txt
+          python -m pip install asyncpg==0.32.0
+      - name: Actual Alembic schema SQLite FK OFF ON and PostgreSQL17
+        shell: bash
+        run: |
+          mkdir -p lifecycle-evidence
+          python -m pytest -q -ra -s --junitxml=lifecycle-evidence/linux-junit.xml se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lifecycle-linux-real-schema
+          path: lifecycle-evidence/
+  real-schema-windows:
+    runs-on: windows-2025
+    timeout-minutes: 40
+    env:
+      AIC_TEST_POSTGRES_URL: postgresql+asyncpg://postgres:root@127.0.0.1:5432/lifecycle_root
+      PGPASSWORD: root
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12.10"
+      - name: Require native Windows PG17
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $service = Get-Service -Name "postgresql-x64-17" -ErrorAction Stop
+          Set-Service -Name $service.Name -StartupType Manual
+          if ($service.Status -ne "Running") { Start-Service -Name $service.Name }
+          if ((Get-Service -Name $service.Name).Status -ne "Running") { throw "PG17 missing" }
+          $psql = Join-Path $env:PGBIN "psql.exe"
+          $v = & $psql -h 127.0.0.1 -U postgres -d postgres -tAc "SHOW server_version_num"
+          if ($LASTEXITCODE -ne 0 -or [int]($v.Trim()) -lt 170000 -or [int]($v.Trim()) -ge 180000) { throw "PG17 needed: $v" }
+          & $psql -h 127.0.0.1 -U postgres -d postgres -v ON_ERROR_STOP=1 -c "CREATE DATABASE lifecycle_root"
+          if ($LASTEXITCODE -ne 0) { throw "CREATE DATABASE failed" }
+      - run: |
+          python -m pip install -r requirements-test.txt
+          python -m pip install asyncpg==0.32.0
+      - name: Actual Alembic schema SQLite FK OFF ON and PostgreSQL17
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path lifecycle-evidence | Out-Null
+          python -m pytest -q -ra -s --junitxml=lifecycle-evidence/windows-junit.xml se/tests/integration/test_cross_owner_aic_cas_ubq_retention_real_schema.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lifecycle-windows-real-schema
+          path: lifecycle-evidence/
